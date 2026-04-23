@@ -1,0 +1,88 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.runner }} with rust-${{ matrix.rust_version }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        rust_version:
+          - 1.95.0
+        runner:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+
+    defaults:
+      run:
+        working-directory: source
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install ${{ matrix.rust_version }} --profile minimal
+          rustup default ${{ matrix.rust_version }}
+
+      - name: Cargo check
+        run: cargo check --all-targets --locked
+
+  build-riscv64-qemu:
+    name: Build (riscv64 via QEMU, rust-${{ matrix.rust_version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        rust_version:
+          - 1.95.0
+
+    defaults:
+      run:
+        working-directory: source
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: riscv64
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install ${{ matrix.rust_version }} --profile minimal
+          rustup default ${{ matrix.rust_version }}
+          rustup target add riscv64gc-unknown-linux-gnu --toolchain ${{ matrix.rust_version }}
+
+      - name: Install RISC-V cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-riscv64-linux-gnu \
+            libc6-dev-riscv64-cross \
+            pkg-config \
+            cmake \
+            ninja-build \
+            perl
+
+      - name: Cargo check for RISC-V target
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+        run: cargo check --all-targets --locked --target riscv64gc-unknown-linux-gnu
