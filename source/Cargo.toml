@@ -1,0 +1,38 @@
+[package]
+name = "oxibelt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "webpki-tokio"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "server", "service", "tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "std"] }
+url = { version = "2", features = ["serde"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[[test]]
+name = "config_and_routes"
+path = "../tests/rust/config_and_routes.rs"
+
+[[test]]
+name = "tls_client_roots"
+path = "../tests/rust/tls_client_roots.rs"

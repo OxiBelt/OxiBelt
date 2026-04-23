@@ -1,0 +1,58 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "/etc/oxibelt/tls/fullchain.pem"
+private_key = "/etc/oxibelt/tls/privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = true
+gzip = true
+deflate = true
+zstd = true
+
+[[upstreams]]
+name = "app"
+origin = "https://app.internal.example"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[routes]]
+name = "app-root"
+hosts = ["example.com", "www.example.com"]
+path_prefix = "/"
+upstream = "app"
+
+[[routes]]
+name = "api-v1"
+hosts = ["api.example.com"]
+path_prefix = "/v1"
+replace_prefix_with = "/"
+upstream = "app"
