@@ -78,16 +78,33 @@ jobs:
       - name: Install RISC-V cross toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-riscv64-linux-gnu \
-            libc6-dev-riscv64-cross \
-            pkg-config \
-            cmake \
-            ninja-build \
+          packages=(
+            gcc-riscv64-linux-gnu
+            g++-riscv64-linux-gnu
+            libc6-dev-riscv64-cross
+            pkg-config
+            cmake
+            ninja-build
             perl
+          )
+
+          if [[ "${{ matrix.target }}" == "riscv64gc-unknown-linux-musl" ]]; then
+            packages+=(
+              clang
+              libclang-dev
+            )
+          fi
+
+          sudo apt-get install -y --no-install-recommends "${packages[@]}"
 
       - name: Cargo check for RISC-V target (${{ matrix.target }})
         env:
+          AR_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-ar
+          CC_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-gcc
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+          CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
+          AR_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-ar
+          CC_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-gcc
+          CXX_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-g++
         run: |
           cargo check --all-targets --locked --target ${{ matrix.target }}

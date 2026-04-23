@@ -26,6 +26,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "std"] 
 url = { version = "2", features = ["serde"] }
 webpki-roots = "1"
 
+[target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["bindgen"] }
+
 [dev-dependencies]
 pretty_assertions = "1"
 

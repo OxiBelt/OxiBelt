@@ -56,4 +56,5 @@ See `ops/Dockerfile.alpine`.
 - Rust integration tests live under `tests/rust` and are wired into Cargo from `source/Cargo.toml`
 - Docker-based HTTP/HTTPS verification assets live under `tests/docker`
 - `tests/scripts/build-targets.sh` verifies both GNU and musl builds for the current Linux architecture
+- `riscv64gc-unknown-linux-musl` uses `aws-lc-rs` bindgen during dependency builds, so `clang/libclang` must be available when targeting it
 - `tests/scripts/run-proxy-integration.sh` generates fresh TLS material for every run, exercises real HTTP + HTTPS proxying, and proves that both `X25519` and `X25519MLKEM768` negotiate with the current `aws-lc-rs`-based server
