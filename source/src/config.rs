@@ -24,11 +24,30 @@ pub struct Config {
 
 impl Config {
   pub fn load(path: &Path) -> anyhow::Result<Self> {
+    let base_dir = config_base_dir(path)?;
     let raw = std::fs::read_to_string(path)
       .with_context(|| format!("failed to read {}", path.display()))?;
-    let config: Self = toml::from_str(&raw)
+    let mut config: Self = toml::from_str(&raw)
       .with_context(|| format!("failed to parse TOML from {}", path.display()))?;
+    config.resolve_relative_paths(&base_dir);
     Ok(config)
+  }
+
+  fn resolve_relative_paths(&mut self, base_dir: &Path) {
+    self.tls.cert_chain = resolve_path(base_dir, &self.tls.cert_chain);
+    self.tls.private_key = resolve_path(base_dir, &self.tls.private_key);
+    self.tls.ocsp.response_file = self
+      .tls
+      .ocsp
+      .response_file
+      .take()
+      .map(|path| resolve_path(base_dir, &path));
+    self.proxy.trusted_ca_certs = self
+      .proxy
+      .trusted_ca_certs
+      .iter()
+      .map(|path| resolve_path(base_dir, path))
+      .collect();
   }
 
   pub fn validate(&self) -> anyhow::Result<()> {
@@ -143,6 +162,31 @@ impl Config {
     }
 
     Ok(())
+  }
+}
+
+fn config_base_dir(path: &Path) -> anyhow::Result<PathBuf> {
+  let absolute_path = if path.is_absolute() {
+    path.to_path_buf()
+  } else {
+    std::env::current_dir()
+      .context("failed to determine current working directory")?
+      .join(path)
+  };
+
+  Ok(
+    absolute_path
+      .parent()
+      .unwrap_or_else(|| Path::new("."))
+      .to_path_buf(),
+  )
+}
+
+fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
+  if path.is_absolute() {
+    path.to_path_buf()
+  } else {
+    base_dir.join(path)
   }
 }
 
