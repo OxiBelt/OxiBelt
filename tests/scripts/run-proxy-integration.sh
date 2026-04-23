@@ -8,6 +8,7 @@ work_dir="${repo_root}/tests/.tmp/${run_id}"
 network_name="oxibelt-it-${run_id}"
 mock_image="oxibelt/mock-upstream:${run_id}"
 proxy_image="oxibelt/proxy-it:${run_id}"
+pq_probe_image="oxibelt/pq-probe:${run_id}"
 http_container="oxibelt-http-${run_id}"
 https_container="oxibelt-https-${run_id}"
 proxy_container="oxibelt-proxy-${run_id}"
@@ -193,6 +194,12 @@ docker build \
   -f "${repo_root}/source/ops/Dockerfile.alpine" \
   "${repo_root}/source"
 
+echo "Building post-quantum probe image"
+docker build \
+  -t "${pq_probe_image}" \
+  -f "${repo_root}/tests/docker/pq_probe/Dockerfile" \
+  "${repo_root}/tests/docker/pq_probe"
+
 docker network create "${network_name}" >/dev/null
 
 docker run -d \
@@ -235,6 +242,46 @@ request_through_proxy() {
     --insecure
 }
 
+run_pq_probe() {
+  local group="$1"
+  local expect="$2"
+  local container_name="oxibelt-pq-${group}-${run_id}"
+  local output=""
+  local status=0
+
+  docker create \
+    --name "${container_name}" \
+    --network "${network_name}" \
+    "${pq_probe_image}" \
+    --host proxy \
+    --port 8443 \
+    --server-name proxy \
+    --ca-cert /tmp/downstream-ca.pem \
+    --group "${group}" >/dev/null
+  docker cp "${work_dir}/proxy-tls/fullchain.pem" "${container_name}:/tmp/downstream-ca.pem"
+
+  if output="$(docker start -a "${container_name}" 2>&1)"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  docker rm -f "${container_name}" >/dev/null 2>&1 || true
+  echo "${output}"
+
+  if [[ "${expect}" == "success" ]]; then
+    if [[ "${status}" -ne 0 ]]; then
+      echo "post-quantum probe with group ${group} unexpectedly failed" >&2
+      exit 1
+    fi
+  else
+    if [[ "${status}" -eq 0 ]]; then
+      echo "post-quantum probe with group ${group} unexpectedly succeeded" >&2
+      exit 1
+    fi
+  fi
+}
+
 for _attempt in $(seq 1 20); do
   if http_response="$(request_through_proxy "https://proxy:8443/app/ping?source=http" "http.example.test" 2>/dev/null)"; then
     break
@@ -260,4 +307,11 @@ echo "${https_response}" | grep -F '"path": "/backend/edge/v1/health?source=http
 echo "${https_response}" | grep -F '"host": "secure.example.test"'
 echo "${https_response}" | grep -F '"x-forwarded-host": "secure.example.test"'
 
+pq_x25519_output="$(run_pq_probe "x25519" "success")"
+echo "${pq_x25519_output}" | grep -F 'requested_group=X25519 negotiated_group=X25519'
+
+pq_hybrid_output="$(run_pq_probe "x25519mlkem768" "success")"
+echo "${pq_hybrid_output}" | grep -F 'requested_group=X25519MLKEM768 negotiated_group=X25519MLKEM768'
+
 echo "HTTP and HTTPS proxy integration checks passed"
+echo "X25519 and X25519MLKEM768 both negotiate successfully with the current aws-lc-rs-based server"

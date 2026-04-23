@@ -8,7 +8,7 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 use crate::config::{ListenerConfig, OcspMode, TlsConfig};
 
 pub fn install_default_provider() -> anyhow::Result<()> {
-  let provider = rustls::crypto::ring::default_provider();
+  let provider = rustls::crypto::aws_lc_rs::default_provider();
   let _ = provider.install_default();
   Ok(())
 }
@@ -17,7 +17,7 @@ pub fn build_server_config(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(rustls::crypto::ring::default_provider());
+  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let certs = load_certs(&tls.cert_chain)?;
   let key = load_private_key(&tls.private_key)?;
   let mut certified_key = CertifiedKey::from_der(certs, key, &provider)
@@ -46,7 +46,7 @@ pub fn build_server_config(
 pub fn build_upstream_client_config(
   extra_root_certificates: &[std::path::PathBuf],
 ) -> anyhow::Result<ClientConfig> {
-  let provider = Arc::new(rustls::crypto::ring::default_provider());
+  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let roots = load_upstream_root_store(extra_root_certificates)?;
 
   let client_config = ClientConfig::builder_with_provider(provider)
