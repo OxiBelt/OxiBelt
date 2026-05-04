@@ -64,6 +64,9 @@ websocket = true
 webrtc = true
 webtransport = true
 
+[upstreams.tls.ech]
+mode = "disabled"
+
 [[routes]]
 name = "app-root"
 hosts = ["example.com", "www.example.com"]

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Context;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
@@ -32,11 +34,29 @@ impl ClientPool {
   }
 }
 
+#[derive(Clone)]
+pub struct UpstreamClientPools {
+  by_upstream: HashMap<String, ClientPool>,
+}
+
+impl UpstreamClientPools {
+  pub fn for_upstream_version(
+    &self,
+    upstream_name: &str,
+    version: HttpVersion,
+  ) -> Option<&HyperClient> {
+    self
+      .by_upstream
+      .get(upstream_name)
+      .map(|pool| pool.for_version(version))
+  }
+}
+
 pub struct AppState {
   pub config: Config,
   pub route_table: RouteTable,
   pub upstreams: Vec<UpstreamConfig>,
-  pub clients: ClientPool,
+  pub clients: UpstreamClientPools,
   pub tls_server_config: std::sync::Arc<rustls::ServerConfig>,
   pub waf: WafEngine,
 }
@@ -45,7 +65,7 @@ impl AppState {
   pub fn new(config: Config) -> anyhow::Result<Self> {
     let route_table = RouteTable::new(config.routes.clone());
     let upstreams = config.upstreams.clone();
-    let clients = build_clients(&config.proxy.trusted_ca_certs)
+    let clients = build_clients(&config.upstreams, &config.proxy.trusted_ca_certs)
       .context("failed to build upstream HTTP clients")?;
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to build downstream TLS config")?;
@@ -62,11 +82,30 @@ impl AppState {
   }
 }
 
-fn build_clients(extra_root_certs: &[std::path::PathBuf]) -> anyhow::Result<ClientPool> {
-  let h1_tls_config = tls::build_upstream_client_config(extra_root_certs)
+fn build_clients(
+  upstreams: &[UpstreamConfig],
+  extra_root_certs: &[std::path::PathBuf],
+) -> anyhow::Result<UpstreamClientPools> {
+  let mut by_upstream = HashMap::new();
+
+  for upstream in upstreams {
+    let pool = build_client_pool(upstream, extra_root_certs)
+      .with_context(|| format!("failed to build clients for upstream {}", upstream.name))?;
+    by_upstream.insert(upstream.name.clone(), pool);
+  }
+
+  Ok(UpstreamClientPools { by_upstream })
+}
+
+fn build_client_pool(
+  upstream: &UpstreamConfig,
+  extra_root_certs: &[std::path::PathBuf],
+) -> anyhow::Result<ClientPool> {
+  let h1_tls_config = tls::build_upstream_client_config(extra_root_certs, &upstream.tls.ech)
     .context("failed to build HTTP/1.1 upstream TLS client")?;
-  let negotiated_tls_config = tls::build_upstream_client_config(extra_root_certs)
-    .context("failed to build negotiated upstream TLS client")?;
+  let negotiated_tls_config =
+    tls::build_upstream_client_config(extra_root_certs, &upstream.tls.ech)
+      .context("failed to build negotiated upstream TLS client")?;
 
   let h1_connector = HttpsConnectorBuilder::new()
     .with_tls_config(h1_tls_config)

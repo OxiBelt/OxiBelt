@@ -1,7 +1,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use oxibelt::config::{CompressionConfig, Config, OcspMode};
+use oxibelt::config::{CompressionConfig, Config, OcspMode, UpstreamEchMode};
 
 #[test]
 fn config_parses_trusted_upstream_ca_certificates() {
@@ -32,6 +32,8 @@ fn config_load_resolves_relative_paths_against_config_directory() {
     std::fs::write(&ocsp_path, b"ocsp").expect("failed to write OCSP response");
     let ca_path = tls_dir.join("upstream-ca.pem");
     std::fs::copy(&cert_path, &ca_path).expect("failed to copy CA certificate");
+    let ech_config_list_path = tls_dir.join("upstream.echconfiglist");
+    std::fs::write(&ech_config_list_path, b"ech").expect("failed to write ECH config list");
 
     let config_path = config_dir.join("oxibelt.toml");
     common::write_file(
@@ -84,6 +86,10 @@ websocket = true
 webrtc = true
 webtransport = true
 
+[upstreams.tls.ech]
+mode = "config_list"
+config_list_file = "tls/upstream.echconfiglist"
+
 [[routes]]
 name = "app-root"
 hosts = ["example.com"]
@@ -101,6 +107,10 @@ upstream = "app"
         Some(ocsp_path.as_path())
     );
     assert_eq!(config.proxy.trusted_ca_certs, vec![ca_path]);
+    assert_eq!(
+        config.upstreams[0].tls.ech.config_list_file.as_deref(),
+        Some(ech_config_list_path.as_path())
+    );
 }
 
 #[test]
@@ -138,4 +148,43 @@ fn compression_header_order_remains_stable() {
 #[test]
 fn ocsp_mode_defaults_to_disabled() {
     assert_eq!(OcspMode::default(), OcspMode::Disabled);
+}
+
+#[test]
+fn upstream_ech_mode_defaults_to_disabled() {
+    assert_eq!(UpstreamEchMode::default(), UpstreamEchMode::Disabled);
+}
+
+#[test]
+fn upstream_ech_config_list_mode_requires_a_file() {
+    let temp_dir = common::TempDir::new("ech-required");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ech-required");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "webtransport = true",
+        "webtransport = true\n\n[upstreams.tls.ech]\nmode = \"config_list\"",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    assert!(
+        error.to_string().contains("tls.ech.config_list_file"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn upstream_ech_config_list_file_is_only_valid_in_config_list_mode() {
+    let temp_dir = common::TempDir::new("ech-unused-file");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ech-unused-file");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "webtransport = true",
+        "webtransport = true\n\n[upstreams.tls.ech]\nmode = \"grease\"\nconfig_list_file = \"unused.bin\"",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    assert!(
+        error.to_string().contains("only valid when tls.ech.mode"),
+        "unexpected error: {error}"
+    );
 }

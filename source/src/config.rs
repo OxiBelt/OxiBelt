@@ -53,6 +53,9 @@ impl Config {
       .iter()
       .map(|path| resolve_path(base_dir, path))
       .collect();
+    for upstream in &mut self.upstreams {
+      upstream.tls.resolve_relative_paths(base_dir);
+    }
     self.waf.resolve_relative_paths(base_dir);
     for route in &mut self.routes {
       route.waf.resolve_relative_paths(base_dir);
@@ -107,6 +110,8 @@ impl Config {
           upstream.origin
         );
       }
+
+      upstream.tls.validate(&upstream.name)?;
     }
 
     let mut route_names = HashSet::new();
@@ -382,6 +387,73 @@ pub struct UpstreamConfig {
   pub webrtc: bool,
   #[serde(default = "default_true")]
   pub webtransport: bool,
+  #[serde(default)]
+  pub tls: UpstreamTlsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpstreamTlsConfig {
+  #[serde(default)]
+  pub ech: UpstreamEchConfig,
+}
+
+impl UpstreamTlsConfig {
+  fn resolve_relative_paths(&mut self, base_dir: &Path) {
+    self.ech.config_list_file = self
+      .ech
+      .config_list_file
+      .take()
+      .map(|path| resolve_path(base_dir, &path));
+  }
+
+  fn validate(&self, upstream_name: &str) -> anyhow::Result<()> {
+    match self.ech.mode {
+      UpstreamEchMode::Disabled | UpstreamEchMode::Grease => {
+        if self.ech.config_list_file.is_some() {
+          bail!(
+            "upstream {} tls.ech.config_list_file is only valid when tls.ech.mode = \"config_list\"",
+            upstream_name
+          );
+        }
+      }
+      UpstreamEchMode::ConfigList => {
+        if self.ech.config_list_file.is_none() {
+          bail!(
+            "upstream {} tls.ech.config_list_file is required when tls.ech.mode = \"config_list\"",
+            upstream_name
+          );
+        }
+      }
+    }
+
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpstreamEchConfig {
+  #[serde(default)]
+  pub mode: UpstreamEchMode,
+  #[serde(default)]
+  pub config_list_file: Option<PathBuf>,
+}
+
+impl Default for UpstreamEchConfig {
+  fn default() -> Self {
+    Self {
+      mode: UpstreamEchMode::Disabled,
+      config_list_file: None,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamEchMode {
+  #[default]
+  Disabled,
+  Grease,
+  ConfigList,
 }
 
 #[derive(Debug, Clone, Deserialize)]

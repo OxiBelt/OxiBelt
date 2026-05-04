@@ -165,6 +165,9 @@ websocket = true
 webrtc = true
 webtransport = true
 
+[upstreams.tls.ech]
+mode = "disabled"
+
 [[upstreams]]
 name = "https-upstream"
 origin = "https://mock-https:18443/backend"
@@ -175,6 +178,9 @@ preserve_host = true
 websocket = true
 webrtc = true
 webtransport = true
+
+[upstreams.tls.ech]
+mode = "grease"
 
 [[routes]]
 name = "http-route"
@@ -339,3 +345,4 @@ echo "${pq_hybrid_output}" | grep -F 'requested_group=X25519MLKEM768 negotiated_
 
 echo "HTTP and HTTPS proxy integration checks passed"
 echo "X25519 and X25519MLKEM768 both negotiate successfully with the current aws-lc-rs-based server"
+echo "HTTPS upstream proxying succeeds with TLS 1.3 ECH GREASE enabled"

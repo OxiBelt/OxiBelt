@@ -122,6 +122,7 @@ mod tests {
       websocket: true,
       webrtc: true,
       webtransport: true,
+      tls: Default::default(),
     }
   }
 

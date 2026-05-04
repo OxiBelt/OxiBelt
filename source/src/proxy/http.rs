@@ -137,7 +137,16 @@ pub async fn handle(
       "proxying downstream request"
   );
 
-  let client = state.clients.for_version(upstream_version);
+  let Some(client) = state
+    .clients
+    .for_upstream_version(&upstream.name, upstream_version)
+  else {
+    warn!(
+        upstream = %upstream.name,
+        "missing upstream client pool"
+    );
+    return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
+  };
   let upstream_response = match client.request(outbound).await {
     Ok(response) => response,
     Err(error) => {

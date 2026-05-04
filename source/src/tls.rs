@@ -2,10 +2,12 @@ use std::fs;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::client::{EchConfig, EchGreaseConfig, EchMode};
+use rustls::crypto::hpke::Hpke;
+use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 
-use crate::config::{ListenerConfig, OcspMode, TlsConfig};
+use crate::config::{ListenerConfig, OcspMode, TlsConfig, UpstreamEchConfig, UpstreamEchMode};
 
 pub fn install_default_provider() -> anyhow::Result<()> {
   let provider = rustls::crypto::aws_lc_rs::default_provider();
@@ -45,15 +47,22 @@ pub fn build_server_config(
 
 pub fn build_upstream_client_config(
   extra_root_certificates: &[std::path::PathBuf],
+  ech: &UpstreamEchConfig,
 ) -> anyhow::Result<ClientConfig> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let roots = load_upstream_root_store(extra_root_certificates)?;
 
-  let client_config = ClientConfig::builder_with_provider(provider)
-    .with_safe_default_protocol_versions()
-    .context("failed to configure upstream TLS versions")?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+  let builder = ClientConfig::builder_with_provider(provider);
+  let builder = match upstream_ech_mode(ech)? {
+    Some(mode) => builder
+      .with_ech(mode)
+      .context("failed to configure upstream TLS 1.3 ECH")?,
+    None => builder
+      .with_safe_default_protocol_versions()
+      .context("failed to configure upstream TLS versions")?,
+  };
+
+  let client_config = builder.with_root_certificates(roots).with_no_client_auth();
 
   Ok(client_config)
 }
@@ -88,6 +97,45 @@ fn load_ocsp_response(tls: &TlsConfig) -> anyhow::Result<Option<Vec<u8>>> {
     }
     OcspMode::LiveFetch => Err(anyhow!("live OCSP fetch is not implemented yet")),
   }
+}
+
+fn upstream_ech_mode(ech: &UpstreamEchConfig) -> anyhow::Result<Option<EchMode>> {
+  match ech.mode {
+    UpstreamEchMode::Disabled => Ok(None),
+    UpstreamEchMode::Grease => Ok(Some(EchMode::Grease(build_ech_grease_config()?))),
+    UpstreamEchMode::ConfigList => Ok(Some(EchMode::Enable(load_ech_config(ech)?))),
+  }
+}
+
+fn build_ech_grease_config() -> anyhow::Result<EchGreaseConfig> {
+  let suite = default_ech_hpke_suites()
+    .first()
+    .copied()
+    .ok_or_else(|| anyhow!("aws-lc-rs provider does not expose HPKE suites for ECH"))?;
+  let (public_key, _private_key) = suite
+    .generate_key_pair()
+    .context("failed to generate ECH GREASE placeholder key")?;
+
+  Ok(EchGreaseConfig::new(suite, public_key))
+}
+
+fn load_ech_config(ech: &UpstreamEchConfig) -> anyhow::Result<EchConfig> {
+  let path = ech
+    .config_list_file
+    .as_ref()
+    .ok_or_else(|| anyhow!("upstream ECH config_list_file must be configured"))?;
+  let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+
+  EchConfig::new(EchConfigListBytes::from(bytes), default_ech_hpke_suites()).with_context(|| {
+    format!(
+      "failed to parse upstream ECH config list from {}",
+      path.display()
+    )
+  })
+}
+
+fn default_ech_hpke_suites() -> &'static [&'static dyn Hpke] {
+  rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES
 }
 
 fn load_upstream_root_store(

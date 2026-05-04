@@ -141,33 +141,20 @@ If no terminal request action is produced after all applicable request rules run
 
 If no terminal response action is produced after all applicable response rules run, the response continues to the external client/source.
 
-## 4. TOML Configuration Integration
+## 4. Rule File and Attachment Format
 
-### 4.1 Global WAF configuration
+This document defines OxiRule itself: rule shape, expression semantics, actions, object model, and execution behavior.
 
-```toml
-[waf]
-enabled = true
-mode = "enforcing"      # enforcing | monitor
-fail_policy = "closed"  # closed | open
+The complete OxiBelt TOML configuration format is documented separately in [Configuration.md](Configuration.md). That document covers listeners, TLS, proxy options, compression, upstreams, routes, global WAF settings, WAF limits, and where OxiRule entries are attached.
 
-[waf.limits]
-max_rule_runtime_ms = 5
-max_total_waf_runtime_ms = 20
-max_expression_steps = 2000
-max_memory_bytes = 262144
-max_string_bytes = 8192
-max_body_inspection_bytes = 1048576
-max_header_count = 128
-max_header_value_bytes = 8192
-max_mutations = 32
-max_regex_runtime_ms = 2
-max_helper_items = 128
-max_helper_pattern_count = 32
-max_helper_result_bytes = 8192
-```
+OxiRule entries may be attached in two places:
 
-### 4.2 Inline request rule
+- Global rules under `[[waf.rules]]`.
+- Route-level rules under `[[routes.waf.rules]]`.
+
+Pattern sets are declared under `[[waf.pattern_sets]]` and referenced by name from OxiRule helper functions.
+
+### 4.1 Inline request rule
 
 ```toml
 [[waf.rules]]
@@ -185,7 +172,7 @@ status = 403
 body = "Forbidden"
 ```
 
-### 4.3 Inline response rule
+### 4.2 Inline response rule
 
 Response rules run after upstream forwarding completes and before the response is sent to the external client/source.
 
@@ -202,7 +189,7 @@ status = 502
 body = "Temporary upstream error"
 ```
 
-### 4.4 Header mutation rule
+### 4.3 Header mutation rule
 
 ```toml
 [[waf.rules]]
@@ -224,14 +211,14 @@ value = "no-referrer"
 
 Because no terminal response action is specified, OxiBelt continues the response after all applicable response rules finish successfully.
 
-### 4.5 Route-level rule
+### 4.4 Route-level rule
 
 ```toml
 [[routes]]
 name = "api"
-match.host = "api.example.com"
-match.path_prefix = "/v1"
-upstream_pool = "api-pool"
+hosts = ["api.example.com"]
+path_prefix = "/v1"
+upstream = "api"
 
 [[routes.waf.rules]]
 name = "api-large-body-guard"
@@ -245,7 +232,7 @@ status = 413
 body = "Payload Too Large"
 ```
 
-### 4.6 External rule file
+### 4.5 External rule file
 
 ```toml
 [[waf.rules]]
@@ -279,7 +266,7 @@ status = 403
 body = "Blocked by WAF"
 ```
 
-### 4.7 Pattern sets
+### 4.6 Pattern sets
 
 Pattern sets are configured in TOML and referenced from CEL-like helper functions.
 
@@ -1018,28 +1005,9 @@ Rules may inspect repeated data only through bounded, engine-provided helper API
 
 ### 10.2 Required execution limits
 
-Every rule execution must be constrained by limits configured in TOML.
+Every rule execution must be constrained by configured limits. The TOML field names and defaults are documented in [Configuration.md](Configuration.md#81-waf-limits).
 
-Recommended global defaults:
-
-```toml
-[waf.limits]
-max_rule_runtime_ms = 5
-max_total_waf_runtime_ms = 20
-max_expression_steps = 2000
-max_memory_bytes = 262144
-max_string_bytes = 8192
-max_body_inspection_bytes = 1048576
-max_header_count = 128
-max_header_value_bytes = 8192
-max_mutations = 32
-max_regex_runtime_ms = 2
-max_helper_items = 128
-max_helper_pattern_count = 32
-max_helper_result_bytes = 8192
-```
-
-Recommended behavior:
+Required limit categories:
 
 - `max_rule_runtime_ms` limits a single rule invocation.
 - `max_total_waf_runtime_ms` limits all WAF processing for a single transaction.
@@ -1057,13 +1025,9 @@ Recommended behavior:
 
 When a rule fails because of timeout, parser error, runtime error, budget exhaustion, or forbidden operation, OxiBelt must apply the configured failure policy.
 
-```toml
-[waf]
-fail_policy = "closed" # closed | open
-mode = "enforcing"    # enforcing | monitor
-```
+The TOML field names and valid values are documented in [Configuration.md](Configuration.md#8-global-waf).
 
-Behavior:
+Required behavior:
 
 - `fail_policy = "closed"`: reject the transaction when WAF execution fails.
 - `fail_policy = "open"`: allow the transaction to continue when WAF execution fails.
