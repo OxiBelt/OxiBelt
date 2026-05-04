@@ -25,8 +25,10 @@ runner_temp="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 upstream_port="${OXIBELT_BROWSER_UPSTREAM_PORT:-18080}"
 proxy_port="${OXIBELT_BROWSER_PROXY_PORT:-18443}"
 session_id=""
+driver_base_url=""
 upstream_pid=""
 proxy_pid=""
+proxy_container=""
 driver_pid=""
 
 if [[ -n "${CHROMEWEBDRIVER:-}" ]]; then
@@ -67,6 +69,10 @@ show_log() {
 }
 
 show_diagnostics() {
+  if [[ -n "${proxy_container}" ]]; then
+    docker logs "${proxy_container}" >"${proxy_log}" 2>&1 || true
+  fi
+
   show_log "Mock upstream log" "${upstream_log}"
   show_log "OxiBelt log" "${proxy_log}"
   show_log "Driver log" "${driver_log:-}"
@@ -79,7 +85,7 @@ fail_with_diagnostics() {
 }
 
 cleanup() {
-  if [[ -n "${session_id}" ]]; then
+  if [[ -n "${session_id}" && -n "${driver_base_url}" ]]; then
     curl --silent --show-error --fail-with-body \
       --request DELETE "${driver_base_url}/session/${session_id}" >/dev/null || true
   fi
@@ -97,6 +103,10 @@ cleanup() {
   if [[ -n "${driver_pid}" ]]; then
     kill "${driver_pid}" >/dev/null 2>&1 || true
     wait "${driver_pid}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${proxy_container}" ]]; then
+    docker rm -f "${proxy_container}" >/dev/null 2>&1 || true
   fi
 
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
@@ -180,6 +190,24 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
   -keyout "${tls_dir}/privkey.pem" \
   -out "${tls_dir}/fullchain.pem" >/dev/null 2>&1
+chmod 644 "${tls_dir}/privkey.pem" "${tls_dir}/fullchain.pem"
+
+if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker is required when OXIBELT_DOCKER_IMAGE is set." >&2
+    exit 1
+  fi
+
+  proxy_bind_addr="0.0.0.0"
+  proxy_origin_host="host.docker.internal"
+  cert_chain="/etc/oxibelt/tls/fullchain.pem"
+  private_key="/etc/oxibelt/tls/privkey.pem"
+else
+  proxy_bind_addr="127.0.0.1"
+  proxy_origin_host="127.0.0.1"
+  cert_chain="tls/fullchain.pem"
+  private_key="tls/privkey.pem"
+fi
 
 cat > "${work_dir}/oxibelt.toml" <<EOF
 [logging]
@@ -192,14 +220,14 @@ memory_only_state = true
 unprivileged_mode = true
 
 [listeners]
-https_bind = "127.0.0.1:${proxy_port}"
+https_bind = "${proxy_bind_addr}:${proxy_port}"
 http1 = true
 http2 = true
 http3 = false
 
 [tls]
-cert_chain = "tls/fullchain.pem"
-private_key = "tls/privkey.pem"
+cert_chain = "${cert_chain}"
+private_key = "${private_key}"
 
 [tls.ocsp]
 mode = "disabled"
@@ -224,7 +252,7 @@ fail_policy = "closed"
 
 [[upstreams]]
 name = "browser-upstream"
-origin = "http://127.0.0.1:${upstream_port}/origin"
+origin = "http://${proxy_origin_host}:${upstream_port}/origin"
 max_http_version = "h1"
 connect_timeout_ms = 3000
 request_timeout_ms = 30000
@@ -258,16 +286,28 @@ if ! curl --silent --fail "http://127.0.0.1:${upstream_port}/ready" >/dev/null; 
   fail_with_diagnostics "Mock upstream did not become ready."
 fi
 
-host_triple="$(rustc -Vv | sed -n 's/^host: //p')"
-oxibelt_binary="${repo_root}/target/${host_triple}/release/oxibelt"
-if [[ ! -x "${oxibelt_binary}" ]]; then
-  echo "Expected OxiBelt binary was not found: ${oxibelt_binary}" >&2
-  find "${repo_root}/target" -path "*/release/oxibelt" -type f -print >&2 || true
-  exit 1
-fi
+if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
+  proxy_container="oxibelt-browser-proxy-${browser}-$(date +%s)-$$"
+  docker create \
+    --name "${proxy_container}" \
+    --add-host host.docker.internal:host-gateway \
+    -p "127.0.0.1:${proxy_port}:${proxy_port}" \
+    "${OXIBELT_DOCKER_IMAGE}" >/dev/null
+  docker cp "${work_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/oxibelt.toml"
+  docker cp "${tls_dir}/." "${proxy_container}:/etc/oxibelt/tls"
+  docker start "${proxy_container}" >/dev/null
+else
+  host_triple="$(rustc -Vv | sed -n 's/^host: //p')"
+  oxibelt_binary="${repo_root}/target/${host_triple}/release/oxibelt"
+  if [[ ! -x "${oxibelt_binary}" ]]; then
+    echo "Expected OxiBelt binary was not found: ${oxibelt_binary}" >&2
+    find "${repo_root}/target" -path "*/release/oxibelt" -type f -print >&2 || true
+    exit 1
+  fi
 
-"${oxibelt_binary}" --config "${work_dir}/oxibelt.toml" >"${proxy_log}" 2>&1 &
-proxy_pid="$!"
+  "${oxibelt_binary}" --config "${work_dir}/oxibelt.toml" >"${proxy_log}" 2>&1 &
+  proxy_pid="$!"
+fi
 
 for _ in {1..30}; do
   if curl --silent --fail --insecure "https://localhost:${proxy_port}/app/preflight" >/dev/null; then
@@ -276,6 +316,9 @@ for _ in {1..30}; do
   sleep 1
 done
 if ! curl --silent --fail --insecure "https://localhost:${proxy_port}/app/preflight" >/dev/null; then
+  if [[ -n "${proxy_container}" ]]; then
+    docker logs "${proxy_container}" >"${proxy_log}" 2>&1 || true
+  fi
   fail_with_diagnostics "OxiBelt proxy did not become ready."
 fi
 
