@@ -139,7 +139,34 @@ jobs:
       - name: Run proxy integration checks
         run: tests/scripts/run-proxy-integration.sh
 
-  docker-alpine-musl-image:
+  docker-alpine-musl-image-amd64:
+    name: Docker image (Alpine musl, amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # 4.0.0
+
+      - name: Build Docker image artifact
+        run: |
+          tests/scripts/build-docker-image-artifact.sh \
+            "linux/amd64" \
+            "amd64" \
+            "${RUNNER_TEMP}/oxibelt-image"
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-alpine-musl-amd64-image
+          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-amd64.tar
+          retention-days: 0
+
+  docker-alpine-musl-image-other:
     name: Docker image (Alpine musl, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -148,10 +175,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            qemu_platforms: ""
           - arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
@@ -192,7 +215,7 @@ jobs:
     name: Browser WebDriver proxy checks (${{ matrix.browser }})
     runs-on: ubuntu-latest
     needs:
-      - docker-alpine-musl-image
+      - docker-alpine-musl-image-amd64
     permissions:
       contents: read
     strategy:
