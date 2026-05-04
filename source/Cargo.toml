@@ -10,6 +10,7 @@ publish = false
 anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+glob = "0.3"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "http2", "server"] }

@@ -1,6 +1,8 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::path::Path;
+
 use oxibelt::config::{CompressionConfig, Config, OcspMode, UpstreamEchMode};
 
 #[test]
@@ -114,6 +116,158 @@ upstream = "app"
 }
 
 #[test]
+fn config_load_merges_modular_include_files() {
+    let temp_dir = common::TempDir::new("modular-config");
+    let config_dir = temp_dir.path().join("config");
+    let tls_dir = config_dir.join("tls");
+    let modules_dir = config_dir.join("conf.d");
+    std::fs::create_dir_all(&tls_dir).expect("failed to create TLS directory");
+    std::fs::create_dir_all(&modules_dir).expect("failed to create module directory");
+
+    let (cert_path, key_path) = common::create_self_signed_cert(&tls_dir, "modular-config");
+    let config_path = config_dir.join("oxibelt.toml");
+    common::write_file(
+        &config_path,
+        &main_entry_config_toml(&cert_path, &key_path, r#"["conf.d/*.toml"]"#),
+    );
+    common::write_file(
+        &modules_dir.join("10-upstreams.toml"),
+        r#"
+[[upstreams]]
+name = "app"
+origin = "https://app.internal.example"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+"#,
+    );
+    common::write_file(
+        &modules_dir.join("20-routes.toml"),
+        r#"
+[[routes]]
+name = "app-root"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+"#,
+    );
+
+    let config = Config::load(&config_path).expect("config should load modular includes");
+
+    config.validate().expect("config should validate");
+    assert_eq!(config.tls.cert_chain, cert_path);
+    assert_eq!(config.tls.private_key, key_path);
+    assert_eq!(config.upstreams.len(), 1);
+    assert_eq!(config.upstreams[0].name, "app");
+    assert_eq!(config.routes.len(), 1);
+    assert_eq!(config.routes[0].name, "app-root");
+}
+
+#[test]
+fn nested_config_includes_are_relative_to_declaring_file() {
+    let temp_dir = common::TempDir::new("nested-config");
+    let config_dir = temp_dir.path().join("config");
+    let tls_dir = config_dir.join("tls");
+    let site_dir = config_dir.join("sites");
+    std::fs::create_dir_all(&tls_dir).expect("failed to create TLS directory");
+    std::fs::create_dir_all(&site_dir).expect("failed to create site directory");
+
+    let (cert_path, key_path) = common::create_self_signed_cert(&tls_dir, "nested-config");
+    let config_path = config_dir.join("oxibelt.toml");
+    common::write_file(
+        &config_path,
+        &main_entry_config_toml(&cert_path, &key_path, r#""sites/site.toml""#),
+    );
+    common::write_file(
+        &site_dir.join("site.toml"),
+        r#"
+include = "upstreams.toml"
+
+[[routes]]
+name = "site-root"
+hosts = ["site.example.com"]
+path_prefix = "/"
+upstream = "site"
+"#,
+    );
+    common::write_file(
+        &site_dir.join("upstreams.toml"),
+        r#"
+[[upstreams]]
+name = "site"
+origin = "https://site.internal.example"
+"#,
+    );
+
+    let config = Config::load(&config_path).expect("config should load nested includes");
+
+    config.validate().expect("config should validate");
+    assert_eq!(config.upstreams[0].name, "site");
+    assert_eq!(config.routes[0].upstream, "site");
+}
+
+#[test]
+fn config_include_cycles_are_rejected() {
+    let temp_dir = common::TempDir::new("config-cycle");
+    let config_dir = temp_dir.path().join("config");
+    let modules_dir = config_dir.join("conf.d");
+    std::fs::create_dir_all(&modules_dir).expect("failed to create module directory");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    common::write_file(&config_path, r#"include = "conf.d/loop.toml""#);
+    common::write_file(
+        &modules_dir.join("loop.toml"),
+        r#"include = "../oxibelt.toml""#,
+    );
+
+    let error = Config::load(&config_path).expect_err("cycle should be rejected");
+
+    assert!(
+        error.to_string().contains("configuration include cycle"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn config_include_rejects_duplicate_scalar_values() {
+    let temp_dir = common::TempDir::new("duplicate-include");
+    let config_dir = temp_dir.path().join("config");
+    let modules_dir = config_dir.join("conf.d");
+    std::fs::create_dir_all(&modules_dir).expect("failed to create module directory");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    common::write_file(
+        &config_path,
+        r#"
+include = "conf.d/logging.toml"
+
+[logging]
+level = "info"
+"#,
+    );
+    common::write_file(
+        &modules_dir.join("logging.toml"),
+        r#"
+[logging]
+level = "debug"
+"#,
+    );
+
+    let error = Config::load(&config_path).expect_err("duplicate scalar should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("configuration key logging.level"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn static_ocsp_requires_a_response_file() {
     let temp_dir = common::TempDir::new("ocsp");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ocsp-test");
@@ -187,4 +341,49 @@ fn upstream_ech_config_list_file_is_only_valid_in_config_list_mode() {
         error.to_string().contains("only valid when tls.ech.mode"),
         "unexpected error: {error}"
     );
+}
+
+fn main_entry_config_toml(cert_path: &Path, key_path: &Path, include: &str) -> String {
+    format!(
+        r#"
+include = {include}
+
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "{cert}"
+private_key = "{key}"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = true
+gzip = true
+deflate = true
+zstd = true
+"#,
+        cert = cert_path.display(),
+        key = key_path.display(),
+    )
 }

@@ -29,10 +29,10 @@ pub struct Config {
 impl Config {
   pub fn load(path: &Path) -> anyhow::Result<Self> {
     let base_dir = config_base_dir(path)?;
-    let raw = std::fs::read_to_string(path)
-      .with_context(|| format!("failed to read {}", path.display()))?;
-    let mut config: Self = toml::from_str(&raw)
-      .with_context(|| format!("failed to parse TOML from {}", path.display()))?;
+    let merged = load_toml_with_includes(path)?;
+    let mut config: Self = merged
+      .try_into()
+      .with_context(|| format!("failed to decode merged TOML from {}", path.display()))?;
     config.resolve_relative_paths(&base_dir);
     config.load_external_waf_rules()?;
     Ok(config)
@@ -189,14 +189,206 @@ impl Config {
   }
 }
 
-fn config_base_dir(path: &Path) -> anyhow::Result<PathBuf> {
-  let absolute_path = if path.is_absolute() {
-    path.to_path_buf()
-  } else {
-    std::env::current_dir()
-      .context("failed to determine current working directory")?
-      .join(path)
+fn load_toml_with_includes(path: &Path) -> anyhow::Result<toml::Value> {
+  let mut stack = Vec::new();
+  load_toml_document(path, &mut stack)
+}
+
+fn load_toml_document(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<toml::Value> {
+  let absolute_path = absolute_config_path(path)?;
+  let canonical_path = absolute_path.canonicalize().with_context(|| {
+    format!(
+      "failed to resolve configuration file {}",
+      absolute_path.display()
+    )
+  })?;
+
+  if let Some(index) = stack.iter().position(|entry| entry == &canonical_path) {
+    let mut cycle = stack[index..]
+      .iter()
+      .map(|entry| entry.display().to_string())
+      .collect::<Vec<_>>();
+    cycle.push(canonical_path.display().to_string());
+    bail!(
+      "configuration include cycle detected: {}",
+      cycle.join(" -> ")
+    );
+  }
+
+  stack.push(canonical_path);
+
+  let raw = std::fs::read_to_string(&absolute_path)
+    .with_context(|| format!("failed to read {}", absolute_path.display()))?;
+  let mut value: toml::Value = toml::from_str(&raw)
+    .with_context(|| format!("failed to parse TOML from {}", absolute_path.display()))?;
+  let include_entries = take_include_entries(&mut value, &absolute_path)?;
+  let base_dir = absolute_path.parent().unwrap_or_else(|| Path::new("."));
+
+  let mut merged = toml::Value::Table(toml::map::Map::new());
+  for entry in include_entries {
+    for include_path in expand_include_entry(&entry, base_dir, &absolute_path)? {
+      let included = load_toml_document(&include_path, stack)?;
+      merge_toml_values(&mut merged, included, "")?;
+    }
+  }
+  merge_toml_values(&mut merged, value, "")?;
+
+  stack.pop();
+  Ok(merged)
+}
+
+fn take_include_entries(value: &mut toml::Value, path: &Path) -> anyhow::Result<Vec<String>> {
+  let Some(table) = value.as_table_mut() else {
+    bail!(
+      "configuration root in {} must be a TOML table",
+      path.display()
+    );
   };
+  let Some(include) = table.remove("include") else {
+    return Ok(Vec::new());
+  };
+
+  match include {
+    toml::Value::String(entry) => Ok(vec![entry]),
+    toml::Value::Array(entries) => entries
+      .into_iter()
+      .map(|entry| match entry {
+        toml::Value::String(entry) => Ok(entry),
+        _ => bail!(
+          "configuration include entries in {} must be strings",
+          path.display()
+        ),
+      })
+      .collect(),
+    _ => bail!(
+      "configuration include in {} must be a string or array of strings",
+      path.display()
+    ),
+  }
+}
+
+fn expand_include_entry(
+  entry: &str,
+  base_dir: &Path,
+  source_path: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+  if entry.trim().is_empty() {
+    bail!(
+      "configuration include in {} must not be empty",
+      source_path.display()
+    );
+  }
+
+  let include_path = Path::new(entry);
+  let pattern_path = if include_path.is_absolute() {
+    include_path.to_path_buf()
+  } else {
+    base_dir.join(include_path)
+  };
+
+  if !has_glob_pattern(entry) {
+    return Ok(vec![pattern_path]);
+  }
+
+  let pattern = pattern_path.to_str().ok_or_else(|| {
+    anyhow!(
+      "configuration include pattern in {} is not valid UTF-8: {}",
+      source_path.display(),
+      pattern_path.display()
+    )
+  })?;
+  let mut paths = Vec::new();
+  for path in glob::glob(pattern).with_context(|| {
+    format!(
+      "invalid configuration include pattern {}",
+      pattern_path.display()
+    )
+  })? {
+    let path = path.with_context(|| {
+      format!(
+        "failed to expand configuration include pattern {}",
+        pattern_path.display()
+      )
+    })?;
+    if path.is_file() {
+      paths.push(path);
+    }
+  }
+  paths.sort();
+  Ok(paths)
+}
+
+fn has_glob_pattern(entry: &str) -> bool {
+  entry.chars().any(|ch| matches!(ch, '*' | '?' | '['))
+}
+
+fn merge_toml_values(
+  target: &mut toml::Value,
+  source: toml::Value,
+  key_path: &str,
+) -> anyhow::Result<()> {
+  match (target, source) {
+    (toml::Value::Table(target), toml::Value::Table(source)) => {
+      for (key, value) in source {
+        let child_path = if key_path.is_empty() {
+          key.clone()
+        } else {
+          format!("{key_path}.{key}")
+        };
+
+        if let Some(existing) = target.get_mut(&key) {
+          merge_toml_values(existing, value, &child_path)?;
+        } else {
+          target.insert(key, value);
+        }
+      }
+      Ok(())
+    }
+    (toml::Value::Array(target), toml::Value::Array(mut source)) => {
+      target.append(&mut source);
+      Ok(())
+    }
+    (target, source) => {
+      let key = if key_path.is_empty() {
+        "<root>"
+      } else {
+        key_path
+      };
+      bail!(
+        "configuration key {key} is defined more than once across included TOML files or uses incompatible value types ({} vs {})",
+        toml_type_name(target),
+        toml_type_name(&source)
+      );
+    }
+  }
+}
+
+fn toml_type_name(value: &toml::Value) -> &'static str {
+  match value {
+    toml::Value::String(_) => "string",
+    toml::Value::Integer(_) => "integer",
+    toml::Value::Float(_) => "float",
+    toml::Value::Boolean(_) => "boolean",
+    toml::Value::Datetime(_) => "datetime",
+    toml::Value::Array(_) => "array",
+    toml::Value::Table(_) => "table",
+  }
+}
+
+fn absolute_config_path(path: &Path) -> anyhow::Result<PathBuf> {
+  if path.is_absolute() {
+    Ok(path.to_path_buf())
+  } else {
+    Ok(
+      std::env::current_dir()
+        .context("failed to determine current working directory")?
+        .join(path),
+    )
+  }
+}
+
+fn config_base_dir(path: &Path) -> anyhow::Result<PathBuf> {
+  let absolute_path = absolute_config_path(path)?;
 
   Ok(
     absolute_path

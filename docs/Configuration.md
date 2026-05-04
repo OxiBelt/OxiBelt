@@ -9,7 +9,9 @@ This document describes the OxiBelt TOML configuration file format. The default 
 source/config/oxibelt.toml
 ```
 
-OxiBelt loads configuration from the path passed with `--config`. Relative file paths inside the configuration are resolved relative to that main configuration file.
+OxiBelt loads configuration from the path passed with `--config`. That file is the main entry configuration. It may include additional modular TOML files with the top-level `include` key.
+
+Relative paths in `include` entries are resolved relative to the TOML file that declares them. Other relative file paths inside the merged configuration, such as TLS certificates, upstream CA files, ECH config lists, OCSP responses, and external OxiRule paths, are resolved relative to the main entry configuration file.
 
 OxiRule WAF rule syntax is documented separately in [OxiRule.md](OxiRule.md). This document only describes how OxiRule entries are placed inside the OxiBelt TOML configuration.
 
@@ -18,6 +20,8 @@ OxiRule WAF rule syntax is documented separately in [OxiRule.md](OxiRule.md). Th
 A typical configuration contains these sections:
 
 ```toml
+include = ["conf.d/*.toml"]
+
 [logging]
 [runtime]
 [listeners]
@@ -38,6 +42,69 @@ Required top-level sections:
 - `[[routes]]`
 
 Most other sections have defaults.
+
+### 1.1 Modular includes
+
+The main entry file can include modular TOML files:
+
+```toml
+include = [
+  "conf.d/upstreams.toml",
+  "conf.d/routes/*.toml",
+]
+```
+
+`include` may be a single string or an array of strings. Include entries support exact file paths and glob patterns using `*`, `?`, and `[...]`.
+
+Include behavior:
+
+- Exact include paths must point to an existing file.
+- Glob include matches are sorted before loading so startup behavior is deterministic.
+- Glob include entries that match no files are allowed.
+- Included files may contain their own top-level `include` entries.
+- Include cycles are rejected.
+
+TOML documents are merged before OxiBelt decodes and validates the final configuration:
+
+- Included files are merged before the file that declared them.
+- Tables are merged recursively.
+- Arrays are appended in include expansion order, then the declaring file's own array entries are appended.
+- Duplicate scalar keys across files are rejected instead of silently overridden.
+- Incompatible value types for the same key are rejected.
+
+This is intended for splitting repeated or environment-specific sections into separate files, for example:
+
+```toml
+# source/config/oxibelt.toml
+include = ["conf.d/*.toml"]
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "/etc/oxibelt/tls/fullchain.pem"
+private_key = "/etc/oxibelt/tls/privkey.pem"
+```
+
+```toml
+# source/config/conf.d/10-upstreams.toml
+[[upstreams]]
+name = "app"
+origin = "https://app.internal.example"
+max_http_version = "h2"
+```
+
+```toml
+# source/config/conf.d/20-routes.toml
+[[routes]]
+name = "app-root"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+```
 
 ## 2. Logging
 
@@ -366,6 +433,10 @@ Route-level rule syntax is the same OxiRule syntax used by global rules.
 
 Configuration validation rejects:
 
+- Invalid include values.
+- Missing exact include files.
+- Include cycles.
+- Duplicate scalar keys or incompatible value types across included TOML files.
 - No enabled downstream HTTP versions.
 - Privileged listener ports when `runtime.unprivileged_mode = true`.
 - Non-Linux runtime when `runtime.linux_only = true`.

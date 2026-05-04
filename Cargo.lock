@@ -758,6 +758,7 @@ dependencies = [
  "aws-lc-rs",
  "bytes",
  "clap",
+ "glob",
  "http",
  "http-body-util",
  "hyper",
