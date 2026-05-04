@@ -15,13 +15,17 @@ pub struct TempDir {
 impl TempDir {
     pub fn new(prefix: &str) -> Self {
         let _ = safe_test_path_component(prefix, "temporary directory prefix");
+        let root = test_artifact_root();
+        fs::create_dir_all(&root).expect("failed to create test artifact root");
+        let root = root
+            .canonicalize()
+            .expect("failed to resolve test artifact root");
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time before unix epoch")
             .as_nanos();
         let id = next_test_id();
-        let path =
-            std::env::temp_dir().join(format!("oxibelt-test-{nanos}-{}-{id}", std::process::id()));
+        let path = root.join(format!("oxibelt-test-{nanos}-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).expect("failed to create temp directory");
         Self { path }
     }
@@ -78,10 +82,14 @@ fn next_test_id() -> u64 {
     NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+fn test_artifact_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/oxibelt-test-fixtures")
+}
+
 fn safe_existing_test_dir(dir: &Path) -> PathBuf {
-    let temp_root = std::env::temp_dir()
+    let test_root = test_artifact_root()
         .canonicalize()
-        .expect("failed to resolve system temp directory");
+        .expect("failed to resolve test artifact root");
     let canonical_dir = dir.canonicalize().unwrap_or_else(|error| {
         panic!(
             "failed to resolve test directory {}: {error}",
@@ -90,8 +98,8 @@ fn safe_existing_test_dir(dir: &Path) -> PathBuf {
     });
 
     assert!(
-        canonical_dir.starts_with(&temp_root),
-        "test directory must stay under the system temp directory"
+        canonical_dir.starts_with(&test_root),
+        "test directory must stay under the test artifact root"
     );
 
     canonical_dir
