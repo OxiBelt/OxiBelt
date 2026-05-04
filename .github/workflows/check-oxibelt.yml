@@ -140,160 +140,39 @@ jobs:
         run: tests/scripts/run-proxy-integration.sh
 
   browser-webdriver:
-    name: Browser WebDriver checks (${{ matrix.browser }})
+    name: Browser WebDriver proxy checks (${{ matrix.browser }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - browser: chromium
-            browser_command: chromium
-            driver_command: chromedriver
-            port: 9515
-          - browser: firefox
-            browser_command: firefox
-            driver_command: geckodriver
-            port: 4444
+        browser:
+          - chromium
+          - firefox
 
     steps:
-      - name: Add WebDriver directories to PATH
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Install Rust toolchain
         run: |
-          if [[ -n "${CHROMEWEBDRIVER:-}" ]]; then
-            echo "${CHROMEWEBDRIVER}" >> "${GITHUB_PATH}"
-          fi
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
 
-          if [[ -n "${GECKOWEBDRIVER:-}" ]]; then
-            echo "${GECKOWEBDRIVER}" >> "${GITHUB_PATH}"
-          fi
-
-      - name: Show browser and driver versions
+      - name: Install native build dependencies
         run: |
-          ${{ matrix.browser_command }} --version
-          ${{ matrix.driver_command }} --version
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            musl-tools \
+            ninja-build \
+            openssl \
+            perl \
+            pkg-config
 
-      - name: Run headless WebDriver smoke test
-        env:
-          BROWSER: ${{ matrix.browser }}
-          BROWSER_COMMAND: ${{ matrix.browser_command }}
-          DRIVER_COMMAND: ${{ matrix.driver_command }}
-          DRIVER_PORT: ${{ matrix.port }}
-        run: |
-          set -euo pipefail
+      - name: Build GNU and musl targets
+        run: tests/scripts/build-targets.sh
 
-          driver_log="${RUNNER_TEMP}/${DRIVER_COMMAND}.log"
-          base_url="http://127.0.0.1:${DRIVER_PORT}"
-          session_id=""
-          driver_pid=""
-
-          cleanup() {
-            if [[ -n "${session_id}" ]]; then
-              curl --silent --show-error --fail-with-body \
-                --request DELETE "${base_url}/session/${session_id}" >/dev/null || true
-            fi
-
-            if [[ -n "${driver_pid}" ]]; then
-              kill "${driver_pid}" >/dev/null 2>&1 || true
-              wait "${driver_pid}" >/dev/null 2>&1 || true
-            fi
-          }
-          trap cleanup EXIT
-
-          case "${BROWSER}" in
-            chromium)
-              browser_binary="$(command -v "${BROWSER_COMMAND}")"
-              "${DRIVER_COMMAND}" --port="${DRIVER_PORT}" >"${driver_log}" 2>&1 &
-              driver_pid="$!"
-              capabilities="$(
-                jq -n --arg binary "${browser_binary}" '{
-                  capabilities: {
-                    alwaysMatch: {
-                      browserName: "chrome",
-                      "goog:chromeOptions": {
-                        binary: $binary,
-                        args: [
-                          "--headless=new",
-                          "--no-sandbox",
-                          "--disable-dev-shm-usage"
-                        ]
-                      }
-                    }
-                  }
-                }'
-              )"
-              ;;
-            firefox)
-              "${DRIVER_COMMAND}" --port "${DRIVER_PORT}" >"${driver_log}" 2>&1 &
-              driver_pid="$!"
-              capabilities="$(
-                jq -n '{
-                  capabilities: {
-                    alwaysMatch: {
-                      browserName: "firefox",
-                      "moz:firefoxOptions": {
-                        args: [
-                          "-headless"
-                        ]
-                      }
-                    }
-                  }
-                }'
-              )"
-              ;;
-            *)
-              echo "Unsupported browser: ${BROWSER}" >&2
-              exit 1
-              ;;
-          esac
-
-          for _ in {1..30}; do
-            if curl --silent --fail "${base_url}/status" >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-
-          curl --silent --show-error --fail-with-body "${base_url}/status" >/dev/null
-
-          session_response="$(
-            curl --silent --show-error --fail-with-body \
-              --header "Content-Type: application/json" \
-              --request POST \
-              --data "${capabilities}" \
-              "${base_url}/session"
-          )"
-          session_id="$(jq -r '.value.sessionId // .sessionId // empty' <<<"${session_response}")"
-
-          if [[ -z "${session_id}" ]]; then
-            echo "Unable to create ${BROWSER} WebDriver session." >&2
-            echo "${session_response}" >&2
-            echo "Driver log:" >&2
-            cat "${driver_log}" >&2
-            exit 1
-          fi
-
-          test_url="data:text/html;charset=utf-8,<title>OxiBelt%20WebDriver</title><main>ready</main>"
-          curl --silent --show-error --fail-with-body \
-            --header "Content-Type: application/json" \
-            --request POST \
-            --data "$(jq -n --arg url "${test_url}" '{url: $url}')" \
-            "${base_url}/session/${session_id}/url" >/dev/null
-
-          result="$(
-            curl --silent --show-error --fail-with-body \
-              --header "Content-Type: application/json" \
-              --request POST \
-              --data '{
-                "script": "return document.title + \":\" + document.querySelector(\"main\").textContent;",
-                "args": []
-              }' \
-              "${base_url}/session/${session_id}/execute/sync" | jq -r ".value"
-          )"
-
-          if [[ "${result}" != "OxiBelt WebDriver:ready" ]]; then
-            echo "Unexpected ${BROWSER} WebDriver result: ${result}" >&2
-            echo "Driver log:" >&2
-            cat "${driver_log}" >&2
-            exit 1
-          fi
+      - name: Run browser-to-proxy WebDriver check
+        run: tests/scripts/run-browser-webdriver-check.sh "${{ matrix.browser }}"
