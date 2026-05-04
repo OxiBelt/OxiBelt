@@ -64,23 +64,30 @@ cargo run -- --config config/oxibelt.toml
 - The application does not assume root privileges or Linux capabilities
 - It does not require disk writes by default
 
-## Alpine Container Example
+## Release Container Image
 
 From the repository root:
 
 ```bash
-docker build -t oxibelt -f source/ops/Dockerfile.alpine .
+docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
-The image entrypoint reads `/etc/oxibelt/config/oxibelt.toml`. Mount configuration, certificate material, and external OxiRule files into the purpose-specific directories:
+The Alpine image is the canonical release image. It runs as UID/GID `10001:10001`, exposes `8443/tcp`, and uses OCI image labels for version, source, revision, and creation metadata when those build arguments are provided. CI image artifacts are built with `tests/scripts/build-docker-image-artifact.sh`.
+
+The bundled `/etc/oxibelt/config/oxibelt.toml` is an example/default configuration. For production, mount environment-specific configuration, certificate material, and external OxiRule files into the purpose-specific directories:
 
 ```bash
 docker run --rm -p 8443:8443 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges \
   --mount type=bind,src=/mnt/user0/oxibelt/config,dst=/etc/oxibelt/config,readonly \
   --mount type=bind,src=/mnt/user0/oxibelt/cert,dst=/etc/oxibelt/cert,readonly \
   --mount type=bind,src=/mnt/user0/oxibelt/oxirule,dst=/etc/oxibelt/oxirule,readonly \
   oxibelt
 ```
+
+Mounted files must be readable by container UID `10001`; for private keys, prefer ownership or group permissions over broad world-readable permissions.
 
 ## Test Assets
 

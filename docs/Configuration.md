@@ -25,10 +25,13 @@ The standard container layout has three purpose-specific directories:
 /etc/oxibelt/oxirule  # External .oxirule.toml rule files
 ```
 
-This layout can be mounted from separate host directories or volumes:
+This layout can be mounted from separate host directories or volumes. For release deployments, keep these mounts read-only and pair them with Docker runtime hardening:
 
 ```sh
-docker run --rm \
+docker run --rm -p 8443:8443 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges \
   --mount type=bind,src=/mnt/user0/oxibelt/config,dst=/etc/oxibelt/config,readonly \
   --mount type=bind,src=/mnt/user0/oxibelt/cert,dst=/etc/oxibelt/cert,readonly \
   --mount type=bind,src=/mnt/user0/oxibelt/oxirule,dst=/etc/oxibelt/oxirule,readonly \
@@ -38,15 +41,20 @@ docker run --rm \
 If the main file has a different host-side name, bind it to the entrypoint path:
 
 ```sh
-docker run --rm \
+docker run --rm -p 8443:8443 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges \
   --mount type=bind,src=/mnt/user0/oxibelt/config,dst=/etc/oxibelt/config,readonly \
-  --mount type=bind,src=/mnt/user/oxibelt/config/main.toml,dst=/etc/oxibelt/config/oxibelt.toml,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/config/main.toml,dst=/etc/oxibelt/config/oxibelt.toml,readonly \
   --mount type=bind,src=/mnt/user0/oxibelt/cert,dst=/etc/oxibelt/cert,readonly \
   --mount type=bind,src=/mnt/user0/oxibelt/oxirule,dst=/etc/oxibelt/oxirule,readonly \
   oxibelt
 ```
 
 With this nested file mount, OxiBelt still sees the main file as `/etc/oxibelt/config/oxibelt.toml`. Other included config files are resolved from the container-visible `/etc/oxibelt/config` directory, which is the parent directory mount above. Make sure bind-mount sources already exist and use Docker's `--mount` form so a missing file source is reported as an error instead of being created as a directory.
+
+The release image runs as UID/GID `10001:10001`. Mounted configuration, certificate, and OxiRule files must be readable by that container identity.
 
 Relative paths in `include` entries are resolved relative to the TOML file that declares them. Include entries must stay under that declaring file's directory. Runtime file paths inside the merged configuration are resolved by purpose: TLS, CA, OCSP, and ECH files are resolved under the cert directory, and external OxiRule files are resolved under the oxirule directory.
 
