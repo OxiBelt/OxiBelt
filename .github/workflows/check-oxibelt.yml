@@ -141,7 +141,7 @@ jobs:
 
   docker-alpine-musl-image:
     name: Docker image (Alpine musl, ${{ matrix.arch }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     strategy:
@@ -150,19 +150,26 @@ jobs:
         include:
           - arch: amd64
             platform: linux/amd64
+            runner: ubuntu-latest
+            qemu_platforms: ""
           - arch: arm64
             platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            qemu_platforms: ""
           - arch: riscv64
             platform: linux/riscv64
+            runner: ubuntu-latest
+            qemu_platforms: riscv64
 
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
 
       - name: Setup QEMU
+        if: matrix.qemu_platforms != ''
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a
         with:
-          platforms: arm64,riscv64
+          platforms: ${{ matrix.qemu_platforms }}
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # 4.0.0
