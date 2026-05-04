@@ -119,16 +119,16 @@ pub async fn handle(
   };
 
   let preserve_host = upstream.preserve_host;
-  let outbound = rebuild_request(
-    request,
+  let rebuild = RebuildRequestOptions {
     target_uri,
-    &state.config.compression,
+    compression: &state.config.compression,
     peer_addr,
-    &host,
+    downstream_host: &host,
     preserve_host,
     upstream_version,
-    &request_waf.request_header_mutations,
-  );
+    waf_mutations: &request_waf.request_header_mutations,
+  };
+  let outbound = rebuild_request(request, rebuild);
 
   debug!(
       route = %resolved.route.name,
@@ -204,35 +204,43 @@ pub async fn handle(
   Response::from_parts(parts, body.map_err(boxed_error).boxed())
 }
 
-fn rebuild_request(
-  request: Request<Incoming>,
+struct RebuildRequestOptions<'a> {
   target_uri: Uri,
-  compression: &crate::config::CompressionConfig,
+  compression: &'a crate::config::CompressionConfig,
   peer_addr: std::net::SocketAddr,
-  downstream_host: &str,
+  downstream_host: &'a str,
   preserve_host: bool,
   upstream_version: HttpVersion,
-  waf_mutations: &[HeaderMutation],
+  waf_mutations: &'a [HeaderMutation],
+}
+
+fn rebuild_request(
+  request: Request<Incoming>,
+  options: RebuildRequestOptions<'_>,
 ) -> Request<ProxyBody> {
   let (mut parts, body) = request.into_parts();
-  parts.uri = target_uri;
-  parts.version = upstream_request_version(upstream_version);
+  parts.uri = options.target_uri;
+  parts.version = upstream_request_version(options.upstream_version);
   strip_hop_by_hop_headers(&mut parts.headers);
 
-  if !preserve_host {
+  if !options.preserve_host {
     parts.headers.remove(HOST);
   }
 
-  add_forwarded_headers(&mut parts.headers, peer_addr, downstream_host);
+  add_forwarded_headers(
+    &mut parts.headers,
+    options.peer_addr,
+    options.downstream_host,
+  );
 
   if !parts.headers.contains_key(ACCEPT_ENCODING)
-    && let Some(accept_encoding) = compression.accept_encoding_value()
+    && let Some(accept_encoding) = options.compression.accept_encoding_value()
     && let Ok(value) = HeaderValue::from_str(&accept_encoding)
   {
     parts.headers.insert(ACCEPT_ENCODING, value);
   }
 
-  apply_header_mutations(&mut parts.headers, waf_mutations);
+  apply_header_mutations(&mut parts.headers, options.waf_mutations);
 
   Request::from_parts(parts, body.map_err(boxed_error).boxed())
 }
