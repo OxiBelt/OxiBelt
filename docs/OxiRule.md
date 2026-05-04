@@ -3,6 +3,24 @@
 Status: Draft 0.4  
 Target project: OxiBelt Rust-based reverse proxy
 
+## Current Rust Implementation Status
+
+The current Rust implementation includes the initial OxiRule execution path for HTTP request and response traffic:
+
+- Global and route-level `[[waf.rules]]` configuration.
+- External `.oxirule.toml` rule files loaded relative to the main config file.
+- Request-phase `reject`, `set_request_header`, `remove_request_header`, `set_tag`, and `route_to_upstream`.
+- Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, and `remove_response_header`.
+- CEL-like boolean expressions with object property access, string helpers, header/query/cookie/tag helpers, regex matching, CIDR checks, and request/response phase validation.
+- Synthetic response context for upstream forwarding failures, exposed to response-phase rules as `Response.Upstream.Error`.
+- Runtime, expression-step, and mutation budgets.
+
+The following parts of this draft remain reserved for a later implementation:
+
+- Streaming-safe request/response body content inspection helpers such as `Body.contains`, `Body.matches`, and `Body.scan`.
+- `route_to_pool` and `set_load_balancing_policy`, pending an upstream-pool/load-balancing configuration model.
+- HTTP/3, WebTransport, UDP-flow metadata, and frame/datagram-level inspection.
+
 ## 1. Purpose
 
 OxiRule is a CEL-like, declarative WAF rule model for OxiBelt, a Rust-based reverse proxy. OxiRule is used to inspect HTTP, WebSocket, WebRTC, and WebTransport traffic and decide whether a transaction should be forwarded, load-balanced, rejected, rewritten, tagged, or inspected further.

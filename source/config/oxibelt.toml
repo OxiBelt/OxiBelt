@@ -33,6 +33,26 @@ gzip = true
 deflate = true
 zstd = true
 
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[waf.limits]
+max_rule_runtime_ms = 5
+max_total_waf_runtime_ms = 20
+max_expression_steps = 2000
+max_memory_bytes = 262144
+max_string_bytes = 8192
+max_body_inspection_bytes = 1048576
+max_header_count = 128
+max_header_value_bytes = 8192
+max_mutations = 32
+max_regex_runtime_ms = 2
+max_helper_items = 128
+max_helper_pattern_count = 32
+max_helper_result_bytes = 8192
+
 [[upstreams]]
 name = "app"
 origin = "https://app.internal.example"

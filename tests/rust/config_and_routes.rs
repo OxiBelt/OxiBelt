@@ -96,7 +96,10 @@ upstream = "app"
 
     assert_eq!(config.tls.cert_chain, cert_path);
     assert_eq!(config.tls.private_key, key_path);
-    assert_eq!(config.tls.ocsp.response_file.as_deref(), Some(ocsp_path.as_path()));
+    assert_eq!(
+        config.tls.ocsp.response_file.as_deref(),
+        Some(ocsp_path.as_path())
+    );
     assert_eq!(config.proxy.trusted_ca_certs, vec![ca_path]);
 }
 

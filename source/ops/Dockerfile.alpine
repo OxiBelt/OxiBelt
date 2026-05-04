@@ -2,9 +2,10 @@ FROM rust:1.95.0-alpine AS builder
 
 RUN apk add --no-cache build-base musl-dev perl
 
-WORKDIR /src
-COPY . .
-RUN cargo build --locked --release
+WORKDIR /repo
+COPY Cargo.toml Cargo.lock ./
+COPY source ./source
+RUN cargo build --locked --release -p oxibelt
 
 FROM alpine:3.21
 
@@ -14,8 +15,8 @@ RUN apk add --no-cache ca-certificates libgcc && \
     mkdir -p /etc/oxibelt/tls
 
 WORKDIR /app
-COPY --from=builder /src/target/release/oxibelt /usr/local/bin/oxibelt
-COPY config/oxibelt.toml /etc/oxibelt/oxibelt.toml
+COPY --from=builder /repo/target/release/oxibelt /usr/local/bin/oxibelt
+COPY source/config/oxibelt.toml /etc/oxibelt/oxibelt.toml
 
 USER 10001:10001
 EXPOSE 8443/tcp

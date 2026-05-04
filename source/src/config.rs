@@ -6,6 +6,8 @@ use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
 use url::Url;
 
+use crate::waf::{RouteWafConfig, WafConfig};
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
   #[serde(default)]
@@ -20,6 +22,8 @@ pub struct Config {
   pub compression: CompressionConfig,
   pub upstreams: Vec<UpstreamConfig>,
   pub routes: Vec<RouteConfig>,
+  #[serde(default)]
+  pub waf: WafConfig,
 }
 
 impl Config {
@@ -30,6 +34,7 @@ impl Config {
     let mut config: Self = toml::from_str(&raw)
       .with_context(|| format!("failed to parse TOML from {}", path.display()))?;
     config.resolve_relative_paths(&base_dir);
+    config.load_external_waf_rules()?;
     Ok(config)
   }
 
@@ -48,6 +53,18 @@ impl Config {
       .iter()
       .map(|path| resolve_path(base_dir, path))
       .collect();
+    self.waf.resolve_relative_paths(base_dir);
+    for route in &mut self.routes {
+      route.waf.resolve_relative_paths(base_dir);
+    }
+  }
+
+  fn load_external_waf_rules(&mut self) -> anyhow::Result<()> {
+    self.waf.load_external_rules()?;
+    for route in &mut self.routes {
+      route.waf.load_external_rules()?;
+    }
+    Ok(())
   }
 
   pub fn validate(&self) -> anyhow::Result<()> {
@@ -106,13 +123,13 @@ impl Config {
       if !route.path_prefix.starts_with('/') {
         bail!("route {} path_prefix must start with '/'", route.name);
       }
-      if let Some(replacement) = &route.replace_prefix_with {
-        if !replacement.starts_with('/') {
-          bail!(
-            "route {} replace_prefix_with must start with '/'",
-            route.name
-          );
-        }
+      if let Some(replacement) = &route.replace_prefix_with
+        && !replacement.starts_with('/')
+      {
+        bail!(
+          "route {} replace_prefix_with must start with '/'",
+          route.name
+        );
       }
       if !upstream_names.contains(&route.upstream) {
         bail!(
@@ -160,6 +177,8 @@ impl Config {
         "upstream HTTP/3 routing is reserved but not implemented yet in this initial build"
       ));
     }
+
+    crate::waf::validate_config(self)?;
 
     Ok(())
   }
@@ -272,21 +291,12 @@ pub enum OcspMode {
   LiveFetch,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProxyConfig {
   #[serde(default)]
   pub auto_upgrade: AutoUpgradeConfig,
   #[serde(default)]
   pub trusted_ca_certs: Vec<PathBuf>,
-}
-
-impl Default for ProxyConfig {
-  fn default() -> Self {
-    Self {
-      auto_upgrade: AutoUpgradeConfig::default(),
-      trusted_ca_certs: Vec::new(),
-    }
-  }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -384,6 +394,8 @@ pub struct RouteConfig {
   #[serde(default)]
   pub replace_prefix_with: Option<String>,
   pub upstream: String,
+  #[serde(default)]
+  pub waf: RouteWafConfig,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]

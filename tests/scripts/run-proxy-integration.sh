@@ -16,6 +16,7 @@ proxy_container="oxibelt-proxy-${run_id}"
 cleanup() {
   docker rm -f "${proxy_container}" "${https_container}" "${http_container}" >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
+  docker rmi -f "${proxy_image}" "${mock_image}" "${pq_probe_image}" >/dev/null 2>&1 || true
   if [[ "${KEEP_TEST_ARTIFACTS:-0}" != "1" ]]; then
     rm -rf "${work_dir}"
   fi
@@ -137,6 +138,22 @@ gzip = true
 deflate = true
 zstd = true
 
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "block-integration-waf-path"
+phase = "request"
+priority = 100
+when = "Request.Http.Path.endsWith('/blocked')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "Blocked by WAF"
+
 [[upstreams]]
 name = "http-upstream"
 origin = "http://mock-http:18080/origin"
@@ -192,7 +209,7 @@ echo "Building proxy runtime image"
 docker build \
   -t "${proxy_image}" \
   -f "${repo_root}/source/ops/Dockerfile.alpine" \
-  "${repo_root}/source"
+  "${repo_root}"
 
 echo "Building post-quantum probe image"
 docker build \
@@ -306,6 +323,13 @@ echo "${https_response}" | grep -F '"upstream": "https-upstream"'
 echo "${https_response}" | grep -F '"path": "/backend/edge/v1/health?source=https"'
 echo "${https_response}" | grep -F '"host": "secure.example.test"'
 echo "${https_response}" | grep -F '"x-forwarded-host": "secure.example.test"'
+
+waf_blocked_response=""
+if waf_blocked_response="$(request_through_proxy "https://proxy:8443/app/blocked" "http.example.test" 2>/dev/null)"; then
+  echo "WAF block request unexpectedly succeeded" >&2
+  exit 1
+fi
+echo "${waf_blocked_response}" | grep -F 'Blocked by WAF'
 
 pq_x25519_output="$(run_pq_probe "x25519" "success")"
 echo "${pq_x25519_output}" | grep -F 'requested_group=X25519 negotiated_group=X25519'

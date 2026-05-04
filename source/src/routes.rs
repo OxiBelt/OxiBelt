@@ -56,16 +56,18 @@ impl RouteTable {
 
 pub fn normalize_host(raw: &str) -> String {
   let trimmed = raw.trim().trim_end_matches('.');
-  if trimmed.starts_with('[') {
-    if let Some(end) = trimmed.find(']') {
-      return trimmed[1..end].to_ascii_lowercase();
-    }
+  if trimmed.starts_with('[')
+    && let Some(end) = trimmed.find(']')
+  {
+    return trimmed[1..end].to_ascii_lowercase();
   }
 
-  if let Some((host, port)) = trimmed.rsplit_once(':') {
-    if !host.contains(':') && !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) {
-      return host.to_ascii_lowercase();
-    }
+  if let Some((host, port)) = trimmed.rsplit_once(':')
+    && !host.contains(':')
+    && !port.is_empty()
+    && port.chars().all(|ch| ch.is_ascii_digit())
+  {
+    return host.to_ascii_lowercase();
   }
 
   trimmed.to_ascii_lowercase()
@@ -132,6 +134,7 @@ mod tests {
         path_prefix: "/".into(),
         replace_prefix_with: None,
         upstream: "wild".into(),
+        waf: Default::default(),
       },
       RouteConfig {
         name: "exact".into(),
@@ -139,6 +142,7 @@ mod tests {
         path_prefix: "/".into(),
         replace_prefix_with: None,
         upstream: "exact".into(),
+        waf: Default::default(),
       },
     ];
     let upstreams = vec![upstream("wild"), upstream("exact")];
@@ -157,6 +161,7 @@ mod tests {
         path_prefix: "/".into(),
         replace_prefix_with: None,
         upstream: "root".into(),
+        waf: Default::default(),
       },
       RouteConfig {
         name: "api".into(),
@@ -164,6 +169,7 @@ mod tests {
         path_prefix: "/api".into(),
         replace_prefix_with: None,
         upstream: "api".into(),
+        waf: Default::default(),
       },
     ];
     let upstreams = vec![upstream("root"), upstream("api")];

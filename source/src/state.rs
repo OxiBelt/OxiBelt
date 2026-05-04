@@ -1,5 +1,6 @@
 use anyhow::Context;
-use hyper::body::Incoming;
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -7,10 +8,13 @@ use hyper_util::rt::TokioExecutor;
 use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::routes::RouteTable;
 use crate::tls;
+use crate::waf::WafEngine;
 
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub type UpstreamBody = BoxBody<Bytes, BoxError>;
 type HyperClient = Client<
   hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-  Incoming,
+  UpstreamBody,
 >;
 
 #[derive(Clone)]
@@ -34,6 +38,7 @@ pub struct AppState {
   pub upstreams: Vec<UpstreamConfig>,
   pub clients: ClientPool,
   pub tls_server_config: std::sync::Arc<rustls::ServerConfig>,
+  pub waf: WafEngine,
 }
 
 impl AppState {
@@ -44,6 +49,7 @@ impl AppState {
       .context("failed to build upstream HTTP clients")?;
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to build downstream TLS config")?;
+    let waf = WafEngine::new(&config).context("failed to build WAF engine")?;
 
     Ok(Self {
       config,
@@ -51,6 +57,7 @@ impl AppState {
       upstreams,
       clients,
       tls_server_config,
+      waf,
     })
   }
 }

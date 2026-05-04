@@ -16,6 +16,10 @@ use url::Url;
 use crate::config::HttpVersion;
 use crate::routes::normalize_host;
 use crate::state::AppState;
+use crate::waf::{
+  HeaderMutation, WafRequestInput, WafResponseInput, WafTerminalResponse, WafUpstreamError,
+  apply_header_mutations, request_protocol,
+};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ProxyBody = BoxBody<Bytes, BoxError>;
@@ -32,6 +36,39 @@ pub async fn handle(
     );
   }
 
+  let host = extract_host(&request).unwrap_or_default();
+  let path = request.uri().path().to_string();
+  let request_method = request.method().clone();
+  let request_uri = request.uri().clone();
+  let request_version = request.version();
+  let request_headers = request.headers().clone();
+  let protocol = request_protocol(&request_headers);
+  let mut tags = std::collections::HashMap::new();
+
+  let Some(resolved) = state.route_table.resolve(&host, &path, &state.upstreams) else {
+    return text_response(StatusCode::NOT_FOUND, "no matching route");
+  };
+
+  let request_waf = state.waf.evaluate_request(WafRequestInput {
+    method: &request_method,
+    uri: &request_uri,
+    version: request_version,
+    headers: &request_headers,
+    peer_addr,
+    downstream_host: &host,
+    route_name: &resolved.route.name,
+    protocol,
+    tags: &tags,
+  });
+
+  for (key, value) in request_waf.tags {
+    tags.insert(key, value);
+  }
+
+  if let Some(terminal) = request_waf.terminal {
+    return waf_terminal_response(terminal, &[]);
+  }
+
   if is_upgrade_request(&request) {
     return text_response(
       StatusCode::NOT_IMPLEMENTED,
@@ -39,17 +76,26 @@ pub async fn handle(
     );
   }
 
-  let host = extract_host(&request).unwrap_or_default();
-  let path = request.uri().path().to_string();
-
-  let Some(resolved) = state.route_table.resolve(&host, &path, &state.upstreams) else {
-    return text_response(StatusCode::NOT_FOUND, "no matching route");
+  let upstream = if let Some(upstream_name) = request_waf.upstream_override.as_deref() {
+    match state
+      .upstreams
+      .iter()
+      .find(|upstream| upstream.name == upstream_name)
+    {
+      Some(upstream) => upstream,
+      None => {
+        warn!(upstream = upstream_name, "WAF selected an unknown upstream");
+        return text_response(StatusCode::BAD_GATEWAY, "WAF selected an unknown upstream");
+      }
+    }
+  } else {
+    resolved.upstream
   };
 
   let upstream_version = select_upstream_http_version(
     state.config.proxy.auto_upgrade.enabled,
     state.config.proxy.auto_upgrade.max_http_version,
-    resolved.upstream.max_http_version,
+    upstream.max_http_version,
   );
 
   if upstream_version == HttpVersion::H3 {
@@ -60,7 +106,7 @@ pub async fn handle(
   }
 
   let target_uri = match rewrite_uri(
-    &resolved.upstream.origin,
+    &upstream.origin,
     resolved.route.path_prefix.as_str(),
     resolved.route.replace_prefix_with.as_deref(),
     request.uri(),
@@ -72,7 +118,7 @@ pub async fn handle(
     }
   };
 
-  let preserve_host = resolved.upstream.preserve_host;
+  let preserve_host = upstream.preserve_host;
   let outbound = rebuild_request(
     request,
     target_uri,
@@ -80,11 +126,12 @@ pub async fn handle(
     peer_addr,
     &host,
     preserve_host,
+    &request_waf.request_header_mutations,
   );
 
   debug!(
       route = %resolved.route.name,
-      upstream = %resolved.upstream.name,
+      upstream = %upstream.name,
       method = %outbound.method(),
       uri = %outbound.uri(),
       "proxying downstream request"
@@ -96,15 +143,53 @@ pub async fn handle(
     Err(error) => {
       warn!(
           error = %error,
-          upstream = %resolved.upstream.name,
+          upstream = %upstream.name,
           "upstream request failed"
       );
-      return text_response(StatusCode::BAD_GATEWAY, "upstream request failed");
+      return upstream_error_response(
+        &state,
+        &resolved.route.name,
+        &request_method,
+        &request_uri,
+        request_version,
+        &request_headers,
+        peer_addr,
+        &host,
+        protocol,
+        &tags,
+        &upstream.name,
+        &error.to_string(),
+      );
     }
   };
 
   let (mut parts, body) = upstream_response.into_parts();
   strip_hop_by_hop_headers(&mut parts.headers);
+
+  if state.waf.has_response_rules(&resolved.route.name) {
+    let request_input = WafRequestInput {
+      method: &request_method,
+      uri: &request_uri,
+      version: request_version,
+      headers: &request_headers,
+      peer_addr,
+      downstream_host: &host,
+      route_name: &resolved.route.name,
+      protocol,
+      tags: &tags,
+    };
+    let response_waf = state.waf.evaluate_response(WafResponseInput {
+      request: request_input,
+      status: parts.status,
+      headers: &parts.headers,
+      upstream_name: &upstream.name,
+      upstream_error: None,
+    });
+    if let Some(terminal) = response_waf.terminal {
+      return waf_terminal_response(terminal, &response_waf.response_header_mutations);
+    }
+    apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
+  }
 
   Response::from_parts(parts, body.map_err(boxed_error).boxed())
 }
@@ -116,7 +201,8 @@ fn rebuild_request(
   peer_addr: std::net::SocketAddr,
   downstream_host: &str,
   preserve_host: bool,
-) -> Request<Incoming> {
+  waf_mutations: &[HeaderMutation],
+) -> Request<ProxyBody> {
   let (mut parts, body) = request.into_parts();
   parts.uri = target_uri;
   strip_hop_by_hop_headers(&mut parts.headers);
@@ -127,15 +213,16 @@ fn rebuild_request(
 
   add_forwarded_headers(&mut parts.headers, peer_addr, downstream_host);
 
-  if !parts.headers.contains_key(ACCEPT_ENCODING) {
-    if let Some(accept_encoding) = compression.accept_encoding_value() {
-      if let Ok(value) = HeaderValue::from_str(&accept_encoding) {
-        parts.headers.insert(ACCEPT_ENCODING, value);
-      }
-    }
+  if !parts.headers.contains_key(ACCEPT_ENCODING)
+    && let Some(accept_encoding) = compression.accept_encoding_value()
+    && let Ok(value) = HeaderValue::from_str(&accept_encoding)
+  {
+    parts.headers.insert(ACCEPT_ENCODING, value);
   }
 
-  Request::from_parts(parts, body)
+  apply_header_mutations(&mut parts.headers, waf_mutations);
+
+  Request::from_parts(parts, body.map_err(boxed_error).boxed())
 }
 
 fn rewrite_uri(
@@ -289,6 +376,68 @@ fn text_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
     .boxed();
   let mut response = Response::new(body);
   *response.status_mut() = status;
+  response
+}
+
+fn waf_terminal_response(
+  terminal: WafTerminalResponse,
+  mutations: &[HeaderMutation],
+) -> Response<ProxyBody> {
+  let mut response = text_response(terminal.status, &terminal.body);
+  apply_header_mutations(response.headers_mut(), mutations);
+  response
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upstream_error_response(
+  state: &AppState,
+  route_name: &str,
+  request_method: &Method,
+  request_uri: &Uri,
+  request_version: http::Version,
+  request_headers: &HeaderMap,
+  peer_addr: std::net::SocketAddr,
+  downstream_host: &str,
+  protocol: crate::waf::WafProtocol,
+  tags: &std::collections::HashMap<String, String>,
+  upstream_name: &str,
+  error_message: &str,
+) -> Response<ProxyBody> {
+  let mut response = text_response(StatusCode::BAD_GATEWAY, "upstream request failed");
+  if !state.waf.has_response_rules(route_name) {
+    return response;
+  }
+
+  let request = WafRequestInput {
+    method: request_method,
+    uri: request_uri,
+    version: request_version,
+    headers: request_headers,
+    peer_addr,
+    downstream_host,
+    route_name,
+    protocol,
+    tags,
+  };
+  let response_waf = state.waf.evaluate_response(WafResponseInput {
+    request,
+    status: StatusCode::BAD_GATEWAY,
+    headers: response.headers(),
+    upstream_name,
+    upstream_error: Some(WafUpstreamError {
+      code: "connect_error",
+      message: error_message,
+    }),
+  });
+
+  if let Some(terminal) = response_waf.terminal {
+    return waf_terminal_response(terminal, &response_waf.response_header_mutations);
+  }
+
+  apply_header_mutations(
+    response.headers_mut(),
+    &response_waf.response_header_mutations,
+  );
   response
 }
 

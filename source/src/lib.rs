@@ -17,6 +17,7 @@ pub mod runtime;
 pub mod server;
 pub mod state;
 pub mod tls;
+pub mod waf;
 
 use std::sync::Arc;
 

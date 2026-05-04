@@ -764,6 +764,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "pretty_assertions",
+ "regex",
  "rustls",
  "rustls-pemfile",
  "serde",

@@ -14,6 +14,7 @@ Current implementation scope:
 - Streaming HTTP body forwarding
 - HTTP/2-based gRPC proxy paths
 - Compression negotiation passthrough for `zstd`, `gzip`, and `deflate`
+- Initial OxiRule WAF support for request/response rules, header mutation, tags, request rejection, upstream-error response policy, and response replacement
 - TOML configuration file
 - Assumptions aligned with non-root / `readonlyRootFilesystem` operation in Alpine containers
 
@@ -25,6 +26,8 @@ Items intentionally left out of this initial implementation:
 - WebSocket upgrade tunneling
 - WebRTC forwarding
 - OCSP live fetch / refresh worker
+- Streaming-safe WAF body content inspection
+- Upstream pool load balancing actions
 
 Current constraints:
 
@@ -56,7 +59,11 @@ cargo run -- --config config/oxibelt.toml
 
 ## Alpine Container Example
 
-See `source/ops/Dockerfile.alpine`.
+From the repository root:
+
+```bash
+docker build -t oxibelt -f source/ops/Dockerfile.alpine .
+```
 
 ## Test Assets
 

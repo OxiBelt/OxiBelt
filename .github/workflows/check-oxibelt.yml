@@ -25,10 +25,6 @@ jobs:
           - ubuntu-latest
           - ubuntu-24.04-arm
 
-    defaults:
-      run:
-        working-directory: source
-
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
@@ -37,9 +33,16 @@ jobs:
         run: |
           rustup toolchain install ${{ matrix.rust_version }} --profile minimal
           rustup default ${{ matrix.rust_version }}
+          rustup component add rustfmt clippy --toolchain ${{ matrix.rust_version }}
 
-      - name: Cargo check
-        run: cargo check --all-targets --locked
+      - name: Cargo fmt
+        run: cargo fmt --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --all-features --locked
 
   build-riscv64-qemu:
     name: Build (riscv64 via QEMU, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
@@ -54,10 +57,6 @@ jobs:
         target:
           - riscv64gc-unknown-linux-gnu
           - riscv64gc-unknown-linux-musl
-
-    defaults:
-      run:
-        working-directory: source
 
     steps:
       - name: Checkout
@@ -108,3 +107,34 @@ jobs:
           CXX_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-g++
         run: |
           cargo check --all-targets --locked --target ${{ matrix.target }}
+
+  docker-integration:
+    name: Docker integration checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            musl-tools \
+            ninja-build \
+            perl \
+            pkg-config
+
+      - name: Build GNU and musl targets
+        run: tests/scripts/build-targets.sh
+
+      - name: Run proxy integration checks
+        run: tests/scripts/run-proxy-integration.sh
