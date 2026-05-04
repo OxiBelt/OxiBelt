@@ -36,7 +36,14 @@ In other words, this commit is meant to be a production-oriented foundation. It 
 
 ## Basic Run
 
+From the repository root:
+
 ```bash
+cargo run --manifest-path source/Cargo.toml -- --config source/config/oxibelt.toml
+```
+Or from `source/`
+```bash
+cd source
 cargo run -- --config config/oxibelt.toml
 ```
 
@@ -49,7 +56,7 @@ cargo run -- --config config/oxibelt.toml
 
 ## Alpine Container Example
 
-See `ops/Dockerfile.alpine`.
+See `source/ops/Dockerfile.alpine`.
 
 ## Test Assets
 
