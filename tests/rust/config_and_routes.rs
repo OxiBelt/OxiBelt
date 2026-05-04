@@ -218,16 +218,67 @@ fn config_include_cycles_are_rejected() {
     std::fs::create_dir_all(&modules_dir).expect("failed to create module directory");
 
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(&config_path, r#"include = "conf.d/loop.toml""#);
+    common::write_file(&config_path, r#"include = "conf.d/loop-a.toml""#);
     common::write_file(
-        &modules_dir.join("loop.toml"),
-        r#"include = "../oxibelt.toml""#,
+        &modules_dir.join("loop-a.toml"),
+        r#"include = "loop-b.toml""#,
+    );
+    common::write_file(
+        &modules_dir.join("loop-b.toml"),
+        r#"include = "loop-a.toml""#,
     );
 
     let error = Config::load(&config_path).expect_err("cycle should be rejected");
 
     assert!(
         error.to_string().contains("configuration include cycle"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn config_include_rejects_parent_directory_escape() {
+    let temp_dir = common::TempDir::new("include-parent");
+    let config_dir = temp_dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    common::write_file(
+        &temp_dir.path().join("outside.toml"),
+        "[logging]\nlevel = \"debug\"\n",
+    );
+
+    let config_path = config_dir.join("oxibelt.toml");
+    common::write_file(&config_path, r#"include = "../outside.toml""#);
+
+    let error = Config::load(&config_path).expect_err("parent traversal should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("configuration include must not contain"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn config_include_rejects_absolute_paths() {
+    let temp_dir = common::TempDir::new("include-absolute");
+    let config_dir = temp_dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    let outside_path = temp_dir.path().join("outside.toml");
+    common::write_file(&outside_path, "[logging]\nlevel = \"debug\"\n");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    common::write_file(
+        &config_path,
+        &format!("include = \"{}\"", outside_path.display()),
+    );
+
+    let error = Config::load(&config_path).expect_err("absolute include should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("configuration include must be a relative path"),
         "unexpected error: {error}"
     );
 }
@@ -339,6 +390,47 @@ fn upstream_ech_config_list_file_is_only_valid_in_config_list_mode() {
     let error = config.validate().expect_err("validation should fail");
     assert!(
         error.to_string().contains("only valid when tls.ech.mode"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn route_path_prefix_rejects_dot_segments() {
+    let temp_dir = common::TempDir::new("route-dot-segment");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-dot-segment");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("path_prefix = \"/\"", "path_prefix = \"/../admin\"");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("route path should be rejected");
+
+    assert!(
+        error.to_string().contains("must not contain dot segments"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn route_replacement_rejects_query_fragments() {
+    let temp_dir = common::TempDir::new("route-query");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "route-query");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "path_prefix = \"/\"",
+        "path_prefix = \"/\"\nreplace_prefix_with = \"/edge?debug=true\"",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("route replacement should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("must not contain control characters"),
         "unexpected error: {error}"
     );
 }

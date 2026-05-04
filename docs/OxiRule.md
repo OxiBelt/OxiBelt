@@ -254,6 +254,7 @@ A rule entry must specify exactly one of:
 - `path`
 
 Specifying both is a configuration validation error. Specifying neither is also a configuration validation error.
+External rule file paths are resolved relative to the main OxiBelt configuration directory and must stay under that directory. Absolute paths and paths containing `.` or `..` components are rejected.
 
 An external `.oxirule.toml` file should contain a single rule body without route attachment metadata:
 

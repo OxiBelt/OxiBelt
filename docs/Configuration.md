@@ -11,7 +11,7 @@ source/config/oxibelt.toml
 
 OxiBelt loads configuration from the path passed with `--config`. That file is the main entry configuration. It may include additional modular TOML files with the top-level `include` key.
 
-Relative paths in `include` entries are resolved relative to the TOML file that declares them. Other relative file paths inside the merged configuration, such as TLS certificates, upstream CA files, ECH config lists, OCSP responses, and external OxiRule paths, are resolved relative to the main entry configuration file.
+Relative paths in `include` entries are resolved relative to the TOML file that declares them. Include entries must stay under that declaring file's directory. Other relative file paths inside the merged configuration, such as TLS certificates, upstream CA files, ECH config lists, OCSP responses, and external OxiRule paths, are resolved relative to the main entry configuration file. Relative configuration paths must be normalized paths without `.` or `..` components.
 
 OxiRule WAF rule syntax is documented separately in [OxiRule.md](OxiRule.md). This document only describes how OxiRule entries are placed inside the OxiBelt TOML configuration.
 
@@ -58,11 +58,14 @@ include = [
 
 Include behavior:
 
+- Include entries must be relative paths under the declaring file's directory.
+- Absolute include paths and include paths containing `.` or `..` components are rejected.
 - Exact include paths must point to an existing file.
 - Glob include matches are sorted before loading so startup behavior is deterministic.
 - Glob include entries that match no files are allowed.
 - Included files may contain their own top-level `include` entries.
 - Include cycles are rejected.
+- Include symlinks or glob matches that resolve outside the declaring file's directory are rejected.
 
 TOML documents are merged before OxiBelt decodes and validates the final configuration:
 
@@ -311,6 +314,7 @@ path = "rules/global-request.oxirule.toml"
 ```
 
 A rule entry must specify exactly one of `when` or `path`.
+External rule file paths must be relative paths under the main configuration directory. Absolute paths and paths containing `.` or `..` components are rejected.
 
 An external `.oxirule.toml` file contains only the rule body:
 
@@ -403,6 +407,7 @@ Fields:
 - `upstream`: target upstream name.
 
 Validation requires each route to reference an existing upstream.
+Route path values must begin with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
 
 ### 10.1 Route-level OxiRule entries
 
@@ -434,6 +439,7 @@ Route-level rule syntax is the same OxiRule syntax used by global rules.
 Configuration validation rejects:
 
 - Invalid include values.
+- Absolute include paths, parent-directory include paths, or include symlinks that escape the declaring directory.
 - Missing exact include files.
 - Include cycles.
 - Duplicate scalar keys or incompatible value types across included TOML files.
@@ -444,7 +450,9 @@ Configuration validation rejects:
 - Duplicate upstream or route names.
 - Upstream origins that are not `http://` or `https://`.
 - Routes with empty host matches.
-- Route `path_prefix` or `replace_prefix_with` values that do not start with `/`.
+- Relative configuration file paths containing `.` or `..` components.
+- External OxiRule paths that are absolute or escape the main configuration directory.
+- Route `path_prefix` or `replace_prefix_with` values that do not start with `/` or contain unsafe path syntax.
 - Routes that reference unknown upstreams.
 - OCSP `static_file` mode without `response_file`.
 - Reserved but unimplemented HTTP/3 modes.

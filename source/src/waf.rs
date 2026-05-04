@@ -10,7 +10,7 @@ use regex::Regex;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::config::Config;
+use crate::config::{Config, resolve_existing_local_config_file_path};
 use crate::routes::normalize_host;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -206,10 +206,11 @@ struct ExternalRuleFile {
 }
 
 impl WafConfig {
-  pub fn resolve_relative_paths(&mut self, base_dir: &Path) {
+  pub fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
     for rule in &mut self.rules {
-      resolve_rule_path(rule, base_dir);
+      resolve_rule_path(rule, base_dir)?;
     }
+    Ok(())
   }
 
   pub fn load_external_rules(&mut self) -> anyhow::Result<()> {
@@ -221,10 +222,11 @@ impl WafConfig {
 }
 
 impl RouteWafConfig {
-  pub fn resolve_relative_paths(&mut self, base_dir: &Path) {
+  pub fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
     for rule in &mut self.rules {
-      resolve_rule_path(rule, base_dir);
+      resolve_rule_path(rule, base_dir)?;
     }
+    Ok(())
   }
 
   pub fn load_external_rules(&mut self) -> anyhow::Result<()> {
@@ -235,14 +237,13 @@ impl RouteWafConfig {
   }
 }
 
-fn resolve_rule_path(rule: &mut WafRuleConfig, base_dir: &Path) {
-  rule.path = rule.path.take().map(|path| {
-    if path.is_absolute() {
-      path
-    } else {
-      base_dir.join(path)
-    }
-  });
+fn resolve_rule_path(rule: &mut WafRuleConfig, base_dir: &Path) -> anyhow::Result<()> {
+  rule.path = rule
+    .path
+    .take()
+    .map(|path| resolve_existing_local_config_file_path("WAF rule path", base_dir, &path))
+    .transpose()?;
+  Ok(())
 }
 
 fn load_external_rule(rule: &mut WafRuleConfig) -> anyhow::Result<()> {

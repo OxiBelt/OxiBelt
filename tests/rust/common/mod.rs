@@ -11,6 +11,7 @@ pub struct TempDir {
 
 impl TempDir {
     pub fn new(prefix: &str) -> Self {
+        let prefix = safe_test_path_component(prefix, "temporary directory prefix");
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time before unix epoch")
@@ -39,6 +40,7 @@ pub fn write_file(path: &Path, contents: &str) {
 }
 
 pub fn create_self_signed_cert(dir: &Path, common_name: &str) -> (PathBuf, PathBuf) {
+    let common_name = safe_test_path_component(common_name, "certificate common name");
     let key_path = dir.join(format!("{common_name}.key"));
     let cert_path = dir.join(format!("{common_name}.pem"));
     let config_path = dir.join(format!("{common_name}.cnf"));
@@ -69,6 +71,21 @@ pub fn create_self_signed_cert(dir: &Path, common_name: &str) -> (PathBuf, PathB
     run_command("openssl", &args);
 
     (cert_path, key_path)
+}
+
+fn safe_test_path_component(value: &str, field_name: &str) -> String {
+    assert!(!value.is_empty(), "{field_name} must not be empty");
+    assert!(
+        value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.')),
+        "{field_name} must contain only ASCII letters, digits, '-' or '.'"
+    );
+    assert!(
+        !value.split('.').any(|segment| segment.is_empty()) && !value.contains(".."),
+        "{field_name} must not contain empty or parent-directory-like segments"
+    );
+    value.to_string()
 }
 
 #[allow(dead_code)]

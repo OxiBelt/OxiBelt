@@ -194,6 +194,50 @@ path = "rules/global-request.oxirule.toml"
 }
 
 #[test]
+fn external_rule_paths_must_stay_in_config_directory() {
+    let temp_dir = common::TempDir::new("waf-path-escape");
+    let config_dir = temp_dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-path-escape");
+    common::write_file(
+        &temp_dir.path().join("outside.oxirule.toml"),
+        r#"
+when = "Request.Http.Path == '/'"
+
+[[actions]]
+type = "reject"
+status = 403
+"#,
+    );
+
+    let config_path = config_dir.join("oxibelt.toml");
+    common::write_file(
+        &config_path,
+        &format!(
+            "{}\n{}",
+            common::minimal_config_toml(&cert_path, &key_path),
+            r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "escaped-rule"
+phase = "request"
+priority = 10
+path = "../outside.oxirule.toml"
+"#
+        ),
+    );
+
+    let error = Config::load(&config_path).expect_err("path escape should be rejected");
+
+    assert!(
+        error.to_string().contains("WAF rule path must not contain"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn validation_rejects_response_access_in_request_phase() {
     let temp_dir = common::TempDir::new("waf-invalid");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-invalid");

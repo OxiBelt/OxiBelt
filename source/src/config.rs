@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
@@ -33,33 +33,37 @@ impl Config {
     let mut config: Self = merged
       .try_into()
       .with_context(|| format!("failed to decode merged TOML from {}", path.display()))?;
-    config.resolve_relative_paths(&base_dir);
+    config.resolve_relative_paths(&base_dir)?;
     config.load_external_waf_rules()?;
     Ok(config)
   }
 
-  fn resolve_relative_paths(&mut self, base_dir: &Path) {
-    self.tls.cert_chain = resolve_path(base_dir, &self.tls.cert_chain);
-    self.tls.private_key = resolve_path(base_dir, &self.tls.private_key);
+  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
+    self.tls.cert_chain =
+      resolve_config_file_path("tls.cert_chain", base_dir, &self.tls.cert_chain)?;
+    self.tls.private_key =
+      resolve_config_file_path("tls.private_key", base_dir, &self.tls.private_key)?;
     self.tls.ocsp.response_file = self
       .tls
       .ocsp
       .response_file
       .take()
-      .map(|path| resolve_path(base_dir, &path));
+      .map(|path| resolve_config_file_path("tls.ocsp.response_file", base_dir, &path))
+      .transpose()?;
     self.proxy.trusted_ca_certs = self
       .proxy
       .trusted_ca_certs
       .iter()
-      .map(|path| resolve_path(base_dir, path))
-      .collect();
+      .map(|path| resolve_config_file_path("proxy.trusted_ca_certs", base_dir, path))
+      .collect::<anyhow::Result<_>>()?;
     for upstream in &mut self.upstreams {
-      upstream.tls.resolve_relative_paths(base_dir);
+      upstream.tls.resolve_relative_paths(base_dir)?;
     }
-    self.waf.resolve_relative_paths(base_dir);
+    self.waf.resolve_relative_paths(base_dir)?;
     for route in &mut self.routes {
-      route.waf.resolve_relative_paths(base_dir);
+      route.waf.resolve_relative_paths(base_dir)?;
     }
+    Ok(())
   }
 
   fn load_external_waf_rules(&mut self) -> anyhow::Result<()> {
@@ -125,16 +129,9 @@ impl Config {
       if route.hosts.is_empty() {
         bail!("route {} must have at least one host match", route.name);
       }
-      if !route.path_prefix.starts_with('/') {
-        bail!("route {} path_prefix must start with '/'", route.name);
-      }
-      if let Some(replacement) = &route.replace_prefix_with
-        && !replacement.starts_with('/')
-      {
-        bail!(
-          "route {} replace_prefix_with must start with '/'",
-          route.name
-        );
+      validate_route_path_value(&route.name, "path_prefix", &route.path_prefix)?;
+      if let Some(replacement) = &route.replace_prefix_with {
+        validate_route_path_value(&route.name, "replace_prefix_with", replacement)?;
       }
       if !upstream_names.contains(&route.upstream) {
         bail!(
@@ -187,6 +184,37 @@ impl Config {
 
     Ok(())
   }
+}
+
+fn validate_route_path_value(
+  route_name: &str,
+  field_name: &str,
+  value: &str,
+) -> anyhow::Result<()> {
+  if !value.starts_with('/') {
+    bail!("route {route_name} {field_name} must start with '/'");
+  }
+  if value
+    .bytes()
+    .any(|byte| byte.is_ascii_control() || matches!(byte, b'\\' | b'?' | b'#'))
+  {
+    bail!(
+      "route {route_name} {field_name} must not contain control characters, backslashes, queries, or fragments"
+    );
+  }
+
+  for segment in value.split('/') {
+    if matches!(segment, "." | "..") {
+      bail!("route {route_name} {field_name} must not contain dot segments");
+    }
+  }
+
+  let lower = value.to_ascii_lowercase();
+  if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+    bail!("route {route_name} {field_name} must not contain encoded dot or slash separators");
+  }
+
+  Ok(())
 }
 
 fn load_toml_with_includes(path: &Path) -> anyhow::Result<toml::Value> {
@@ -280,14 +308,22 @@ fn expand_include_entry(
   }
 
   let include_path = Path::new(entry);
-  let pattern_path = if include_path.is_absolute() {
-    include_path.to_path_buf()
-  } else {
-    base_dir.join(include_path)
-  };
+  let pattern_path =
+    resolve_local_config_file_path("configuration include", base_dir, include_path)?;
+  let canonical_base_dir = base_dir.canonicalize().with_context(|| {
+    format!(
+      "failed to resolve configuration include base directory {}",
+      base_dir.display()
+    )
+  })?;
 
   if !has_glob_pattern(entry) {
-    return Ok(vec![pattern_path]);
+    return Ok(vec![canonicalize_local_config_file(
+      "configuration include",
+      &pattern_path,
+      &canonical_base_dir,
+      source_path,
+    )?]);
   }
 
   let pattern = pattern_path.to_str().ok_or_else(|| {
@@ -311,7 +347,12 @@ fn expand_include_entry(
       )
     })?;
     if path.is_file() {
-      paths.push(path);
+      paths.push(canonicalize_local_config_file(
+        "configuration include",
+        &path,
+        &canonical_base_dir,
+        source_path,
+      )?);
     }
   }
   paths.sort();
@@ -398,12 +439,92 @@ fn config_base_dir(path: &Path) -> anyhow::Result<PathBuf> {
   )
 }
 
-fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
+pub(crate) fn resolve_config_file_path(
+  field_name: &str,
+  base_dir: &Path,
+  path: &Path,
+) -> anyhow::Result<PathBuf> {
   if path.is_absolute() {
-    path.to_path_buf()
-  } else {
-    base_dir.join(path)
+    return Ok(path.to_path_buf());
   }
+
+  validate_relative_path(field_name, path)?;
+  Ok(base_dir.join(path))
+}
+
+pub(crate) fn resolve_local_config_file_path(
+  field_name: &str,
+  base_dir: &Path,
+  path: &Path,
+) -> anyhow::Result<PathBuf> {
+  if path.is_absolute() {
+    bail!("{field_name} must be a relative path under the configuration directory");
+  }
+
+  validate_relative_path(field_name, path)?;
+  Ok(base_dir.join(path))
+}
+
+pub(crate) fn resolve_existing_local_config_file_path(
+  field_name: &str,
+  base_dir: &Path,
+  path: &Path,
+) -> anyhow::Result<PathBuf> {
+  let resolved_path = resolve_local_config_file_path(field_name, base_dir, path)?;
+  let canonical_base_dir = base_dir.canonicalize().with_context(|| {
+    format!(
+      "failed to resolve configuration directory {}",
+      base_dir.display()
+    )
+  })?;
+  let canonical_path = resolved_path
+    .canonicalize()
+    .with_context(|| format!("failed to resolve {field_name} {}", resolved_path.display()))?;
+
+  if !canonical_path.starts_with(&canonical_base_dir) {
+    bail!("{field_name} must stay within the configuration directory");
+  }
+
+  Ok(canonical_path)
+}
+
+fn canonicalize_local_config_file(
+  field_name: &str,
+  path: &Path,
+  canonical_base_dir: &Path,
+  source_path: &Path,
+) -> anyhow::Result<PathBuf> {
+  let canonical_path = path
+    .canonicalize()
+    .with_context(|| format!("failed to resolve {field_name} {}", path.display()))?;
+
+  if !canonical_path.starts_with(canonical_base_dir) {
+    bail!(
+      "{field_name} in {} must stay within the declaring directory",
+      source_path.display()
+    );
+  }
+
+  Ok(canonical_path)
+}
+
+fn validate_relative_path(field_name: &str, path: &Path) -> anyhow::Result<()> {
+  if path.as_os_str().is_empty() {
+    bail!("{field_name} must not be empty");
+  }
+
+  for component in path.components() {
+    match component {
+      Component::Normal(_) => {}
+      Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+        bail!(
+          "{field_name} must not contain absolute, current-directory, or parent-directory components"
+        );
+      }
+    }
+  }
+
+  Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -590,12 +711,14 @@ pub struct UpstreamTlsConfig {
 }
 
 impl UpstreamTlsConfig {
-  fn resolve_relative_paths(&mut self, base_dir: &Path) {
+  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
     self.ech.config_list_file = self
       .ech
       .config_list_file
       .take()
-      .map(|path| resolve_path(base_dir, &path));
+      .map(|path| resolve_config_file_path("upstreams.tls.ech.config_list_file", base_dir, &path))
+      .transpose()?;
+    Ok(())
   }
 
   fn validate(&self, upstream_name: &str) -> anyhow::Result<()> {

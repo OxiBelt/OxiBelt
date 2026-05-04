@@ -12,8 +12,10 @@ pq_probe_image="oxibelt/pq-probe:${run_id}"
 http_container="oxibelt-http-${run_id}"
 https_container="oxibelt-https-${run_id}"
 proxy_container="oxibelt-proxy-${run_id}"
+test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
+  docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker rm -f "${proxy_container}" "${https_container}" "${http_container}" >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
   docker rmi -f "${proxy_image}" "${mock_image}" "${pq_probe_image}" >/dev/null 2>&1 || true
@@ -258,11 +260,29 @@ docker start "${proxy_container}" >/dev/null
 request_through_proxy() {
   local url="$1"
   local host="$2"
-  docker run --rm --network "${network_name}" --entrypoint python "${mock_image}" \
+  local client_container="oxibelt-client-${run_id}-${RANDOM}"
+  local status=0
+
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
     /opt/mock_upstream/client.py \
     --url "${url}" \
     --host "${host}" \
-    --insecure
+    --ca-file /tmp/proxy-ca.pem >/dev/null
+  docker cp "${work_dir}/proxy-tls/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+  if docker start -a "${client_container}"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  return "${status}"
 }
 
 run_pq_probe() {
