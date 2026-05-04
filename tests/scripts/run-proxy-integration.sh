@@ -159,7 +159,7 @@ body = "Blocked by WAF"
 [[upstreams]]
 name = "http-upstream"
 origin = "http://mock-http:18080/origin"
-max_http_version = "h2"
+max_http_version = "h1"
 connect_timeout_ms = 3000
 request_timeout_ms = 30000
 preserve_host = false
@@ -173,7 +173,7 @@ mode = "disabled"
 [[upstreams]]
 name = "https-upstream"
 origin = "https://mock-https:18443/backend"
-max_http_version = "h2"
+max_http_version = "h1"
 connect_timeout_ms = 3000
 request_timeout_ms = 30000
 preserve_host = true
@@ -329,6 +329,7 @@ for _attempt in $(seq 1 20); do
   if http_response="$(request_through_proxy "https://proxy:8443/app/ping?source=http" "http.example.test" 2>/dev/null)"; then
     break
   fi
+  http_response=""
   sleep 1
 done
 

@@ -158,7 +158,10 @@ case "${browser}" in
               binary: $binary,
               args: [
                 "-headless"
-              ]
+              ],
+              prefs: {
+                "devtools.jsonview.enabled": false
+              }
             }
           }
         }
