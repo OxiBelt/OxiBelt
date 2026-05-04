@@ -72,6 +72,16 @@ From the repository root:
 docker build -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
+The image entrypoint reads `/etc/oxibelt/config/oxibelt.toml`. Mount configuration, certificate material, and external OxiRule files into the purpose-specific directories:
+
+```bash
+docker run --rm -p 8443:8443 \
+  --mount type=bind,src=/mnt/user0/oxibelt/config,dst=/etc/oxibelt/config,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/cert,dst=/etc/oxibelt/cert,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/oxirule,dst=/etc/oxibelt/oxirule,readonly \
+  oxibelt
+```
+
 ## Test Assets
 
 - Rust integration tests live under `tests/rust` and are wired into Cargo from `source/Cargo.toml`

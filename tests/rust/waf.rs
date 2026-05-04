@@ -131,13 +131,17 @@ value = "no-store"
 }
 
 #[test]
-fn external_rule_files_are_loaded_from_config_directory() {
+fn external_rule_files_are_loaded_from_oxirule_directory() {
     let temp_dir = common::TempDir::new("waf-external");
-    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-external");
-    let rules_dir = temp_dir.path().join("rules");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rules_dir = temp_dir.path().join("oxirule").join("rules");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
     std::fs::create_dir_all(&rules_dir).expect("failed to create rules directory");
-    common::write_file(
-        &rules_dir.join("global-request.oxirule.toml"),
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "waf-external");
+    std::fs::write(
+        rules_dir.join("global-request.oxirule.toml"),
         r#"
 when = "Request.Headers.anyValueContains('sqlmap')"
 
@@ -146,14 +150,18 @@ type = "reject"
 status = 403
 body = "Blocked by WAF"
 "#,
-    );
+    )
+    .expect("failed to write global WAF rule");
 
-    let config_path = temp_dir.path().join("oxibelt.toml");
-    common::write_file(
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
         &config_path,
-        &format!(
+        format!(
             "{}\n{}",
-            common::minimal_config_toml(&cert_path, &key_path),
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
             r#"
 [waf]
 enabled = true
@@ -167,7 +175,8 @@ priority = 10
 path = "rules/global-request.oxirule.toml"
 "#
         ),
-    );
+    )
+    .expect("failed to write config");
 
     let config = Config::load(&config_path).expect("config should load external rule");
     config.validate().expect("config should validate");
@@ -194,13 +203,15 @@ path = "rules/global-request.oxirule.toml"
 }
 
 #[test]
-fn external_rule_paths_must_stay_in_config_directory() {
+fn external_rule_paths_must_stay_in_oxirule_directory() {
     let temp_dir = common::TempDir::new("waf-path-escape");
     let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
     std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
-    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-path-escape");
-    common::write_file(
-        &temp_dir.path().join("outside.oxirule.toml"),
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "waf-path-escape");
+    std::fs::write(
+        temp_dir.path().join("outside.oxirule.toml"),
         r#"
 when = "Request.Http.Path == '/'"
 
@@ -208,14 +219,18 @@ when = "Request.Http.Path == '/'"
 type = "reject"
 status = 403
 "#,
-    );
+    )
+    .expect("failed to write outside WAF rule");
 
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(
+    std::fs::write(
         &config_path,
-        &format!(
+        format!(
             "{}\n{}",
-            common::minimal_config_toml(&cert_path, &key_path),
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
             r#"
 [waf]
 enabled = true
@@ -227,7 +242,8 @@ priority = 10
 path = "../outside.oxirule.toml"
 "#
         ),
-    );
+    )
+    .expect("failed to write config");
 
     let error = Config::load(&config_path).expect_err("path escape should be rejected");
 

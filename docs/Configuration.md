@@ -9,9 +9,48 @@ This document describes the OxiBelt TOML configuration file format. The default 
 source/config/oxibelt.toml
 ```
 
-OxiBelt loads configuration from the path passed with `--config`. That file is the main entry configuration. It may include additional modular TOML files with the top-level `include` key.
+OxiBelt loads configuration from the path passed with `--config`. The default container entrypoint uses:
 
-Relative paths in `include` entries are resolved relative to the TOML file that declares them. Include entries must stay under that declaring file's directory. Other relative file paths inside the merged configuration, such as TLS certificates, upstream CA files, ECH config lists, OCSP responses, and external OxiRule paths, are resolved relative to the main entry configuration file. Relative configuration paths must be normalized paths without `.` or `..` components.
+```sh
+/etc/oxibelt/config/oxibelt.toml
+```
+
+That file is the main entry configuration. It may include additional modular TOML files with the top-level `include` key.
+
+The standard container layout has three purpose-specific directories:
+
+```sh
+/etc/oxibelt/config   # OxiBelt TOML configuration and included TOML modules
+/etc/oxibelt/cert     # TLS certificates, private keys, CA roots, OCSP responses, ECH config lists
+/etc/oxibelt/oxirule  # External .oxirule.toml rule files
+```
+
+This layout can be mounted from separate host directories or volumes:
+
+```sh
+docker run --rm \
+  --mount type=bind,src=/mnt/user0/oxibelt/config,dst=/etc/oxibelt/config,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/cert,dst=/etc/oxibelt/cert,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/oxirule,dst=/etc/oxibelt/oxirule,readonly \
+  oxibelt
+```
+
+If the main file has a different host-side name, bind it to the entrypoint path:
+
+```sh
+docker run --rm \
+  --mount type=bind,src=/mnt/user0/oxibelt/config,dst=/etc/oxibelt/config,readonly \
+  --mount type=bind,src=/mnt/user/oxibelt/config/main.toml,dst=/etc/oxibelt/config/oxibelt.toml,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/cert,dst=/etc/oxibelt/cert,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/oxirule,dst=/etc/oxibelt/oxirule,readonly \
+  oxibelt
+```
+
+With this nested file mount, OxiBelt still sees the main file as `/etc/oxibelt/config/oxibelt.toml`. Other included config files are resolved from the container-visible `/etc/oxibelt/config` directory, which is the parent directory mount above. Make sure bind-mount sources already exist and use Docker's `--mount` form so a missing file source is reported as an error instead of being created as a directory.
+
+Relative paths in `include` entries are resolved relative to the TOML file that declares them. Include entries must stay under that declaring file's directory. Runtime file paths inside the merged configuration are resolved by purpose: TLS, CA, OCSP, and ECH files are resolved under the cert directory, and external OxiRule files are resolved under the oxirule directory.
+
+File paths referenced from configuration must be relative, normalized paths without `.` or `..` components. Runtime file paths must resolve to existing regular files under their purpose-specific directory before startup continues.
 
 OxiRule WAF rule syntax is documented separately in [OxiRule.md](OxiRule.md). This document only describes how OxiRule entries are placed inside the OxiBelt TOML configuration.
 
@@ -88,8 +127,8 @@ http2 = true
 http3 = false
 
 [tls]
-cert_chain = "/etc/oxibelt/tls/fullchain.pem"
-private_key = "/etc/oxibelt/tls/privkey.pem"
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
 ```
 
 ```toml
@@ -156,14 +195,14 @@ Current implementation notes:
 
 ```toml
 [tls]
-cert_chain = "/etc/oxibelt/tls/fullchain.pem"
-private_key = "/etc/oxibelt/tls/privkey.pem"
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
 
 [tls.ocsp]
 mode = "disabled"
 ```
 
-`cert_chain` and `private_key` are required. Relative paths are resolved relative to the main configuration file.
+`cert_chain` and `private_key` are required. Paths are resolved relative to the cert directory. Both paths must resolve to existing regular files under that directory.
 
 OCSP modes:
 
@@ -176,10 +215,10 @@ Example static OCSP configuration:
 ```toml
 [tls.ocsp]
 mode = "static_file"
-response_file = "tls/ocsp.der"
+response_file = "ocsp.der"
 ```
 
-`response_file` is required when `mode = "static_file"`.
+`response_file` is required when `mode = "static_file"` and must resolve to an existing regular file under the cert directory.
 
 ## 6. Proxy
 
@@ -192,7 +231,7 @@ enabled = true
 max_http_version = "h2"
 ```
 
-`trusted_ca_certs` is a list of additional CA certificate files used for upstream TLS verification. Relative paths are resolved relative to the main configuration file.
+`trusted_ca_certs` is a list of additional CA certificate files used for upstream TLS verification. Paths are resolved relative to the cert directory. Each entry must resolve to an existing regular file under that directory.
 
 `proxy.auto_upgrade` controls upstream HTTP version selection:
 
@@ -314,7 +353,7 @@ path = "rules/global-request.oxirule.toml"
 ```
 
 A rule entry must specify exactly one of `when` or `path`.
-External rule file paths must be relative paths under the main configuration directory. Absolute paths and paths containing `.` or `..` components are rejected.
+External rule file paths are resolved relative to the oxirule directory. Absolute paths and paths containing `.` or `..` components are rejected.
 
 An external `.oxirule.toml` file contains only the rule body:
 
@@ -371,7 +410,7 @@ max_http_version = "h2"
 
 [upstreams.tls.ech]
 mode = "config_list" # disabled | grease | config_list
-config_list_file = "tls/private-api.echconfiglist"
+config_list_file = "private-api.echconfiglist"
 ```
 
 Modes:
@@ -384,6 +423,7 @@ Validation rules:
 
 - `tls.ech.config_list_file` is required when `tls.ech.mode = "config_list"`.
 - `tls.ech.config_list_file` is invalid for `disabled` and `grease`.
+- `tls.ech.config_list_file` must resolve to an existing regular file under the cert directory when it is configured.
 - Enabling ECH selects TLS 1.3 for that upstream TLS client, matching the rustls ECH requirement.
 - Downstream ECH termination is not configured here; it requires server-side ECH support in the TLS provider.
 
@@ -450,8 +490,9 @@ Configuration validation rejects:
 - Duplicate upstream or route names.
 - Upstream origins that are not `http://` or `https://`.
 - Routes with empty host matches.
-- Relative configuration file paths containing `.` or `..` components.
-- External OxiRule paths that are absolute or escape the main configuration directory.
+- Absolute include/runtime file paths or relative configuration file paths containing `.` or `..` components.
+- Runtime file paths that do not resolve to existing regular files under their purpose-specific directory.
+- External OxiRule paths that are absolute or escape the oxirule directory.
 - Route `path_prefix` or `replace_prefix_with` values that do not start with `/` or contain unsafe path syntax.
 - Routes that reference unknown upstreams.
 - OCSP `static_file` mode without `response_file`.
@@ -477,8 +518,8 @@ http2 = true
 http3 = false
 
 [tls]
-cert_chain = "/etc/oxibelt/tls/fullchain.pem"
-private_key = "/etc/oxibelt/tls/privkey.pem"
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
 
 [tls.ocsp]
 mode = "disabled"

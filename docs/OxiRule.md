@@ -8,7 +8,7 @@ Target project: OxiBelt Rust-based reverse proxy
 The current Rust implementation includes the initial OxiRule execution path for HTTP request and response traffic:
 
 - Global and route-level `[[waf.rules]]` configuration.
-- External `.oxirule.toml` rule files loaded relative to the main config file.
+- External `.oxirule.toml` rule files loaded relative to the configured OxiRule directory.
 - Request-phase `reject`, `set_request_header`, `remove_request_header`, `set_tag`, and `route_to_upstream`.
 - Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, and `remove_response_header`.
 - CEL-like boolean expressions with object property access, string helpers, header/query/cookie/tag helpers, regex matching, CIDR checks, and request/response phase validation.
@@ -254,7 +254,7 @@ A rule entry must specify exactly one of:
 - `path`
 
 Specifying both is a configuration validation error. Specifying neither is also a configuration validation error.
-External rule file paths are resolved relative to the main OxiBelt configuration directory and must stay under that directory. Absolute paths and paths containing `.` or `..` components are rejected.
+External rule file paths are resolved relative to the OxiRule directory and must stay under that directory. Absolute paths and paths containing `.` or `..` components are rejected.
 
 An external `.oxirule.toml` file should contain a single rule body without route attachment metadata:
 

@@ -7,7 +7,10 @@ use rustls::crypto::hpke::Hpke;
 use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 
-use crate::config::{ListenerConfig, OcspMode, TlsConfig, UpstreamEchConfig, UpstreamEchMode};
+use crate::config::{
+  ListenerConfig, OcspMode, TlsConfig, UpstreamEchConfig, UpstreamEchMode,
+  canonicalize_existing_file,
+};
 
 pub fn install_default_provider() -> anyhow::Result<()> {
   let provider = rustls::crypto::aws_lc_rs::default_provider();
@@ -68,7 +71,7 @@ pub fn build_upstream_client_config(
 }
 
 fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
-  let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+  let bytes = read_existing_file("certificate file", path)?;
   let mut cursor = bytes.as_slice();
   rustls_pemfile::certs(&mut cursor)
     .collect::<Result<Vec<_>, _>>()
@@ -76,7 +79,7 @@ fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'stat
 }
 
 fn load_private_key(path: &std::path::Path) -> anyhow::Result<PrivateKeyDer<'static>> {
-  let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+  let bytes = read_existing_file("private key file", path)?;
   let mut cursor = bytes.as_slice();
   rustls_pemfile::private_key(&mut cursor)
     .with_context(|| format!("failed to parse private key from {}", path.display()))?
@@ -92,7 +95,7 @@ fn load_ocsp_response(tls: &TlsConfig) -> anyhow::Result<Option<Vec<u8>>> {
         .response_file
         .as_ref()
         .ok_or_else(|| anyhow!("OCSP response file must be configured"))?;
-      let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+      let bytes = read_existing_file("OCSP response file", path)?;
       Ok(Some(bytes))
     }
     OcspMode::LiveFetch => Err(anyhow!("live OCSP fetch is not implemented yet")),
@@ -124,7 +127,7 @@ fn load_ech_config(ech: &UpstreamEchConfig) -> anyhow::Result<EchConfig> {
     .config_list_file
     .as_ref()
     .ok_or_else(|| anyhow!("upstream ECH config_list_file must be configured"))?;
-  let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+  let bytes = read_existing_file("upstream ECH config list file", path)?;
 
   EchConfig::new(EchConfigListBytes::from(bytes), default_ech_hpke_suites()).with_context(|| {
     format!(
@@ -136,6 +139,26 @@ fn load_ech_config(ech: &UpstreamEchConfig) -> anyhow::Result<EchConfig> {
 
 fn default_ech_hpke_suites() -> &'static [&'static dyn Hpke] {
   rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES
+}
+
+fn read_existing_file(field_name: &str, path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+  let canonical_path = canonicalize_existing_file(field_name, path)?;
+  let canonical_parent = path
+    .parent()
+    .unwrap_or_else(|| std::path::Path::new("."))
+    .canonicalize()
+    .with_context(|| {
+      format!(
+        "failed to resolve {field_name} parent for {}",
+        path.display()
+      )
+    })?;
+
+  if !canonical_path.starts_with(&canonical_parent) {
+    bail!("{field_name} must stay within its configured directory");
+  }
+
+  fs::read(&canonical_path).with_context(|| format!("failed to read {}", canonical_path.display()))
 }
 
 fn load_upstream_root_store(

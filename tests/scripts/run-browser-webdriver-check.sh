@@ -41,7 +41,8 @@ fi
 
 mkdir -p "${runner_temp}"
 work_dir="$(mktemp -d "${runner_temp%/}/oxibelt-browser-${browser}.XXXXXX")"
-tls_dir="${work_dir}/tls"
+config_dir="${work_dir}/config"
+cert_dir="${work_dir}/cert"
 upstream_log="${work_dir}/mock-upstream.log"
 proxy_log="${work_dir}/oxibelt.log"
 
@@ -182,7 +183,7 @@ fi
 
 driver_base_url="http://127.0.0.1:${driver_port}"
 
-mkdir -p "${tls_dir}"
+mkdir -p "${config_dir}" "${cert_dir}"
 
 "${browser_binary}" --version
 "${driver_binary}" --version
@@ -191,9 +192,9 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
   -days 1 \
   -subj "/CN=localhost" \
   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
-  -keyout "${tls_dir}/privkey.pem" \
-  -out "${tls_dir}/fullchain.pem" >/dev/null 2>&1
-chmod 644 "${tls_dir}/privkey.pem" "${tls_dir}/fullchain.pem"
+  -keyout "${cert_dir}/privkey.pem" \
+  -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
+chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
 
 if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   if ! command -v docker >/dev/null 2>&1; then
@@ -203,16 +204,16 @@ if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
 
   proxy_bind_addr="0.0.0.0"
   proxy_origin_host="host.docker.internal"
-  cert_chain="/etc/oxibelt/tls/fullchain.pem"
-  private_key="/etc/oxibelt/tls/privkey.pem"
+  cert_chain="fullchain.pem"
+  private_key="privkey.pem"
 else
   proxy_bind_addr="127.0.0.1"
   proxy_origin_host="127.0.0.1"
-  cert_chain="tls/fullchain.pem"
-  private_key="tls/privkey.pem"
+  cert_chain="fullchain.pem"
+  private_key="privkey.pem"
 fi
 
-cat > "${work_dir}/oxibelt.toml" <<EOF
+cat > "${config_dir}/oxibelt.toml" <<EOF
 [logging]
 level = "info"
 
@@ -296,8 +297,8 @@ if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
     --add-host host.docker.internal:host-gateway \
     -p "127.0.0.1:${proxy_port}:${proxy_port}" \
     "${OXIBELT_DOCKER_IMAGE}" >/dev/null
-  docker cp "${work_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/oxibelt.toml"
-  docker cp "${tls_dir}/." "${proxy_container}:/etc/oxibelt/tls"
+  docker cp "${config_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
+  docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
   docker start "${proxy_container}" >/dev/null
 else
   host_triple="$(rustc -Vv | sed -n 's/^host: //p')"
@@ -308,7 +309,7 @@ else
     exit 1
   fi
 
-  "${oxibelt_binary}" --config "${work_dir}/oxibelt.toml" >"${proxy_log}" 2>&1 &
+  "${oxibelt_binary}" --config "${config_dir}/oxibelt.toml" >"${proxy_log}" 2>&1 &
   proxy_pid="$!"
 fi
 

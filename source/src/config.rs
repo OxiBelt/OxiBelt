@@ -28,40 +28,58 @@ pub struct Config {
 
 impl Config {
   pub fn load(path: &Path) -> anyhow::Result<Self> {
-    let base_dir = config_base_dir(path)?;
+    let path_roots = config_path_roots(path)?;
     let merged = load_toml_with_includes(path)?;
     let mut config: Self = merged
       .try_into()
       .with_context(|| format!("failed to decode merged TOML from {}", path.display()))?;
-    config.resolve_relative_paths(&base_dir)?;
+    config.resolve_relative_paths(&path_roots)?;
     config.load_external_waf_rules()?;
     Ok(config)
   }
 
-  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
-    self.tls.cert_chain =
-      resolve_config_file_path("tls.cert_chain", base_dir, &self.tls.cert_chain)?;
-    self.tls.private_key =
-      resolve_config_file_path("tls.private_key", base_dir, &self.tls.private_key)?;
+  fn resolve_relative_paths(&mut self, path_roots: &ConfigPathRoots) -> anyhow::Result<()> {
+    self.tls.cert_chain = resolve_existing_local_config_file_path(
+      "tls.cert_chain",
+      &path_roots.cert_dir,
+      &self.tls.cert_chain,
+    )?;
+    self.tls.private_key = resolve_existing_local_config_file_path(
+      "tls.private_key",
+      &path_roots.cert_dir,
+      &self.tls.private_key,
+    )?;
     self.tls.ocsp.response_file = self
       .tls
       .ocsp
       .response_file
       .take()
-      .map(|path| resolve_config_file_path("tls.ocsp.response_file", base_dir, &path))
+      .map(|path| {
+        resolve_existing_local_config_file_path(
+          "tls.ocsp.response_file",
+          &path_roots.cert_dir,
+          &path,
+        )
+      })
       .transpose()?;
     self.proxy.trusted_ca_certs = self
       .proxy
       .trusted_ca_certs
       .iter()
-      .map(|path| resolve_config_file_path("proxy.trusted_ca_certs", base_dir, path))
+      .map(|path| {
+        resolve_existing_local_config_file_path(
+          "proxy.trusted_ca_certs",
+          &path_roots.cert_dir,
+          path,
+        )
+      })
       .collect::<anyhow::Result<_>>()?;
     for upstream in &mut self.upstreams {
-      upstream.tls.resolve_relative_paths(base_dir)?;
+      upstream.tls.resolve_relative_paths(&path_roots.cert_dir)?;
     }
-    self.waf.resolve_relative_paths(base_dir)?;
+    self.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     for route in &mut self.routes {
-      route.waf.resolve_relative_paths(base_dir)?;
+      route.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     }
     Ok(())
   }
@@ -230,6 +248,23 @@ fn load_toml_document(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<t
       absolute_path.display()
     )
   })?;
+  let canonical_parent = absolute_path
+    .parent()
+    .unwrap_or_else(|| Path::new("."))
+    .canonicalize()
+    .with_context(|| {
+      format!(
+        "failed to resolve configuration directory for {}",
+        absolute_path.display()
+      )
+    })?;
+
+  if !canonical_path.starts_with(&canonical_parent) {
+    bail!(
+      "configuration file {} must stay within its declaring directory",
+      absolute_path.display()
+    );
+  }
 
   if let Some(index) = stack.iter().position(|entry| entry == &canonical_path) {
     let mut cycle = stack[index..]
@@ -243,10 +278,10 @@ fn load_toml_document(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<t
     );
   }
 
-  stack.push(canonical_path);
+  stack.push(canonical_path.clone());
 
-  let raw = std::fs::read_to_string(&absolute_path)
-    .with_context(|| format!("failed to read {}", absolute_path.display()))?;
+  let raw = std::fs::read_to_string(&canonical_path)
+    .with_context(|| format!("failed to read {}", canonical_path.display()))?;
   let mut value: toml::Value = toml::from_str(&raw)
     .with_context(|| format!("failed to parse TOML from {}", absolute_path.display()))?;
   let include_entries = take_include_entries(&mut value, &absolute_path)?;
@@ -439,17 +474,19 @@ fn config_base_dir(path: &Path) -> anyhow::Result<PathBuf> {
   )
 }
 
-pub(crate) fn resolve_config_file_path(
-  field_name: &str,
-  base_dir: &Path,
-  path: &Path,
-) -> anyhow::Result<PathBuf> {
-  if path.is_absolute() {
-    return Ok(path.to_path_buf());
-  }
+struct ConfigPathRoots {
+  cert_dir: PathBuf,
+  oxirule_dir: PathBuf,
+}
 
-  validate_relative_path(field_name, path)?;
-  Ok(base_dir.join(path))
+fn config_path_roots(path: &Path) -> anyhow::Result<ConfigPathRoots> {
+  let config_dir = config_base_dir(path)?;
+  let layout_root = config_dir.parent().unwrap_or_else(|| Path::new("."));
+
+  Ok(ConfigPathRoots {
+    cert_dir: layout_root.join("cert"),
+    oxirule_dir: layout_root.join("oxirule"),
+  })
 }
 
 pub(crate) fn resolve_local_config_file_path(
@@ -458,7 +495,7 @@ pub(crate) fn resolve_local_config_file_path(
   path: &Path,
 ) -> anyhow::Result<PathBuf> {
   if path.is_absolute() {
-    bail!("{field_name} must be a relative path under the configuration directory");
+    bail!("{field_name} must be a relative path under the configured directory");
   }
 
   validate_relative_path(field_name, path)?;
@@ -473,7 +510,7 @@ pub(crate) fn resolve_existing_local_config_file_path(
   let resolved_path = resolve_local_config_file_path(field_name, base_dir, path)?;
   let canonical_base_dir = base_dir.canonicalize().with_context(|| {
     format!(
-      "failed to resolve configuration directory {}",
+      "failed to resolve configured directory {}",
       base_dir.display()
     )
   })?;
@@ -482,10 +519,32 @@ pub(crate) fn resolve_existing_local_config_file_path(
     .with_context(|| format!("failed to resolve {field_name} {}", resolved_path.display()))?;
 
   if !canonical_path.starts_with(&canonical_base_dir) {
-    bail!("{field_name} must stay within the configuration directory");
+    bail!("{field_name} must stay within the configured directory");
   }
+  ensure_regular_file(field_name, &canonical_path)?;
 
   Ok(canonical_path)
+}
+
+pub(crate) fn canonicalize_existing_file(field_name: &str, path: &Path) -> anyhow::Result<PathBuf> {
+  let canonical_path = path
+    .canonicalize()
+    .with_context(|| format!("failed to resolve {field_name} {}", path.display()))?;
+  ensure_regular_file(field_name, &canonical_path)?;
+
+  Ok(canonical_path)
+}
+
+fn ensure_regular_file(field_name: &str, path: &Path) -> anyhow::Result<()> {
+  let metadata = path
+    .metadata()
+    .with_context(|| format!("failed to inspect {field_name} {}", path.display()))?;
+
+  if !metadata.is_file() {
+    bail!("{field_name} must point to a regular file");
+  }
+
+  Ok(())
 }
 
 fn canonicalize_local_config_file(
@@ -716,7 +775,13 @@ impl UpstreamTlsConfig {
       .ech
       .config_list_file
       .take()
-      .map(|path| resolve_config_file_path("upstreams.tls.ech.config_list_file", base_dir, &path))
+      .map(|path| {
+        resolve_existing_local_config_file_path(
+          "upstreams.tls.ech.config_list_file",
+          base_dir,
+          &path,
+        )
+      })
       .transpose()?;
     Ok(())
   }

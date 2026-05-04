@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
 pub struct TempDir {
     path: PathBuf,
@@ -11,13 +14,14 @@ pub struct TempDir {
 
 impl TempDir {
     pub fn new(prefix: &str) -> Self {
-        let prefix = safe_test_path_component(prefix, "temporary directory prefix");
+        let _ = safe_test_path_component(prefix, "temporary directory prefix");
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time before unix epoch")
             .as_nanos();
+        let id = next_test_id();
         let path =
-            std::env::temp_dir().join(format!("oxibelt-{prefix}-{nanos}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("oxibelt-test-{nanos}-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).expect("failed to create temp directory");
         Self { path }
     }
@@ -33,24 +37,21 @@ impl Drop for TempDir {
     }
 }
 
-pub fn write_file(path: &Path, contents: &str) {
-    fs::write(path, contents).unwrap_or_else(|error| {
-        panic!("failed to write {}: {error}", path.display());
-    });
-}
-
 pub fn create_self_signed_cert(dir: &Path, common_name: &str) -> (PathBuf, PathBuf) {
     let common_name = safe_test_path_component(common_name, "certificate common name");
-    let key_path = dir.join(format!("{common_name}.key"));
-    let cert_path = dir.join(format!("{common_name}.pem"));
-    let config_path = dir.join(format!("{common_name}.cnf"));
+    let dir = safe_existing_test_dir(dir);
+    let id = next_test_id();
+    let key_path = dir.join(format!("cert-{id}.key"));
+    let cert_path = dir.join(format!("cert-{id}.pem"));
+    let config_path = dir.join(format!("cert-{id}.cnf"));
 
-    write_file(
+    fs::write(
         &config_path,
-        &format!(
+        format!(
             "[req]\ndistinguished_name = req_distinguished_name\nx509_extensions = req_ext\nprompt = no\n\n[req_distinguished_name]\nCN = {common_name}\n\n[req_ext]\nsubjectAltName = @alt_names\nbasicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign, digitalSignature\n\n[alt_names]\nDNS.1 = {common_name}\n"
         ),
-    );
+    )
+    .unwrap_or_else(|error| panic!("failed to write {}: {error}", config_path.display()));
 
     let args = [
         OsStr::new("req"),
@@ -73,6 +74,29 @@ pub fn create_self_signed_cert(dir: &Path, common_name: &str) -> (PathBuf, PathB
     (cert_path, key_path)
 }
 
+fn next_test_id() -> u64 {
+    NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn safe_existing_test_dir(dir: &Path) -> PathBuf {
+    let temp_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("failed to resolve system temp directory");
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "failed to resolve test directory {}: {error}",
+            dir.display()
+        )
+    });
+
+    assert!(
+        canonical_dir.starts_with(&temp_root),
+        "test directory must stay under the system temp directory"
+    );
+
+    canonical_dir
+}
+
 fn safe_test_path_component(value: &str, field_name: &str) -> String {
     assert!(!value.is_empty(), "{field_name} must not be empty");
     assert!(
@@ -90,6 +114,14 @@ fn safe_test_path_component(value: &str, field_name: &str) -> String {
 
 #[allow(dead_code)]
 pub fn minimal_config_toml(cert_path: &Path, key_path: &Path) -> String {
+    minimal_config_toml_with_paths(
+        &cert_path.display().to_string(),
+        &key_path.display().to_string(),
+    )
+}
+
+#[allow(dead_code)]
+pub fn minimal_config_toml_with_paths(cert_path: &str, key_path: &str) -> String {
     format!(
         r#"
 [logging]
@@ -144,8 +176,8 @@ hosts = ["example.com"]
 path_prefix = "/"
 upstream = "app"
 "#,
-        cert = cert_path.display(),
-        key = key_path.display(),
+        cert = cert_path,
+        key = key_path,
     )
 }
 

@@ -121,14 +121,14 @@ http2 = true
 http3 = false
 
 [tls]
-cert_chain = "/etc/oxibelt/tls/fullchain.pem"
-private_key = "/etc/oxibelt/tls/privkey.pem"
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
 
 [tls.ocsp]
 mode = "disabled"
 
 [proxy]
-trusted_ca_certs = ["/etc/oxibelt/tls/upstream-ca.pem"]
+trusted_ca_certs = ["upstream-ca.pem"]
 
 [proxy.auto_upgrade]
 enabled = true
@@ -253,12 +253,12 @@ docker create \
   --network "${network_name}" \
   --network-alias proxy \
   "${proxy_image}" >/dev/null
-docker cp "${work_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/oxibelt.toml"
-docker cp "${work_dir}/proxy-tls/." "${proxy_container}:/etc/oxibelt/tls"
+docker cp "${work_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
+docker cp "${work_dir}/proxy-tls/." "${proxy_container}:/etc/oxibelt/cert"
 docker start "${proxy_container}" >/dev/null
 
 request_through_proxy() {
-  local url="$1"
+  local target="$1"
   local host="$2"
   local client_container="oxibelt-client-${run_id}-${RANDOM}"
   local status=0
@@ -270,7 +270,7 @@ request_through_proxy() {
     --entrypoint python \
     "${mock_image}" \
     /opt/mock_upstream/client.py \
-    --url "${url}" \
+    --target "${target}" \
     --host "${host}" \
     --ca-file /tmp/proxy-ca.pem >/dev/null
   docker cp "${work_dir}/proxy-tls/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
@@ -326,7 +326,7 @@ run_pq_probe() {
 }
 
 for _attempt in $(seq 1 20); do
-  if http_response="$(request_through_proxy "https://proxy:8443/app/ping?source=http" "http.example.test" 2>/dev/null)"; then
+  if http_response="$(request_through_proxy "http-ping" "http.example.test" 2>/dev/null)"; then
     break
   fi
   http_response=""
@@ -339,7 +339,7 @@ if [[ -z "${http_response:-}" ]]; then
   exit 1
 fi
 
-https_response="$(request_through_proxy "https://proxy:8443/secure/v1/health?source=https" "secure.example.test")"
+https_response="$(request_through_proxy "secure-health" "secure.example.test")"
 
 echo "${http_response}" | grep -F '"upstream": "http-upstream"'
 echo "${http_response}" | grep -F '"path": "/origin/app/ping?source=http"'
@@ -352,7 +352,7 @@ echo "${https_response}" | grep -F '"host": "secure.example.test"'
 echo "${https_response}" | grep -F '"x-forwarded-host": "secure.example.test"'
 
 waf_blocked_response=""
-if waf_blocked_response="$(request_through_proxy "https://proxy:8443/app/blocked" "http.example.test" 2>/dev/null)"; then
+if waf_blocked_response="$(request_through_proxy "waf-blocked" "http.example.test" 2>/dev/null)"; then
   echo "WAF block request unexpectedly succeeded" >&2
   exit 1
 fi

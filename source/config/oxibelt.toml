@@ -14,8 +14,8 @@ http2 = true
 http3 = false
 
 [tls]
-cert_chain = "/etc/oxibelt/tls/fullchain.pem"
-private_key = "/etc/oxibelt/tls/privkey.pem"
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
 
 [tls.ocsp]
 mode = "disabled"

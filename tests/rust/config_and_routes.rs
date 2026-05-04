@@ -26,21 +26,25 @@ fn config_parses_trusted_upstream_ca_certificates() {
 fn config_load_resolves_relative_paths_against_config_directory() {
     let temp_dir = common::TempDir::new("relative-config");
     let config_dir = temp_dir.path().join("config");
-    let tls_dir = config_dir.join("tls");
-    std::fs::create_dir_all(&tls_dir).expect("failed to create TLS directory");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
 
-    let (cert_path, key_path) = common::create_self_signed_cert(&tls_dir, "relative-config");
-    let ocsp_path = tls_dir.join("response.der");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "relative-config");
+    let ocsp_path = cert_dir.join("response.der");
     std::fs::write(&ocsp_path, b"ocsp").expect("failed to write OCSP response");
-    let ca_path = tls_dir.join("upstream-ca.pem");
+    let ca_path = cert_dir.join("upstream-ca.pem");
     std::fs::copy(&cert_path, &ca_path).expect("failed to copy CA certificate");
-    let ech_config_list_path = tls_dir.join("upstream.echconfiglist");
+    let ech_config_list_path = cert_dir.join("upstream.echconfiglist");
     std::fs::write(&ech_config_list_path, b"ech").expect("failed to write ECH config list");
 
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(
+    let cert_file = cert_path.file_name().unwrap().to_string_lossy();
+    let key_file = key_path.file_name().unwrap().to_string_lossy();
+    std::fs::write(
         &config_path,
-        r#"
+        format!(
+            r#"
 [logging]
 level = "info"
 
@@ -57,15 +61,15 @@ http2 = true
 http3 = false
 
 [tls]
-cert_chain = "tls/relative-config.pem"
-private_key = "tls/relative-config.key"
+cert_chain = "{cert_file}"
+private_key = "{key_file}"
 
 [tls.ocsp]
 mode = "static_file"
-response_file = "tls/response.der"
+response_file = "response.der"
 
 [proxy]
-trusted_ca_certs = ["tls/upstream-ca.pem"]
+trusted_ca_certs = ["upstream-ca.pem"]
 
 [proxy.auto_upgrade]
 enabled = true
@@ -90,28 +94,84 @@ webtransport = true
 
 [upstreams.tls.ech]
 mode = "config_list"
-config_list_file = "tls/upstream.echconfiglist"
+config_list_file = "upstream.echconfiglist"
 
 [[routes]]
 name = "app-root"
 hosts = ["example.com"]
 path_prefix = "/"
 upstream = "app"
-"#,
-    );
+"#
+        ),
+    )
+    .expect("failed to write config");
 
     let config = Config::load(&config_path).expect("config should load");
+    let expected_ocsp_path = ocsp_path.canonicalize().unwrap();
+    let expected_ca_path = ca_path.canonicalize().unwrap();
+    let expected_ech_config_list_path = ech_config_list_path.canonicalize().unwrap();
 
     assert_eq!(config.tls.cert_chain, cert_path);
     assert_eq!(config.tls.private_key, key_path);
     assert_eq!(
         config.tls.ocsp.response_file.as_deref(),
-        Some(ocsp_path.as_path())
+        Some(expected_ocsp_path.as_path())
     );
-    assert_eq!(config.proxy.trusted_ca_certs, vec![ca_path]);
+    assert_eq!(config.proxy.trusted_ca_certs, vec![expected_ca_path]);
     assert_eq!(
         config.upstreams[0].tls.ech.config_list_file.as_deref(),
-        Some(ech_config_list_path.as_path())
+        Some(expected_ech_config_list_path.as_path())
+    );
+}
+
+#[test]
+fn config_load_rejects_absolute_runtime_file_paths() {
+    let temp_dir = common::TempDir::new("absolute-runtime-path");
+    let config_dir = temp_dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&config_dir, "absolute-runtime-path");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        common::minimal_config_toml(&cert_path, &key_path),
+    )
+    .expect("failed to write config");
+
+    let error = Config::load(&config_path).expect_err("absolute runtime path should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tls.cert_chain must be a relative path"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn config_load_rejects_runtime_directories() {
+    let temp_dir = common::TempDir::new("runtime-directory");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let cert_subdir = cert_dir.join("not-a-file");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_subdir).expect("failed to create cert subdirectory");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        common::minimal_config_toml_with_paths("not-a-file", "not-a-file"),
+    )
+    .expect("failed to write config");
+
+    let error = Config::load(&config_path).expect_err("directory path should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tls.cert_chain must point to a regular file"),
+        "unexpected error: {error}"
     );
 }
 
@@ -119,19 +179,20 @@ upstream = "app"
 fn config_load_merges_modular_include_files() {
     let temp_dir = common::TempDir::new("modular-config");
     let config_dir = temp_dir.path().join("config");
-    let tls_dir = config_dir.join("tls");
+    let cert_dir = temp_dir.path().join("cert");
     let modules_dir = config_dir.join("conf.d");
-    std::fs::create_dir_all(&tls_dir).expect("failed to create TLS directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
     std::fs::create_dir_all(&modules_dir).expect("failed to create module directory");
 
-    let (cert_path, key_path) = common::create_self_signed_cert(&tls_dir, "modular-config");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "modular-config");
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(
+    std::fs::write(
         &config_path,
-        &main_entry_config_toml(&cert_path, &key_path, r#"["conf.d/*.toml"]"#),
-    );
-    common::write_file(
-        &modules_dir.join("10-upstreams.toml"),
+        main_entry_config_toml(&cert_path, &key_path, r#"["conf.d/*.toml"]"#),
+    )
+    .expect("failed to write config");
+    std::fs::write(
+        modules_dir.join("10-upstreams.toml"),
         r#"
 [[upstreams]]
 name = "app"
@@ -144,9 +205,10 @@ websocket = true
 webrtc = true
 webtransport = true
 "#,
-    );
-    common::write_file(
-        &modules_dir.join("20-routes.toml"),
+    )
+    .expect("failed to write upstream module");
+    std::fs::write(
+        modules_dir.join("20-routes.toml"),
         r#"
 [[routes]]
 name = "app-root"
@@ -154,7 +216,8 @@ hosts = ["example.com"]
 path_prefix = "/"
 upstream = "app"
 "#,
-    );
+    )
+    .expect("failed to write routes module");
 
     let config = Config::load(&config_path).expect("config should load modular includes");
 
@@ -171,19 +234,20 @@ upstream = "app"
 fn nested_config_includes_are_relative_to_declaring_file() {
     let temp_dir = common::TempDir::new("nested-config");
     let config_dir = temp_dir.path().join("config");
-    let tls_dir = config_dir.join("tls");
+    let cert_dir = temp_dir.path().join("cert");
     let site_dir = config_dir.join("sites");
-    std::fs::create_dir_all(&tls_dir).expect("failed to create TLS directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
     std::fs::create_dir_all(&site_dir).expect("failed to create site directory");
 
-    let (cert_path, key_path) = common::create_self_signed_cert(&tls_dir, "nested-config");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "nested-config");
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(
+    std::fs::write(
         &config_path,
-        &main_entry_config_toml(&cert_path, &key_path, r#""sites/site.toml""#),
-    );
-    common::write_file(
-        &site_dir.join("site.toml"),
+        main_entry_config_toml(&cert_path, &key_path, r#""sites/site.toml""#),
+    )
+    .expect("failed to write config");
+    std::fs::write(
+        site_dir.join("site.toml"),
         r#"
 include = "upstreams.toml"
 
@@ -193,15 +257,17 @@ hosts = ["site.example.com"]
 path_prefix = "/"
 upstream = "site"
 "#,
-    );
-    common::write_file(
-        &site_dir.join("upstreams.toml"),
+    )
+    .expect("failed to write site config");
+    std::fs::write(
+        site_dir.join("upstreams.toml"),
         r#"
 [[upstreams]]
 name = "site"
 origin = "https://site.internal.example"
 "#,
-    );
+    )
+    .expect("failed to write upstream config");
 
     let config = Config::load(&config_path).expect("config should load nested includes");
 
@@ -218,15 +284,18 @@ fn config_include_cycles_are_rejected() {
     std::fs::create_dir_all(&modules_dir).expect("failed to create module directory");
 
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(&config_path, r#"include = "conf.d/loop-a.toml""#);
-    common::write_file(
-        &modules_dir.join("loop-a.toml"),
+    std::fs::write(&config_path, r#"include = "conf.d/loop-a.toml""#)
+        .expect("failed to write config");
+    std::fs::write(
+        modules_dir.join("loop-a.toml"),
         r#"include = "loop-b.toml""#,
-    );
-    common::write_file(
-        &modules_dir.join("loop-b.toml"),
+    )
+    .expect("failed to write loop-a module");
+    std::fs::write(
+        modules_dir.join("loop-b.toml"),
         r#"include = "loop-a.toml""#,
-    );
+    )
+    .expect("failed to write loop-b module");
 
     let error = Config::load(&config_path).expect_err("cycle should be rejected");
 
@@ -241,13 +310,14 @@ fn config_include_rejects_parent_directory_escape() {
     let temp_dir = common::TempDir::new("include-parent");
     let config_dir = temp_dir.path().join("config");
     std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
-    common::write_file(
-        &temp_dir.path().join("outside.toml"),
+    std::fs::write(
+        temp_dir.path().join("outside.toml"),
         "[logging]\nlevel = \"debug\"\n",
-    );
+    )
+    .expect("failed to write outside config");
 
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(&config_path, r#"include = "../outside.toml""#);
+    std::fs::write(&config_path, r#"include = "../outside.toml""#).expect("failed to write config");
 
     let error = Config::load(&config_path).expect_err("parent traversal should be rejected");
 
@@ -265,13 +335,15 @@ fn config_include_rejects_absolute_paths() {
     let config_dir = temp_dir.path().join("config");
     std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
     let outside_path = temp_dir.path().join("outside.toml");
-    common::write_file(&outside_path, "[logging]\nlevel = \"debug\"\n");
+    std::fs::write(&outside_path, "[logging]\nlevel = \"debug\"\n")
+        .expect("failed to write outside config");
 
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(
+    std::fs::write(
         &config_path,
-        &format!("include = \"{}\"", outside_path.display()),
-    );
+        format!("include = \"{}\"", outside_path.display()),
+    )
+    .expect("failed to write config");
 
     let error = Config::load(&config_path).expect_err("absolute include should be rejected");
 
@@ -291,7 +363,7 @@ fn config_include_rejects_duplicate_scalar_values() {
     std::fs::create_dir_all(&modules_dir).expect("failed to create module directory");
 
     let config_path = config_dir.join("oxibelt.toml");
-    common::write_file(
+    std::fs::write(
         &config_path,
         r#"
 include = "conf.d/logging.toml"
@@ -299,14 +371,16 @@ include = "conf.d/logging.toml"
 [logging]
 level = "info"
 "#,
-    );
-    common::write_file(
-        &modules_dir.join("logging.toml"),
+    )
+    .expect("failed to write config");
+    std::fs::write(
+        modules_dir.join("logging.toml"),
         r#"
 [logging]
 level = "debug"
 "#,
-    );
+    )
+    .expect("failed to write logging module");
 
     let error = Config::load(&config_path).expect_err("duplicate scalar should be rejected");
 
@@ -436,6 +510,8 @@ fn route_replacement_rejects_query_fragments() {
 }
 
 fn main_entry_config_toml(cert_path: &Path, key_path: &Path, include: &str) -> String {
+    let cert_file = cert_path.file_name().unwrap().to_string_lossy();
+    let key_file = key_path.file_name().unwrap().to_string_lossy();
     format!(
         r#"
 include = {include}
@@ -475,7 +551,7 @@ gzip = true
 deflate = true
 zstd = true
 "#,
-        cert = cert_path.display(),
-        key = key_path.display(),
+        cert = cert_file,
+        key = key_file,
     )
 }

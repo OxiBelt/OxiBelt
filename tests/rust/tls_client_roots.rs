@@ -17,7 +17,7 @@ fn upstream_tls_client_accepts_extra_root_certificates() {
 fn upstream_tls_client_rejects_invalid_root_pem() {
     let temp_dir = common::TempDir::new("invalid-root");
     let invalid_cert = temp_dir.path().join("invalid.pem");
-    common::write_file(&invalid_cert, "not a certificate");
+    std::fs::write(&invalid_cert, "not a certificate").expect("failed to write invalid cert");
 
     let error = tls::build_upstream_client_config(&[invalid_cert], &UpstreamEchConfig::default())
         .expect_err("must reject invalid PEM");
@@ -45,7 +45,8 @@ fn upstream_tls_client_builds_with_ech_grease() {
 fn upstream_tls_client_rejects_invalid_ech_config_list() {
     let temp_dir = common::TempDir::new("invalid-ech");
     let config_list = temp_dir.path().join("echconfiglist.bin");
-    common::write_file(&config_list, "not an ECHConfigList");
+    std::fs::write(&config_list, "not an ECHConfigList")
+        .expect("failed to write invalid ECH config list");
 
     let error = tls::build_upstream_client_config(
         &[],

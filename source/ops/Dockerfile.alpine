@@ -40,13 +40,13 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates libgcc && \
     addgroup -S oxibelt && \
     adduser -S -D -H -u 10001 -G oxibelt oxibelt && \
-    mkdir -p /etc/oxibelt/tls
+    mkdir -p /etc/oxibelt/config /etc/oxibelt/cert /etc/oxibelt/oxirule
 
 WORKDIR /app
 COPY --from=builder /tmp/oxibelt /usr/local/bin/oxibelt
-COPY source/config/oxibelt.toml /etc/oxibelt/oxibelt.toml
+COPY source/config/oxibelt.toml /etc/oxibelt/config/oxibelt.toml
 
 USER 10001:10001
 EXPOSE 8443/tcp
 
-ENTRYPOINT ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/oxibelt.toml"]
+ENTRYPOINT ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"]
