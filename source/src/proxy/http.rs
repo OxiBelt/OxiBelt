@@ -6,7 +6,7 @@ use http::header::{
   ACCEPT_ENCODING, CONNECTION, HOST, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHENTICATE,
   PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
-use http::{Method, Request, Response, StatusCode, Uri};
+use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
@@ -126,6 +126,7 @@ pub async fn handle(
     peer_addr,
     &host,
     preserve_host,
+    upstream_version,
     &request_waf.request_header_mutations,
   );
 
@@ -210,10 +211,12 @@ fn rebuild_request(
   peer_addr: std::net::SocketAddr,
   downstream_host: &str,
   preserve_host: bool,
+  upstream_version: HttpVersion,
   waf_mutations: &[HeaderMutation],
 ) -> Request<ProxyBody> {
   let (mut parts, body) = request.into_parts();
   parts.uri = target_uri;
+  parts.version = upstream_request_version(upstream_version);
   strip_hop_by_hop_headers(&mut parts.headers);
 
   if !preserve_host {
@@ -232,6 +235,14 @@ fn rebuild_request(
   apply_header_mutations(&mut parts.headers, waf_mutations);
 
   Request::from_parts(parts, body.map_err(boxed_error).boxed())
+}
+
+fn upstream_request_version(version: HttpVersion) -> Version {
+  match version {
+    HttpVersion::H1 => Version::HTTP_11,
+    HttpVersion::H2 => Version::HTTP_2,
+    HttpVersion::H3 => Version::HTTP_3,
+  }
 }
 
 fn rewrite_uri(
@@ -488,5 +499,12 @@ mod tests {
       rewritten.to_string(),
       "https://backend.internal/root/users?id=1"
     );
+  }
+
+  #[test]
+  fn upstream_request_version_matches_selected_upstream_version() {
+    assert_eq!(upstream_request_version(HttpVersion::H1), Version::HTTP_11);
+    assert_eq!(upstream_request_version(HttpVersion::H2), Version::HTTP_2);
+    assert_eq!(upstream_request_version(HttpVersion::H3), Version::HTTP_3);
   }
 }
