@@ -27,6 +27,12 @@ RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
       if [ "${OXIBELT_RUST_TARGET}" = "riscv64gc-unknown-linux-musl" ]; then \
         export CC_riscv64gc_unknown_linux_musl=musl-gcc; \
         export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc; \
+        libgcc_s_path="$(find /lib /usr/lib -name libgcc_s.so.1 -print -quit)"; \
+        if [ -z "${libgcc_s_path}" ]; then \
+          echo "libgcc_s.so.1 is required for riscv64 musl unwind support but was not found." >&2; \
+          exit 1; \
+        fi; \
+        export LIBRARY_PATH="$(dirname "${libgcc_s_path}")${LIBRARY_PATH:+:${LIBRARY_PATH}}"; \
       fi && \
       cargo build --locked --release -p oxibelt --target "${OXIBELT_RUST_TARGET}" && \
       cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt" /tmp/oxibelt; \
