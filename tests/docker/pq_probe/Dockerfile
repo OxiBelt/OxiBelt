@@ -1,4 +1,4 @@
-FROM rust:1.95.0-bookworm AS builder
+FROM rust:1.95.0-trixie AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential clang cmake perl pkg-config && \
@@ -9,7 +9,7 @@ COPY Cargo.toml /src/Cargo.toml
 COPY src /src/src
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \

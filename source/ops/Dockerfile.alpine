@@ -1,4 +1,4 @@
-ARG RUST_BUILDER_IMAGE=rust:1.95.0-alpine
+ARG RUST_BUILDER_IMAGE=rust:1.95.0-alpine3.23
 FROM ${RUST_BUILDER_IMAGE} AS builder
 
 ARG OXIBELT_RUST_TARGET=
@@ -35,7 +35,7 @@ RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
       cp target/release/oxibelt /tmp/oxibelt; \
     fi
 
-FROM alpine:3.21
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates libgcc && \
     addgroup -S oxibelt && \
