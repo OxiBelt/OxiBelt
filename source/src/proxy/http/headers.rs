@@ -5,11 +5,10 @@ use http::header::{
   CONNECTION, HOST, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
   TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
-use hyper::body::Incoming;
 
 use crate::routes::normalize_host;
 
-pub(super) fn extract_host(request: &Request<Incoming>) -> Option<String> {
+pub(crate) fn extract_host<B>(request: &Request<B>) -> Option<String> {
   if let Some(authority) = request.uri().authority() {
     return Some(normalize_host(authority.as_str()));
   }
@@ -21,7 +20,7 @@ pub(super) fn extract_host(request: &Request<Incoming>) -> Option<String> {
     .map(normalize_host)
 }
 
-pub(super) fn add_forwarded_headers(
+pub(crate) fn add_forwarded_headers(
   headers: &mut HeaderMap,
   peer_addr: std::net::SocketAddr,
   host: &str,
@@ -56,7 +55,7 @@ fn append_csv_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
   }
 }
 
-pub(super) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
   let connection_tokens = headers
     .get_all(CONNECTION)
     .iter()
@@ -89,7 +88,7 @@ pub(super) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
   }
 }
 
-pub(super) fn is_upgrade_request(request: &Request<Incoming>) -> bool {
+pub(crate) fn is_upgrade_request<B>(request: &Request<B>) -> bool {
   request.headers().contains_key(UPGRADE)
     || request
       .headers()

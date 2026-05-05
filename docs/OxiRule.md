@@ -12,7 +12,7 @@ The current Rust implementation includes the initial OxiRule execution path for 
 - Request-phase `reject`, `set_request_header`, `remove_request_header`, `set_tag`, and `route_to_upstream`.
 - Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, and `remove_response_header`.
 - CEL-like boolean expressions with object property access, string helpers, header/query/cookie/tag helpers, regex matching, CIDR checks, and request/response phase validation.
-- Request transport metadata for direct peer IP/port, encryption state, negotiated TCP TLS SNI/ALPN, and configured TCP max-hop policy.
+- Request transport metadata for direct peer IP/port, encryption state, negotiated TCP TLS SNI/ALPN, configured TCP max-hop policy, and HTTP/3/WebTransport UDP metadata.
 - Synthetic response context for upstream forwarding failures, exposed to response-phase rules as `Response.Upstream.Error`.
 - Runtime, expression-step, and mutation budgets.
 
@@ -20,7 +20,7 @@ The following parts of this draft remain reserved for a later implementation:
 
 - Streaming-safe request/response body content inspection helpers such as `Body.contains`, `Body.matches`, and `Body.scan`.
 - `route_to_pool` and `set_load_balancing_policy`, pending an upstream-pool/load-balancing configuration model.
-- Transport local endpoint fields, connection IDs, byte counters, TCP MSS/RTT metadata, HTTP/3, WebTransport, UDP-flow metadata, and frame/datagram-level inspection.
+- Transport local endpoint fields, connection IDs, byte counters, TCP MSS/RTT metadata, and frame/datagram-level payload inspection.
 
 ## 1. Purpose
 
@@ -539,7 +539,7 @@ The server signs challenge and clearance tokens with a startup-local secret. Tok
 `token_bindings` controls which request attributes must match when a proof or clearance token is reused:
 
 - `user_agent` binds to the `User-Agent` request header.
-- `tls_fingerprint` binds to OxiBelt's TLS fingerprint. The current implementation hashes a `rustls-negotiated-v2` payload containing ClientHello-offered cipher suite identifiers, named/key-exchange groups, signature schemes, derived cipher-suite integrity/hash groups, and the selected TLS version, cipher suite, key-exchange group, integrity/hash group, SNI, and ALPN exposed by rustls; it is not a raw JA3/JA4 ClientHello fingerprint.
+- `tls_fingerprint` binds to OxiBelt's TLS fingerprint. TCP HTTP/1.1 and HTTP/2 requests use the `rustls-tcp-negotiated-v2` scheme, which hashes ClientHello-offered cipher suite identifiers, named/key-exchange groups, signature schemes, derived cipher-suite integrity/hash groups, and the selected TLS version, cipher suite, key-exchange group, integrity/hash group, SNI, and ALPN exposed by rustls. HTTP/3 requests use the reduced `quinn-rustls-quic-v1` scheme, which hashes the QUIC accept path metadata exposed by Quinn/rustls: selected TLS version, SNI, and ALPN. Neither scheme is a raw JA3/JA4 ClientHello fingerprint.
 - `route` binds to the matched OxiBelt route name from the configuration file.
 - `direct_peer_ip_network_prefix` binds to OxiBelt's direct peer IP after applying `direct_peer_ipv4_prefix_bits` or `direct_peer_ipv6_prefix_bits`.
 - `tcp_max_hop` binds to the configured TCP max-hop policy applied to the downstream socket.
@@ -785,7 +785,7 @@ PersonProofTokenBindingView.directPeerIpNetworkPrefix(Ipv4PrefixBits: Int, Ipv6P
 PersonProofTokenBindingView.tcpMaxHop(ConfiguredMaxHop: Int): String
 ```
 
-`UserAgent` is the `User-Agent` header or an empty string. `TlsFingerprint` is the `rustls-negotiated-v2` TLS fingerprint or `unavailable`. `Route` is the matched OxiBelt route name. `DirectPeerIpNetworkPrefix` uses the default person-proof prefix sizes, `/24` for IPv4 and `/56` for IPv6. Use `directPeerIpNetworkPrefix(...)` when a rule needs the canonical value for custom prefix sizes. `TcpMaxHop` uses an unconfigured policy value with the applied downstream max-hop value; use `tcpMaxHop(...)` when a rule needs the canonical value for a configured `tcp_max_hop` policy.
+`UserAgent` is the `User-Agent` header or an empty string. `TlsFingerprint` is the active TLS fingerprint for the downstream connection or `unavailable`; inspect `Request.Tls.FingerprintScheme` to distinguish `rustls-tcp-negotiated-v2` from the reduced `quinn-rustls-quic-v1` HTTP/3 scheme. `Route` is the matched OxiBelt route name. `DirectPeerIpNetworkPrefix` uses the default person-proof prefix sizes, `/24` for IPv4 and `/56` for IPv6. Use `directPeerIpNetworkPrefix(...)` when a rule needs the canonical value for custom prefix sizes. `TcpMaxHop` uses an unconfigured policy value with the applied downstream max-hop value; use `tcpMaxHop(...)` when a rule needs the canonical value for a configured `tcp_max_hop` policy.
 
 ### 8.5 Transport metadata
 
@@ -803,7 +803,7 @@ TransportMetadata.Tcp: TcpMetadata | Null
 TransportMetadata.Udp: UdpMetadata | Null
 ```
 
-Current implementation note: request rules expose `Network`, `RemoteIp`, `RemotePort`, `IsEncrypted`, `Tcp`, and `Udp`. Local endpoint fields, connection IDs, and byte counters are reserved until connection accounting is added.
+Current implementation note: request rules expose `Network`, `RemoteIp`, `RemotePort`, `IsEncrypted`, `Tcp`, and `Udp`. TCP downstream requests expose `Tcp` metadata and `Udp == null`; HTTP/3 and WebTransport downstream requests expose `Network == 'udp'`, `Udp` metadata, and `Tcp == null`. Local endpoint fields, connection IDs, and byte counters are reserved until connection accounting is added.
 
 ### 8.6 TCP metadata
 
@@ -827,6 +827,8 @@ UdpMetadata.FlowId: String
 UdpMetadata.QuicDetected: Bool
 UdpMetadata.ConnectionId: String | Null
 ```
+
+Current implementation note: HTTP/3 and WebTransport request rules expose `QuicDetected == true`. Datagram size, flow ID, and QUIC connection ID are reserved for future per-flow accounting and currently evaluate to `null`.
 
 ### 8.8 HTTP request metadata
 
@@ -879,6 +881,7 @@ TlsMetadata.CipherSuite: String | Null
 TlsMetadata.Sni: String | Null
 TlsMetadata.Alpn: String | Null
 TlsMetadata.Fingerprint: String | Null
+TlsMetadata.FingerprintScheme: String | Null
 TlsMetadata.ClientCertificatePresent: Bool
 ```
 
@@ -1159,7 +1162,7 @@ WebRTC rules may inspect signaling HTTP requests when signaling passes through O
 
 ### 11.4 WebTransport
 
-WebTransport over HTTP/3 may expose HTTP metadata and UDP/QUIC-related transport metadata.
+WebTransport over HTTP/3 exposes the CONNECT request as `Request.Protocol == 'webtransport'` with UDP/QUIC transport metadata. OxiBelt evaluates request WAF rules before accepting the session and forwards WebTransport streams and datagrams between downstream and upstream HTTP/3 sessions. WAF frame-level and datagram payload inspection is not implemented.
 
 ```toml
 [[waf.rules]]

@@ -133,6 +133,13 @@ impl Config {
         );
       }
 
+      if upstream.max_http_version == HttpVersion::H3 && upstream.origin.scheme() != "https" {
+        bail!(
+          "upstream {} must use https:// origin when max_http_version = \"h3\"",
+          upstream.name
+        );
+      }
+
       upstream.tls.validate(&upstream.name)?;
     }
 
@@ -172,30 +179,6 @@ impl Config {
           "tls.ocsp.mode = \"live_fetch\" is reserved but not implemented yet"
         ));
       }
-    }
-
-    if self.listeners.http3 {
-      return Err(anyhow!(
-        "downstream HTTP/3 is reserved in config but not implemented in this initial build"
-      ));
-    }
-
-    if self.proxy.auto_upgrade.enabled
-      && self.proxy.auto_upgrade.max_http_version == HttpVersion::H3
-    {
-      return Err(anyhow!(
-        "auto-upgrade to HTTP/3 is not implemented yet in this initial build"
-      ));
-    }
-
-    if self
-      .upstreams
-      .iter()
-      .any(|upstream| upstream.max_http_version == HttpVersion::H3)
-    {
-      return Err(anyhow!(
-        "upstream HTTP/3 routing is reserved but not implemented yet in this initial build"
-      ));
     }
 
     crate::waf::validate_config(self)?;

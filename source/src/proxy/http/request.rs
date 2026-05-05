@@ -1,29 +1,33 @@
 use http::header::{ACCEPT_ENCODING, HOST, HeaderValue};
 use http::{Request, Uri};
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
+use hyper::body::Body;
 
 use crate::config::{CompressionConfig, HttpVersion};
 use crate::waf::{HeaderMutation, apply_header_mutations};
 
-use super::body::{ProxyBody, boxed_error};
+use super::body::{BoxError, ProxyBody};
 use super::headers::{add_forwarded_headers, strip_hop_by_hop_headers};
 use super::version::upstream_request_version;
 
-pub(super) struct RebuildRequestOptions<'a> {
-  pub(super) target_uri: Uri,
-  pub(super) compression: &'a CompressionConfig,
-  pub(super) peer_addr: std::net::SocketAddr,
-  pub(super) downstream_host: &'a str,
-  pub(super) preserve_host: bool,
-  pub(super) upstream_version: HttpVersion,
-  pub(super) waf_mutations: &'a [HeaderMutation],
+pub(crate) struct RebuildRequestOptions<'a> {
+  pub(crate) target_uri: Uri,
+  pub(crate) compression: &'a CompressionConfig,
+  pub(crate) peer_addr: std::net::SocketAddr,
+  pub(crate) downstream_host: &'a str,
+  pub(crate) preserve_host: bool,
+  pub(crate) upstream_version: HttpVersion,
+  pub(crate) waf_mutations: &'a [HeaderMutation],
 }
 
-pub(super) fn rebuild_request(
-  request: Request<Incoming>,
+pub(crate) fn rebuild_request<B>(
+  request: Request<B>,
   options: RebuildRequestOptions<'_>,
-) -> Request<ProxyBody> {
+) -> Request<ProxyBody>
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
+  B::Error: Into<BoxError> + Send + Sync + 'static,
+{
   let (mut parts, body) = request.into_parts();
   parts.uri = options.target_uri;
   parts.version = upstream_request_version(options.upstream_version);
@@ -48,5 +52,5 @@ pub(super) fn rebuild_request(
 
   apply_header_mutations(&mut parts.headers, options.waf_mutations);
 
-  Request::from_parts(parts, body.map_err(boxed_error).boxed())
+  Request::from_parts(parts, body.map_err(Into::into).boxed())
 }

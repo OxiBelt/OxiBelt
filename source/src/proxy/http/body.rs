@@ -1,9 +1,12 @@
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 
-pub(super) type BoxError = Box<dyn std::error::Error + Send + Sync>;
-pub(super) type ProxyBody = BoxBody<Bytes, BoxError>;
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
 
-pub(super) fn boxed_error(error: hyper::Error) -> BoxError {
+pub(crate) fn boxed_error<E>(error: E) -> BoxError
+where
+  E: std::error::Error + Send + Sync + 'static,
+{
   Box::new(error)
 }

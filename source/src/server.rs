@@ -8,15 +8,54 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use ring::digest;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio_rustls::LazyConfigAcceptor;
 use tracing::{error, info, warn};
 
-use crate::proxy::http;
+use crate::proxy::{http, http3};
 use crate::state::AppState;
 use crate::tcp_hop;
 use crate::waf::WafTlsMetadata;
 
+const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
+const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v1";
+
 pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
+  let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+
+  if state.config.listeners.http1 || state.config.listeners.http2 {
+    let tcp_state = state.clone();
+    let tcp_errors = error_tx.clone();
+    tokio::spawn(async move {
+      if let Err(error) = serve_tcp(tcp_state).await {
+        let _ = tcp_errors.send(error.context("downstream TCP HTTP listener failed"));
+      }
+    });
+  }
+
+  if state.config.listeners.http3 {
+    let h3_state = state.clone();
+    let h3_errors = error_tx.clone();
+    tokio::spawn(async move {
+      if let Err(error) = serve_http3(h3_state).await {
+        let _ = h3_errors.send(error.context("downstream HTTP/3 listener failed"));
+      }
+    });
+  }
+
+  drop(error_tx);
+
+  tokio::select! {
+      result = tokio::signal::ctrl_c() => {
+          result.context("failed to wait for ctrl_c signal")?;
+          info!("shutdown signal received");
+          Ok(())
+      }
+      Some(error) = error_rx.recv() => Err(error),
+  }
+}
+
+async fn serve_tcp(state: Arc<AppState>) -> anyhow::Result<()> {
   let bind = state.config.listeners.https_bind;
   let listener = TcpListener::bind(bind)
     .await
@@ -49,6 +88,84 @@ pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
             });
         }
     }
+  }
+}
+
+async fn serve_http3(state: Arc<AppState>) -> anyhow::Result<()> {
+  let bind = state.config.listeners.https_bind;
+  let server_config = state
+    .quic_server_config
+    .clone()
+    .ok_or_else(|| anyhow::anyhow!("HTTP/3 listener is enabled without QUIC server config"))?;
+  let endpoint = h3_quinn::quinn::Endpoint::server(server_config, bind)
+    .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))?;
+
+  info!(bind = %bind, "downstream HTTP/3 listener started");
+
+  loop {
+    tokio::select! {
+        biased;
+        result = tokio::signal::ctrl_c() => {
+            result.context("failed to wait for ctrl_c signal")?;
+            info!("shutdown signal received");
+            return Ok(());
+        }
+        connecting = endpoint.accept() => {
+            let Some(connecting) = connecting else {
+                return Ok(());
+            };
+            let connection_state = state.clone();
+            tokio::spawn(async move {
+                match connecting.await {
+                    Ok(connection) => {
+                        if let Err(error) = http3::handle_downstream_connection(connection, connection_state).await {
+                            warn!(error = %error, "HTTP/3 downstream connection closed with error");
+                        }
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "failed to accept downstream HTTP/3 connection");
+                    }
+                }
+            });
+        }
+    }
+  }
+}
+
+pub(crate) fn downstream_quic_tls_metadata(
+  connection: &h3_quinn::quinn::Connection,
+) -> WafTlsMetadata {
+  let handshake_data = connection.handshake_data().and_then(|data| {
+    data
+      .downcast::<h3_quinn::quinn::crypto::rustls::HandshakeData>()
+      .ok()
+  });
+  let (alpn, sni) = handshake_data
+    .map(|data| {
+      (
+        data
+          .protocol
+          .as_ref()
+          .map(|value| String::from_utf8_lossy(value).into_owned()),
+        data.server_name.clone(),
+      )
+    })
+    .unwrap_or_default();
+  let version = Some("TLSv1_3".to_string());
+  let fingerprint = Some(quic_tls_fingerprint(
+    version.as_deref(),
+    sni.as_deref(),
+    alpn.as_deref(),
+  ));
+
+  WafTlsMetadata {
+    enabled: true,
+    version,
+    cipher_suite: None,
+    sni,
+    alpn,
+    fingerprint,
+    fingerprint_scheme: Some(QUIC_TLS_FINGERPRINT_SCHEME.to_string()),
   }
 }
 
@@ -193,6 +310,7 @@ fn downstream_tls_metadata(
     sni,
     alpn,
     fingerprint,
+    fingerprint_scheme: Some(TCP_TLS_FINGERPRINT_SCHEME.to_string()),
   }
 }
 
@@ -228,7 +346,7 @@ fn tls_fingerprint_payload(
   alpn: Option<&str>,
 ) -> String {
   format!(
-    "rustls-negotiated-v2\nclient_hello_cipher_suites={}\nclient_hello_key_exchange_groups={}\nclient_hello_signature_schemes={}\nclient_hello_data_integrity_groups={}\nselected_version={}\nselected_cipher_suite={}\nselected_key_exchange_group={}\nselected_data_integrity_group={}\nsni={}\nalpn={}",
+    "{TCP_TLS_FINGERPRINT_SCHEME}\nclient_hello_cipher_suites={}\nclient_hello_key_exchange_groups={}\nclient_hello_signature_schemes={}\nclient_hello_data_integrity_groups={}\nselected_version={}\nselected_cipher_suite={}\nselected_key_exchange_group={}\nselected_data_integrity_group={}\nsni={}\nalpn={}",
     client_hello.cipher_suites,
     client_hello.key_exchange_groups,
     client_hello.signature_schemes,
@@ -237,6 +355,25 @@ fn tls_fingerprint_payload(
     cipher_suite.unwrap_or_default(),
     key_exchange_group.unwrap_or_default(),
     data_integrity_group.unwrap_or_default(),
+    sni.unwrap_or_default(),
+    alpn.unwrap_or_default()
+  )
+}
+
+fn quic_tls_fingerprint(version: Option<&str>, sni: Option<&str>, alpn: Option<&str>) -> String {
+  let payload = quic_tls_fingerprint_payload(version, sni, alpn);
+  let hash = digest::digest(&digest::SHA256, payload.as_bytes());
+  hex_encode(hash.as_ref())
+}
+
+fn quic_tls_fingerprint_payload(
+  version: Option<&str>,
+  sni: Option<&str>,
+  alpn: Option<&str>,
+) -> String {
+  format!(
+    "{QUIC_TLS_FINGERPRINT_SCHEME}\nselected_version={}\nsni={}\nalpn={}",
+    version.unwrap_or_default(),
     sni.unwrap_or_default(),
     alpn.unwrap_or_default()
   )
@@ -325,7 +462,7 @@ mod tests {
       Some("h2"),
     );
 
-    assert!(payload.starts_with("rustls-negotiated-v2\n"));
+    assert!(payload.starts_with("rustls-tcp-negotiated-v2\n"));
     assert!(
       payload.contains("client_hello_cipher_suites=TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384")
     );
@@ -385,6 +522,27 @@ mod tests {
     assert_eq!(base.len(), 64);
     assert_ne!(base, changed_client_hello);
     assert_ne!(base, changed_selection);
+  }
+
+  #[test]
+  fn quic_tls_fingerprint_payload_uses_reduced_quic_scheme() {
+    let payload = quic_tls_fingerprint_payload(Some("TLSv1_3"), Some("example.com"), Some("h3"));
+
+    assert!(payload.starts_with("quinn-rustls-quic-v1\n"));
+    assert!(payload.contains("selected_version=TLSv1_3"));
+    assert!(payload.contains("sni=example.com"));
+    assert!(payload.contains("alpn=h3"));
+  }
+
+  #[test]
+  fn quic_tls_fingerprint_changes_when_exposed_handshake_metadata_changes() {
+    let base = quic_tls_fingerprint(Some("TLSv1_3"), Some("example.com"), Some("h3"));
+    let changed_sni = quic_tls_fingerprint(Some("TLSv1_3"), Some("alt.example.com"), Some("h3"));
+    let changed_alpn = quic_tls_fingerprint(Some("TLSv1_3"), Some("example.com"), Some("h3-29"));
+
+    assert_eq!(base.len(), 64);
+    assert_ne!(base, changed_sni);
+    assert_ne!(base, changed_alpn);
   }
 
   #[test]

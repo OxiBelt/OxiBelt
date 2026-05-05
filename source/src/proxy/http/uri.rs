@@ -1,7 +1,7 @@
 use http::Uri;
 use url::Url;
 
-pub(super) fn rewrite_uri(
+pub(crate) fn rewrite_uri(
   origin: &Url,
   route_prefix: &str,
   replace_prefix_with: Option<&str>,

@@ -58,6 +58,7 @@ pub struct AppState {
   pub upstreams: Vec<UpstreamConfig>,
   pub clients: UpstreamClientPools,
   pub tls_server_config: std::sync::Arc<rustls::ServerConfig>,
+  pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub waf: WafEngine,
 }
 
@@ -69,6 +70,11 @@ impl AppState {
       .context("failed to build upstream HTTP clients")?;
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to build downstream TLS config")?;
+    let quic_server_config = if config.listeners.http3 {
+      Some(tls::build_quic_server_config(&config.tls).context("failed to build QUIC TLS config")?)
+    } else {
+      None
+    };
     let waf = WafEngine::new(&config).context("failed to build WAF engine")?;
 
     Ok(Self {
@@ -77,6 +83,7 @@ impl AppState {
       upstreams,
       clients,
       tls_server_config,
+      quic_server_config,
       waf,
     })
   }

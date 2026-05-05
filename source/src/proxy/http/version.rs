@@ -10,7 +10,7 @@ pub(super) fn upstream_request_version(version: HttpVersion) -> Version {
   }
 }
 
-pub(super) fn select_upstream_http_version(
+pub(crate) fn select_upstream_http_version(
   auto_upgrade_enabled: bool,
   configured_max: HttpVersion,
   upstream_max: HttpVersion,

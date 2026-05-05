@@ -435,6 +435,68 @@ fn upstream_ech_mode_defaults_to_disabled() {
 }
 
 #[test]
+fn downstream_http3_listener_validates() {
+    let temp_dir = common::TempDir::new("downstream-http3");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "downstream-h3");
+    let raw =
+        common::minimal_config_toml(&cert_path, &key_path).replace("http3 = false", "http3 = true");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("HTTP/3 listener should validate");
+}
+
+#[test]
+fn upstream_http3_https_origin_validates() {
+    let temp_dir = common::TempDir::new("upstream-http3-https");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "upstream-h3-https");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("max_http_version = \"h2\"", "max_http_version = \"h3\"");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("HTTPS HTTP/3 upstream should validate");
+}
+
+#[test]
+fn upstream_http3_requires_https_origin() {
+    let temp_dir = common::TempDir::new("upstream-http3-http");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "upstream-h3-http");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace(
+            "origin = \"https://app.internal.example\"",
+            "origin = \"http://app.internal.example\"",
+        )
+        .replace("max_http_version = \"h2\"", "max_http_version = \"h3\"");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("HTTP/3 upstream over HTTP should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("must use https:// origin when max_http_version = \"h3\""),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn auto_upgrade_to_http3_validates_when_upstream_supports_https_h3() {
+    let temp_dir = common::TempDir::new("auto-upgrade-http3");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "auto-upgrade-h3");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("max_http_version = \"h2\"", "max_http_version = \"h3\"");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("auto-upgrade to HTTP/3 should validate");
+}
+
+#[test]
 fn upstream_ech_config_list_mode_requires_a_file() {
     let temp_dir = common::TempDir::new("ech-required");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ech-required");

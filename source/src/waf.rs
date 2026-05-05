@@ -941,6 +941,7 @@ pub struct WafRequestInput<'a> {
   pub tcp_max_hop: Option<u8>,
   pub tls: &'a WafTlsMetadata,
   pub protocol: WafProtocol,
+  pub transport_network: WafTransportNetwork,
   pub tags: &'a HashMap<String, String>,
 }
 
@@ -952,12 +953,15 @@ pub struct WafTlsMetadata {
   pub sni: Option<String>,
   pub alpn: Option<String>,
   pub fingerprint: Option<String>,
+  pub fingerprint_scheme: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum WafProtocol {
   Http,
   Websocket,
+  Webrtc,
+  Webtransport,
 }
 
 impl WafProtocol {
@@ -965,6 +969,23 @@ impl WafProtocol {
     match self {
       Self::Http => "http",
       Self::Websocket => "websocket",
+      Self::Webrtc => "webrtc",
+      Self::Webtransport => "webtransport",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum WafTransportNetwork {
+  Tcp,
+  Udp,
+}
+
+impl WafTransportNetwork {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Tcp => "tcp",
+      Self::Udp => "udp",
     }
   }
 }
@@ -1351,6 +1372,7 @@ enum ObjectRef {
   RequestClientBot,
   RequestTransport,
   RequestTransportTcp,
+  RequestTransportUdp,
   RequestHttp,
   RequestHeaders,
   RequestQueryParams,
@@ -1475,7 +1497,9 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestClientBot, "Malicious") => Ok(Value::Null),
     (ObjectRef::RequestClientBot, "Score") => Ok(Value::Int(0)),
     (ObjectRef::RequestClientBot, "Reason") => Ok(Value::Null),
-    (ObjectRef::RequestTransport, "Network") => Ok(Value::String("tcp".to_string())),
+    (ObjectRef::RequestTransport, "Network") => Ok(Value::String(
+      ctx.request.transport_network.as_str().to_string(),
+    )),
     (ObjectRef::RequestTransport, "RemoteIp") => {
       Ok(Value::String(ctx.request.peer_addr.ip().to_string()))
     }
@@ -1483,8 +1507,20 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
       Ok(Value::Int(ctx.request.peer_addr.port().into()))
     }
     (ObjectRef::RequestTransport, "IsEncrypted") => Ok(Value::Bool(true)),
-    (ObjectRef::RequestTransport, "Tcp") => Ok(Value::Object(ObjectRef::RequestTransportTcp)),
-    (ObjectRef::RequestTransport, "Udp") => Ok(Value::Null),
+    (ObjectRef::RequestTransport, "Tcp") => {
+      if ctx.request.transport_network == WafTransportNetwork::Tcp {
+        Ok(Value::Object(ObjectRef::RequestTransportTcp))
+      } else {
+        Ok(Value::Null)
+      }
+    }
+    (ObjectRef::RequestTransport, "Udp") => {
+      if ctx.request.transport_network == WafTransportNetwork::Udp {
+        Ok(Value::Object(ObjectRef::RequestTransportUdp))
+      } else {
+        Ok(Value::Null)
+      }
+    }
     (ObjectRef::RequestTransportTcp, "State") => Ok(Value::String("accepted".to_string())),
     (ObjectRef::RequestTransportTcp, "TlsDetected") => Ok(Value::Bool(true)),
     (ObjectRef::RequestTransportTcp, "MaxHop") => Ok(
@@ -1515,6 +1551,10 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestTransportTcp, "Mss") | (ObjectRef::RequestTransportTcp, "RttMs") => {
       Ok(Value::Null)
     }
+    (ObjectRef::RequestTransportUdp, "DatagramSize")
+    | (ObjectRef::RequestTransportUdp, "FlowId")
+    | (ObjectRef::RequestTransportUdp, "ConnectionId") => Ok(Value::Null),
+    (ObjectRef::RequestTransportUdp, "QuicDetected") => Ok(Value::Bool(true)),
     (ObjectRef::RequestHttp, "Version") => Ok(Value::String(version_string(ctx.request.version))),
     (ObjectRef::RequestHttp, "Method") => {
       Ok(Value::String(ctx.request.method.as_str().to_string()))
@@ -1572,6 +1612,15 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         .request
         .tls
         .fingerprint
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTls, "FingerprintScheme") => Ok(
+      ctx
+        .request
+        .tls
+        .fingerprint_scheme
         .as_ref()
         .map(|value| Value::String(value.clone()))
         .unwrap_or(Value::Null),
@@ -1683,7 +1732,9 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::ResponseTls, "Version")
     | (ObjectRef::ResponseTls, "CipherSuite")
     | (ObjectRef::ResponseTls, "Sni")
-    | (ObjectRef::ResponseTls, "Alpn") => Ok(Value::Null),
+    | (ObjectRef::ResponseTls, "Alpn")
+    | (ObjectRef::ResponseTls, "Fingerprint")
+    | (ObjectRef::ResponseTls, "FingerprintScheme") => Ok(Value::Null),
     (ObjectRef::ResponseTls, "ClientCertificatePresent") => Ok(Value::Bool(false)),
     (ObjectRef::ResponseTransport, "Network") => Ok(Value::String("tcp".to_string())),
     (ObjectRef::ResponseTransport, "IsEncrypted") => Ok(Value::Bool(false)),

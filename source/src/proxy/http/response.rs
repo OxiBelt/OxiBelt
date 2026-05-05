@@ -6,12 +6,12 @@ use http_body_util::{BodyExt, Empty, Full};
 use crate::state::AppState;
 use crate::waf::{
   HeaderMutation, WafRequestInput, WafResponseInput, WafTerminalResponse, WafTlsMetadata,
-  WafUpstreamError, apply_header_mutations,
+  WafTransportNetwork, WafUpstreamError, apply_header_mutations,
 };
 
 use super::body::{BoxError, ProxyBody};
 
-pub(super) fn text_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
+pub(crate) fn text_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
   let body = Full::new(Bytes::copy_from_slice(message.as_bytes()))
     .map_err(|never| -> BoxError { match never {} })
     .boxed();
@@ -20,7 +20,7 @@ pub(super) fn text_response(status: StatusCode, message: &str) -> Response<Proxy
   response
 }
 
-pub(super) fn waf_terminal_response(
+pub(crate) fn waf_terminal_response(
   terminal: WafTerminalResponse,
   mutations: &[HeaderMutation],
 ) -> Response<ProxyBody> {
@@ -31,7 +31,7 @@ pub(super) fn waf_terminal_response(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn upstream_error_response(
+pub(crate) fn upstream_error_response(
   state: &AppState,
   route_name: &str,
   request_method: &Method,
@@ -43,6 +43,7 @@ pub(super) fn upstream_error_response(
   tcp_max_hop: Option<u8>,
   tls: &WafTlsMetadata,
   protocol: crate::waf::WafProtocol,
+  transport_network: WafTransportNetwork,
   tags: &std::collections::HashMap<String, String>,
   upstream_name: &str,
   error_message: &str,
@@ -65,6 +66,7 @@ pub(super) fn upstream_error_response(
     tcp_max_hop,
     tls,
     protocol,
+    transport_network,
     tags,
   };
   let response_waf = state.waf.evaluate_response(WafResponseInput {

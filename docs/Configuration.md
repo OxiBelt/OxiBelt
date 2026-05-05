@@ -196,8 +196,8 @@ At least one downstream HTTP version must be enabled.
 
 Current implementation notes:
 
-- HTTP/1.1 and HTTP/2 are implemented.
-- HTTP/3 is reserved in configuration but currently rejected during validation.
+- HTTP/1.1 and HTTP/2 listen on TCP.
+- HTTP/3 listens on UDP using the same `https_bind` address and port. Deployments must expose both TCP and UDP when all three downstream versions are enabled.
 
 ## 5. Downstream TLS
 
@@ -248,8 +248,8 @@ max_http_version = "h2"
 
 Current implementation notes:
 
-- Upstream HTTP/1.1 and HTTP/2 are implemented.
-- HTTP/3 is reserved but currently rejected during validation.
+- Upstream HTTP/1.1 and HTTP/2 use the existing TLS/TCP client path.
+- Upstream HTTP/3 uses QUIC and requires an `https://` upstream origin. When `max_http_version = "h3"` is selected, OxiBelt forwards ordinary HTTP requests over HTTP/3.
 
 ## 7. Compression
 
@@ -423,12 +423,13 @@ Fields:
 - `connect_timeout_ms`: upstream connection timeout.
 - `request_timeout_ms`: upstream request timeout.
 - `preserve_host`: forward the original `Host` when true; use the upstream origin host when false.
-- `websocket`, `webrtc`, `webtransport`: protocol capability flags reserved for routing behavior.
+- `websocket`, `webrtc`, `webtransport`: protocol capability flags used by routing and protocol-specific forwarding behavior.
 
 Current implementation notes:
 
-- `max_http_version = "h3"` is reserved but currently rejected during validation.
-- `websocket`, `webrtc`, and `webtransport` flags are configuration surface for protocol support; full forwarding support is not complete in this initial implementation.
+- `max_http_version = "h3"` requires an `https://` origin.
+- WebTransport forwarding is supported for downstream HTTP/3 extended CONNECT requests when the selected upstream also uses HTTP/3 and `webtransport = true`.
+- WebTransport streams and datagrams are forwarded between downstream and upstream sessions. WAF rules evaluate the CONNECT request metadata before the session is accepted; frame-level and datagram payload inspection remain outside the current WAF implementation.
 
 ### 9.1 Upstream TLS ECH
 

@@ -8,6 +8,7 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::waf::{
     HeaderMutation, WafEngine, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
+    WafTransportNetwork,
 };
 use ring::digest;
 
@@ -125,7 +126,7 @@ fail_policy = "closed"
 name = "reject-transport-tls-metadata"
 phase = "request"
 priority = 10
-when = "Request.Transport.Tcp.Sni == 'example.com' && Request.Transport.Tcp.Alpn == 'h2'"
+when = "Request.Transport.Tcp.Sni == 'example.com' && Request.Transport.Tcp.Alpn == 'h2' && Request.Tls.FingerprintScheme == 'rustls-tcp-negotiated-v2'"
 
 [[waf.rules.actions]]
 type = "reject"
@@ -150,6 +151,69 @@ body = "blocked transport TLS metadata"
         &tags,
         peer_addr,
         &test_tls("browser-fingerprint"),
+    ));
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn request_rule_can_match_webtransport_udp_metadata() {
+    let temp_dir = common::TempDir::new("waf-webtransport-udp");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-webtransport-udp");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "reject-webtransport-udp"
+phase = "request"
+priority = 10
+when = "Request.Protocol == 'webtransport' && Request.Transport.Network == 'udp' && Request.Transport.Udp != null && Request.Transport.Tcp == null"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "webtransport blocked"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::CONNECT;
+    let uri: Uri = "https://example.com/session"
+        .parse()
+        .expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let tls = WafTlsMetadata {
+        enabled: true,
+        version: Some("TLSv1_3".to_string()),
+        cipher_suite: None,
+        sni: Some("example.com".to_string()),
+        alpn: Some("h3".to_string()),
+        fingerprint: Some("quic-fingerprint".to_string()),
+        fingerprint_scheme: Some("quinn-rustls-quic-v1".to_string()),
+    };
+
+    let rejected = engine.evaluate_request(request_input_with_protocol_and_network(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        &tls,
+        WafProtocol::Webtransport,
+        WafTransportNetwork::Udp,
     ));
     assert_eq!(
         rejected.terminal.as_ref().map(|terminal| terminal.status),
@@ -1138,6 +1202,7 @@ fn request_input<'a>(
         sni: None,
         alpn: None,
         fingerprint: None,
+        fingerprint_scheme: None,
     };
 
     request_input_with_transport(method, uri, headers, tags, peer_addr, None, &TEST_TLS)
@@ -1169,6 +1234,7 @@ fn request_input_with_tcp_max_hop<'a>(
         sni: None,
         alpn: None,
         fingerprint: None,
+        fingerprint_scheme: None,
     };
 
     request_input_with_transport(
@@ -1202,6 +1268,34 @@ fn request_input_with_transport<'a>(
         tcp_max_hop,
         tls,
         protocol: WafProtocol::Http,
+        transport_network: WafTransportNetwork::Tcp,
+        tags,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_input_with_protocol_and_network<'a>(
+    method: &'a Method,
+    uri: &'a Uri,
+    headers: &'a HeaderMap,
+    tags: &'a HashMap<String, String>,
+    peer_addr: SocketAddr,
+    tls: &'a WafTlsMetadata,
+    protocol: WafProtocol,
+    transport_network: WafTransportNetwork,
+) -> WafRequestInput<'a> {
+    WafRequestInput {
+        method,
+        uri,
+        version: http::Version::HTTP_3,
+        headers,
+        peer_addr,
+        downstream_host: "example.com",
+        route_name: "app-root",
+        tcp_max_hop: None,
+        tls,
+        protocol,
+        transport_network,
         tags,
     }
 }
@@ -1214,6 +1308,7 @@ fn test_tls(fingerprint: &str) -> WafTlsMetadata {
         sni: Some("example.com".to_string()),
         alpn: Some("h2".to_string()),
         fingerprint: Some(fingerprint.to_string()),
+        fingerprint_scheme: Some("rustls-tcp-negotiated-v2".to_string()),
     }
 }
 
