@@ -1,6 +1,7 @@
 import argparse
 import http.client
 import json
+import re
 import ssl
 import sys
 import urllib.parse
@@ -12,6 +13,40 @@ TARGET_PATHS = {
   "secure-health": "/secure/v1/health?source=https",
   "waf-blocked": "/app/blocked",
 }
+HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+def validate_header_name(raw_name: str) -> str:
+  name = raw_name.strip()
+  if not name:
+    raise ValueError("header name must not be empty")
+  if not HEADER_NAME_RE.fullmatch(name):
+    raise ValueError(f"invalid header name {raw_name!r}")
+  return name
+
+
+def validate_header_value(raw_value: str) -> str:
+  value = raw_value.strip()
+  if "\r" in value or "\n" in value or "\0" in value:
+    raise ValueError("header value must not contain control characters")
+  return value
+
+
+def validate_origin_form_path(raw_path: str) -> str:
+  if not raw_path:
+    raise ValueError("request path must not be empty")
+  if "\r" in raw_path or "\n" in raw_path or "\0" in raw_path:
+    raise ValueError("request path must not contain control characters")
+
+  parsed = urllib.parse.urlsplit(raw_path)
+  if parsed.scheme or parsed.netloc:
+    raise ValueError("request path must be an origin-form path, not an absolute URL")
+  if not parsed.path.startswith("/"):
+    raise ValueError("request path must start with '/'")
+
+  path = urllib.parse.quote(parsed.path, safe="/!$&'()*+,;=:@%~-._")
+  query = urllib.parse.quote(parsed.query, safe="/!$&'()*+,;=:@?%~-._")
+  return urllib.parse.urlunsplit(("", "", path, query, ""))
 
 
 def validate_host_header(raw_host: str) -> str:
@@ -47,7 +82,7 @@ def main() -> int:
 
   try:
     if args.path:
-      target_path = args.path
+      target_path = validate_origin_form_path(args.path)
     elif args.target:
       target_path = TARGET_PATHS[args.target]
     else:
@@ -75,11 +110,13 @@ def main() -> int:
         sys.stderr.write(f"invalid header {item!r}; expected Name: value\n")
         return 2
       name, value = item.split(":", 1)
-      name = name.strip()
-      if not name:
-        sys.stderr.write("header name must not be empty\n")
+      try:
+        name = validate_header_name(name)
+        value = validate_header_value(value)
+      except ValueError as error:
+        sys.stderr.write(f"{error}\n")
         return 2
-      headers[name] = value.strip()
+      headers[name] = value
 
     body = args.body.encode("utf-8")
     connection.request(args.method, target_path, body=body, headers=headers)
