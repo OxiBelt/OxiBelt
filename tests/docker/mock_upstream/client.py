@@ -119,7 +119,20 @@ def main() -> int:
       headers[name] = value
 
     body = args.body.encode("utf-8")
-    connection.request(args.method, target_path, body=body, headers=headers)
+    connection.putrequest(
+      args.method,
+      target_path,
+      skip_host=True,
+      skip_accept_encoding=True,
+    )
+    has_content_length = False
+    for name, value in headers.items():
+      if name.lower() == "content-length":
+        has_content_length = True
+      connection.putheader(name, value)
+    if not has_content_length:
+      connection.putheader("Content-Length", str(len(body)))
+    connection.endheaders(body)
     response = connection.getresponse()
     response_body = response.read().decode("utf-8", "replace")
     if args.dump_response_json:

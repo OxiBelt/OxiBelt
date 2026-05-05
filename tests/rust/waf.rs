@@ -61,6 +61,62 @@ body = "Forbidden"
 }
 
 #[test]
+fn request_helper_maps_match_case_insensitive_header_names() {
+    let temp_dir = common::TempDir::new("waf-helper-maps");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-helper-maps");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "helper-block"
+phase = "request"
+priority = 10
+when = "Request.Headers.anyNameMatches('^X-Matrix-') && Request.Headers.anyEntryMatches('^X-Matrix-', '^yes$') && Request.QueryParams.get('block') == 'yes' && Request.Cookies.get('matrix') == 'cookie'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+body = "helper matched"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::HeaderName::from_static("x-matrix-case"),
+        HeaderValue::from_static("yes"),
+    );
+    headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_static("matrix=cookie"),
+    );
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/helpers?block=yes".parse().expect("URI should parse");
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::from_u16(418).unwrap())
+    );
+}
+
+#[test]
 fn request_body_format_helper_can_reject_non_png_payload() {
     let temp_dir = common::TempDir::new("waf-request-body-png");
     let (cert_path, key_path) =

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, anyhow, bail};
 use http::header::{COOKIE, HeaderName, HeaderValue, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 use tracing::{debug, warn};
@@ -2066,7 +2066,7 @@ fn eval_header_call(
       header_name(expect_string_arg(args, 0)?)?,
     )?),
     "anyNameMatches" => {
-      let regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let regex = header_name_regex(expect_string_arg(args, 0)?)?;
       Ok(Value::Bool(
         headers
           .keys()
@@ -2095,7 +2095,7 @@ fn eval_header_call(
       ))
     }
     "anyEntryMatches" => {
-      let name_regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let name_regex = header_name_regex(expect_string_arg(args, 0)?)?;
       let value_regex = Regex::new(expect_string_arg(args, 1)?)?;
       Ok(Value::Bool(
         headers
@@ -2106,7 +2106,7 @@ fn eval_header_call(
       ))
     }
     "allEntriesMatch" => {
-      let name_regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let name_regex = header_name_regex(expect_string_arg(args, 0)?)?;
       let value_regex = Regex::new(expect_string_arg(args, 1)?)?;
       Ok(Value::Bool(
         headers
@@ -2118,6 +2118,10 @@ fn eval_header_call(
     }
     _ => bail!("unknown HeaderMap method {method}"),
   }
+}
+
+fn header_name_regex(pattern: &str) -> anyhow::Result<Regex> {
+  Ok(RegexBuilder::new(pattern).case_insensitive(true).build()?)
 }
 
 fn eval_query_call(ctx: &EvalContext<'_>, method: &str, args: &[Value]) -> anyhow::Result<Value> {
