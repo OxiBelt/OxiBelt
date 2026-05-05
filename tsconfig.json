@@ -1,0 +1,25 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./ui/person-proof"
+    }
+  ],
+  "compilerOptions": {
+    "module": "NodeNext",
+    "target": "ES2024",
+    "moduleResolution": "NodeNext",
+    "removeComments": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "ignoreDeprecations": "6.0",
+    "baseUrl": ".",
+    "paths": {
+      "@builder/*": ["./builder/source/*"],
+      "@userscript/*": ["./userscript/source/*"],
+      "@root/*": ["./source/*"],
+      "@reporoot/*": ["./*"],
+      "@person-proof-ui/*": ["./ui/person-proof/source/*"]
+    }
+  }
+}

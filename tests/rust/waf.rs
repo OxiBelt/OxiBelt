@@ -6,7 +6,8 @@ use std::net::SocketAddr;
 
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
-use oxibelt::waf::{WafEngine, WafProtocol, WafRequestInput, WafResponseInput};
+use oxibelt::waf::{HeaderMutation, WafEngine, WafProtocol, WafRequestInput, WafResponseInput};
+use ring::digest;
 
 #[test]
 fn request_rule_can_reject_by_path_and_client_cidr() {
@@ -128,6 +129,205 @@ value = "no-store"
     });
 
     assert_eq!(response_decision.response_header_mutations.len(), 1);
+}
+
+#[test]
+fn person_proof_challenge_allows_solved_pow() {
+    let temp_dir = common::TempDir::new("waf-person-proof");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid' && Request.Client.Agent.Verified != true && Request.Client.Bot.Disposition != 'normal'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+ttl_seconds = 60
+cookie = "__test_person_proof"
+success_tag = "PersonProof"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let challenge_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    let challenge = challenge_decision
+        .terminal
+        .as_ref()
+        .expect("missing person proof challenge");
+    assert_eq!(challenge.status, StatusCode::FORBIDDEN);
+    assert!(challenge.body.contains("Person proof required"));
+    assert!(challenge.body.contains("cdn.jsdelivr.net"));
+    assert!(challenge.body.contains("Pretendard"));
+    assert!(challenge.body.contains("nonce=\""));
+
+    let csp = extract_response_header(
+        &challenge.headers,
+        http::header::HeaderName::from_static("content-security-policy"),
+    );
+    assert!(csp.contains("default-src 'none'"));
+    assert!(csp.contains("script-src 'nonce-"));
+    assert!(csp.contains("style-src 'nonce-"));
+    assert!(csp.contains("https://cdn.jsdelivr.net"));
+    assert!(csp.contains("font-src https://cdn.jsdelivr.net"));
+
+    assert_eq!(
+        extract_response_header(
+            &challenge.headers,
+            http::header::HeaderName::from_static("cross-origin-resource-policy"),
+        ),
+        "same-origin"
+    );
+    assert_eq!(
+        extract_response_header(
+            &challenge.headers,
+            http::header::HeaderName::from_static("access-control-allow-origin"),
+        ),
+        "https://example.com"
+    );
+
+    let token = extract_person_proof_token(&challenge.body);
+    let nonce = solve_pow_nonce(&token, 4);
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+
+    let solved_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert!(solved_decision.terminal.is_none());
+    assert_eq!(
+        solved_decision.tags,
+        vec![("PersonProof".to_string(), "valid".to_string())]
+    );
+    let clearance_cookie = extract_set_cookie(&solved_decision.response_header_mutations);
+    assert!(clearance_cookie.contains("__test_person_proof=clearance.v1."));
+    assert!(clearance_cookie.contains("HttpOnly"));
+
+    let clearance_value = clearance_cookie
+        .split_once('=')
+        .and_then(|(_, value)| value.split_once(';'))
+        .map(|(value, _)| value)
+        .expect("clearance cookie should contain a value");
+    let mut clearance_headers = HeaderMap::new();
+    clearance_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={clearance_value}")).unwrap(),
+    );
+    let clearance_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert!(clearance_decision.terminal.is_none());
+    assert!(clearance_decision.response_header_mutations.is_empty());
+}
+
+#[test]
+fn person_proof_challenge_rejects_invalid_pow() {
+    let temp_dir = common::TempDir::new("waf-person-proof-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-invalid");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+ttl_seconds = 60
+cookie = "__test_person_proof"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let challenge_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+
+    let mut invalid_headers = HeaderMap::new();
+    invalid_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "__test_person_proof={token}.{}",
+            unsolved_pow_nonce(&token, 4)
+        ))
+        .unwrap(),
+    );
+
+    let invalid_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &invalid_headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        invalid_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
 }
 
 #[test]
@@ -285,6 +485,40 @@ status = 403
     );
 }
 
+#[test]
+fn validation_rejects_unsafe_person_proof_difficulty() {
+    let temp_dir = common::TempDir::new("waf-person-proof-invalid-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-invalid-config");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "bad-person-proof"
+phase = "request"
+priority = 1
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 31
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("require_person_proof difficulty"),
+        "unexpected error: {error}"
+    );
+}
+
 fn request_input<'a>(
     method: &'a Method,
     uri: &'a Uri,
@@ -303,4 +537,83 @@ fn request_input<'a>(
         protocol: WafProtocol::Http,
         tags,
     }
+}
+
+fn extract_person_proof_token(body: &str) -> String {
+    let marker = "name=\"oxibelt-person-proof-token\" content=\"";
+    let start = body
+        .find(marker)
+        .map(|index| index + marker.len())
+        .expect("challenge token marker should exist");
+    let end = body[start..]
+        .find('"')
+        .map(|index| start + index)
+        .expect("challenge token should be quoted");
+    body[start..end].to_string()
+}
+
+fn solve_pow_nonce(token: &str, difficulty: u8) -> u64 {
+    for nonce in 0u64.. {
+        let input = format!("{token}.{nonce}");
+        let hash = digest::digest(&digest::SHA256, input.as_bytes());
+        if leading_zero_bits(hash.as_ref()) >= u32::from(difficulty) {
+            return nonce;
+        }
+    }
+    unreachable!("u64 nonce space should be sufficient for test difficulty")
+}
+
+fn unsolved_pow_nonce(token: &str, difficulty: u8) -> u64 {
+    for nonce in 0u64.. {
+        let input = format!("{token}.{nonce}");
+        let hash = digest::digest(&digest::SHA256, input.as_bytes());
+        if leading_zero_bits(hash.as_ref()) < u32::from(difficulty) {
+            return nonce;
+        }
+    }
+    unreachable!("u64 nonce space should contain an unsolved test nonce")
+}
+
+fn leading_zero_bits(bytes: &[u8]) -> u32 {
+    let mut total = 0u32;
+    for byte in bytes {
+        if *byte == 0 {
+            total += 8;
+        } else {
+            total += byte.leading_zeros();
+            break;
+        }
+    }
+    total
+}
+
+fn extract_set_cookie(mutations: &[HeaderMutation]) -> String {
+    mutations
+        .iter()
+        .find_map(|mutation| match mutation {
+            HeaderMutation::Append { name, value } | HeaderMutation::Set { name, value }
+                if name == http::header::SET_COOKIE =>
+            {
+                value.to_str().ok().map(str::to_string)
+            }
+            _ => None,
+        })
+        .expect("Set-Cookie mutation should exist")
+}
+
+fn extract_response_header(
+    mutations: &[HeaderMutation],
+    expected_name: http::HeaderName,
+) -> String {
+    mutations
+        .iter()
+        .find_map(|mutation| match mutation {
+            HeaderMutation::Append { name, value } | HeaderMutation::Set { name, value }
+                if name == expected_name =>
+            {
+                value.to_str().ok().map(str::to_string)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{} header should exist", expected_name))
 }

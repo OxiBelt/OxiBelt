@@ -1,0 +1,22 @@
+{
+  "name": "oxibelt",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "ui/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint \"ui/*/source/**/*.ts\"",
+    "person-proof-ui:build": "npm run build --workspace @oxibelt/person-proof-ui"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.2",
+    "@typescript-eslint/eslint-plugin": "^8.48.0",
+    "@typescript-eslint/parser": "^8.48.0",
+    "eslint": "^9.39.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}

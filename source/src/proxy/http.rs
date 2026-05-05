@@ -66,7 +66,7 @@ pub async fn handle(
   }
 
   if let Some(terminal) = request_waf.terminal {
-    return waf_terminal_response(terminal, &[]);
+    return waf_terminal_response(terminal, &request_waf.response_header_mutations);
   }
 
   if is_upgrade_request(&request) {
@@ -169,12 +169,14 @@ pub async fn handle(
         &tags,
         &upstream.name,
         &error.to_string(),
+        &request_waf.response_header_mutations,
       );
     }
   };
 
   let (mut parts, body) = upstream_response.into_parts();
   strip_hop_by_hop_headers(&mut parts.headers);
+  apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
   if state.waf.has_response_rules(&resolved.route.name) {
     let request_input = WafRequestInput {
@@ -196,7 +198,9 @@ pub async fn handle(
       upstream_error: None,
     });
     if let Some(terminal) = response_waf.terminal {
-      return waf_terminal_response(terminal, &response_waf.response_header_mutations);
+      let mut mutations = request_waf.response_header_mutations.clone();
+      mutations.extend(response_waf.response_header_mutations);
+      return waf_terminal_response(terminal, &mutations);
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
@@ -412,6 +416,7 @@ fn waf_terminal_response(
   mutations: &[HeaderMutation],
 ) -> Response<ProxyBody> {
   let mut response = text_response(terminal.status, &terminal.body);
+  apply_header_mutations(response.headers_mut(), &terminal.headers);
   apply_header_mutations(response.headers_mut(), mutations);
   response
 }
@@ -430,8 +435,10 @@ fn upstream_error_response(
   tags: &std::collections::HashMap<String, String>,
   upstream_name: &str,
   error_message: &str,
+  request_response_mutations: &[HeaderMutation],
 ) -> Response<ProxyBody> {
   let mut response = text_response(StatusCode::BAD_GATEWAY, "upstream request failed");
+  apply_header_mutations(response.headers_mut(), request_response_mutations);
   if !state.waf.has_response_rules(route_name) {
     return response;
   }
@@ -459,7 +466,9 @@ fn upstream_error_response(
   });
 
   if let Some(terminal) = response_waf.terminal {
-    return waf_terminal_response(terminal, &response_waf.response_header_mutations);
+    let mut mutations = request_response_mutations.to_vec();
+    mutations.extend(response_waf.response_header_mutations);
+    return waf_terminal_response(terminal, &mutations);
   }
 
   apply_header_mutations(

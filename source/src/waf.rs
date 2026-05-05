@@ -13,6 +13,10 @@ use tracing::{debug, warn};
 use crate::config::{Config, resolve_existing_local_config_file_path};
 use crate::routes::normalize_host;
 
+mod person_proof;
+
+use person_proof::{PersonProofEngine, PersonProofRequestStatus, PersonProofState};
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WafConfig {
   #[serde(default)]
@@ -182,6 +186,35 @@ pub enum WafActionConfig {
     key: String,
     value: String,
   },
+  RequirePersonProof {
+    #[serde(default)]
+    algorithm: PersonProofAlgorithm,
+    #[serde(default = "default_person_proof_difficulty")]
+    difficulty: u8,
+    #[serde(default = "default_person_proof_ttl_seconds")]
+    ttl_seconds: u64,
+    #[serde(default = "default_person_proof_cookie")]
+    cookie: String,
+    #[serde(default)]
+    success_tag: Option<String>,
+    #[serde(default = "default_person_proof_status")]
+    status: u16,
+  },
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonProofAlgorithm {
+  #[default]
+  PowSha256V1,
+}
+
+impl PersonProofAlgorithm {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::PowSha256V1 => "pow_sha256_v1",
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -451,6 +484,18 @@ fn validate_actions(
         }
         mutations += 1;
       }
+      WafActionConfig::RequirePersonProof {
+        difficulty,
+        ttl_seconds,
+        cookie,
+        success_tag,
+        status,
+        ..
+      } => {
+        require_phase(rule, WafPhase::Request, "require_person_proof")?;
+        validate_status(*status, &rule.name)?;
+        validate_person_proof_settings(&rule.name, *difficulty, *ttl_seconds, cookie, success_tag)?;
+      }
     }
   }
 
@@ -489,6 +534,39 @@ fn validate_header_name(name: &str) -> anyhow::Result<()> {
   Ok(())
 }
 
+fn validate_person_proof_settings(
+  rule_name: &str,
+  difficulty: u8,
+  ttl_seconds: u64,
+  cookie: &str,
+  success_tag: &Option<String>,
+) -> anyhow::Result<()> {
+  if !(1..=30).contains(&difficulty) {
+    bail!("WAF rule {rule_name} require_person_proof difficulty must be between 1 and 30");
+  }
+  if !(1..=86_400).contains(&ttl_seconds) {
+    bail!("WAF rule {rule_name} require_person_proof ttl_seconds must be between 1 and 86400");
+  }
+  if !is_valid_cookie_name(cookie) {
+    bail!("WAF rule {rule_name} require_person_proof cookie must be a safe cookie name");
+  }
+  if let Some(tag) = success_tag
+    && (tag.is_empty() || tag.len() > 128)
+  {
+    bail!("WAF rule {rule_name} require_person_proof success_tag exceeds tag size limits");
+  }
+  Ok(())
+}
+
+fn is_valid_cookie_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.len() <= 64
+    && !name.starts_with('$')
+    && name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
 #[derive(Clone)]
 pub struct WafEngine {
   enabled: bool,
@@ -498,6 +576,7 @@ pub struct WafEngine {
   pattern_sets: HashMap<String, CompiledPatternSet>,
   global_rules: Vec<CompiledRule>,
   route_rules: HashMap<String, Vec<CompiledRule>>,
+  person_proof: PersonProofEngine,
 }
 
 impl WafEngine {
@@ -510,6 +589,7 @@ impl WafEngine {
     for route in &config.routes {
       route_rules.insert(route.name.clone(), compile_rules(&route.waf.rules)?);
     }
+    let person_proof = PersonProofEngine::from_config(config)?;
 
     Ok(Self {
       enabled: config.waf.enabled,
@@ -519,6 +599,7 @@ impl WafEngine {
       pattern_sets,
       global_rules,
       route_rules,
+      person_proof,
     })
   }
 
@@ -554,10 +635,10 @@ impl WafEngine {
         WafFailPolicy::Closed => {
           warn!(error = %error, "WAF request evaluation failed closed");
           RequestWafDecision {
-            terminal: Some(WafTerminalResponse {
-              status: StatusCode::FORBIDDEN,
-              body: "WAF evaluation failed".to_string(),
-            }),
+            terminal: Some(WafTerminalResponse::new(
+              StatusCode::FORBIDDEN,
+              "WAF evaluation failed".to_string(),
+            )),
             ..RequestWafDecision::default()
           }
         }
@@ -580,10 +661,10 @@ impl WafEngine {
         WafFailPolicy::Closed => {
           warn!(error = %error, "WAF response evaluation failed closed");
           ResponseWafDecision {
-            terminal: Some(WafTerminalResponse {
-              status: StatusCode::FORBIDDEN,
-              body: "WAF evaluation failed".to_string(),
-            }),
+            terminal: Some(WafTerminalResponse::new(
+              StatusCode::FORBIDDEN,
+              "WAF evaluation failed".to_string(),
+            )),
             ..ResponseWafDecision::default()
           }
         }
@@ -597,12 +678,20 @@ impl WafEngine {
   ) -> anyhow::Result<RequestWafDecision> {
     let mut tx = TransactionBudget::new(&self.limits);
     let mut decision = RequestWafDecision::default();
+    let person_proof = self.person_proof.evaluate_request(input);
+    if let Some(tag) = self.person_proof.success_tag_for(&person_proof) {
+      decision.tags.push((tag.to_string(), "valid".to_string()));
+    }
+    if let Some(mutation) = self.person_proof.clearance_cookie_mutation(&person_proof)? {
+      decision.response_header_mutations.push(mutation);
+    }
     let ctx = EvalContext {
       phase: WafPhase::Request,
       mode: self.mode,
       rule_name: "",
       request: input,
       response: None,
+      person_proof: &person_proof,
       pattern_sets: &self.pattern_sets,
       limits: &self.limits,
     };
@@ -617,7 +706,7 @@ impl WafEngine {
       if self.mode == WafMode::Monitor {
         continue;
       }
-      apply_request_actions(rule, &mut decision, &mut tx)?;
+      apply_request_actions(rule, input, &self.person_proof, &mut decision, &mut tx)?;
       if decision.terminal.is_some() {
         return Ok(decision);
       }
@@ -632,12 +721,14 @@ impl WafEngine {
   ) -> anyhow::Result<ResponseWafDecision> {
     let mut tx = TransactionBudget::new(&self.limits);
     let mut decision = ResponseWafDecision::default();
+    let person_proof = self.person_proof.evaluate_request(input.request);
     let ctx = EvalContext {
       phase: WafPhase::Response,
       mode: self.mode,
       rule_name: "",
       request: input.request,
       response: Some(input),
+      person_proof: &person_proof,
       pattern_sets: &self.pattern_sets,
       limits: &self.limits,
     };
@@ -805,6 +896,7 @@ pub struct WafUpstreamError<'a> {
 pub struct RequestWafDecision {
   pub terminal: Option<WafTerminalResponse>,
   pub request_header_mutations: Vec<HeaderMutation>,
+  pub response_header_mutations: Vec<HeaderMutation>,
   pub tags: Vec<(String, String)>,
   pub upstream_override: Option<String>,
 }
@@ -819,11 +911,26 @@ pub struct ResponseWafDecision {
 pub struct WafTerminalResponse {
   pub status: StatusCode,
   pub body: String,
+  pub headers: Vec<HeaderMutation>,
+}
+
+impl WafTerminalResponse {
+  pub(super) fn new(status: StatusCode, body: String) -> Self {
+    Self {
+      status,
+      body,
+      headers: Vec::new(),
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
 pub enum HeaderMutation {
   Set {
+    name: HeaderName,
+    value: HeaderValue,
+  },
+  Append {
     name: HeaderName,
     value: HeaderValue,
   },
@@ -834,6 +941,8 @@ pub enum HeaderMutation {
 
 fn apply_request_actions(
   rule: &CompiledRule,
+  input: WafRequestInput<'_>,
+  person_proof: &PersonProofEngine,
   decision: &mut RequestWafDecision,
   tx: &mut TransactionBudget,
 ) -> anyhow::Result<()> {
@@ -841,10 +950,10 @@ fn apply_request_actions(
     tx.count_mutation()?;
     match action {
       WafActionConfig::Reject { status, body } => {
-        decision.terminal = Some(WafTerminalResponse {
-          status: StatusCode::from_u16(*status)?,
-          body: body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
-        });
+        decision.terminal = Some(WafTerminalResponse::new(
+          StatusCode::from_u16(*status)?,
+          body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
+        ));
         return Ok(());
       }
       WafActionConfig::SetRequestHeader { name, value } => {
@@ -865,6 +974,27 @@ fn apply_request_actions(
       }
       WafActionConfig::RouteToUpstream { upstream } => {
         decision.upstream_override = Some(upstream.clone());
+      }
+      WafActionConfig::RequirePersonProof {
+        algorithm,
+        difficulty,
+        ttl_seconds,
+        cookie,
+        success_tag,
+        status,
+      } => {
+        decision.terminal = Some(person_proof.issue_challenge(
+          input,
+          person_proof::PersonProofPolicy {
+            algorithm: *algorithm,
+            difficulty: *difficulty,
+            ttl_seconds: *ttl_seconds,
+            cookie: cookie.clone(),
+            success_tag: success_tag.clone(),
+            status: *status,
+          },
+        )?);
+        return Ok(());
       }
       WafActionConfig::RouteToPool { .. }
       | WafActionConfig::SetLoadBalancingPolicy { .. }
@@ -891,10 +1021,10 @@ fn apply_response_actions(
       WafActionConfig::ContinueResponse => return Ok(()),
       WafActionConfig::ReplaceResponse { status, body }
       | WafActionConfig::RejectResponse { status, body } => {
-        decision.terminal = Some(WafTerminalResponse {
-          status: StatusCode::from_u16(*status)?,
-          body: body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
-        });
+        decision.terminal = Some(WafTerminalResponse::new(
+          StatusCode::from_u16(*status)?,
+          body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
+        ));
         return Ok(());
       }
       WafActionConfig::SetResponseHeader { name, value } => {
@@ -918,7 +1048,8 @@ fn apply_response_actions(
       | WafActionConfig::SetLoadBalancingPolicy { .. }
       | WafActionConfig::SetRequestHeader { .. }
       | WafActionConfig::RemoveRequestHeader { .. }
-      | WafActionConfig::SetTag { .. } => {
+      | WafActionConfig::SetTag { .. }
+      | WafActionConfig::RequirePersonProof { .. } => {
         bail!("invalid response-phase WAF action in rule {}", rule.name);
       }
     }
@@ -931,6 +1062,9 @@ pub fn apply_header_mutations(headers: &mut HeaderMap, mutations: &[HeaderMutati
     match mutation {
       HeaderMutation::Set { name, value } => {
         headers.insert(name, value.clone());
+      }
+      HeaderMutation::Append { name, value } => {
+        headers.append(name, value.clone());
       }
       HeaderMutation::Remove { name } => {
         headers.remove(name);
@@ -999,6 +1133,7 @@ struct EvalContext<'a> {
   rule_name: &'a str,
   request: WafRequestInput<'a>,
   response: Option<WafResponseInput<'a>>,
+  person_proof: &'a PersonProofRequestStatus,
   pattern_sets: &'a HashMap<String, CompiledPatternSet>,
   limits: &'a WafLimits,
 }
@@ -1109,6 +1244,9 @@ enum ObjectRef {
   Context,
   Request,
   RequestClient,
+  RequestClientPersonProof,
+  RequestClientAgent,
+  RequestClientBot,
   RequestTransport,
   RequestTransportTcp,
   RequestHttp,
@@ -1173,13 +1311,66 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::Request, "Body") => Ok(Value::Object(ObjectRef::RequestBody)),
     (ObjectRef::Request, "Tags") => Ok(Value::Object(ObjectRef::RequestTags)),
     (ObjectRef::Request, "Tls") => Ok(Value::Object(ObjectRef::RequestTls)),
+    (ObjectRef::RequestClient, "Kind") => Ok(Value::String(
+      if ctx.person_proof.state == PersonProofState::Valid {
+        "person"
+      } else {
+        "unknown"
+      }
+      .to_string(),
+    )),
     (ObjectRef::RequestClient, "Ip") => Ok(Value::String(ctx.request.peer_addr.ip().to_string())),
     (ObjectRef::RequestClient, "Port") => Ok(Value::Int(ctx.request.peer_addr.port().into())),
     (ObjectRef::RequestClient, "SourceAddress") => {
       Ok(Value::String(ctx.request.peer_addr.to_string()))
     }
     (ObjectRef::RequestClient, "UserAgent") => header_single(ctx.request.headers, USER_AGENT),
+    (ObjectRef::RequestClient, "PersonProof") => {
+      Ok(Value::Object(ObjectRef::RequestClientPersonProof))
+    }
+    (ObjectRef::RequestClient, "Agent") => Ok(Value::Object(ObjectRef::RequestClientAgent)),
+    (ObjectRef::RequestClient, "Bot") => Ok(Value::Object(ObjectRef::RequestClientBot)),
     (ObjectRef::RequestClient, "GeoCountry") | (ObjectRef::RequestClient, "Asn") => Ok(Value::Null),
+    (ObjectRef::RequestClientPersonProof, "State") => {
+      Ok(Value::String(ctx.person_proof.state.as_str().to_string()))
+    }
+    (ObjectRef::RequestClientPersonProof, "Method") => Ok(
+      ctx
+        .person_proof
+        .method
+        .map(|method| Value::String(method.to_string()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestClientPersonProof, "Difficulty") => Ok(
+      ctx
+        .person_proof
+        .difficulty
+        .map(|difficulty| Value::Int(difficulty.into()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestClientPersonProof, "IssuedAtUnixMs") => Ok(
+      ctx
+        .person_proof
+        .issued_at_unix_ms
+        .map(Value::Int)
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestClientPersonProof, "ExpiresAtUnixMs") => Ok(
+      ctx
+        .person_proof
+        .expires_at_unix_ms
+        .map(Value::Int)
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestClientAgent, "Verified") => Ok(Value::Bool(false)),
+    (ObjectRef::RequestClientAgent, "Kind")
+    | (ObjectRef::RequestClientAgent, "Provider")
+    | (ObjectRef::RequestClientAgent, "Model")
+    | (ObjectRef::RequestClientAgent, "AuthMethod") => Ok(Value::Null),
+    (ObjectRef::RequestClientBot, "Disposition") => Ok(Value::String("unknown".to_string())),
+    (ObjectRef::RequestClientBot, "Malicious") => Ok(Value::Null),
+    (ObjectRef::RequestClientBot, "Score") => Ok(Value::Int(0)),
+    (ObjectRef::RequestClientBot, "Reason") => Ok(Value::Null),
     (ObjectRef::RequestTransport, "Network") => Ok(Value::String("tcp".to_string())),
     (ObjectRef::RequestTransport, "RemoteIp") => {
       Ok(Value::String(ctx.request.peer_addr.ip().to_string()))
@@ -2095,6 +2286,22 @@ fn default_max_helper_pattern_count() -> usize {
 
 fn default_max_helper_result_bytes() -> usize {
   8_192
+}
+
+fn default_person_proof_difficulty() -> u8 {
+  18
+}
+
+fn default_person_proof_ttl_seconds() -> u64 {
+  300
+}
+
+fn default_person_proof_cookie() -> String {
+  "__oxibelt_person_proof".to_string()
+}
+
+fn default_person_proof_status() -> u16 {
+  403
 }
 
 pub fn request_protocol(headers: &HeaderMap) -> WafProtocol {

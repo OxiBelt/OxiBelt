@@ -46,6 +46,16 @@ The two primary data objects available to rule conditions are:
 
 OxiRule object properties use `PascalCase`, for example `Request.Http.Path`, `Request.Client.Ip`, and `Response.Http.Status`. CEL-like functions use `lowerCamelCase`, for example `startsWith`, `contains`, `matches`, and `inCidr`.
 
+### 1.1 Client Actor Terminology
+
+OxiRule documentation uses three actor classes for traffic policy:
+
+- **Person**: a policy-recognized person interacting with a protected service. The term intentionally uses a broad concept of personhood: an entity with capacities or attributes such as reason, morality, consciousness, or self-consciousness, and with a place in culturally established social relations such as kinship, property ownership, or legal responsibility. Current deployments usually involve a web browser user, but the term intentionally avoids assuming that every future person must have the same biological form as today's users.
+- **Agent**: an AI-based automated actor, such as an LLM-driven agent, that acts through software. Non-AI automation is not an Agent in OxiRule terminology.
+- **Bot**: any non-AI automated client, crawler, script, scraper, scanner, or browser automation client. Bot classification is separate from intent: a Bot may be `normal` when it is expected and allowed by website policy, or `malicious` when it is abusive, deceptive, unwanted, or harmful.
+
+Documentation must not describe OxiRule proof challenges as verification of biological status. A proof challenge can support Person-oriented access policy, but it does not prove identity, legal personhood, biological status, or benign intent.
+
 ## 2. Design Goals
 
 OxiRule is designed to be easy to write, deterministic, and safe to execute inside a high-throughput proxy.
@@ -499,6 +509,36 @@ body = "Forbidden"
 ```
 
 `reject` stops request processing and creates a local response.
+
+#### `require_person_proof`
+
+```toml
+[[waf.rules.actions]]
+type = "require_person_proof"
+algorithm = "pow_sha256_v1"
+difficulty = 18
+ttl_seconds = 300
+cookie = "__oxibelt_person_proof"
+success_tag = "PersonProof"
+status = 403
+```
+
+`require_person_proof` stops request forwarding and returns a local challenge page unless the request already carries a valid Person proof clearance token. The initial challenge type is `pow_sha256_v1`: the client computes a nonce such that `SHA-256(challenge || "." || nonce)` has the configured number of leading zero bits.
+
+The first cookie value set by the challenge page is a proof submission, not a clearance token. OxiBelt validates the submitted challenge token and nonce on the retried request. If the proof is correct and unexpired, OxiBelt appends a new `HttpOnly` clearance cookie in the response and forwards the request. Later requests present that clearance cookie; OxiBelt validates its signature and expiration without asking the client to recompute the proof.
+
+The server signs challenge and clearance tokens with a startup-local secret. Tokens are bound to the configured cookie name, route name, downstream host, user agent, challenge random value, difficulty, issue time, and expiration time. A valid proof or clearance sets `Request.Client.PersonProof.State` to `valid`; if `success_tag` is configured, request evaluation also emits that tag with value `valid`.
+
+Validation constraints:
+
+- `require_person_proof` is valid only in request-phase rules.
+- `algorithm` must be `pow_sha256_v1`.
+- `difficulty` must be between `1` and `30`.
+- `ttl_seconds` must be between `1` and `86400`.
+- `cookie` must be a safe cookie name containing only ASCII letters, digits, `_`, `-`, or `.`.
+- `status` must be a valid HTTP status code.
+
+Person proof is a defense-in-depth control for selected traffic. It raises the cost of unwanted automation, but it is not an authentication factor, a rate limiter, a bot reputation service, or proof of benign intent. Normal Bots should be handled by explicit allow policy, and AI-based Agents should be handled by Agent-specific authentication or authorization policy instead of being silently treated as Person traffic.
 
 ### 7.2 Terminal response actions
 

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="oxibelt-person-proof-token" content="__TOKEN_HTML__">
+<title>OxiBelt Person Proof</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css">
+<style nonce="__CSP_NONCE__">
+:root {
+  color-scheme: light dark;
+  --page-text: #162033;
+  --page-bg: #f7f9fb;
+  --panel-bg: rgba(255, 255, 255, 0.94);
+  --panel-border: #d9e2ea;
+  --panel-shadow: rgba(24, 38, 55, 0.12);
+  --muted-text: #536579;
+  --divider: #e4ebf1;
+  --warning-text: #553600;
+  --warning-border: #e4b15f;
+  --warning-bg: #fff7e8;
+  --wash-a: rgba(60, 103, 136, 0.16);
+  --wash-b: rgba(64, 126, 101, 0.16);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font-family:
+    "Pretendard", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: var(--page-text);
+  background:
+    linear-gradient(135deg, var(--wash-a), transparent 38%),
+    linear-gradient(315deg, var(--wash-b), transparent 34%),
+    var(--page-bg);
+}
+
+main {
+  width: min(42rem, calc(100vw - 2rem));
+  padding: 2rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  box-shadow: 0 20px 48px var(--panel-shadow);
+}
+
+h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.65rem;
+  line-height: 1.2;
+}
+
+p {
+  margin: 0 0 1rem;
+  line-height: 1.55;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.5rem 1rem;
+  margin: 1.25rem 0 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--divider);
+}
+
+dt {
+  color: var(--muted-text);
+  font-weight: 600;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.95em;
+}
+
+noscript {
+  display: block;
+  margin-top: 1.25rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--warning-border);
+  border-radius: 6px;
+  color: var(--warning-text);
+  background: var(--warning-bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page-text: #edf4f8;
+    --page-bg: #101820;
+    --panel-bg: rgba(20, 31, 41, 0.96);
+    --panel-border: #2f4355;
+    --panel-shadow: rgba(0, 0, 0, 0.38);
+    --muted-text: #9fb1c2;
+    --divider: #2a3d4e;
+    --warning-text: #ffe0a6;
+    --warning-border: #8d6932;
+    --warning-bg: #2a2114;
+    --wash-a: rgba(85, 144, 181, 0.24);
+    --wash-b: rgba(86, 160, 123, 0.18);
+  }
+}
+
+</style>
+</head>
+<body>
+<main>
+  <h1>Person proof required</h1>
+  <p>This request must complete a bounded proof-of-work challenge before OxiBelt forwards it upstream.</p>
+  <p>The challenge runs locally in this browser and submits only the resulting proof token.</p>
+  <dl>
+    <dt>Method</dt>
+    <dd>__ALGORITHM__</dd>
+    <dt>Difficulty</dt>
+    <dd>__DIFFICULTY__ leading zero bits</dd>
+    <dt>Cookie</dt>
+    <dd><code>__COOKIE_HTML__</code></dd>
+  </dl>
+  <noscript>This challenge requires JavaScript or a compatible client that can compute the proof and return it in the configured cookie.</noscript>
+</main>
+<script type="module" nonce="__CSP_NONCE__">
+const Token = '__TOKEN_JS__';
+const CookieName = '__COOKIE_JS__';
+const Difficulty = Number('__DIFFICULTY__');
+const MaxAge = Number('__TTL_SECONDS__');
+const Encoder = new TextEncoder();
+const CountLeadingZeroBits = (Bytes) => {
+    let Total = 0;
+    for (const Byte of Bytes) {
+        if (Byte === 0) {
+            Total += 8;
+            continue;
+        }
+        for (let Bit = 7; Bit >= 0; Bit -= 1) {
+            if ((Byte & (1 << Bit)) === 0) {
+                Total += 1;
+            }
+            else {
+                return Total;
+            }
+        }
+    }
+    return Total;
+};
+const YieldToBrowser = async () => {
+    await new Promise((Resolve) => setTimeout(Resolve, 0));
+};
+const SolveChallenge = async () => {
+    for (let Nonce = 0;; Nonce += 1) {
+        const Hash = await crypto.subtle.digest('SHA-256', Encoder.encode(`${Token}.${Nonce}`));
+        if (CountLeadingZeroBits(new Uint8Array(Hash)) >= Difficulty) {
+            document.cookie = `${CookieName}=${Token}.${Nonce}; Max-Age=${MaxAge}; Path=/; SameSite=Lax; Secure`;
+            window.location.reload();
+            return;
+        }
+        if (Nonce % 512 === 0) {
+            await YieldToBrowser();
+        }
+    }
+};
+void SolveChallenge();
+export {};
+
+</script>
+<!-- expires_unix_ms=__EXPIRES_UNIX_MS__ -->
+</body>
+</html>

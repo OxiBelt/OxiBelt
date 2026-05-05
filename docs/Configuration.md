@@ -374,6 +374,26 @@ status = 403
 body = "Blocked by WAF"
 ```
 
+Request-phase OxiRule entries may also require a bounded Person proof challenge:
+
+```toml
+[[waf.rules]]
+name = "require-person-proof-for-unknown-browser"
+phase = "request"
+priority = 50
+when = "Request.Client.PersonProof.State != 'valid' && Request.Client.Bot.Disposition != 'normal'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+algorithm = "pow_sha256_v1"
+difficulty = 18
+ttl_seconds = 300
+cookie = "__oxibelt_person_proof"
+success_tag = "PersonProof"
+```
+
+`require_person_proof` is documented in [OxiRule.md](OxiRule.md#require_person_proof). It is a defense-in-depth anti-automation challenge, not authentication and not a complete denial-of-service defense.
+
 ## 9. Upstreams
 
 ```toml
