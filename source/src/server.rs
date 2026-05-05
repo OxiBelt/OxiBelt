@@ -18,7 +18,7 @@ use crate::tcp_hop;
 use crate::waf::WafTlsMetadata;
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
-const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v1";
+const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
 
 pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
   let (error_tx, mut error_rx) = mpsc::unbounded_channel();
@@ -152,11 +152,17 @@ pub(crate) fn downstream_quic_tls_metadata(
     })
     .unwrap_or_default();
   let version = Some("TLSv1_3".to_string());
-  let fingerprint = Some(quic_tls_fingerprint(
-    version.as_deref(),
-    sni.as_deref(),
-    alpn.as_deref(),
-  ));
+  // Quinn's stable rustls handshake data exposes ALPN and SNI for QUIC, but not the
+  // negotiated cipher suite or key-exchange group. Keep explicit empty payload
+  // slots so future metadata additions can move the QUIC scheme forward cleanly.
+  let fingerprint = Some(quic_tls_fingerprint(QuicTlsFingerprintInput {
+    version: version.as_deref(),
+    cipher_suite: None,
+    key_exchange_group: None,
+    data_integrity_group: None,
+    sni: sni.as_deref(),
+    alpn: alpn.as_deref(),
+  }));
 
   WafTlsMetadata {
     enabled: true,
@@ -360,22 +366,31 @@ fn tls_fingerprint_payload(
   )
 }
 
-fn quic_tls_fingerprint(version: Option<&str>, sni: Option<&str>, alpn: Option<&str>) -> String {
-  let payload = quic_tls_fingerprint_payload(version, sni, alpn);
+#[derive(Debug, Clone, Copy)]
+struct QuicTlsFingerprintInput<'a> {
+  version: Option<&'a str>,
+  cipher_suite: Option<&'a str>,
+  key_exchange_group: Option<&'a str>,
+  data_integrity_group: Option<&'a str>,
+  sni: Option<&'a str>,
+  alpn: Option<&'a str>,
+}
+
+fn quic_tls_fingerprint(input: QuicTlsFingerprintInput<'_>) -> String {
+  let payload = quic_tls_fingerprint_payload(input);
   let hash = digest::digest(&digest::SHA256, payload.as_bytes());
   hex_encode(hash.as_ref())
 }
 
-fn quic_tls_fingerprint_payload(
-  version: Option<&str>,
-  sni: Option<&str>,
-  alpn: Option<&str>,
-) -> String {
+fn quic_tls_fingerprint_payload(input: QuicTlsFingerprintInput<'_>) -> String {
   format!(
-    "{QUIC_TLS_FINGERPRINT_SCHEME}\nselected_version={}\nsni={}\nalpn={}",
-    version.unwrap_or_default(),
-    sni.unwrap_or_default(),
-    alpn.unwrap_or_default()
+    "{QUIC_TLS_FINGERPRINT_SCHEME}\nselected_version={}\nselected_cipher_suite={}\nselected_key_exchange_group={}\nselected_data_integrity_group={}\nsni={}\nalpn={}\nmetadata_source=quinn-rustls-handshake-data",
+    input.version.unwrap_or_default(),
+    input.cipher_suite.unwrap_or_default(),
+    input.key_exchange_group.unwrap_or_default(),
+    input.data_integrity_group.unwrap_or_default(),
+    input.sni.unwrap_or_default(),
+    input.alpn.unwrap_or_default()
   )
 }
 
@@ -525,20 +540,52 @@ mod tests {
   }
 
   #[test]
-  fn quic_tls_fingerprint_payload_uses_reduced_quic_scheme() {
-    let payload = quic_tls_fingerprint_payload(Some("TLSv1_3"), Some("example.com"), Some("h3"));
+  fn quic_tls_fingerprint_payload_uses_exposed_quic_scheme() {
+    let payload = quic_tls_fingerprint_payload(QuicTlsFingerprintInput {
+      version: Some("TLSv1_3"),
+      cipher_suite: None,
+      key_exchange_group: None,
+      data_integrity_group: None,
+      sni: Some("example.com"),
+      alpn: Some("h3"),
+    });
 
-    assert!(payload.starts_with("quinn-rustls-quic-v1\n"));
+    assert!(payload.starts_with("quinn-rustls-quic-v2\n"));
     assert!(payload.contains("selected_version=TLSv1_3"));
+    assert!(payload.contains("selected_cipher_suite="));
+    assert!(payload.contains("selected_key_exchange_group="));
+    assert!(payload.contains("selected_data_integrity_group="));
     assert!(payload.contains("sni=example.com"));
     assert!(payload.contains("alpn=h3"));
+    assert!(payload.contains("metadata_source=quinn-rustls-handshake-data"));
   }
 
   #[test]
   fn quic_tls_fingerprint_changes_when_exposed_handshake_metadata_changes() {
-    let base = quic_tls_fingerprint(Some("TLSv1_3"), Some("example.com"), Some("h3"));
-    let changed_sni = quic_tls_fingerprint(Some("TLSv1_3"), Some("alt.example.com"), Some("h3"));
-    let changed_alpn = quic_tls_fingerprint(Some("TLSv1_3"), Some("example.com"), Some("h3-29"));
+    let base = quic_tls_fingerprint(QuicTlsFingerprintInput {
+      version: Some("TLSv1_3"),
+      cipher_suite: None,
+      key_exchange_group: None,
+      data_integrity_group: None,
+      sni: Some("example.com"),
+      alpn: Some("h3"),
+    });
+    let changed_sni = quic_tls_fingerprint(QuicTlsFingerprintInput {
+      version: Some("TLSv1_3"),
+      cipher_suite: None,
+      key_exchange_group: None,
+      data_integrity_group: None,
+      sni: Some("alt.example.com"),
+      alpn: Some("h3"),
+    });
+    let changed_alpn = quic_tls_fingerprint(QuicTlsFingerprintInput {
+      version: Some("TLSv1_3"),
+      cipher_suite: None,
+      key_exchange_group: None,
+      data_integrity_group: None,
+      sni: Some("example.com"),
+      alpn: Some("h3-29"),
+    });
 
     assert_eq!(base.len(), 64);
     assert_ne!(base, changed_sni);

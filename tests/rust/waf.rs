@@ -318,7 +318,7 @@ body = "webtransport blocked"
         sni: Some("example.com".to_string()),
         alpn: Some("h3".to_string()),
         fingerprint: Some("quic-fingerprint".to_string()),
-        fingerprint_scheme: Some("quinn-rustls-quic-v1".to_string()),
+        fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
     };
 
     let rejected = engine.evaluate_request(request_input_with_protocol_and_network(
@@ -334,6 +334,67 @@ body = "webtransport blocked"
     assert_eq!(
         rejected.terminal.as_ref().map(|terminal| terminal.status),
         Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn http3_request_rules_can_match_quic_tls_fingerprint() {
+    let temp_dir = common::TempDir::new("waf-quic-fingerprint");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-quic-fingerprint");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "block-quic-fingerprint"
+phase = "request"
+priority = 1
+when = "Request.Protocol == 'http' && Request.Transport.Network == 'udp' && Request.Transport.Udp.QuicDetected == true && Request.Tls.FingerprintScheme == 'quinn-rustls-quic-v2' && Request.Tls.Fingerprint == 'quic-fingerprint'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "quic fingerprint blocked"
+"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::GET;
+    let uri: Uri = "https://example.com/h3".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let tls = WafTlsMetadata {
+        enabled: true,
+        version: Some("TLSv1_3".to_string()),
+        cipher_suite: None,
+        sni: Some("example.com".to_string()),
+        alpn: Some("h3".to_string()),
+        fingerprint: Some("quic-fingerprint".to_string()),
+        fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
+    };
+
+    let rejected = engine.evaluate_request(request_input_with_protocol_and_network(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        &tls,
+        WafProtocol::Http,
+        WafTransportNetwork::Udp,
+    ));
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
     );
 }
 

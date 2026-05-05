@@ -558,7 +558,7 @@ The server signs challenge and clearance tokens with a startup-local secret. Tok
 `token_bindings` controls which request attributes must match when a proof or clearance token is reused:
 
 - `user_agent` binds to the `User-Agent` request header.
-- `tls_fingerprint` binds to OxiBelt's TLS fingerprint. TCP HTTP/1.1 and HTTP/2 requests use the `rustls-tcp-negotiated-v2` scheme, which hashes ClientHello-offered cipher suite identifiers, named/key-exchange groups, signature schemes, derived cipher-suite integrity/hash groups, and the selected TLS version, cipher suite, key-exchange group, integrity/hash group, SNI, and ALPN exposed by rustls. HTTP/3 requests use the reduced `quinn-rustls-quic-v1` scheme, which hashes the QUIC accept path metadata exposed by Quinn/rustls: selected TLS version, SNI, and ALPN. Neither scheme is a raw JA3/JA4 ClientHello fingerprint.
+- `tls_fingerprint` binds to OxiBelt's TLS fingerprint. TCP HTTP/1.1 and HTTP/2 requests use the `rustls-tcp-negotiated-v2` scheme, which hashes ClientHello-offered cipher suite identifiers, named/key-exchange groups, signature schemes, derived cipher-suite integrity/hash groups, and the selected TLS version, cipher suite, key-exchange group, integrity/hash group, SNI, and ALPN exposed by rustls. HTTP/3 requests use the reduced `quinn-rustls-quic-v2` scheme, which hashes the stable QUIC accept path metadata exposed by Quinn/rustls: selected TLS version, SNI, ALPN, explicit empty slots for selected cipher suite, key-exchange group, and integrity/hash group, and the metadata source. Neither scheme is a raw JA3/JA4 ClientHello fingerprint.
 - `route` binds to the matched OxiBelt route name from the configuration file.
 - `direct_peer_ip_network_prefix` binds to OxiBelt's direct peer IP after applying `direct_peer_ipv4_prefix_bits` or `direct_peer_ipv6_prefix_bits`.
 - `tcp_max_hop` binds to the configured TCP max-hop policy applied to the downstream socket.
@@ -806,7 +806,7 @@ PersonProofTokenBindingView.directPeerIpNetworkPrefix(Ipv4PrefixBits: Int, Ipv6P
 PersonProofTokenBindingView.tcpMaxHop(ConfiguredMaxHop: Int): String
 ```
 
-`UserAgent` is the `User-Agent` header or an empty string. `TlsFingerprint` is the active TLS fingerprint for the downstream connection or `unavailable`; inspect `Request.Tls.FingerprintScheme` to distinguish `rustls-tcp-negotiated-v2` from the reduced `quinn-rustls-quic-v1` HTTP/3 scheme. `Route` is the matched OxiBelt route name. `DirectPeerIpNetworkPrefix` uses the default person-proof prefix sizes, `/24` for IPv4 and `/56` for IPv6. Use `directPeerIpNetworkPrefix(...)` when a rule needs the canonical value for custom prefix sizes. `TcpMaxHop` uses an unconfigured policy value with the applied downstream max-hop value; use `tcpMaxHop(...)` when a rule needs the canonical value for a configured `tcp_max_hop` policy.
+`UserAgent` is the `User-Agent` header or an empty string. `TlsFingerprint` is the active TLS fingerprint for the downstream connection or `unavailable`; inspect `Request.Tls.FingerprintScheme` to distinguish `rustls-tcp-negotiated-v2` from the reduced `quinn-rustls-quic-v2` HTTP/3 scheme. `Route` is the matched OxiBelt route name. `DirectPeerIpNetworkPrefix` uses the default person-proof prefix sizes, `/24` for IPv4 and `/56` for IPv6. Use `directPeerIpNetworkPrefix(...)` when a rule needs the canonical value for custom prefix sizes. `TcpMaxHop` uses an unconfigured policy value with the applied downstream max-hop value; use `tcpMaxHop(...)` when a rule needs the canonical value for a configured `tcp_max_hop` policy.
 
 ### 8.5 Transport metadata
 
@@ -905,6 +905,8 @@ TlsMetadata.Fingerprint: String | Null
 TlsMetadata.FingerprintScheme: String | Null
 TlsMetadata.ClientCertificatePresent: Bool
 ```
+
+Current implementation note: downstream HTTP/3 and WebTransport rules can match `Request.Tls.Fingerprint` and `Request.Tls.FingerprintScheme == 'quinn-rustls-quic-v2'`. Quinn/rustls currently exposes negotiated ALPN and SNI for QUIC handshake metadata on the stable path; selected cipher suite and key-exchange group remain unavailable there and are represented as empty fields inside the v2 fingerprint payload.
 
 ## 9. Bounded Helper API
 
