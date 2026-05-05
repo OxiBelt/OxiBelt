@@ -23,18 +23,21 @@ logs_dir="${work_dir}/logs"
 network_name="oxibelt-matrix-${run_id}"
 mock_image="oxibelt/mock-upstream:${run_id}"
 pq_probe_image="oxibelt/pq-probe:${run_id}"
+protocol_probe_image="oxibelt/protocol-probe:${run_id}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy-matrix:${run_id}}"
 remove_proxy_image=0
 proxy_container="oxibelt-proxy-${run_id}"
 http_container="oxibelt-http-${run_id}"
 https_container="oxibelt-https-${run_id}"
 alt_container="oxibelt-alt-${run_id}"
+h2_container="oxibelt-h2-${run_id}"
+h2c_container="oxibelt-h2c-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker rmi -f "${mock_image}" "${pq_probe_image}" >/dev/null 2>&1 || true
+  docker rmi -f "${mock_image}" "${pq_probe_image}" "${protocol_probe_image}" >/dev/null 2>&1 || true
   if [[ "${remove_proxy_image}" == "1" ]]; then
     docker rmi -f "${proxy_image}" >/dev/null 2>&1 || true
   fi
@@ -62,6 +65,8 @@ collect_diagnostics() {
   docker logs "${http_container}" >"${logs_dir}/mock-http.log" 2>&1 || true
   docker logs "${https_container}" >"${logs_dir}/mock-https.log" 2>&1 || true
   docker logs "${alt_container}" >"${logs_dir}/mock-alt.log" 2>&1 || true
+  docker logs "${h2_container}" >"${logs_dir}/mock-h2.log" 2>&1 || true
+  docker logs "${h2c_container}" >"${logs_dir}/mock-h2c.log" 2>&1 || true
 
   if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
@@ -151,6 +156,48 @@ client_request_with_headers() {
   fail_with_diagnostics "client request did not reach expected status ${expect_status}"
 }
 
+protocol_probe_client() {
+  local protocol="$1"
+  local authority="$2"
+  local path="$3"
+  local expect_status="$4"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-protocol-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      downstream \
+      --protocol "${protocol}" \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --expect-status "${expect_status}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "protocol probe client failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "protocol probe did not reach expected status ${expect_status}"
+}
+
 run_pq_probe() {
   local group="$1"
   local container_name="oxibelt-pq-${group}-${run_id}"
@@ -207,6 +254,7 @@ extendedKeyUsage = serverAuth
 
 [alt_names]
 DNS.1 = mock-https
+DNS.2 = mock-h2
 EOF
 
 cat >"${work_dir}/downstream.cnf" <<'EOF'
@@ -275,6 +323,13 @@ if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
     "${repo_root}/tests/docker/pq_probe" >/dev/null
 fi
 
+if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" ]]; then
+  docker build \
+    -t "${protocol_probe_image}" \
+    -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
+    "${repo_root}/tests/docker/protocol_probe" >/dev/null
+fi
+
 if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   remove_proxy_image=1
   docker build \
@@ -319,6 +374,35 @@ if [[ "${CASE_NEED_HTTPS_UPSTREAM}" == "1" ]]; then
   docker cp "${upstream_tls_dir}/server.pem" "${https_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${https_container}:/tls/server.key"
   docker start "${https_container}" >/dev/null
+fi
+
+if [[ "${CASE_NEED_H2_UPSTREAM}" == "1" ]]; then
+  docker create \
+    --name "${h2_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-h2 \
+    "${protocol_probe_image}" \
+    h2-upstream \
+    --listen 0.0.0.0:18444 \
+    --cert /tls/server.pem \
+    --key /tls/server.key \
+    --name h2-upstream >/dev/null
+  docker cp "${upstream_tls_dir}/server.pem" "${h2_container}:/tls/server.pem"
+  docker cp "${upstream_tls_dir}/server.key" "${h2_container}:/tls/server.key"
+  docker start "${h2_container}" >/dev/null
+fi
+
+if [[ "${CASE_NEED_H2C_UPSTREAM}" == "1" ]]; then
+  docker run -d \
+    --name "${h2c_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-h2c \
+    "${protocol_probe_image}" \
+    h2c-upstream \
+    --listen 0.0.0.0:18082 \
+    --name h2c-upstream >/dev/null
 fi
 
 docker create \

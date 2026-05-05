@@ -248,7 +248,9 @@ max_http_version = "h2"
 
 Current implementation notes:
 
-- Upstream HTTP/1.1 and HTTP/2 use the existing TLS/TCP client path.
+- Upstream HTTP/1.1 supports `http://` and `https://` origins.
+- Upstream HTTP/2 over `https://` uses TLS ALPN negotiation.
+- Upstream HTTP/2 over `http://` uses cleartext h2c with prior knowledge. OxiBelt does not use the HTTP/1.1 Upgrade flow for h2c.
 - Upstream HTTP/3 uses QUIC and requires an `https://` upstream origin. When `max_http_version = "h3"` is selected, OxiBelt forwards ordinary HTTP requests over HTTP/3.
 
 ## 7. Compression
@@ -433,6 +435,7 @@ Fields:
 Current implementation notes:
 
 - `max_http_version = "h3"` requires an `https://` origin.
+- `max_http_version = "h2"` with an `http://` origin uses cleartext h2c with prior knowledge.
 - WebTransport forwarding is supported for downstream HTTP/3 extended CONNECT requests when the selected upstream also uses HTTP/3 and `webtransport = true`.
 - WebTransport streams and datagrams are forwarded between downstream and upstream sessions. WAF rules evaluate the CONNECT request metadata before the session is accepted; frame-level and datagram payload inspection remain outside the current WAF implementation.
 

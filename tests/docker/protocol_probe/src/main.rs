@@ -1,0 +1,647 @@
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::env;
+use std::fs;
+use std::io;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{anyhow, bail, Context};
+use bytes::{Buf, Bytes, BytesMut};
+use h3_quinn::quinn::crypto::rustls::QuicClientConfig;
+use h3_quinn::quinn::{ClientConfig as QuinnClientConfig, Endpoint};
+use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
+use http::{Method, Request, Response, StatusCode, Uri, Version};
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use tokio::net::{lookup_host, TcpListener, TcpStream};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+#[derive(Clone, Copy)]
+enum DownstreamProtocol {
+    H2,
+    H3,
+}
+
+impl DownstreamProtocol {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "h2" => Ok(Self::H2),
+            "h3" => Ok(Self::H3),
+            _ => bail!("unsupported downstream protocol: {raw}"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::H2 => "h2",
+            Self::H3 => "h3",
+        }
+    }
+}
+
+struct H2UpstreamArgs {
+    listen: SocketAddr,
+    cert: String,
+    key: String,
+    name: String,
+}
+
+struct H2cUpstreamArgs {
+    listen: SocketAddr,
+    name: String,
+}
+
+struct DownstreamArgs {
+    protocol: DownstreamProtocol,
+    host: String,
+    port: u16,
+    server_name: String,
+    authority: String,
+    path: String,
+    method: Method,
+    body: String,
+    ca_cert: String,
+    expect_status: Option<u16>,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut args = env::args().skip(1);
+    let Some(command) = args.next() else {
+        usage();
+        bail!("missing command");
+    };
+
+    match command.as_str() {
+        "h2-upstream" => serve_h2_upstream(parse_h2_upstream_args(args)?).await,
+        "h2c-upstream" => serve_h2c_upstream(parse_h2c_upstream_args(args)?).await,
+        "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
+        _ => {
+            usage();
+            bail!("unknown command: {command}");
+        }
+    }
+}
+
+fn usage() {
+    eprintln!(
+    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]"
+  );
+}
+
+fn parse_h2_upstream_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<H2UpstreamArgs> {
+    let mut listen = None;
+    let mut cert = None;
+    let mut key = None;
+    let mut name = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--listen" => listen = Some(value.parse().context("invalid --listen value")?),
+            "--cert" => cert = Some(value),
+            "--key" => key = Some(value),
+            "--name" => name = Some(value),
+            _ => bail!("unknown h2-upstream flag: {flag}"),
+        }
+    }
+
+    Ok(H2UpstreamArgs {
+        listen: listen.ok_or_else(|| anyhow!("--listen is required"))?,
+        cert: cert.ok_or_else(|| anyhow!("--cert is required"))?,
+        key: key.ok_or_else(|| anyhow!("--key is required"))?,
+        name: name.ok_or_else(|| anyhow!("--name is required"))?,
+    })
+}
+
+fn parse_h2c_upstream_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<H2cUpstreamArgs> {
+    let mut listen = None;
+    let mut name = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--listen" => listen = Some(value.parse().context("invalid --listen value")?),
+            "--name" => name = Some(value),
+            _ => bail!("unknown h2c-upstream flag: {flag}"),
+        }
+    }
+
+    Ok(H2cUpstreamArgs {
+        listen: listen.ok_or_else(|| anyhow!("--listen is required"))?,
+        name: name.ok_or_else(|| anyhow!("--name is required"))?,
+    })
+}
+
+fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<DownstreamArgs> {
+    let mut protocol = None;
+    let mut host = None;
+    let mut port = None;
+    let mut server_name = None;
+    let mut authority = None;
+    let mut path = None;
+    let mut method = Method::GET;
+    let mut body = String::new();
+    let mut ca_cert = None;
+    let mut expect_status = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--protocol" => protocol = Some(DownstreamProtocol::parse(&value)?),
+            "--host" => host = Some(value),
+            "--port" => port = Some(value.parse().context("invalid --port value")?),
+            "--server-name" => server_name = Some(value),
+            "--authority" => authority = Some(value),
+            "--path" => path = Some(validate_origin_form_path(&value)?),
+            "--method" => method = value.parse().context("invalid --method value")?,
+            "--body" => body = value,
+            "--ca-cert" => ca_cert = Some(value),
+            "--expect-status" => {
+                expect_status = Some(value.parse().context("invalid --expect-status value")?);
+            }
+            _ => bail!("unknown downstream flag: {flag}"),
+        }
+    }
+
+    let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+    Ok(DownstreamArgs {
+        protocol: protocol.ok_or_else(|| anyhow!("--protocol is required"))?,
+        host: host.ok_or_else(|| anyhow!("--host is required"))?,
+        port: port.ok_or_else(|| anyhow!("--port is required"))?,
+        authority: authority.unwrap_or_else(|| server_name.clone()),
+        server_name,
+        path: path.ok_or_else(|| anyhow!("--path is required"))?,
+        method,
+        body,
+        ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+        expect_status,
+    })
+}
+
+fn validate_origin_form_path(raw_path: &str) -> anyhow::Result<String> {
+    if !raw_path.starts_with('/') {
+        bail!("request path must start with '/'");
+    }
+    if raw_path.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) {
+        bail!("request path must not contain control characters");
+    }
+    Ok(raw_path.to_string())
+}
+
+async fn serve_h2_upstream(args: H2UpstreamArgs) -> anyhow::Result<()> {
+    let mut server_config = ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("failed to configure upstream TLS versions")?
+    .with_no_client_auth()
+    .with_single_cert(
+        load_certs(Path::new(&args.cert))?,
+        load_private_key(Path::new(&args.key))?,
+    )
+    .context("failed to configure upstream TLS certificate")?;
+    server_config.alpn_protocols = vec![b"h2".to_vec()];
+
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("failed to bind h2 upstream to {}", args.listen))?;
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+    let upstream_name = Arc::<str>::from(args.name);
+    let scheme = Arc::<str>::from("https");
+
+    loop {
+        let (stream, peer_addr) = listener.accept().await.context("failed to accept TCP")?;
+        let acceptor = acceptor.clone();
+        let upstream_name = upstream_name.clone();
+        let scheme = scheme.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                handle_h2_upstream_connection(stream, acceptor, upstream_name, scheme).await
+            {
+                eprintln!("h2 upstream connection from {peer_addr} failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn handle_h2_upstream_connection(
+    stream: TcpStream,
+    acceptor: TlsAcceptor,
+    upstream_name: Arc<str>,
+    scheme: Arc<str>,
+) -> anyhow::Result<()> {
+    let tls_stream = acceptor
+        .accept(stream)
+        .await
+        .context("failed to accept upstream TLS")?;
+    let negotiated = tls_stream
+        .get_ref()
+        .1
+        .alpn_protocol()
+        .map(|protocol| protocol.to_vec())
+        .unwrap_or_default();
+    if negotiated != b"h2" {
+        bail!(
+            "expected upstream ALPN h2, got {}",
+            String::from_utf8_lossy(&negotiated)
+        );
+    }
+
+    let service = service_fn(move |request| {
+        let upstream_name = upstream_name.clone();
+        let scheme = scheme.clone();
+        async move { Ok::<_, Infallible>(echo_upstream_request(request, upstream_name, scheme).await) }
+    });
+
+    hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+        .serve_connection(TokioIo::new(tls_stream), service)
+        .await
+        .context("failed to serve upstream HTTP/2 connection")?;
+    Ok(())
+}
+
+async fn serve_h2c_upstream(args: H2cUpstreamArgs) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("failed to bind h2c upstream to {}", args.listen))?;
+    let upstream_name = Arc::<str>::from(args.name);
+    let scheme = Arc::<str>::from("http");
+
+    loop {
+        let (stream, peer_addr) = listener.accept().await.context("failed to accept TCP")?;
+        let upstream_name = upstream_name.clone();
+        let scheme = scheme.clone();
+        tokio::spawn(async move {
+            if let Err(error) = handle_h2c_upstream_connection(stream, upstream_name, scheme).await
+            {
+                eprintln!("h2c upstream connection from {peer_addr} failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn handle_h2c_upstream_connection(
+    stream: TcpStream,
+    upstream_name: Arc<str>,
+    scheme: Arc<str>,
+) -> anyhow::Result<()> {
+    let service = service_fn(move |request| {
+        let upstream_name = upstream_name.clone();
+        let scheme = scheme.clone();
+        async move { Ok::<_, Infallible>(echo_upstream_request(request, upstream_name, scheme).await) }
+    });
+
+    hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+        .serve_connection(TokioIo::new(stream), service)
+        .await
+        .context("failed to serve upstream cleartext HTTP/2 connection")?;
+    Ok(())
+}
+
+async fn echo_upstream_request(
+    request: Request<Incoming>,
+    upstream_name: Arc<str>,
+    scheme: Arc<str>,
+) -> Response<Full<Bytes>> {
+    let (parts, body) = request.into_parts();
+    let status = status_from_path(parts.uri.path()).unwrap_or(StatusCode::OK);
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(error) => {
+            return text_response(
+                StatusCode::BAD_REQUEST,
+                &format!("failed to read upstream request body: {error}"),
+            );
+        }
+    };
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let payload = serde_json::json!({
+      "upstream": upstream_name.as_ref(),
+      "scheme": scheme.as_ref(),
+      "method": parts.method.as_str(),
+      "path": path,
+      "request_version": version_label(parts.version),
+      "headers": header_json(&parts.headers),
+      "body": body_text,
+    });
+    json_response(status, payload.to_string(), Some(upstream_name.as_ref()))
+}
+
+fn status_from_path(path: &str) -> Option<StatusCode> {
+    let raw_status = path.strip_prefix("/status/")?.split('/').next()?;
+    raw_status.parse::<u16>().ok().and_then(|status| {
+        StatusCode::from_u16(status)
+            .ok()
+            .filter(|status| status.as_u16() >= 100)
+    })
+}
+
+async fn run_downstream_client(args: DownstreamArgs) -> anyhow::Result<()> {
+    let output = match args.protocol {
+        DownstreamProtocol::H2 => h2_downstream_request(&args).await?,
+        DownstreamProtocol::H3 => h3_downstream_request(&args).await?,
+    };
+
+    if let Some(expected) = args.expect_status {
+        let status = output["status"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("probe output did not contain numeric status"))?;
+        if status != u64::from(expected) {
+            eprintln!("{}", serde_json::to_string(&output)?);
+            bail!("expected downstream status {expected}, got {status}");
+        }
+    }
+
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
+    let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"h2")?;
+    client_config.enable_sni = true;
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .with_context(|| format!("failed to connect to {}:{}", args.host, args.port))?;
+    let server_name = ServerName::try_from(args.server_name.clone())
+        .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
+    let tls_stream = connector
+        .connect(server_name, stream)
+        .await
+        .context("failed to establish downstream TLS")?;
+    let negotiated = tls_stream
+        .get_ref()
+        .1
+        .alpn_protocol()
+        .map(|protocol| protocol.to_vec())
+        .unwrap_or_default();
+    if negotiated != b"h2" {
+        bail!(
+            "expected downstream ALPN h2, got {}",
+            String::from_utf8_lossy(&negotiated)
+        );
+    }
+
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake(TokioIo::new(tls_stream))
+        .await
+        .context("failed to establish downstream HTTP/2 client")?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            eprintln!("downstream HTTP/2 connection failed: {error}");
+        }
+    });
+
+    let request = downstream_request(
+        args,
+        Version::HTTP_2,
+        Full::new(Bytes::from(args.body.clone())),
+    )?;
+    let response = sender
+        .send_request(request)
+        .await
+        .context("failed to send downstream HTTP/2 request")?;
+    let (parts, body) = response.into_parts();
+    let body = body
+        .collect()
+        .await
+        .context("failed to read downstream HTTP/2 response body")?
+        .to_bytes();
+    Ok(response_json(
+        args.protocol.label(),
+        parts.status,
+        &parts.headers,
+        &body,
+    ))
+}
+
+async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
+    let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3")?;
+    let quic_crypto =
+        QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
+    let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
+    let remote_addr = resolve_remote_addr(&args.host, args.port).await?;
+    let endpoint = Endpoint::client(client_bind_addr(remote_addr))
+        .context("failed to create downstream QUIC endpoint")?;
+    let quinn_connection = endpoint
+        .connect_with(quic_config, remote_addr, &args.server_name)
+        .with_context(|| {
+            format!(
+                "failed to start downstream HTTP/3 connection to {}",
+                args.host
+            )
+        })?
+        .await
+        .context("failed to connect downstream HTTP/3")?;
+    let close_connection = quinn_connection.clone();
+    let h3_connection = h3_quinn::Connection::new(quinn_connection);
+    let (mut driver, mut send_request) = h3::client::builder()
+        .build(h3_connection)
+        .await
+        .context("failed to establish downstream HTTP/3 client")?;
+    let driver_task = tokio::spawn(async move {
+        let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let request = downstream_request(args, Version::HTTP_3, ())?;
+    let mut stream = send_request
+        .send_request(request)
+        .await
+        .context("failed to send downstream HTTP/3 request")?;
+    if !args.body.is_empty() {
+        stream
+            .send_data(Bytes::from(args.body.clone()))
+            .await
+            .context("failed to send downstream HTTP/3 request body")?;
+    }
+    stream
+        .finish()
+        .await
+        .context("failed to finish downstream HTTP/3 request")?;
+
+    let response = stream
+        .recv_response()
+        .await
+        .context("failed to receive downstream HTTP/3 response")?;
+    let mut response_body = BytesMut::new();
+    while let Some(mut chunk) = stream
+        .recv_data()
+        .await
+        .context("failed to read downstream HTTP/3 response body")?
+    {
+        let len = chunk.remaining();
+        response_body.extend_from_slice(&chunk.copy_to_bytes(len));
+    }
+
+    close_connection.close(0u32.into(), b"probe complete");
+    let _ = driver_task.await;
+
+    let (parts, _) = response.into_parts();
+    Ok(response_json(
+        args.protocol.label(),
+        parts.status,
+        &parts.headers,
+        &response_body.freeze(),
+    ))
+}
+
+fn downstream_client_config(path: &Path, alpn: &[u8]) -> anyhow::Result<ClientConfig> {
+    let mut config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("failed to configure downstream TLS versions")?
+    .with_root_certificates(load_root_store(path)?)
+    .with_no_client_auth();
+    config.alpn_protocols = vec![alpn.to_vec()];
+    Ok(config)
+}
+
+fn downstream_request<B>(
+    args: &DownstreamArgs,
+    version: Version,
+    body: B,
+) -> anyhow::Result<Request<B>> {
+    let uri: Uri = format!("https://{}{}", args.authority, args.path)
+        .parse()
+        .context("failed to build request URI")?;
+    Request::builder()
+        .method(args.method.clone())
+        .uri(uri)
+        .version(version)
+        .header(CONTENT_LENGTH, args.body.len().to_string())
+        .body(body)
+        .map_err(Into::into)
+}
+
+async fn resolve_remote_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
+    lookup_host((host, port))
+        .await
+        .with_context(|| format!("failed to resolve {host}:{port}"))?
+        .next()
+        .ok_or_else(|| anyhow!("host resolved no addresses: {host}:{port}"))
+}
+
+fn client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
+    if remote_addr.is_ipv4() {
+        "0.0.0.0:0".parse().expect("valid IPv4 bind address")
+    } else {
+        "[::]:0".parse().expect("valid IPv6 bind address")
+    }
+}
+
+fn response_json(
+    negotiated_protocol: &str,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> serde_json::Value {
+    serde_json::json!({
+      "negotiated_protocol": negotiated_protocol,
+      "status": status.as_u16(),
+      "reason": status.canonical_reason().unwrap_or(""),
+      "headers": header_json(headers),
+      "body": String::from_utf8_lossy(body),
+    })
+}
+
+fn header_json(headers: &HeaderMap) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    for (name, value) in headers {
+        if let Ok(value) = value.to_str() {
+            values.insert(name.as_str().to_ascii_lowercase(), value.to_string());
+        }
+    }
+    values
+}
+
+fn json_response(
+    status: StatusCode,
+    body: String,
+    upstream_marker: Option<&str>,
+) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::from(body.clone())));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if let Ok(value) = HeaderValue::from_str(&body.len().to_string()) {
+        response.headers_mut().insert(CONTENT_LENGTH, value);
+    }
+    if let Some(marker) = upstream_marker {
+        if let Ok(value) = HeaderValue::from_str(marker) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("x-upstream-marker"), value);
+        }
+    }
+    response
+}
+
+fn text_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::from(body.to_string())));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    response
+}
+
+fn version_label(version: Version) -> &'static str {
+    match version {
+        Version::HTTP_09 => "HTTP/0.9",
+        Version::HTTP_10 => "HTTP/1.0",
+        Version::HTTP_11 => "HTTP/1.1",
+        Version::HTTP_2 => "HTTP/2.0",
+        Version::HTTP_3 => "HTTP/3.0",
+        _ => "HTTP/unknown",
+    }
+}
+
+fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut cursor = io::Cursor::new(bytes);
+    rustls_pemfile::certs(&mut cursor)
+        .collect::<Result<Vec<CertificateDer<'static>>, _>>()
+        .with_context(|| format!("failed to parse PEM certificates from {}", path.display()))
+}
+
+fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut cursor = io::Cursor::new(bytes);
+    rustls_pemfile::private_key(&mut cursor)
+        .with_context(|| format!("failed to parse private key from {}", path.display()))?
+        .ok_or_else(|| anyhow!("no private key found in {}", path.display()))
+}
+
+fn load_root_store(path: &Path) -> anyhow::Result<RootCertStore> {
+    let certs = load_certs(path)?;
+    let mut roots = RootCertStore::empty();
+    let (added, _ignored) = roots.add_parsable_certificates(certs);
+    if added == 0 {
+        bail!("no parsable certificates found in {}", path.display());
+    }
+    Ok(roots)
+}

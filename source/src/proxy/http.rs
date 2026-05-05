@@ -250,10 +250,11 @@ where
       }
     }
   } else {
-    let Some(client) = state
-      .clients
-      .for_upstream_version(&upstream.name, upstream_version)
-    else {
+    let Some(client) = state.clients.for_upstream_version(
+      &upstream.name,
+      upstream.origin.scheme(),
+      upstream_version,
+    ) else {
       warn!(
           upstream = %upstream.name,
           "missing upstream client pool"

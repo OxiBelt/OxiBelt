@@ -36,6 +36,9 @@ struct Needs {
   http_upstream: bool,
   https_upstream: bool,
   alt_upstream: bool,
+  h2_upstream: bool,
+  h2c_upstream: bool,
+  protocol_probe: bool,
   pq_probe: bool,
 }
 
@@ -178,6 +181,18 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
   manifest.push_str(&format!(
     "CASE_NEED_ALT_UPSTREAM={}\n",
     bool_env(case.needs.alt_upstream)
+  ));
+  manifest.push_str(&format!(
+    "CASE_NEED_H2_UPSTREAM={}\n",
+    bool_env(case.needs.h2_upstream)
+  ));
+  manifest.push_str(&format!(
+    "CASE_NEED_H2C_UPSTREAM={}\n",
+    bool_env(case.needs.h2c_upstream)
+  ));
+  manifest.push_str(&format!(
+    "CASE_NEED_PROTOCOL_PROBE={}\n",
+    bool_env(case.needs.protocol_probe)
   ));
   manifest.push_str(&format!(
     "CASE_NEED_PQ_PROBE={}\n",
@@ -1495,6 +1510,208 @@ run_case_checks() {
   response="$(client_request "example.test" "/app/h3-enabled" 200)"
   assert_body_jq "${response}" '.path == "/origin/app/h3-enabled"'
 }
+      "#,
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
+      "downstream-h2-upstream-h1",
+      "downstream HTTP/2 over HTTPS forwards to an HTTP/1.1 upstream",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      vec![config_file(config_with(
+        HTTP2_ONLY_LISTENERS,
+        DEFAULT_TLS_OCSP,
+        DEFAULT_PROXY,
+        DEFAULT_COMPRESSION,
+        default_waf(),
+        HTTP_UPSTREAM,
+        MAIN_ROUTE,
+      ))],
+      r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h2" "example.test" "/app/downstream-h2-upstream-h1" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h2"'
+  assert_body_jq "${response}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/downstream-h2-upstream-h1"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
+"#,
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
+      "downstream-h2-upstream-h2",
+      "downstream HTTP/2 over HTTPS forwards to an HTTP/2 upstream",
+      ExpectStart::Success,
+      Needs {
+        h2_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      vec![config_file(config_with(
+        HTTP2_ONLY_LISTENERS,
+        DEFAULT_TLS_OCSP,
+        TRUSTED_CA_PROXY,
+        DEFAULT_COMPRESSION,
+        default_waf(),
+        H2_UPSTREAM,
+        H2_ROUTE,
+      ))],
+      r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h2" "example.test" "/app/downstream-h2-upstream-h2" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h2"'
+  assert_body_jq "${response}" '.upstream == "h2-upstream"
+    and .scheme == "https"
+    and .request_version == "HTTP/2.0"
+    and .path == "/h2-origin/app/downstream-h2-upstream-h2"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
+      "#,
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
+      "downstream-h2-upstream-h2c",
+      "downstream HTTP/2 over HTTPS forwards to a cleartext HTTP/2 upstream",
+      ExpectStart::Success,
+      Needs {
+        h2c_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      vec![config_file(config_with(
+        HTTP2_ONLY_LISTENERS,
+        DEFAULT_TLS_OCSP,
+        DEFAULT_PROXY,
+        DEFAULT_COMPRESSION,
+        default_waf(),
+        H2C_UPSTREAM,
+        H2C_ROUTE,
+      ))],
+      r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h2" "example.test" "/app/downstream-h2-upstream-h2c" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h2"'
+  assert_body_jq "${response}" '.upstream == "h2c-upstream"
+    and .scheme == "http"
+    and .request_version == "HTTP/2.0"
+    and .path == "/h2c-origin/app/downstream-h2-upstream-h2c"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
+"#,
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
+      "downstream-h3-upstream-h1",
+      "downstream HTTP/3 over HTTPS forwards to an HTTP/1.1 upstream",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      vec![config_file(config_with(
+        HTTP3_ONLY_LISTENERS,
+        DEFAULT_TLS_OCSP,
+        DEFAULT_PROXY,
+        DEFAULT_COMPRESSION,
+        default_waf(),
+        HTTP_UPSTREAM,
+        MAIN_ROUTE,
+      ))],
+      r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h3" "example.test" "/app/downstream-h3-upstream-h1" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h3"'
+  assert_body_jq "${response}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/downstream-h3-upstream-h1"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
+"#,
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
+      "downstream-h3-upstream-h2",
+      "downstream HTTP/3 over HTTPS forwards to an HTTP/2 upstream",
+      ExpectStart::Success,
+      Needs {
+        h2_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      vec![config_file(config_with(
+        HTTP3_ONLY_LISTENERS,
+        DEFAULT_TLS_OCSP,
+        TRUSTED_CA_PROXY,
+        DEFAULT_COMPRESSION,
+        default_waf(),
+        H2_UPSTREAM,
+        H2_ROUTE,
+      ))],
+      r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h3" "example.test" "/app/downstream-h3-upstream-h2" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h3"'
+  assert_body_jq "${response}" '.upstream == "h2-upstream"
+    and .scheme == "https"
+    and .request_version == "HTTP/2.0"
+    and .path == "/h2-origin/app/downstream-h3-upstream-h2"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
+      "#,
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
+      "downstream-h3-upstream-h2c",
+      "downstream HTTP/3 over HTTPS forwards to a cleartext HTTP/2 upstream",
+      ExpectStart::Success,
+      Needs {
+        h2c_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      vec![config_file(config_with(
+        HTTP3_ONLY_LISTENERS,
+        DEFAULT_TLS_OCSP,
+        DEFAULT_PROXY,
+        DEFAULT_COMPRESSION,
+        default_waf(),
+        H2C_UPSTREAM,
+        H2C_ROUTE,
+      ))],
+      r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h3" "example.test" "/app/downstream-h3-upstream-h2c" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h3"'
+  assert_body_jq "${response}" '.upstream == "h2c-upstream"
+    and .scheme == "http"
+    and .request_version == "HTTP/2.0"
+    and .path == "/h2c-origin/app/downstream-h3-upstream-h2c"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
 "#,
       None,
     ),
@@ -1660,6 +1877,20 @@ http2 = true
 http3 = false
 "#;
 
+const HTTP2_ONLY_LISTENERS: &str = r#"[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = false
+http2 = true
+http3 = false
+"#;
+
+const HTTP3_ONLY_LISTENERS: &str = r#"[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = false
+http2 = false
+http3 = true
+"#;
+
 const DEFAULT_TLS_OCSP: &str = r#"[tls.ocsp]
 mode = "disabled"
 "#;
@@ -1748,6 +1979,36 @@ webtransport = true
 mode = "grease"
 "#;
 
+const H2_UPSTREAM: &str = r#"[[upstreams]]
+name = "h2-upstream"
+origin = "https://mock-h2:18444/h2-origin"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[upstreams.tls.ech]
+mode = "disabled"
+"#;
+
+const H2C_UPSTREAM: &str = r#"[[upstreams]]
+name = "h2c-upstream"
+origin = "http://mock-h2c:18082/h2c-origin"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[upstreams.tls.ech]
+mode = "disabled"
+"#;
+
 const MISSING_UPSTREAM: &str = r#"[[upstreams]]
 name = "http-upstream"
 origin = "http://missing-upstream:19999/origin"
@@ -1769,4 +2030,18 @@ name = "secure-route"
 hosts = ["secure.example.test"]
 path_prefix = "/secure"
 upstream = "https-upstream"
+"#;
+
+const H2_ROUTE: &str = r#"[[routes]]
+name = "h2-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "h2-upstream"
+"#;
+
+const H2C_ROUTE: &str = r#"[[routes]]
+name = "h2c-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "h2c-upstream"
 "#;

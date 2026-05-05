@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use anyhow::Context;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
+use hyper::body::Incoming;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 
 use crate::config::{Config, HttpVersion, UpstreamConfig};
@@ -14,22 +16,39 @@ use crate::waf::WafEngine;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type UpstreamBody = BoxBody<Bytes, BoxError>;
-type HyperClient = Client<
-  hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-  UpstreamBody,
->;
+type HyperClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, UpstreamBody>;
+type H2cClient = Client<HttpConnector, UpstreamBody>;
 
 #[derive(Clone)]
-pub struct ClientPool {
+struct ClientPool {
   h1_only: HyperClient,
   negotiated: HyperClient,
+  h2c: H2cClient,
 }
 
 impl ClientPool {
-  pub fn for_version(&self, version: HttpVersion) -> &HyperClient {
+  fn for_version(&self, origin_scheme: &str, version: HttpVersion) -> UpstreamClientRef<'_> {
     match version {
-      HttpVersion::H1 => &self.h1_only,
-      HttpVersion::H2 | HttpVersion::H3 => &self.negotiated,
+      HttpVersion::H1 => UpstreamClientRef::Hyper(&self.h1_only),
+      HttpVersion::H2 if origin_scheme == "http" => UpstreamClientRef::H2c(&self.h2c),
+      HttpVersion::H2 | HttpVersion::H3 => UpstreamClientRef::Hyper(&self.negotiated),
+    }
+  }
+}
+
+pub(crate) enum UpstreamClientRef<'a> {
+  Hyper(&'a HyperClient),
+  H2c(&'a H2cClient),
+}
+
+impl UpstreamClientRef<'_> {
+  pub(crate) async fn request(
+    &self,
+    request: http::Request<UpstreamBody>,
+  ) -> Result<http::Response<Incoming>, hyper_util::client::legacy::Error> {
+    match self {
+      Self::Hyper(client) => client.request(request).await,
+      Self::H2c(client) => client.request(request).await,
     }
   }
 }
@@ -40,15 +59,16 @@ pub struct UpstreamClientPools {
 }
 
 impl UpstreamClientPools {
-  pub fn for_upstream_version(
+  pub(crate) fn for_upstream_version(
     &self,
     upstream_name: &str,
+    origin_scheme: &str,
     version: HttpVersion,
-  ) -> Option<&HyperClient> {
+  ) -> Option<UpstreamClientRef<'_>> {
     self
       .by_upstream
       .get(upstream_name)
-      .map(|pool| pool.for_version(version))
+      .map(|pool| pool.for_version(origin_scheme, version))
   }
 }
 
@@ -129,8 +149,13 @@ fn build_client_pool(
     .build();
   let negotiated = Client::builder(TokioExecutor::new()).build(negotiated_connector);
 
+  let mut h2c_builder = Client::builder(TokioExecutor::new());
+  h2c_builder.http2_only(true);
+  let h2c = h2c_builder.build_http();
+
   Ok(ClientPool {
     h1_only,
     negotiated,
+    h2c,
   })
 }
