@@ -1,0 +1,6 @@
+when = "Request.Http.Path.endsWith('/external')"
+
+[[actions]]
+type = "reject"
+status = 403
+body = "external rule"

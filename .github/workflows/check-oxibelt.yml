@@ -133,11 +133,11 @@ jobs:
         id: matrices
         run: |
           docker_matrix="$(
-            cargo run --quiet --locked -p oxibelt --example oxibelt-test-matrix -- \
+            cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
               list --suite docker --format github-matrix
           )"
           browser_matrix="$(
-            cargo run --quiet --locked -p oxibelt --example oxibelt-test-matrix -- \
+            cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
               list --suite browser --format github-matrix
           )"
           echo "docker=${docker_matrix}" >> "${GITHUB_OUTPUT}"

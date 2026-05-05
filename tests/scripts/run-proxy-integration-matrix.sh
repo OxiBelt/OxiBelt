@@ -49,7 +49,7 @@ trap cleanup EXIT
 
 mkdir -p "${case_dir}" "${cert_dir}" "${upstream_tls_dir}" "${logs_dir}"
 
-cargo run --quiet --locked -p oxibelt --example oxibelt-test-matrix -- \
+cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
   materialize \
   --suite docker \
   --category "${category}" \

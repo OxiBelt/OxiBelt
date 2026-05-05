@@ -1,0 +1,62 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = true
+gzip = true
+deflate = true
+zstd = true
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "replace-upstream-5xx"
+phase = "response"
+priority = 10
+when = "Response.Http.Status >= 500"
+
+[[waf.rules.actions]]
+type = "replace_response"
+status = 502
+body = "matrix replacement"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080"
+max_http_version = "h1"
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "http-upstream"
+

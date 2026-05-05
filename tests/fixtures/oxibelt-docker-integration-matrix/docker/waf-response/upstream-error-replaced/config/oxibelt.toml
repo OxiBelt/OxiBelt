@@ -1,0 +1,65 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = true
+gzip = true
+deflate = true
+zstd = true
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "replace-upstream-error"
+phase = "response"
+priority = 10
+when = "Response.Upstream.Error != null"
+
+[[waf.rules.actions]]
+type = "replace_response"
+status = 502
+body = "upstream synthetic error replaced"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://missing-upstream:19999/origin"
+max_http_version = "h1"
+connect_timeout_ms = 200
+request_timeout_ms = 1000
+preserve_host = false
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "http-upstream"
+

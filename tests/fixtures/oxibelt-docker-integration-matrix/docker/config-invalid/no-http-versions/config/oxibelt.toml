@@ -1,0 +1,60 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = false
+http2 = false
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = true
+gzip = true
+deflate = true
+zstd = true
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "http-upstream"
+

@@ -9,7 +9,8 @@
 - `scripts/run-proxy-integration.sh`: generates fresh TLS certificates for every run, validates HTTP and HTTPS proxying through Docker, probes `X25519` plus `X25519MLKEM768` TLS negotiation against the current server, and exercises HTTPS upstream proxying with ECH GREASE enabled
 - `scripts/run-proxy-integration-matrix.sh`: materializes one Rust-cataloged Docker integration case and validates it in Docker. Cases are grouped by configuration validity, routing, proxy headers, upstream TLS, WAF request/response behavior, helper behavior, Person proof, and protocol startup behavior.
 - `scripts/run-browser-webdriver-check.sh`: starts a mock upstream and validates that Chromium or Firefox WebDriver can reach OxiBelt through either a local release binary or an `OXIBELT_DOCKER_IMAGE` container. Pass a scenario name (`basic-navigation`, `waf-request`, `waf-response`, or `person-proof`) to run the corresponding browser-level check.
-- `source/examples/oxibelt-test-matrix.rs`: test-only Rust catalog used by CI and scripts to list GitHub matrix entries and materialize Docker/WebDriver case manifests.
+- `rust/oxibelt-docker-integration-matrix.rs`: test-only Rust binary used by CI and scripts to list GitHub matrix entries and materialize Docker/WebDriver case manifests.
+- `fixtures/oxibelt-docker-integration-matrix/docker/`: TOML fixture files copied by the matrix materializer for Docker integration cases.
 - `docker/mock_upstream/client.py`: test-only HTTPS client used by the integration script. It only connects to the Docker-network proxy endpoint and trusts the generated proxy CA instead of disabling certificate verification.
 - `docker/mock_upstream/server.py`: test-only echo upstream. When TLS is enabled, it requires TLS 1.2 or newer.
 - `docker/protocol_probe/`: test-only Rust probe that provides HTTP/2 TLS and cleartext h2c upstreams plus HTTP/2 or HTTP/3 downstream clients for protocol proxying matrix cases.
