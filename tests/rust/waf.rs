@@ -360,6 +360,66 @@ value = "no-store"
 }
 
 #[test]
+fn request_tags_are_visible_to_later_request_rules() {
+    let temp_dir = common::TempDir::new("waf-request-tag-chain");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-request-tag-chain");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "tag-login"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.startsWith('/login')"
+
+[[waf.rules.actions]]
+type = "set_tag"
+key = "LoginRequest"
+value = "true"
+
+[[waf.rules]]
+name = "block-tagged-login"
+phase = "request"
+priority = 20
+when = "Request.Tags.get('LoginRequest') == 'true'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "tagged"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/login".parse().expect("URI should parse");
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn person_proof_challenge_allows_solved_pow() {
     let temp_dir = common::TempDir::new("waf-person-proof");
     let (cert_path, key_path) =
@@ -484,6 +544,94 @@ success_tag = "PersonProof"
 
     assert!(clearance_decision.terminal.is_none());
     assert!(clearance_decision.response_header_mutations.is_empty());
+}
+
+#[test]
+fn person_proof_success_tag_can_chain_to_later_request_rule() {
+    let temp_dir = common::TempDir::new("waf-person-proof-chain");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-chain");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+success_tag = "PersonProof"
+
+[[waf.rules]]
+name = "mark-person-proof"
+phase = "request"
+priority = 20
+when = "Request.Tags.get('PersonProof') == 'valid'"
+
+[[waf.rules.actions]]
+type = "set_request_header"
+name = "X-Person-Proof"
+value = "valid"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let challenge_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+    let nonce = solve_pow_nonce(&token, 4);
+
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+    let solved_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert!(solved_decision.terminal.is_none());
+    assert_eq!(
+        solved_decision.tags,
+        vec![("PersonProof".to_string(), "valid".to_string())]
+    );
+    assert!(
+        solved_decision
+            .request_header_mutations
+            .iter()
+            .any(|mutation| matches!(
+                mutation,
+                HeaderMutation::Set { name, value }
+                    if name.as_str() == "x-person-proof" && value.as_bytes() == b"valid"
+            ))
+    );
 }
 
 #[test]
@@ -1086,6 +1234,89 @@ path = "../outside.oxirule.toml"
 
     assert!(
         error.to_string().contains("WAF rule path must not contain"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rule_id_and_tags_are_available_in_context() {
+    let temp_dir = common::TempDir::new("waf-rule-metadata");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rule-metadata");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "metadata-rule"
+id = "proof-chain"
+tags = ["person-proof", "chain"]
+phase = "request"
+priority = 1
+when = "Context.RuleId == 'proof-chain' && Context.RuleTags.has('person-proof')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/".parse().expect("URI should parse");
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn validation_rejects_invalid_rule_metadata_label() {
+    let temp_dir = common::TempDir::new("waf-invalid-rule-metadata");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-invalid-rule-metadata");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "bad-metadata-rule"
+id = "bad_rule"
+phase = "request"
+priority = 1
+when = "true"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("id must match [A-Za-z0-9-]{0,32}"),
         "unexpected error: {error}"
     );
 }

@@ -7,6 +7,7 @@ use anyhow::{Context, anyhow, bail};
 use http::header::{COOKIE, HeaderName, HeaderValue, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use regex::Regex;
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -121,6 +122,10 @@ impl Default for WafLimits {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WafRuleConfig {
   pub name: String,
+  #[serde(default)]
+  pub id: Option<String>,
+  #[serde(default)]
+  pub tags: Vec<String>,
   pub phase: WafPhase,
   pub priority: i64,
   #[serde(default)]
@@ -363,7 +368,36 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
       &upstream_names,
     )?;
   }
+  validate_unique_rule_ids(config)?;
 
+  Ok(())
+}
+
+fn validate_unique_rule_ids(config: &Config) -> anyhow::Result<()> {
+  let mut ids = HashMap::new();
+  for rule in &config.waf.rules {
+    remember_rule_id(&mut ids, "global WAF", rule)?;
+  }
+  for route in &config.routes {
+    for rule in &route.waf.rules {
+      remember_rule_id(&mut ids, &format!("route {} WAF", route.name), rule)?;
+    }
+  }
+  Ok(())
+}
+
+fn remember_rule_id(
+  ids: &mut HashMap<String, String>,
+  scope: &str,
+  rule: &WafRuleConfig,
+) -> anyhow::Result<()> {
+  let Some(id) = rule.id.as_deref().filter(|id| !id.is_empty()) else {
+    return Ok(());
+  };
+  let label = format!("{scope} rule {}", rule.name);
+  if let Some(previous) = ids.insert(id.to_string(), label.clone()) {
+    bail!("duplicate WAF rule id {id} in {label}; already used by {previous}");
+  }
   Ok(())
 }
 
@@ -387,6 +421,7 @@ fn validate_scope(
     if rule.priority < 0 {
       bail!("WAF rule {} priority must not be negative", rule.name);
     }
+    validate_rule_metadata(rule)?;
     if rule.path.is_some() {
       bail!(
         "WAF rule {} external path was not loaded; use Config::load for rule files",
@@ -412,6 +447,26 @@ fn validate_scope(
       .with_context(|| format!("invalid WAF rule {} expression", rule.name))?;
 
     validate_actions(rule, upstream_names, limits)?;
+  }
+
+  Ok(())
+}
+
+fn validate_rule_metadata(rule: &WafRuleConfig) -> anyhow::Result<()> {
+  if let Some(id) = rule.id.as_deref()
+    && !is_valid_rule_label(id)
+  {
+    bail!("WAF rule {} id must match [A-Za-z0-9-]{{0,32}}", rule.name);
+  }
+
+  let mut tags = HashSet::new();
+  for tag in &rule.tags {
+    if !is_valid_rule_label(tag) {
+      bail!("WAF rule {} tag must match [A-Za-z0-9-]{{0,32}}", rule.name);
+    }
+    if !tags.insert(tag.as_str()) {
+      bail!("WAF rule {} contains duplicate tag {}", rule.name, tag);
+    }
   }
 
   Ok(())
@@ -517,7 +572,7 @@ fn validate_actions(
       }
       WafActionConfig::SetTag { key, value } => {
         require_phase(rule, WafPhase::Request, "set_tag")?;
-        if key.len() > 128 || value.len() > 1024 {
+        if key.is_empty() || !is_valid_rule_label(key) || value.len() > 1024 {
           bail!("WAF rule {} set_tag exceeds tag size limits", rule.name);
         }
         mutations += 1;
@@ -620,11 +675,18 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     );
   }
   if let Some(tag) = success_tag
-    && (tag.is_empty() || tag.len() > 128)
+    && (tag.is_empty() || !is_valid_rule_label(tag))
   {
     bail!("WAF rule {rule_name} require_person_proof success_tag exceeds tag size limits");
   }
   Ok(())
+}
+
+fn is_valid_rule_label(value: &str) -> bool {
+  value.len() <= 32
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 fn is_valid_cookie_name(name: &str) -> bool {
@@ -758,35 +820,65 @@ impl WafEngine {
   ) -> anyhow::Result<RequestWafDecision> {
     let mut tx = TransactionBudget::new(&self.limits);
     let mut decision = RequestWafDecision::default();
+    let mut active_tags = input.tags.to_owned();
     let person_proof = self.person_proof.evaluate_request(input);
     if let Some(tag) = self.person_proof.success_tag_for(&person_proof) {
-      decision.tags.push((tag.to_string(), "valid".to_string()));
+      record_request_tag(
+        &mut decision,
+        &mut active_tags,
+        tag.to_string(),
+        "valid".to_string(),
+      );
     }
     if let Some(mutation) = self.person_proof.clearance_cookie_mutation(&person_proof)? {
       decision.response_header_mutations.push(mutation);
     }
-    let ctx = EvalContext {
-      phase: WafPhase::Request,
-      mode: self.mode,
-      rule_name: "",
-      request: input,
-      response: None,
-      person_proof: &person_proof,
-      pattern_sets: &self.pattern_sets,
-      limits: &self.limits,
-    };
 
     for rule in self.rules_for(input.route_name, WafPhase::Request) {
       tx.check_total()?;
-      let matched = self.evaluate_rule(rule, &ctx, &mut tx)?;
+      let matched = {
+        let request = WafRequestInput {
+          tags: &active_tags,
+          ..input
+        };
+        let ctx = EvalContext {
+          phase: WafPhase::Request,
+          mode: self.mode,
+          rule_name: "",
+          rule_id: None,
+          rule_tags: &[],
+          request,
+          response: None,
+          person_proof: &person_proof,
+          pattern_sets: &self.pattern_sets,
+          limits: &self.limits,
+        };
+        self.evaluate_rule(rule, &ctx, &mut tx)?
+      };
       if !matched {
         continue;
       }
-      debug!(rule = %rule.name, phase = "request", "WAF rule matched");
+      debug!(
+        rule = %rule.name,
+        rule_id = rule.id.as_deref().unwrap_or_default(),
+        internal_rule_id = %rule.internal_id,
+        phase = "request",
+        "WAF rule matched"
+      );
       if self.mode == WafMode::Monitor {
         continue;
       }
-      apply_request_actions(rule, input, &self.person_proof, &mut decision, &mut tx)?;
+      let previous_tag_count = decision.tags.len();
+      {
+        let request = WafRequestInput {
+          tags: &active_tags,
+          ..input
+        };
+        apply_request_actions(rule, request, &self.person_proof, &mut decision, &mut tx)?;
+      }
+      for (key, value) in &decision.tags[previous_tag_count..] {
+        active_tags.insert(key.clone(), value.clone());
+      }
       if decision.terminal.is_some() {
         return Ok(decision);
       }
@@ -806,6 +898,8 @@ impl WafEngine {
       phase: WafPhase::Response,
       mode: self.mode,
       rule_name: "",
+      rule_id: None,
+      rule_tags: &[],
       request: input.request,
       response: Some(input),
       person_proof: &person_proof,
@@ -819,7 +913,13 @@ impl WafEngine {
       if !matched {
         continue;
       }
-      debug!(rule = %rule.name, phase = "response", "WAF rule matched");
+      debug!(
+        rule = %rule.name,
+        rule_id = rule.id.as_deref().unwrap_or_default(),
+        internal_rule_id = %rule.internal_id,
+        phase = "response",
+        "WAF rule matched"
+      );
       if self.mode == WafMode::Monitor {
         continue;
       }
@@ -841,6 +941,8 @@ impl WafEngine {
     tx.start_rule();
     let rule_ctx = EvalContext {
       rule_name: &rule.name,
+      rule_id: rule.id.as_deref(),
+      rule_tags: &rule.tags,
       ..*ctx
     };
     let value = rule.expression.eval(&rule_ctx, tx)?;
@@ -905,6 +1007,9 @@ fn compile_rules(configs: &[WafRuleConfig]) -> anyhow::Result<Vec<CompiledRule>>
         .with_context(|| format!("failed to compile WAF rule {}", rule.name))?;
       Ok(CompiledRule {
         name: rule.name.clone(),
+        id: rule.id.clone().filter(|id| !id.is_empty()),
+        tags: rule.tags.clone(),
+        internal_id: new_internal_rule_id()?,
         phase: rule.phase,
         priority: rule.priority,
         expression,
@@ -914,9 +1019,40 @@ fn compile_rules(configs: &[WafRuleConfig]) -> anyhow::Result<Vec<CompiledRule>>
     .collect()
 }
 
+fn new_internal_rule_id() -> anyhow::Result<String> {
+  let mut bytes = [0u8; 16];
+  SystemRandom::new()
+    .fill(&mut bytes)
+    .map_err(|_| anyhow!("failed to generate WAF internal rule id"))?;
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  Ok(format!(
+    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+    bytes[0],
+    bytes[1],
+    bytes[2],
+    bytes[3],
+    bytes[4],
+    bytes[5],
+    bytes[6],
+    bytes[7],
+    bytes[8],
+    bytes[9],
+    bytes[10],
+    bytes[11],
+    bytes[12],
+    bytes[13],
+    bytes[14],
+    bytes[15]
+  ))
+}
+
 #[derive(Clone)]
 struct CompiledRule {
   name: String,
+  id: Option<String>,
+  tags: Vec<String>,
+  internal_id: String,
   phase: WafPhase,
   priority: i64,
   expression: Expr,
@@ -1018,6 +1154,16 @@ pub struct RequestWafDecision {
 pub struct ResponseWafDecision {
   pub terminal: Option<WafTerminalResponse>,
   pub response_header_mutations: Vec<HeaderMutation>,
+}
+
+fn record_request_tag(
+  decision: &mut RequestWafDecision,
+  active_tags: &mut HashMap<String, String>,
+  key: String,
+  value: String,
+) {
+  active_tags.insert(key.clone(), value.clone());
+  decision.tags.push((key, value));
 }
 
 #[derive(Debug)]
@@ -1254,6 +1400,8 @@ struct EvalContext<'a> {
   phase: WafPhase,
   mode: WafMode,
   rule_name: &'a str,
+  rule_id: Option<&'a str>,
+  rule_tags: &'a [String],
   request: WafRequestInput<'a>,
   response: Option<WafResponseInput<'a>>,
   person_proof: &'a PersonProofRequestStatus,
@@ -1365,6 +1513,7 @@ impl Value {
 #[derive(Debug, Clone, Copy)]
 enum ObjectRef {
   Context,
+  ContextRuleTags,
   Request,
   RequestClient,
   RequestClientPersonProof,
@@ -1416,6 +1565,13 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
       WafPhase::Response => "response".to_string(),
     })),
     (ObjectRef::Context, "RuleName") => Ok(Value::String(ctx.rule_name.to_string())),
+    (ObjectRef::Context, "RuleId") => Ok(
+      ctx
+        .rule_id
+        .map(|id| Value::String(id.to_string()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::Context, "RuleTags") => Ok(Value::Object(ObjectRef::ContextRuleTags)),
     (ObjectRef::Context, "RouteName") => Ok(Value::String(ctx.request.route_name.to_string())),
     (ObjectRef::Context, "TransactionId") => Ok(Value::String(String::new())),
     (ObjectRef::Context, "Mode") => Ok(Value::String(match ctx.mode {
@@ -1752,6 +1908,7 @@ fn eval_call(
 ) -> anyhow::Result<Value> {
   match value {
     Value::String(text) => eval_string_call(&text, method, args, ctx, tx),
+    Value::Object(ObjectRef::ContextRuleTags) => eval_rule_tag_call(ctx.rule_tags, method, args),
     Value::Object(ObjectRef::RequestHeaders) => {
       eval_header_call(ctx.request.headers, method, args, ctx)
     }
@@ -1934,6 +2091,21 @@ fn eval_tag_call(
       })))
     }
     _ => bail!("unknown TagMap method {method}"),
+  }
+}
+
+fn eval_rule_tag_call(tags: &[String], method: &str, args: &[Value]) -> anyhow::Result<Value> {
+  match method {
+    "count" => Ok(Value::Int(tags.len() as i64)),
+    "has" => {
+      let expected = expect_string_arg(args, 0)?;
+      Ok(Value::Bool(tags.iter().any(|tag| tag == expected)))
+    }
+    "anyMatches" => {
+      let regex = Regex::new(expect_string_arg(args, 0)?)?;
+      Ok(Value::Bool(tags.iter().any(|tag| regex.is_match(tag))))
+    }
+    _ => bail!("unknown RuleTagSet method {method}"),
   }
 }
 

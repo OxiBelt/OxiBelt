@@ -337,6 +337,8 @@ Inline global rules are configured under `[[waf.rules]]`:
 ```toml
 [[waf.rules]]
 name = "block-public-admin"
+id = "block-admin-public"
+tags = ["access-control", "admin"]
 phase = "request"
 priority = 100
 when = """
@@ -355,12 +357,14 @@ External rule files are referenced with `path`:
 ```toml
 [[waf.rules]]
 name = "global-request-policy"
+id = "global-request"
+tags = ["baseline"]
 phase = "request"
 priority = 10
 path = "rules/global-request.oxirule.toml"
 ```
 
-A rule entry must specify exactly one of `when` or `path`.
+A rule entry must specify exactly one of `when` or `path`. `id` is optional and must be unique when non-empty. `id` and entries in `tags` must match `[A-Za-z0-9-]{0,32}`.
 External rule file paths are resolved relative to the oxirule directory. Absolute paths and paths containing `.` or `..` components are rejected.
 
 An external `.oxirule.toml` file contains only the rule body:
@@ -399,6 +403,7 @@ success_tag = "PersonProof"
 ```
 
 `require_person_proof` is documented in [OxiRule.md](OxiRule.md#require_person_proof). It is a defense-in-depth anti-automation challenge, not authentication and not a complete denial-of-service defense.
+When `success_tag` is set, a validated proof or clearance emits that transaction tag with value `valid`, making it available to later request-phase rules and response-phase rules through `Request.Tags`.
 
 ## 9. Upstreams
 
@@ -528,6 +533,7 @@ Configuration validation rejects:
 - Absolute include/runtime file paths or relative configuration file paths containing `.` or `..` components.
 - Runtime file paths that do not resolve to existing regular files under their purpose-specific directory.
 - External OxiRule paths that are absolute or escape the oxirule directory.
+- Invalid or duplicate non-empty OxiRule IDs, or invalid OxiRule tags.
 - Route `path_prefix` or `replace_prefix_with` values that do not start with `/` or contain unsafe path syntax.
 - Routes that reference unknown upstreams.
 - OCSP `static_file` mode without `response_file`.

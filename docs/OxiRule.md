@@ -9,9 +9,11 @@ The current Rust implementation includes the initial OxiRule execution path for 
 
 - Global and route-level `[[waf.rules]]` configuration.
 - External `.oxirule.toml` rule files loaded relative to the configured OxiRule directory.
+- Optional public rule `id` and rule `tags` metadata, plus internal UUIDv4 rule identifiers for runtime bookkeeping and logs.
 - Request-phase `reject`, `set_request_header`, `remove_request_header`, `set_tag`, and `route_to_upstream`.
 - Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, and `remove_response_header`.
 - CEL-like boolean expressions with object property access, string helpers, header/query/cookie/tag helpers, regex matching, CIDR checks, and request/response phase validation.
+- Request tags created by Person proof success or earlier request-phase `set_tag` actions are visible to later request-phase rules and to response-phase rules.
 - Request transport metadata for direct peer IP/port, encryption state, negotiated TCP TLS SNI/ALPN, configured TCP max-hop policy, and HTTP/3/WebTransport UDP metadata.
 - Synthetic response context for upstream forwarding failures, exposed to response-phase rules as `Response.Upstream.Error`.
 - Runtime, expression-step, and mutation budgets.
@@ -94,6 +96,8 @@ A rule has metadata, a CEL-like `when` expression, and one or more declarative a
 ```toml
 [[waf.rules]]
 name = "block-admin-from-public"
+id = "block-admin-public"
+tags = ["access-control", "admin"]
 phase = "request"
 priority = 100
 when = """
@@ -108,6 +112,21 @@ body = "Forbidden"
 ```
 
 The `when` expression must evaluate to `Bool`. If it evaluates to `false`, the rule is skipped and no action from that rule is executed.
+
+### 3.1.1 Rule identifiers and tags
+
+Rules may carry optional public metadata:
+
+```toml
+id = "person-proof-entry"
+tags = ["person-proof", "challenge"]
+```
+
+`id` and each entry in `tags` must match `[A-Za-z0-9-]{0,32}`. A non-empty `id` must be unique across the loaded OxiBelt configuration. These public identifiers are for policy authors, configuration management, conditions such as `Context.RuleId == 'person-proof-entry'`, and logs.
+
+OxiBelt also assigns every compiled rule a runtime-only internal UUIDv4. This internal identifier is not configured by users, is not stable across restarts, and should be used only for internal bookkeeping and diagnostic correlation.
+
+Rule metadata tags are distinct from transaction tags. Rule metadata tags describe the rule itself and are visible through `Context.RuleTags`. Transaction tags are created by request actions such as `set_tag` and by Person proof `success_tag`; they are visible through `Request.Tags`.
 
 ### 3.2 Why CEL-like instead of TypeScript-like
 
@@ -320,11 +339,11 @@ A request rule may:
 - Add routing hints.
 - Select an upstream pool.
 - Select a named upstream target.
-- Attach tags for later response rules.
+- Attach tags for later request rules and response rules.
 - Inspect a bounded amount of request body data.
 - Apply policy based on TCP or UDP metadata.
 
-If request rules do not reject the request, OxiBelt continues to route selection, load balancing, and upstream forwarding.
+Request rules run in priority order, with rule name as the tie-breaker. Transaction tags created by a matched request rule are visible to later request rules in the same evaluation and to response rules for the same transaction. If request rules do not reject the request, OxiBelt continues to route selection, load balancing, and upstream forwarding.
 
 ### 5.2 Response phase
 
@@ -534,7 +553,7 @@ status = 403
 
 The first cookie value set by the challenge page is a proof submission, not a clearance token. OxiBelt validates the submitted challenge token and nonce on the retried request. If the proof is correct and unexpired, OxiBelt appends a new `HttpOnly` clearance cookie in the response and forwards the request. Later requests present that clearance cookie; OxiBelt validates its signature and expiration without asking the client to recompute the proof.
 
-The server signs challenge and clearance tokens with a startup-local secret. Tokens are always bound to the configured cookie name, downstream host, HTTP method, challenge random value, difficulty, issue time, and expiration time. `token_bindings` adds configured client-context bindings. A valid proof or clearance sets `Request.Client.PersonProof.State` to `valid`; if `success_tag` is configured, request evaluation also emits that tag with value `valid`.
+The server signs challenge and clearance tokens with a startup-local secret. Tokens are always bound to the configured cookie name, downstream host, HTTP method, challenge random value, difficulty, issue time, and expiration time. `token_bindings` adds configured client-context bindings. A valid proof or clearance sets `Request.Client.PersonProof.State` to `valid`; if `success_tag` is configured, request evaluation also emits that tag with value `valid`. The emitted tag is available through `Request.Tags` for later request-phase rules and for response-phase rules in the same transaction.
 
 `token_bindings` controls which request attributes must match when a proof or clearance token is reused:
 
@@ -566,6 +585,7 @@ Validation constraints:
 - `direct_peer_ipv6_prefix_bits` must be between `0` and `128`.
 - `tcp_max_hop`, when set, must be between `0` and `255`.
 - `token_bindings` containing `tcp_max_hop` must also set `tcp_max_hop`.
+- `success_tag`, when set, must match `[A-Za-z0-9-]{1,32}`.
 - `status` must be a valid HTTP status code.
 
 Person proof is a defense-in-depth control for selected traffic. It raises the cost of unwanted automation, but it is not an authentication factor, a rate limiter, a bot reputation service, or proof of benign intent. Normal Bots should be handled by explicit allow policy, and AI-based Agents should be handled by Agent-specific authentication or authorization policy instead of being silently treated as Person traffic.
@@ -671,7 +691,7 @@ Header mutation actions count against `max_mutations`.
 
 ### 7.5 Tag actions
 
-Tags allow request-side logic to pass bounded metadata to response-side logic.
+Tags allow request-side logic to pass bounded metadata to later request-side logic and response-side logic.
 
 ```toml
 [[waf.rules.actions]]
@@ -680,22 +700,21 @@ key = "SuspiciousLoginPath"
 value = "true"
 ```
 
-A response rule may read the tag:
+A later request rule or response rule may read the tag:
 
 ```toml
 [[waf.rules]]
-name = "login-response-cache-guard"
-phase = "response"
+name = "login-extra-guard"
+phase = "request"
 priority = 200
-when = "Request.Tags.get('SuspiciousLoginPath') == 'true' && Response.Http.Status >= 500"
+when = "Request.Tags.get('SuspiciousLoginPath') == 'true' && Request.Client.PersonProof.State != 'valid'"
 
 [[waf.rules.actions]]
-type = "set_response_header"
-name = "Cache-Control"
-value = "no-store"
+type = "require_person_proof"
+success_tag = "PersonProof"
 ```
 
-Tag count and tag value size are bounded by OxiBelt limits.
+Tag keys must match `[A-Za-z0-9-]{1,32}`. Tag count and tag value size are bounded by OxiBelt limits.
 
 ### 7.6 Body replacement actions
 
@@ -719,6 +738,8 @@ All object properties use `PascalCase`.
 ```text
 Context.Phase: 'request' | 'response'
 Context.RuleName: String
+Context.RuleId: String | Null
+Context.RuleTags: RuleTagSet
 Context.RouteName: String | Null
 Context.TransactionId: String
 Context.Mode: 'enforcing' | 'monitor'
@@ -1002,7 +1023,17 @@ Request.Tags.anyValueContains(Value: String): Bool
 Request.Tags.anyEntryMatches(KeyPattern: String, ValuePattern: String): Bool
 ```
 
-Response-phase rules may read `Request.Tags` values created by request-phase actions.
+Request-phase rules may read `Request.Tags` values created by earlier request-phase actions in priority order. Response-phase rules may read the final `Request.Tags` values created by request-phase actions.
+
+### 9.6.1 RuleTagSet helpers
+
+```text
+Context.RuleTags.count(): Int
+Context.RuleTags.has(Tag: String): Bool
+Context.RuleTags.anyMatches(Pattern: String): Bool
+```
+
+Rule tags are static metadata attached to the currently evaluating rule. They are not transaction tags and are not copied into `Request.Tags` unless a rule explicitly emits a transaction tag with `set_tag` or `require_person_proof.success_tag`.
 
 ### 9.7 BoundedStringList
 
@@ -1379,6 +1410,35 @@ name = "Cache-Control"
 value = "no-store"
 ```
 
+### 12.12 Chain Person proof success into a later request rule
+
+```toml
+[[waf.rules]]
+name = "require-person-proof"
+id = "person-proof-entry"
+tags = ["person-proof"]
+phase = "request"
+priority = 100
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+success_tag = "PersonProof"
+
+[[waf.rules]]
+name = "route-verified-person"
+phase = "request"
+priority = 110
+when = "Request.Tags.get('PersonProof') == 'valid'"
+
+[[waf.rules.actions]]
+type = "set_request_header"
+name = "X-OxiBelt-Person-Proof"
+value = "valid"
+```
+
+The second request rule runs only after the submitted proof or clearance token has been validated and the `success_tag` has been emitted.
+
 ## 13. Validation Rules
 
 Configuration validation must reject:
@@ -1386,6 +1446,9 @@ Configuration validation must reject:
 - A rule with both `when` and `path`.
 - A rule with neither `when` nor `path`.
 - Duplicate rule names in the same scope.
+- Duplicate non-empty rule IDs across the loaded configuration.
+- Rule IDs or rule tags that do not match `[A-Za-z0-9-]{0,32}`.
+- Transaction tag keys or Person proof `success_tag` values that do not match `[A-Za-z0-9-]{1,32}`.
 - Unsupported phase values.
 - Negative priorities.
 - Unsupported expression operators.
