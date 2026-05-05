@@ -17,8 +17,8 @@ use crate::config::HttpVersion;
 use crate::routes::normalize_host;
 use crate::state::AppState;
 use crate::waf::{
-  HeaderMutation, WafRequestInput, WafResponseInput, WafTerminalResponse, WafUpstreamError,
-  apply_header_mutations, request_protocol,
+  HeaderMutation, WafRequestInput, WafResponseInput, WafTerminalResponse, WafTlsMetadata,
+  WafUpstreamError, apply_header_mutations, request_protocol,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -27,6 +27,8 @@ type ProxyBody = BoxBody<Bytes, BoxError>;
 pub async fn handle(
   request: Request<Incoming>,
   peer_addr: std::net::SocketAddr,
+  tcp_max_hop: Option<u8>,
+  tls: Arc<WafTlsMetadata>,
   state: Arc<AppState>,
 ) -> Response<ProxyBody> {
   if request.method() == Method::CONNECT {
@@ -57,6 +59,8 @@ pub async fn handle(
     peer_addr,
     downstream_host: &host,
     route_name: &resolved.route.name,
+    tcp_max_hop,
+    tls: tls.as_ref(),
     protocol,
     tags: &tags,
   });
@@ -165,6 +169,8 @@ pub async fn handle(
         &request_headers,
         peer_addr,
         &host,
+        tcp_max_hop,
+        tls.as_ref(),
         protocol,
         &tags,
         &upstream.name,
@@ -187,6 +193,8 @@ pub async fn handle(
       peer_addr,
       downstream_host: &host,
       route_name: &resolved.route.name,
+      tcp_max_hop,
+      tls: tls.as_ref(),
       protocol,
       tags: &tags,
     };
@@ -431,6 +439,8 @@ fn upstream_error_response(
   request_headers: &HeaderMap,
   peer_addr: std::net::SocketAddr,
   downstream_host: &str,
+  tcp_max_hop: Option<u8>,
+  tls: &WafTlsMetadata,
   protocol: crate::waf::WafProtocol,
   tags: &std::collections::HashMap<String, String>,
   upstream_name: &str,
@@ -451,6 +461,8 @@ fn upstream_error_response(
     peer_addr,
     downstream_host,
     route_name,
+    tcp_max_hop,
+    tls,
     protocol,
     tags,
   };

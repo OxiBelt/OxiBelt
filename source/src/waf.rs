@@ -191,10 +191,25 @@ pub enum WafActionConfig {
     algorithm: PersonProofAlgorithm,
     #[serde(default = "default_person_proof_difficulty")]
     difficulty: u8,
-    #[serde(default = "default_person_proof_ttl_seconds")]
+    #[serde(
+      rename = "token_validity_seconds",
+      default = "default_person_proof_token_validity_seconds",
+      alias = "ttl_seconds",
+      alias = "token_ttl_seconds"
+    )]
     ttl_seconds: u64,
     #[serde(default = "default_person_proof_cookie")]
     cookie: String,
+    #[serde(default = "default_person_proof_token_bindings")]
+    token_bindings: Vec<PersonProofTokenBinding>,
+    #[serde(default = "default_person_proof_direct_peer_ipv4_prefix_bits")]
+    direct_peer_ipv4_prefix_bits: u8,
+    #[serde(default = "default_person_proof_direct_peer_ipv6_prefix_bits")]
+    direct_peer_ipv6_prefix_bits: u8,
+    #[serde(default)]
+    tcp_max_hop: Option<u8>,
+    #[serde(default)]
+    single_use: bool,
     #[serde(default)]
     success_tag: Option<String>,
     #[serde(default = "default_person_proof_status")]
@@ -213,6 +228,29 @@ impl PersonProofAlgorithm {
   pub(crate) fn as_str(self) -> &'static str {
     match self {
       Self::PowSha256V1 => "pow_sha256_v1",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonProofTokenBinding {
+  UserAgent,
+  TlsFingerprint,
+  Route,
+  #[serde(alias = "peer_ip_prefix")]
+  DirectPeerIpNetworkPrefix,
+  TcpMaxHop,
+}
+
+impl PersonProofTokenBinding {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::UserAgent => "user_agent",
+      Self::TlsFingerprint => "tls_fingerprint",
+      Self::Route => "route",
+      Self::DirectPeerIpNetworkPrefix => "direct_peer_ip_network_prefix",
+      Self::TcpMaxHop => "tcp_max_hop",
     }
   }
 }
@@ -484,17 +522,10 @@ fn validate_actions(
         }
         mutations += 1;
       }
-      WafActionConfig::RequirePersonProof {
-        difficulty,
-        ttl_seconds,
-        cookie,
-        success_tag,
-        status,
-        ..
-      } => {
+      WafActionConfig::RequirePersonProof { status, .. } => {
         require_phase(rule, WafPhase::Request, "require_person_proof")?;
         validate_status(*status, &rule.name)?;
-        validate_person_proof_settings(&rule.name, *difficulty, *ttl_seconds, cookie, success_tag)?;
+        validate_person_proof_settings(&rule.name, action)?;
       }
     }
   }
@@ -534,21 +565,59 @@ fn validate_header_name(name: &str) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn validate_person_proof_settings(
-  rule_name: &str,
-  difficulty: u8,
-  ttl_seconds: u64,
-  cookie: &str,
-  success_tag: &Option<String>,
-) -> anyhow::Result<()> {
-  if !(1..=30).contains(&difficulty) {
+fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> anyhow::Result<()> {
+  let WafActionConfig::RequirePersonProof {
+    difficulty,
+    ttl_seconds,
+    cookie,
+    token_bindings,
+    direct_peer_ipv4_prefix_bits,
+    direct_peer_ipv6_prefix_bits,
+    tcp_max_hop,
+    success_tag,
+    ..
+  } = action
+  else {
+    unreachable!("validate_person_proof_settings requires require_person_proof action");
+  };
+
+  if !(1..=30).contains(difficulty) {
     bail!("WAF rule {rule_name} require_person_proof difficulty must be between 1 and 30");
   }
-  if !(1..=86_400).contains(&ttl_seconds) {
-    bail!("WAF rule {rule_name} require_person_proof ttl_seconds must be between 1 and 86400");
+  if !(1..=86_400).contains(ttl_seconds) {
+    bail!(
+      "WAF rule {rule_name} require_person_proof token_validity_seconds must be between 1 and 86400"
+    );
   }
   if !is_valid_cookie_name(cookie) {
     bail!("WAF rule {rule_name} require_person_proof cookie must be a safe cookie name");
+  }
+  if token_bindings.is_empty() {
+    bail!("WAF rule {rule_name} require_person_proof token_bindings must not be empty");
+  }
+  let mut seen_bindings = HashSet::new();
+  for binding in token_bindings {
+    if !seen_bindings.insert(*binding) {
+      bail!(
+        "WAF rule {rule_name} require_person_proof token_bindings contains duplicate {}",
+        binding.as_str()
+      );
+    }
+    if *binding == PersonProofTokenBinding::TcpMaxHop && tcp_max_hop.is_none() {
+      bail!(
+        "WAF rule {rule_name} require_person_proof token binding tcp_max_hop requires tcp_max_hop"
+      );
+    }
+  }
+  if *direct_peer_ipv4_prefix_bits > 32 {
+    bail!(
+      "WAF rule {rule_name} require_person_proof direct_peer_ipv4_prefix_bits must be between 0 and 32"
+    );
+  }
+  if *direct_peer_ipv6_prefix_bits > 128 {
+    bail!(
+      "WAF rule {rule_name} require_person_proof direct_peer_ipv6_prefix_bits must be between 0 and 128"
+    );
   }
   if let Some(tag) = success_tag
     && (tag.is_empty() || tag.len() > 128)
@@ -577,6 +646,7 @@ pub struct WafEngine {
   global_rules: Vec<CompiledRule>,
   route_rules: HashMap<String, Vec<CompiledRule>>,
   person_proof: PersonProofEngine,
+  person_proof_tcp_max_hop: Option<u8>,
 }
 
 impl WafEngine {
@@ -590,6 +660,11 @@ impl WafEngine {
       route_rules.insert(route.name.clone(), compile_rules(&route.waf.rules)?);
     }
     let person_proof = PersonProofEngine::from_config(config)?;
+    let person_proof_tcp_max_hop = if config.waf.enabled {
+      person_proof.tcp_max_hop()
+    } else {
+      None
+    };
 
     Ok(Self {
       enabled: config.waf.enabled,
@@ -600,7 +675,12 @@ impl WafEngine {
       global_rules,
       route_rules,
       person_proof,
+      person_proof_tcp_max_hop,
     })
+  }
+
+  pub fn person_proof_tcp_max_hop(&self) -> Option<u8> {
+    self.person_proof_tcp_max_hop
   }
 
   pub fn enabled(&self) -> bool {
@@ -858,8 +938,20 @@ pub struct WafRequestInput<'a> {
   pub peer_addr: std::net::SocketAddr,
   pub downstream_host: &'a str,
   pub route_name: &'a str,
+  pub tcp_max_hop: Option<u8>,
+  pub tls: &'a WafTlsMetadata,
   pub protocol: WafProtocol,
   pub tags: &'a HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WafTlsMetadata {
+  pub enabled: bool,
+  pub version: Option<String>,
+  pub cipher_suite: Option<String>,
+  pub sni: Option<String>,
+  pub alpn: Option<String>,
+  pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -980,6 +1072,11 @@ fn apply_request_actions(
         difficulty,
         ttl_seconds,
         cookie,
+        token_bindings,
+        direct_peer_ipv4_prefix_bits,
+        direct_peer_ipv6_prefix_bits,
+        tcp_max_hop,
+        single_use,
         success_tag,
         status,
       } => {
@@ -990,6 +1087,11 @@ fn apply_request_actions(
             difficulty: *difficulty,
             ttl_seconds: *ttl_seconds,
             cookie: cookie.clone(),
+            token_bindings: token_bindings.clone(),
+            direct_peer_ipv4_prefix_bits: *direct_peer_ipv4_prefix_bits,
+            direct_peer_ipv6_prefix_bits: *direct_peer_ipv6_prefix_bits,
+            tcp_max_hop: *tcp_max_hop,
+            single_use: *single_use,
             success_tag: success_tag.clone(),
             status: *status,
           },
@@ -1383,10 +1485,34 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestTransport, "Udp") => Ok(Value::Null),
     (ObjectRef::RequestTransportTcp, "State") => Ok(Value::String("accepted".to_string())),
     (ObjectRef::RequestTransportTcp, "TlsDetected") => Ok(Value::Bool(true)),
-    (ObjectRef::RequestTransportTcp, "Sni")
-    | (ObjectRef::RequestTransportTcp, "Alpn")
-    | (ObjectRef::RequestTransportTcp, "Mss")
-    | (ObjectRef::RequestTransportTcp, "RttMs") => Ok(Value::Null),
+    (ObjectRef::RequestTransportTcp, "MaxHop") => Ok(
+      ctx
+        .request
+        .tcp_max_hop
+        .map(|max_hop| Value::Int(i64::from(max_hop)))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTransportTcp, "Sni") => Ok(
+      ctx
+        .request
+        .tls
+        .sni
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTransportTcp, "Alpn") => Ok(
+      ctx
+        .request
+        .tls
+        .alpn
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTransportTcp, "Mss") | (ObjectRef::RequestTransportTcp, "RttMs") => {
+      Ok(Value::Null)
+    }
     (ObjectRef::RequestHttp, "Version") => Ok(Value::String(version_string(ctx.request.version))),
     (ObjectRef::RequestHttp, "Method") => {
       Ok(Value::String(ctx.request.method.as_str().to_string()))
@@ -1402,11 +1528,52 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestBody, "Size") => Ok(Value::Int(content_length(ctx.request.headers))),
     (ObjectRef::RequestBody, "IsTruncated") => Ok(Value::Bool(false)),
     (ObjectRef::RequestBody, "Text") | (ObjectRef::RequestBody, "Bytes") => Ok(Value::Null),
-    (ObjectRef::RequestTls, "Enabled") => Ok(Value::Bool(true)),
-    (ObjectRef::RequestTls, "Version")
-    | (ObjectRef::RequestTls, "CipherSuite")
-    | (ObjectRef::RequestTls, "Sni")
-    | (ObjectRef::RequestTls, "Alpn") => Ok(Value::Null),
+    (ObjectRef::RequestTls, "Enabled") => Ok(Value::Bool(ctx.request.tls.enabled)),
+    (ObjectRef::RequestTls, "Version") => Ok(
+      ctx
+        .request
+        .tls
+        .version
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTls, "CipherSuite") => Ok(
+      ctx
+        .request
+        .tls
+        .cipher_suite
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTls, "Sni") => Ok(
+      ctx
+        .request
+        .tls
+        .sni
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTls, "Alpn") => Ok(
+      ctx
+        .request
+        .tls
+        .alpn
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTls, "Fingerprint") => Ok(
+      ctx
+        .request
+        .tls
+        .fingerprint
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::RequestTls, "ClientCertificatePresent") => Ok(Value::Bool(false)),
     (ObjectRef::Response, "Id") => Ok(Value::String(String::new())),
     (ObjectRef::Response, "ReceivedAtUnixMs") => Ok(Value::Int(0)),
@@ -2292,12 +2459,28 @@ fn default_person_proof_difficulty() -> u8 {
   18
 }
 
-fn default_person_proof_ttl_seconds() -> u64 {
+fn default_person_proof_token_validity_seconds() -> u64 {
   300
 }
 
 fn default_person_proof_cookie() -> String {
   "__oxibelt_person_proof".to_string()
+}
+
+fn default_person_proof_token_bindings() -> Vec<PersonProofTokenBinding> {
+  vec![
+    PersonProofTokenBinding::UserAgent,
+    PersonProofTokenBinding::Route,
+    PersonProofTokenBinding::DirectPeerIpNetworkPrefix,
+  ]
+}
+
+fn default_person_proof_direct_peer_ipv4_prefix_bits() -> u8 {
+  24
+}
+
+fn default_person_proof_direct_peer_ipv6_prefix_bits() -> u8 {
+  56
 }
 
 fn default_person_proof_status() -> u16 {

@@ -6,7 +6,9 @@ use std::net::SocketAddr;
 
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
-use oxibelt::waf::{HeaderMutation, WafEngine, WafProtocol, WafRequestInput, WafResponseInput};
+use oxibelt::waf::{
+    HeaderMutation, WafEngine, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
+};
 use ring::digest;
 
 #[test]
@@ -53,6 +55,104 @@ body = "Forbidden"
 
     assert_eq!(
         decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn request_rule_can_match_tcp_max_hop_metadata() {
+    let temp_dir = common::TempDir::new("waf-tcp-hop-metadata");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-tcp-hop");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "reject-short-hop"
+phase = "request"
+priority = 10
+when = "Request.Transport.Tcp.MaxHop == 16"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "short hop"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let rejected = engine.evaluate_request(request_input_with_tcp_max_hop(
+        &method, &uri, &headers, &tags, peer_addr, 16,
+    ));
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let allowed = engine.evaluate_request(request_input_with_tcp_max_hop(
+        &method, &uri, &headers, &tags, peer_addr, 32,
+    ));
+    assert!(allowed.terminal.is_none());
+}
+
+#[test]
+fn request_rule_can_match_tcp_sni_and_alpn_metadata() {
+    let temp_dir = common::TempDir::new("waf-tcp-tls-metadata");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-tcp-tls");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "reject-transport-tls-metadata"
+phase = "request"
+priority = 10
+when = "Request.Transport.Tcp.Sni == 'example.com' && Request.Transport.Tcp.Alpn == 'h2'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked transport TLS metadata"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let rejected = engine.evaluate_request(request_input_with_tls(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        &test_tls("browser-fingerprint"),
+    ));
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
         Some(StatusCode::FORBIDDEN)
     );
 }
@@ -154,7 +254,7 @@ when = "Request.Client.PersonProof.State != 'valid' && Request.Client.Agent.Veri
 [[waf.rules.actions]]
 type = "require_person_proof"
 difficulty = 4
-ttl_seconds = 60
+token_validity_seconds = 60
 cookie = "__test_person_proof"
 success_tag = "PersonProof"
 "#
@@ -281,7 +381,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 [[waf.rules.actions]]
 type = "require_person_proof"
 difficulty = 4
-ttl_seconds = 60
+token_validity_seconds = 60
 cookie = "__test_person_proof"
 "#
     );
@@ -323,6 +423,415 @@ cookie = "__test_person_proof"
 
     assert_eq!(
         invalid_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn person_proof_token_bindings_can_use_client_network() {
+    let temp_dir = common::TempDir::new("waf-person-proof-network-binding");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-network-binding");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
+direct_peer_ipv4_prefix_bits = 24
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let challenge_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+    let nonce = solve_pow_nonce(&token, 4);
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+
+    let different_network_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        "198.51.100.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        different_network_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let same_network_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        "203.0.113.42:49152".parse().unwrap(),
+    ));
+
+    assert!(same_network_decision.terminal.is_none());
+}
+
+#[test]
+fn person_proof_token_bindings_can_use_tls_fingerprint() {
+    let temp_dir = common::TempDir::new("waf-person-proof-tls-binding");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-tls-binding");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+token_bindings = ["tls_fingerprint"]
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let browser_tls = test_tls("browser-fingerprint");
+    let automation_tls = test_tls("automation-fingerprint");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision = engine.evaluate_request(request_input_with_tls(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        client_addr,
+        &browser_tls,
+    ));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+    let nonce = solve_pow_nonce(&token, 4);
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+
+    let automation_decision = engine.evaluate_request(request_input_with_tls(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+        &automation_tls,
+    ));
+    assert_eq!(
+        automation_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let browser_decision = engine.evaluate_request(request_input_with_tls(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+        &browser_tls,
+    ));
+    assert!(browser_decision.terminal.is_none());
+}
+
+#[test]
+fn person_proof_token_bindings_can_use_tcp_max_hop() {
+    let temp_dir = common::TempDir::new("waf-person-proof-tcp-hop-binding");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-tcp-hop-binding");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+token_bindings = ["tcp_max_hop"]
+tcp_max_hop = 16
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert_eq!(engine.person_proof_tcp_max_hop(), Some(16));
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision = engine.evaluate_request(request_input_with_tcp_max_hop(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        client_addr,
+        16,
+    ));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+    let nonce = solve_pow_nonce(&token, 4);
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+
+    let different_hop_decision = engine.evaluate_request(request_input_with_tcp_max_hop(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+        32,
+    ));
+    assert_eq!(
+        different_hop_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let same_hop_decision = engine.evaluate_request(request_input_with_tcp_max_hop(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+        16,
+    ));
+    assert!(same_hop_decision.terminal.is_none());
+}
+
+#[test]
+fn disabled_waf_does_not_apply_person_proof_tcp_max_hop() {
+    let temp_dir = common::TempDir::new("waf-disabled-tcp-hop");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-disabled-tcp-hop");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = false
+
+[[waf.rules]]
+name = "disabled-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+token_bindings = ["tcp_max_hop"]
+tcp_max_hop = 16
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    assert_eq!(engine.person_proof_tcp_max_hop(), None);
+}
+
+#[test]
+fn person_proof_single_use_bindings_rotate_clearance() {
+    let temp_dir = common::TempDir::new("waf-person-proof-single-use");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-single-use");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
+direct_peer_ipv4_prefix_bits = 32
+single_use = true
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+    let nonce = solve_pow_nonce(&token, 4);
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+
+    let different_client_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        "203.0.113.11:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        different_client_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let solved_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+    ));
+    assert!(solved_decision.terminal.is_none());
+    let initial_clearance = extract_cookie_value(&extract_set_cookie(
+        &solved_decision.response_header_mutations,
+    ));
+    let mut clearance_headers = HeaderMap::new();
+    clearance_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={initial_clearance}")).unwrap(),
+    );
+
+    let clearance_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert!(clearance_decision.terminal.is_none());
+    let rotated_clearance = extract_cookie_value(&extract_set_cookie(
+        &clearance_decision.response_header_mutations,
+    ));
+    assert_ne!(initial_clearance, rotated_clearance);
+
+    let replay_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert_eq!(
+        replay_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let mut rotated_headers = HeaderMap::new();
+    rotated_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={rotated_clearance}")).unwrap(),
+    );
+    let rotated_from_different_client = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &rotated_headers,
+        &tags,
+        "203.0.113.11:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        rotated_from_different_client
             .terminal
             .as_ref()
             .map(|terminal| terminal.status),
@@ -519,12 +1028,104 @@ difficulty = 31
     );
 }
 
+#[test]
+fn validation_requires_tcp_max_hop_value_for_tcp_max_hop_person_proof_binding() {
+    let temp_dir = common::TempDir::new("waf-person-proof-tcp-hop-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-tcp-hop-config");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "bad-person-proof-binding"
+phase = "request"
+priority = 1
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+token_bindings = ["tcp_max_hop"]
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    assert!(
+        error.to_string().contains("requires tcp_max_hop"),
+        "unexpected error: {error}"
+    );
+}
+
 fn request_input<'a>(
     method: &'a Method,
     uri: &'a Uri,
     headers: &'a HeaderMap,
     tags: &'a HashMap<String, String>,
     peer_addr: SocketAddr,
+) -> WafRequestInput<'a> {
+    static TEST_TLS: WafTlsMetadata = WafTlsMetadata {
+        enabled: true,
+        version: None,
+        cipher_suite: None,
+        sni: None,
+        alpn: None,
+        fingerprint: None,
+    };
+
+    request_input_with_transport(method, uri, headers, tags, peer_addr, None, &TEST_TLS)
+}
+
+fn request_input_with_tls<'a>(
+    method: &'a Method,
+    uri: &'a Uri,
+    headers: &'a HeaderMap,
+    tags: &'a HashMap<String, String>,
+    peer_addr: SocketAddr,
+    tls: &'a WafTlsMetadata,
+) -> WafRequestInput<'a> {
+    request_input_with_transport(method, uri, headers, tags, peer_addr, None, tls)
+}
+
+fn request_input_with_tcp_max_hop<'a>(
+    method: &'a Method,
+    uri: &'a Uri,
+    headers: &'a HeaderMap,
+    tags: &'a HashMap<String, String>,
+    peer_addr: SocketAddr,
+    tcp_max_hop: u8,
+) -> WafRequestInput<'a> {
+    static TEST_TLS: WafTlsMetadata = WafTlsMetadata {
+        enabled: true,
+        version: None,
+        cipher_suite: None,
+        sni: None,
+        alpn: None,
+        fingerprint: None,
+    };
+
+    request_input_with_transport(
+        method,
+        uri,
+        headers,
+        tags,
+        peer_addr,
+        Some(tcp_max_hop),
+        &TEST_TLS,
+    )
+}
+
+fn request_input_with_transport<'a>(
+    method: &'a Method,
+    uri: &'a Uri,
+    headers: &'a HeaderMap,
+    tags: &'a HashMap<String, String>,
+    peer_addr: SocketAddr,
+    tcp_max_hop: Option<u8>,
+    tls: &'a WafTlsMetadata,
 ) -> WafRequestInput<'a> {
     WafRequestInput {
         method,
@@ -534,8 +1135,21 @@ fn request_input<'a>(
         peer_addr,
         downstream_host: "example.com",
         route_name: "app-root",
+        tcp_max_hop,
+        tls,
         protocol: WafProtocol::Http,
         tags,
+    }
+}
+
+fn test_tls(fingerprint: &str) -> WafTlsMetadata {
+    WafTlsMetadata {
+        enabled: true,
+        version: Some("TLSv1_3".to_string()),
+        cipher_suite: Some("TLS13_AES_128_GCM_SHA256".to_string()),
+        sni: Some("example.com".to_string()),
+        alpn: Some("h2".to_string()),
+        fingerprint: Some(fingerprint.to_string()),
     }
 }
 
@@ -599,6 +1213,14 @@ fn extract_set_cookie(mutations: &[HeaderMutation]) -> String {
             _ => None,
         })
         .expect("Set-Cookie mutation should exist")
+}
+
+fn extract_cookie_value(set_cookie: &str) -> String {
+    set_cookie
+        .split_once('=')
+        .and_then(|(_, value)| value.split_once(';'))
+        .map(|(value, _)| value.to_string())
+        .expect("Set-Cookie header should contain a cookie value")
 }
 
 fn extract_response_header(

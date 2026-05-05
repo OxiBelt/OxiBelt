@@ -12,6 +12,7 @@ The current Rust implementation includes the initial OxiRule execution path for 
 - Request-phase `reject`, `set_request_header`, `remove_request_header`, `set_tag`, and `route_to_upstream`.
 - Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, and `remove_response_header`.
 - CEL-like boolean expressions with object property access, string helpers, header/query/cookie/tag helpers, regex matching, CIDR checks, and request/response phase validation.
+- Request transport metadata for direct peer IP/port, encryption state, negotiated TCP TLS SNI/ALPN, and configured TCP max-hop policy.
 - Synthetic response context for upstream forwarding failures, exposed to response-phase rules as `Response.Upstream.Error`.
 - Runtime, expression-step, and mutation budgets.
 
@@ -19,7 +20,7 @@ The following parts of this draft remain reserved for a later implementation:
 
 - Streaming-safe request/response body content inspection helpers such as `Body.contains`, `Body.matches`, and `Body.scan`.
 - `route_to_pool` and `set_load_balancing_policy`, pending an upstream-pool/load-balancing configuration model.
-- HTTP/3, WebTransport, UDP-flow metadata, and frame/datagram-level inspection.
+- Transport local endpoint fields, connection IDs, byte counters, TCP MSS/RTT metadata, HTTP/3, WebTransport, UDP-flow metadata, and frame/datagram-level inspection.
 
 ## 1. Purpose
 
@@ -517,8 +518,14 @@ body = "Forbidden"
 type = "require_person_proof"
 algorithm = "pow_sha256_v1"
 difficulty = 18
-ttl_seconds = 300
+token_validity_seconds = 300
 cookie = "__oxibelt_person_proof"
+token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
+direct_peer_ipv4_prefix_bits = 24
+direct_peer_ipv6_prefix_bits = 56
+# Required when token_bindings contains "tcp_max_hop".
+# tcp_max_hop = 16
+single_use = false
 success_tag = "PersonProof"
 status = 403
 ```
@@ -527,15 +534,36 @@ status = 403
 
 The first cookie value set by the challenge page is a proof submission, not a clearance token. OxiBelt validates the submitted challenge token and nonce on the retried request. If the proof is correct and unexpired, OxiBelt appends a new `HttpOnly` clearance cookie in the response and forwards the request. Later requests present that clearance cookie; OxiBelt validates its signature and expiration without asking the client to recompute the proof.
 
-The server signs challenge and clearance tokens with a startup-local secret. Tokens are bound to the configured cookie name, route name, downstream host, user agent, challenge random value, difficulty, issue time, and expiration time. A valid proof or clearance sets `Request.Client.PersonProof.State` to `valid`; if `success_tag` is configured, request evaluation also emits that tag with value `valid`.
+The server signs challenge and clearance tokens with a startup-local secret. Tokens are always bound to the configured cookie name, downstream host, HTTP method, challenge random value, difficulty, issue time, and expiration time. `token_bindings` adds configured client-context bindings. A valid proof or clearance sets `Request.Client.PersonProof.State` to `valid`; if `success_tag` is configured, request evaluation also emits that tag with value `valid`.
+
+`token_bindings` controls which request attributes must match when a proof or clearance token is reused:
+
+- `user_agent` binds to the `User-Agent` request header.
+- `tls_fingerprint` binds to OxiBelt's negotiated TLS fingerprint. The current implementation hashes the negotiated TLS version, cipher suite, SNI, and ALPN exposed by rustls; it is not a raw JA3/JA4 ClientHello fingerprint.
+- `route` binds to the matched OxiBelt route name from the configuration file.
+- `direct_peer_ip_network_prefix` binds to OxiBelt's direct peer IP after applying `direct_peer_ipv4_prefix_bits` or `direct_peer_ipv6_prefix_bits`.
+- `tcp_max_hop` binds to the configured TCP max-hop policy applied to the downstream socket.
+
+The default `token_bindings` are `["user_agent", "route", "direct_peer_ip_network_prefix"]`, with `/24` for IPv4 and `/56` for IPv6. Set `direct_peer_ipv4_prefix_bits = 32` and `direct_peer_ipv6_prefix_bits = 128` to bind to exact direct peer IPs. The client address used for direct peer bindings is OxiBelt's direct peer address, not a forwarded header value.
+
+When any Person proof policy sets `tcp_max_hop`, OxiBelt applies the strictest configured value listener-wide at accept time using Linux `IP_MINTTL` for IPv4 and `IPV6_MINHOPCOUNT` for IPv6. This is a GTSM-style control: packets whose TTL or hop limit indicates more hops than allowed are rejected before the HTTP request is processed. Because the HTTP route is not known until after TLS and request parsing, this enforcement is not route-local even when the `require_person_proof` action lives on a route rule. Very small values are strict and can block normal clients unless the client network intentionally sends a high TTL or hop limit.
+
+`single_use = true` tracks issued challenge and clearance tokens in OxiBelt memory. Challenge tokens and clearance tokens become single-use; each valid clearance request receives a rotated `HttpOnly` clearance cookie. This better limits copied-token reuse, but users may be challenged again when a browser sends concurrent requests with the same clearance or after OxiBelt restarts.
+
+`token_validity_seconds` controls how long a challenge token and its resulting clearance may be used. `ttl_seconds` and `token_ttl_seconds` are accepted as compatibility aliases.
 
 Validation constraints:
 
 - `require_person_proof` is valid only in request-phase rules.
 - `algorithm` must be `pow_sha256_v1`.
 - `difficulty` must be between `1` and `30`.
-- `ttl_seconds` must be between `1` and `86400`.
+- `token_validity_seconds` must be between `1` and `86400`.
 - `cookie` must be a safe cookie name containing only ASCII letters, digits, `_`, `-`, or `.`.
+- `token_bindings` must not be empty and may not contain duplicates.
+- `direct_peer_ipv4_prefix_bits` must be between `0` and `32`.
+- `direct_peer_ipv6_prefix_bits` must be between `0` and `128`.
+- `tcp_max_hop`, when set, must be between `0` and `255`.
+- `token_bindings` containing `tcp_max_hop` must also set `tcp_max_hop`.
 - `status` must be a valid HTTP status code.
 
 Person proof is a defense-in-depth control for selected traffic. It raises the cost of unwanted automation, but it is not an authentication factor, a rate limiter, a bot reputation service, or proof of benign intent. Normal Bots should be handled by explicit allow policy, and AI-based Agents should be handled by Agent-specific authentication or authorization policy instead of being silently treated as Person traffic.
@@ -756,6 +784,8 @@ TransportMetadata.Tcp: TcpMetadata | Null
 TransportMetadata.Udp: UdpMetadata | Null
 ```
 
+Current implementation note: request rules expose `Network`, `RemoteIp`, `RemotePort`, `IsEncrypted`, `Tcp`, and `Udp`. Local endpoint fields, connection IDs, and byte counters are reserved until connection accounting is added.
+
 ### 8.6 TCP metadata
 
 ```text
@@ -763,9 +793,12 @@ TcpMetadata.State: 'accepted' | 'connected' | 'closing' | 'closed'
 TcpMetadata.TlsDetected: Bool
 TcpMetadata.Alpn: String | Null
 TcpMetadata.Sni: String | Null
+TcpMetadata.MaxHop: Int | Null
 TcpMetadata.Mss: Int | Null
 TcpMetadata.RttMs: Int | Null
 ```
+
+Current implementation note: `Sni`, `Alpn`, and `MaxHop` are available for request rules when the downstream connection supplies those values. `Mss` and `RttMs` are reserved and currently evaluate to `null`.
 
 ### 8.7 UDP metadata
 
@@ -826,6 +859,7 @@ TlsMetadata.Version: String | Null
 TlsMetadata.CipherSuite: String | Null
 TlsMetadata.Sni: String | Null
 TlsMetadata.Alpn: String | Null
+TlsMetadata.Fingerprint: String | Null
 TlsMetadata.ClientCertificatePresent: Bool
 ```
 

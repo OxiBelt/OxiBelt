@@ -387,8 +387,14 @@ when = "Request.Client.PersonProof.State != 'valid' && Request.Client.Bot.Dispos
 type = "require_person_proof"
 algorithm = "pow_sha256_v1"
 difficulty = 18
-ttl_seconds = 300
+token_validity_seconds = 300
 cookie = "__oxibelt_person_proof"
+token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
+direct_peer_ipv4_prefix_bits = 24
+direct_peer_ipv6_prefix_bits = 56
+# Required when token_bindings contains "tcp_max_hop".
+# tcp_max_hop = 16
+single_use = false
 success_tag = "PersonProof"
 ```
 

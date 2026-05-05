@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv6Addr};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -10,13 +13,15 @@ use ring::rand::{SecureRandom, SystemRandom};
 use crate::config::Config;
 
 use super::{
-  HeaderMutation, PersonProofAlgorithm, WafActionConfig, WafRequestInput, WafTerminalResponse,
+  HeaderMutation, PersonProofAlgorithm, PersonProofTokenBinding, WafActionConfig, WafRequestInput,
+  WafTerminalResponse,
 };
 
 #[derive(Clone)]
 pub(super) struct PersonProofEngine {
   secret: [u8; 32],
   policies: Vec<PersonProofPolicy>,
+  active_reuse_tokens: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +30,11 @@ pub(super) struct PersonProofPolicy {
   pub difficulty: u8,
   pub ttl_seconds: u64,
   pub cookie: String,
+  pub token_bindings: Vec<PersonProofTokenBinding>,
+  pub direct_peer_ipv4_prefix_bits: u8,
+  pub direct_peer_ipv6_prefix_bits: u8,
+  pub tcp_max_hop: Option<u8>,
+  pub single_use: bool,
   pub success_tag: Option<String>,
   pub status: u16,
 }
@@ -101,7 +111,19 @@ impl PersonProofEngine {
       collect_policies(&route.waf.rules, &mut policies);
     }
 
-    Ok(Self { secret, policies })
+    Ok(Self {
+      secret,
+      policies,
+      active_reuse_tokens: Arc::new(Mutex::new(HashMap::new())),
+    })
+  }
+
+  pub(super) fn tcp_max_hop(&self) -> Option<u8> {
+    self
+      .policies
+      .iter()
+      .filter_map(|policy| policy.tcp_max_hop)
+      .min()
   }
 
   pub(super) fn evaluate_request(&self, input: WafRequestInput<'_>) -> PersonProofRequestStatus {
@@ -180,6 +202,9 @@ impl PersonProofEngine {
       .context("person proof expiration overflow")?;
     let random = random_hex(16)?;
     let token = self.sign_token(input, &policy, now, expires, &random);
+    if policy.single_use {
+      self.remember_reuse_token(&challenge_reuse_key(&token), expires, now)?;
+    }
     let csp_nonce = random_hex(16)?;
     let body = challenge_html(&policy, &token, expires, &csp_nonce);
     let mut response = WafTerminalResponse {
@@ -275,14 +300,33 @@ impl PersonProofEngine {
     }
 
     if hash_meets_difficulty(format!("{token}.{nonce}").as_bytes(), fields.difficulty) {
+      if policy.single_use && !self.consume_reuse_token(&challenge_reuse_key(token), now)? {
+        bail!("person proof challenge token was already used");
+      }
       status.state = PersonProofState::Valid;
-      status.clearance = Some(PersonProofClearance {
-        cookie: policy.cookie.clone(),
-        value: self.sign_clearance_token(input, policy, &fields),
-        max_age_seconds: remaining_seconds(now, fields.expires),
-      });
+      status.clearance = Some(self.issue_clearance(input, policy, &fields, now)?);
     }
     Ok(status)
+  }
+
+  fn issue_clearance(
+    &self,
+    input: WafRequestInput<'_>,
+    policy: &PersonProofPolicy,
+    fields: &TokenFields<'_>,
+    now: i64,
+  ) -> anyhow::Result<PersonProofClearance> {
+    let value = self.sign_clearance_token(input, policy, fields);
+
+    if policy.single_use {
+      self.remember_reuse_token(&clearance_reuse_key(&value), fields.expires, now)?;
+    }
+
+    Ok(PersonProofClearance {
+      cookie: policy.cookie.clone(),
+      value,
+      max_age_seconds: remaining_seconds(now, fields.expires),
+    })
   }
 
   fn sign_token(
@@ -382,21 +426,60 @@ impl PersonProofEngine {
       .map_err(|_| anyhow!("person proof clearance signature is invalid"))?;
 
     let now = now_unix_ms()?;
-    let state = if now > fields.expires {
-      PersonProofState::Expired
-    } else {
-      PersonProofState::Valid
-    };
-
-    Ok(PersonProofRequestStatus {
-      state,
+    let mut status = PersonProofRequestStatus {
+      state: if now > fields.expires {
+        PersonProofState::Expired
+      } else {
+        PersonProofState::Valid
+      },
       method: Some(policy.algorithm.as_str()),
       difficulty: Some(fields.difficulty),
       issued_at_unix_ms: Some(fields.issued),
       expires_at_unix_ms: Some(fields.expires),
       cookie: Some(policy.cookie.clone()),
       clearance: None,
-    })
+    };
+
+    if status.state != PersonProofState::Valid {
+      return Ok(status);
+    }
+
+    if policy.single_use {
+      if !self.consume_reuse_token(&clearance_reuse_key(proof), now)? {
+        bail!("person proof clearance token was already used");
+      }
+
+      let random = random_hex(16)?;
+      let rotated_fields = TokenFields {
+        issued: now,
+        expires: fields.expires,
+        difficulty: fields.difficulty,
+        random: &random,
+        mac: "",
+      };
+      status.clearance = Some(self.issue_clearance(input, policy, &rotated_fields, now)?);
+    }
+
+    Ok(status)
+  }
+
+  fn remember_reuse_token(&self, key: &str, expires: i64, now: i64) -> anyhow::Result<()> {
+    let mut active = self
+      .active_reuse_tokens
+      .lock()
+      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
+    purge_expired_reuse_tokens(&mut active, now);
+    active.insert(key.to_string(), expires);
+    Ok(())
+  }
+
+  fn consume_reuse_token(&self, key: &str, now: i64) -> anyhow::Result<bool> {
+    let mut active = self
+      .active_reuse_tokens
+      .lock()
+      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
+    purge_expired_reuse_tokens(&mut active, now);
+    Ok(active.remove(key).is_some())
   }
 }
 
@@ -408,6 +491,11 @@ fn collect_policies(rules: &[super::WafRuleConfig], policies: &mut Vec<PersonPro
         difficulty,
         ttl_seconds,
         cookie,
+        token_bindings,
+        direct_peer_ipv4_prefix_bits,
+        direct_peer_ipv6_prefix_bits,
+        tcp_max_hop,
+        single_use,
         success_tag,
         status,
       } = action
@@ -417,6 +505,11 @@ fn collect_policies(rules: &[super::WafRuleConfig], policies: &mut Vec<PersonPro
           difficulty: *difficulty,
           ttl_seconds: *ttl_seconds,
           cookie: cookie.clone(),
+          token_bindings: token_bindings.clone(),
+          direct_peer_ipv4_prefix_bits: *direct_peer_ipv4_prefix_bits,
+          direct_peer_ipv6_prefix_bits: *direct_peer_ipv6_prefix_bits,
+          tcp_max_hop: *tcp_max_hop,
+          single_use: *single_use,
           success_tag: success_tag.clone(),
           status: *status,
         });
@@ -433,19 +526,13 @@ fn token_payload(
   difficulty: u8,
   random: &str,
 ) -> String {
-  let user_agent = input
-    .headers
-    .get(http::header::USER_AGENT)
-    .and_then(|value| value.to_str().ok())
-    .unwrap_or_default();
+  let token_bindings = token_binding_payload(input, policy);
   format!(
-    "v1\n{}\n{issued}\n{expires}\n{difficulty}\n{}\n{}\n{}\n{}\n{}\n{random}",
+    "v1\n{}\n{issued}\n{expires}\n{difficulty}\n{}\n{}\n{}\n{token_bindings}\n{random}",
     policy.algorithm.as_str(),
     policy.cookie,
-    input.route_name,
     input.downstream_host,
-    input.method.as_str(),
-    user_agent
+    input.method.as_str()
   )
 }
 
@@ -454,23 +541,108 @@ fn clearance_payload(
   policy: &PersonProofPolicy,
   fields: &TokenFields<'_>,
 ) -> String {
-  let user_agent = input
-    .headers
-    .get(http::header::USER_AGENT)
-    .and_then(|value| value.to_str().ok())
-    .unwrap_or_default();
+  let token_bindings = token_binding_payload(input, policy);
   format!(
-    "clearance\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+    "clearance\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{token_bindings}\n{}",
     policy.algorithm.as_str(),
     policy.cookie,
-    input.route_name,
     input.downstream_host,
-    user_agent,
+    input.method.as_str(),
     fields.issued,
     fields.expires,
     fields.difficulty,
     fields.random
   )
+}
+
+fn token_binding_payload(input: WafRequestInput<'_>, policy: &PersonProofPolicy) -> String {
+  policy
+    .token_bindings
+    .iter()
+    .map(|binding| {
+      format!(
+        "{}={}",
+        binding.as_str(),
+        token_binding_value(input, policy, *binding)
+      )
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn token_binding_value(
+  input: WafRequestInput<'_>,
+  policy: &PersonProofPolicy,
+  binding: PersonProofTokenBinding,
+) -> String {
+  match binding {
+    PersonProofTokenBinding::UserAgent => input
+      .headers
+      .get(http::header::USER_AGENT)
+      .and_then(|value| value.to_str().ok())
+      .unwrap_or_default()
+      .to_string(),
+    PersonProofTokenBinding::TlsFingerprint => input
+      .tls
+      .fingerprint
+      .as_deref()
+      .unwrap_or("unavailable")
+      .to_string(),
+    PersonProofTokenBinding::Route => input.route_name.to_string(),
+    PersonProofTokenBinding::DirectPeerIpNetworkPrefix => direct_peer_ip_network_prefix(
+      input.peer_addr.ip(),
+      policy.direct_peer_ipv4_prefix_bits,
+      policy.direct_peer_ipv6_prefix_bits,
+    ),
+    PersonProofTokenBinding::TcpMaxHop => format!(
+      "configured={};applied={}",
+      policy
+        .tcp_max_hop
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unconfigured".to_string()),
+      input
+        .tcp_max_hop
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unavailable".to_string())
+    ),
+  }
+}
+
+fn direct_peer_ip_network_prefix(ip: IpAddr, ipv4_prefix_bits: u8, ipv6_prefix_bits: u8) -> String {
+  match ip {
+    IpAddr::V4(addr) => {
+      let bits = ipv4_prefix_bits.min(32);
+      let value = u32::from(addr);
+      let mask = if bits == 0 {
+        0
+      } else {
+        u32::MAX << (32 - bits)
+      };
+      format!("ipv4:{}/{}", std::net::Ipv4Addr::from(value & mask), bits)
+    }
+    IpAddr::V6(addr) => {
+      let bits = ipv6_prefix_bits.min(128);
+      let value = u128::from(addr);
+      let mask = if bits == 0 {
+        0
+      } else {
+        u128::MAX << (128 - bits)
+      };
+      format!("ipv6:{}/{}", Ipv6Addr::from(value & mask), bits)
+    }
+  }
+}
+
+fn challenge_reuse_key(token: &str) -> String {
+  format!("challenge:{token}")
+}
+
+fn clearance_reuse_key(token: &str) -> String {
+  format!("clearance:{token}")
+}
+
+fn purge_expired_reuse_tokens(active: &mut HashMap<String, i64>, now: i64) {
+  active.retain(|_, expires| *expires >= now);
 }
 
 fn find_cookie<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {

@@ -85,6 +85,68 @@ fail_with_diagnostics() {
   exit 1
 }
 
+webdriver_navigate() {
+  local url="$1"
+
+  curl --silent --show-error --fail-with-body \
+    --header "Content-Type: application/json" \
+    --request POST \
+    --data "$(jq -n --arg url "${url}" '{url: $url}')" \
+    "${driver_base_url}/session/${session_id}/url" >/dev/null
+}
+
+webdriver_execute_sync() {
+  local script="$1"
+
+  curl --silent --show-error --fail-with-body \
+    --header "Content-Type: application/json" \
+    --request POST \
+    --data "$(jq -n --arg script "${script}" '{script: $script, args: []}')" \
+    "${driver_base_url}/session/${session_id}/execute/sync" | jq -r ".value"
+}
+
+webdriver_body_text() {
+  webdriver_execute_sync "return document.body.innerText;"
+}
+
+wait_for_upstream_json() {
+  local expected_path="$1"
+  local label="$2"
+  local body_text=""
+
+  for _ in {1..30}; do
+    if body_text="$(webdriver_body_text 2>/dev/null)"; then
+      if jq -e \
+        --arg expected_path "${expected_path}" \
+        '.upstream == "browser-upstream"
+          and .scheme == "http"
+          and .method == "GET"
+          and .path == $expected_path
+          and .headers["x-forwarded-proto"] == "https"
+          and .headers["x-forwarded-host"] == "localhost"' <<<"${body_text}" >/dev/null 2>&1; then
+        echo "${body_text}"
+        return 0
+      fi
+    fi
+
+    sleep 1
+  done
+
+  echo "Unexpected ${browser} ${label} response:" >&2
+  if [[ -n "${body_text}" ]]; then
+    echo "${body_text}" >&2
+  fi
+  show_diagnostics
+  exit 1
+}
+
+webdriver_cookie() {
+  local name="$1"
+
+  curl --silent --show-error --fail-with-body \
+    "${driver_base_url}/session/${session_id}/cookie/${name}"
+}
+
 cleanup() {
   if [[ -n "${session_id}" && -n "${driver_base_url}" ]]; then
     curl --silent --show-error --fail-with-body \
@@ -131,6 +193,7 @@ case "${browser}" in
           alwaysMatch: {
             browserName: "chrome",
             acceptInsecureCerts: true,
+            pageLoadStrategy: "none",
             "goog:chromeOptions": {
               binary: $binary,
               args: [
@@ -155,6 +218,7 @@ case "${browser}" in
           alwaysMatch: {
             browserName: "firefox",
             acceptInsecureCerts: true,
+            pageLoadStrategy: "none",
             "moz:firefoxOptions": {
               binary: $binary,
               args: [
@@ -250,9 +314,25 @@ deflate = true
 zstd = true
 
 [waf]
-enabled = false
+enabled = true
 mode = "enforcing"
 fail_policy = "closed"
+
+[[waf.rules]]
+name = "browser-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.startsWith('/app/person-proof') && Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__webdriver_person_proof"
+token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
+direct_peer_ipv4_prefix_bits = 32
+single_use = true
+success_tag = "PersonProof"
 
 [[upstreams]]
 name = "browser-upstream"
@@ -363,35 +443,50 @@ if [[ -z "${session_id}" ]]; then
 fi
 
 test_url="https://localhost:${proxy_port}/app/webdriver?browser=${browser}"
-curl --silent --show-error --fail-with-body \
-  --header "Content-Type: application/json" \
-  --request POST \
-  --data "$(jq -n --arg url "${test_url}" '{url: $url}')" \
-  "${driver_base_url}/session/${session_id}/url" >/dev/null
+webdriver_navigate "${test_url}"
+wait_for_upstream_json "/origin/app/webdriver?browser=${browser}" "proxy" >/dev/null
 
-result="$(
-  curl --silent --show-error --fail-with-body \
-    --header "Content-Type: application/json" \
-    --request POST \
-    --data '{
-      "script": "return document.body.innerText;",
-      "args": []
-    }' \
-    "${driver_base_url}/session/${session_id}/execute/sync" | jq -r ".value"
+protected_url="https://localhost:${proxy_port}/app/person-proof?browser=${browser}"
+webdriver_navigate "${protected_url}"
+protected_result="$(
+  wait_for_upstream_json \
+    "/origin/app/person-proof?browser=${browser}" \
+    "person proof challenge"
 )"
 
 if ! jq -e \
-  --arg browser "${browser}" \
-  '.upstream == "browser-upstream"
-    and .scheme == "http"
-    and .method == "GET"
-    and .path == ("/origin/app/webdriver?browser=" + $browser)
-    and .headers["x-forwarded-proto"] == "https"
-    and .headers["x-forwarded-host"] == "localhost"' <<<"${result}" >/dev/null; then
-  echo "Unexpected ${browser} proxy response:" >&2
-  echo "${result}" >&2
+  '.headers.cookie | contains("__webdriver_person_proof=v1.")' <<<"${protected_result}" >/dev/null; then
+  echo "Expected ${browser} person proof request to submit a solved proof cookie:" >&2
+  echo "${protected_result}" >&2
   show_diagnostics
   exit 1
 fi
 
-echo "${browser} WebDriver reached OxiBelt and received the expected proxied upstream response."
+clearance_cookie="$(webdriver_cookie "__webdriver_person_proof")"
+if ! jq -e \
+  '.value.name == "__webdriver_person_proof"
+    and (.value.value | startswith("clearance.v1."))
+    and .value.secure == true' <<<"${clearance_cookie}" >/dev/null; then
+  echo "Expected ${browser} to receive a secure person proof clearance cookie:" >&2
+  echo "${clearance_cookie}" >&2
+  show_diagnostics
+  exit 1
+fi
+
+clearance_url="https://localhost:${proxy_port}/app/person-proof/clearance?browser=${browser}"
+webdriver_navigate "${clearance_url}"
+clearance_result="$(
+  wait_for_upstream_json \
+    "/origin/app/person-proof/clearance?browser=${browser}" \
+    "person proof clearance"
+)"
+
+if ! jq -e \
+  '.headers.cookie | contains("__webdriver_person_proof=clearance.v1.")' <<<"${clearance_result}" >/dev/null; then
+  echo "Expected ${browser} person proof clearance request to reuse the clearance cookie:" >&2
+  echo "${clearance_result}" >&2
+  show_diagnostics
+  exit 1
+fi
+
+echo "${browser} WebDriver reached OxiBelt, solved the person proof challenge, and reused the clearance cookie."

@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("oxibelt-proxy intentionally targets Linux only.");
@@ -16,6 +16,7 @@ pub mod routes;
 pub mod runtime;
 pub mod server;
 pub mod state;
+mod tcp_hop;
 pub mod tls;
 pub mod waf;
 
