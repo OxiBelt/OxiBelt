@@ -11,8 +11,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build (${{ matrix.runner }} with rust-${{ matrix.rust_version }})
+  test:
+    name: Test (${{ matrix.runner }} with rust-${{ matrix.rust_version }})
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -44,8 +44,8 @@ jobs:
       - name: Cargo test
         run: cargo test --all-features --locked
 
-  build-riscv64-qemu:
-    name: Build (riscv64 via QEMU, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
+  test-riscv64-qemu:
+    name: Test (riscv64 via QEMU, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,6 +111,9 @@ jobs:
   generate-test-matrices:
     name: Generate integration test matrices
     runs-on: ubuntu-latest
+    needs:
+      - test
+      - test-riscv64-qemu
     permissions:
       contents: read
     outputs:
@@ -143,6 +146,9 @@ jobs:
   linux-target-builds:
     name: Linux target builds
     runs-on: ubuntu-latest
+    needs:
+      - test
+      - test-riscv64-qemu
     permissions:
       contents: read
 
@@ -171,6 +177,9 @@ jobs:
   docker-alpine-musl-image-amd64:
     name: Docker image (Alpine musl, amd64)
     runs-on: ubuntu-latest
+    needs:
+      - test
+      - test-riscv64-qemu
     permissions:
       contents: read
 
@@ -200,6 +209,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+    needs:
+      - test
+      - test-riscv64-qemu
     strategy:
       fail-fast: false
       matrix:
