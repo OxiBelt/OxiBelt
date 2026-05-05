@@ -539,10 +539,12 @@ The server signs challenge and clearance tokens with a startup-local secret. Tok
 `token_bindings` controls which request attributes must match when a proof or clearance token is reused:
 
 - `user_agent` binds to the `User-Agent` request header.
-- `tls_fingerprint` binds to OxiBelt's negotiated TLS fingerprint. The current implementation hashes the negotiated TLS version, cipher suite, SNI, and ALPN exposed by rustls; it is not a raw JA3/JA4 ClientHello fingerprint.
+- `tls_fingerprint` binds to OxiBelt's TLS fingerprint. The current implementation hashes a `rustls-negotiated-v2` payload containing ClientHello-offered cipher suite identifiers, named/key-exchange groups, signature schemes, derived cipher-suite integrity/hash groups, and the selected TLS version, cipher suite, key-exchange group, integrity/hash group, SNI, and ALPN exposed by rustls; it is not a raw JA3/JA4 ClientHello fingerprint.
 - `route` binds to the matched OxiBelt route name from the configuration file.
 - `direct_peer_ip_network_prefix` binds to OxiBelt's direct peer IP after applying `direct_peer_ipv4_prefix_bits` or `direct_peer_ipv6_prefix_bits`.
 - `tcp_max_hop` binds to the configured TCP max-hop policy applied to the downstream socket.
+
+The same normalized request-side binding values are available in OxiRule expressions through `Request.TokenBindings`. For example, `Request.TokenBindings.Route` exposes the route binding value, and `Request.TokenBindings.directPeerIpNetworkPrefix(32, 128)` exposes the exact-IP network prefix form used when a policy overrides the default prefix sizes.
 
 The default `token_bindings` are `["user_agent", "route", "direct_peer_ip_network_prefix"]`, with `/24` for IPv4 and `/56` for IPv6. Set `direct_peer_ipv4_prefix_bits = 32` and `direct_peer_ipv6_prefix_bits = 128` to bind to exact direct peer IPs. The client address used for direct peer bindings is OxiBelt's direct peer address, not a forwarded header value.
 
@@ -737,6 +739,7 @@ Request.Cookies: CookieMap
 Request.Body: BodyView
 Request.Tls: TlsMetadata | Null
 Request.Tags: TagMap
+Request.TokenBindings: PersonProofTokenBindingView
 ```
 
 ### 8.3 Response object
@@ -767,6 +770,22 @@ ClientMetadata.UserAgent: String | Null
 ClientMetadata.GeoCountry: String | Null
 ClientMetadata.Asn: Int | Null
 ```
+
+### 8.4.1 Person proof token binding view
+
+`Request.TokenBindings` exposes the normalized request-side values that correspond to `require_person_proof.token_bindings`.
+
+```text
+PersonProofTokenBindingView.UserAgent: String
+PersonProofTokenBindingView.TlsFingerprint: String
+PersonProofTokenBindingView.Route: String
+PersonProofTokenBindingView.DirectPeerIpNetworkPrefix: String
+PersonProofTokenBindingView.TcpMaxHop: String
+PersonProofTokenBindingView.directPeerIpNetworkPrefix(Ipv4PrefixBits: Int, Ipv6PrefixBits: Int): String
+PersonProofTokenBindingView.tcpMaxHop(ConfiguredMaxHop: Int): String
+```
+
+`UserAgent` is the `User-Agent` header or an empty string. `TlsFingerprint` is the `rustls-negotiated-v2` TLS fingerprint or `unavailable`. `Route` is the matched OxiBelt route name. `DirectPeerIpNetworkPrefix` uses the default person-proof prefix sizes, `/24` for IPv4 and `/56` for IPv6. Use `directPeerIpNetworkPrefix(...)` when a rule needs the canonical value for custom prefix sizes. `TcpMaxHop` uses an unconfigured policy value with the applied downstream max-hop value; use `tcpMaxHop(...)` when a rule needs the canonical value for a configured `tcp_max_hop` policy.
 
 ### 8.5 Transport metadata
 

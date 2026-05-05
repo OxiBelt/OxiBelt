@@ -594,21 +594,17 @@ fn token_binding_value(
       policy.direct_peer_ipv4_prefix_bits,
       policy.direct_peer_ipv6_prefix_bits,
     ),
-    PersonProofTokenBinding::TcpMaxHop => format!(
-      "configured={};applied={}",
-      policy
-        .tcp_max_hop
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unconfigured".to_string()),
-      input
-        .tcp_max_hop
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unavailable".to_string())
-    ),
+    PersonProofTokenBinding::TcpMaxHop => {
+      tcp_max_hop_binding_value(policy.tcp_max_hop, input.tcp_max_hop)
+    }
   }
 }
 
-fn direct_peer_ip_network_prefix(ip: IpAddr, ipv4_prefix_bits: u8, ipv6_prefix_bits: u8) -> String {
+pub(super) fn direct_peer_ip_network_prefix(
+  ip: IpAddr,
+  ipv4_prefix_bits: u8,
+  ipv6_prefix_bits: u8,
+) -> String {
   match ip {
     IpAddr::V4(addr) => {
       let bits = ipv4_prefix_bits.min(32);
@@ -631,6 +627,18 @@ fn direct_peer_ip_network_prefix(ip: IpAddr, ipv4_prefix_bits: u8, ipv6_prefix_b
       format!("ipv6:{}/{}", Ipv6Addr::from(value & mask), bits)
     }
   }
+}
+
+pub(super) fn tcp_max_hop_binding_value(configured: Option<u8>, applied: Option<u8>) -> String {
+  format!(
+    "configured={};applied={}",
+    configured
+      .map(|value| value.to_string())
+      .unwrap_or_else(|| "unconfigured".to_string()),
+    applied
+      .map(|value| value.to_string())
+      .unwrap_or_else(|| "unavailable".to_string())
+  )
 }
 
 fn challenge_reuse_key(token: &str) -> String {

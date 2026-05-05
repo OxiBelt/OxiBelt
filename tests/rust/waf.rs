@@ -158,6 +158,70 @@ body = "blocked transport TLS metadata"
 }
 
 #[test]
+fn request_rule_can_match_person_proof_token_binding_inputs() {
+    let temp_dir = common::TempDir::new("waf-token-binding-inputs");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-token-binding-inputs");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "reject-token-binding-inputs"
+phase = "request"
+priority = 10
+when = """
+Request.TokenBindings.UserAgent == 'Mozilla/5.0 TokenBindingTest' &&
+Request.TokenBindings.TlsFingerprint == 'browser-fingerprint' &&
+Request.TokenBindings.Route == 'app-root' &&
+Request.TokenBindings.DirectPeerIpNetworkPrefix == 'ipv4:203.0.113.0/24' &&
+Request.TokenBindings.TcpMaxHop == 'configured=unconfigured;applied=16' &&
+Request.TokenBindings.directPeerIpNetworkPrefix(32, 128) == 'ipv4:203.0.113.10/32' &&
+Request.TokenBindings.tcpMaxHop(16) == 'configured=16;applied=16'
+"""
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked token binding inputs"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::USER_AGENT,
+        HeaderValue::from_static("Mozilla/5.0 TokenBindingTest"),
+    );
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let rejected = engine.evaluate_request(request_input_with_transport(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        Some(16),
+        &test_tls("browser-fingerprint"),
+    ));
+
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn request_tags_are_visible_to_response_rules() {
     let temp_dir = common::TempDir::new("waf-tags");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-tags");

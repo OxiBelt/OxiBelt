@@ -1358,6 +1358,7 @@ enum ObjectRef {
   RequestBody,
   RequestTags,
   RequestTls,
+  RequestTokenBindings,
   Response,
   ResponseHttp,
   ResponseHeaders,
@@ -1413,6 +1414,7 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::Request, "Body") => Ok(Value::Object(ObjectRef::RequestBody)),
     (ObjectRef::Request, "Tags") => Ok(Value::Object(ObjectRef::RequestTags)),
     (ObjectRef::Request, "Tls") => Ok(Value::Object(ObjectRef::RequestTls)),
+    (ObjectRef::Request, "TokenBindings") => Ok(Value::Object(ObjectRef::RequestTokenBindings)),
     (ObjectRef::RequestClient, "Kind") => Ok(Value::String(
       if ctx.person_proof.state == PersonProofState::Valid {
         "person"
@@ -1575,6 +1577,25 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         .unwrap_or(Value::Null),
     ),
     (ObjectRef::RequestTls, "ClientCertificatePresent") => Ok(Value::Bool(false)),
+    (ObjectRef::RequestTokenBindings, "UserAgent") => Ok(Value::String(
+      request_token_binding_value(ctx.request, PersonProofTokenBinding::UserAgent),
+    )),
+    (ObjectRef::RequestTokenBindings, "TlsFingerprint") => Ok(Value::String(
+      request_token_binding_value(ctx.request, PersonProofTokenBinding::TlsFingerprint),
+    )),
+    (ObjectRef::RequestTokenBindings, "Route") => Ok(Value::String(request_token_binding_value(
+      ctx.request,
+      PersonProofTokenBinding::Route,
+    ))),
+    (ObjectRef::RequestTokenBindings, "DirectPeerIpNetworkPrefix") => {
+      Ok(Value::String(request_token_binding_value(
+        ctx.request,
+        PersonProofTokenBinding::DirectPeerIpNetworkPrefix,
+      )))
+    }
+    (ObjectRef::RequestTokenBindings, "TcpMaxHop") => Ok(Value::String(
+      request_token_binding_value(ctx.request, PersonProofTokenBinding::TcpMaxHop),
+    )),
     (ObjectRef::Response, "Id") => Ok(Value::String(String::new())),
     (ObjectRef::Response, "ReceivedAtUnixMs") => Ok(Value::Int(0)),
     (ObjectRef::Response, "Protocol") => Ok(Value::String(
@@ -1692,6 +1713,7 @@ fn eval_call(
     Value::Object(ObjectRef::RequestQueryParams) => eval_query_call(ctx, method, args),
     Value::Object(ObjectRef::RequestCookies) => eval_cookie_call(ctx, method, args),
     Value::Object(ObjectRef::RequestTags) => eval_tag_call(ctx.request.tags, method, args, ctx),
+    Value::Object(ObjectRef::RequestTokenBindings) => eval_token_binding_call(ctx, method, args),
     Value::Object(ObjectRef::RequestBody) | Value::Object(ObjectRef::ResponseBody) => {
       eval_body_call(method)
     }
@@ -1864,6 +1886,63 @@ fn eval_tag_call(
   }
 }
 
+fn eval_token_binding_call(
+  ctx: &EvalContext<'_>,
+  method: &str,
+  args: &[Value],
+) -> anyhow::Result<Value> {
+  match method {
+    "directPeerIpNetworkPrefix" => {
+      let ipv4_prefix_bits = expect_u8_arg(args, 0, 32, "IPv4 prefix bits")?;
+      let ipv6_prefix_bits = expect_u8_arg(args, 1, 128, "IPv6 prefix bits")?;
+      Ok(Value::String(person_proof::direct_peer_ip_network_prefix(
+        ctx.request.peer_addr.ip(),
+        ipv4_prefix_bits,
+        ipv6_prefix_bits,
+      )))
+    }
+    "tcpMaxHop" => {
+      let configured = expect_u8_arg(args, 0, 255, "configured TCP max-hop")?;
+      Ok(Value::String(person_proof::tcp_max_hop_binding_value(
+        Some(configured),
+        ctx.request.tcp_max_hop,
+      )))
+    }
+    _ => bail!("unknown PersonProofTokenBindings method {method}"),
+  }
+}
+
+fn request_token_binding_value(
+  input: WafRequestInput<'_>,
+  binding: PersonProofTokenBinding,
+) -> String {
+  match binding {
+    PersonProofTokenBinding::UserAgent => input
+      .headers
+      .get(USER_AGENT)
+      .and_then(|value| value.to_str().ok())
+      .unwrap_or_default()
+      .to_string(),
+    PersonProofTokenBinding::TlsFingerprint => input
+      .tls
+      .fingerprint
+      .as_deref()
+      .unwrap_or("unavailable")
+      .to_string(),
+    PersonProofTokenBinding::Route => input.route_name.to_string(),
+    PersonProofTokenBinding::DirectPeerIpNetworkPrefix => {
+      person_proof::direct_peer_ip_network_prefix(
+        input.peer_addr.ip(),
+        default_person_proof_direct_peer_ipv4_prefix_bits(),
+        default_person_proof_direct_peer_ipv6_prefix_bits(),
+      )
+    }
+    PersonProofTokenBinding::TcpMaxHop => {
+      person_proof::tcp_max_hop_binding_value(None, input.tcp_max_hop)
+    }
+  }
+}
+
 fn eval_pair_map_call(
   pairs: &[(String, String)],
   method: &str,
@@ -2002,6 +2081,24 @@ fn expect_string_arg(args: &[Value], index: usize) -> anyhow::Result<&str> {
     .get(index)
     .ok_or_else(|| anyhow!("missing string argument {index}"))?
     .as_string()
+}
+
+fn expect_int_arg(args: &[Value], index: usize) -> anyhow::Result<i64> {
+  match args
+    .get(index)
+    .ok_or_else(|| anyhow!("missing integer argument {index}"))?
+  {
+    Value::Int(value) => Ok(*value),
+    value => bail!("expected Int argument {index}, got {:?}", value),
+  }
+}
+
+fn expect_u8_arg(args: &[Value], index: usize, max: i64, label: &str) -> anyhow::Result<u8> {
+  let value = expect_int_arg(args, index)?;
+  if !(0..=max).contains(&value) {
+    bail!("{label} must be between 0 and {max}");
+  }
+  Ok(value as u8)
 }
 
 fn header_name(name: &str) -> anyhow::Result<HeaderName> {

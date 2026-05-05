@@ -8,7 +8,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use ring::digest;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::LazyConfigAcceptor;
 use tracing::{error, info, warn};
 
 use crate::proxy::http;
@@ -21,7 +21,6 @@ pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
   let listener = TcpListener::bind(bind)
     .await
     .with_context(|| format!("failed to bind downstream listener to {bind}"))?;
-  let acceptor = TlsAcceptor::from(state.tls_server_config.clone());
 
   info!(bind = %bind, "downstream HTTPS listener started");
 
@@ -43,9 +42,8 @@ pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
             };
 
             let connection_state = state.clone();
-            let connection_acceptor = acceptor.clone();
             tokio::spawn(async move {
-                if let Err(error) = handle_connection(stream, peer_addr, connection_acceptor, connection_state).await {
+                if let Err(error) = handle_connection(stream, peer_addr, connection_state).await {
                     warn!(peer = %peer_addr, error = %error, "downstream connection closed with error");
                 }
             });
@@ -57,7 +55,6 @@ pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
 async fn handle_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
-  acceptor: TlsAcceptor,
   state: Arc<AppState>,
 ) -> anyhow::Result<()> {
   let tcp_max_hop = state.waf.person_proof_tcp_max_hop();
@@ -66,8 +63,12 @@ async fn handle_connection(
       .with_context(|| format!("failed to apply TCP max hop {max_hop} for {peer_addr}"))?;
   }
 
-  let tls_stream = acceptor
-    .accept(stream)
+  let start = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream)
+    .await
+    .context("TLS ClientHello failed")?;
+  let client_hello_metadata = client_hello_fingerprint_metadata(start.client_hello());
+  let tls_stream = start
+    .into_stream(state.tls_server_config.clone())
     .await
     .context("TLS handshake failed")?;
 
@@ -77,7 +78,10 @@ async fn handle_connection(
     .alpn_protocol()
     .map(|proto| proto.to_vec())
     .unwrap_or_else(|| b"http/1.1".to_vec());
-  let tls_metadata = Arc::new(downstream_tls_metadata(tls_stream.get_ref().1));
+  let tls_metadata = Arc::new(downstream_tls_metadata(
+    tls_stream.get_ref().1,
+    &client_hello_metadata,
+  ));
 
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
@@ -110,20 +114,74 @@ async fn handle_connection(
   Ok(())
 }
 
-fn downstream_tls_metadata(connection: &rustls::ServerConnection) -> WafTlsMetadata {
+#[derive(Debug, Clone, Default)]
+struct ClientHelloFingerprintMetadata {
+  cipher_suites: String,
+  key_exchange_groups: String,
+  signature_schemes: String,
+  data_integrity_groups: String,
+}
+
+fn client_hello_fingerprint_metadata(
+  client_hello: rustls::server::ClientHello<'_>,
+) -> ClientHelloFingerprintMetadata {
+  let cipher_suites = client_hello
+    .cipher_suites()
+    .iter()
+    .map(|suite| format!("{suite:?}"))
+    .collect::<Vec<_>>();
+  let key_exchange_groups = client_hello
+    .named_groups()
+    .unwrap_or_default()
+    .iter()
+    .map(|group| format!("{group:?}"))
+    .collect::<Vec<_>>();
+  let signature_schemes = client_hello
+    .signature_schemes()
+    .iter()
+    .map(|scheme| format!("{scheme:?}"))
+    .collect::<Vec<_>>();
+  let data_integrity_groups = unique_nonempty(
+    cipher_suites
+      .iter()
+      .filter_map(|suite| cipher_suite_data_integrity_group(suite))
+      .map(str::to_string),
+  );
+
+  ClientHelloFingerprintMetadata {
+    cipher_suites: cipher_suites.join(","),
+    key_exchange_groups: key_exchange_groups.join(","),
+    signature_schemes: signature_schemes.join(","),
+    data_integrity_groups: data_integrity_groups.join(","),
+  }
+}
+
+fn downstream_tls_metadata(
+  connection: &rustls::ServerConnection,
+  client_hello: &ClientHelloFingerprintMetadata,
+) -> WafTlsMetadata {
   let version = connection
     .protocol_version()
     .map(|version| format!("{version:?}"));
   let cipher_suite = connection
     .negotiated_cipher_suite()
     .map(|suite| format!("{:?}", suite.suite()));
+  let key_exchange_group = connection
+    .negotiated_key_exchange_group()
+    .map(|group| format!("{:?}", group.name()));
+  let data_integrity_group = connection
+    .negotiated_cipher_suite()
+    .map(|suite| negotiated_cipher_suite_data_integrity_group(suite).to_string());
   let sni = connection.server_name().map(str::to_string);
   let alpn = connection
     .alpn_protocol()
     .map(|proto| String::from_utf8_lossy(proto).into_owned());
   let fingerprint = Some(tls_fingerprint(
+    client_hello,
     version.as_deref(),
     cipher_suite.as_deref(),
+    key_exchange_group.as_deref(),
+    data_integrity_group.as_deref(),
     sni.as_deref(),
     alpn.as_deref(),
   ));
@@ -139,20 +197,49 @@ fn downstream_tls_metadata(connection: &rustls::ServerConnection) -> WafTlsMetad
 }
 
 fn tls_fingerprint(
+  client_hello: &ClientHelloFingerprintMetadata,
   version: Option<&str>,
   cipher_suite: Option<&str>,
+  key_exchange_group: Option<&str>,
+  data_integrity_group: Option<&str>,
   sni: Option<&str>,
   alpn: Option<&str>,
 ) -> String {
-  let payload = format!(
-    "rustls-negotiated-v1\nversion={}\ncipher_suite={}\nsni={}\nalpn={}",
-    version.unwrap_or_default(),
-    cipher_suite.unwrap_or_default(),
-    sni.unwrap_or_default(),
-    alpn.unwrap_or_default()
+  let payload = tls_fingerprint_payload(
+    client_hello,
+    version,
+    cipher_suite,
+    key_exchange_group,
+    data_integrity_group,
+    sni,
+    alpn,
   );
   let hash = digest::digest(&digest::SHA256, payload.as_bytes());
   hex_encode(hash.as_ref())
+}
+
+fn tls_fingerprint_payload(
+  client_hello: &ClientHelloFingerprintMetadata,
+  version: Option<&str>,
+  cipher_suite: Option<&str>,
+  key_exchange_group: Option<&str>,
+  data_integrity_group: Option<&str>,
+  sni: Option<&str>,
+  alpn: Option<&str>,
+) -> String {
+  format!(
+    "rustls-negotiated-v2\nclient_hello_cipher_suites={}\nclient_hello_key_exchange_groups={}\nclient_hello_signature_schemes={}\nclient_hello_data_integrity_groups={}\nselected_version={}\nselected_cipher_suite={}\nselected_key_exchange_group={}\nselected_data_integrity_group={}\nsni={}\nalpn={}",
+    client_hello.cipher_suites,
+    client_hello.key_exchange_groups,
+    client_hello.signature_schemes,
+    client_hello.data_integrity_groups,
+    version.unwrap_or_default(),
+    cipher_suite.unwrap_or_default(),
+    key_exchange_group.unwrap_or_default(),
+    data_integrity_group.unwrap_or_default(),
+    sni.unwrap_or_default(),
+    alpn.unwrap_or_default()
+  )
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -163,4 +250,156 @@ fn hex_encode(bytes: &[u8]) -> String {
     out.push(HEX[(byte & 0x0f) as usize] as char);
   }
   out
+}
+
+fn negotiated_cipher_suite_data_integrity_group(
+  suite: rustls::SupportedCipherSuite,
+) -> &'static str {
+  match suite {
+    rustls::SupportedCipherSuite::Tls12(suite) => {
+      hash_algorithm_name(format!("{:?}", suite.common.hash_provider.algorithm()).as_str())
+    }
+    rustls::SupportedCipherSuite::Tls13(suite) => {
+      hash_algorithm_name(format!("{:?}", suite.common.hash_provider.algorithm()).as_str())
+    }
+  }
+}
+
+fn cipher_suite_data_integrity_group(cipher_suite: &str) -> Option<&'static str> {
+  if cipher_suite.ends_with("_SHA512") {
+    Some("SHA512")
+  } else if cipher_suite.ends_with("_SHA384") {
+    Some("SHA384")
+  } else if cipher_suite.ends_with("_SHA256") {
+    Some("SHA256")
+  } else if cipher_suite.ends_with("_SHA") {
+    Some("SHA")
+  } else if cipher_suite.ends_with("_MD5") {
+    Some("MD5")
+  } else {
+    None
+  }
+}
+
+fn hash_algorithm_name(name: &str) -> &'static str {
+  match name {
+    "SHA512" => "SHA512",
+    "SHA384" => "SHA384",
+    "SHA256" => "SHA256",
+    "SHA1" => "SHA",
+    "MD5" => "MD5",
+    _ => "unknown",
+  }
+}
+
+fn unique_nonempty(values: impl IntoIterator<Item = String>) -> Vec<String> {
+  let mut unique = Vec::new();
+  for value in values {
+    if !value.is_empty() && !unique.contains(&value) {
+      unique.push(value);
+    }
+  }
+  unique
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn tls_fingerprint_payload_includes_client_hello_and_selected_tls_metadata() {
+    let client_hello = ClientHelloFingerprintMetadata {
+      cipher_suites: "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384".to_string(),
+      key_exchange_groups: "X25519,X25519MLKEM768".to_string(),
+      signature_schemes: "ECDSA_NISTP256_SHA256,RSA_PSS_SHA256".to_string(),
+      data_integrity_groups: "SHA256,SHA384".to_string(),
+    };
+
+    let payload = tls_fingerprint_payload(
+      &client_hello,
+      Some("TLSv1_3"),
+      Some("TLS_AES_128_GCM_SHA256"),
+      Some("X25519MLKEM768"),
+      Some("SHA256"),
+      Some("example.com"),
+      Some("h2"),
+    );
+
+    assert!(payload.starts_with("rustls-negotiated-v2\n"));
+    assert!(
+      payload.contains("client_hello_cipher_suites=TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384")
+    );
+    assert!(payload.contains("client_hello_key_exchange_groups=X25519,X25519MLKEM768"));
+    assert!(
+      payload.contains("client_hello_signature_schemes=ECDSA_NISTP256_SHA256,RSA_PSS_SHA256")
+    );
+    assert!(payload.contains("client_hello_data_integrity_groups=SHA256,SHA384"));
+    assert!(payload.contains("selected_cipher_suite=TLS_AES_128_GCM_SHA256"));
+    assert!(payload.contains("selected_key_exchange_group=X25519MLKEM768"));
+    assert!(payload.contains("selected_data_integrity_group=SHA256"));
+  }
+
+  #[test]
+  fn tls_fingerprint_changes_when_client_hello_or_selection_changes() {
+    let client_hello = ClientHelloFingerprintMetadata {
+      cipher_suites: "TLS_AES_128_GCM_SHA256".to_string(),
+      key_exchange_groups: "X25519".to_string(),
+      signature_schemes: "ECDSA_NISTP256_SHA256".to_string(),
+      data_integrity_groups: "SHA256".to_string(),
+    };
+    let different_client_hello = ClientHelloFingerprintMetadata {
+      cipher_suites: "TLS_AES_256_GCM_SHA384".to_string(),
+      key_exchange_groups: "X25519".to_string(),
+      signature_schemes: "ECDSA_NISTP256_SHA256".to_string(),
+      data_integrity_groups: "SHA384".to_string(),
+    };
+
+    let base = tls_fingerprint(
+      &client_hello,
+      Some("TLSv1_3"),
+      Some("TLS_AES_128_GCM_SHA256"),
+      Some("X25519"),
+      Some("SHA256"),
+      Some("example.com"),
+      Some("h2"),
+    );
+    let changed_client_hello = tls_fingerprint(
+      &different_client_hello,
+      Some("TLSv1_3"),
+      Some("TLS_AES_128_GCM_SHA256"),
+      Some("X25519"),
+      Some("SHA256"),
+      Some("example.com"),
+      Some("h2"),
+    );
+    let changed_selection = tls_fingerprint(
+      &client_hello,
+      Some("TLSv1_3"),
+      Some("TLS_AES_256_GCM_SHA384"),
+      Some("X25519"),
+      Some("SHA384"),
+      Some("example.com"),
+      Some("h2"),
+    );
+
+    assert_eq!(base.len(), 64);
+    assert_ne!(base, changed_client_hello);
+    assert_ne!(base, changed_selection);
+  }
+
+  #[test]
+  fn cipher_suite_data_integrity_groups_are_deduplicated_in_order() {
+    let groups = unique_nonempty(
+      [
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_CHACHA20_POLY1305_SHA256",
+        "TLS_AES_256_GCM_SHA384",
+      ]
+      .iter()
+      .filter_map(|suite| cipher_suite_data_integrity_group(suite))
+      .map(str::to_string),
+    );
+
+    assert_eq!(groups, vec!["SHA256".to_string(), "SHA384".to_string()]);
+  }
 }
