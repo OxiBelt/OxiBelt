@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::waf::{
-    HeaderMutation, WafEngine, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
-    WafTransportNetwork,
+    HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput, WafResponseInput,
+    WafTlsMetadata, WafTransportNetwork,
 };
 use ring::digest;
 
@@ -58,6 +58,122 @@ body = "Forbidden"
         decision.terminal.as_ref().map(|terminal| terminal.status),
         Some(StatusCode::FORBIDDEN)
     );
+}
+
+#[test]
+fn request_body_format_helper_can_reject_non_png_payload() {
+    let temp_dir = common::TempDir::new("waf-request-body-png");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-request-body-png");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "post-must-be-png"
+phase = "request"
+priority = 10
+when = "Request.Http.Method == 'POST' && !Request.Body.isFormat('png')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 415
+body = "Unsupported Media Type"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert!(engine.requires_request_body_inspection("app-root"));
+
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let png = b"\x89PNG\r\n\x1a\npayload";
+    let allowed = engine.evaluate_request(request_input_with_body(
+        &method, &uri, &headers, &tags, peer_addr, png, false,
+    ));
+    assert!(allowed.terminal.is_none());
+
+    let zip = b"PK\x03\x04payload";
+    let rejected = engine.evaluate_request(request_input_with_body(
+        &method, &uri, &headers, &tags, peer_addr, zip, false,
+    ));
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+    );
+}
+
+#[test]
+fn request_body_bytes_format_helper_matches_supported_binary_formats() {
+    let temp_dir = common::TempDir::new("waf-request-body-binary-formats");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-request-body-binary-formats");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "block-archive-and-webm"
+phase = "request"
+priority = 10
+when = "Request.Http.Body.Bytes.isFormat('zip') || Request.Http.Body.Bytes.isFormat('webm') || Request.Http.Body.Bytes.isFormat('7z') || Request.Http.Body.Bytes.isFormat('elf') || Request.Http.Body.Bytes.isFormat('windows-exe')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked binary format"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert!(engine.requires_request_body_inspection("app-root"));
+
+    let method = Method::PUT;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let pe = {
+        let mut bytes = vec![0u8; 0x84];
+        bytes[0..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes
+    };
+
+    for body in [
+        b"PK\x03\x04payload".as_slice(),
+        b"\x37\x7a\xbc\xaf\x27\x1c\x00\x04payload".as_slice(),
+        b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x84webmpayload".as_slice(),
+        b"\x7fELF\x02\x01\x01payload".as_slice(),
+        pe.as_slice(),
+    ] {
+        let decision = engine.evaluate_request(request_input_with_body(
+            &method, &uri, &headers, &tags, peer_addr, body, false,
+        ));
+        assert_eq!(
+            decision.terminal.as_ref().map(|terminal| terminal.status),
+            Some(StatusCode::FORBIDDEN)
+        );
+    }
 }
 
 #[test]
@@ -1439,6 +1555,23 @@ fn request_input<'a>(
     request_input_with_transport(method, uri, headers, tags, peer_addr, None, &TEST_TLS)
 }
 
+fn request_input_with_body<'a>(
+    method: &'a Method,
+    uri: &'a Uri,
+    headers: &'a HeaderMap,
+    tags: &'a HashMap<String, String>,
+    peer_addr: SocketAddr,
+    body: &'a [u8],
+    is_truncated: bool,
+) -> WafRequestInput<'a> {
+    let mut input = request_input(method, uri, headers, tags, peer_addr);
+    input.body = Some(WafBodyInput {
+        bytes: body,
+        is_truncated,
+    });
+    input
+}
+
 fn request_input_with_tls<'a>(
     method: &'a Method,
     uri: &'a Uri,
@@ -1493,6 +1626,7 @@ fn request_input_with_transport<'a>(
         uri,
         version: http::Version::HTTP_11,
         headers,
+        body: None,
         peer_addr,
         downstream_host: "example.com",
         route_name: "app-root",
@@ -1520,6 +1654,7 @@ fn request_input_with_protocol_and_network<'a>(
         uri,
         version: http::Version::HTTP_3,
         headers,
+        body: None,
         peer_addr,
         downstream_host: "example.com",
         route_name: "app-root",

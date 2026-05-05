@@ -8,8 +8,8 @@ use tracing::{debug, warn};
 use crate::config::{HttpVersion, UpstreamConfig};
 use crate::state::AppState;
 use crate::waf::{
-  WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata, WafTransportNetwork,
-  apply_header_mutations, request_protocol,
+  WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
+  WafTransportNetwork, apply_header_mutations, request_protocol,
 };
 
 pub(crate) mod body;
@@ -19,7 +19,7 @@ pub(crate) mod response;
 pub(crate) mod uri;
 pub(crate) mod version;
 
-use self::body::{ProxyBody, boxed_error};
+use self::body::{CapturedBody, ProxyBody, boxed_error, capture_prefix};
 use self::headers::{
   add_forwarded_headers, extract_host, is_upgrade_request, strip_hop_by_hop_headers,
 };
@@ -108,11 +108,31 @@ where
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
 
+  let (request, captured_body) = if state
+    .waf
+    .requires_request_body_inspection(&resolved.route.name)
+  {
+    match capture_prefix(request, state.config.waf.limits.max_body_inspection_bytes).await {
+      Ok(result) => {
+        let (request, body) = result;
+        (request, Some(body))
+      }
+      Err(error) => {
+        warn!(error = %error, "failed to read request body for WAF inspection");
+        return text_response(StatusCode::BAD_REQUEST, "failed to read request body");
+      }
+    }
+  } else {
+    (request.map(|body| body.map_err(Into::into).boxed()), None)
+  };
+  let request_body = captured_body.as_ref().map(waf_body_input);
+
   let request_waf = state.waf.evaluate_request(WafRequestInput {
     method: &request_method,
     uri: &request_uri,
     version: request_version,
     headers: &request_headers,
+    body: request_body,
     peer_addr,
     downstream_host: &host,
     route_name: &resolved.route.name,
@@ -221,6 +241,7 @@ where
           tls.as_ref(),
           protocol,
           transport_network,
+          request_body,
           &tags,
           &upstream.name,
           &error.to_string(),
@@ -260,6 +281,7 @@ where
           tls.as_ref(),
           protocol,
           transport_network,
+          request_body,
           &tags,
           &upstream.name,
           &error.to_string(),
@@ -279,6 +301,7 @@ where
       uri: &request_uri,
       version: request_version,
       headers: &request_headers,
+      body: request_body,
       peer_addr,
       downstream_host: &host,
       route_name: &resolved.route.name,
@@ -338,6 +361,7 @@ pub(crate) fn prepare_webtransport(
     uri: &request_uri,
     version: http::Version::HTTP_3,
     headers: &request_headers,
+    body: None,
     peer_addr,
     downstream_host: &host,
     route_name: &resolved.route.name,
@@ -454,4 +478,11 @@ fn parse_webtransport_protocols(headers: &http::HeaderMap) -> Vec<String> {
         .collect()
     })
     .unwrap_or_default()
+}
+
+fn waf_body_input(body: &CapturedBody) -> WafBodyInput<'_> {
+  WafBodyInput {
+    bytes: body.bytes.as_ref(),
+    is_truncated: body.is_truncated,
+  }
 }

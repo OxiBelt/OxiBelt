@@ -305,7 +305,7 @@ max_helper_pattern_count = 32
 max_helper_result_bytes = 8192
 ```
 
-These limits constrain OxiRule parsing, evaluation, helper scans, derived strings, body inspection, regex use, and mutations.
+These limits constrain OxiRule parsing, evaluation, helper scans, derived strings, body inspection, binary format signature checks, regex use, and mutations.
 
 ### 8.2 Pattern sets
 

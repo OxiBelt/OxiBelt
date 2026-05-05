@@ -5,8 +5,8 @@ use http_body_util::{BodyExt, Empty, Full};
 
 use crate::state::AppState;
 use crate::waf::{
-  HeaderMutation, WafRequestInput, WafResponseInput, WafTerminalResponse, WafTlsMetadata,
-  WafTransportNetwork, WafUpstreamError, apply_header_mutations,
+  HeaderMutation, WafBodyInput, WafRequestInput, WafResponseInput, WafTerminalResponse,
+  WafTlsMetadata, WafTransportNetwork, WafUpstreamError, apply_header_mutations,
 };
 
 use super::body::{BoxError, ProxyBody};
@@ -44,6 +44,7 @@ pub(crate) fn upstream_error_response(
   tls: &WafTlsMetadata,
   protocol: crate::waf::WafProtocol,
   transport_network: WafTransportNetwork,
+  request_body: Option<WafBodyInput<'_>>,
   tags: &std::collections::HashMap<String, String>,
   upstream_name: &str,
   error_message: &str,
@@ -60,6 +61,7 @@ pub(crate) fn upstream_error_response(
     uri: request_uri,
     version: request_version,
     headers: request_headers,
+    body: request_body,
     peer_addr,
     downstream_host,
     route_name,

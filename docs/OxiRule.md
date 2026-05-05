@@ -12,7 +12,7 @@ The current Rust implementation includes the initial OxiRule execution path for 
 - Optional public rule `id` and rule `tags` metadata, plus internal UUIDv4 rule identifiers for runtime bookkeeping and logs.
 - Request-phase `reject`, `set_request_header`, `remove_request_header`, `set_tag`, and `route_to_upstream`.
 - Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, and `remove_response_header`.
-- CEL-like boolean expressions with object property access, string helpers, header/query/cookie/tag helpers, regex matching, CIDR checks, and request/response phase validation.
+- CEL-like boolean expressions with object property access, string helpers, header/query/cookie/tag helpers, request body byte format helpers, regex matching, CIDR checks, and request/response phase validation.
 - Request tags created by Person proof success or earlier request-phase `set_tag` actions are visible to later request-phase rules and to response-phase rules.
 - Request transport metadata for direct peer IP/port, encryption state, negotiated TCP TLS SNI/ALPN, configured TCP max-hop policy, and HTTP/3/WebTransport UDP metadata.
 - Synthetic response context for upstream forwarding failures, exposed to response-phase rules as `Response.Upstream.Error`.
@@ -20,7 +20,7 @@ The current Rust implementation includes the initial OxiRule execution path for 
 
 The following parts of this draft remain reserved for a later implementation:
 
-- Streaming-safe request/response body content inspection helpers such as `Body.contains`, `Body.matches`, and `Body.scan`.
+- Streaming-safe text scanning helpers such as `Body.contains`, `Body.matches`, and `Body.scan`, plus response body byte inspection.
 - `route_to_pool` and `set_load_balancing_policy`, pending an upstream-pool/load-balancing configuration model.
 - Transport local endpoint fields, connection IDs, byte counters, TCP MSS/RTT metadata, and frame/datagram-level payload inspection.
 
@@ -991,6 +991,7 @@ Request.Body.Size: Int
 Request.Body.IsTruncated: Bool
 Request.Body.Text: String | Null
 Request.Body.Bytes: Bytes | Null
+Request.Body.isFormat(Format: String): Bool
 Request.Body.contains(Value: String): Bool
 Request.Body.matches(Pattern: String): Bool
 Request.Body.containsAny(PatternSetName: String): Bool
@@ -1003,6 +1004,14 @@ The same helpers are available on `Response.Body` in response-phase rules.
 Examples:
 
 ```cel
+Request.Http.Method == 'POST' && !Request.Body.isFormat('png')
+```
+
+```cel
+Request.Body.Bytes != null && Request.Body.Bytes.isFormat('zip')
+```
+
+```cel
 Request.Body.containsAny('sql-injection-keywords')
 ```
 
@@ -1011,6 +1020,37 @@ Response.Body.matchesAny('xss-regexes')
 ```
 
 The visible body is limited by `max_body_inspection_bytes`. If the original body is larger than the visible limit, `IsTruncated` must be `true`.
+
+Current implementation note: request-phase rules may inspect a bounded request body byte view for binary format signatures. `Request.Body.Bytes` is an ArrayBuffer-like immutable byte value, and byte helpers are available on any OxiRule value of type `Bytes`. `Request.Body.isFormat(...)` is a convenience wrapper around the same byte view and returns `false` when no request body bytes are available. Response body byte inspection and text scanning helpers remain reserved.
+
+Supported binary formats:
+
+- Images and image containers: `apng`, `avif`, `flif`, `gbr`, `gif`, `jpeg`, `jpeg-2000`, `jpeg-xl`, `mng`, `openexr`, `openraster`, `png`, `qoi`, `webp`, `xcf`.
+- Audio and audio containers: `alac`, `flac`, `mp3`, `musepack`, `ogg`, `opus`, `speex`, `vorbis`, `wavpack`.
+- Video and video containers: `av1`, `dirac`, `matroska`, `mkv`, `webm`, `theora`.
+- Documents and packaged document formats: `djvu`, `dvi`, `epub`, `office-open-xml`, `ooxml`, `docx`, `xlsx`, `pptx`, `opendocument`, `odf`, `odt`, `ods`, `odp`, `openxps`, `oxps`, `xps`, `pdf`, `pdf-a`, `pdf-e`, `pdf-raster`, `pdf-ua`, `pdf-x`, `zim`.
+- Archives and compression formats: `7z`, `bzip2`, `gzip`, `lzip`, `maff`, `tar`, `xz`, `zip`.
+- Data and font containers: `glb`, `hdf`, `hdf4`, `hdf5`, `netcdf`, `woff`, `woff2`.
+- Executables: `elf`, `linux-executable`, `exe`, `pe`, `portable-executable`, `windows-exe`, `windows-executable`.
+
+Common MIME aliases such as `image/png`, `application/zip`, `video/webm`, `application/pdf`, `application/x-elf`, `application/x-msdownload`, and `application/vnd.microsoft.portable-executable` are also accepted where they map unambiguously to the same binary signature.
+
+The implementation intentionally does not match text-based formats from the source format list, such as `svg`, `xpm`, `obj`, `dae`, `html`, `xml`, `json`, `yaml`, `css`, `csv`, `markdown`, `rdf`, or `gpx`. It also does not match filesystem-like or disk-encryption container entries such as `ltfs`, `luks`, `truecrypt`, or `freeotfe`.
+
+The format helper is a fast signature check, not a full archive, image, or media decoder. If the visible request body is truncated before the required signature data, the helper returns `false`.
+
+### 9.5.1 Bytes helpers
+
+Available on `Bytes` values such as `Request.Body.Bytes`:
+
+```text
+Bytes.size(): Int
+Bytes.isFormat(Format: String): Bool
+Bytes.isBinaryFormat(Format: String): Bool
+Bytes.matchesFormat(Format: String): Bool
+```
+
+`isBinaryFormat` and `matchesFormat` are aliases for `isFormat`.
 
 ### 9.6 TagMap helpers
 

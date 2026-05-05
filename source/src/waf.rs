@@ -762,6 +762,14 @@ impl WafEngine {
           .unwrap_or(false))
   }
 
+  pub fn requires_request_body_inspection(&self, route_name: &str) -> bool {
+    self.enabled
+      && self
+        .rules_for(route_name, WafPhase::Request)
+        .iter()
+        .any(|rule| rule.requires_request_body_inspection)
+  }
+
   pub fn evaluate_request(&self, input: WafRequestInput<'_>) -> RequestWafDecision {
     if !self.enabled {
       return RequestWafDecision::default();
@@ -1012,6 +1020,8 @@ fn compile_rules(configs: &[WafRuleConfig]) -> anyhow::Result<Vec<CompiledRule>>
         internal_id: new_internal_rule_id()?,
         phase: rule.phase,
         priority: rule.priority,
+        requires_request_body_inspection: rule.phase == WafPhase::Request
+          && expression.requires_request_body_inspection(),
         expression,
         actions: rule.actions.clone(),
       })
@@ -1055,6 +1065,7 @@ struct CompiledRule {
   internal_id: String,
   phase: WafPhase,
   priority: i64,
+  requires_request_body_inspection: bool,
   expression: Expr,
   actions: Vec<WafActionConfig>,
 }
@@ -1071,6 +1082,7 @@ pub struct WafRequestInput<'a> {
   pub uri: &'a Uri,
   pub version: Version,
   pub headers: &'a HeaderMap,
+  pub body: Option<WafBodyInput<'a>>,
   pub peer_addr: std::net::SocketAddr,
   pub downstream_host: &'a str,
   pub route_name: &'a str,
@@ -1079,6 +1091,12 @@ pub struct WafRequestInput<'a> {
   pub protocol: WafProtocol,
   pub transport_network: WafTransportNetwork,
   pub tags: &'a HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WafBodyInput<'a> {
+  pub bytes: &'a [u8],
+  pub is_truncated: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1455,6 +1473,47 @@ impl Expr {
     }
   }
 
+  fn requires_request_body_inspection(&self) -> bool {
+    match self {
+      Self::Member(receiver, field) => {
+        receiver.requires_request_body_inspection()
+          || (matches!(field.as_str(), "Bytes" | "IsTruncated") && receiver.is_request_body_expr())
+      }
+      Self::Call(receiver, method, args) => {
+        receiver.requires_request_body_inspection()
+          || args.iter().any(Self::requires_request_body_inspection)
+          || (receiver.is_request_body_expr() && body_content_method(method))
+          || (receiver.is_request_body_bytes_expr() && bytes_content_method(method))
+      }
+      Self::UnaryNot(expr) => expr.requires_request_body_inspection(),
+      Self::Binary(left, _, right) => {
+        left.requires_request_body_inspection() || right.requires_request_body_inspection()
+      }
+      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
+    }
+  }
+
+  fn is_request_body_expr(&self) -> bool {
+    match self {
+      Self::Member(receiver, field) if field == "Body" => {
+        receiver.is_request_expr() || receiver.is_request_http_expr()
+      }
+      _ => false,
+    }
+  }
+
+  fn is_request_body_bytes_expr(&self) -> bool {
+    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_request_body_expr())
+  }
+
+  fn is_request_expr(&self) -> bool {
+    matches!(self, Self::Ident(name) if name == "Request")
+  }
+
+  fn is_request_http_expr(&self) -> bool {
+    matches!(self, Self::Member(receiver, field) if field == "Http" && receiver.is_request_expr())
+  }
+
   fn eval(&self, ctx: &EvalContext<'_>, tx: &mut TransactionBudget) -> anyhow::Result<Value> {
     tx.step()?;
     match self {
@@ -1486,6 +1545,7 @@ enum Value {
   Bool(bool),
   Int(i64),
   String(String),
+  Bytes(Vec<u8>),
   Null,
   Object(ObjectRef),
 }
@@ -1723,9 +1783,24 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     )),
     (ObjectRef::RequestHttp, "Uri") => Ok(Value::String(ctx.request.uri.to_string())),
     (ObjectRef::RequestHttp, "Body") => Ok(Value::Object(ObjectRef::RequestBody)),
-    (ObjectRef::RequestBody, "Size") => Ok(Value::Int(content_length(ctx.request.headers))),
-    (ObjectRef::RequestBody, "IsTruncated") => Ok(Value::Bool(false)),
-    (ObjectRef::RequestBody, "Text") | (ObjectRef::RequestBody, "Bytes") => Ok(Value::Null),
+    (ObjectRef::RequestBody, "Size") => {
+      Ok(Value::Int(body_size(ctx.request.headers, ctx.request.body)))
+    }
+    (ObjectRef::RequestBody, "IsTruncated") => Ok(Value::Bool(
+      ctx
+        .request
+        .body
+        .map(|body| body.is_truncated)
+        .unwrap_or(false),
+    )),
+    (ObjectRef::RequestBody, "Bytes") => Ok(
+      ctx
+        .request
+        .body
+        .map(|body| Value::Bytes(body.bytes.to_vec()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestBody, "Text") => Ok(Value::Null),
     (ObjectRef::RequestTls, "Enabled") => Ok(Value::Bool(ctx.request.tls.enabled)),
     (ObjectRef::RequestTls, "Version") => Ok(
       ctx
@@ -1908,6 +1983,7 @@ fn eval_call(
 ) -> anyhow::Result<Value> {
   match value {
     Value::String(text) => eval_string_call(&text, method, args, ctx, tx),
+    Value::Bytes(bytes) => eval_bytes_call(&bytes, method, args),
     Value::Object(ObjectRef::ContextRuleTags) => eval_rule_tag_call(ctx.rule_tags, method, args),
     Value::Object(ObjectRef::RequestHeaders) => {
       eval_header_call(ctx.request.headers, method, args, ctx)
@@ -1922,9 +1998,8 @@ fn eval_call(
     Value::Object(ObjectRef::RequestCookies) => eval_cookie_call(ctx, method, args),
     Value::Object(ObjectRef::RequestTags) => eval_tag_call(ctx.request.tags, method, args, ctx),
     Value::Object(ObjectRef::RequestTokenBindings) => eval_token_binding_call(ctx, method, args),
-    Value::Object(ObjectRef::RequestBody) | Value::Object(ObjectRef::ResponseBody) => {
-      eval_body_call(method)
-    }
+    Value::Object(ObjectRef::RequestBody) => eval_body_call(ctx.request.body, method, args),
+    Value::Object(ObjectRef::ResponseBody) => eval_body_call(None, method, args),
     _ => bail!("method {method} is not available on {:?}", value),
   }
 }
@@ -1959,6 +2034,17 @@ fn eval_string_call(
       text,
     )?)),
     _ => bail!("unknown String method {method}"),
+  }
+}
+
+fn eval_bytes_call(bytes: &[u8], method: &str, args: &[Value]) -> anyhow::Result<Value> {
+  match method {
+    "size" => Ok(Value::Int(bytes.len() as i64)),
+    "isFormat" | "isBinaryFormat" | "matchesFormat" => Ok(Value::Bool(bytes_match_format(
+      bytes,
+      expect_string_arg(args, 0)?,
+    ))),
+    _ => bail!("unknown Bytes method {method}"),
   }
 }
 
@@ -2216,13 +2302,36 @@ fn eval_pair_map_call(
   }
 }
 
-fn eval_body_call(method: &str) -> anyhow::Result<Value> {
+fn eval_body_call(
+  body: Option<WafBodyInput<'_>>,
+  method: &str,
+  args: &[Value],
+) -> anyhow::Result<Value> {
   match method {
+    "isFormat" | "isBinaryFormat" | "matchesFormat" => {
+      let format = expect_string_arg(args, 0)?;
+      Ok(Value::Bool(
+        body
+          .map(|body| bytes_match_format(body.bytes, format))
+          .unwrap_or(false),
+      ))
+    }
     "contains" | "matches" | "containsAny" | "matchesAny" | "scan" => bail!(
       "body content inspection is reserved for a streaming-safe WAF body buffer implementation"
     ),
     _ => bail!("unknown BodyView method {method}"),
   }
+}
+
+fn body_content_method(method: &str) -> bool {
+  matches!(method, "isFormat" | "isBinaryFormat" | "matchesFormat")
+}
+
+fn bytes_content_method(method: &str) -> bool {
+  matches!(
+    method,
+    "isFormat" | "isBinaryFormat" | "matchesFormat" | "size"
+  )
 }
 
 fn eval_binary(
@@ -2292,6 +2401,7 @@ fn values_equal(left: &Value, right: &Value) -> anyhow::Result<bool> {
     (Value::Bool(left), Value::Bool(right)) => Ok(left == right),
     (Value::Int(left), Value::Int(right)) => Ok(left == right),
     (Value::String(left), Value::String(right)) => Ok(left == right),
+    (Value::Bytes(left), Value::Bytes(right)) => Ok(left == right),
     (Value::Null, Value::Null) => Ok(true),
     (Value::Null, other) | (other, Value::Null) => Ok(other.is_null()),
     (Value::Object(_), Value::Object(_)) => Ok(true),
@@ -2346,6 +2456,15 @@ fn content_length(headers: &HeaderMap) -> i64 {
     .unwrap_or(0)
 }
 
+fn body_size(headers: &HeaderMap, body: Option<WafBodyInput<'_>>) -> i64 {
+  let size = content_length(headers);
+  if size > 0 {
+    size
+  } else {
+    body.map(|body| body.bytes.len() as i64).unwrap_or(0)
+  }
+}
+
 fn version_string(version: Version) -> String {
   match version {
     Version::HTTP_09 => "0.9",
@@ -2356,6 +2475,366 @@ fn version_string(version: Version) -> String {
     _ => "unknown",
   }
   .to_string()
+}
+
+fn bytes_match_format(bytes: &[u8], format: &str) -> bool {
+  match normalize_binary_format(format).as_str() {
+    "7z" | "7zip" | "application/x-7z-compressed" => bytes.starts_with(b"\x37\x7a\xbc\xaf\x27\x1c"),
+    "alac" | "audio/alac" => is_alac(bytes),
+    "apng" | "image/apng" => is_apng(bytes),
+    "av1" | "video/av1" => is_av1(bytes),
+    "avif" | "image/avif" => is_isobmff_with_brand(bytes, &[b"avif", b"avis"]),
+    "bzip2" | "bz2" | "application/x-bzip2" => bytes.starts_with(b"BZh"),
+    "dirac" | "video/dirac" => bytes.starts_with(b"BBCD"),
+    "djvu" | "djv" | "image/vnd.djvu" => bytes.starts_with(b"AT&TFORM"),
+    "dvi" | "application/x-dvi" => bytes.starts_with(b"\xf7\x02"),
+    "elf" | "linux-exe" | "linux-executable" | "application/x-elf" => bytes.starts_with(b"\x7fELF"),
+    "epub" | "application/epub+zip" => is_zip_with(bytes, b"application/epub+zip"),
+    "exe"
+    | "pe"
+    | "pe32"
+    | "portable-executable"
+    | "windows-exe"
+    | "windows-executable"
+    | "application/x-msdownload"
+    | "application/vnd.microsoft.portable-executable" => is_pe_executable(bytes),
+    "exr" | "openexr" | "image/x-exr" => bytes.starts_with(b"\x76\x2f\x31\x01"),
+    "flac" | "audio/flac" => bytes.starts_with(b"fLaC"),
+    "flif" | "image/flif" => bytes.starts_with(b"FLIF"),
+    "gbr" | "gimp-brush" | "image/x-gimp-gbr" => is_gbr(bytes),
+    "gif" | "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+    "glb" | "gltf-binary" | "model/gltf-binary" => bytes.starts_with(b"glTF"),
+    "gzip" | "gz" | "application/gzip" | "application/x-gzip" => bytes.starts_with(b"\x1f\x8b\x08"),
+    "hdf" | "hdf4" | "application/x-hdf" => {
+      bytes.starts_with(b"\x0e\x03\x13\x01") || is_hdf5(bytes)
+    }
+    "hdf5" | "h5" | "application/x-hdf5" => is_hdf5(bytes),
+    "jpeg" | "jpg" | "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+    "jpeg-2000" | "jpeg2000" | "jp2" | "j2k" | "image/jp2" => is_jpeg_2000(bytes),
+    "jpeg-xl" | "jpegxl" | "jxl" | "image/jxl" => is_jpeg_xl(bytes),
+    "lzip" | "application/x-lzip" => bytes.starts_with(b"LZIP"),
+    "maff" | "application/x-maff" => is_zip_with(bytes, b"index.rdf"),
+    "matroska" | "mkv" | "video/x-matroska" => is_ebml_doctype(bytes, b"matroska"),
+    "mng" | "video/x-mng" => bytes.starts_with(b"\x8aMNG\r\n\x1a\n"),
+    "mp3" | "audio/mpeg" => is_mp3(bytes),
+    "musepack" | "mpc" | "audio/x-musepack" => {
+      bytes.starts_with(b"MPCK") || bytes.starts_with(b"MP+")
+    }
+    "netcdf" | "nc" | "application/x-netcdf" => is_netcdf(bytes),
+    "odf" | "odt" | "ods" | "odp" | "odg" | "opendocument" => {
+      is_zip_with(bytes, b"application/vnd.oasis.opendocument")
+    }
+    "ogg" | "application/ogg" | "audio/ogg" | "video/ogg" => is_ogg(bytes),
+    "ooxml" | "office-open-xml" | "docx" | "xlsx" | "pptx" => is_ooxml(bytes),
+    "openraster" | "ora" | "image/openraster" => is_zip_with(bytes, b"application/x-openraster"),
+    "openxps" | "oxps" | "xps" | "application/oxps" | "application/vnd.ms-xpsdocument" => {
+      is_openxps(bytes)
+    }
+    "opus" | "audio/opus" => is_ogg_with(bytes, b"OpusHead"),
+    "pdf" | "pdf-a" | "pdf-e" | "pdf-raster" | "pdf-ua" | "pdf-x" | "application/pdf" => {
+      bytes.starts_with(b"%PDF-")
+    }
+    "png" | "image/png" => is_png(bytes),
+    "qoi" | "image/qoi" => bytes.starts_with(b"qoif"),
+    "speex" | "audio/speex" => is_ogg_with(bytes, b"Speex   "),
+    "tar" | "application/x-tar" => is_tar(bytes),
+    "theora" | "video/theora" => is_ogg_with(bytes, b"\x80theora"),
+    "vorbis" | "audio/vorbis" => is_ogg_with(bytes, b"\x01vorbis"),
+    "wavpack" | "wv" | "audio/wavpack" => bytes.starts_with(b"wvpk"),
+    "webp" | "image/webp" => is_webp(bytes),
+    "zip" | "application/zip" | "application/x-zip-compressed" => is_zip(bytes),
+    "webm" | "video/webm" | "audio/webm" => is_ebml_doctype(bytes, b"webm"),
+    "woff" | "font/woff" => bytes.starts_with(b"wOFF"),
+    "woff2" | "font/woff2" => bytes.starts_with(b"wOF2"),
+    "xcf" | "image/x-xcf" => bytes.starts_with(b"gimp xcf "),
+    "xz" | "application/x-xz" => bytes.starts_with(b"\xfd7zXZ\x00"),
+    "zim" | "application/x-zim" => bytes.starts_with(b"ZIM\x04"),
+    _ => false,
+  }
+}
+
+fn normalize_binary_format(format: &str) -> String {
+  format.trim().to_ascii_lowercase().replace(['_', ' '], "-")
+}
+
+fn is_zip(bytes: &[u8]) -> bool {
+  bytes.starts_with(b"PK\x03\x04")
+    || bytes.starts_with(b"PK\x05\x06")
+    || bytes.starts_with(b"PK\x07\x08")
+}
+
+fn is_png(bytes: &[u8]) -> bool {
+  bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+}
+
+fn is_apng(bytes: &[u8]) -> bool {
+  is_png(bytes) && png_contains_chunk(bytes, b"acTL")
+}
+
+fn png_contains_chunk(bytes: &[u8], chunk_type: &[u8; 4]) -> bool {
+  let mut offset = 8usize;
+  while offset + 8 <= bytes.len() {
+    let length = u32::from_be_bytes([
+      bytes[offset],
+      bytes[offset + 1],
+      bytes[offset + 2],
+      bytes[offset + 3],
+    ]) as usize;
+    if &bytes[offset + 4..offset + 8] == chunk_type {
+      return true;
+    }
+    let Some(next) = offset
+      .checked_add(8)
+      .and_then(|offset| offset.checked_add(length))
+      .and_then(|offset| offset.checked_add(4))
+    else {
+      return false;
+    };
+    if next <= offset {
+      return false;
+    }
+    offset = next;
+  }
+  false
+}
+
+fn is_webp(bytes: &[u8]) -> bool {
+  bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+}
+
+fn is_gbr(bytes: &[u8]) -> bool {
+  bytes.len() >= 24 && &bytes[20..24] == b"GIMP"
+}
+
+fn is_jpeg_2000(bytes: &[u8]) -> bool {
+  bytes.starts_with(b"\x00\x00\x00\x0cjP  \r\n\x87\n") || bytes.starts_with(b"\xff\x4f\xff\x51")
+}
+
+fn is_jpeg_xl(bytes: &[u8]) -> bool {
+  bytes.starts_with(b"\xff\x0a") || is_isobmff_with_brand(bytes, &[b"jxl "])
+}
+
+fn is_isobmff_with_brand(bytes: &[u8], brands: &[&[u8; 4]]) -> bool {
+  if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+    return false;
+  }
+  if brands.iter().any(|brand| &bytes[8..12] == brand.as_slice()) {
+    return true;
+  }
+
+  let box_size = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+  let limit = if box_size >= 16 && box_size <= bytes.len() {
+    box_size
+  } else {
+    bytes.len().min(256)
+  };
+  bytes[16..limit]
+    .chunks_exact(4)
+    .any(|brand| brands.iter().any(|expected| brand == expected.as_slice()))
+}
+
+fn is_alac(bytes: &[u8]) -> bool {
+  bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && byte_contains(bytes, b"alac")
+}
+
+fn is_av1(bytes: &[u8]) -> bool {
+  (bytes.len() >= 12 && bytes.starts_with(b"DKIF") && &bytes[8..12] == b"AV01")
+    || is_isobmff_with_brand(bytes, &[b"av01"])
+}
+
+fn is_ogg(bytes: &[u8]) -> bool {
+  bytes.starts_with(b"OggS")
+}
+
+fn is_ogg_with(bytes: &[u8], marker: &[u8]) -> bool {
+  is_ogg(bytes) && byte_contains(bytes, marker)
+}
+
+fn is_mp3(bytes: &[u8]) -> bool {
+  bytes.starts_with(b"ID3") || (bytes.len() >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0)
+}
+
+fn is_tar(bytes: &[u8]) -> bool {
+  bytes.len() >= 263 && (&bytes[257..263] == b"ustar\0" || &bytes[257..263] == b"ustar ")
+}
+
+fn is_ooxml(bytes: &[u8]) -> bool {
+  is_zip(bytes)
+    && byte_contains(bytes, b"[Content_Types].xml")
+    && (byte_contains(bytes, b"word/")
+      || byte_contains(bytes, b"xl/")
+      || byte_contains(bytes, b"ppt/"))
+}
+
+fn is_openxps(bytes: &[u8]) -> bool {
+  is_zip(bytes)
+    && (byte_contains(bytes, b"FixedDocumentSequence.fdseq")
+      || byte_contains(bytes, b"application/vnd.ms-package.xps")
+      || byte_contains(bytes, b"schemas.microsoft.com/xps/"))
+}
+
+fn is_zip_with(bytes: &[u8], marker: &[u8]) -> bool {
+  is_zip(bytes) && byte_contains(bytes, marker)
+}
+
+fn is_hdf5(bytes: &[u8]) -> bool {
+  bytes.starts_with(b"\x89HDF\r\n\x1a\n")
+}
+
+fn is_netcdf(bytes: &[u8]) -> bool {
+  bytes.starts_with(b"CDF\x01") || bytes.starts_with(b"CDF\x02") || bytes.starts_with(b"CDF\x05")
+}
+
+fn is_pe_executable(bytes: &[u8]) -> bool {
+  if bytes.len() < 0x40 || !bytes.starts_with(b"MZ") {
+    return false;
+  }
+  let pe_offset = u32::from_le_bytes([bytes[0x3c], bytes[0x3d], bytes[0x3e], bytes[0x3f]]) as usize;
+  pe_offset + 4 <= bytes.len() && &bytes[pe_offset..pe_offset + 4] == b"PE\0\0"
+}
+
+fn is_ebml_doctype(bytes: &[u8], expected_doctype: &[u8]) -> bool {
+  if !bytes.starts_with(b"\x1a\x45\xdf\xa3") {
+    return false;
+  }
+
+  let limit = bytes.len().min(4096);
+  let header = &bytes[..limit];
+  let Some(position) = header.windows(2).position(|window| window == b"\x42\x82") else {
+    return false;
+  };
+  let Some((size_len, doc_type_len)) = parse_ebml_vint(&header[position + 2..]) else {
+    return false;
+  };
+  let start = position + 2 + size_len;
+  let end = start + doc_type_len;
+  end <= header.len() && &header[start..end] == expected_doctype
+}
+
+fn byte_contains(bytes: &[u8], needle: &[u8]) -> bool {
+  !needle.is_empty()
+    && bytes.len() >= needle.len()
+    && bytes.windows(needle.len()).any(|window| window == needle)
+}
+
+fn parse_ebml_vint(bytes: &[u8]) -> Option<(usize, usize)> {
+  let first = *bytes.first()?;
+  for width in 1..=8 {
+    let marker = 1u8 << (8 - width);
+    if first & marker == 0 {
+      continue;
+    }
+    if bytes.len() < width {
+      return None;
+    }
+    let mut value = u64::from(first & !marker);
+    for byte in &bytes[1..width] {
+      value = (value << 8) | u64::from(*byte);
+    }
+    return usize::try_from(value).ok().map(|value| (width, value));
+  }
+  None
+}
+
+#[cfg(test)]
+mod tests {
+  use super::bytes_match_format;
+
+  #[test]
+  fn binary_format_helper_matches_attachment_formats_with_stable_signatures() {
+    let pe = {
+      let mut bytes = vec![0u8; 0x84];
+      bytes[0..2].copy_from_slice(b"MZ");
+      bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+      bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+      bytes
+    };
+    let tar = {
+      let mut bytes = vec![0u8; 512];
+      bytes[257..263].copy_from_slice(b"ustar\0");
+      bytes
+    };
+
+    let cases: &[(&str, &[u8])] = &[
+      ("7z", b"\x37\x7a\xbc\xaf\x27\x1c\x00\x04"),
+      ("alac", b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00alac"),
+      (
+        "apng",
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00acTL\x00\x00\x00\x00",
+      ),
+      ("av1", b"DKIF\x00\x00\x00\x00AV01"),
+      ("avif", b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00mif1"),
+      ("bzip2", b"BZh9"),
+      ("dirac", b"BBCD"),
+      ("djvu", b"AT&TFORM"),
+      ("dvi", b"\xf7\x02"),
+      ("elf", b"\x7fELF\x02\x01\x01"),
+      ("epub", b"PK\x03\x04mimetypeapplication/epub+zip"),
+      ("exr", b"\x76\x2f\x31\x01"),
+      ("flac", b"fLaC"),
+      ("flif", b"FLIF"),
+      (
+        "gbr",
+        b"\x00\x00\x00\x1c\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x04GIMP",
+      ),
+      ("gif", b"GIF89a"),
+      ("glb", b"glTF\x02\x00\x00\x00"),
+      ("gzip", b"\x1f\x8b\x08"),
+      ("hdf4", b"\x0e\x03\x13\x01"),
+      ("hdf5", b"\x89HDF\r\n\x1a\n"),
+      ("jpeg", b"\xff\xd8\xff\xe0"),
+      ("jpeg-2000", b"\x00\x00\x00\x0cjP  \r\n\x87\n"),
+      ("jpeg-xl", b"\xff\x0a"),
+      ("lzip", b"LZIP"),
+      ("maff", b"PK\x03\x04index.rdf"),
+      ("mkv", b"\x1a\x45\xdf\xa3\x9f\x42\x82\x88matroska"),
+      ("mng", b"\x8aMNG\r\n\x1a\n"),
+      ("mp3", b"ID3\x04\x00"),
+      ("musepack", b"MPCK"),
+      ("netcdf", b"CDF\x01"),
+      (
+        "odf",
+        b"PK\x03\x04mimetypeapplication/vnd.oasis.opendocument.text",
+      ),
+      ("ogg", b"OggS"),
+      ("ooxml", b"PK\x03\x04[Content_Types].xmlword/document.xml"),
+      ("openraster", b"PK\x03\x04mimetypeapplication/x-openraster"),
+      ("openxps", b"PK\x03\x04FixedDocumentSequence.fdseq"),
+      ("opus", b"OggS\x00OpusHead"),
+      ("pdf", b"%PDF-1.7"),
+      ("png", b"\x89PNG\r\n\x1a\n"),
+      ("qoi", b"qoif"),
+      ("speex", b"OggS\x00Speex   "),
+      ("theora", b"OggS\x00\x80theora"),
+      ("vorbis", b"OggS\x00\x01vorbis"),
+      ("wavpack", b"wvpk"),
+      ("webm", b"\x1a\x45\xdf\xa3\x9f\x42\x82\x84webm"),
+      ("webp", b"RIFF\x00\x00\x00\x00WEBP"),
+      ("woff", b"wOFF"),
+      ("woff2", b"wOF2"),
+      ("xcf", b"gimp xcf "),
+      ("xz", b"\xfd7zXZ\x00"),
+      ("zim", b"ZIM\x04"),
+      ("zip", b"PK\x03\x04"),
+    ];
+
+    for (format, bytes) in cases {
+      assert!(
+        bytes_match_format(bytes, format),
+        "expected {format} to match"
+      );
+    }
+    assert!(bytes_match_format(&pe, "windows-exe"));
+    assert!(bytes_match_format(&tar, "tar"));
+  }
+
+  #[test]
+  fn binary_format_helper_leaves_text_and_filesystem_like_formats_unmatched() {
+    assert!(!bytes_match_format(b"<svg></svg>", "svg"));
+    assert!(!bytes_match_format(b"key: value\n", "yaml"));
+    assert!(!bytes_match_format(b"LUKS\xba\xbe", "luks"));
+    assert!(!bytes_match_format(b"OBJ text", "obj"));
+  }
 }
 
 fn pattern_set_matches(
