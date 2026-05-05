@@ -81,6 +81,9 @@ pub(crate) fn upstream_error_response(
       message: error_message,
     }),
   });
+  for access_log in &response_waf.access_logs {
+    access_log.emit_stdout();
+  }
 
   if let Some(terminal) = response_waf.terminal {
     let mut mutations = request_response_mutations.to_vec();

@@ -73,6 +73,10 @@ enabled = true
 mode = "enforcing"
 fail_policy = "closed"
 
+[waf.limits]
+max_rule_runtime_ms = 50
+max_total_waf_runtime_ms = 100
+
 [[waf.rules]]
 name = "helper-block"
 phase = "request"
@@ -590,6 +594,104 @@ value = "no-store"
     });
 
     assert_eq!(response_decision.response_header_mutations.len(), 1);
+}
+
+#[test]
+fn response_rule_can_emit_structured_access_log() {
+    let temp_dir = common::TempDir::new("waf-access-log");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-access-log");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "stdout-access"
+id = "access-log"
+tags = ["audit", "access"]
+phase = "response"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+
+[[waf.rules.actions.fields]]
+name = "request_method"
+value = "Request.Http.Method"
+
+[[waf.rules.actions.fields]]
+name = "request_uri"
+value = "Request.Http.Uri"
+
+[[waf.rules.actions.fields]]
+name = "agent"
+value = "Request.Headers.get('User-Agent')"
+
+[[waf.rules.actions.fields]]
+name = "status_code"
+value = "Response.Http.Status"
+
+[[waf.rules.actions.fields]]
+name = "body_bytes"
+value = "Response.Body.Size"
+
+[[waf.rules.actions.fields]]
+name = "upstream_name"
+value = "Response.Upstream.Name"
+
+[[waf.rules.actions.fields]]
+name = "matched_rule"
+value = "Context.RuleName"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(
+        http::header::USER_AGENT,
+        HeaderValue::from_static("curl/8.0 \"quoted\""),
+    );
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/search?q=one%20two".parse().expect("URI should parse");
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("12"));
+
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(
+            &method,
+            &uri,
+            &request_headers,
+            &tags,
+            "203.0.113.10:49152".parse().unwrap(),
+        ),
+        status: StatusCode::CREATED,
+        headers: &response_headers,
+        upstream_name: "app",
+        upstream_error: None,
+    });
+
+    assert_eq!(response_decision.access_logs.len(), 1);
+    let line = response_decision.access_logs[0].to_json_line();
+    assert!(line.contains("\"event\":\"oxibelt.access\""));
+    assert!(line.contains("\"timestamp_unix_ms\":"));
+    assert!(line.contains("\"request_method\":\"GET\""));
+    assert!(line.contains("\"request_uri\":\"/search?q=one%20two\""));
+    assert!(line.contains("\"agent\":\"curl/8.0 \\\"quoted\\\"\""));
+    assert!(line.contains("\"status_code\":201"));
+    assert!(line.contains("\"body_bytes\":12"));
+    assert!(line.contains("\"upstream_name\":\"app\""));
+    assert!(line.contains("\"matched_rule\":\"stdout-access\""));
+    assert!(!line.contains("\"client_ip\":"));
+    assert!(!line.contains("\"waf_rule_tags\":"));
 }
 
 #[test]
@@ -1582,6 +1684,39 @@ status = 403
     let error_chain = format!("{error:#}");
     assert!(
         error_chain.contains("Response is unavailable"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn validation_rejects_access_log_action_in_request_phase() {
+    let temp_dir = common::TempDir::new("waf-access-log-phase");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-access-log-phase");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "bad-access-log-phase"
+phase = "request"
+priority = 1
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("action emit_access_log is not valid in Request phase"),
         "unexpected error: {error}"
     );
 }

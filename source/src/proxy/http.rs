@@ -319,6 +319,9 @@ where
       upstream_name: &upstream.name,
       upstream_error: None,
     });
+    for access_log in &response_waf.access_logs {
+      access_log.emit_stdout();
+    }
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);

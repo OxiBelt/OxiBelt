@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use http::header::{COOKIE, HeaderName, HeaderValue, USER_AGENT};
@@ -164,6 +166,10 @@ pub enum WafActionConfig {
     #[serde(default)]
     body: Option<String>,
   },
+  EmitAccessLog {
+    #[serde(default = "default_access_log_field_configs")]
+    fields: Vec<AccessLogFieldConfig>,
+  },
   RouteToPool {
     pool: String,
   },
@@ -220,6 +226,13 @@ pub enum WafActionConfig {
     #[serde(default = "default_person_proof_status")]
     status: u16,
   },
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+pub struct AccessLogFieldConfig {
+  pub name: String,
+  #[serde(alias = "expression")]
+  pub value: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -527,6 +540,10 @@ fn validate_actions(
         require_phase(rule, WafPhase::Response, "response terminal action")?;
         validate_status(*status, &rule.name)?;
       }
+      WafActionConfig::EmitAccessLog { fields } => {
+        require_phase(rule, WafPhase::Response, "emit_access_log")?;
+        validate_access_log_fields(rule, fields)?;
+      }
       WafActionConfig::RouteToUpstream { upstream } => {
         require_phase(rule, WafPhase::Request, "route_to_upstream")?;
         if !upstream_names.contains(upstream.as_str()) {
@@ -617,6 +634,70 @@ fn validate_header(name: &str, value: &str) -> anyhow::Result<()> {
 
 fn validate_header_name(name: &str) -> anyhow::Result<()> {
   HeaderName::from_bytes(name.as_bytes()).context("invalid WAF header name")?;
+  Ok(())
+}
+
+fn validate_access_log_fields(
+  rule: &WafRuleConfig,
+  fields: &[AccessLogFieldConfig],
+) -> anyhow::Result<()> {
+  if fields.is_empty() {
+    bail!(
+      "WAF rule {} emit_access_log must define at least one field",
+      rule.name
+    );
+  }
+
+  let mut names = HashSet::new();
+  for field in fields {
+    validate_access_log_field_name(&rule.name, &field.name)?;
+    if matches!(field.name.as_str(), "event" | "timestamp_unix_ms") {
+      bail!(
+        "WAF rule {} emit_access_log field {} uses a reserved field name",
+        rule.name,
+        field.name
+      );
+    }
+    if !names.insert(field.name.as_str()) {
+      bail!(
+        "WAF rule {} emit_access_log contains duplicate field {}",
+        rule.name,
+        field.name
+      );
+    }
+    let expression = Parser::new(&field.value).parse().with_context(|| {
+      format!(
+        "failed to parse WAF rule {} emit_access_log field {}",
+        rule.name, field.name
+      )
+    })?;
+    expression.validate_for_phase(rule.phase).with_context(|| {
+      format!(
+        "invalid WAF rule {} emit_access_log field {}",
+        rule.name, field.name
+      )
+    })?;
+    if expression.requires_request_body_inspection() {
+      bail!(
+        "WAF rule {} emit_access_log field {} cannot read request body bytes",
+        rule.name,
+        field.name
+      );
+    }
+  }
+
+  Ok(())
+}
+
+fn validate_access_log_field_name(rule_name: &str, field_name: &str) -> anyhow::Result<()> {
+  if field_name.is_empty()
+    || field_name.len() > 64
+    || !field_name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+  {
+    bail!("WAF rule {rule_name} emit_access_log field names must match [A-Za-z0-9_.-]{{1,64}}");
+  }
   Ok(())
 }
 
@@ -931,7 +1012,7 @@ impl WafEngine {
       if self.mode == WafMode::Monitor {
         continue;
       }
-      apply_response_actions(rule, &mut decision, &mut tx)?;
+      apply_response_actions(rule, &ctx, input, &mut decision, &mut tx)?;
       if decision.terminal.is_some() {
         return Ok(decision);
       }
@@ -1023,8 +1104,31 @@ fn compile_rules(configs: &[WafRuleConfig]) -> anyhow::Result<Vec<CompiledRule>>
         requires_request_body_inspection: rule.phase == WafPhase::Request
           && expression.requires_request_body_inspection(),
         expression,
-        actions: rule.actions.clone(),
+        actions: compile_actions(&rule.actions)
+          .with_context(|| format!("failed to compile WAF rule {} actions", rule.name))?,
       })
+    })
+    .collect()
+}
+
+fn compile_actions(configs: &[WafActionConfig]) -> anyhow::Result<Vec<CompiledAction>> {
+  configs
+    .iter()
+    .map(|action| match action {
+      WafActionConfig::EmitAccessLog { fields } => Ok(CompiledAction::EmitAccessLog {
+        fields: fields
+          .iter()
+          .map(|field| {
+            Ok(CompiledAccessLogField {
+              name: field.name.clone(),
+              expression: Parser::new(&field.value).parse().with_context(|| {
+                format!("failed to compile emit_access_log field {}", field.name)
+              })?,
+            })
+          })
+          .collect::<anyhow::Result<Vec<_>>>()?,
+      }),
+      action => Ok(CompiledAction::Config(action.clone())),
     })
     .collect()
 }
@@ -1067,7 +1171,19 @@ struct CompiledRule {
   priority: i64,
   requires_request_body_inspection: bool,
   expression: Expr,
-  actions: Vec<WafActionConfig>,
+  actions: Vec<CompiledAction>,
+}
+
+#[derive(Clone)]
+enum CompiledAction {
+  Config(WafActionConfig),
+  EmitAccessLog { fields: Vec<CompiledAccessLogField> },
+}
+
+#[derive(Clone)]
+struct CompiledAccessLogField {
+  name: String,
+  expression: Expr,
 }
 
 #[derive(Clone)]
@@ -1172,6 +1288,7 @@ pub struct RequestWafDecision {
 pub struct ResponseWafDecision {
   pub terminal: Option<WafTerminalResponse>,
   pub response_header_mutations: Vec<HeaderMutation>,
+  pub access_logs: Vec<AccessLogRecord>,
 }
 
 fn record_request_tag(
@@ -1226,33 +1343,33 @@ fn apply_request_actions(
   for action in &rule.actions {
     tx.count_mutation()?;
     match action {
-      WafActionConfig::Reject { status, body } => {
+      CompiledAction::Config(WafActionConfig::Reject { status, body }) => {
         decision.terminal = Some(WafTerminalResponse::new(
           StatusCode::from_u16(*status)?,
           body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
         ));
         return Ok(());
       }
-      WafActionConfig::SetRequestHeader { name, value } => {
+      CompiledAction::Config(WafActionConfig::SetRequestHeader { name, value }) => {
         decision.request_header_mutations.push(HeaderMutation::Set {
           name: HeaderName::from_bytes(name.as_bytes())?,
           value: HeaderValue::from_str(value)?,
         });
       }
-      WafActionConfig::RemoveRequestHeader { name } => {
+      CompiledAction::Config(WafActionConfig::RemoveRequestHeader { name }) => {
         decision
           .request_header_mutations
           .push(HeaderMutation::Remove {
             name: HeaderName::from_bytes(name.as_bytes())?,
           });
       }
-      WafActionConfig::SetTag { key, value } => {
+      CompiledAction::Config(WafActionConfig::SetTag { key, value }) => {
         decision.tags.push((key.clone(), value.clone()));
       }
-      WafActionConfig::RouteToUpstream { upstream } => {
+      CompiledAction::Config(WafActionConfig::RouteToUpstream { upstream }) => {
         decision.upstream_override = Some(upstream.clone());
       }
-      WafActionConfig::RequirePersonProof {
+      CompiledAction::Config(WafActionConfig::RequirePersonProof {
         algorithm,
         difficulty,
         ttl_seconds,
@@ -1264,7 +1381,7 @@ fn apply_request_actions(
         single_use,
         success_tag,
         status,
-      } => {
+      }) => {
         decision.terminal = Some(person_proof.issue_challenge(
           input,
           person_proof::PersonProofPolicy {
@@ -1283,13 +1400,15 @@ fn apply_request_actions(
         )?);
         return Ok(());
       }
-      WafActionConfig::RouteToPool { .. }
-      | WafActionConfig::SetLoadBalancingPolicy { .. }
-      | WafActionConfig::ContinueResponse
-      | WafActionConfig::ReplaceResponse { .. }
-      | WafActionConfig::RejectResponse { .. }
-      | WafActionConfig::SetResponseHeader { .. }
-      | WafActionConfig::RemoveResponseHeader { .. } => {
+      CompiledAction::Config(WafActionConfig::RouteToPool { .. })
+      | CompiledAction::Config(WafActionConfig::SetLoadBalancingPolicy { .. })
+      | CompiledAction::Config(WafActionConfig::ContinueResponse)
+      | CompiledAction::Config(WafActionConfig::ReplaceResponse { .. })
+      | CompiledAction::Config(WafActionConfig::RejectResponse { .. })
+      | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. })
+      | CompiledAction::Config(WafActionConfig::SetResponseHeader { .. })
+      | CompiledAction::Config(WafActionConfig::RemoveResponseHeader { .. })
+      | CompiledAction::EmitAccessLog { .. } => {
         bail!("invalid request-phase WAF action in rule {}", rule.name);
       }
     }
@@ -1299,22 +1418,24 @@ fn apply_request_actions(
 
 fn apply_response_actions(
   rule: &CompiledRule,
+  ctx: &EvalContext<'_>,
+  input: WafResponseInput<'_>,
   decision: &mut ResponseWafDecision,
   tx: &mut TransactionBudget,
 ) -> anyhow::Result<()> {
   for action in &rule.actions {
     tx.count_mutation()?;
     match action {
-      WafActionConfig::ContinueResponse => return Ok(()),
-      WafActionConfig::ReplaceResponse { status, body }
-      | WafActionConfig::RejectResponse { status, body } => {
+      CompiledAction::Config(WafActionConfig::ContinueResponse) => return Ok(()),
+      CompiledAction::Config(WafActionConfig::ReplaceResponse { status, body })
+      | CompiledAction::Config(WafActionConfig::RejectResponse { status, body }) => {
         decision.terminal = Some(WafTerminalResponse::new(
           StatusCode::from_u16(*status)?,
           body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
         ));
         return Ok(());
       }
-      WafActionConfig::SetResponseHeader { name, value } => {
+      CompiledAction::Config(WafActionConfig::SetResponseHeader { name, value }) => {
         decision
           .response_header_mutations
           .push(HeaderMutation::Set {
@@ -1322,26 +1443,210 @@ fn apply_response_actions(
             value: HeaderValue::from_str(value)?,
           });
       }
-      WafActionConfig::RemoveResponseHeader { name } => {
+      CompiledAction::Config(WafActionConfig::RemoveResponseHeader { name }) => {
         decision
           .response_header_mutations
           .push(HeaderMutation::Remove {
             name: HeaderName::from_bytes(name.as_bytes())?,
           });
       }
-      WafActionConfig::Reject { .. }
-      | WafActionConfig::RouteToPool { .. }
-      | WafActionConfig::RouteToUpstream { .. }
-      | WafActionConfig::SetLoadBalancingPolicy { .. }
-      | WafActionConfig::SetRequestHeader { .. }
-      | WafActionConfig::RemoveRequestHeader { .. }
-      | WafActionConfig::SetTag { .. }
-      | WafActionConfig::RequirePersonProof { .. } => {
+      CompiledAction::EmitAccessLog { fields } => {
+        let action_ctx = EvalContext {
+          rule_name: &rule.name,
+          rule_id: rule.id.as_deref(),
+          rule_tags: &rule.tags,
+          response: Some(input),
+          ..*ctx
+        };
+        decision
+          .access_logs
+          .push(AccessLogRecord::from_fields(fields, &action_ctx, tx)?);
+      }
+      CompiledAction::Config(WafActionConfig::Reject { .. })
+      | CompiledAction::Config(WafActionConfig::RouteToPool { .. })
+      | CompiledAction::Config(WafActionConfig::RouteToUpstream { .. })
+      | CompiledAction::Config(WafActionConfig::SetLoadBalancingPolicy { .. })
+      | CompiledAction::Config(WafActionConfig::SetRequestHeader { .. })
+      | CompiledAction::Config(WafActionConfig::RemoveRequestHeader { .. })
+      | CompiledAction::Config(WafActionConfig::SetTag { .. })
+      | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
+      | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. }) => {
         bail!("invalid response-phase WAF action in rule {}", rule.name);
       }
     }
   }
   Ok(())
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AccessLogRecord {
+  timestamp_unix_ms: u64,
+  fields: Vec<AccessLogFieldValue>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct AccessLogFieldValue {
+  name: String,
+  value: AccessLogJsonValue,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum AccessLogJsonValue {
+  Bool(bool),
+  Int(i64),
+  String(String),
+  Null,
+}
+
+impl AccessLogRecord {
+  fn from_fields(
+    fields: &[CompiledAccessLogField],
+    ctx: &EvalContext<'_>,
+    tx: &mut TransactionBudget,
+  ) -> anyhow::Result<Self> {
+    let values = fields
+      .iter()
+      .map(|field| {
+        let value = field
+          .expression
+          .eval(ctx, tx)
+          .with_context(|| format!("failed to evaluate emit_access_log field {}", field.name))?;
+        Ok(AccessLogFieldValue {
+          name: field.name.clone(),
+          value: AccessLogJsonValue::from_value(value, ctx.limits)?,
+        })
+      })
+      .collect::<anyhow::Result<Vec<_>>>()?;
+
+    Ok(Self {
+      timestamp_unix_ms: current_unix_ms(),
+      fields: values,
+    })
+  }
+
+  pub fn to_json_line(&self) -> String {
+    let mut out = String::new();
+    out.push('{');
+    let mut first = true;
+
+    push_json_string_field(&mut out, &mut first, "event", "oxibelt.access");
+    push_json_u64_field(
+      &mut out,
+      &mut first,
+      "timestamp_unix_ms",
+      self.timestamp_unix_ms,
+    );
+    for field in &self.fields {
+      push_json_value_field(&mut out, &mut first, &field.name, &field.value);
+    }
+
+    out.push('}');
+    out
+  }
+
+  pub fn emit_stdout(&self) {
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = writeln!(stdout, "{}", self.to_json_line()) {
+      warn!(error = %error, "failed to write OxiRule access log to stdout");
+    }
+  }
+}
+
+impl AccessLogJsonValue {
+  fn from_value(value: Value, limits: &WafLimits) -> anyhow::Result<Self> {
+    match value {
+      Value::Bool(value) => Ok(Self::Bool(value)),
+      Value::Int(value) => Ok(Self::Int(value)),
+      Value::String(value) => Ok(Self::String(truncate_log_string(
+        &value,
+        limits.max_helper_result_bytes,
+      ))),
+      Value::Null => Ok(Self::Null),
+      Value::Bytes(_) | Value::Object(_) => {
+        bail!("emit_access_log fields must evaluate to Bool, Int, String, or Null")
+      }
+    }
+  }
+}
+
+fn current_unix_ms() -> u64 {
+  SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+    .unwrap_or_default()
+}
+
+fn truncate_log_string(value: &str, max_bytes: usize) -> String {
+  if value.len() <= max_bytes {
+    return value.to_string();
+  }
+
+  let mut end = 0usize;
+  for (index, character) in value.char_indices() {
+    let next = index + character.len_utf8();
+    if next > max_bytes {
+      break;
+    }
+    end = next;
+  }
+  value[..end].to_string()
+}
+
+fn push_json_field_name(out: &mut String, first: &mut bool, name: &str) {
+  if *first {
+    *first = false;
+  } else {
+    out.push(',');
+  }
+  push_json_string(out, name);
+  out.push(':');
+}
+
+fn push_json_string_field(out: &mut String, first: &mut bool, name: &str, value: &str) {
+  push_json_field_name(out, first, name);
+  push_json_string(out, value);
+}
+
+fn push_json_value_field(
+  out: &mut String,
+  first: &mut bool,
+  name: &str,
+  value: &AccessLogJsonValue,
+) {
+  push_json_field_name(out, first, name);
+  match value {
+    AccessLogJsonValue::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+    AccessLogJsonValue::Int(value) => {
+      let _ = write!(out, "{value}");
+    }
+    AccessLogJsonValue::String(value) => push_json_string(out, value),
+    AccessLogJsonValue::Null => out.push_str("null"),
+  }
+}
+
+fn push_json_u64_field(out: &mut String, first: &mut bool, name: &str, value: u64) {
+  push_json_field_name(out, first, name);
+  let _ = write!(out, "{value}");
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+  out.push('"');
+  for character in value.chars() {
+    match character {
+      '"' => out.push_str("\\\""),
+      '\\' => out.push_str("\\\\"),
+      '\u{08}' => out.push_str("\\b"),
+      '\u{0c}' => out.push_str("\\f"),
+      '\n' => out.push_str("\\n"),
+      '\r' => out.push_str("\\r"),
+      '\t' => out.push_str("\\t"),
+      character if character <= '\u{1f}' => {
+        let _ = write!(out, "\\u{:04x}", character as u32);
+      }
+      character => out.push(character),
+    }
+  }
+  out.push('"');
 }
 
 pub fn apply_header_mutations(headers: &mut HeaderMap, mutations: &[HeaderMutation]) {
@@ -3204,6 +3509,36 @@ fn validate_identifier(identifier: &str) -> anyhow::Result<()> {
     }
     _ => Ok(()),
   }
+}
+
+fn default_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
+  [
+    ("method", "Request.Http.Method"),
+    ("uri", "Request.Http.Uri"),
+    ("path", "Request.Http.Path"),
+    ("query", "Request.Http.Query"),
+    ("request_version", "Request.Http.Version"),
+    ("host", "Request.Http.Host"),
+    ("user_agent", "Request.Headers.get('User-Agent')"),
+    ("client_ip", "Request.Client.Ip"),
+    ("client_port", "Request.Client.Port"),
+    ("protocol", "Request.Protocol"),
+    ("transport", "Request.Transport.Network"),
+    ("tls", "Request.Tls.Enabled"),
+    ("route", "Context.RouteName"),
+    ("status", "Response.Http.Status"),
+    ("reason", "Response.Http.Reason"),
+    ("response_body_bytes", "Response.Body.Size"),
+    ("upstream", "Response.Upstream.Name"),
+    ("waf_rule", "Context.RuleName"),
+    ("waf_rule_id", "Context.RuleId"),
+  ]
+  .into_iter()
+  .map(|(name, value)| AccessLogFieldConfig {
+    name: name.to_string(),
+    value: value.to_string(),
+  })
+  .collect()
 }
 
 fn default_max_rule_runtime_ms() -> u64 {

@@ -11,7 +11,7 @@ The current Rust implementation includes the initial OxiRule execution path for 
 - External `.oxirule.toml` rule files loaded relative to the configured OxiRule directory.
 - Optional public rule `id` and rule `tags` metadata, plus internal UUIDv4 rule identifiers for runtime bookkeeping and logs.
 - Request-phase `reject`, `set_request_header`, `remove_request_header`, `set_tag`, and `route_to_upstream`.
-- Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, and `remove_response_header`.
+- Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, `remove_response_header`, and `emit_access_log`.
 - CEL-like boolean expressions with object property access, string helpers, header/query/cookie/tag helpers, request body byte format helpers, regex matching, CIDR checks, and request/response phase validation.
 - Request tags created by Person proof success or earlier request-phase `set_tag` actions are visible to later request-phase rules and to response-phase rules.
 - Request transport metadata for direct peer IP/port, encryption state, negotiated TCP TLS SNI/ALPN, configured TCP max-hop policy, and HTTP/3/WebTransport UDP metadata.
@@ -716,7 +716,46 @@ success_tag = "PersonProof"
 
 Tag keys must match `[A-Za-z0-9-]{1,32}`. Tag count and tag value size are bounded by OxiBelt limits.
 
-### 7.6 Body replacement actions
+### 7.6 Access log actions
+
+#### `emit_access_log`
+
+```toml
+[[waf.rules]]
+name = "stdout-access-log"
+phase = "response"
+priority = 1000
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+
+[[waf.rules.actions.fields]]
+name = "method"
+value = "Request.Http.Method"
+
+[[waf.rules.actions.fields]]
+name = "path"
+value = "Request.Http.Path"
+
+[[waf.rules.actions.fields]]
+name = "status"
+value = "Response.Http.Status"
+
+[[waf.rules.actions.fields]]
+name = "upstream"
+value = "Response.Upstream.Name"
+```
+
+`emit_access_log` writes one newline-delimited JSON access log record to stdout when a response-phase rule matches. Container runtimes capture stdout, so the record is visible from the host with commands such as `docker logs <container>`.
+
+Each `fields` entry chooses one JSON property and the OxiRule expression used to populate it. `value` may also be written as `expression`. Field expressions run in the same bounded evaluator as rule conditions, so they may read response-phase `Request`, `Response`, and `Context` properties such as `Request.Http.Host`, `Response.Http.Status`, `Response.Upstream.Name`, `Context.RuleName`, or bounded helpers such as `Request.Headers.get('User-Agent')`.
+
+The emitted JSON object always includes `event = "oxibelt.access"` and `timestamp_unix_ms`, followed by the configured fields in order. Field values must evaluate to `Bool`, `Int`, `String`, or `Null`; object and byte values are rejected. Field names must match `[A-Za-z0-9_.-]{1,64}` and may not be `event` or `timestamp_unix_ms`. If `fields` is omitted, OxiBelt emits a default access-log field set covering common request, response, upstream, and matched-rule metadata.
+
+The action is valid only in response-phase rules, after OxiBelt has received an upstream response or created a synthetic upstream-error response. Fields that read request body bytes are rejected so enabling an access log cannot silently force request-body capture.
+
+### 7.7 Body replacement actions
 
 Body replacement is allowed only through explicit response actions and must obey body size limits.
 
@@ -1550,7 +1589,7 @@ Possible future features:
 - Reusable named rule sets.
 - Precompiled safe regex sets.
 - Rule versioning.
-- Structured audit logs.
+- Additional structured audit logs.
 - Rule testing CLI.
 - Dry-run simulation mode.
 - Per-route limit overrides.
