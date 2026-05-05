@@ -2,10 +2,11 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <chromium|firefox>" >&2
+  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof]" >&2
 }
 
 browser="${1:-}"
+scenario="${2:-person-proof}"
 if [[ -z "${browser}" ]]; then
   usage
   exit 2
@@ -13,6 +14,14 @@ fi
 
 case "${browser}" in
   chromium|firefox) ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
+case "${scenario}" in
+  basic-navigation|waf-request|waf-response|person-proof) ;;
   *)
     usage
     exit 2
@@ -40,7 +49,7 @@ if [[ -n "${GECKOWEBDRIVER:-}" ]]; then
 fi
 
 mkdir -p "${runner_temp}"
-work_dir="$(mktemp -d "${runner_temp%/}/oxibelt-browser-${browser}.XXXXXX")"
+work_dir="$(mktemp -d "${runner_temp%/}/oxibelt-browser-${browser}-${scenario}.XXXXXX")"
 config_dir="${work_dir}/config"
 cert_dir="${work_dir}/cert"
 upstream_log="${work_dir}/mock-upstream.log"
@@ -77,6 +86,14 @@ show_diagnostics() {
   show_log "Mock upstream log" "${upstream_log}"
   show_log "OxiBelt log" "${proxy_log}"
   show_log "Driver log" "${driver_log:-}"
+
+  if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
+    mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
+    cp "${upstream_log}" "${OXIBELT_TEST_ARTIFACT_DIR}/mock-upstream.log" 2>/dev/null || true
+    cp "${proxy_log}" "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.log" 2>/dev/null || true
+    cp "${driver_log:-}" "${OXIBELT_TEST_ARTIFACT_DIR}/webdriver.log" 2>/dev/null || true
+    cp "${config_dir}/oxibelt.toml" "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.toml" 2>/dev/null || true
+  fi
 }
 
 fail_with_diagnostics() {
@@ -105,8 +122,42 @@ webdriver_execute_sync() {
     "${driver_base_url}/session/${session_id}/execute/sync" | jq -r ".value"
 }
 
+webdriver_execute_async() {
+  local script="$1"
+
+  curl --silent --show-error --fail-with-body \
+    --header "Content-Type: application/json" \
+    --request POST \
+    --data "$(jq -n --arg script "${script}" '{script: $script, args: []}')" \
+    "${driver_base_url}/session/${session_id}/execute/async" | jq -c ".value"
+}
+
 webdriver_body_text() {
   webdriver_execute_sync "return document.body.innerText;"
+}
+
+wait_for_body_contains() {
+  local expected="$1"
+  local label="$2"
+  local body_text=""
+
+  for _ in {1..30}; do
+    if body_text="$(webdriver_body_text 2>/dev/null)"; then
+      if grep -F "${expected}" <<<"${body_text}" >/dev/null; then
+        echo "${body_text}"
+        return 0
+      fi
+    fi
+
+    sleep 1
+  done
+
+  echo "Unexpected ${browser} ${label} body:" >&2
+  if [[ -n "${body_text}" ]]; then
+    echo "${body_text}" >&2
+  fi
+  show_diagnostics
+  exit 1
 }
 
 wait_for_upstream_json() {
@@ -334,6 +385,39 @@ direct_peer_ipv4_prefix_bits = 32
 single_use = true
 success_tag = "PersonProof"
 
+[[waf.rules]]
+name = "browser-request-block"
+phase = "request"
+priority = 20
+when = "Request.Http.Path.endsWith('/browser-blocked')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "browser request blocked"
+
+[[waf.rules]]
+name = "browser-response-header"
+phase = "response"
+priority = 30
+when = "Request.Http.Path.endsWith('/browser-header')"
+
+[[waf.rules.actions]]
+type = "set_response_header"
+name = "X-Browser-Waf"
+value = "set"
+
+[[waf.rules]]
+name = "browser-response-replace"
+phase = "response"
+priority = 40
+when = "Request.Http.Path.endsWith('/browser-replace')"
+
+[[waf.rules.actions]]
+type = "replace_response"
+status = 202
+body = "browser response replaced"
+
 [[upstreams]]
 name = "browser-upstream"
 origin = "http://${proxy_origin_host}:${upstream_port}/origin"
@@ -442,51 +526,80 @@ if [[ -z "${session_id}" ]]; then
   exit 1
 fi
 
-test_url="https://localhost:${proxy_port}/app/webdriver?browser=${browser}"
-webdriver_navigate "${test_url}"
-wait_for_upstream_json "/origin/app/webdriver?browser=${browser}" "proxy" >/dev/null
+case "${scenario}" in
+  basic-navigation)
+    test_url="https://localhost:${proxy_port}/app/webdriver?browser=${browser}"
+    webdriver_navigate "${test_url}"
+    wait_for_upstream_json "/origin/app/webdriver?browser=${browser}" "proxy" >/dev/null
+    echo "${browser} WebDriver basic navigation reached OxiBelt."
+    ;;
+  waf-request)
+    blocked_url="https://localhost:${proxy_port}/app/browser-blocked?browser=${browser}"
+    webdriver_navigate "${blocked_url}"
+    wait_for_body_contains "browser request blocked" "request WAF block" >/dev/null
+    echo "${browser} WebDriver observed a request-phase WAF block."
+    ;;
+  waf-response)
+    replace_url="https://localhost:${proxy_port}/app/browser-replace?browser=${browser}"
+    webdriver_navigate "${replace_url}"
+    wait_for_body_contains "browser response replaced" "response WAF replacement" >/dev/null
 
-protected_url="https://localhost:${proxy_port}/app/person-proof?browser=${browser}"
-webdriver_navigate "${protected_url}"
-protected_result="$(
-  wait_for_upstream_json \
-    "/origin/app/person-proof?browser=${browser}" \
-    "person proof challenge"
-)"
+    header_result="$(
+      webdriver_execute_async \
+        "const done = arguments[arguments.length - 1]; fetch('/app/browser-header?browser=${browser}', {cache: 'no-store'}).then((response) => done({status: response.status, header: response.headers.get('x-browser-waf')})).catch((error) => done({error: String(error)}));"
+    )"
+    if ! jq -e '.status == 200 and .header == "set"' <<<"${header_result}" >/dev/null; then
+      echo "Expected ${browser} fetch to see response WAF header:" >&2
+      echo "${header_result}" >&2
+      show_diagnostics
+      exit 1
+    fi
+    echo "${browser} WebDriver observed response-phase WAF behavior."
+    ;;
+  person-proof)
+    protected_url="https://localhost:${proxy_port}/app/person-proof?browser=${browser}"
+    webdriver_navigate "${protected_url}"
+    protected_result="$(
+      wait_for_upstream_json \
+        "/origin/app/person-proof?browser=${browser}" \
+        "person proof challenge"
+    )"
 
-if ! jq -e \
-  '.headers.cookie | contains("__webdriver_person_proof=v1.")' <<<"${protected_result}" >/dev/null; then
-  echo "Expected ${browser} person proof request to submit a solved proof cookie:" >&2
-  echo "${protected_result}" >&2
-  show_diagnostics
-  exit 1
-fi
+    if ! jq -e \
+      '.headers.cookie | contains("__webdriver_person_proof=v1.")' <<<"${protected_result}" >/dev/null; then
+      echo "Expected ${browser} person proof request to submit a solved proof cookie:" >&2
+      echo "${protected_result}" >&2
+      show_diagnostics
+      exit 1
+    fi
 
-clearance_cookie="$(webdriver_cookie "__webdriver_person_proof")"
-if ! jq -e \
-  '.value.name == "__webdriver_person_proof"
-    and (.value.value | startswith("clearance.v1."))
-    and .value.secure == true' <<<"${clearance_cookie}" >/dev/null; then
-  echo "Expected ${browser} to receive a secure person proof clearance cookie:" >&2
-  echo "${clearance_cookie}" >&2
-  show_diagnostics
-  exit 1
-fi
+    clearance_cookie="$(webdriver_cookie "__webdriver_person_proof")"
+    if ! jq -e \
+      '.value.name == "__webdriver_person_proof"
+        and (.value.value | startswith("clearance.v1."))
+        and .value.secure == true' <<<"${clearance_cookie}" >/dev/null; then
+      echo "Expected ${browser} to receive a secure person proof clearance cookie:" >&2
+      echo "${clearance_cookie}" >&2
+      show_diagnostics
+      exit 1
+    fi
 
-clearance_url="https://localhost:${proxy_port}/app/person-proof/clearance?browser=${browser}"
-webdriver_navigate "${clearance_url}"
-clearance_result="$(
-  wait_for_upstream_json \
-    "/origin/app/person-proof/clearance?browser=${browser}" \
-    "person proof clearance"
-)"
+    clearance_url="https://localhost:${proxy_port}/app/person-proof/clearance?browser=${browser}"
+    webdriver_navigate "${clearance_url}"
+    clearance_result="$(
+      wait_for_upstream_json \
+        "/origin/app/person-proof/clearance?browser=${browser}" \
+        "person proof clearance"
+    )"
 
-if ! jq -e \
-  '.headers.cookie | contains("__webdriver_person_proof=clearance.v1.")' <<<"${clearance_result}" >/dev/null; then
-  echo "Expected ${browser} person proof clearance request to reuse the clearance cookie:" >&2
-  echo "${clearance_result}" >&2
-  show_diagnostics
-  exit 1
-fi
+    if ! jq -e \
+      '.headers.cookie | contains("__webdriver_person_proof=clearance.v1.")' <<<"${clearance_result}" >/dev/null; then
+      echo "Expected ${browser} person proof clearance request to reuse the clearance cookie:" >&2
+      echo "${clearance_result}" >&2
+      show_diagnostics
+      exit 1
+    fi
 
-echo "${browser} WebDriver reached OxiBelt, solved the person proof challenge, and reused the clearance cookie."
+    echo "${browser} WebDriver solved the person proof challenge and reused the clearance cookie."
+    ;;
+esac
