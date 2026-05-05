@@ -1499,6 +1499,8 @@ enum AccessLogJsonValue {
 }
 
 impl AccessLogRecord {
+  pub const EVENT: &'static str = "oxibelt.access";
+
   fn from_fields(
     fields: &[CompiledAccessLogField],
     ctx: &EvalContext<'_>,
@@ -1524,12 +1526,16 @@ impl AccessLogRecord {
     })
   }
 
+  pub fn timestamp_unix_ms(&self) -> u64 {
+    self.timestamp_unix_ms
+  }
+
   pub fn to_json_line(&self) -> String {
     let mut out = String::new();
     out.push('{');
     let mut first = true;
 
-    push_json_string_field(&mut out, &mut first, "event", "oxibelt.access");
+    push_json_string_field(&mut out, &mut first, "event", Self::EVENT);
     push_json_u64_field(
       &mut out,
       &mut first,

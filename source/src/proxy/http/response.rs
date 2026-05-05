@@ -82,7 +82,7 @@ pub(crate) fn upstream_error_response(
     }),
   });
   for access_log in &response_waf.access_logs {
-    access_log.emit_stdout();
+    state.access_logs.emit(access_log);
   }
 
   if let Some(terminal) = response_waf.terminal {

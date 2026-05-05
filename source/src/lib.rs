@@ -10,6 +10,7 @@ compile_error!("oxibelt-proxy intentionally targets Linux only.");
 )))]
 compile_error!("oxibelt-proxy supports only x86_64, aarch64, and riscv64.");
 
+pub mod access_log;
 pub mod config;
 pub mod proxy;
 pub mod routes;
@@ -31,6 +32,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
   config.validate()?;
   tls::install_default_provider()?;
 
-  let state = Arc::new(AppState::new(config).context("failed to initialize application state")?);
+  let state = Arc::new(
+    AppState::new(config)
+      .await
+      .context("failed to initialize application state")?,
+  );
   server::serve(state).await
 }

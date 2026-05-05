@@ -20,6 +20,8 @@ pub struct Config {
   pub proxy: ProxyConfig,
   #[serde(default)]
   pub compression: CompressionConfig,
+  #[serde(default)]
+  pub database: DatabaseConfig,
   pub upstreams: Vec<UpstreamConfig>,
   pub routes: Vec<RouteConfig>,
   #[serde(default)]
@@ -77,6 +79,11 @@ impl Config {
     for upstream in &mut self.upstreams {
       upstream.tls.resolve_relative_paths(&path_roots.cert_dir)?;
     }
+    self
+      .database
+      .access_log
+      .tls
+      .resolve_relative_paths(&path_roots.cert_dir)?;
     self.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     for route in &mut self.routes {
       route.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
@@ -115,6 +122,8 @@ impl Config {
     if self.routes.is_empty() {
       bail!("at least one route must be configured");
     }
+
+    self.database.validate()?;
 
     let mut upstream_names = HashSet::new();
     for upstream in &self.upstreams {
@@ -569,6 +578,64 @@ fn validate_relative_path(field_name: &str, path: &Path) -> anyhow::Result<()> {
   Ok(())
 }
 
+fn validate_optional_non_empty(field_name: &str, value: Option<&str>) -> anyhow::Result<()> {
+  if matches!(value, Some(value) if value.trim().is_empty()) {
+    bail!("{field_name} must not be empty");
+  }
+  Ok(())
+}
+
+pub(crate) fn quote_postgres_identifier_path(
+  field_name: &str,
+  value: &str,
+) -> anyhow::Result<String> {
+  validate_postgres_identifier_path(field_name, value)?;
+
+  Ok(
+    value
+      .split('.')
+      .map(|segment| format!("\"{segment}\""))
+      .collect::<Vec<_>>()
+      .join("."),
+  )
+}
+
+fn validate_postgres_identifier_path(field_name: &str, value: &str) -> anyhow::Result<()> {
+  if value.trim().is_empty() {
+    bail!("{field_name} must not be empty");
+  }
+
+  let parts = value.split('.').collect::<Vec<_>>();
+  if parts.len() > 2 || parts.iter().any(|part| part.is_empty()) {
+    bail!("{field_name} must be an unqualified table name or schema-qualified table name");
+  }
+
+  for part in parts {
+    validate_postgres_identifier(field_name, part)?;
+  }
+
+  Ok(())
+}
+
+fn validate_postgres_identifier(field_name: &str, value: &str) -> anyhow::Result<()> {
+  let mut bytes = value.bytes();
+  let Some(first) = bytes.next() else {
+    bail!("{field_name} must not contain empty identifier segments");
+  };
+  if !(first.is_ascii_alphabetic() || first == b'_') {
+    bail!("{field_name} identifier segments must start with an ASCII letter or underscore");
+  }
+  if value.len() > 63 {
+    bail!("{field_name} identifier segments must be 63 bytes or shorter");
+  }
+  if !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+    bail!(
+      "{field_name} identifier segments must contain only ASCII letters, digits, or underscores"
+    );
+  }
+  Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
   #[serde(default = "default_log_level")]
@@ -722,6 +789,207 @@ impl Default for CompressionConfig {
       zstd: true,
     }
   }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DatabaseConfig {
+  #[serde(default)]
+  pub access_log: DatabaseAccessLogConfig,
+}
+
+impl DatabaseConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    self.access_log.validate()
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseAccessLogConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub connection_url: Option<String>,
+  #[serde(default)]
+  pub connection_url_env: Option<String>,
+  #[serde(default)]
+  pub table: Option<String>,
+  #[serde(default = "default_database_access_log_max_connections")]
+  pub max_connections: u32,
+  #[serde(default = "default_database_access_log_connect_timeout_ms")]
+  pub connect_timeout_ms: u64,
+  #[serde(default = "default_database_access_log_queue_capacity")]
+  pub queue_capacity: usize,
+  #[serde(default)]
+  pub tls: DatabaseTlsConfig,
+}
+
+impl Default for DatabaseAccessLogConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      connection_url: None,
+      connection_url_env: None,
+      table: None,
+      max_connections: default_database_access_log_max_connections(),
+      connect_timeout_ms: default_database_access_log_connect_timeout_ms(),
+      queue_capacity: default_database_access_log_queue_capacity(),
+      tls: DatabaseTlsConfig::default(),
+    }
+  }
+}
+
+impl DatabaseAccessLogConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    validate_optional_non_empty(
+      "database.access_log.connection_url",
+      self.connection_url.as_deref(),
+    )?;
+    validate_optional_non_empty(
+      "database.access_log.connection_url_env",
+      self.connection_url_env.as_deref(),
+    )?;
+    if let Some(table) = &self.table {
+      validate_postgres_identifier_path("database.access_log.table", table)?;
+    }
+    if self.max_connections == 0 {
+      bail!("database.access_log.max_connections must be greater than 0");
+    }
+    if self.connect_timeout_ms == 0 {
+      bail!("database.access_log.connect_timeout_ms must be greater than 0");
+    }
+    if self.queue_capacity == 0 {
+      bail!("database.access_log.queue_capacity must be greater than 0");
+    }
+    self.tls.validate()?;
+
+    if !self.enabled {
+      return Ok(());
+    }
+
+    match (&self.connection_url, &self.connection_url_env) {
+      (Some(_), Some(_)) => {
+        bail!("database.access_log must set only one of connection_url or connection_url_env")
+      }
+      (None, None) => {
+        bail!("database.access_log requires connection_url or connection_url_env when enabled=true")
+      }
+      _ => {}
+    }
+    if self.table.is_none() {
+      bail!("database.access_log.table is required when enabled=true");
+    }
+
+    Ok(())
+  }
+
+  pub(crate) fn connection_url(&self) -> anyhow::Result<Option<String>> {
+    if let Some(env_name) = &self.connection_url_env {
+      let value = std::env::var(env_name).with_context(|| {
+        format!("failed to read database.access_log.connection_url_env {env_name}")
+      })?;
+      if value.trim().is_empty() {
+        bail!("database.access_log.connection_url_env {env_name} resolved to an empty value");
+      }
+      return Ok(Some(value));
+    }
+    Ok(self.connection_url.clone())
+  }
+
+  pub(crate) fn table_name(&self) -> anyhow::Result<Option<String>> {
+    self
+      .table
+      .as_deref()
+      .map(|table| quote_postgres_identifier_path("database.access_log.table", table))
+      .transpose()
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseTlsConfig {
+  #[serde(default)]
+  pub mode: DatabaseTlsMode,
+  #[serde(default)]
+  pub ca_cert: Option<PathBuf>,
+  #[serde(default)]
+  pub client_cert: Option<PathBuf>,
+  #[serde(default)]
+  pub client_key: Option<PathBuf>,
+}
+
+impl Default for DatabaseTlsConfig {
+  fn default() -> Self {
+    Self {
+      mode: DatabaseTlsMode::Off,
+      ca_cert: None,
+      client_cert: None,
+      client_key: None,
+    }
+  }
+}
+
+impl DatabaseTlsConfig {
+  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
+    self.ca_cert = self
+      .ca_cert
+      .take()
+      .map(|path| {
+        resolve_existing_local_config_file_path("database.access_log.tls.ca_cert", base_dir, &path)
+      })
+      .transpose()?;
+    self.client_cert = self
+      .client_cert
+      .take()
+      .map(|path| {
+        resolve_existing_local_config_file_path(
+          "database.access_log.tls.client_cert",
+          base_dir,
+          &path,
+        )
+      })
+      .transpose()?;
+    self.client_key = self
+      .client_key
+      .take()
+      .map(|path| {
+        resolve_existing_local_config_file_path(
+          "database.access_log.tls.client_key",
+          base_dir,
+          &path,
+        )
+      })
+      .transpose()?;
+    Ok(())
+  }
+
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.ca_cert.is_some() && self.mode != DatabaseTlsMode::VerifyFull {
+      bail!(
+        "database.access_log.tls.ca_cert is only valid when database.access_log.tls.mode is \"verify_full\""
+      );
+    }
+    match (&self.client_cert, &self.client_key) {
+      (Some(_), Some(_)) if self.mode == DatabaseTlsMode::VerifyFull => {}
+      (Some(_), Some(_)) => bail!(
+        "database.access_log.tls.client_cert and client_key are only valid when database.access_log.tls.mode is \"verify_full\""
+      ),
+      (Some(_), None) => {
+        bail!("database.access_log.tls.client_key is required when client_cert is configured")
+      }
+      (None, Some(_)) => {
+        bail!("database.access_log.tls.client_cert is required when client_key is configured")
+      }
+      (None, None) => {}
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseTlsMode {
+  #[default]
+  Off,
+  VerifyFull,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -879,4 +1147,16 @@ fn default_request_timeout_ms() -> u64 {
 
 fn default_proxy_max_http_version() -> HttpVersion {
   HttpVersion::H2
+}
+
+fn default_database_access_log_max_connections() -> u32 {
+  4
+}
+
+fn default_database_access_log_connect_timeout_ms() -> u64 {
+  3_000
+}
+
+fn default_database_access_log_queue_capacity() -> usize {
+  1024
 }

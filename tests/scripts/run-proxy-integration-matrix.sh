@@ -19,11 +19,13 @@ work_dir="${repo_root}/tests/.tmp/matrix-${category}-${case_name}-${run_id}"
 case_dir="${work_dir}/case"
 cert_dir="${work_dir}/cert"
 upstream_tls_dir="${work_dir}/upstream-tls"
+postgres_tls_dir="${work_dir}/postgres-tls"
 logs_dir="${work_dir}/logs"
 network_name="oxibelt-matrix-${run_id}"
 mock_image="oxibelt/mock-upstream:${run_id}"
 pq_probe_image="oxibelt/pq-probe:${run_id}"
 protocol_probe_image="oxibelt/protocol-probe:${run_id}"
+postgres_image="oxibelt/postgres:${run_id}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy-matrix:${run_id}}"
 remove_proxy_image=0
 proxy_container="oxibelt-proxy-${run_id}"
@@ -32,12 +34,13 @@ https_container="oxibelt-https-${run_id}"
 alt_container="oxibelt-alt-${run_id}"
 h2_container="oxibelt-h2-${run_id}"
 h2c_container="oxibelt-h2c-${run_id}"
+postgres_container="oxibelt-postgres-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker rmi -f "${mock_image}" "${pq_probe_image}" "${protocol_probe_image}" >/dev/null 2>&1 || true
+  docker rmi -f "${mock_image}" "${pq_probe_image}" "${protocol_probe_image}" "${postgres_image}" >/dev/null 2>&1 || true
   if [[ "${remove_proxy_image}" == "1" ]]; then
     docker rmi -f "${proxy_image}" >/dev/null 2>&1 || true
   fi
@@ -47,7 +50,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${case_dir}" "${cert_dir}" "${upstream_tls_dir}" "${logs_dir}"
+mkdir -p "${case_dir}" "${cert_dir}" "${upstream_tls_dir}" "${postgres_tls_dir}" "${logs_dir}"
 
 cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
   materialize \
@@ -67,6 +70,7 @@ collect_diagnostics() {
   docker logs "${alt_container}" >"${logs_dir}/mock-alt.log" 2>&1 || true
   docker logs "${h2_container}" >"${logs_dir}/mock-h2.log" 2>&1 || true
   docker logs "${h2c_container}" >"${logs_dir}/mock-h2c.log" 2>&1 || true
+  docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
 
   if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
@@ -198,6 +202,14 @@ protocol_probe_client() {
   fail_with_diagnostics "protocol probe did not reach expected status ${expect_status}"
 }
 
+postgres_query() {
+  local sql="$1"
+  docker exec \
+    -e PGPASSWORD=oxibelt \
+    "${postgres_container}" \
+    psql -U oxibelt -d oxibelt -Atc "${sql}"
+}
+
 run_pq_probe() {
   local group="$1"
   local container_name="oxibelt-pq-${group}-${run_id}"
@@ -276,6 +288,51 @@ DNS.2 = localhost
 IP.1 = 127.0.0.1
 EOF
 
+cat >"${work_dir}/postgres-ca.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+CN = oxibelt-matrix-postgres-root
+
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+EOF
+
+cat >"${work_dir}/postgres-server.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = mock-postgres
+
+[req_ext]
+subjectAltName = @alt_names
+extendedKeyUsage = serverAuth
+
+[alt_names]
+DNS.1 = mock-postgres
+EOF
+
+cat >"${work_dir}/postgres-client.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = oxibelt
+
+[req_ext]
+extendedKeyUsage = clientAuth
+EOF
+
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
   -days 1 \
   -config "${work_dir}/upstream-ca.cnf" \
@@ -302,10 +359,48 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
   -keyout "${cert_dir}/privkey.pem" \
   -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
 
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+  -days 1 \
+  -config "${work_dir}/postgres-ca.cnf" \
+  -keyout "${postgres_tls_dir}/ca.key" \
+  -out "${postgres_tls_dir}/ca.pem" >/dev/null 2>&1
+
+openssl req -newkey rsa:2048 -sha256 -nodes \
+  -config "${work_dir}/postgres-server.cnf" \
+  -keyout "${postgres_tls_dir}/server.key" \
+  -out "${postgres_tls_dir}/server.csr" >/dev/null 2>&1
+
+openssl x509 -req -sha256 -days 1 \
+  -in "${postgres_tls_dir}/server.csr" \
+  -CA "${postgres_tls_dir}/ca.pem" \
+  -CAkey "${postgres_tls_dir}/ca.key" \
+  -CAcreateserial \
+  -extfile "${work_dir}/postgres-server.cnf" \
+  -extensions req_ext \
+  -out "${postgres_tls_dir}/server.pem" >/dev/null 2>&1
+
+openssl req -newkey rsa:2048 -sha256 -nodes \
+  -config "${work_dir}/postgres-client.cnf" \
+  -keyout "${postgres_tls_dir}/client.key" \
+  -out "${postgres_tls_dir}/client.csr" >/dev/null 2>&1
+
+openssl x509 -req -sha256 -days 1 \
+  -in "${postgres_tls_dir}/client.csr" \
+  -CA "${postgres_tls_dir}/ca.pem" \
+  -CAkey "${postgres_tls_dir}/ca.key" \
+  -CAcreateserial \
+  -extfile "${work_dir}/postgres-client.cnf" \
+  -extensions req_ext \
+  -out "${postgres_tls_dir}/client.pem" >/dev/null 2>&1
+
 cp "${upstream_tls_dir}/ca.pem" "${cert_dir}/upstream-ca.pem"
+cp "${postgres_tls_dir}/ca.pem" "${cert_dir}/postgres-ca.pem"
+cp "${postgres_tls_dir}/client.pem" "${cert_dir}/postgres-client.pem"
+cp "${postgres_tls_dir}/client.key" "${cert_dir}/postgres-client.key"
 printf 'ocsp' >"${cert_dir}/ocsp.der"
 printf 'not an ECHConfigList' >"${cert_dir}/invalid.echconfiglist"
-chmod 644 "${cert_dir}/"* "${upstream_tls_dir}/"*
+chmod 644 "${cert_dir}/"* "${upstream_tls_dir}/"* "${postgres_tls_dir}/"*
+chmod 600 "${postgres_tls_dir}/"*.key
 
 docker network create "${network_name}" >/dev/null
 
@@ -328,6 +423,13 @@ if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" 
     -t "${protocol_probe_image}" \
     -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
     "${repo_root}/tests/docker/protocol_probe" >/dev/null
+fi
+
+if [[ "${CASE_NEED_POSTGRES}" == "1" ]]; then
+  docker build \
+    -t "${postgres_image}" \
+    -f "${repo_root}/tests/docker/postgres/Dockerfile" \
+    "${repo_root}/tests/docker/postgres" >/dev/null
 fi
 
 if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
@@ -403,6 +505,61 @@ if [[ "${CASE_NEED_H2C_UPSTREAM}" == "1" ]]; then
     h2c-upstream \
     --listen 0.0.0.0:18082 \
     --name h2c-upstream >/dev/null
+fi
+
+if [[ "${CASE_NEED_POSTGRES}" == "1" ]]; then
+  cat >"${work_dir}/postgres-init.sql" <<'EOF'
+CREATE TABLE oxibelt_access_log (
+  event text NOT NULL,
+  timestamp_unix_ms bigint NOT NULL,
+  record jsonb NOT NULL
+);
+EOF
+
+  if [[ "${CASE_NEED_POSTGRES_MTLS}" == "1" ]]; then
+    cat >"${work_dir}/pg_hba.conf" <<'EOF'
+local all all trust
+hostssl oxibelt oxibelt all scram-sha-256 clientcert=verify-full
+hostnossl all all all reject
+EOF
+    docker create \
+      --name "${postgres_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --network-alias mock-postgres \
+      -e POSTGRES_USER=oxibelt \
+      -e POSTGRES_PASSWORD=oxibelt \
+      -e POSTGRES_DB=oxibelt \
+      --entrypoint /bin/sh \
+      "${postgres_image}" \
+      -ceu 'chown -R postgres:postgres /tls && chmod 0600 /tls/*.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.pem -c ssl_key_file=/tls/server.key -c ssl_ca_file=/tls/ca.pem -c hba_file=/tls/pg_hba.conf' >/dev/null
+    docker cp "${postgres_tls_dir}/server.pem" "${postgres_container}:/tls/server.pem"
+    docker cp "${postgres_tls_dir}/server.key" "${postgres_container}:/tls/server.key"
+    docker cp "${postgres_tls_dir}/ca.pem" "${postgres_container}:/tls/ca.pem"
+    docker cp "${work_dir}/pg_hba.conf" "${postgres_container}:/tls/pg_hba.conf"
+  else
+    docker create \
+      --name "${postgres_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --network-alias mock-postgres \
+      -e POSTGRES_USER=oxibelt \
+      -e POSTGRES_PASSWORD=oxibelt \
+      -e POSTGRES_DB=oxibelt \
+      "${postgres_image}" >/dev/null
+  fi
+  docker cp "${work_dir}/postgres-init.sql" "${postgres_container}:/docker-entrypoint-initdb.d/10-oxibelt.sql"
+  docker start "${postgres_container}" >/dev/null
+
+  for _attempt in $(seq 1 30); do
+    if docker exec "${postgres_container}" pg_isready -U oxibelt -d oxibelt >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  if ! docker exec "${postgres_container}" pg_isready -U oxibelt -d oxibelt >/dev/null 2>&1; then
+    fail_with_diagnostics "PostgreSQL did not become ready"
+  fi
 fi
 
 docker create \

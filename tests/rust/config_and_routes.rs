@@ -3,7 +3,7 @@ mod common;
 
 use std::path::Path;
 
-use oxibelt::config::{CompressionConfig, Config, OcspMode, UpstreamEchMode};
+use oxibelt::config::{CompressionConfig, Config, DatabaseTlsMode, OcspMode, UpstreamEchMode};
 
 #[test]
 fn config_parses_trusted_upstream_ca_certificates() {
@@ -121,6 +121,258 @@ upstream = "app"
     assert_eq!(
         config.upstreams[0].tls.ech.config_list_file.as_deref(),
         Some(expected_ech_config_list_path.as_path())
+    );
+}
+
+#[test]
+fn config_load_resolves_database_access_log_tls_ca_under_cert_directory() {
+    let temp_dir = common::TempDir::new("database-access-log-ca");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "database-access-log-ca");
+    let ca_path = cert_dir.join("postgres-ca.pem");
+    std::fs::copy(&cert_path, &ca_path).expect("failed to copy CA certificate");
+    let cert_file = cert_path.file_name().unwrap().to_string_lossy();
+    let key_file = key_path.file_name().unwrap().to_string_lossy();
+    let config_path = config_dir.join("oxibelt.toml");
+    let raw = common::minimal_config_toml_with_paths(&cert_file, &key_file).replace(
+        "[[upstreams]]",
+        r#"[database.access_log]
+enabled = true
+connection_url_env = "OXIBELT_TEST_ACCESS_LOG_DATABASE_URL"
+table = "audit.access_log"
+
+[database.access_log.tls]
+mode = "verify_full"
+ca_cert = "postgres-ca.pem"
+
+[[upstreams]]"#,
+    );
+    std::fs::write(&config_path, raw).expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load");
+
+    config.validate().expect("config should validate");
+    let expected_ca_path = ca_path.canonicalize().unwrap();
+    assert_eq!(
+        config.database.access_log.tls.ca_cert.as_deref(),
+        Some(expected_ca_path.as_path())
+    );
+    assert_eq!(
+        config.database.access_log.tls.mode,
+        DatabaseTlsMode::VerifyFull
+    );
+}
+
+#[test]
+fn database_access_log_tls_mode_defaults_to_off() {
+    let temp_dir = common::TempDir::new("database-access-log-tls-default");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "database-access-log-tls-default");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.access_log]
+enabled = true
+connection_url = "postgres://log-user:log-pass@postgres.example:5432/oxibelt"
+table = "access_log"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config.validate().expect("config should validate");
+    assert_eq!(config.database.access_log.tls.mode, DatabaseTlsMode::Off);
+}
+
+#[test]
+fn database_access_log_custom_ca_requires_verifying_tls_mode() {
+    let temp_dir = common::TempDir::new("database-access-log-ca-mode");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "database-access-log-ca-mode");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.access_log]
+enabled = true
+connection_url = "postgres://log-user:log-pass@postgres.example:5432/oxibelt"
+table = "access_log"
+
+[database.access_log.tls]
+mode = "off"
+ca_cert = "postgres-ca.pem"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ca_cert is only valid when database.access_log.tls.mode is \"verify_full\""),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn database_access_log_rejects_unsupported_tls_mode() {
+    let temp_dir = common::TempDir::new("database-access-log-tls-mode");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "database-access-log-tls-mode");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.access_log]
+enabled = true
+connection_url = "postgres://log-user:log-pass@postgres.example:5432/oxibelt"
+table = "access_log"
+
+[database.access_log.tls]
+mode = "prefer"
+
+[[upstreams]]"#,
+    );
+
+    let error = toml::from_str::<Config>(&raw).expect_err("unsupported TLS mode should fail");
+
+    assert!(
+        error.to_string().contains("unknown variant") && error.to_string().contains("verify_full"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn database_access_log_mtls_resolves_client_certificate_and_key() {
+    let temp_dir = common::TempDir::new("database-access-log-mtls");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "database-access-log");
+    let ca_path = cert_dir.join("postgres-ca.pem");
+    let client_cert_path = cert_dir.join("postgres-client.pem");
+    let client_key_path = cert_dir.join("postgres-client.key");
+    std::fs::copy(&cert_path, &ca_path).expect("failed to copy CA certificate");
+    std::fs::copy(&cert_path, &client_cert_path).expect("failed to copy client certificate");
+    std::fs::copy(&key_path, &client_key_path).expect("failed to copy client key");
+    let cert_file = cert_path.file_name().unwrap().to_string_lossy();
+    let key_file = key_path.file_name().unwrap().to_string_lossy();
+    let config_path = config_dir.join("oxibelt.toml");
+    let raw = common::minimal_config_toml_with_paths(&cert_file, &key_file).replace(
+        "[[upstreams]]",
+        r#"[database.access_log]
+enabled = true
+connection_url_env = "OXIBELT_TEST_ACCESS_LOG_DATABASE_URL"
+table = "audit.access_log"
+
+[database.access_log.tls]
+mode = "verify_full"
+ca_cert = "postgres-ca.pem"
+client_cert = "postgres-client.pem"
+client_key = "postgres-client.key"
+
+[[upstreams]]"#,
+    );
+    std::fs::write(&config_path, raw).expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load");
+
+    config.validate().expect("config should validate");
+    let expected_client_cert_path = client_cert_path.canonicalize().unwrap();
+    let expected_client_key_path = client_key_path.canonicalize().unwrap();
+    assert_eq!(
+        config.database.access_log.tls.client_cert.as_deref(),
+        Some(expected_client_cert_path.as_path())
+    );
+    assert_eq!(
+        config.database.access_log.tls.client_key.as_deref(),
+        Some(expected_client_key_path.as_path())
+    );
+}
+
+#[test]
+fn database_access_log_mtls_requires_client_certificate_and_key_pair() {
+    let temp_dir = common::TempDir::new("database-access-log-mtls-pair");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "database-access-log-mtls-pair");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.access_log]
+enabled = true
+connection_url = "postgres://log-user:log-pass@postgres.example:5432/oxibelt"
+table = "access_log"
+
+[database.access_log.tls]
+mode = "verify_full"
+client_cert = "postgres-client.pem"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("client_key is required when client_cert is configured"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn database_access_log_requires_connection_source_when_enabled() {
+    let temp_dir = common::TempDir::new("database-access-log-source");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "database-access-log-source");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.access_log]
+enabled = true
+table = "access_log"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires connection_url or connection_url_env"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn database_access_log_rejects_unsafe_table_name() {
+    let temp_dir = common::TempDir::new("database-access-log-table");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "database-access-log-table");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.access_log]
+enabled = true
+connection_url = "postgres://log-user:log-pass@postgres.example:5432/oxibelt"
+table = "audit.access_log;drop"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("identifier segments must contain only ASCII letters"),
+        "unexpected error: {error}"
     );
 }
 

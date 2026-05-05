@@ -9,6 +9,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 
+use crate::access_log::AccessLogSinks;
 use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::routes::RouteTable;
 use crate::tls;
@@ -80,10 +81,11 @@ pub struct AppState {
   pub tls_server_config: std::sync::Arc<rustls::ServerConfig>,
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub waf: WafEngine,
+  pub access_logs: AccessLogSinks,
 }
 
 impl AppState {
-  pub fn new(config: Config) -> anyhow::Result<Self> {
+  pub async fn new(config: Config) -> anyhow::Result<Self> {
     let route_table = RouteTable::new(config.routes.clone());
     let upstreams = config.upstreams.clone();
     let clients = build_clients(&config.upstreams, &config.proxy.trusted_ca_certs)
@@ -96,6 +98,9 @@ impl AppState {
       None
     };
     let waf = WafEngine::new(&config).context("failed to build WAF engine")?;
+    let access_logs = AccessLogSinks::new(&config.database.access_log)
+      .await
+      .context("failed to build access log sinks")?;
 
     Ok(Self {
       config,
@@ -105,6 +110,7 @@ impl AppState {
       tls_server_config,
       quic_server_config,
       waf,
+      access_logs,
     })
   }
 }

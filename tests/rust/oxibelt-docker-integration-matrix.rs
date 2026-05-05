@@ -34,6 +34,8 @@ struct Needs {
     h2c_upstream: bool,
     protocol_probe: bool,
     pq_probe: bool,
+    postgres: bool,
+    postgres_mtls: bool,
 }
 
 fn main() -> Result<()> {
@@ -190,6 +192,14 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     manifest.push_str(&format!(
         "CASE_NEED_PQ_PROBE={}\n",
         bool_env(case.needs.pq_probe)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_POSTGRES={}\n",
+        bool_env(case.needs.postgres)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_POSTGRES_MTLS={}\n",
+        bool_env(case.needs.postgres_mtls)
     ));
     manifest.push_str(&format!(
         "CASE_EXPECT_FAILURE_CONTAINS={}\n",
@@ -361,6 +371,32 @@ run_case_checks() {
   local response
   response="$(client_request "secure.example.test" "/secure/health" 200)"
   assert_body_jq "${response}" '.upstream == "https-upstream" and .scheme == "https" and .headers.host == "secure.example.test"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "database-access-log",
+            "postgres-mtls",
+            "OxiRule access logs are written to PostgreSQL over verified mTLS",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                postgres: true,
+                postgres_mtls: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/db-log?case=mtls" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/db-log?case=mtls"'
+
+  local count
+  count="$(postgres_query "SELECT count(*) FROM oxibelt_access_log WHERE event = 'oxibelt.access' AND record->>'path' = '/app/db-log' AND record->>'status' = '200' AND record->>'route' = 'main-route';")"
+  if [[ "${count}" != "1" ]]; then
+    fail_with_diagnostics "expected one PostgreSQL access log row, got ${count}"
+  fi
 }
 "#,
             None,

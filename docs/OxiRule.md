@@ -747,7 +747,7 @@ name = "upstream"
 value = "Response.Upstream.Name"
 ```
 
-`emit_access_log` writes one newline-delimited JSON access log record to stdout when a response-phase rule matches. Container runtimes capture stdout, so the record is visible from the host with commands such as `docker logs <container>`.
+`emit_access_log` writes one newline-delimited JSON access log record to stdout when a response-phase rule matches. Container runtimes capture stdout, so the record is visible from the host with commands such as `docker logs <container>`. If `database.access_log.enabled = true`, OxiBelt also sends the same record to the configured PostgreSQL table after validating the database connection and table during startup.
 
 Each `fields` entry chooses one JSON property and the OxiRule expression used to populate it. `value` may also be written as `expression`. Field expressions run in the same bounded evaluator as rule conditions, so they may read response-phase `Request`, `Response`, and `Context` properties such as `Request.Http.Host`, `Response.Http.Status`, `Response.Upstream.Name`, `Context.RuleName`, or bounded helpers such as `Request.Headers.get('User-Agent')`.
 

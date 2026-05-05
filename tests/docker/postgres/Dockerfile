@@ -1,0 +1,4 @@
+ARG POSTGRES_BASE_IMAGE=postgres:17-alpine
+FROM ${POSTGRES_BASE_IMAGE}
+
+RUN mkdir -p /tls

@@ -75,6 +75,7 @@ include = ["conf.d/*.toml"]
 [tls]
 [proxy]
 [compression]
+[database]
 [waf]
 
 [[upstreams]]
@@ -164,6 +165,51 @@ level = "info"
 ```
 
 `level` is passed to the tracing filter. The default is `info`.
+
+## 2.1 Database Access Log Sink
+
+```toml
+[database.access_log]
+enabled = false
+connection_url_env = "OXIBELT_ACCESS_LOG_DATABASE_URL"
+table = "oxibelt_access_log"
+max_connections = 4
+connect_timeout_ms = 3000
+queue_capacity = 1024
+
+[database.access_log.tls]
+mode = "off"
+# ca_cert = "postgres-ca.pem"
+# client_cert = "postgres-client.pem"
+# client_key = "postgres-client.key"
+```
+
+`database.access_log` configures the optional PostgreSQL sink for OxiRule `emit_access_log` records. When enabled, OxiBelt validates the PostgreSQL connection and target table before the listeners start. The stdout access log remains enabled; PostgreSQL receives an additional copy.
+
+`connection_url` may hold a PostgreSQL connection URL directly. Prefer `connection_url_env` for deployments so secrets stay outside committed TOML. Exactly one of `connection_url` or `connection_url_env` is required when `enabled = true`.
+
+`table` is the access-log table name. It may be an unqualified table name such as `oxibelt_access_log` or a schema-qualified name such as `audit.access_log`. Identifier segments must contain only ASCII letters, digits, and underscores, and each segment is quoted when SQL is generated.
+
+The target table must already exist with this shape:
+
+```sql
+CREATE TABLE audit.access_log (
+  event text NOT NULL,
+  timestamp_unix_ms bigint NOT NULL,
+  record jsonb NOT NULL
+);
+```
+
+`record` stores the complete newline-delimited JSON object that `emit_access_log` also writes to stdout. OxiBelt validates the table with a zero-row `INSERT ... SELECT ... WHERE false`, so startup catches missing columns and missing insert permission without writing a row.
+
+`database.access_log.tls.mode` controls PostgreSQL TLS negotiation. The default is `off`.
+
+- `off`: do not use TLS.
+- `verify_full`: require TLS, validate the chain, and verify the server name.
+
+`ca_cert` imports a custom PostgreSQL server CA from the cert directory and is valid only with `verify_full`.
+
+`client_cert` and `client_key` enable PostgreSQL mutual TLS client authentication. They must be configured together, are read from the cert directory, and are valid only with `mode = "verify_full"`.
 
 ## 3. Runtime
 
@@ -540,6 +586,7 @@ Configuration validation rejects:
 - Route `path_prefix` or `replace_prefix_with` values that do not start with `/` or contain unsafe path syntax.
 - Routes that reference unknown upstreams.
 - OCSP `static_file` mode without `response_file`.
+- Enabled `database.access_log` without a connection URL source, target table, or valid TLS/CA settings.
 - Reserved but unimplemented HTTP/3 modes.
 - Invalid WAF rules, pattern sets, actions, phases, expressions, or budgets.
 
@@ -580,6 +627,11 @@ enabled = true
 gzip = true
 deflate = true
 zstd = true
+
+[database.access_log]
+enabled = false
+connection_url_env = "OXIBELT_ACCESS_LOG_DATABASE_URL"
+table = "oxibelt_access_log"
 
 [waf]
 enabled = false
