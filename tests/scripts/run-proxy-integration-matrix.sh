@@ -227,6 +227,10 @@ postgres_query() {
     psql -U oxibelt -d oxibelt -Atc "${sql}"
 }
 
+postgres_is_ready() {
+  docker exec "${postgres_container}" pg_isready -h 127.0.0.1 -U oxibelt -d oxibelt >/dev/null 2>&1
+}
+
 run_pq_probe() {
   local group="$1"
   local container_name="oxibelt-pq-${group}-${run_id}"
@@ -569,12 +573,12 @@ EOF
   docker start "${postgres_container}" >/dev/null
 
   for _attempt in $(seq 1 30); do
-    if docker exec "${postgres_container}" pg_isready -U oxibelt -d oxibelt >/dev/null 2>&1; then
+    if postgres_is_ready; then
       break
     fi
     sleep 1
   done
-  if ! docker exec "${postgres_container}" pg_isready -U oxibelt -d oxibelt >/dev/null 2>&1; then
+  if ! postgres_is_ready; then
     fail_with_diagnostics "PostgreSQL did not become ready"
   fi
 fi
