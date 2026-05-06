@@ -990,7 +990,23 @@ pub struct ProxyConfig {
   #[serde(default)]
   pub auto_upgrade: AutoUpgradeConfig,
   #[serde(default)]
+  pub forwarded_headers: ForwardedHeadersConfig,
+  #[serde(default)]
   pub trusted_ca_certs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+pub struct ForwardedHeadersConfig {
+  #[serde(default)]
+  pub mode: ForwardedHeaderMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardedHeaderMode {
+  #[default]
+  Overwrite,
+  Append,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

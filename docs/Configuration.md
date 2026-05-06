@@ -75,6 +75,7 @@ include = ["conf.d/*.toml"]
 [listeners]
 [tls]
 [proxy]
+[proxy.forwarded_headers]
 [compression]
 [database]
 [waf]
@@ -316,12 +317,20 @@ response_file = "ocsp.der"
 [proxy]
 trusted_ca_certs = []
 
+[proxy.forwarded_headers]
+mode = "overwrite"
+
 [proxy.auto_upgrade]
 enabled = true
 max_http_version = "h2"
 ```
 
 `trusted_ca_certs` is a list of additional CA certificate files used for upstream TLS verification. Paths are resolved relative to the cert directory. Each entry must resolve to an existing regular file under that directory.
+
+`proxy.forwarded_headers.mode` controls how OxiBelt handles inbound forwarding metadata before sending a request upstream:
+
+- `overwrite` (default): remove client-supplied `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-Port`, then set OxiBelt's direct peer address, downstream host, HTTPS scheme, and peer port.
+- `append`: remove `Forwarded`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-Port`, preserve any existing `X-Forwarded-For` chain, and append OxiBelt's direct peer address.
 
 `proxy.auto_upgrade` controls upstream HTTP version selection:
 
@@ -658,6 +667,9 @@ mode = "disabled"
 
 [proxy]
 trusted_ca_certs = []
+
+[proxy.forwarded_headers]
+mode = "overwrite"
 
 [proxy.auto_upgrade]
 enabled = true

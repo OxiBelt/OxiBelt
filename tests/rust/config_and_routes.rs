@@ -4,8 +4,8 @@ mod common;
 use std::path::Path;
 
 use oxibelt::config::{
-    CompressionConfig, Config, DatabaseTlsMode, HotReloadMode, OcspMode, RuntimeOverrides,
-    UpstreamEchMode,
+    CompressionConfig, Config, DatabaseTlsMode, ForwardedHeaderMode, HotReloadMode, OcspMode,
+    RuntimeOverrides, UpstreamEchMode,
 };
 
 #[test]
@@ -677,6 +677,40 @@ fn compression_header_order_remains_stable() {
         config.accept_encoding_value().as_deref(),
         Some("zstd, gzip, deflate")
     );
+}
+
+#[test]
+fn forwarded_headers_mode_defaults_to_overwrite() {
+    let temp_dir = common::TempDir::new("forwarded-headers-default");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "forwarded-headers-default");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("\n[proxy.forwarded_headers]\nmode = \"overwrite\"\n", "\n");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert_eq!(
+        config.proxy.forwarded_headers.mode,
+        ForwardedHeaderMode::Overwrite
+    );
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn forwarded_headers_mode_parses_append() {
+    let temp_dir = common::TempDir::new("forwarded-headers-append");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "forwarded-headers-append");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("mode = \"overwrite\"", "mode = \"append\"");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert_eq!(
+        config.proxy.forwarded_headers.mode,
+        ForwardedHeaderMode::Append
+    );
+    config.validate().expect("config should validate");
 }
 
 #[test]

@@ -300,17 +300,17 @@ fn fingerprint_file(path: PathBuf) -> FileFingerprint {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::{AtomicU64, Ordering};
+
   use super::*;
+
+  static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
   #[test]
   fn fingerprint_changes_when_symlink_target_changes() {
-    let root = std::env::temp_dir().join(format!(
-      "oxibelt-reload-test-{}-{}",
-      std::process::id(),
-      std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
+    let root = test_artifact_root().join(format!(
+      "fingerprint-symlink-{}",
+      NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&root).expect("failed to create temp dir");
     let first = root.join("first.pem");
@@ -327,5 +327,13 @@ mod tests {
 
     let _ = fs::remove_dir_all(&root);
     assert_ne!(first_fingerprint, second_fingerprint);
+  }
+
+  fn test_artifact_root() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/oxibelt-reload-test-fixtures");
+    fs::create_dir_all(&root).expect("failed to create test artifact root");
+    root
+      .canonicalize()
+      .expect("failed to resolve test artifact root")
   }
 }

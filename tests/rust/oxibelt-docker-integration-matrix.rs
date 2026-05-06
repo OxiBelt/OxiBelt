@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -151,6 +152,7 @@ fn print_browser_matrix() -> Result<()> {
 
 fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
+    let output = canonical_existing_dir(output, "docker case output directory")?;
     let mut manifest = String::new();
     manifest.push_str(&format!("CASE_CATEGORY={}\n", shell_quote(case.category)));
     manifest.push_str(&format!("CASE_NAME={}\n", shell_quote(case.name)));
@@ -205,16 +207,17 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
         "CASE_EXPECT_FAILURE_CONTAINS={}\n",
         shell_quote(case.failure_contains.unwrap_or(""))
     ));
-    write_file(output, "manifest.env", &manifest)?;
-    write_file(output, "checks.sh", case.checks)?;
-    copy_case_fixture_tree(case, output)?;
+    write_file(&output, "manifest.env", &manifest)?;
+    write_file(&output, "checks.sh", case.checks)?;
+    copy_case_fixture_tree(case, &output)?;
     Ok(())
 }
 
 fn materialize_browser_scenario(scenario: &BrowserScenario, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
+    let output = canonical_existing_dir(output, "browser scenario output directory")?;
     write_file(
-        output,
+        &output,
         "manifest.env",
         &format!(
             "CASE_CATEGORY='webdriver'\nCASE_NAME={}\nCASE_DESCRIPTION={}\n",
@@ -234,10 +237,22 @@ fn write_file(root: &Path, relative: &str, content: &str) -> Result<()> {
 }
 
 fn copy_case_fixture_tree(case: &DockerCase, output: &Path) -> Result<()> {
-    let source = docker_fixture_root().join(case.category).join(case.name);
+    let fixture_root = docker_fixture_root()
+        .canonicalize()
+        .map_err(|err| format!("failed to resolve docker fixture root: {err}"))?;
+    let category = safe_path_component(OsStr::new(case.category), "docker case category")?;
+    let name = safe_path_component(OsStr::new(case.name), "docker case name")?;
+    let source = fixture_root.join(category).join(name);
     if !source.is_dir() {
         return Err(format!("missing docker fixture directory: {}", source.display()).into());
     }
+    let source = source.canonicalize().map_err(|err| {
+        format!(
+            "failed to resolve docker fixture directory {}: {err}",
+            source.display()
+        )
+    })?;
+    ensure_path_under(&fixture_root, &source, "docker fixture directory")?;
     copy_dir_contents(&source, output)
 }
 
@@ -247,6 +262,17 @@ fn docker_fixture_root() -> PathBuf {
 }
 
 fn copy_dir_contents(source: &Path, target: &Path) -> Result<()> {
+    let source_root = canonical_existing_dir(source, "fixture source directory")?;
+    let target_root = canonical_existing_dir(target, "fixture target directory")?;
+    copy_dir_contents_inner(&source_root, &source_root, &target_root, &target_root)
+}
+
+fn copy_dir_contents_inner(
+    source_root: &Path,
+    source: &Path,
+    target_root: &Path,
+    target: &Path,
+) -> Result<()> {
     for entry in fs::read_dir(source).map_err(|err| {
         format!(
             "failed to read fixture directory {}: {err}",
@@ -254,21 +280,52 @@ fn copy_dir_contents(source: &Path, target: &Path) -> Result<()> {
         )
     })? {
         let entry = entry?;
+        let entry_name = safe_path_component(&entry.file_name(), "fixture entry name")?;
         let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
+        let target_path = target.join(&entry_name);
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             fs::create_dir_all(&target_path)?;
-            copy_dir_contents(&source_path, &target_path)?;
+            let source_path = source_path.canonicalize().map_err(|err| {
+                format!(
+                    "failed to resolve fixture directory {}: {err}",
+                    source_path.display()
+                )
+            })?;
+            let target_path = target_path.canonicalize().map_err(|err| {
+                format!(
+                    "failed to resolve fixture output directory {}: {err}",
+                    target_path.display()
+                )
+            })?;
+            ensure_path_under(source_root, &source_path, "fixture source directory")?;
+            ensure_path_under(target_root, &target_path, "fixture output directory")?;
+            copy_dir_contents_inner(source_root, &source_path, target_root, &target_path)?;
         } else if file_type.is_file() {
+            let source_path = source_path.canonicalize().map_err(|err| {
+                format!(
+                    "failed to resolve fixture file {}: {err}",
+                    source_path.display()
+                )
+            })?;
+            ensure_path_under(source_root, &source_path, "fixture source file")?;
+            let mut target_file = target_path.clone();
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent)?;
+                let parent = parent.canonicalize().map_err(|err| {
+                    format!(
+                        "failed to resolve fixture output parent {}: {err}",
+                        parent.display()
+                    )
+                })?;
+                ensure_path_under(target_root, &parent, "fixture output parent")?;
+                target_file = parent.join(&entry_name);
             }
-            fs::copy(&source_path, &target_path).map_err(|err| {
+            fs::copy(&source_path, &target_file).map_err(|err| {
                 format!(
                     "failed to copy fixture {} to {}: {err}",
                     source_path.display(),
-                    target_path.display()
+                    target_file.display()
                 )
             })?;
         } else {
@@ -276,6 +333,50 @@ fn copy_dir_contents(source: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn canonical_existing_dir(path: &Path, field_name: &str) -> Result<PathBuf> {
+    let path = path
+        .canonicalize()
+        .map_err(|err| format!("failed to resolve {field_name} {}: {err}", path.display()))?;
+    if !path.is_dir() {
+        return Err(format!("{field_name} is not a directory: {}", path.display()).into());
+    }
+    Ok(path)
+}
+
+fn ensure_path_under(root: &Path, path: &Path, field_name: &str) -> Result<()> {
+    if !path.starts_with(root) {
+        return Err(format!(
+            "{field_name} {} must stay under {}",
+            path.display(),
+            root.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn safe_path_component(value: &OsStr, field_name: &str) -> Result<String> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| format!("{field_name} must be valid UTF-8"))?;
+    if value.is_empty() || matches!(value, "." | "..") {
+        return Err(format!("{field_name} must not be empty or a dot segment").into());
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(format!(
+            "{field_name} must contain only ASCII letters, digits, '.', '_' or '-'"
+        )
+        .into());
+    }
+    if value.contains("..") {
+        return Err(format!("{field_name} must not contain parent-directory-like segments").into());
+    }
+    Ok(value.to_string())
 }
 
 fn bool_env(value: bool) -> &'static str {
@@ -611,8 +712,20 @@ run_case_checks() {
             r#"
 run_case_checks() {
   local response
-  response="$(client_request "example.test" "/app/headers" 200)"
-  assert_body_jq "${response}" '.headers["x-forwarded-proto"] == "https" and .headers["x-forwarded-host"] == "example.test" and (.headers.host | startswith("mock-http:18080"))'
+  response="$(
+    client_request_with_headers "example.test" "/app/headers" 200 "GET" "" \
+      "Forwarded: for=198.51.100.1;proto=http;host=evil.test" \
+      "X-Forwarded-For: 198.51.100.1" \
+      "X-Forwarded-Host: evil.test" \
+      "X-Forwarded-Proto: http" \
+      "X-Forwarded-Port: 80"
+  )"
+  assert_body_jq "${response}" '.headers.forwarded == null
+    and (.headers["x-forwarded-for"] | contains("198.51.100.1") | not)
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"
+    and .headers["x-forwarded-port"] != "80"
+    and (.headers.host | startswith("mock-http:18080"))'
 }
 "#,
             None,
@@ -1225,5 +1338,42 @@ fn docker_case(
         needs,
         checks,
         failure_contains,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_path_component_accepts_fixture_style_names() {
+        assert_eq!(
+            safe_path_component(OsStr::new("config-valid"), "test field").unwrap(),
+            "config-valid"
+        );
+        assert_eq!(
+            safe_path_component(OsStr::new("10-upstreams.toml"), "test field").unwrap(),
+            "10-upstreams.toml"
+        );
+        assert_eq!(
+            safe_path_component(OsStr::new("conf.d"), "test field").unwrap(),
+            "conf.d"
+        );
+    }
+
+    #[test]
+    fn safe_path_component_rejects_traversal_and_separators() {
+        for value in [
+            "..",
+            "../escape",
+            "escape/child",
+            "escape\\child",
+            "bad..name",
+        ] {
+            assert!(
+                safe_path_component(OsStr::new(value), "test field").is_err(),
+                "{value} should be rejected"
+            );
+        }
     }
 }

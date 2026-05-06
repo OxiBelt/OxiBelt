@@ -157,6 +157,9 @@ mode = "disabled"
 [proxy]
 trusted_ca_certs = []
 
+[proxy.forwarded_headers]
+mode = "overwrite"
+
 [proxy.auto_upgrade]
 enabled = true
 max_http_version = "h2"

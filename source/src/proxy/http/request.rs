@@ -3,7 +3,7 @@ use http::{Request, Uri};
 use http_body_util::BodyExt;
 use hyper::body::Body;
 
-use crate::config::{CompressionConfig, HttpVersion};
+use crate::config::{CompressionConfig, ForwardedHeaderMode, HttpVersion};
 use crate::waf::{HeaderMutation, apply_header_mutations};
 
 use super::body::{BoxError, ProxyBody};
@@ -15,6 +15,7 @@ pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) compression: &'a CompressionConfig,
   pub(crate) peer_addr: std::net::SocketAddr,
   pub(crate) downstream_host: &'a str,
+  pub(crate) forwarded_header_mode: ForwardedHeaderMode,
   pub(crate) preserve_host: bool,
   pub(crate) upstream_version: HttpVersion,
   pub(crate) waf_mutations: &'a [HeaderMutation],
@@ -41,6 +42,7 @@ where
     &mut parts.headers,
     options.peer_addr,
     options.downstream_host,
+    options.forwarded_header_mode,
   );
 
   if !parts.headers.contains_key(ACCEPT_ENCODING)

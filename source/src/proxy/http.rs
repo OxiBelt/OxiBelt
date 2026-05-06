@@ -207,6 +207,7 @@ where
     compression: &state.config.compression,
     peer_addr,
     downstream_host: &host,
+    forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
     preserve_host: upstream.preserve_host,
     upstream_version,
     waf_mutations: &request_waf.request_header_mutations,
@@ -459,7 +460,12 @@ pub(crate) fn prepare_webtransport(
   if !upstream.preserve_host {
     headers.remove(http::header::HOST);
   }
-  add_forwarded_headers(&mut headers, peer_addr, &host);
+  add_forwarded_headers(
+    &mut headers,
+    peer_addr,
+    &host,
+    state.config.proxy.forwarded_headers.mode,
+  );
   apply_header_mutations(&mut headers, &request_waf.request_header_mutations);
 
   let protocols = parse_webtransport_protocols(&headers);
