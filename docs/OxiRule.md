@@ -9,6 +9,7 @@ The current Rust implementation includes the initial OxiRule execution path for 
 
 - Global and route-level `[[waf.rules]]` configuration.
 - External `.oxirule.toml` rule files loaded relative to the configured OxiRule directory.
+- OxiRule hot reload through `[runtime.hot_reload].mode = "oxirule"` or `mode = "full"`.
 - Optional public rule `id` and rule `tags` metadata, plus internal UUIDv4 rule identifiers for runtime bookkeeping and logs.
 - Request-phase `reject`, `set_request_header`, `remove_request_header`, `set_tag`, and `route_to_upstream`.
 - Response-phase `continue_response`, `replace_response`, `reject_response`, `set_response_header`, `remove_response_header`, and `emit_access_log`.
@@ -297,7 +298,31 @@ status = 403
 body = "Blocked by WAF"
 ```
 
-### 4.6 Pattern sets
+### 4.6 OxiRule hot reload
+
+OxiRule policy can be reloaded at runtime when OxiBelt is started with either:
+
+```toml
+[runtime.hot_reload]
+mode = "oxirule"
+```
+
+or:
+
+```toml
+[runtime.hot_reload]
+mode = "full"
+```
+
+In `oxirule` mode, only WAF-owned configuration is allowed to change: global WAF settings, inline global rules, route-level rules, pattern sets, and external rule files. If a reload attempt also changes listeners, TLS, upstreams, routes outside their WAF blocks, database access logging, or other OxiBelt configuration, OxiBelt rejects the reload and keeps the previous active policy.
+
+Reloaded rules apply to new request evaluations. Existing TLS sessions stay connected, and new requests on reusable HTTP connections evaluate against the latest active OxiRule snapshot.
+
+Person proof runtime state is preserved where possible across OxiRule reloads. The startup-local challenge secret and active single-use clearance token state are carried forward instead of behaving like a process restart. Changing Person proof configuration still revalidates the resulting policy before it becomes active.
+
+External rule files are fingerprinted through both their configured logical path and their validated canonical target. Updating a symlink target inside the configured OxiRule directory is therefore detected by polling and by `SIGHUP` reload checks.
+
+### 4.7 Pattern sets
 
 Pattern sets are configured in TOML and referenced from CEL-like helper functions.
 

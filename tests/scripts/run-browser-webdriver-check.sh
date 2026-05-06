@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof]" >&2
+  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof|hot-reload]" >&2
 }
 
 browser="${1:-}"
@@ -21,7 +21,7 @@ case "${browser}" in
 esac
 
 case "${scenario}" in
-  basic-navigation|waf-request|waf-response|person-proof) ;;
+  basic-navigation|waf-request|waf-response|person-proof|hot-reload) ;;
   *)
     usage
     exit 2
@@ -198,6 +198,16 @@ webdriver_cookie() {
     "${driver_base_url}/session/${session_id}/cookie/${name}"
 }
 
+reload_proxy() {
+  if [[ -n "${proxy_container}" ]]; then
+    docker cp "${config_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
+    docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
+    docker kill --signal HUP "${proxy_container}" >/dev/null
+  else
+    kill -HUP "${proxy_pid}"
+  fi
+}
+
 cleanup() {
   if [[ -n "${session_id}" && -n "${driver_base_url}" ]]; then
     curl --silent --show-error --fail-with-body \
@@ -328,6 +338,11 @@ else
   private_key="privkey.pem"
 fi
 
+hot_reload_mode="off"
+if [[ "${scenario}" == "hot-reload" ]]; then
+  hot_reload_mode="full"
+fi
+
 cat > "${config_dir}/oxibelt.toml" <<EOF
 [logging]
 level = "info"
@@ -337,6 +352,10 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+
+[runtime.hot_reload]
+mode = "${hot_reload_mode}"
+poll_interval_ms = 2000
 
 [listeners]
 https_bind = "${proxy_bind_addr}:${proxy_port}"
@@ -417,6 +436,17 @@ when = "Request.Http.Path.endsWith('/browser-replace')"
 type = "replace_response"
 status = 202
 body = "browser response replaced"
+
+[[waf.rules]]
+name = "browser-hot-reload"
+phase = "request"
+priority = 50
+when = "false"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 409
+body = "browser hot reloaded"
 
 [[upstreams]]
 name = "browser-upstream"
@@ -601,5 +631,32 @@ case "${scenario}" in
     fi
 
     echo "${browser} WebDriver solved the person proof challenge and reused the clearance cookie."
+    ;;
+  hot-reload)
+    reload_url="https://localhost:${proxy_port}/app/hot-reload?browser=${browser}"
+    webdriver_navigate "${reload_url}"
+    wait_for_upstream_json "/origin/app/hot-reload?browser=${browser}" "hot reload before" >/dev/null
+
+    python3 - "${config_dir}/oxibelt.toml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace('when = "false"', "when = \"Request.Http.Path.endsWith('/hot-reload')\"")
+path.write_text(text)
+PY
+    openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+      -days 1 \
+      -subj "/CN=localhost" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+      -keyout "${cert_dir}/privkey.pem" \
+      -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
+    chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
+    reload_proxy
+
+    webdriver_navigate "${reload_url}"
+    wait_for_body_contains "browser hot reloaded" "hot reload after" >/dev/null
+    echo "${browser} WebDriver observed hot-reloaded config and TLS material."
     ;;
 esac

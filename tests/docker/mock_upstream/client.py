@@ -75,6 +75,7 @@ def main() -> int:
   parser.add_argument("--header", action="append", default=[])
   parser.add_argument("--host", required=True)
   parser.add_argument("--ca-file")
+  parser.add_argument("--port", type=int, default=TARGET_PORT)
   parser.add_argument("--dump-response-json", action="store_true")
   parser.add_argument("--expect-status", type=int)
   parser.add_argument("--timeout", type=float, default=5.0)
@@ -99,7 +100,7 @@ def main() -> int:
 
   connection = http.client.HTTPSConnection(
     TARGET_HOST,
-    TARGET_PORT,
+    args.port,
     context=context,
     timeout=args.timeout,
   )

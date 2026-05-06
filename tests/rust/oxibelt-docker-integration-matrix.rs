@@ -402,6 +402,94 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "hot-reload",
+            "oxirule-config",
+            "OxiRule-only hot reload updates inline WAF policy without restarting",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/reload" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/reload"'
+
+  docker cp "${case_dir}/config/reloaded-oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
+  reload_proxy
+
+  response="$(client_request "example.test" "/app/reload" 403)"
+  assert_response_jq "${response}" '.body == "hot reloaded oxirule"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "hot-reload",
+            "downstream-tls-only",
+            "downstream TLS-only hot reload imports renewed certificate material",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/tls-before" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/tls-before"'
+
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+    -days 1 \
+    -config "${work_dir}/downstream.cnf" \
+    -keyout "${cert_dir}/privkey.pem" \
+    -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
+  chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
+  docker cp "${cert_dir}/fullchain.pem" "${proxy_container}:/etc/oxibelt/cert/fullchain.pem"
+  docker cp "${cert_dir}/privkey.pem" "${proxy_container}:/etc/oxibelt/cert/privkey.pem"
+  reload_proxy
+
+  response="$(client_request "example.test" "/app/tls-after" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/tls-after"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "hot-reload",
+            "full-config-tls-listener-rebind",
+            "full hot reload updates configuration, TLS material, and listener bind port",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/full-before" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+    -days 1 \
+    -config "${work_dir}/downstream.cnf" \
+    -keyout "${cert_dir}/privkey.pem" \
+    -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
+  chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
+  docker cp "${cert_dir}/fullchain.pem" "${proxy_container}:/etc/oxibelt/cert/fullchain.pem"
+  docker cp "${cert_dir}/privkey.pem" "${proxy_container}:/etc/oxibelt/cert/privkey.pem"
+  docker cp "${case_dir}/config/reloaded-oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
+  reload_proxy
+
+  response="$(client_request_on_port 9443 "example.test" "/app/full-after" 200)"
+  assert_body_jq "${response}" '.upstream == "alt-upstream" and .path == "/alt/app/full-after"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "config-invalid",
             "no-http-versions",
             "listener validation rejects all downstream HTTP versions disabled",
@@ -1112,6 +1200,10 @@ fn browser_scenarios() -> Vec<BrowserScenario> {
         BrowserScenario {
             name: "person-proof",
             description: "browser solves person proof and reuses clearance",
+        },
+        BrowserScenario {
+            name: "hot-reload",
+            description: "browser observes full config and TLS hot reload",
         },
     ]
 }

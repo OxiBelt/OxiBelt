@@ -7,8 +7,8 @@
 - `riscv64gc-unknown-linux-musl` builds need `clang/libclang`, and either a native `riscv64gc-unknown-linux-musl` toolchain or `riscv64-linux-musl-gcc`
 - RISC-V Docker image artifacts use `rust:1.95.0-trixie` as the builder because the official `rust:1.95.0-alpine3.23` image is not published for `riscv64`; the runtime image is still Alpine/musl.
 - `scripts/run-proxy-integration.sh`: generates fresh TLS certificates for every run, validates HTTP and HTTPS proxying through Docker, probes `X25519` plus `X25519MLKEM768` TLS negotiation against the current server, and exercises HTTPS upstream proxying with ECH GREASE enabled
-- `scripts/run-proxy-integration-matrix.sh`: materializes one Rust-cataloged Docker integration case and validates it in Docker. Cases are grouped by configuration validity, routing, proxy headers, upstream TLS, database access logging, WAF request/response behavior, helper behavior, Person proof, and protocol startup behavior.
-- `scripts/run-browser-webdriver-check.sh`: starts a mock upstream and validates that Chromium or Firefox WebDriver can reach OxiBelt through either a local release binary or an `OXIBELT_DOCKER_IMAGE` container. Pass a scenario name (`basic-navigation`, `waf-request`, `waf-response`, or `person-proof`) to run the corresponding browser-level check.
+- `scripts/run-proxy-integration-matrix.sh`: materializes one Rust-cataloged Docker integration case and validates it in Docker. Cases are grouped by configuration validity, routing, proxy headers, upstream TLS, database access logging, WAF request/response behavior, helper behavior, Person proof, protocol startup behavior, and hot reload behavior.
+- `scripts/run-browser-webdriver-check.sh`: starts a mock upstream and validates that Chromium or Firefox WebDriver can reach OxiBelt through either a local release binary or an `OXIBELT_DOCKER_IMAGE` container. Pass a scenario name (`basic-navigation`, `waf-request`, `waf-response`, `person-proof`, or `hot-reload`) to run the corresponding browser-level check.
 - `rust/oxibelt-docker-integration-matrix.rs`: test-only Rust binary used by CI and scripts to list GitHub matrix entries and materialize Docker/WebDriver case manifests.
 - `fixtures/oxibelt-docker-integration-matrix/docker/`: TOML fixture files copied by the matrix materializer for Docker integration cases.
 - `docker/mock_upstream/client.py`: test-only HTTPS client used by the integration script. It only connects to the Docker-network proxy endpoint and trusts the generated proxy CA instead of disabling certificate verification.
@@ -17,3 +17,5 @@
 - `docker/postgres/`: test-only PostgreSQL image used by database access-log matrix cases.
 
 The Docker integration flow avoids host bind mounts on purpose. It uses `docker build` and `docker cp`, which behaves more reliably when Docker is exposed through `docker-outside-of-docker`.
+
+Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, and `hot-reload/full-config-tls-listener-rebind`. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.

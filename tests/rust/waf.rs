@@ -1451,6 +1451,124 @@ single_use = true
 }
 
 #[test]
+fn person_proof_single_use_clearance_survives_waf_reload() {
+    let temp_dir = common::TempDir::new("waf-person-proof-reload");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-reload");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
+direct_peer_ipv4_prefix_bits = 32
+single_use = true
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+    let nonce = solve_pow_nonce(&token, 4);
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+
+    let solved_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+    ));
+    assert!(solved_decision.terminal.is_none());
+    let initial_clearance = extract_cookie_value(&extract_set_cookie(
+        &solved_decision.response_header_mutations,
+    ));
+
+    let reloaded_raw = format!(
+        "{raw}\n{}",
+        r#"
+[[waf.rules]]
+name = "reload-marker"
+phase = "request"
+priority = 20
+when = "false"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 409
+body = "reloaded"
+"#
+    );
+    let reloaded_config: Config = toml::from_str(&reloaded_raw).expect("config should parse");
+    reloaded_config
+        .validate()
+        .expect("reloaded config should validate");
+    let reloaded_engine = WafEngine::new_with_previous(&reloaded_config, Some(&engine))
+        .expect("reloaded WAF should compile");
+
+    let mut clearance_headers = HeaderMap::new();
+    clearance_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={initial_clearance}")).unwrap(),
+    );
+    let clearance_decision = reloaded_engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert!(clearance_decision.terminal.is_none());
+    let rotated_clearance = extract_cookie_value(&extract_set_cookie(
+        &clearance_decision.response_header_mutations,
+    ));
+    assert_ne!(initial_clearance, rotated_clearance);
+
+    let replay_decision = reloaded_engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert_eq!(
+        replay_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn external_rule_files_are_loaded_from_oxirule_directory() {
     let temp_dir = common::TempDir::new("waf-external");
     let config_dir = temp_dir.path().join("config");

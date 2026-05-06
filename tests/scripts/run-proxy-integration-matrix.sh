@@ -106,10 +106,22 @@ assert_body_jq() {
 }
 
 client_request() {
-  client_request_with_headers "$1" "$2" "$3" "GET" ""
+  client_request_on_port 8443 "$1" "$2" "$3" "GET" ""
+}
+
+client_request_on_port() {
+  local port="$1"
+  shift
+  client_request_with_headers_on_port "${port}" "$1" "$2" "$3" "GET" ""
 }
 
 client_request_with_headers() {
+  client_request_with_headers_on_port 8443 "$@"
+}
+
+client_request_with_headers_on_port() {
+  local proxy_port="$1"
+  shift
   local host="$1"
   local path="$2"
   local expect_status="$3"
@@ -137,6 +149,7 @@ client_request_with_headers() {
       /opt/mock_upstream/client.py \
       --path "${path}" \
       --host "${host}" \
+      --port "${proxy_port}" \
       --method "${method}" \
       --body "${body}" \
       --ca-file /tmp/proxy-ca.pem \
@@ -158,6 +171,10 @@ client_request_with_headers() {
   echo "client request failed after retries with status ${status}" >&2
   echo "${output}" >&2
   fail_with_diagnostics "client request did not reach expected status ${expect_status}"
+}
+
+reload_proxy() {
+  docker kill --signal HUP "${proxy_container}" >/dev/null
 }
 
 protocol_probe_client() {

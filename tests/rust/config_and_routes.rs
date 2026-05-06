@@ -3,7 +3,10 @@ mod common;
 
 use std::path::Path;
 
-use oxibelt::config::{CompressionConfig, Config, DatabaseTlsMode, OcspMode, UpstreamEchMode};
+use oxibelt::config::{
+    CompressionConfig, Config, DatabaseTlsMode, HotReloadMode, OcspMode, RuntimeOverrides,
+    UpstreamEchMode,
+};
 
 #[test]
 fn config_parses_trusted_upstream_ca_certificates() {
@@ -684,6 +687,288 @@ fn ocsp_mode_defaults_to_disabled() {
 #[test]
 fn upstream_ech_mode_defaults_to_disabled() {
     assert_eq!(UpstreamEchMode::default(), UpstreamEchMode::Disabled);
+}
+
+#[test]
+fn hot_reload_config_defaults_to_off() {
+    let temp_dir = common::TempDir::new("hot-reload-default");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");
+    let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+        .expect("config should parse");
+
+    assert_eq!(config.runtime.hot_reload.mode, HotReloadMode::Off);
+    assert_eq!(config.runtime.hot_reload.poll_interval_ms, 2_000);
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn hot_reload_config_parses_modes_and_poll_interval() {
+    let temp_dir = common::TempDir::new("hot-reload-parse");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "unprivileged_mode = true",
+        "unprivileged_mode = true\n\n[runtime.hot_reload]\nmode = \"full\"\npoll_interval_ms = 500",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert_eq!(config.runtime.hot_reload.mode, HotReloadMode::Full);
+    assert_eq!(config.runtime.hot_reload.poll_interval_ms, 500);
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn hot_reload_config_rejects_zero_poll_interval() {
+    let temp_dir = common::TempDir::new("hot-reload-zero");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "unprivileged_mode = true",
+        "unprivileged_mode = true\n\n[runtime.hot_reload]\nmode = \"oxirule\"\npoll_interval_ms = 0",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("runtime.hot_reload.poll_interval_ms must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn hot_reload_cli_overrides_config_and_reports_conflicts() {
+    let temp_dir = common::TempDir::new("hot-reload-override");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "unprivileged_mode = true",
+        "unprivileged_mode = true\n\n[runtime.hot_reload]\nmode = \"oxirule\"\npoll_interval_ms = 2000",
+    );
+    let mut config: Config = toml::from_str(&raw).expect("config should parse");
+
+    let warnings = config.apply_runtime_overrides(&RuntimeOverrides {
+        hot_reload_mode: Some(HotReloadMode::Full),
+        hot_reload_poll_interval_ms: Some(1_000),
+    });
+
+    assert_eq!(config.runtime.hot_reload.mode, HotReloadMode::Full);
+    assert_eq!(config.runtime.hot_reload.poll_interval_ms, 1_000);
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings[0].contains("--hot-reload-mode=full"));
+    assert!(warnings[1].contains("--hot-reload-poll-interval-ms=1000"));
+}
+
+#[test]
+fn oxirule_reload_equivalence_accepts_waf_only_changes() {
+    let temp_dir = common::TempDir::new("hot-reload-waf-only");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");
+    let base_raw = common::minimal_config_toml(&cert_path, &key_path);
+    let changed_raw = base_raw.replace(
+        "[[upstreams]]",
+        r#"[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.pattern_sets]]
+name = "blocked-paths"
+kind = "contains"
+patterns = ["/blocked"]
+
+[[waf.rules]]
+name = "block-matrix"
+phase = "request"
+priority = 10
+when = "PatternSets.contains('blocked-paths', Request.Http.Path)"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked"
+
+[[upstreams]]"#,
+    );
+
+    let base: Config = toml::from_str(&base_raw).expect("base config should parse");
+    let changed: Config = toml::from_str(&changed_raw).expect("changed config should parse");
+
+    assert!(base.non_waf_equivalent(&changed));
+    assert!(!base.waf_equivalent(&changed));
+}
+
+#[test]
+fn oxirule_reload_equivalence_accepts_inline_route_pattern_set_and_external_changes() {
+    let temp_dir = common::TempDir::new("hot-reload-waf-loaded");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rules_dir = temp_dir.path().join("oxirule").join("rules");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rules_dir).expect("failed to create rules directory");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "hot-reload-waf");
+    let cert_file = cert_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("certificate filename should be UTF-8");
+    let key_file = key_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("key filename should be UTF-8");
+
+    let base_config = format!(
+        r#"
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "{cert_file}"
+private_key = "{key_file}"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = true
+gzip = true
+deflate = true
+zstd = true
+
+[[upstreams]]
+name = "app"
+origin = "https://app.internal.example"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[routes]]
+name = "app-root"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+"#
+    );
+    let changed_config = base_config.replace(
+        "[[upstreams]]",
+        r#"[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.pattern_sets]]
+name = "blocked-keywords"
+kind = "contains"
+patterns = ["blocked"]
+
+[[waf.rules]]
+name = "inline-global"
+phase = "request"
+priority = 10
+when = "PatternSets.contains('blocked-keywords', Request.Http.Path)"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "inline blocked"
+
+[[waf.rules]]
+name = "external-global"
+phase = "request"
+priority = 20
+path = "rules/external.oxirule.toml"
+
+[[upstreams]]"#,
+    ) + r#"
+
+[[routes.waf.rules]]
+name = "route-level"
+phase = "request"
+priority = 30
+when = "Request.Http.Path.endsWith('/route-blocked')"
+
+[[routes.waf.rules.actions]]
+type = "reject"
+status = 409
+body = "route blocked"
+"#;
+
+    std::fs::write(
+        rules_dir.join("external.oxirule.toml"),
+        r#"
+when = "Request.Headers.anyValueContains('external-block')"
+
+[[actions]]
+type = "reject"
+status = 451
+body = "external blocked"
+"#,
+    )
+    .expect("failed to write external rule");
+    let base_path = config_dir.join("base.toml");
+    let changed_path = config_dir.join("changed.toml");
+    std::fs::write(&base_path, base_config).expect("failed to write base config");
+    std::fs::write(&changed_path, changed_config).expect("failed to write changed config");
+
+    let base = Config::load(&base_path).expect("base config should load");
+    base.validate().expect("base config should validate");
+    let changed = Config::load(&changed_path).expect("changed config should load");
+    changed.validate().expect("changed config should validate");
+
+    assert!(base.non_waf_equivalent(&changed));
+    assert!(!base.waf_equivalent(&changed));
+    assert_eq!(changed.waf.pattern_sets.len(), 1);
+    assert_eq!(changed.waf.rules.len(), 2);
+    assert_eq!(changed.routes[0].waf.rules.len(), 1);
+    assert!(
+        changed
+            .source_paths
+            .oxirule_reload_files()
+            .iter()
+            .any(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| name == "external.oxirule.toml")
+            })
+    );
+}
+
+#[test]
+fn oxirule_reload_equivalence_rejects_non_waf_changes() {
+    let temp_dir = common::TempDir::new("hot-reload-non-waf");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");
+    let base_raw = common::minimal_config_toml(&cert_path, &key_path);
+    let changed_raw = base_raw.replace(
+        "origin = \"https://app.internal.example\"",
+        "origin = \"https://other.internal.example\"",
+    );
+
+    let base: Config = toml::from_str(&base_raw).expect("base config should parse");
+    let changed: Config = toml::from_str(&changed_raw).expect("changed config should parse");
+
+    assert!(!base.non_waf_equivalent(&changed));
 }
 
 #[test]

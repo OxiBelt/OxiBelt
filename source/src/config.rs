@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
@@ -8,7 +9,7 @@ use url::Url;
 
 use crate::waf::{RouteWafConfig, WafConfig};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Config {
   #[serde(default)]
   pub logging: LoggingConfig,
@@ -26,42 +27,172 @@ pub struct Config {
   pub routes: Vec<RouteConfig>,
   #[serde(default)]
   pub waf: WafConfig,
+  #[serde(skip)]
+  pub source_paths: ConfigSourcePaths,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfigSourcePaths {
+  pub config_entry: Option<PathBuf>,
+  pub cert_dir: Option<PathBuf>,
+  pub config_files: Vec<PathBuf>,
+  pub runtime_files: Vec<PathBuf>,
+  pub downstream_tls_files: Vec<PathBuf>,
+  pub downstream_tls_cert_chain: Option<PathBuf>,
+  pub downstream_tls_private_key: Option<PathBuf>,
+  pub downstream_tls_ocsp_response_file: Option<PathBuf>,
+  pub oxirule_files: Vec<PathBuf>,
+}
+
+impl ConfigSourcePaths {
+  pub fn all_reload_files(&self) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(path) = &self.config_entry {
+      files.push(path.clone());
+    }
+    files.extend(self.config_files.iter().cloned());
+    files.extend(self.runtime_files.iter().cloned());
+    files.extend(self.oxirule_files.iter().cloned());
+    dedup_paths(files)
+  }
+
+  pub fn oxirule_reload_files(&self) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(path) = &self.config_entry {
+      files.push(path.clone());
+    }
+    files.extend(self.config_files.iter().cloned());
+    files.extend(self.oxirule_files.iter().cloned());
+    dedup_paths(files)
+  }
+
+  pub fn downstream_tls_reload_files(&self) -> Vec<PathBuf> {
+    dedup_paths(self.downstream_tls_files.clone())
+  }
+
+  fn remember_runtime_file(&mut self, path: PathBuf) {
+    push_unique_path(&mut self.runtime_files, path);
+  }
+
+  fn remember_downstream_tls_file(&mut self, path: PathBuf) {
+    push_unique_path(&mut self.downstream_tls_files, path);
+  }
+
+  fn remember_oxirule_file(&mut self, path: PathBuf) {
+    push_unique_path(&mut self.oxirule_files, path);
+  }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeOverrides {
+  pub hot_reload_mode: Option<HotReloadMode>,
+  pub hot_reload_poll_interval_ms: Option<u64>,
 }
 
 impl Config {
   pub fn load(path: &Path) -> anyhow::Result<Self> {
     let path_roots = config_path_roots(path)?;
-    let merged = load_toml_with_includes(path)?;
-    let mut config: Self = merged
+    let loaded = load_toml_with_includes(path)?;
+    let mut config: Self = loaded
+      .value
       .try_into()
       .with_context(|| format!("failed to decode merged TOML from {}", path.display()))?;
+    config.source_paths.config_entry = Some(absolute_config_path(path)?);
+    config.source_paths.config_files = loaded.files;
     config.resolve_relative_paths(&path_roots)?;
     config.load_external_waf_rules()?;
+    config.collect_loaded_waf_rule_paths();
     Ok(config)
   }
 
+  pub fn apply_runtime_overrides(&mut self, overrides: &RuntimeOverrides) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(mode) = overrides.hot_reload_mode {
+      if self.runtime.hot_reload.mode != mode {
+        warnings.push(format!(
+          "CLI --hot-reload-mode={mode} overrides runtime.hot_reload.mode={}",
+          self.runtime.hot_reload.mode
+        ));
+      }
+      self.runtime.hot_reload.mode = mode;
+    }
+    if let Some(poll_interval_ms) = overrides.hot_reload_poll_interval_ms {
+      if self.runtime.hot_reload.poll_interval_ms != poll_interval_ms {
+        warnings.push(format!(
+          "CLI --hot-reload-poll-interval-ms={poll_interval_ms} overrides runtime.hot_reload.poll_interval_ms={}",
+          self.runtime.hot_reload.poll_interval_ms
+        ));
+      }
+      self.runtime.hot_reload.poll_interval_ms = poll_interval_ms;
+    }
+    warnings
+  }
+
+  pub fn non_waf_equivalent(&self, other: &Self) -> bool {
+    self.logging == other.logging
+      && self.runtime == other.runtime
+      && self.listeners == other.listeners
+      && self.tls == other.tls
+      && self.proxy == other.proxy
+      && self.compression == other.compression
+      && self.database == other.database
+      && self.upstreams == other.upstreams
+      && routes_without_waf_are_equivalent(&self.routes, &other.routes)
+  }
+
+  pub fn waf_equivalent(&self, other: &Self) -> bool {
+    self.waf == other.waf && route_waf_configs_are_equivalent(&self.routes, &other.routes)
+  }
+
   fn resolve_relative_paths(&mut self, path_roots: &ConfigPathRoots) -> anyhow::Result<()> {
-    self.tls.cert_chain = resolve_existing_local_config_file_path(
-      "tls.cert_chain",
-      &path_roots.cert_dir,
-      &self.tls.cert_chain,
-    )?;
-    self.tls.private_key = resolve_existing_local_config_file_path(
-      "tls.private_key",
-      &path_roots.cert_dir,
-      &self.tls.private_key,
-    )?;
+    self.source_paths.cert_dir = Some(path_roots.cert_dir.clone());
+    let (tls_cert_chain, tls_cert_chain_logical) =
+      resolve_existing_local_config_file_path_with_logical(
+        "tls.cert_chain",
+        &path_roots.cert_dir,
+        &self.tls.cert_chain,
+      )?;
+    self.tls.cert_chain = tls_cert_chain;
+    self
+      .source_paths
+      .remember_runtime_file(tls_cert_chain_logical.clone());
+    self
+      .source_paths
+      .remember_downstream_tls_file(tls_cert_chain_logical.clone());
+    self.source_paths.downstream_tls_cert_chain = Some(tls_cert_chain_logical);
+
+    let (tls_private_key, tls_private_key_logical) =
+      resolve_existing_local_config_file_path_with_logical(
+        "tls.private_key",
+        &path_roots.cert_dir,
+        &self.tls.private_key,
+      )?;
+    self.tls.private_key = tls_private_key;
+    self
+      .source_paths
+      .remember_runtime_file(tls_private_key_logical.clone());
+    self
+      .source_paths
+      .remember_downstream_tls_file(tls_private_key_logical.clone());
+    self.source_paths.downstream_tls_private_key = Some(tls_private_key_logical);
+
     self.tls.ocsp.response_file = self
       .tls
       .ocsp
       .response_file
       .take()
       .map(|path| {
-        resolve_existing_local_config_file_path(
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
           "tls.ocsp.response_file",
           &path_roots.cert_dir,
           &path,
-        )
+        )?;
+        self.source_paths.remember_runtime_file(logical.clone());
+        self
+          .source_paths
+          .remember_downstream_tls_file(logical.clone());
+        self.source_paths.downstream_tls_ocsp_response_file = Some(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
     self.proxy.trusted_ca_certs = self
@@ -69,21 +200,28 @@ impl Config {
       .trusted_ca_certs
       .iter()
       .map(|path| {
-        resolve_existing_local_config_file_path(
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
           "proxy.trusted_ca_certs",
           &path_roots.cert_dir,
           path,
-        )
+        )?;
+        self.source_paths.remember_runtime_file(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .collect::<anyhow::Result<_>>()?;
     for upstream in &mut self.upstreams {
-      upstream.tls.resolve_relative_paths(&path_roots.cert_dir)?;
+      for path in upstream.tls.resolve_relative_paths(&path_roots.cert_dir)? {
+        self.source_paths.remember_runtime_file(path);
+      }
     }
-    self
+    for path in self
       .database
       .access_log
       .tls
-      .resolve_relative_paths(&path_roots.cert_dir)?;
+      .resolve_relative_paths(&path_roots.cert_dir)?
+    {
+      self.source_paths.remember_runtime_file(path);
+    }
     self.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     for route in &mut self.routes {
       route.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
@@ -99,6 +237,17 @@ impl Config {
     Ok(())
   }
 
+  fn collect_loaded_waf_rule_paths(&mut self) {
+    for path in self.waf.loaded_rule_paths() {
+      self.source_paths.remember_oxirule_file(path);
+    }
+    for route in &self.routes {
+      for path in route.waf.loaded_rule_paths() {
+        self.source_paths.remember_oxirule_file(path);
+      }
+    }
+  }
+
   pub fn validate(&self) -> anyhow::Result<()> {
     if !self.listeners.http1 && !self.listeners.http2 && !self.listeners.http3 {
       bail!("at least one downstream HTTP version must be enabled");
@@ -110,6 +259,8 @@ impl Config {
         self.listeners.https_bind
       );
     }
+
+    self.runtime.hot_reload.validate()?;
 
     if self.runtime.linux_only && !cfg!(target_os = "linux") {
       bail!("this build is configured for Linux only");
@@ -227,12 +378,48 @@ fn validate_route_path_value(
   Ok(())
 }
 
-fn load_toml_with_includes(path: &Path) -> anyhow::Result<toml::Value> {
+fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]) -> bool {
+  left.len() == right.len()
+    && left.iter().zip(right).all(|(left, right)| {
+      left.name == right.name
+        && left.hosts == right.hosts
+        && left.path_prefix == right.path_prefix
+        && left.replace_prefix_with == right.replace_prefix_with
+        && left.upstream == right.upstream
+    })
+}
+
+fn route_waf_configs_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]) -> bool {
+  left.len() == right.len()
+    && left
+      .iter()
+      .zip(right)
+      .all(|(left, right)| left.name == right.name && left.waf == right.waf)
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+  if !paths.contains(&path) {
+    paths.push(path);
+  }
+}
+
+fn dedup_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+  paths.sort();
+  paths.dedup();
+  paths
+}
+
+struct LoadedToml {
+  value: toml::Value,
+  files: Vec<PathBuf>,
+}
+
+fn load_toml_with_includes(path: &Path) -> anyhow::Result<LoadedToml> {
   let mut stack = Vec::new();
   load_toml_document(path, &mut stack)
 }
 
-fn load_toml_document(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<toml::Value> {
+fn load_toml_document(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<LoadedToml> {
   let absolute_path = absolute_config_path(path)?;
   let canonical_path = absolute_path.canonicalize().with_context(|| {
     format!(
@@ -271,6 +458,7 @@ fn load_toml_document(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<t
   }
 
   stack.push(canonical_path.clone());
+  let mut files = vec![canonical_path.clone()];
 
   let raw = std::fs::read_to_string(&canonical_path)
     .with_context(|| format!("failed to read {}", canonical_path.display()))?;
@@ -283,13 +471,19 @@ fn load_toml_document(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<t
   for entry in include_entries {
     for include_path in expand_include_entry(&entry, base_dir, &absolute_path)? {
       let included = load_toml_document(&include_path, stack)?;
-      merge_toml_values(&mut merged, included, "")?;
+      files.extend(included.files);
+      merge_toml_values(&mut merged, included.value, "")?;
     }
   }
   merge_toml_values(&mut merged, value, "")?;
 
   stack.pop();
-  Ok(merged)
+  files.sort();
+  files.dedup();
+  Ok(LoadedToml {
+    value: merged,
+    files,
+  })
 }
 
 fn take_include_entries(value: &mut toml::Value, path: &Path) -> anyhow::Result<Vec<String>> {
@@ -494,11 +688,11 @@ pub(crate) fn resolve_local_config_file_path(
   Ok(base_dir.join(path))
 }
 
-pub(crate) fn resolve_existing_local_config_file_path(
+pub(crate) fn resolve_existing_local_config_file_path_with_logical(
   field_name: &str,
   base_dir: &Path,
   path: &Path,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<(PathBuf, PathBuf)> {
   let resolved_path = resolve_local_config_file_path(field_name, base_dir, path)?;
   let canonical_base_dir = base_dir.canonicalize().with_context(|| {
     format!(
@@ -515,7 +709,7 @@ pub(crate) fn resolve_existing_local_config_file_path(
   }
   ensure_regular_file(field_name, &canonical_path)?;
 
-  Ok(canonical_path)
+  Ok((canonical_path, resolved_path))
 }
 
 pub(crate) fn canonicalize_existing_file(field_name: &str, path: &Path) -> anyhow::Result<PathBuf> {
@@ -636,7 +830,7 @@ fn validate_postgres_identifier(field_name: &str, value: &str) -> anyhow::Result
   Ok(())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct LoggingConfig {
   #[serde(default = "default_log_level")]
   pub level: String,
@@ -650,7 +844,7 @@ impl Default for LoggingConfig {
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
   #[serde(default = "default_true")]
   pub linux_only: bool,
@@ -660,6 +854,8 @@ pub struct RuntimeConfig {
   pub memory_only_state: bool,
   #[serde(default = "default_true")]
   pub unprivileged_mode: bool,
+  #[serde(default)]
+  pub hot_reload: HotReloadConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -669,11 +865,82 @@ impl Default for RuntimeConfig {
       read_only_rootfs_compatible: true,
       memory_only_state: true,
       unprivileged_mode: true,
+      hot_reload: HotReloadConfig::default(),
     }
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HotReloadConfig {
+  #[serde(default)]
+  pub mode: HotReloadMode,
+  #[serde(default = "default_hot_reload_poll_interval_ms")]
+  pub poll_interval_ms: u64,
+}
+
+impl Default for HotReloadConfig {
+  fn default() -> Self {
+    Self {
+      mode: HotReloadMode::Off,
+      poll_interval_ms: default_hot_reload_poll_interval_ms(),
+    }
+  }
+}
+
+impl HotReloadConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.poll_interval_ms == 0 {
+      bail!("runtime.hot_reload.poll_interval_ms must be greater than 0");
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HotReloadMode {
+  #[default]
+  Off,
+  #[serde(rename = "oxirule")]
+  OxiRule,
+  Full,
+  DownstreamTls,
+}
+
+impl HotReloadMode {
+  pub fn enabled(self) -> bool {
+    self != Self::Off
+  }
+}
+
+impl std::fmt::Display for HotReloadMode {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str(match self {
+      Self::Off => "off",
+      Self::OxiRule => "oxirule",
+      Self::Full => "full",
+      Self::DownstreamTls => "downstream_tls",
+    })
+  }
+}
+
+impl FromStr for HotReloadMode {
+  type Err = anyhow::Error;
+
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    match value {
+      "off" => Ok(Self::Off),
+      "oxirule" => Ok(Self::OxiRule),
+      "full" => Ok(Self::Full),
+      "downstream_tls" => Ok(Self::DownstreamTls),
+      _ => {
+        bail!("unsupported hot reload mode {value}; expected off, oxirule, full, or downstream_tls")
+      }
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ListenerConfig {
   pub https_bind: SocketAddr,
   #[serde(default = "default_true")]
@@ -684,7 +951,7 @@ pub struct ListenerConfig {
   pub http3: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TlsConfig {
   pub cert_chain: PathBuf,
   pub private_key: PathBuf,
@@ -692,7 +959,7 @@ pub struct TlsConfig {
   pub ocsp: OcspConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct OcspConfig {
   #[serde(default)]
   pub mode: OcspMode,
@@ -718,7 +985,7 @@ pub enum OcspMode {
   LiveFetch,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct ProxyConfig {
   #[serde(default)]
   pub auto_upgrade: AutoUpgradeConfig,
@@ -726,7 +993,7 @@ pub struct ProxyConfig {
   pub trusted_ca_certs: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AutoUpgradeConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -743,7 +1010,7 @@ impl Default for AutoUpgradeConfig {
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CompressionConfig {
   #[serde(default = "default_true")]
   pub enabled: bool,
@@ -791,7 +1058,7 @@ impl Default for CompressionConfig {
   }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct DatabaseConfig {
   #[serde(default)]
   pub access_log: DatabaseAccessLogConfig,
@@ -803,7 +1070,7 @@ impl DatabaseConfig {
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DatabaseAccessLogConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -904,7 +1171,7 @@ impl DatabaseAccessLogConfig {
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DatabaseTlsConfig {
   #[serde(default)]
   pub mode: DatabaseTlsMode,
@@ -928,37 +1195,48 @@ impl Default for DatabaseTlsConfig {
 }
 
 impl DatabaseTlsConfig {
-  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
+  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut source_paths = Vec::new();
     self.ca_cert = self
       .ca_cert
       .take()
       .map(|path| {
-        resolve_existing_local_config_file_path("database.access_log.tls.ca_cert", base_dir, &path)
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          "database.access_log.tls.ca_cert",
+          base_dir,
+          &path,
+        )?;
+        source_paths.push(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
     self.client_cert = self
       .client_cert
       .take()
       .map(|path| {
-        resolve_existing_local_config_file_path(
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
           "database.access_log.tls.client_cert",
           base_dir,
           &path,
-        )
+        )?;
+        source_paths.push(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
     self.client_key = self
       .client_key
       .take()
       .map(|path| {
-        resolve_existing_local_config_file_path(
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
           "database.access_log.tls.client_key",
           base_dir,
           &path,
-        )
+        )?;
+        source_paths.push(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
-    Ok(())
+    Ok(source_paths)
   }
 
   fn validate(&self) -> anyhow::Result<()> {
@@ -992,7 +1270,7 @@ pub enum DatabaseTlsMode {
   VerifyFull,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct UpstreamConfig {
   pub name: String,
   pub origin: Url,
@@ -1014,27 +1292,30 @@ pub struct UpstreamConfig {
   pub tls: UpstreamTlsConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct UpstreamTlsConfig {
   #[serde(default)]
   pub ech: UpstreamEchConfig,
 }
 
 impl UpstreamTlsConfig {
-  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
+  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut source_paths = Vec::new();
     self.ech.config_list_file = self
       .ech
       .config_list_file
       .take()
       .map(|path| {
-        resolve_existing_local_config_file_path(
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
           "upstreams.tls.ech.config_list_file",
           base_dir,
           &path,
-        )
+        )?;
+        source_paths.push(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
-    Ok(())
+    Ok(source_paths)
   }
 
   fn validate(&self, upstream_name: &str) -> anyhow::Result<()> {
@@ -1061,7 +1342,7 @@ impl UpstreamTlsConfig {
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct UpstreamEchConfig {
   #[serde(default)]
   pub mode: UpstreamEchMode,
@@ -1087,7 +1368,7 @@ pub enum UpstreamEchMode {
   ConfigList,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RouteConfig {
   pub name: String,
   #[serde(default = "default_hosts")]
@@ -1127,6 +1408,10 @@ fn default_true() -> bool {
 
 fn default_log_level() -> String {
   "info".to_string()
+}
+
+fn default_hot_reload_poll_interval_ms() -> u64 {
+  2_000
 }
 
 fn default_hosts() -> Vec<String> {

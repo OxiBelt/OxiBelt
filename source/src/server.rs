@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -8,43 +9,56 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use ring::digest;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio_rustls::LazyConfigAcceptor;
 use tracing::{error, info, warn};
 
+use crate::config::RuntimeOverrides;
 use crate::proxy::{http, http3};
-use crate::state::AppState;
+use crate::reload::{ReloadManager, ReloadTrigger};
+use crate::state::{AppHandle, AppSnapshot};
 use crate::tcp_hop;
 use crate::waf::WafTlsMetadata;
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
 const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
 
-pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
+pub async fn serve(
+  state: AppHandle,
+  config_path: Option<PathBuf>,
+  runtime_overrides: RuntimeOverrides,
+) -> anyhow::Result<()> {
   let (error_tx, mut error_rx) = mpsc::unbounded_channel();
-
-  if state.config.listeners.http1 || state.config.listeners.http2 {
-    let tcp_state = state.clone();
-    let tcp_errors = error_tx.clone();
-    tokio::spawn(async move {
-      if let Err(error) = serve_tcp(tcp_state).await {
-        let _ = tcp_errors.send(error.context("downstream TCP HTTP listener failed"));
+  let mut listeners = ListenerSupervisor::start(state.clone(), error_tx.clone()).await?;
+  let reload = if state.snapshot().config.runtime.hot_reload.mode.enabled() {
+    match config_path {
+      Some(config_path) => Some(ReloadManager::new(
+        config_path,
+        runtime_overrides,
+        state.snapshot().as_ref(),
+      )?),
+      None => {
+        warn!("hot reload is enabled but no configuration path is available; reload disabled");
+        None
       }
-    });
-  }
-
-  if state.config.listeners.http3 {
-    let h3_state = state.clone();
-    let h3_errors = error_tx.clone();
-    tokio::spawn(async move {
-      if let Err(error) = serve_http3(h3_state).await {
-        let _ = h3_errors.send(error.context("downstream HTTP/3 listener failed"));
-      }
-    });
-  }
+    }
+  } else {
+    None
+  };
 
   drop(error_tx);
 
+  if let Some(reload) = reload {
+    serve_with_reload(state, &mut listeners, &mut error_rx, reload).await
+  } else {
+    serve_until_shutdown(&mut error_rx).await
+  }
+}
+
+async fn serve_until_shutdown(
+  error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
+) -> anyhow::Result<()> {
   tokio::select! {
       result = tokio::signal::ctrl_c() => {
           result.context("failed to wait for ctrl_c signal")?;
@@ -55,20 +69,211 @@ pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
   }
 }
 
-async fn serve_tcp(state: Arc<AppState>) -> anyhow::Result<()> {
-  let bind = state.config.listeners.https_bind;
+async fn serve_with_reload(
+  state: AppHandle,
+  listeners: &mut ListenerSupervisor,
+  error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
+  mut reload: ReloadManager,
+) -> anyhow::Result<()> {
+  #[cfg(unix)]
+  let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+    .context("failed to install SIGHUP listener")?;
+
+  loop {
+    let poll_sleep = tokio::time::sleep(reload.poll_interval());
+    tokio::pin!(poll_sleep);
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result.context("failed to wait for ctrl_c signal")?;
+            info!("shutdown signal received");
+            return Ok(());
+        }
+        Some(error) = error_rx.recv() => return Err(error),
+        _ = &mut poll_sleep => {
+            reload.reload_if_changed(ReloadTrigger::Poll, &state, listeners).await;
+        }
+        _ = hup.recv() => {
+            reload.reload_if_changed(ReloadTrigger::Signal, &state, listeners).await;
+        }
+    }
+  }
+}
+
+pub(crate) struct ListenerSupervisor {
+  tcp: Option<TcpListenerTask>,
+  http3: Option<Http3ListenerTask>,
+  error_tx: mpsc::UnboundedSender<anyhow::Error>,
+}
+
+struct TcpListenerTask {
+  bind: SocketAddr,
+  shutdown: watch::Sender<bool>,
+  task: JoinHandle<()>,
+}
+
+struct Http3ListenerTask {
+  bind: SocketAddr,
+  endpoint: h3_quinn::quinn::Endpoint,
+  shutdown: watch::Sender<bool>,
+  task: JoinHandle<()>,
+}
+
+pub(crate) struct PendingListenerUpdate {
+  tcp: Option<Option<TcpListenerTask>>,
+  http3: Option<Option<Http3ListenerTask>>,
+  refresh_http3_config: bool,
+}
+
+impl ListenerSupervisor {
+  async fn start(
+    state: AppHandle,
+    error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  ) -> anyhow::Result<Self> {
+    let snapshot = state.snapshot();
+    let mut supervisor = Self {
+      tcp: None,
+      http3: None,
+      error_tx,
+    };
+    let pending = supervisor.prepare(&snapshot, state).await?;
+    supervisor.commit(pending, &snapshot);
+    Ok(supervisor)
+  }
+
+  pub(crate) async fn prepare(
+    &self,
+    snapshot: &AppSnapshot,
+    state: AppHandle,
+  ) -> anyhow::Result<PendingListenerUpdate> {
+    let tcp = if snapshot.config.listeners.http1 || snapshot.config.listeners.http2 {
+      let bind = snapshot.config.listeners.https_bind;
+      if self.tcp.as_ref().map(|task| task.bind) == Some(bind) {
+        None
+      } else {
+        Some(Some(
+          start_tcp_listener(bind, state.clone(), self.error_tx.clone()).await?,
+        ))
+      }
+    } else if self.tcp.is_some() {
+      Some(None)
+    } else {
+      None
+    };
+
+    let (http3, refresh_http3_config) = if snapshot.config.listeners.http3 {
+      let bind = snapshot.config.listeners.https_bind;
+      if self.http3.as_ref().map(|task| task.bind) == Some(bind) {
+        (None, true)
+      } else {
+        (
+          Some(Some(
+            start_http3_listener(bind, snapshot, state, self.error_tx.clone()).await?,
+          )),
+          false,
+        )
+      }
+    } else if self.http3.is_some() {
+      (Some(None), false)
+    } else {
+      (None, false)
+    };
+
+    Ok(PendingListenerUpdate {
+      tcp,
+      http3,
+      refresh_http3_config,
+    })
+  }
+
+  pub(crate) fn commit(&mut self, pending: PendingListenerUpdate, snapshot: &AppSnapshot) {
+    match pending.tcp {
+      Some(Some(tcp)) => {
+        if let Some(old) = self.tcp.replace(tcp) {
+          old.shutdown();
+        }
+      }
+      Some(None) => {
+        if let Some(old) = self.tcp.take() {
+          old.shutdown();
+        }
+      }
+      None => {}
+    }
+    match pending.http3 {
+      Some(Some(http3)) => {
+        if let Some(old) = self.http3.replace(http3) {
+          old.shutdown();
+        }
+      }
+      Some(None) => {
+        if let Some(old) = self.http3.take() {
+          old.shutdown();
+        }
+      }
+      None if pending.refresh_http3_config => {
+        if let (Some(task), Some(config)) = (&self.http3, &snapshot.quic_server_config) {
+          task.endpoint.set_server_config(Some(config.clone()));
+          info!(bind = %task.bind, "downstream HTTP/3 TLS config refreshed");
+        }
+      }
+      None => {}
+    }
+  }
+}
+
+impl TcpListenerTask {
+  fn shutdown(self) {
+    let _ = self.shutdown.send(true);
+    self.task.abort();
+  }
+}
+
+impl Http3ListenerTask {
+  fn shutdown(self) {
+    let _ = self.shutdown.send(true);
+    self.endpoint.close(0u32.into(), b"listener reload");
+    self.task.abort();
+  }
+}
+
+async fn start_tcp_listener(
+  bind: SocketAddr,
+  state: AppHandle,
+  error_tx: mpsc::UnboundedSender<anyhow::Error>,
+) -> anyhow::Result<TcpListenerTask> {
   let listener = TcpListener::bind(bind)
     .await
     .with_context(|| format!("failed to bind downstream listener to {bind}"))?;
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = tokio::spawn(async move {
+    if let Err(error) = serve_tcp(listener, state, shutdown_rx).await {
+      let _ = error_tx.send(error.context("downstream TCP HTTP listener failed"));
+    }
+  });
+  Ok(TcpListenerTask {
+    bind,
+    shutdown,
+    task,
+  })
+}
 
+async fn serve_tcp(
+  listener: TcpListener,
+  state: AppHandle,
+  mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+  let bind = listener
+    .local_addr()
+    .context("failed to read TCP listener address")?;
   info!(bind = %bind, "downstream HTTPS listener started");
 
   loop {
     tokio::select! {
         biased;
-        result = tokio::signal::ctrl_c() => {
-            result.context("failed to wait for ctrl_c signal")?;
-            info!("shutdown signal received");
+        changed = shutdown.changed() => {
+            if changed.is_ok() && *shutdown.borrow() {
+              info!(bind = %bind, "downstream HTTPS listener stopped");
+            }
             return Ok(());
         }
         accepted = listener.accept() => {
@@ -91,23 +296,50 @@ async fn serve_tcp(state: Arc<AppState>) -> anyhow::Result<()> {
   }
 }
 
-async fn serve_http3(state: Arc<AppState>) -> anyhow::Result<()> {
-  let bind = state.config.listeners.https_bind;
-  let server_config = state
+async fn start_http3_listener(
+  bind: SocketAddr,
+  snapshot: &AppSnapshot,
+  state: AppHandle,
+  error_tx: mpsc::UnboundedSender<anyhow::Error>,
+) -> anyhow::Result<Http3ListenerTask> {
+  let server_config = snapshot
     .quic_server_config
     .clone()
     .ok_or_else(|| anyhow::anyhow!("HTTP/3 listener is enabled without QUIC server config"))?;
   let endpoint = h3_quinn::quinn::Endpoint::server(server_config, bind)
     .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))?;
+  let task_endpoint = endpoint.clone();
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = tokio::spawn(async move {
+    if let Err(error) = serve_http3(task_endpoint, state, shutdown_rx).await {
+      let _ = error_tx.send(error.context("downstream HTTP/3 listener failed"));
+    }
+  });
+  Ok(Http3ListenerTask {
+    bind,
+    endpoint,
+    shutdown,
+    task,
+  })
+}
 
+async fn serve_http3(
+  endpoint: h3_quinn::quinn::Endpoint,
+  state: AppHandle,
+  mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+  let bind = endpoint
+    .local_addr()
+    .context("failed to read HTTP/3 listener address")?;
   info!(bind = %bind, "downstream HTTP/3 listener started");
 
   loop {
     tokio::select! {
         biased;
-        result = tokio::signal::ctrl_c() => {
-            result.context("failed to wait for ctrl_c signal")?;
-            info!("shutdown signal received");
+        changed = shutdown.changed() => {
+            if changed.is_ok() && *shutdown.borrow() {
+              info!(bind = %bind, "downstream HTTP/3 listener stopped");
+            }
             return Ok(());
         }
         connecting = endpoint.accept() => {
@@ -178,9 +410,10 @@ pub(crate) fn downstream_quic_tls_metadata(
 async fn handle_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
-  state: Arc<AppState>,
+  state: AppHandle,
 ) -> anyhow::Result<()> {
-  let tcp_max_hop = state.waf.person_proof_tcp_max_hop();
+  let handshake_state = state.snapshot();
+  let tcp_max_hop = handshake_state.waf.person_proof_tcp_max_hop();
   if let Some(max_hop) = tcp_max_hop {
     tcp_hop::apply_tcp_max_hop(&stream, peer_addr.ip(), max_hop)
       .with_context(|| format!("failed to apply TCP max hop {max_hop} for {peer_addr}"))?;
@@ -191,7 +424,7 @@ async fn handle_connection(
     .context("TLS ClientHello failed")?;
   let client_hello_metadata = client_hello_fingerprint_metadata(start.client_hello());
   let tls_stream = start
-    .into_stream(state.tls_server_config.clone())
+    .into_stream(handshake_state.tls_server_config.clone())
     .await
     .context("TLS handshake failed")?;
 

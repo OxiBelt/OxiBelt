@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -73,19 +74,51 @@ impl UpstreamClientPools {
   }
 }
 
-pub struct AppState {
+#[derive(Clone)]
+pub struct AppHandle {
+  current: Arc<RwLock<Arc<AppSnapshot>>>,
+}
+
+impl AppHandle {
+  pub fn new(snapshot: AppSnapshot) -> Self {
+    Self {
+      current: Arc::new(RwLock::new(Arc::new(snapshot))),
+    }
+  }
+
+  pub fn snapshot(&self) -> Arc<AppSnapshot> {
+    self
+      .current
+      .read()
+      .expect("app snapshot lock poisoned")
+      .clone()
+  }
+
+  pub fn replace(&self, snapshot: AppSnapshot) {
+    *self.current.write().expect("app snapshot lock poisoned") = Arc::new(snapshot);
+  }
+}
+
+pub struct AppSnapshot {
   pub config: Config,
   pub route_table: RouteTable,
   pub upstreams: Vec<UpstreamConfig>,
   pub clients: UpstreamClientPools,
-  pub tls_server_config: std::sync::Arc<rustls::ServerConfig>,
+  pub tls_server_config: Arc<rustls::ServerConfig>,
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub waf: WafEngine,
   pub access_logs: AccessLogSinks,
 }
 
-impl AppState {
+impl AppSnapshot {
   pub async fn new(config: Config) -> anyhow::Result<Self> {
+    Self::new_with_previous(config, None).await
+  }
+
+  pub async fn new_with_previous(
+    config: Config,
+    previous: Option<&AppSnapshot>,
+  ) -> anyhow::Result<Self> {
     let route_table = RouteTable::new(config.routes.clone());
     let upstreams = config.upstreams.clone();
     let clients = build_clients(&config.upstreams, &config.proxy.trusted_ca_certs)
@@ -97,7 +130,8 @@ impl AppState {
     } else {
       None
     };
-    let waf = WafEngine::new(&config).context("failed to build WAF engine")?;
+    let waf = WafEngine::new_with_previous(&config, previous.map(|snapshot| &snapshot.waf))
+      .context("failed to build WAF engine")?;
     let access_logs = AccessLogSinks::new(&config.database.access_log)
       .await
       .context("failed to build access log sinks")?;

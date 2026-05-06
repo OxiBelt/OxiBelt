@@ -71,6 +71,7 @@ include = ["conf.d/*.toml"]
 
 [logging]
 [runtime]
+[runtime.hot_reload]
 [listeners]
 [tls]
 [proxy]
@@ -219,6 +220,10 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+
+[runtime.hot_reload]
+mode = "off"
+poll_interval_ms = 2000
 ```
 
 Runtime defaults are conservative for container deployment:
@@ -227,6 +232,37 @@ Runtime defaults are conservative for container deployment:
 - `read_only_rootfs_compatible`: declare that runtime state should not require root filesystem writes.
 - `memory_only_state`: declare that runtime state should stay in memory.
 - `unprivileged_mode`: reject privileged listener ports below `1024`.
+
+`[runtime.hot_reload]` controls runtime reload behavior. The default is `off`, so existing deployments keep restart-only semantics unless this section or the matching CLI flags enable reload.
+
+Supported modes:
+
+- `off`: disable hot reload. OxiBelt ignores `SIGHUP` for reload purposes.
+- `oxirule`: reload WAF policy only. Inline global WAF rules, route-level WAF rules, pattern sets, and external `.oxirule.toml` files may change. Any non-WAF configuration difference is rejected and the previous active state stays in use.
+- `full`: reload OxiRule policy, OxiBelt TOML configuration, upstream clients, access-log sinks, downstream TLS material, and listener bind/protocol settings.
+- `downstream_tls`: reload only the currently configured downstream `tls.cert_chain`, `tls.private_key`, and static OCSP response file. This mode is intended for short-lived certificate renewals such as Let's Encrypt.
+
+`poll_interval_ms` controls how often OxiBelt fingerprints reload-relevant files. It must be greater than zero. On Unix, sending `SIGHUP` to the process triggers an immediate reload check:
+
+```sh
+kill -HUP <oxibelt-pid>
+```
+
+The same settings can be supplied on the CLI:
+
+```sh
+oxibelt --config source/config/oxibelt.toml \
+  --hot-reload-mode full \
+  --hot-reload-poll-interval-ms 1000
+```
+
+CLI values override TOML values. When a CLI value differs from TOML, OxiBelt emits a `warn!` log message to stdout and uses the CLI value.
+
+Reload apply behavior is failure-safe. Invalid TOML, invalid rules, invalid certificate/key pairs, unreadable files, failed upstream client construction, failed database access-log setup, and failed listener binds all leave the previous active state in place. Reload failure diagnostics are emitted with `warn!` to stdout.
+
+In `full` mode, listener bind or protocol changes are supervised. If TCP or UDP bind settings change, OxiBelt starts replacement listeners before committing the new snapshot. If the replacement listener cannot bind, the old listeners and old configuration remain active. If HTTP/3 remains on the same bind address, new QUIC connections receive the reloaded server TLS configuration without rebinding the endpoint.
+
+OxiBelt tracks both configured logical paths and validated canonical paths for reloadable files. This lets certificate renewals that update a stable symlink, for example `fullchain.pem -> archive/example/fullchain42.pem`, be detected and revalidated safely. Keep renewed certificate, private-key, OCSP, and OxiRule files inside their purpose-specific directories so path validation continues to pass after reload.
 
 ## 4. Listeners
 
@@ -575,6 +611,7 @@ Configuration validation rejects:
 - No enabled downstream HTTP versions.
 - Privileged listener ports when `runtime.unprivileged_mode = true`.
 - Non-Linux runtime when `runtime.linux_only = true`.
+- Invalid hot reload mode or `runtime.hot_reload.poll_interval_ms = 0`.
 - Empty upstream or route lists.
 - Duplicate upstream or route names.
 - Upstream origins that are not `http://` or `https://`.
@@ -601,6 +638,10 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+
+[runtime.hot_reload]
+mode = "off"
+poll_interval_ms = 2000
 
 [listeners]
 https_bind = "0.0.0.0:8443"

@@ -16,6 +16,7 @@ Current implementation scope:
 - HTTP/2-based gRPC proxy paths
 - Compression negotiation passthrough for `zstd`, `gzip`, and `deflate`
 - Initial OxiRule WAF support for request/response rules, header mutation, tags, request rejection, upstream-error response policy, and response replacement
+- Runtime hot reload for OxiRule policy, full configuration, and downstream TLS certificate renewal paths
 - TOML configuration file
 - Assumptions aligned with non-root / `readonlyRootFilesystem` operation in Alpine containers
 
@@ -51,6 +52,17 @@ Or from `source/`
 cd source
 cargo run -- --config config/oxibelt.toml
 ```
+
+Hot reload is disabled by default. It can be enabled in TOML with `[runtime.hot_reload]` or overridden at startup:
+
+```bash
+cargo run --manifest-path source/Cargo.toml -- \
+  --config source/config/oxibelt.toml \
+  --hot-reload-mode full \
+  --hot-reload-poll-interval-ms 1000
+```
+
+Send `SIGHUP` to trigger an immediate reload check; otherwise OxiBelt polls reload-relevant files at the configured interval.
 
 ## Documentation
 
@@ -89,6 +101,8 @@ docker run --rm -p 8443:8443 \
 
 Mounted files must be readable by container UID `10001`; for private keys, prefer ownership or group permissions over broad world-readable permissions.
 
+For certificate renewal workflows, mount stable certificate/key paths under `/etc/oxibelt/cert` and enable `runtime.hot_reload.mode = "downstream_tls"` or `full`. OxiBelt tracks symlink target changes so Let's Encrypt-style renewals can be imported without restarting the process.
+
 ## Test Assets
 
 - Rust integration tests live under `tests/rust` and are wired into Cargo from `source/Cargo.toml`
@@ -96,3 +110,4 @@ Mounted files must be readable by container UID `10001`; for private keys, prefe
 - `tests/scripts/build-targets.sh` verifies both GNU and musl builds for the current Linux architecture
 - `riscv64gc-unknown-linux-musl` uses `aws-lc-rs` bindgen during dependency builds, so `clang/libclang` must be available when targeting it
 - `tests/scripts/run-proxy-integration.sh` generates fresh TLS material for every run, exercises real HTTP + HTTPS proxying, proves that both `X25519` and `X25519MLKEM768` negotiate with the current `aws-lc-rs`-based server, and verifies HTTPS upstream proxying with ECH GREASE enabled
+- The Docker and WebDriver matrices include hot reload coverage for OxiRule-only reload, downstream TLS-only reload, full config/TLS/listener rebind, and browser-visible reload behavior in Chromium and Firefox

@@ -10,6 +10,7 @@ pub fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {
 
   tracing_subscriber::fmt()
     .with_env_filter(env_filter)
+    .with_writer(std::io::stdout)
     .with_target(false)
     .compact()
     .try_init()

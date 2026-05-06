@@ -7,6 +7,10 @@ read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
 
+[runtime.hot_reload]
+mode = "off"
+poll_interval_ms = 2000
+
 [listeners]
 https_bind = "0.0.0.0:8443"
 http1 = true

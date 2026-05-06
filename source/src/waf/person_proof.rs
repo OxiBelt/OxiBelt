@@ -99,11 +99,20 @@ impl Default for PersonProofRequestStatus {
 }
 
 impl PersonProofEngine {
-  pub(super) fn from_config(config: &Config) -> anyhow::Result<Self> {
+  pub(super) fn from_config_with_previous(
+    config: &Config,
+    previous: Option<&Self>,
+  ) -> anyhow::Result<Self> {
     let mut secret = [0u8; 32];
-    SystemRandom::new()
-      .fill(&mut secret)
-      .map_err(|_| anyhow!("failed to generate WAF person proof secret"))?;
+    let active_reuse_tokens = if let Some(previous) = previous {
+      secret = previous.secret;
+      previous.active_reuse_tokens.clone()
+    } else {
+      SystemRandom::new()
+        .fill(&mut secret)
+        .map_err(|_| anyhow!("failed to generate WAF person proof secret"))?;
+      Arc::new(Mutex::new(HashMap::new()))
+    };
 
     let mut policies = Vec::new();
     collect_policies(&config.waf.rules, &mut policies);
@@ -114,7 +123,7 @@ impl PersonProofEngine {
     Ok(Self {
       secret,
       policies,
-      active_reuse_tokens: Arc::new(Mutex::new(HashMap::new())),
+      active_reuse_tokens,
     })
   }
 

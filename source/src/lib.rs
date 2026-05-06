@@ -13,6 +13,7 @@ compile_error!("oxibelt-proxy supports only x86_64, aarch64, and riscv64.");
 pub mod access_log;
 pub mod config;
 pub mod proxy;
+pub mod reload;
 pub mod routes;
 pub mod runtime;
 pub mod server;
@@ -21,21 +22,29 @@ mod tcp_hop;
 pub mod tls;
 pub mod waf;
 
-use std::sync::Arc;
-
 use anyhow::Context;
-use config::Config;
-use state::AppState;
+use config::{Config, RuntimeOverrides};
+use state::{AppHandle, AppSnapshot};
+
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+  pub config_path: Option<std::path::PathBuf>,
+  pub runtime_overrides: RuntimeOverrides,
+}
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
+  run_with_options(config, RunOptions::default()).await
+}
+
+pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
   runtime::init_tracing(&config.logging)?;
   config.validate()?;
   tls::install_default_provider()?;
 
-  let state = Arc::new(
-    AppState::new(config)
+  let state = AppHandle::new(
+    AppSnapshot::new(config)
       .await
       .context("failed to initialize application state")?,
   );
-  server::serve(state).await
+  server::serve(state, options.config_path, options.runtime_overrides).await
 }

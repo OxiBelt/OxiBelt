@@ -13,14 +13,14 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::config::{Config, resolve_existing_local_config_file_path};
+use crate::config::{Config, resolve_existing_local_config_file_path_with_logical};
 use crate::routes::normalize_host;
 
 mod person_proof;
 
 use person_proof::{PersonProofEngine, PersonProofRequestStatus, PersonProofState};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -49,7 +49,7 @@ impl Default for WafConfig {
   }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteWafConfig {
   #[serde(default)]
   pub rules: Vec<WafRuleConfig>,
@@ -71,7 +71,7 @@ pub enum WafFailPolicy {
   Open,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafLimits {
   #[serde(default = "default_max_rule_runtime_ms")]
   pub max_rule_runtime_ms: u64,
@@ -121,7 +121,7 @@ impl Default for WafLimits {
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafRuleConfig {
   pub name: String,
   #[serde(default)]
@@ -138,6 +138,8 @@ pub struct WafRuleConfig {
   pub actions: Vec<WafActionConfig>,
   #[serde(skip)]
   pub loaded_from_path: Option<PathBuf>,
+  #[serde(skip)]
+  pub loaded_from_logical_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
@@ -147,7 +149,7 @@ pub enum WafPhase {
   Response,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WafActionConfig {
   Reject {
@@ -273,7 +275,7 @@ impl PersonProofTokenBinding {
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafPatternSetConfig {
   pub name: String,
   pub kind: WafPatternSetKind,
@@ -308,6 +310,19 @@ impl WafConfig {
     }
     Ok(())
   }
+
+  pub fn loaded_rule_paths(&self) -> Vec<PathBuf> {
+    self
+      .rules
+      .iter()
+      .filter_map(|rule| {
+        rule
+          .loaded_from_logical_path
+          .clone()
+          .or_else(|| rule.loaded_from_path.clone())
+      })
+      .collect()
+  }
 }
 
 impl RouteWafConfig {
@@ -324,13 +339,31 @@ impl RouteWafConfig {
     }
     Ok(())
   }
+
+  pub fn loaded_rule_paths(&self) -> Vec<PathBuf> {
+    self
+      .rules
+      .iter()
+      .filter_map(|rule| {
+        rule
+          .loaded_from_logical_path
+          .clone()
+          .or_else(|| rule.loaded_from_path.clone())
+      })
+      .collect()
+  }
 }
 
 fn resolve_rule_path(rule: &mut WafRuleConfig, base_dir: &Path) -> anyhow::Result<()> {
   rule.path = rule
     .path
     .take()
-    .map(|path| resolve_existing_local_config_file_path("WAF rule path", base_dir, &path))
+    .map(|path| {
+      let (resolved, logical) =
+        resolve_existing_local_config_file_path_with_logical("WAF rule path", base_dir, &path)?;
+      rule.loaded_from_logical_path = Some(logical);
+      Ok::<PathBuf, anyhow::Error>(resolved)
+    })
     .transpose()?;
   Ok(())
 }
@@ -794,6 +827,10 @@ pub struct WafEngine {
 
 impl WafEngine {
   pub fn new(config: &Config) -> anyhow::Result<Self> {
+    Self::new_with_previous(config, None)
+  }
+
+  pub fn new_with_previous(config: &Config, previous: Option<&Self>) -> anyhow::Result<Self> {
     validate_config(config)?;
 
     let pattern_sets = compile_pattern_sets(&config.waf.pattern_sets, &config.waf.limits)?;
@@ -802,7 +839,8 @@ impl WafEngine {
     for route in &config.routes {
       route_rules.insert(route.name.clone(), compile_rules(&route.waf.rules)?);
     }
-    let person_proof = PersonProofEngine::from_config(config)?;
+    let person_proof =
+      PersonProofEngine::from_config_with_previous(config, previous.map(|waf| &waf.person_proof))?;
     let person_proof_tcp_max_hop = if config.waf.enabled {
       person_proof.tcp_max_hop()
     } else {

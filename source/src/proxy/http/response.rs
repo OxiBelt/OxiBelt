@@ -3,7 +3,7 @@ use http::header::HeaderMap;
 use http::{Method, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full};
 
-use crate::state::AppState;
+use crate::state::AppSnapshot;
 use crate::waf::{
   HeaderMutation, WafBodyInput, WafRequestInput, WafResponseInput, WafTerminalResponse,
   WafTlsMetadata, WafTransportNetwork, WafUpstreamError, apply_header_mutations,
@@ -32,7 +32,7 @@ pub(crate) fn waf_terminal_response(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn upstream_error_response(
-  state: &AppState,
+  state: &AppSnapshot,
   route_name: &str,
   request_method: &Method,
   request_uri: &Uri,

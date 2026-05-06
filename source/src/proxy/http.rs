@@ -6,7 +6,7 @@ use hyper::body::{Body, Incoming};
 use tracing::{debug, warn};
 
 use crate::config::{HttpVersion, UpstreamConfig};
-use crate::state::AppState;
+use crate::state::{AppHandle, AppSnapshot};
 use crate::waf::{
   WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
   WafTransportNetwork, apply_header_mutations, request_protocol,
@@ -33,7 +33,7 @@ pub async fn handle(
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
   tls: Arc<WafTlsMetadata>,
-  state: Arc<AppState>,
+  state: AppHandle,
 ) -> Response<ProxyBody> {
   let protocol = request_protocol(request.headers());
   handle_inner(
@@ -53,7 +53,7 @@ pub(crate) async fn handle_http3(
   request: Request<ProxyBody>,
   peer_addr: std::net::SocketAddr,
   tls: Arc<WafTlsMetadata>,
-  state: Arc<AppState>,
+  state: AppHandle,
 ) -> Response<ProxyBody> {
   handle_inner(
     request,
@@ -74,7 +74,7 @@ async fn handle_inner<B>(
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
   tls: Arc<WafTlsMetadata>,
-  state: Arc<AppState>,
+  state: AppHandle,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
   reject_connect: bool,
@@ -83,6 +83,8 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
+  let state = state.snapshot();
+
   if request.method() == Method::CONNECT {
     if !reject_connect {
       return text_response(
@@ -344,7 +346,7 @@ pub(crate) fn prepare_webtransport(
   request: &Request<()>,
   peer_addr: std::net::SocketAddr,
   tls: &WafTlsMetadata,
-  state: &AppState,
+  state: &AppSnapshot,
 ) -> Result<PreparedWebTransport, Box<Response<ProxyBody>>> {
   let host = extract_host(request).unwrap_or_default();
   let path = request.uri().path().to_string();

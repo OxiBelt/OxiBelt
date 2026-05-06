@@ -16,7 +16,7 @@ use crate::proxy::http as http_proxy;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 use crate::proxy::http::response::text_response;
 use crate::server::downstream_quic_tls_metadata;
-use crate::state::AppState;
+use crate::state::{AppHandle, AppSnapshot};
 use crate::tls;
 
 type H3BidiStream = h3_quinn::BidiStream<Bytes>;
@@ -25,7 +25,7 @@ type H3WebTransportSession = WebTransportSession<h3_quinn::Connection, Bytes>;
 
 pub(crate) async fn handle_downstream_connection(
   connection: h3_quinn::quinn::Connection,
-  state: Arc<AppState>,
+  state: AppHandle,
 ) -> anyhow::Result<()> {
   let peer_addr = connection.remote_address();
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
@@ -58,7 +58,7 @@ pub(crate) async fn handle_downstream_connection(
         &request,
         peer_addr,
         tls_metadata.as_ref(),
-        state.as_ref(),
+        state.snapshot().as_ref(),
       ) {
         Ok(prepared) => prepared,
         Err(response) => {
@@ -67,25 +67,26 @@ pub(crate) async fn handle_downstream_connection(
         }
       };
 
-      let upstream_session = match connect_upstream_webtransport(&prepared, state.as_ref()).await {
-        Ok(session) => session,
-        Err(error) => {
-          warn!(
-              upstream = %prepared.upstream.name,
-              error = %error,
-              "failed to connect upstream WebTransport session"
-          );
-          respond_to_h3_request(
-            stream,
-            text_response(
-              StatusCode::BAD_GATEWAY,
-              "upstream WebTransport session failed",
-            ),
-          )
-          .await?;
-          continue;
-        }
-      };
+      let upstream_session =
+        match connect_upstream_webtransport(&prepared, state.snapshot().as_ref()).await {
+          Ok(session) => session,
+          Err(error) => {
+            warn!(
+                upstream = %prepared.upstream.name,
+                error = %error,
+                "failed to connect upstream WebTransport session"
+            );
+            respond_to_h3_request(
+              stream,
+              text_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream WebTransport session failed",
+              ),
+            )
+            .await?;
+            continue;
+          }
+        };
 
       let downstream_session = WebTransportSession::accept(request, stream, h3_connection)
         .await
@@ -116,7 +117,7 @@ pub(crate) async fn handle_downstream_connection(
 pub(crate) async fn forward_request(
   request: Request<ProxyBody>,
   upstream: &UpstreamConfig,
-  state: &AppState,
+  state: &AppSnapshot,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let quic_config =
     tls::build_upstream_quic_client_config(&state.config.proxy.trusted_ca_certs, &upstream.tls.ech)
@@ -204,7 +205,7 @@ async fn handle_h3_request(
   mut stream: H3RequestStream,
   peer_addr: SocketAddr,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
-  state: Arc<AppState>,
+  state: AppHandle,
 ) -> anyhow::Result<StatusCode> {
   let request = collect_h3_request_body(request, &mut stream).await?;
   let response = http_proxy::handle_http3(request, peer_addr, tls_metadata, state).await;
@@ -276,7 +277,7 @@ async fn respond_to_h3_request(
 
 async fn connect_upstream_webtransport(
   prepared: &http_proxy::PreparedWebTransport,
-  state: &AppState,
+  state: &AppSnapshot,
 ) -> anyhow::Result<web_transport_quinn::Session> {
   let quic_config = tls::build_upstream_quic_client_config(
     &state.config.proxy.trusted_ca_certs,
@@ -311,7 +312,7 @@ async fn bridge_webtransport(
   upstream: web_transport_quinn::Session,
   peer_addr: SocketAddr,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
-  state: Arc<AppState>,
+  state: AppHandle,
 ) -> anyhow::Result<()> {
   let downstream = Arc::new(downstream);
   let upstream = Arc::new(upstream);
@@ -345,7 +346,7 @@ async fn bridge_downstream_bidi(
   upstream: Arc<web_transport_quinn::Session>,
   peer_addr: SocketAddr,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
-  state: Arc<AppState>,
+  state: AppHandle,
 ) -> anyhow::Result<()> {
   loop {
     match downstream.accept_bi().await? {
