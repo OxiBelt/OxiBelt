@@ -1,3 +1,7 @@
+[config]
+strict_unknown_fields = true
+warn_on_deprecated_fields = true
+
 [logging]
 level = "info"
 
@@ -13,13 +17,29 @@ poll_interval_ms = 2000
 
 [listeners]
 https_bind = "0.0.0.0:8443"
+http_bind = "0.0.0.0:8080"
+http_mode = "redirect_to_https"
 http1 = true
 http2 = true
 http3 = false
 
+[listeners.proxy_protocol]
+enabled = false
+version = "any"
+trusted_sources = []
+
 [tls]
 cert_chain = "fullchain.pem"
 private_key = "privkey.pem"
+min_version = "tls1.3"
+max_version = "tls1.3"
+session_tickets = true
+session_ticket_rotation_seconds = 86400
+
+[tls.client_auth]
+mode = "off"
+ca_certs = []
+verify_depth = 4
 
 [tls.ocsp]
 mode = "disabled"
@@ -30,15 +50,92 @@ trusted_ca_certs = []
 [proxy.forwarded_headers]
 mode = "overwrite"
 
+[proxy.real_ip]
+enabled = false
+trusted_proxies = []
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = false
+
 [proxy.auto_upgrade]
 enabled = true
 max_http_version = "h2"
+
+[proxy.upgrades]
+websocket = true
+generic_http_upgrade = false
+connect_tunneling = false
+
+[proxy.retry]
+enabled = false
+tries = 2
+timeout_ms = 5000
+on = ["connect_error", "read_timeout", "502", "503", "504"]
+retry_non_idempotent = false
+
+[proxy.buffering]
+request = "streaming"
+response = "streaming"
+max_memory_body_bytes = 1048576
+max_temp_file_bytes = 0
+
+[proxy.http]
+early_hints = "drop"
+trailers = "pass"
+
+[limits]
+max_connections = 65536
+max_connections_per_ip = 128
+max_requests_per_connection = 1000
+client_header_timeout_ms = 10000
+client_body_timeout_ms = 30000
+client_idle_timeout_ms = 75000
+tls_handshake_timeout_ms = 10000
+response_send_timeout_ms = 60000
+max_headers = 128
+max_header_name_bytes = 128
+max_header_value_bytes = 8192
+max_total_header_bytes = 65536
+max_uri_bytes = 8192
+max_request_body_bytes = 10485760
 
 [compression]
 enabled = true
 gzip = true
 deflate = true
 zstd = true
+
+[cache]
+enabled = false
+store = "memory"
+tmpfs_dir = "/dev/shm/oxibelt-cache"
+max_size_bytes = 1073741824
+default_ttl_seconds = 60
+cache_methods = ["GET", "HEAD"]
+cache_key = "{scheme}:{host}:{uri}"
+respect_cache_control = true
+stale_if_error_seconds = 30
+lock = true
+
+[metrics]
+enabled = false
+bind = "127.0.0.1:9090"
+format = "prometheus"
+
+[health]
+enabled = false
+bind = "127.0.0.1:9091"
+ready_path = "/ready"
+live_path = "/live"
+
+[security.headers]
+hsts = false
+hsts_max_age_seconds = 31536000
+hsts_include_subdomains = true
+hsts_preload = false
+# x_content_type_options = "nosniff"
+# referrer_policy = "strict-origin-when-cross-origin"
+# permissions_policy = "default"
 
 [database.access_log]
 enabled = false
@@ -82,6 +179,9 @@ origin = "https://app.internal.example"
 max_http_version = "h2"
 connect_timeout_ms = 3000
 request_timeout_ms = 30000
+read_timeout_ms = 30000
+send_timeout_ms = 30000
+idle_timeout_ms = 75000
 preserve_host = false
 websocket = true
 webrtc = true

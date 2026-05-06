@@ -11,6 +11,12 @@ Current implementation scope:
 - Upstream TLS 1.3 ECH support for GREASE and configured ECHConfigList modes
 - Downstream HTTP/1.1 and HTTP/2
 - Upstream HTTP/1.1 and HTTP/2
+- Optional downstream HTTP/3 and upstream HTTP/3 forwarding
+- WebSocket upgrade tunneling for HTTP/1.1 routes
+- Client/header/body/connection/rate limits, trusted real-IP handling, and PROXY protocol intake
+- Upstream pools with local load-balancing state and passive health marking
+- Optional HTTP redirect listener, local health endpoint, and Prometheus-style metrics endpoint
+- Route opt-in memory/tmpfs-validated response cache
 - Routing based on hostname + path prefix
 - Streaming HTTP body forwarding
 - HTTP/2-based gRPC proxy paths
@@ -22,14 +28,13 @@ Current implementation scope:
 
 Items intentionally left out of this initial implementation:
 
-- Downstream HTTP/3
-- Upstream HTTP/3
-- QUIC / WebTransport forwarding
-- WebSocket upgrade tunneling
 - WebRTC forwarding
+- ACME HTTP-01 challenge handling
+- New request-wide `[access_log]` structured logging
 - OCSP live fetch / refresh worker
 - Streaming-safe WAF body content inspection
-- Upstream pool load balancing actions
+- Sticky-cookie upstream sessions
+- Passing 103 Early Hints
 
 Current constraints:
 
@@ -38,7 +43,7 @@ Current constraints:
 - ECH is currently supported where OxiBelt acts as an upstream TLS client; downstream ECH termination depends on server-side ECH support in the TLS provider
 - The project now targets Rust 1.95
 
-In other words, this commit is meant to be a production-oriented foundation. It focuses on locking in module boundaries and the configuration model first, so the HTTP/3/QUIC layer can be added cleanly in the next phase.
+In other words, this commit is meant to be a production-oriented foundation for an edge reverse proxy while keeping ACME and request-wide access logging as separate future work.
 
 ## Basic Run
 

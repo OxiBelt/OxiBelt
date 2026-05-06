@@ -8,7 +8,7 @@ pub struct RouteTable {
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute<'a> {
   pub route: &'a RouteConfig,
-  pub upstream: &'a UpstreamConfig,
+  pub upstream: Option<&'a UpstreamConfig>,
 }
 
 impl RouteTable {
@@ -49,7 +49,10 @@ impl RouteTable {
     }
 
     let (route, _, _) = best?;
-    let upstream = upstreams.iter().find(|item| item.name == route.upstream)?;
+    let upstream = route
+      .upstream
+      .as_deref()
+      .and_then(|name| upstreams.iter().find(|item| item.name == name));
     Some(ResolvedRoute { route, upstream })
   }
 }
@@ -118,6 +121,9 @@ mod tests {
       max_http_version: HttpVersion::H2,
       connect_timeout_ms: 1_000,
       request_timeout_ms: 10_000,
+      read_timeout_ms: 10_000,
+      send_timeout_ms: 10_000,
+      idle_timeout_ms: 75_000,
       preserve_host: false,
       websocket: true,
       webrtc: true,
@@ -134,7 +140,9 @@ mod tests {
         hosts: vec!["*.example.com".into()],
         path_prefix: "/".into(),
         replace_prefix_with: None,
-        upstream: "wild".into(),
+        upstream: Some("wild".into()),
+        upstream_pool: None,
+        cache: None,
         waf: Default::default(),
       },
       RouteConfig {
@@ -142,7 +150,9 @@ mod tests {
         hosts: vec!["api.example.com".into()],
         path_prefix: "/".into(),
         replace_prefix_with: None,
-        upstream: "exact".into(),
+        upstream: Some("exact".into()),
+        upstream_pool: None,
+        cache: None,
         waf: Default::default(),
       },
     ];
@@ -161,7 +171,9 @@ mod tests {
         hosts: vec!["example.com".into()],
         path_prefix: "/".into(),
         replace_prefix_with: None,
-        upstream: "root".into(),
+        upstream: Some("root".into()),
+        upstream_pool: None,
+        cache: None,
         waf: Default::default(),
       },
       RouteConfig {
@@ -169,7 +181,9 @@ mod tests {
         hosts: vec!["example.com".into()],
         path_prefix: "/api".into(),
         replace_prefix_with: None,
-        upstream: "api".into(),
+        upstream: Some("api".into()),
+        upstream_pool: None,
+        cache: None,
         waf: Default::default(),
       },
     ];

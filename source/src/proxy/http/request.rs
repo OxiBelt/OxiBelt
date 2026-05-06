@@ -15,6 +15,7 @@ pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) compression: &'a CompressionConfig,
   pub(crate) peer_addr: std::net::SocketAddr,
   pub(crate) downstream_host: &'a str,
+  pub(crate) downstream_scheme: &'a str,
   pub(crate) forwarded_header_mode: ForwardedHeaderMode,
   pub(crate) preserve_host: bool,
   pub(crate) upstream_version: HttpVersion,
@@ -42,6 +43,7 @@ where
     &mut parts.headers,
     options.peer_addr,
     options.downstream_host,
+    options.downstream_scheme,
     options.forwarded_header_mode,
   );
 

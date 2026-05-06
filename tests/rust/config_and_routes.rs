@@ -128,6 +128,63 @@ upstream = "app"
 }
 
 #[test]
+fn config_load_rejects_unknown_fields_by_default() {
+    let temp_dir = common::TempDir::new("strict-unknown");
+    let config_path = write_loadable_config(&temp_dir, "strict-unknown", |raw| {
+        raw.replace(
+            "[proxy]\ntrusted_ca_certs = []",
+            "[proxy]\ntrusted_ca_certs = []\nunknown_proxy_key = true",
+        )
+    });
+
+    let error = Config::load(&config_path).expect_err("unknown field should be rejected");
+
+    assert!(
+        error.to_string().contains("proxy.unknown_proxy_key"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn config_load_allows_unknown_fields_when_strict_mode_is_disabled() {
+    let temp_dir = common::TempDir::new("strict-disabled");
+    let config_path = write_loadable_config(&temp_dir, "strict-disabled", |raw| {
+        format!(
+            "[config]\nstrict_unknown_fields = false\n\n{}",
+            raw.replace(
+                "[proxy]\ntrusted_ca_certs = []",
+                "[proxy]\ntrusted_ca_certs = []\nunknown_proxy_key = true",
+            )
+        )
+    });
+
+    Config::load(&config_path).expect("unknown field should be ignored when strict mode is off");
+}
+
+#[test]
+fn effective_config_dump_redacts_database_connection_url() {
+    let temp_dir = common::TempDir::new("effective-redacted");
+    let config_path = write_loadable_config(&temp_dir, "effective-redacted", |raw| {
+        raw.replace(
+            "[[upstreams]]",
+            r#"[database.access_log]
+enabled = true
+connection_url = "postgres://user:secret@postgres.example:5432/oxibelt"
+table = "access_log"
+
+[[upstreams]]"#,
+        )
+    });
+
+    let redacted =
+        toml::to_string_pretty(&Config::load_effective_toml_redacted(&config_path).unwrap())
+            .expect("redacted TOML should serialize");
+
+    assert!(redacted.contains("connection_url = \"<redacted>\""));
+    assert!(!redacted.contains("secret@postgres.example"));
+}
+
+#[test]
 fn config_load_resolves_database_access_log_tls_ca_under_cert_directory() {
     let temp_dir = common::TempDir::new("database-access-log-ca");
     let config_dir = temp_dir.path().join("config");
@@ -528,7 +585,7 @@ origin = "https://site.internal.example"
 
     config.validate().expect("config should validate");
     assert_eq!(config.upstreams[0].name, "site");
-    assert_eq!(config.routes[0].upstream, "site");
+    assert_eq!(config.routes[0].upstream.as_deref(), Some("site"));
 }
 
 #[test]
@@ -1140,6 +1197,29 @@ fn route_replacement_rejects_query_fragments() {
             .contains("must not contain control characters"),
         "unexpected error: {error}"
     );
+}
+
+fn write_loadable_config(
+    temp_dir: &common::TempDir,
+    common_name: &str,
+    edit: impl FnOnce(String) -> String,
+) -> std::path::PathBuf {
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, common_name);
+    let cert_file = cert_path.file_name().unwrap().to_string_lossy();
+    let key_file = key_path.file_name().unwrap().to_string_lossy();
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        edit(common::minimal_config_toml_with_paths(
+            &cert_file, &key_file,
+        )),
+    )
+    .expect("failed to write config");
+    config_path
 }
 
 fn main_entry_config_toml(cert_path: &Path, key_path: &Path, include: &str) -> String {

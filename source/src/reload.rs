@@ -101,9 +101,13 @@ impl ReloadManager {
       .context("failed to rebuild WAF engine")?;
     let snapshot = AppSnapshot {
       route_table: RouteTable::new(config.routes.clone()),
-      upstreams: config.upstreams.clone(),
+      upstreams: active.upstreams.clone(),
       config,
       clients: active.clients.clone(),
+      limits: active.limits.clone(),
+      pools: active.pools.clone(),
+      cache: active.cache.clone(),
+      metrics: active.metrics.clone(),
       tls_server_config: active.tls_server_config.clone(),
       quic_server_config: active.quic_server_config.clone(),
       waf,
@@ -167,6 +171,10 @@ impl ReloadManager {
       upstreams: active.upstreams.clone(),
       config,
       clients: active.clients.clone(),
+      limits: active.limits.clone(),
+      pools: active.pools.clone(),
+      cache: active.cache.clone(),
+      metrics: active.metrics.clone(),
       tls_server_config,
       quic_server_config,
       waf: active.waf.clone(),
@@ -215,11 +223,17 @@ fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
     .map(|path| canonicalize_under_base("tls.ocsp.response_file", cert_dir, path))
     .transpose()?;
 
+  let old_tls = config.tls.clone();
   config.tls = TlsConfig {
     cert_chain: canonicalize_under_base("tls.cert_chain", cert_dir, cert_chain)?,
     private_key: canonicalize_under_base("tls.private_key", cert_dir, private_key)?,
+    min_version: old_tls.min_version,
+    max_version: old_tls.max_version,
+    session_tickets: old_tls.session_tickets,
+    session_ticket_rotation_seconds: old_tls.session_ticket_rotation_seconds,
+    client_auth: old_tls.client_auth,
     ocsp: crate::config::OcspConfig {
-      mode: config.tls.ocsp.mode,
+      mode: old_tls.ocsp.mode,
       response_file: ocsp,
     },
   };

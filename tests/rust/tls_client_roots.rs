@@ -1,7 +1,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use oxibelt::config::{ListenerConfig, OcspConfig, TlsConfig, UpstreamEchConfig, UpstreamEchMode};
+use oxibelt::config::{
+    ListenerConfig, OcspConfig, ProxyProtocolConfig, TlsClientAuthConfig, TlsConfig, TlsVersion,
+    UpstreamEchConfig, UpstreamEchMode,
+};
 use oxibelt::tls;
 
 #[test]
@@ -69,13 +72,21 @@ fn server_config_sets_alpn_from_listener_flags() {
     let tls_config = TlsConfig {
         cert_chain: cert_path,
         private_key: key_path,
+        min_version: TlsVersion::Tls13,
+        max_version: TlsVersion::Tls13,
+        session_tickets: true,
+        session_ticket_rotation_seconds: 86_400,
+        client_auth: TlsClientAuthConfig::default(),
         ocsp: OcspConfig::default(),
     };
     let listeners = ListenerConfig {
         https_bind: "127.0.0.1:8443".parse().unwrap(),
+        http_bind: None,
+        http_mode: Default::default(),
         http1: true,
         http2: false,
         http3: false,
+        proxy_protocol: ProxyProtocolConfig::default(),
     };
 
     let server_config =

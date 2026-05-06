@@ -2,11 +2,14 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
+use ::http::{Response, StatusCode};
 use anyhow::Context;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use ring::digest;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
@@ -15,7 +18,12 @@ use tokio_rustls::LazyConfigAcceptor;
 use tracing::{error, info, warn};
 
 use crate::config::RuntimeOverrides;
+use crate::limits::ConnectionPermit;
+use crate::pool_health;
+use crate::proxy::http::body::ProxyBody;
+use crate::proxy::http::response::text_response;
 use crate::proxy::{http, http3};
+use crate::proxy_protocol;
 use crate::reload::{ReloadManager, ReloadTrigger};
 use crate::state::{AppHandle, AppSnapshot};
 use crate::tcp_hop;
@@ -31,6 +39,7 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
   let (error_tx, mut error_rx) = mpsc::unbounded_channel();
   let mut listeners = ListenerSupervisor::start(state.clone(), error_tx.clone()).await?;
+  let _ops = OpsTasks::start(state.clone(), error_tx.clone()).await?;
   let reload = if state.snapshot().config.runtime.hot_reload.mode.enabled() {
     match config_path {
       Some(config_path) => Some(ReloadManager::new(
@@ -53,6 +62,146 @@ pub async fn serve(
     serve_with_reload(state, &mut listeners, &mut error_rx, reload).await
   } else {
     serve_until_shutdown(&mut error_rx).await
+  }
+}
+
+struct OpsTasks {
+  shutdown: Vec<watch::Sender<bool>>,
+  tasks: Vec<JoinHandle<()>>,
+}
+
+impl OpsTasks {
+  async fn start(
+    state: AppHandle,
+    error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  ) -> anyhow::Result<Self> {
+    let snapshot = state.snapshot();
+    let mut shutdown = Vec::new();
+    let mut tasks = Vec::new();
+    if snapshot.config.metrics.enabled {
+      let listener = TcpListener::bind(snapshot.config.metrics.bind)
+        .await
+        .with_context(|| {
+          format!(
+            "failed to bind metrics listener to {}",
+            snapshot.config.metrics.bind
+          )
+        })?;
+      let (tx, rx) = watch::channel(false);
+      shutdown.push(tx);
+      let task_state = state.clone();
+      let task_error = error_tx.clone();
+      tasks.push(tokio::spawn(async move {
+        if let Err(error) = serve_ops_listener(listener, task_state, rx, OpsKind::Metrics).await {
+          let _ = task_error.send(error.context("metrics listener failed"));
+        }
+      }));
+    }
+    if snapshot.config.health.enabled {
+      let listener = TcpListener::bind(snapshot.config.health.bind)
+        .await
+        .with_context(|| {
+          format!(
+            "failed to bind health listener to {}",
+            snapshot.config.health.bind
+          )
+        })?;
+      let (tx, rx) = watch::channel(false);
+      shutdown.push(tx);
+      let task_state = state.clone();
+      let task_error = error_tx;
+      tasks.push(tokio::spawn(async move {
+        if let Err(error) = serve_ops_listener(listener, task_state, rx, OpsKind::Health).await {
+          let _ = task_error.send(error.context("health listener failed"));
+        }
+      }));
+    }
+    let (tx, rx) = watch::channel(false);
+    shutdown.push(tx);
+    let task_state = state;
+    tasks.push(tokio::spawn(async move {
+      pool_health::run_pool_health_checks(task_state, rx).await;
+    }));
+    Ok(Self { shutdown, tasks })
+  }
+}
+
+impl Drop for OpsTasks {
+  fn drop(&mut self) {
+    for tx in &self.shutdown {
+      let _ = tx.send(true);
+    }
+    for task in &self.tasks {
+      task.abort();
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+enum OpsKind {
+  Metrics,
+  Health,
+}
+
+async fn serve_ops_listener(
+  listener: TcpListener,
+  state: AppHandle,
+  mut shutdown: watch::Receiver<bool>,
+  kind: OpsKind,
+) -> anyhow::Result<()> {
+  loop {
+    tokio::select! {
+      biased;
+      changed = shutdown.changed() => {
+        if changed.is_ok() && *shutdown.borrow() {
+          return Ok(());
+        }
+      }
+      accepted = listener.accept() => {
+        let (stream, peer_addr) = match accepted {
+          Ok(value) => value,
+          Err(error) => {
+            warn!(error = %error, "failed to accept ops connection");
+            continue;
+          }
+        };
+        let state = state.clone();
+        tokio::spawn(async move {
+          let service = service_fn(move |request: hyper::Request<Incoming>| {
+            let state = state.clone();
+            async move { Ok::<_, Infallible>(ops_response(request, state, kind)) }
+          });
+          if let Err(error) = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+          {
+            warn!(peer = %peer_addr, error = %error, "ops connection failed");
+          }
+        });
+      }
+    }
+  }
+}
+
+fn ops_response(
+  request: hyper::Request<Incoming>,
+  state: AppHandle,
+  kind: OpsKind,
+) -> Response<ProxyBody> {
+  match kind {
+    OpsKind::Metrics => {
+      let body = state.snapshot().metrics.prometheus();
+      text_response(StatusCode::OK, &body)
+    }
+    OpsKind::Health => {
+      let snapshot = state.snapshot();
+      let path = request.uri().path();
+      if path == snapshot.config.health.ready_path || path == snapshot.config.health.live_path {
+        text_response(StatusCode::OK, "ok")
+      } else {
+        text_response(StatusCode::NOT_FOUND, "not found")
+      }
+    }
   }
 }
 
@@ -101,6 +250,7 @@ async fn serve_with_reload(
 
 pub(crate) struct ListenerSupervisor {
   tcp: Option<TcpListenerTask>,
+  http: Option<TcpListenerTask>,
   http3: Option<Http3ListenerTask>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
 }
@@ -113,7 +263,14 @@ struct TcpListenerTask {
 
 struct BoundTcpListener {
   bind: SocketAddr,
+  kind: TcpListenerKind,
   listener: TcpListener,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TcpListenerKind {
+  Https,
+  PlainHttp,
 }
 
 struct Http3ListenerTask {
@@ -130,6 +287,7 @@ struct BoundHttp3Listener {
 
 pub(crate) struct PendingListenerUpdate {
   tcp: Option<Option<BoundTcpListener>>,
+  http: Option<Option<BoundTcpListener>>,
   http3: Option<Option<BoundHttp3Listener>>,
   refresh_http3_config: bool,
 }
@@ -142,6 +300,7 @@ impl ListenerSupervisor {
     let snapshot = state.snapshot();
     let mut supervisor = Self {
       tcp: None,
+      http: None,
       http3: None,
       error_tx,
     };
@@ -159,9 +318,28 @@ impl ListenerSupervisor {
       if self.tcp.as_ref().map(|task| task.bind) == Some(bind) {
         None
       } else {
-        Some(Some(bind_tcp_listener(bind).await?))
+        Some(Some(bind_tcp_listener(bind, TcpListenerKind::Https).await?))
       }
     } else if self.tcp.is_some() {
+      Some(None)
+    } else {
+      None
+    };
+
+    let http = if snapshot.config.listeners.http_mode != crate::config::HttpListenerMode::Off {
+      let bind = snapshot
+        .config
+        .listeners
+        .http_bind
+        .expect("validated http_bind");
+      if self.http.as_ref().map(|task| task.bind) == Some(bind) {
+        None
+      } else {
+        Some(Some(
+          bind_tcp_listener(bind, TcpListenerKind::PlainHttp).await?,
+        ))
+      }
+    } else if self.http.is_some() {
       Some(None)
     } else {
       None
@@ -182,6 +360,7 @@ impl ListenerSupervisor {
 
     Ok(PendingListenerUpdate {
       tcp,
+      http,
       http3,
       refresh_http3_config,
     })
@@ -202,6 +381,20 @@ impl ListenerSupervisor {
       }
       Some(None) => {
         if let Some(old) = self.tcp.take() {
+          old.shutdown();
+        }
+      }
+      None => {}
+    }
+    match pending.http {
+      Some(Some(http)) => {
+        let http = http.start(state.clone(), self.error_tx.clone());
+        if let Some(old) = self.http.replace(http) {
+          old.shutdown();
+        }
+      }
+      Some(None) => {
+        if let Some(old) = self.http.take() {
           old.shutdown();
         }
       }
@@ -245,8 +438,9 @@ impl BoundTcpListener {
   ) -> TcpListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
+    let kind = self.kind;
     let task = tokio::spawn(async move {
-      if let Err(error) = serve_tcp(self.listener, state, shutdown_rx).await {
+      if let Err(error) = serve_tcp(self.listener, kind, state, shutdown_rx).await {
         let _ = error_tx.send(error.context("downstream TCP HTTP listener failed"));
       }
     });
@@ -289,22 +483,30 @@ impl BoundHttp3Listener {
   }
 }
 
-async fn bind_tcp_listener(bind: SocketAddr) -> anyhow::Result<BoundTcpListener> {
+async fn bind_tcp_listener(
+  bind: SocketAddr,
+  kind: TcpListenerKind,
+) -> anyhow::Result<BoundTcpListener> {
   let listener = TcpListener::bind(bind)
     .await
     .with_context(|| format!("failed to bind downstream listener to {bind}"))?;
-  Ok(BoundTcpListener { bind, listener })
+  Ok(BoundTcpListener {
+    bind,
+    kind,
+    listener,
+  })
 }
 
 async fn serve_tcp(
   listener: TcpListener,
+  kind: TcpListenerKind,
   state: AppHandle,
   mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
   let bind = listener
     .local_addr()
     .context("failed to read TCP listener address")?;
-  info!(bind = %bind, "downstream HTTPS listener started");
+  info!(bind = %bind, ?kind, "downstream TCP listener started");
 
   loop {
     tokio::select! {
@@ -326,7 +528,11 @@ async fn serve_tcp(
 
             let connection_state = state.clone();
             tokio::spawn(async move {
-                if let Err(error) = handle_connection(stream, peer_addr, connection_state).await {
+                let result = match kind {
+                  TcpListenerKind::Https => handle_connection(stream, peer_addr, connection_state).await,
+                  TcpListenerKind::PlainHttp => handle_plain_http_connection(stream, peer_addr, connection_state).await,
+                };
+                if let Err(error) = result {
                     warn!(peer = %peer_addr, error = %error, "downstream connection closed with error");
                 }
             });
@@ -438,20 +644,34 @@ async fn handle_connection(
   state: AppHandle,
 ) -> anyhow::Result<()> {
   let handshake_state = state.snapshot();
+  let _permit = acquire_connection_permit(&handshake_state, peer_addr)?;
+  let (stream, peer_addr) = proxy_protocol::accept_proxy_header(
+    stream,
+    peer_addr,
+    &handshake_state.config.listeners.proxy_protocol,
+  )
+  .await?;
   let tcp_max_hop = handshake_state.waf.person_proof_tcp_max_hop();
   if let Some(max_hop) = tcp_max_hop {
     tcp_hop::apply_tcp_max_hop(&stream, peer_addr.ip(), max_hop)
       .with_context(|| format!("failed to apply TCP max hop {max_hop} for {peer_addr}"))?;
   }
 
-  let start = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream)
-    .await
-    .context("TLS ClientHello failed")?;
+  let start = tokio::time::timeout(
+    Duration::from_millis(handshake_state.config.limits.tls_handshake_timeout_ms),
+    LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream),
+  )
+  .await
+  .context("TLS ClientHello timed out")?
+  .context("TLS ClientHello failed")?;
   let client_hello_metadata = client_hello_fingerprint_metadata(start.client_hello());
-  let tls_stream = start
-    .into_stream(handshake_state.tls_server_config.clone())
-    .await
-    .context("TLS handshake failed")?;
+  let tls_stream = tokio::time::timeout(
+    Duration::from_millis(handshake_state.config.limits.tls_handshake_timeout_ms),
+    start.into_stream(handshake_state.tls_server_config.clone()),
+  )
+  .await
+  .context("TLS handshake timed out")?
+  .context("TLS handshake failed")?;
 
   let negotiated = tls_stream
     .get_ref()
@@ -464,16 +684,43 @@ async fn handle_connection(
     &client_hello_metadata,
   ));
 
+  let request_count = Arc::new(AtomicUsize::new(0));
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
     let tls_metadata = tls_metadata.clone();
+    let request_count = request_count.clone();
     async move {
-      Ok::<_, Infallible>(http::handle(request, peer_addr, tcp_max_hop, tls_metadata, state).await)
+      Ok::<_, Infallible>(
+        if request_count.fetch_add(1, Ordering::Relaxed)
+          >= state.snapshot().config.limits.max_requests_per_connection
+        {
+          text_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many requests on this connection",
+          )
+        } else {
+          http::handle(
+            request,
+            peer_addr,
+            tcp_max_hop,
+            tls_metadata,
+            state,
+            "https",
+          )
+          .await
+        },
+      )
     }
   });
 
   if negotiated == b"h2" {
-    hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+    let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+    builder.timer(TokioTimer::new());
+    builder.max_header_list_size(handshake_state.config.limits.max_total_header_bytes as u32);
+    builder.keep_alive_timeout(Duration::from_millis(
+      handshake_state.config.limits.client_idle_timeout_ms,
+    ));
+    builder
       .serve_connection(TokioIo::new(tls_stream), service)
       .await
       .map_err(|error| {
@@ -481,8 +728,22 @@ async fn handle_connection(
         anyhow::anyhow!(error)
       })?;
   } else {
-    hyper::server::conn::http1::Builder::new()
-      .keep_alive(true)
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+      .timer(TokioTimer::new())
+      .header_read_timeout(Duration::from_millis(
+        handshake_state.config.limits.client_header_timeout_ms,
+      ))
+      .max_headers(handshake_state.config.limits.max_headers)
+      .max_buf_size(
+        handshake_state
+          .config
+          .limits
+          .max_total_header_bytes
+          .max(8192),
+      )
+      .keep_alive(true);
+    builder
       .serve_connection(TokioIo::new(tls_stream), service)
       .with_upgrades()
       .await
@@ -493,6 +754,101 @@ async fn handle_connection(
   }
 
   Ok(())
+}
+
+async fn handle_plain_http_connection(
+  stream: TcpStream,
+  peer_addr: SocketAddr,
+  state: AppHandle,
+) -> anyhow::Result<()> {
+  let snapshot = state.snapshot();
+  let _permit = acquire_connection_permit(&snapshot, peer_addr)?;
+  let request_count = Arc::new(AtomicUsize::new(0));
+  let service = service_fn(move |request: hyper::Request<Incoming>| {
+    let state = state.clone();
+    let request_count = request_count.clone();
+    async move {
+      let response = match state.snapshot().config.listeners.http_mode {
+        crate::config::HttpListenerMode::RedirectToHttps => redirect_to_https(&request),
+        crate::config::HttpListenerMode::Proxy => {
+          if request_count.fetch_add(1, Ordering::Relaxed)
+            >= state.snapshot().config.limits.max_requests_per_connection
+          {
+            text_response(
+              StatusCode::TOO_MANY_REQUESTS,
+              "too many requests on this connection",
+            )
+          } else {
+            http::handle(
+              request,
+              peer_addr,
+              None,
+              Arc::new(WafTlsMetadata::default()),
+              state,
+              "http",
+            )
+            .await
+          }
+        }
+        crate::config::HttpListenerMode::Off => {
+          text_response(StatusCode::NOT_FOUND, "HTTP listener is disabled")
+        }
+      };
+      Ok::<_, Infallible>(response)
+    }
+  });
+  let mut builder = hyper::server::conn::http1::Builder::new();
+  builder
+    .timer(TokioTimer::new())
+    .header_read_timeout(Duration::from_millis(
+      snapshot.config.limits.client_header_timeout_ms,
+    ))
+    .max_headers(snapshot.config.limits.max_headers)
+    .max_buf_size(snapshot.config.limits.max_total_header_bytes.max(8192))
+    .keep_alive(true);
+  builder
+    .serve_connection(TokioIo::new(stream), service)
+    .await
+    .map_err(|error| {
+      error!(peer = %peer_addr, error = %error, "plain HTTP downstream connection failed");
+      anyhow::anyhow!(error)
+    })?;
+  Ok(())
+}
+
+fn redirect_to_https(request: &hyper::Request<Incoming>) -> Response<ProxyBody> {
+  let host = request
+    .headers()
+    .get(::http::header::HOST)
+    .and_then(|value| value.to_str().ok())
+    .unwrap_or_default();
+  let path = request
+    .uri()
+    .path_and_query()
+    .map(|value| value.as_str())
+    .unwrap_or("/");
+  let location = format!("https://{host}{path}");
+  let mut response = text_response(StatusCode::PERMANENT_REDIRECT, "");
+  if let Ok(value) = ::http::HeaderValue::from_str(&location) {
+    response
+      .headers_mut()
+      .insert(::http::header::LOCATION, value);
+  }
+  response
+}
+
+fn acquire_connection_permit(
+  snapshot: &AppSnapshot,
+  peer_addr: SocketAddr,
+) -> anyhow::Result<ConnectionPermit> {
+  snapshot
+    .limits
+    .acquire_connection(
+      peer_addr.ip(),
+      &snapshot.config.limits,
+      &snapshot.config.connection_limits,
+    )
+    .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))
 }
 
 #[derive(Debug, Clone, Default)]

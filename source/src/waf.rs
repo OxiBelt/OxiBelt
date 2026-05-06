@@ -418,12 +418,18 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
     .iter()
     .map(|upstream| upstream.name.as_str())
     .collect::<HashSet<_>>();
+  let pool_names = config
+    .upstream_pools
+    .iter()
+    .map(|pool| pool.name.as_str())
+    .collect::<HashSet<_>>();
   validate_scope(
     "global WAF",
     &config.waf.rules,
     &config.waf.pattern_sets,
     &config.waf.limits,
     &upstream_names,
+    &pool_names,
   )?;
 
   for route in &config.routes {
@@ -433,6 +439,7 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
       &config.waf.pattern_sets,
       &config.waf.limits,
       &upstream_names,
+      &pool_names,
     )?;
   }
   validate_unique_rule_ids(config)?;
@@ -474,6 +481,7 @@ fn validate_scope(
   pattern_sets: &[WafPatternSetConfig],
   limits: &WafLimits,
   upstream_names: &HashSet<&str>,
+  pool_names: &HashSet<&str>,
 ) -> anyhow::Result<()> {
   validate_pattern_sets(pattern_sets, limits)?;
 
@@ -513,7 +521,7 @@ fn validate_scope(
       .validate_for_phase(rule.phase)
       .with_context(|| format!("invalid WAF rule {} expression", rule.name))?;
 
-    validate_actions(rule, upstream_names, limits)?;
+    validate_actions(rule, upstream_names, pool_names, limits)?;
   }
 
   Ok(())
@@ -577,6 +585,7 @@ fn validate_pattern_sets(
 fn validate_actions(
   rule: &WafRuleConfig,
   upstream_names: &HashSet<&str>,
+  pool_names: &HashSet<&str>,
   limits: &WafLimits,
 ) -> anyhow::Result<()> {
   let mut mutations = 0usize;
@@ -609,17 +618,30 @@ fn validate_actions(
         }
         mutations += 1;
       }
-      WafActionConfig::RouteToPool { .. } => {
-        bail!(
-          "WAF rule {} uses route_to_pool, but upstream pools are not implemented in this build",
-          rule.name
-        );
+      WafActionConfig::RouteToPool { pool } => {
+        require_phase(rule, WafPhase::Request, "route_to_pool")?;
+        if !pool_names.contains(pool.as_str()) {
+          bail!(
+            "WAF rule {} route_to_pool references unknown upstream pool {}",
+            rule.name,
+            pool
+          );
+        }
+        mutations += 1;
       }
-      WafActionConfig::SetLoadBalancingPolicy { .. } => {
-        bail!(
-          "WAF rule {} uses set_load_balancing_policy, but load-balancing policies are not implemented in this build",
-          rule.name
-        );
+      WafActionConfig::SetLoadBalancingPolicy { policy } => {
+        require_phase(rule, WafPhase::Request, "set_load_balancing_policy")?;
+        if !matches!(
+          policy.as_str(),
+          "round_robin" | "least_conn" | "least_connections" | "random" | "hash" | "ip_hash"
+        ) {
+          bail!(
+            "WAF rule {} set_load_balancing_policy uses unsupported policy {}",
+            rule.name,
+            policy
+          );
+        }
+        mutations += 1;
       }
       WafActionConfig::SetRequestHeader { name, value } => {
         require_phase(rule, WafPhase::Request, "set_request_header")?;
@@ -1450,6 +1472,8 @@ pub struct RequestWafDecision {
   pub response_header_mutations: Vec<HeaderMutation>,
   pub tags: Vec<(String, String)>,
   pub upstream_override: Option<String>,
+  pub upstream_pool_override: Option<String>,
+  pub load_balancing_policy: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1547,13 +1571,17 @@ fn apply_request_actions(
       CompiledAction::Config(WafActionConfig::RouteToUpstream { upstream }) => {
         decision.upstream_override = Some(upstream.clone());
       }
+      CompiledAction::Config(WafActionConfig::RouteToPool { pool }) => {
+        decision.upstream_pool_override = Some(pool.clone());
+      }
+      CompiledAction::Config(WafActionConfig::SetLoadBalancingPolicy { policy }) => {
+        decision.load_balancing_policy = Some(policy.clone());
+      }
       CompiledAction::RequirePersonProof(policy) => {
         decision.terminal = Some(person_proof.issue_challenge(input, policy.clone())?);
         return Ok(());
       }
-      CompiledAction::Config(WafActionConfig::RouteToPool { .. })
-      | CompiledAction::Config(WafActionConfig::SetLoadBalancingPolicy { .. })
-      | CompiledAction::Config(WafActionConfig::ContinueResponse)
+      CompiledAction::Config(WafActionConfig::ContinueResponse)
       | CompiledAction::Config(WafActionConfig::ReplaceResponse { .. })
       | CompiledAction::Config(WafActionConfig::RejectResponse { .. })
       | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. })

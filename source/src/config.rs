@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -12,6 +12,8 @@ use crate::waf::{RouteWafConfig, WafConfig};
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Config {
   #[serde(default)]
+  pub config: ConfigBehaviorConfig,
+  #[serde(default)]
   pub logging: LoggingConfig,
   #[serde(default)]
   pub runtime: RuntimeConfig,
@@ -20,10 +22,26 @@ pub struct Config {
   #[serde(default)]
   pub proxy: ProxyConfig,
   #[serde(default)]
+  pub limits: LimitsConfig,
+  #[serde(default)]
+  pub rate_limits: Vec<RateLimitConfig>,
+  #[serde(default)]
+  pub connection_limits: Vec<ConnectionLimitConfig>,
+  #[serde(default)]
   pub compression: CompressionConfig,
+  #[serde(default)]
+  pub cache: CacheConfig,
+  #[serde(default)]
+  pub metrics: MetricsConfig,
+  #[serde(default)]
+  pub health: HealthConfig,
+  #[serde(default)]
+  pub security: SecurityConfig,
   #[serde(default)]
   pub database: DatabaseConfig,
   pub upstreams: Vec<UpstreamConfig>,
+  #[serde(default)]
+  pub upstream_pools: Vec<UpstreamPoolConfig>,
   pub routes: Vec<RouteConfig>,
   #[serde(default)]
   pub waf: WafConfig,
@@ -89,10 +107,28 @@ pub struct RuntimeOverrides {
   pub hot_reload_poll_interval_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ConfigBehaviorConfig {
+  #[serde(default = "default_true")]
+  pub strict_unknown_fields: bool,
+  #[serde(default = "default_true")]
+  pub warn_on_deprecated_fields: bool,
+}
+
+impl Default for ConfigBehaviorConfig {
+  fn default() -> Self {
+    Self {
+      strict_unknown_fields: true,
+      warn_on_deprecated_fields: true,
+    }
+  }
+}
+
 impl Config {
   pub fn load(path: &Path) -> anyhow::Result<Self> {
     let path_roots = config_path_roots(path)?;
     let loaded = load_toml_with_includes(path)?;
+    validate_merged_toml_shape(&loaded.value)?;
     let mut config: Self = loaded
       .value
       .try_into()
@@ -103,6 +139,14 @@ impl Config {
     config.load_external_waf_rules()?;
     config.collect_loaded_waf_rule_paths();
     Ok(config)
+  }
+
+  pub fn load_effective_toml_redacted(path: &Path) -> anyhow::Result<toml::Value> {
+    let loaded = load_toml_with_includes(path)?;
+    validate_merged_toml_shape(&loaded.value)?;
+    let mut value = loaded.value;
+    redact_effective_toml(&mut value);
+    Ok(value)
   }
 
   pub fn apply_runtime_overrides(&mut self, overrides: &RuntimeOverrides) -> Vec<String> {
@@ -130,13 +174,22 @@ impl Config {
 
   pub fn non_waf_equivalent(&self, other: &Self) -> bool {
     self.logging == other.logging
+      && self.config == other.config
       && self.runtime == other.runtime
       && self.listeners == other.listeners
       && self.tls == other.tls
       && self.proxy == other.proxy
+      && self.limits == other.limits
+      && self.rate_limits == other.rate_limits
+      && self.connection_limits == other.connection_limits
       && self.compression == other.compression
+      && self.cache == other.cache
+      && self.metrics == other.metrics
+      && self.health == other.health
+      && self.security == other.security
       && self.database == other.database
       && self.upstreams == other.upstreams
+      && self.upstream_pools == other.upstream_pools
       && routes_without_waf_are_equivalent(&self.routes, &other.routes)
   }
 
@@ -195,6 +248,22 @@ impl Config {
         Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
+    self.tls.client_auth.ca_certs = self
+      .tls
+      .client_auth
+      .ca_certs
+      .iter()
+      .map(|path| {
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          "tls.client_auth.ca_certs",
+          &path_roots.cert_dir,
+          path,
+        )?;
+        self.source_paths.remember_runtime_file(logical.clone());
+        self.source_paths.remember_downstream_tls_file(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
+      })
+      .collect::<anyhow::Result<_>>()?;
     self.proxy.trusted_ca_certs = self
       .proxy
       .trusted_ca_certs
@@ -259,8 +328,33 @@ impl Config {
         self.listeners.https_bind
       );
     }
+    if self.runtime.unprivileged_mode
+      && let Some(http_bind) = self.listeners.http_bind
+      && http_bind.port() < 1024
+    {
+      bail!(
+        "http_bind {} requires a privileged port but unprivileged_mode=true",
+        http_bind
+      );
+    }
+    if self.listeners.http_mode != HttpListenerMode::Off && self.listeners.http_bind.is_none() {
+      bail!("listeners.http_bind is required when listeners.http_mode is not \"off\"");
+    }
+    if self.listeners.proxy_protocol.enabled {
+      for cidr in &self.listeners.proxy_protocol.trusted_sources {
+        crate::identity::Cidr::parse(cidr).with_context(|| {
+          format!("invalid listeners.proxy_protocol.trusted_sources entry {cidr}")
+        })?;
+      }
+    }
 
     self.runtime.hot_reload.validate()?;
+    self.validate_limits()?;
+    self.validate_proxy()?;
+    self.validate_cache()?;
+    self.validate_metrics_and_health()?;
+    self.validate_security_headers()?;
+    self.validate_tls()?;
 
     if self.runtime.linux_only && !cfg!(target_os = "linux") {
       bail!("this build is configured for Linux only");
@@ -303,6 +397,83 @@ impl Config {
       upstream.tls.validate(&upstream.name)?;
     }
 
+    let mut pool_names = HashSet::new();
+    for pool in &self.upstream_pools {
+      if pool.name.trim().is_empty() {
+        bail!("upstream pool name must not be empty");
+      }
+      if !pool_names.insert(pool.name.clone()) {
+        bail!("duplicate upstream pool name: {}", pool.name);
+      }
+      if pool.algorithm == LoadBalancingAlgorithm::StickyCookie {
+        bail!(
+          "upstream pool {} uses sticky_cookie, but sticky sessions are reserved and not implemented yet",
+          pool.name
+        );
+      }
+      if matches!(pool.algorithm, LoadBalancingAlgorithm::Hash) && pool.hash_key.is_none() {
+        bail!(
+          "upstream pool {} requires hash_key when algorithm = \"hash\"",
+          pool.name
+        );
+      }
+      if pool.servers.is_empty() {
+        bail!(
+          "upstream pool {} must define at least one server",
+          pool.name
+        );
+      }
+      for server in &pool.servers {
+        if server.origin.scheme() != "http" && server.origin.scheme() != "https" {
+          bail!(
+            "upstream pool {} server origin must use http:// or https://, got {}",
+            pool.name,
+            server.origin
+          );
+        }
+        if server.weight == 0 {
+          bail!(
+            "upstream pool {} server weight must be greater than 0",
+            pool.name
+          );
+        }
+      }
+      if !pool.health_check.path.starts_with('/') {
+        bail!(
+          "upstream pool {} health_check.path must start with '/'",
+          pool.name
+        );
+      }
+      if pool.health_check.enabled {
+        if pool.health_check.interval_ms == 0 {
+          bail!(
+            "upstream pool {} health_check.interval_ms must be greater than 0",
+            pool.name
+          );
+        }
+        if pool.health_check.timeout_ms == 0 {
+          bail!(
+            "upstream pool {} health_check.timeout_ms must be greater than 0",
+            pool.name
+          );
+        }
+        if pool.health_check.healthy_threshold == 0 || pool.health_check.unhealthy_threshold == 0 {
+          bail!(
+            "upstream pool {} health_check thresholds must be greater than 0",
+            pool.name
+          );
+        }
+      }
+      for status in &pool.health_check.expected_status {
+        http::StatusCode::from_u16(*status).with_context(|| {
+          format!(
+            "upstream pool {} has invalid expected_status {status}",
+            pool.name
+          )
+        })?;
+      }
+    }
+
     let mut route_names = HashSet::new();
     for route in &self.routes {
       if route.name.trim().is_empty() {
@@ -318,12 +489,42 @@ impl Config {
       if let Some(replacement) = &route.replace_prefix_with {
         validate_route_path_value(&route.name, "replace_prefix_with", replacement)?;
       }
-      if !upstream_names.contains(&route.upstream) {
-        bail!(
-          "route {} references unknown upstream {}",
-          route.name,
-          route.upstream
-        );
+      match (&route.upstream, &route.upstream_pool) {
+        (Some(upstream), None) => {
+          if !upstream_names.contains(upstream) {
+            bail!(
+              "route {} references unknown upstream {}",
+              route.name,
+              upstream
+            );
+          }
+        }
+        (None, Some(pool)) => {
+          if !pool_names.contains(pool) {
+            bail!(
+              "route {} references unknown upstream_pool {}",
+              route.name,
+              pool
+            );
+          }
+        }
+        (Some(_), Some(_)) => {
+          bail!(
+            "route {} must set exactly one of upstream or upstream_pool, not both",
+            route.name
+          );
+        }
+        (None, None) => {
+          bail!(
+            "route {} must set exactly one of upstream or upstream_pool",
+            route.name
+          );
+        }
+      }
+      if let Some(cache) = &route.cache
+        && cache != "default"
+      {
+        bail!("route {} references unknown cache {}", route.name, cache);
       }
     }
 
@@ -343,6 +544,146 @@ impl Config {
 
     crate::waf::validate_config(self)?;
 
+    Ok(())
+  }
+
+  fn validate_limits(&self) -> anyhow::Result<()> {
+    if self.limits.max_connections == 0
+      || self.limits.max_connections_per_ip == 0
+      || self.limits.max_requests_per_connection == 0
+      || self.limits.client_header_timeout_ms == 0
+      || self.limits.client_body_timeout_ms == 0
+      || self.limits.client_idle_timeout_ms == 0
+      || self.limits.tls_handshake_timeout_ms == 0
+      || self.limits.response_send_timeout_ms == 0
+      || self.limits.max_headers == 0
+      || self.limits.max_header_name_bytes == 0
+      || self.limits.max_header_value_bytes == 0
+      || self.limits.max_total_header_bytes == 0
+      || self.limits.max_uri_bytes == 0
+      || self.limits.max_request_body_bytes == 0
+    {
+      bail!("limits values must be greater than 0");
+    }
+    let mut names = HashSet::new();
+    for rate_limit in &self.rate_limits {
+      if rate_limit.name.trim().is_empty() {
+        bail!("rate limit name must not be empty");
+      }
+      if !names.insert(rate_limit.name.as_str()) {
+        bail!("duplicate rate limit name {}", rate_limit.name);
+      }
+      crate::limits::parse_rate(&rate_limit.rate)
+        .with_context(|| format!("invalid rate_limits {} rate", rate_limit.name))?;
+      http::StatusCode::from_u16(rate_limit.status)
+        .with_context(|| format!("rate limit {} has invalid status", rate_limit.name))?;
+    }
+    names.clear();
+    for connection_limit in &self.connection_limits {
+      if connection_limit.name.trim().is_empty() {
+        bail!("connection limit name must not be empty");
+      }
+      if !names.insert(connection_limit.name.as_str()) {
+        bail!("duplicate connection limit name {}", connection_limit.name);
+      }
+      if connection_limit.limit == 0 {
+        bail!(
+          "connection limit {} limit must be greater than 0",
+          connection_limit.name
+        );
+      }
+      http::StatusCode::from_u16(connection_limit.status).with_context(|| {
+        format!(
+          "connection limit {} has invalid status",
+          connection_limit.name
+        )
+      })?;
+    }
+    Ok(())
+  }
+
+  fn validate_proxy(&self) -> anyhow::Result<()> {
+    if self.proxy.http.early_hints == EarlyHintsMode::Pass {
+      bail!("proxy.http.early_hints = \"pass\" is reserved but not implemented yet");
+    }
+    if self.proxy.upgrades.generic_http_upgrade {
+      bail!("proxy.upgrades.generic_http_upgrade is reserved but not implemented yet");
+    }
+    if self.proxy.upgrades.connect_tunneling {
+      bail!("proxy.upgrades.connect_tunneling is reserved but not implemented yet");
+    }
+    if self.proxy.retry.tries == 0 {
+      bail!("proxy.retry.tries must be greater than 0");
+    }
+    if self.proxy.retry.timeout_ms == 0 {
+      bail!("proxy.retry.timeout_ms must be greater than 0");
+    }
+    if self.proxy.buffering.max_temp_file_bytes != 0 {
+      bail!("proxy.buffering.max_temp_file_bytes must be 0; disk buffering is not implemented");
+    }
+    for cidr in &self.proxy.real_ip.trusted_proxies {
+      crate::identity::Cidr::parse(cidr)
+        .with_context(|| format!("invalid proxy.real_ip.trusted_proxies entry {cidr}"))?;
+    }
+    Ok(())
+  }
+
+  fn validate_cache(&self) -> anyhow::Result<()> {
+    if self.cache.max_size_bytes == 0 {
+      bail!("cache.max_size_bytes must be greater than 0");
+    }
+    if self.cache.default_ttl_seconds == 0 {
+      bail!("cache.default_ttl_seconds must be greater than 0");
+    }
+    if self.cache.store == CacheStore::Tmpfs && self.cache.enabled {
+      let dir = self
+        .cache
+        .tmpfs_dir
+        .clone()
+        .unwrap_or_else(default_cache_tmpfs_dir);
+      crate::cache::validate_tmpfs_dir(&dir)?;
+    }
+    Ok(())
+  }
+
+  fn validate_metrics_and_health(&self) -> anyhow::Result<()> {
+    if !self.health.ready_path.starts_with('/') || !self.health.live_path.starts_with('/') {
+      bail!("health ready_path and live_path must start with '/'");
+    }
+    Ok(())
+  }
+
+  fn validate_security_headers(&self) -> anyhow::Result<()> {
+    validate_optional_header_value(
+      "security.headers.x_content_type_options",
+      self.security.headers.x_content_type_options.as_deref(),
+    )?;
+    validate_optional_header_value(
+      "security.headers.referrer_policy",
+      self.security.headers.referrer_policy.as_deref(),
+    )?;
+    validate_optional_header_value(
+      "security.headers.permissions_policy",
+      self.security.headers.permissions_policy.as_deref(),
+    )?;
+    Ok(())
+  }
+
+  fn validate_tls(&self) -> anyhow::Result<()> {
+    if self.tls.min_version > self.tls.max_version {
+      bail!("tls.min_version must be less than or equal to tls.max_version");
+    }
+    if self.tls.session_ticket_rotation_seconds == 0 {
+      bail!("tls.session_ticket_rotation_seconds must be greater than 0");
+    }
+    if self.listeners.http3 && self.tls.min_version != TlsVersion::Tls13 {
+      bail!("HTTP/3 requires tls.min_version = \"tls1.3\"");
+    }
+    if self.tls.client_auth.mode != TlsClientAuthMode::Off
+      && self.tls.client_auth.ca_certs.is_empty()
+    {
+      bail!("tls.client_auth.ca_certs is required when client_auth mode is not off");
+    }
     Ok(())
   }
 }
@@ -386,6 +727,8 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.path_prefix == right.path_prefix
         && left.replace_prefix_with == right.replace_prefix_with
         && left.upstream == right.upstream
+        && left.upstream_pool == right.upstream_pool
+        && left.cache == right.cache
     })
 }
 
@@ -412,6 +755,269 @@ fn dedup_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 struct LoadedToml {
   value: toml::Value,
   files: Vec<PathBuf>,
+}
+
+fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<()> {
+  let strict = value
+    .get("config")
+    .and_then(|config| config.get("strict_unknown_fields"))
+    .and_then(toml::Value::as_bool)
+    .unwrap_or(true);
+  if !strict {
+    return Ok(());
+  }
+
+  let mut unknown = Vec::new();
+  collect_unknown_keys(value, "", &mut unknown);
+  if !unknown.is_empty() {
+    unknown.sort();
+    bail!(
+      "configuration contains unknown field(s): {}",
+      unknown.join(", ")
+    );
+  }
+  Ok(())
+}
+
+fn collect_unknown_keys(value: &toml::Value, path: &str, unknown: &mut Vec<String>) {
+  if path == "waf" || path.ends_with(".waf") || path.contains(".waf.") {
+    return;
+  }
+  match value {
+    toml::Value::Table(table) => {
+      let Some(allowed) = allowed_config_keys(path) else {
+        return;
+      };
+      for (key, child) in table {
+        let child_path = join_key_path(path, key);
+        if allowed.contains(key.as_str()) {
+          collect_unknown_keys(child, &child_path, unknown);
+        } else {
+          unknown.push(child_path);
+        }
+      }
+    }
+    toml::Value::Array(items) => {
+      for item in items {
+        collect_unknown_keys(item, path, unknown);
+      }
+    }
+    _ => {}
+  }
+}
+
+fn join_key_path(parent: &str, key: &str) -> String {
+  if parent.is_empty() {
+    key.to_string()
+  } else {
+    format!("{parent}.{key}")
+  }
+}
+
+fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
+  let keys = match path {
+    "" => &[
+      "cache",
+      "compression",
+      "config",
+      "connection_limits",
+      "database",
+      "health",
+      "limits",
+      "listeners",
+      "logging",
+      "metrics",
+      "proxy",
+      "rate_limits",
+      "routes",
+      "runtime",
+      "security",
+      "tls",
+      "upstream_pools",
+      "upstreams",
+      "waf",
+    ][..],
+    "config" => &["strict_unknown_fields", "warn_on_deprecated_fields"][..],
+    "logging" => &["level"][..],
+    "runtime" => &[
+      "hot_reload",
+      "linux_only",
+      "memory_only_state",
+      "read_only_rootfs_compatible",
+      "unprivileged_mode",
+    ][..],
+    "runtime.hot_reload" => &["mode", "poll_interval_ms"][..],
+    "listeners" => &[
+      "http1",
+      "http2",
+      "http3",
+      "http_bind",
+      "http_mode",
+      "https_bind",
+      "proxy_protocol",
+    ][..],
+    "listeners.proxy_protocol" => &["enabled", "trusted_sources", "version"][..],
+    "tls" => &[
+      "cert_chain",
+      "client_auth",
+      "max_version",
+      "min_version",
+      "ocsp",
+      "private_key",
+      "session_ticket_rotation_seconds",
+      "session_tickets",
+    ][..],
+    "tls.ocsp" => &["mode", "response_file"][..],
+    "tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
+    "proxy" => &[
+      "auto_upgrade",
+      "buffering",
+      "forwarded_headers",
+      "http",
+      "real_ip",
+      "retry",
+      "trusted_ca_certs",
+      "upgrades",
+    ][..],
+    "proxy.forwarded_headers" => &["mode"][..],
+    "proxy.auto_upgrade" => &["enabled", "max_http_version"][..],
+    "proxy.real_ip" => &[
+      "enabled",
+      "fail_on_untrusted_forwarded_headers",
+      "header",
+      "recursive",
+      "trusted_proxies",
+    ][..],
+    "proxy.upgrades" => &["connect_tunneling", "generic_http_upgrade", "websocket"][..],
+    "proxy.retry" => &[
+      "enabled",
+      "on",
+      "retry_non_idempotent",
+      "timeout_ms",
+      "tries",
+    ][..],
+    "proxy.buffering" => &[
+      "max_memory_body_bytes",
+      "max_temp_file_bytes",
+      "request",
+      "response",
+    ][..],
+    "proxy.http" => &["early_hints", "trailers"][..],
+    "limits" => &[
+      "client_body_timeout_ms",
+      "client_header_timeout_ms",
+      "client_idle_timeout_ms",
+      "max_connections",
+      "max_connections_per_ip",
+      "max_header_name_bytes",
+      "max_header_value_bytes",
+      "max_headers",
+      "max_request_body_bytes",
+      "max_requests_per_connection",
+      "max_total_header_bytes",
+      "max_uri_bytes",
+      "response_send_timeout_ms",
+      "tls_handshake_timeout_ms",
+    ][..],
+    "compression" => &["deflate", "enabled", "gzip", "zstd"][..],
+    "cache" => &[
+      "cache_key",
+      "cache_methods",
+      "default_ttl_seconds",
+      "enabled",
+      "lock",
+      "max_size_bytes",
+      "respect_cache_control",
+      "stale_if_error_seconds",
+      "store",
+      "tmpfs_dir",
+    ][..],
+    "metrics" => &["bind", "enabled", "format"][..],
+    "health" => &["bind", "enabled", "live_path", "ready_path"][..],
+    "security" => &["headers"][..],
+    "security.headers" => &[
+      "hsts",
+      "hsts_include_subdomains",
+      "hsts_max_age_seconds",
+      "hsts_preload",
+      "permissions_policy",
+      "referrer_policy",
+      "x_content_type_options",
+    ][..],
+    "database" => &["access_log"][..],
+    "database.access_log" => &[
+      "connect_timeout_ms",
+      "connection_url",
+      "connection_url_env",
+      "enabled",
+      "max_connections",
+      "queue_capacity",
+      "table",
+      "tls",
+    ][..],
+    "database.access_log.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
+    "upstreams" => &[
+      "connect_timeout_ms",
+      "idle_timeout_ms",
+      "max_http_version",
+      "name",
+      "origin",
+      "preserve_host",
+      "read_timeout_ms",
+      "request_timeout_ms",
+      "send_timeout_ms",
+      "tls",
+      "webrtc",
+      "websocket",
+      "webtransport",
+    ][..],
+    "upstreams.tls" => &["ech"][..],
+    "upstreams.tls.ech" => &["config_list_file", "mode"][..],
+    "upstream_pools" => &[
+      "algorithm",
+      "hash_key",
+      "health_check",
+      "keepalive",
+      "name",
+      "servers",
+    ][..],
+    "upstream_pools.keepalive" => &["idle_timeout_ms", "max_idle", "max_lifetime_ms"][..],
+    "upstream_pools.health_check" => &[
+      "enabled",
+      "expected_status",
+      "healthy_threshold",
+      "interval_ms",
+      "mode",
+      "path",
+      "timeout_ms",
+      "unhealthy_threshold",
+    ][..],
+    "upstream_pools.servers" => &["backup", "max_conns", "origin", "weight"][..],
+    "routes" => &[
+      "cache",
+      "hosts",
+      "name",
+      "path_prefix",
+      "replace_prefix_with",
+      "upstream",
+      "upstream_pool",
+      "waf",
+    ][..],
+    "rate_limits" => &["burst", "key", "mode", "name", "rate", "status"][..],
+    "connection_limits" => &["key", "limit", "name", "status"][..],
+    _ => return None,
+  };
+  Some(keys.iter().copied().collect())
+}
+
+fn redact_effective_toml(value: &mut toml::Value) {
+  if let Some(connection_url) = value
+    .get_mut("database")
+    .and_then(|database| database.get_mut("access_log"))
+    .and_then(|access_log| access_log.get_mut("connection_url"))
+  {
+    *connection_url = toml::Value::String("<redacted>".to_string());
+  }
 }
 
 fn load_toml_with_includes(path: &Path) -> anyhow::Result<LoadedToml> {
@@ -779,6 +1385,15 @@ fn validate_optional_non_empty(field_name: &str, value: Option<&str>) -> anyhow:
   Ok(())
 }
 
+fn validate_optional_header_value(field_name: &str, value: Option<&str>) -> anyhow::Result<()> {
+  if let Some(value) = value {
+    validate_optional_non_empty(field_name, Some(value))?;
+    http::HeaderValue::from_str(value)
+      .with_context(|| format!("{field_name} is not a valid header value"))?;
+  }
+  Ok(())
+}
+
 pub(crate) fn quote_postgres_identifier_path(
   field_name: &str,
   value: &str,
@@ -943,20 +1558,112 @@ impl FromStr for HotReloadMode {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ListenerConfig {
   pub https_bind: SocketAddr,
+  #[serde(default)]
+  pub http_bind: Option<SocketAddr>,
+  #[serde(default)]
+  pub http_mode: HttpListenerMode,
   #[serde(default = "default_true")]
   pub http1: bool,
   #[serde(default = "default_true")]
   pub http2: bool,
   #[serde(default)]
   pub http3: bool,
+  #[serde(default)]
+  pub proxy_protocol: ProxyProtocolConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpListenerMode {
+  #[default]
+  Off,
+  RedirectToHttps,
+  Proxy,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProxyProtocolConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub version: ProxyProtocolVersion,
+  #[serde(default)]
+  pub trusted_sources: Vec<String>,
+}
+
+impl Default for ProxyProtocolConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      version: ProxyProtocolVersion::Any,
+      trusted_sources: Vec::new(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyProtocolVersion {
+  V1,
+  V2,
+  #[default]
+  Any,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TlsConfig {
   pub cert_chain: PathBuf,
   pub private_key: PathBuf,
+  #[serde(default = "default_tls_min_version")]
+  pub min_version: TlsVersion,
+  #[serde(default = "default_tls_max_version")]
+  pub max_version: TlsVersion,
+  #[serde(default = "default_true")]
+  pub session_tickets: bool,
+  #[serde(default = "default_session_ticket_rotation_seconds")]
+  pub session_ticket_rotation_seconds: u64,
+  #[serde(default)]
+  pub client_auth: TlsClientAuthConfig,
   #[serde(default)]
   pub ocsp: OcspConfig,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsVersion {
+  #[serde(rename = "tls1.2")]
+  Tls12,
+  #[serde(rename = "tls1.3")]
+  Tls13,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct TlsClientAuthConfig {
+  #[serde(default)]
+  pub mode: TlsClientAuthMode,
+  #[serde(default)]
+  pub ca_certs: Vec<PathBuf>,
+  #[serde(default = "default_tls_client_auth_verify_depth")]
+  pub verify_depth: u8,
+}
+
+impl Default for TlsClientAuthConfig {
+  fn default() -> Self {
+    Self {
+      mode: TlsClientAuthMode::Off,
+      ca_certs: Vec::new(),
+      verify_depth: default_tls_client_auth_verify_depth(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsClientAuthMode {
+  #[default]
+  Off,
+  Optional,
+  Require,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -992,6 +1699,16 @@ pub struct ProxyConfig {
   #[serde(default)]
   pub forwarded_headers: ForwardedHeadersConfig,
   #[serde(default)]
+  pub real_ip: RealIpConfig,
+  #[serde(default)]
+  pub upgrades: ProxyUpgradesConfig,
+  #[serde(default)]
+  pub retry: ProxyRetryConfig,
+  #[serde(default)]
+  pub buffering: ProxyBufferingConfig,
+  #[serde(default)]
+  pub http: ProxyHttpConfig,
+  #[serde(default)]
   pub trusted_ca_certs: Vec<PathBuf>,
 }
 
@@ -1007,6 +1724,168 @@ pub enum ForwardedHeaderMode {
   #[default]
   Overwrite,
   Append,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RealIpConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub trusted_proxies: Vec<String>,
+  #[serde(default)]
+  pub header: RealIpHeader,
+  #[serde(default = "default_true")]
+  pub recursive: bool,
+  #[serde(default)]
+  pub fail_on_untrusted_forwarded_headers: bool,
+}
+
+impl Default for RealIpConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      trusted_proxies: Vec::new(),
+      header: RealIpHeader::XForwardedFor,
+      recursive: true,
+      fail_on_untrusted_forwarded_headers: false,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RealIpHeader {
+  #[default]
+  XForwardedFor,
+  XRealIp,
+  Forwarded,
+  CfConnectingIp,
+}
+
+impl RealIpHeader {
+  pub fn header_name(self) -> &'static str {
+    match self {
+      Self::XForwardedFor => "x-forwarded-for",
+      Self::XRealIp => "x-real-ip",
+      Self::Forwarded => "forwarded",
+      Self::CfConnectingIp => "cf-connecting-ip",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProxyUpgradesConfig {
+  #[serde(default = "default_true")]
+  pub websocket: bool,
+  #[serde(default)]
+  pub generic_http_upgrade: bool,
+  #[serde(default)]
+  pub connect_tunneling: bool,
+}
+
+impl Default for ProxyUpgradesConfig {
+  fn default() -> Self {
+    Self {
+      websocket: true,
+      generic_http_upgrade: false,
+      connect_tunneling: false,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProxyRetryConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_retry_tries")]
+  pub tries: usize,
+  #[serde(default = "default_retry_timeout_ms")]
+  pub timeout_ms: u64,
+  #[serde(default = "default_retry_on")]
+  pub on: Vec<RetryCondition>,
+  #[serde(default)]
+  pub retry_non_idempotent: bool,
+}
+
+impl Default for ProxyRetryConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      tries: default_retry_tries(),
+      timeout_ms: default_retry_timeout_ms(),
+      on: default_retry_on(),
+      retry_non_idempotent: false,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryCondition {
+  ConnectError,
+  ReadTimeout,
+  #[serde(rename = "502")]
+  Status502,
+  #[serde(rename = "503")]
+  Status503,
+  #[serde(rename = "504")]
+  Status504,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProxyBufferingConfig {
+  #[serde(default)]
+  pub request: BufferingMode,
+  #[serde(default)]
+  pub response: BufferingMode,
+  #[serde(default = "default_buffering_max_memory_body_bytes")]
+  pub max_memory_body_bytes: usize,
+  #[serde(default)]
+  pub max_temp_file_bytes: usize,
+}
+
+impl Default for ProxyBufferingConfig {
+  fn default() -> Self {
+    Self {
+      request: BufferingMode::Streaming,
+      response: BufferingMode::Streaming,
+      max_memory_body_bytes: default_buffering_max_memory_body_bytes(),
+      max_temp_file_bytes: 0,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BufferingMode {
+  #[default]
+  Streaming,
+  Memory,
+  RejectIfTooLarge,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct ProxyHttpConfig {
+  #[serde(default)]
+  pub early_hints: EarlyHintsMode,
+  #[serde(default)]
+  pub trailers: TrailerMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EarlyHintsMode {
+  #[default]
+  Drop,
+  Pass,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailerMode {
+  #[default]
+  Pass,
+  Drop,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -1070,6 +1949,235 @@ impl Default for CompressionConfig {
       gzip: true,
       deflate: true,
       zstd: true,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct LimitsConfig {
+  #[serde(default = "default_max_connections")]
+  pub max_connections: usize,
+  #[serde(default = "default_max_connections_per_ip")]
+  pub max_connections_per_ip: usize,
+  #[serde(default = "default_max_requests_per_connection")]
+  pub max_requests_per_connection: usize,
+  #[serde(default = "default_client_header_timeout_ms")]
+  pub client_header_timeout_ms: u64,
+  #[serde(default = "default_client_body_timeout_ms")]
+  pub client_body_timeout_ms: u64,
+  #[serde(default = "default_client_idle_timeout_ms")]
+  pub client_idle_timeout_ms: u64,
+  #[serde(default = "default_tls_handshake_timeout_ms")]
+  pub tls_handshake_timeout_ms: u64,
+  #[serde(default = "default_response_send_timeout_ms")]
+  pub response_send_timeout_ms: u64,
+  #[serde(default = "default_max_headers")]
+  pub max_headers: usize,
+  #[serde(default = "default_max_header_name_bytes")]
+  pub max_header_name_bytes: usize,
+  #[serde(default = "default_max_header_value_bytes")]
+  pub max_header_value_bytes: usize,
+  #[serde(default = "default_max_total_header_bytes")]
+  pub max_total_header_bytes: usize,
+  #[serde(default = "default_max_uri_bytes")]
+  pub max_uri_bytes: usize,
+  #[serde(default = "default_max_request_body_bytes")]
+  pub max_request_body_bytes: u64,
+}
+
+impl Default for LimitsConfig {
+  fn default() -> Self {
+    Self {
+      max_connections: default_max_connections(),
+      max_connections_per_ip: default_max_connections_per_ip(),
+      max_requests_per_connection: default_max_requests_per_connection(),
+      client_header_timeout_ms: default_client_header_timeout_ms(),
+      client_body_timeout_ms: default_client_body_timeout_ms(),
+      client_idle_timeout_ms: default_client_idle_timeout_ms(),
+      tls_handshake_timeout_ms: default_tls_handshake_timeout_ms(),
+      response_send_timeout_ms: default_response_send_timeout_ms(),
+      max_headers: default_max_headers(),
+      max_header_name_bytes: default_max_header_name_bytes(),
+      max_header_value_bytes: default_max_header_value_bytes(),
+      max_total_header_bytes: default_max_total_header_bytes(),
+      max_uri_bytes: default_max_uri_bytes(),
+      max_request_body_bytes: default_max_request_body_bytes(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RateLimitConfig {
+  pub name: String,
+  #[serde(default)]
+  pub key: LimitKey,
+  pub rate: String,
+  #[serde(default)]
+  pub burst: u32,
+  #[serde(default)]
+  pub mode: LimitMode,
+  #[serde(default = "default_rate_limit_status")]
+  pub status: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ConnectionLimitConfig {
+  pub name: String,
+  #[serde(default)]
+  pub key: LimitKey,
+  pub limit: usize,
+  #[serde(default = "default_connection_limit_status")]
+  pub status: u16,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitKey {
+  #[default]
+  ClientIp,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitMode {
+  #[default]
+  Enforcing,
+  Monitor,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CacheConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub store: CacheStore,
+  #[serde(default)]
+  pub tmpfs_dir: Option<PathBuf>,
+  #[serde(default = "default_cache_max_size_bytes")]
+  pub max_size_bytes: usize,
+  #[serde(default = "default_cache_default_ttl_seconds")]
+  pub default_ttl_seconds: u64,
+  #[serde(default = "default_cache_methods")]
+  pub cache_methods: Vec<String>,
+  #[serde(default = "default_cache_key")]
+  pub cache_key: String,
+  #[serde(default = "default_true")]
+  pub respect_cache_control: bool,
+  #[serde(default)]
+  pub stale_if_error_seconds: u64,
+  #[serde(default = "default_true")]
+  pub lock: bool,
+}
+
+impl Default for CacheConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      store: CacheStore::Memory,
+      tmpfs_dir: None,
+      max_size_bytes: default_cache_max_size_bytes(),
+      default_ttl_seconds: default_cache_default_ttl_seconds(),
+      cache_methods: default_cache_methods(),
+      cache_key: default_cache_key(),
+      respect_cache_control: true,
+      stale_if_error_seconds: 0,
+      lock: true,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStore {
+  #[default]
+  Memory,
+  Tmpfs,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MetricsConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_metrics_bind")]
+  pub bind: SocketAddr,
+  #[serde(default)]
+  pub format: MetricsFormat,
+}
+
+impl Default for MetricsConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      bind: default_metrics_bind(),
+      format: MetricsFormat::Prometheus,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsFormat {
+  #[default]
+  Prometheus,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HealthConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_health_bind")]
+  pub bind: SocketAddr,
+  #[serde(default = "default_ready_path")]
+  pub ready_path: String,
+  #[serde(default = "default_live_path")]
+  pub live_path: String,
+}
+
+impl Default for HealthConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      bind: default_health_bind(),
+      ready_path: default_ready_path(),
+      live_path: default_live_path(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct SecurityConfig {
+  #[serde(default)]
+  pub headers: SecurityHeadersConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SecurityHeadersConfig {
+  #[serde(default)]
+  pub hsts: bool,
+  #[serde(default = "default_hsts_max_age_seconds")]
+  pub hsts_max_age_seconds: u64,
+  #[serde(default = "default_true")]
+  pub hsts_include_subdomains: bool,
+  #[serde(default)]
+  pub hsts_preload: bool,
+  #[serde(default)]
+  pub x_content_type_options: Option<String>,
+  #[serde(default)]
+  pub referrer_policy: Option<String>,
+  #[serde(default)]
+  pub permissions_policy: Option<String>,
+}
+
+impl Default for SecurityHeadersConfig {
+  fn default() -> Self {
+    Self {
+      hsts: false,
+      hsts_max_age_seconds: default_hsts_max_age_seconds(),
+      hsts_include_subdomains: true,
+      hsts_preload: false,
+      x_content_type_options: None,
+      referrer_policy: None,
+      permissions_policy: None,
     }
   }
 }
@@ -1296,6 +2404,12 @@ pub struct UpstreamConfig {
   pub connect_timeout_ms: u64,
   #[serde(default = "default_request_timeout_ms")]
   pub request_timeout_ms: u64,
+  #[serde(default = "default_request_timeout_ms")]
+  pub read_timeout_ms: u64,
+  #[serde(default = "default_request_timeout_ms")]
+  pub send_timeout_ms: u64,
+  #[serde(default = "default_client_idle_timeout_ms")]
+  pub idle_timeout_ms: u64,
   #[serde(default)]
   pub preserve_host: bool,
   #[serde(default = "default_true")]
@@ -1306,6 +2420,107 @@ pub struct UpstreamConfig {
   pub webtransport: bool,
   #[serde(default)]
   pub tls: UpstreamTlsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamPoolConfig {
+  pub name: String,
+  #[serde(default)]
+  pub algorithm: LoadBalancingAlgorithm,
+  #[serde(default)]
+  pub hash_key: Option<String>,
+  #[serde(default)]
+  pub keepalive: UpstreamPoolKeepaliveConfig,
+  #[serde(default)]
+  pub servers: Vec<UpstreamPoolServerConfig>,
+  #[serde(default)]
+  pub health_check: UpstreamPoolHealthCheckConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadBalancingAlgorithm {
+  #[default]
+  RoundRobin,
+  LeastConn,
+  Random,
+  Hash,
+  IpHash,
+  StickyCookie,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamPoolKeepaliveConfig {
+  #[serde(default = "default_pool_keepalive_max_idle")]
+  pub max_idle: usize,
+  #[serde(default = "default_client_idle_timeout_ms")]
+  pub idle_timeout_ms: u64,
+  #[serde(default = "default_pool_keepalive_max_lifetime_ms")]
+  pub max_lifetime_ms: u64,
+}
+
+impl Default for UpstreamPoolKeepaliveConfig {
+  fn default() -> Self {
+    Self {
+      max_idle: default_pool_keepalive_max_idle(),
+      idle_timeout_ms: default_client_idle_timeout_ms(),
+      max_lifetime_ms: default_pool_keepalive_max_lifetime_ms(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamPoolServerConfig {
+  pub origin: Url,
+  #[serde(default = "default_pool_server_weight")]
+  pub weight: u32,
+  #[serde(default)]
+  pub max_conns: usize,
+  #[serde(default)]
+  pub backup: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamPoolHealthCheckConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub mode: HealthCheckMode,
+  #[serde(default = "default_health_check_path")]
+  pub path: String,
+  #[serde(default = "default_health_check_interval_ms")]
+  pub interval_ms: u64,
+  #[serde(default = "default_health_check_timeout_ms")]
+  pub timeout_ms: u64,
+  #[serde(default = "default_health_check_healthy_threshold")]
+  pub healthy_threshold: u32,
+  #[serde(default = "default_health_check_unhealthy_threshold")]
+  pub unhealthy_threshold: u32,
+  #[serde(default = "default_health_check_expected_status")]
+  pub expected_status: Vec<u16>,
+}
+
+impl Default for UpstreamPoolHealthCheckConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      mode: HealthCheckMode::Passive,
+      path: default_health_check_path(),
+      interval_ms: default_health_check_interval_ms(),
+      timeout_ms: default_health_check_timeout_ms(),
+      healthy_threshold: default_health_check_healthy_threshold(),
+      unhealthy_threshold: default_health_check_unhealthy_threshold(),
+      expected_status: default_health_check_expected_status(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthCheckMode {
+  #[default]
+  Passive,
+  Active,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -1393,7 +2608,12 @@ pub struct RouteConfig {
   pub path_prefix: String,
   #[serde(default)]
   pub replace_prefix_with: Option<String>,
-  pub upstream: String,
+  #[serde(default)]
+  pub upstream: Option<String>,
+  #[serde(default)]
+  pub upstream_pool: Option<String>,
+  #[serde(default)]
+  pub cache: Option<String>,
   #[serde(default)]
   pub waf: RouteWafConfig,
 }
@@ -1448,6 +2668,186 @@ fn default_request_timeout_ms() -> u64 {
 
 fn default_proxy_max_http_version() -> HttpVersion {
   HttpVersion::H2
+}
+
+fn default_tls_min_version() -> TlsVersion {
+  TlsVersion::Tls13
+}
+
+fn default_tls_max_version() -> TlsVersion {
+  TlsVersion::Tls13
+}
+
+fn default_session_ticket_rotation_seconds() -> u64 {
+  86_400
+}
+
+fn default_tls_client_auth_verify_depth() -> u8 {
+  4
+}
+
+fn default_max_connections() -> usize {
+  65_536
+}
+
+fn default_max_connections_per_ip() -> usize {
+  128
+}
+
+fn default_max_requests_per_connection() -> usize {
+  1_000
+}
+
+fn default_client_header_timeout_ms() -> u64 {
+  10_000
+}
+
+fn default_client_body_timeout_ms() -> u64 {
+  30_000
+}
+
+fn default_client_idle_timeout_ms() -> u64 {
+  75_000
+}
+
+fn default_tls_handshake_timeout_ms() -> u64 {
+  10_000
+}
+
+fn default_response_send_timeout_ms() -> u64 {
+  60_000
+}
+
+fn default_max_headers() -> usize {
+  128
+}
+
+fn default_max_header_name_bytes() -> usize {
+  128
+}
+
+fn default_max_header_value_bytes() -> usize {
+  8_192
+}
+
+fn default_max_total_header_bytes() -> usize {
+  65_536
+}
+
+fn default_max_uri_bytes() -> usize {
+  8_192
+}
+
+fn default_max_request_body_bytes() -> u64 {
+  10_485_760
+}
+
+fn default_retry_tries() -> usize {
+  2
+}
+
+fn default_retry_timeout_ms() -> u64 {
+  5_000
+}
+
+fn default_retry_on() -> Vec<RetryCondition> {
+  vec![
+    RetryCondition::ConnectError,
+    RetryCondition::ReadTimeout,
+    RetryCondition::Status502,
+    RetryCondition::Status503,
+    RetryCondition::Status504,
+  ]
+}
+
+fn default_buffering_max_memory_body_bytes() -> usize {
+  1_048_576
+}
+
+fn default_rate_limit_status() -> u16 {
+  429
+}
+
+fn default_connection_limit_status() -> u16 {
+  429
+}
+
+fn default_cache_max_size_bytes() -> usize {
+  1_073_741_824
+}
+
+fn default_cache_default_ttl_seconds() -> u64 {
+  60
+}
+
+fn default_cache_methods() -> Vec<String> {
+  vec!["GET".to_string(), "HEAD".to_string()]
+}
+
+fn default_cache_key() -> String {
+  "{scheme}:{host}:{uri}".to_string()
+}
+
+pub(crate) fn default_cache_tmpfs_dir() -> PathBuf {
+  PathBuf::from("/dev/shm/oxibelt-cache")
+}
+
+fn default_metrics_bind() -> SocketAddr {
+  "127.0.0.1:9090"
+    .parse()
+    .expect("valid metrics bind default")
+}
+
+fn default_health_bind() -> SocketAddr {
+  "127.0.0.1:9091".parse().expect("valid health bind default")
+}
+
+fn default_ready_path() -> String {
+  "/ready".to_string()
+}
+
+fn default_live_path() -> String {
+  "/live".to_string()
+}
+
+fn default_hsts_max_age_seconds() -> u64 {
+  31_536_000
+}
+
+fn default_pool_keepalive_max_idle() -> usize {
+  32
+}
+
+fn default_pool_keepalive_max_lifetime_ms() -> u64 {
+  3_600_000
+}
+
+fn default_pool_server_weight() -> u32 {
+  1
+}
+
+fn default_health_check_path() -> String {
+  "/healthz".to_string()
+}
+
+fn default_health_check_interval_ms() -> u64 {
+  5_000
+}
+
+fn default_health_check_timeout_ms() -> u64 {
+  1_000
+}
+
+fn default_health_check_healthy_threshold() -> u32 {
+  2
+}
+
+fn default_health_check_unhealthy_threshold() -> u32 {
+  3
+}
+
+fn default_health_check_expected_status() -> Vec<u16> {
+  vec![200, 204]
 }
 
 fn default_database_access_log_max_connections() -> u32 {

@@ -25,6 +25,7 @@ pub(crate) fn add_forwarded_headers(
   headers: &mut HeaderMap,
   peer_addr: std::net::SocketAddr,
   host: &str,
+  scheme: &str,
   mode: ForwardedHeaderMode,
 ) {
   remove_inbound_forwarded_headers(headers, mode);
@@ -39,7 +40,7 @@ pub(crate) fn add_forwarded_headers(
 
   headers.insert(
     HeaderName::from_static("x-forwarded-proto"),
-    HeaderValue::from_static("https"),
+    HeaderValue::from_str(scheme).unwrap_or_else(|_| HeaderValue::from_static("https")),
   );
 
   if let Ok(value) = HeaderValue::from_str(host) {
@@ -152,6 +153,7 @@ mod tests {
       &mut headers,
       "203.0.113.10:5443".parse().unwrap(),
       "example.test",
+      "https",
       ForwardedHeaderMode::Overwrite,
     );
 
@@ -178,6 +180,7 @@ mod tests {
       &mut headers,
       "203.0.113.10:5443".parse().unwrap(),
       "example.test",
+      "https",
       ForwardedHeaderMode::Append,
     );
 
