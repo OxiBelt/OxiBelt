@@ -39,6 +39,7 @@ pub struct Config {
   pub security: SecurityConfig,
   #[serde(default)]
   pub database: DatabaseConfig,
+  #[serde(default)]
   pub upstreams: Vec<UpstreamConfig>,
   #[serde(default)]
   pub upstream_pools: Vec<UpstreamPoolConfig>,
@@ -360,8 +361,8 @@ impl Config {
       bail!("this build is configured for Linux only");
     }
 
-    if self.upstreams.is_empty() {
-      bail!("at least one upstream must be configured");
+    if self.upstreams.is_empty() && self.upstream_pools.is_empty() {
+      bail!("at least one upstream or upstream pool must be configured");
     }
 
     if self.routes.is_empty() {

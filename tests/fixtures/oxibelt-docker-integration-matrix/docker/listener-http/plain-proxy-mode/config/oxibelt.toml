@@ -9,6 +9,8 @@ unprivileged_mode = true
 
 [listeners]
 https_bind = "0.0.0.0:8443"
+http_bind = "0.0.0.0:8080"
+http_mode = "proxy"
 http1 = true
 http2 = true
 http3 = false
@@ -27,27 +29,6 @@ trusted_ca_certs = []
 enabled = true
 max_http_version = "h2"
 
-[compression]
-enabled = true
-gzip = true
-deflate = true
-zstd = true
-
-[waf]
-enabled = true
-mode = "enforcing"
-fail_policy = "closed"
-
-[[waf.rules]]
-name = "reserved-lb"
-phase = "request"
-priority = 10
-when = "true"
-
-[[waf.rules.actions]]
-type = "set_load_balancing_policy"
-policy = "sticky_cookie"
-
 [[upstreams]]
 name = "http-upstream"
 origin = "http://mock-http:18080/origin"
@@ -58,9 +39,6 @@ preserve_host = false
 websocket = true
 webrtc = true
 webtransport = true
-
-[upstreams.tls.ech]
-mode = "disabled"
 
 [[routes]]
 name = "main-route"

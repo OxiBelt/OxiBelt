@@ -1199,6 +1199,49 @@ fn route_replacement_rejects_query_fragments() {
     );
 }
 
+#[test]
+fn route_can_reference_pool_without_direct_upstreams() {
+    let temp_dir = common::TempDir::new("pool-only-route");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "pool-only-route");
+    let raw = format!(
+        r#"
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "{cert}"
+private_key = "{key}"
+
+[tls.ocsp]
+mode = "disabled"
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "round_robin"
+
+[[upstream_pools.servers]]
+origin = "http://app-a.example/origin"
+
+[[routes]]
+name = "pool-route"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream_pool = "app-pool"
+"#,
+        cert = cert_path.display(),
+        key = key_path.display(),
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config.validate().expect("pool-only route should validate");
+    assert!(config.upstreams.is_empty());
+    assert_eq!(config.routes[0].upstream_pool.as_deref(), Some("app-pool"));
+}
+
 fn write_loadable_config(
     temp_dir: &common::TempDir,
     common_name: &str,

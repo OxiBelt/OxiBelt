@@ -87,7 +87,11 @@ impl PoolState {
           .map(|(index, server)| UpstreamConfig {
             name: synthetic_upstream_name(&pool.name, index),
             origin: server.origin.clone(),
-            max_http_version: HttpVersion::H2,
+            max_http_version: if server.origin.scheme() == "http" {
+              HttpVersion::H1
+            } else {
+              HttpVersion::H2
+            },
             connect_timeout_ms: 3_000,
             request_timeout_ms: 30_000,
             read_timeout_ms: 30_000,

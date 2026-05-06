@@ -477,6 +477,175 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "config-invalid",
+            "strict-unknown-field",
+            "strict configuration rejects unknown merged fields by default",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some("configuration contains unknown field"),
+        ),
+        docker_case(
+            "listener-http",
+            "redirect-to-https",
+            "plain HTTP listener redirects to HTTPS",
+            ExpectStart::Success,
+            Needs::default(),
+            r#"
+run_case_checks() {
+  local response
+  response="$(plain_client_request "example.test" "/app/redirect?x=1" 308)"
+  assert_response_jq "${response}" '.headers.location == "https://example.test/app/redirect?x=1"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "listener-http",
+            "plain-proxy-mode",
+            "plain HTTP listener can proxy requests without TLS",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(plain_client_request "example.test" "/app/plain" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"
+    and .path == "/origin/app/plain"
+    and .headers["x-forwarded-proto"] == "http"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "ops",
+            "metrics-and-health",
+            "local metrics and health listeners expose operational endpoints",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/metrics-seed" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/metrics-seed"'
+
+  response="$(plain_client_request_on_port 9091 "ops.test" "/ready" 200)"
+  assert_response_jq "${response}" '.body == "ready"'
+
+  response="$(plain_client_request_on_port 9091 "ops.test" "/live" 200)"
+  assert_response_jq "${response}" '.body == "live"'
+
+  response="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
+  assert_response_jq "${response}" '.body | contains("oxibelt_requests_total")'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "limits",
+            "request-body-limit",
+            "configured request body limit rejects oversized requests before upstream forwarding",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request_with_headers "example.test" "/app/body-limit" 413 "POST" "too-large" "Content-Type: text/plain")"
+  assert_response_jq "${response}" '.body == "request body is too large"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-identity",
+            "real-ip-waf",
+            "trusted X-Forwarded-For real IP is used by request WAF rules",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request_with_headers "example.test" "/app/real-ip" 451 "GET" "" "X-Forwarded-For: 203.0.113.10")"
+  assert_response_jq "${response}" '.body == "real ip blocked"'
+
+  response="$(client_request "example.test" "/app/real-ip" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/real-ip"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-protocol",
+            "trusted-v1",
+            "trusted PROXY protocol v1 source address reaches request WAF rules",
+            ExpectStart::Success,
+            Needs::default(),
+            r#"
+run_case_checks() {
+  local response
+  response="$(proxy_protocol_client_request "PROXY TCP4 203.0.113.10 192.0.2.10 45678 443" "example.test" "/app/proxy-protocol" 409)"
+  assert_response_jq "${response}" '.body == "proxy protocol source blocked"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-pools",
+            "round-robin",
+            "routes can select upstream pools with round-robin balancing",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second
+  first="$(client_request "example.test" "/app/pool-a" 200)"
+  second="$(client_request "example.test" "/app/pool-b" 200)"
+  assert_body_jq "${first}" '.upstream == "http-upstream"'
+  assert_body_jq "${second}" '.upstream == "alt-upstream"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "tmpfs-route-cache",
+            "tmpfs cache serves a route response after the upstream disappears",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/cache?item=1" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+
+  docker rm -f "${http_container}" >/dev/null
+
+  response="$(client_request "example.test" "/app/cache?item=1" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/cache?item=1"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "database-access-log",
             "postgres-mtls",
             "OxiRule access logs are written to PostgreSQL over verified mTLS",
@@ -841,6 +1010,25 @@ run_case_checks() {
         ),
         docker_case(
             "waf-request",
+            "route-to-pool",
+            "request rule can override the selected upstream pool",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request_with_headers "example.test" "/app/pool-canary" 200 "GET" "" "X-Use-Pool: yes")"
+  assert_body_jq "${response}" '.upstream == "alt-upstream" and .path == "/alt/app/pool-canary"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "waf-request",
             "set-tag-chain",
             "request tags created by one rule are visible to later rules",
             ExpectStart::Success,
@@ -965,7 +1153,7 @@ run_case_checks() {
         docker_case(
             "waf-validation",
             "route-to-pool-reserved",
-            "reserved route_to_pool action is rejected at startup",
+            "route_to_pool rejects unknown upstream pool names",
             ExpectStart::Failure,
             Needs::default(),
             "",
@@ -974,7 +1162,7 @@ run_case_checks() {
         docker_case(
             "waf-validation",
             "set-load-balancing-reserved",
-            "reserved load-balancing action is rejected at startup",
+            "set_load_balancing_policy rejects unsupported policies",
             ExpectStart::Failure,
             Needs::default(),
             "",
@@ -1373,6 +1561,21 @@ mod tests {
             assert!(
                 safe_path_component(OsStr::new(value), "test field").is_err(),
                 "{value} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn every_docker_case_has_a_fixture_directory() {
+        let fixture_root = docker_fixture_root();
+        for case in docker_cases() {
+            let path = fixture_root.join(case.category).join(case.name);
+            assert!(
+                path.is_dir(),
+                "missing fixture directory for {}/{} at {}",
+                case.category,
+                case.name,
+                path.display()
             );
         }
     }

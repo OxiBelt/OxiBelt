@@ -2,6 +2,7 @@ import argparse
 import http.client
 import json
 import re
+import socket
 import ssl
 import sys
 import urllib.parse
@@ -66,9 +67,44 @@ def validate_host_header(raw_host: str) -> str:
 
   return raw_host
 
+def request_with_proxy_protocol(args, target_path, host_header, headers, body):
+  sock = socket.create_connection((args.target_host, args.port), timeout=args.timeout)
+  try:
+    sock.sendall((args.proxy_protocol_line + "\r\n").encode("ascii"))
+    if args.scheme == "https":
+      if args.ca_file:
+        context = ssl.create_default_context(cafile=args.ca_file)
+      else:
+        context = ssl.create_default_context()
+      sock = context.wrap_socket(sock, server_hostname=args.target_host)
+
+    request_lines = [
+      f"{args.method} {target_path} HTTP/1.1",
+      f"Host: {host_header}",
+    ]
+    has_content_length = False
+    for name, value in headers.items():
+      if name.lower() == "content-length":
+        has_content_length = True
+      request_lines.append(f"{name}: {value}")
+    if not has_content_length:
+      request_lines.append(f"Content-Length: {len(body)}")
+    request_lines.append("Connection: close")
+    request = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8") + body
+    sock.sendall(request)
+
+    response = http.client.HTTPResponse(sock)
+    response.begin()
+    response_body = response.read().decode("utf-8", "replace")
+    return response, response_body
+  finally:
+    sock.close()
+
+
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--target", choices=sorted(TARGET_PATHS))
+  parser.add_argument("--target-host", default=TARGET_HOST)
   parser.add_argument("--path")
   parser.add_argument("--method", default="GET")
   parser.add_argument("--body", default="")
@@ -76,6 +112,8 @@ def main() -> int:
   parser.add_argument("--host", required=True)
   parser.add_argument("--ca-file")
   parser.add_argument("--port", type=int, default=TARGET_PORT)
+  parser.add_argument("--scheme", choices=("http", "https"), default="https")
+  parser.add_argument("--proxy-protocol-line")
   parser.add_argument("--dump-response-json", action="store_true")
   parser.add_argument("--expect-status", type=int)
   parser.add_argument("--timeout", type=float, default=5.0)
@@ -98,12 +136,7 @@ def main() -> int:
   else:
     context = ssl.create_default_context()
 
-  connection = http.client.HTTPSConnection(
-    TARGET_HOST,
-    args.port,
-    context=context,
-    timeout=args.timeout,
-  )
+  connection = None
   try:
     headers = {"Host": host_header}
     for item in args.header:
@@ -120,22 +153,44 @@ def main() -> int:
       headers[name] = value
 
     body = args.body.encode("utf-8")
-    connection.putrequest(
-      args.method,
-      target_path,
-      skip_host=True,
-      skip_accept_encoding=True,
-    )
-    has_content_length = False
-    for name, value in headers.items():
-      if name.lower() == "content-length":
-        has_content_length = True
-      connection.putheader(name, value)
-    if not has_content_length:
-      connection.putheader("Content-Length", str(len(body)))
-    connection.endheaders(body)
-    response = connection.getresponse()
-    response_body = response.read().decode("utf-8", "replace")
+    if args.proxy_protocol_line:
+      response, response_body = request_with_proxy_protocol(
+        args,
+        target_path,
+        host_header,
+        headers,
+        body,
+      )
+    else:
+      if args.scheme == "https":
+        connection = http.client.HTTPSConnection(
+          args.target_host,
+          args.port,
+          context=context,
+          timeout=args.timeout,
+        )
+      else:
+        connection = http.client.HTTPConnection(
+          args.target_host,
+          args.port,
+          timeout=args.timeout,
+        )
+      connection.putrequest(
+        args.method,
+        target_path,
+        skip_host=True,
+        skip_accept_encoding=True,
+      )
+      has_content_length = False
+      for name, value in headers.items():
+        if name.lower() == "content-length":
+          has_content_length = True
+        connection.putheader(name, value)
+      if not has_content_length:
+        connection.putheader("Content-Length", str(len(body)))
+      connection.endheaders(body)
+      response = connection.getresponse()
+      response_body = response.read().decode("utf-8", "replace")
     if args.dump_response_json:
       sys.stdout.write(json.dumps({
         "status": response.status,
@@ -152,7 +207,8 @@ def main() -> int:
       return 0
     return 1
   finally:
-    connection.close()
+    if connection:
+      connection.close()
 
 
 if __name__ == "__main__":

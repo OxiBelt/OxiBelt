@@ -27,26 +27,15 @@ trusted_ca_certs = []
 enabled = true
 max_http_version = "h2"
 
-[compression]
+[metrics]
 enabled = true
-gzip = true
-deflate = true
-zstd = true
+bind = "0.0.0.0:9090"
 
-[waf]
+[health]
 enabled = true
-mode = "enforcing"
-fail_policy = "closed"
-
-[[waf.rules]]
-name = "reserved-lb"
-phase = "request"
-priority = 10
-when = "true"
-
-[[waf.rules.actions]]
-type = "set_load_balancing_policy"
-policy = "sticky_cookie"
+bind = "0.0.0.0:9091"
+ready_path = "/ready"
+live_path = "/live"
 
 [[upstreams]]
 name = "http-upstream"
@@ -58,9 +47,6 @@ preserve_host = false
 websocket = true
 webrtc = true
 webtransport = true
-
-[upstreams.tls.ech]
-mode = "disabled"
 
 [[routes]]
 name = "main-route"

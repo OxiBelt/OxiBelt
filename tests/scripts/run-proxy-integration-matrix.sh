@@ -173,6 +173,114 @@ client_request_with_headers_on_port() {
   fail_with_diagnostics "client request did not reach expected status ${expect_status}"
 }
 
+plain_client_request() {
+  plain_client_request_on_port 8080 "$1" "$2" "$3" "GET" ""
+}
+
+plain_client_request_on_port() {
+  local port="$1"
+  shift
+  plain_client_request_with_headers_on_port "${port}" "$1" "$2" "$3" "GET" ""
+}
+
+plain_client_request_with_headers_on_port() {
+  local proxy_port="$1"
+  shift
+  local host="$1"
+  local path="$2"
+  local expect_status="$3"
+  local method="$4"
+  local body="$5"
+  shift 5
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-plain-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --entrypoint python \
+      "${mock_image}" \
+      /opt/mock_upstream/client.py \
+      --scheme http \
+      --path "${path}" \
+      --host "${host}" \
+      --port "${proxy_port}" \
+      --method "${method}" \
+      --body "${body}" \
+      --dump-response-json \
+      --expect-status "${expect_status}" \
+      "${header_args[@]}" >/dev/null
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "plain client request failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "plain client request did not reach expected status ${expect_status}"
+}
+
+proxy_protocol_client_request() {
+  local proxy_line="$1"
+  local host="$2"
+  local path="$3"
+  local expect_status="$4"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-proxy-protocol-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --entrypoint python \
+      "${mock_image}" \
+      /opt/mock_upstream/client.py \
+      --scheme https \
+      --path "${path}" \
+      --host "${host}" \
+      --port 8443 \
+      --method GET \
+      --body "" \
+      --ca-file /tmp/proxy-ca.pem \
+      --proxy-protocol-line "${proxy_line}" \
+      --dump-response-json \
+      --expect-status "${expect_status}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "PROXY protocol client request failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "PROXY protocol request did not reach expected status ${expect_status}"
+}
+
 reload_proxy() {
   docker kill --signal HUP "${proxy_container}" >/dev/null
 }

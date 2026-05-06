@@ -13,6 +13,11 @@ http1 = true
 http2 = true
 http3 = false
 
+[listeners.proxy_protocol]
+enabled = true
+version = "v1"
+trusted_sources = ["0.0.0.0/0"]
+
 [tls]
 cert_chain = "fullchain.pem"
 private_key = "privkey.pem"
@@ -27,26 +32,21 @@ trusted_ca_certs = []
 enabled = true
 max_http_version = "h2"
 
-[compression]
-enabled = true
-gzip = true
-deflate = true
-zstd = true
-
 [waf]
 enabled = true
 mode = "enforcing"
 fail_policy = "closed"
 
 [[waf.rules]]
-name = "reserved-lb"
+name = "block-proxy-protocol-source"
 phase = "request"
 priority = 10
-when = "true"
+when = "Request.Client.Ip.inCidr('203.0.113.0/24')"
 
 [[waf.rules.actions]]
-type = "set_load_balancing_policy"
-policy = "sticky_cookie"
+type = "reject"
+status = 409
+body = "proxy protocol source blocked"
 
 [[upstreams]]
 name = "http-upstream"
@@ -58,9 +58,6 @@ preserve_host = false
 websocket = true
 webrtc = true
 webtransport = true
-
-[upstreams.tls.ech]
-mode = "disabled"
 
 [[routes]]
 name = "main-route"

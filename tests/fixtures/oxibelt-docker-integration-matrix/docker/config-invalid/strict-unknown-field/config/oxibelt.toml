@@ -22,31 +22,11 @@ mode = "disabled"
 
 [proxy]
 trusted_ca_certs = []
+unexpected_proxy_field = true
 
 [proxy.auto_upgrade]
 enabled = true
 max_http_version = "h2"
-
-[compression]
-enabled = true
-gzip = true
-deflate = true
-zstd = true
-
-[waf]
-enabled = true
-mode = "enforcing"
-fail_policy = "closed"
-
-[[waf.rules]]
-name = "reserved-lb"
-phase = "request"
-priority = 10
-when = "true"
-
-[[waf.rules.actions]]
-type = "set_load_balancing_policy"
-policy = "sticky_cookie"
 
 [[upstreams]]
 name = "http-upstream"
@@ -58,9 +38,6 @@ preserve_host = false
 websocket = true
 webrtc = true
 webtransport = true
-
-[upstreams.tls.ech]
-mode = "disabled"
 
 [[routes]]
 name = "main-route"

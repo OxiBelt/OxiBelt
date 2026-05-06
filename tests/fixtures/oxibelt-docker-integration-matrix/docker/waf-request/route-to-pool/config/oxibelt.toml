@@ -27,26 +27,24 @@ trusted_ca_certs = []
 enabled = true
 max_http_version = "h2"
 
-[compression]
-enabled = true
-gzip = true
-deflate = true
-zstd = true
-
 [waf]
 enabled = true
 mode = "enforcing"
 fail_policy = "closed"
 
 [[waf.rules]]
-name = "reserved-lb"
+name = "route-to-pool"
 phase = "request"
 priority = 10
-when = "true"
+when = "Request.Headers.get('X-Use-Pool') == 'yes'"
 
 [[waf.rules.actions]]
 type = "set_load_balancing_policy"
-policy = "sticky_cookie"
+policy = "least_conn"
+
+[[waf.rules.actions]]
+type = "route_to_pool"
+pool = "canary-pool"
 
 [[upstreams]]
 name = "http-upstream"
@@ -59,8 +57,12 @@ websocket = true
 webrtc = true
 webtransport = true
 
-[upstreams.tls.ech]
-mode = "disabled"
+[[upstream_pools]]
+name = "canary-pool"
+algorithm = "round_robin"
+
+[[upstream_pools.servers]]
+origin = "http://mock-alt:18081/alt"
 
 [[routes]]
 name = "main-route"
