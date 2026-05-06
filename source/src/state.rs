@@ -194,6 +194,7 @@ fn build_client_pool(
       .context("failed to build negotiated upstream TLS client")?;
 
   let mut h1_http = HttpConnector::new();
+  h1_http.enforce_http(false);
   h1_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
   let h1_connector = HttpsConnectorBuilder::new()
     .with_tls_config(h1_tls_config)
@@ -205,6 +206,7 @@ fn build_client_pool(
   let h1_only = h1_builder.build(h1_connector);
 
   let mut negotiated_http = HttpConnector::new();
+  negotiated_http.enforce_http(false);
   negotiated_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
   let negotiated_connector = HttpsConnectorBuilder::new()
     .with_tls_config(negotiated_tls_config)

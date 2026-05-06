@@ -403,6 +403,7 @@ where
         state.pools.report_failure(&upstream.name);
         warn!(
             error = %error,
+            error_debug = ?error,
             upstream = %upstream.name,
             "upstream request failed"
         );
