@@ -472,6 +472,8 @@ live_path = "/live"
 
 Limits are process-local. `store = "tmpfs"` validates that `tmpfs_dir` is an existing writable directory under `/dev/shm`; cached response bodies are written there while metadata remains in OxiBelt's bounded process state.
 
+When `[health]` is enabled, `ready_path` returns HTTP 200 with body `ready`, and `live_path` returns HTTP 200 with body `live`.
+
 `[security.headers]` can add HSTS, `X-Content-Type-Options`, `Referrer-Policy`, and `Permissions-Policy` to proxied responses.
 
 ## 7. Compression

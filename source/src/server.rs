@@ -196,8 +196,10 @@ fn ops_response(
     OpsKind::Health => {
       let snapshot = state.snapshot();
       let path = request.uri().path();
-      if path == snapshot.config.health.ready_path || path == snapshot.config.health.live_path {
-        text_response(StatusCode::OK, "ok")
+      if path == snapshot.config.health.ready_path {
+        text_response(StatusCode::OK, "ready")
+      } else if path == snapshot.config.health.live_path {
+        text_response(StatusCode::OK, "live")
       } else {
         text_response(StatusCode::NOT_FOUND, "not found")
       }
