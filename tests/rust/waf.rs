@@ -121,6 +121,201 @@ body = "helper matched"
 }
 
 #[test]
+fn duplicate_metadata_get_fails_closed_by_default() {
+    let temp_dir = common::TempDir::new("waf-duplicate-get-fail-closed");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-duplicate-get-fail-closed");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "single-role"
+phase = "request"
+priority = 10
+when = "Request.QueryParams.get('role') == 'user'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+body = "role matched"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let method = Method::GET;
+    let uri: Uri = "/helpers?role=user&role=admin"
+        .parse()
+        .expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn duplicate_metadata_policy_can_return_null_or_reject_request() {
+    let temp_dir = common::TempDir::new("waf-duplicate-policy");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-duplicate-policy");
+    let null_raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+duplicate_metadata_policy = "null_on_duplicate"
+
+[[waf.rules]]
+name = "duplicate-role-is-null"
+phase = "request"
+priority = 10
+when = "Request.QueryParams.get('role') == null"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 409
+body = "duplicate role"
+"#
+    );
+    let null_config: Config = toml::from_str(&null_raw).expect("config should parse");
+    null_config.validate().expect("config should validate");
+    let null_engine = WafEngine::new(&null_config).expect("WAF should compile");
+
+    let method = Method::GET;
+    let uri: Uri = "/helpers?role=user&role=admin"
+        .parse()
+        .expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let null_decision = null_engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        null_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::CONFLICT)
+    );
+
+    let reject_raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+duplicate_metadata_policy = "reject_request"
+"#
+    );
+    let reject_config: Config = toml::from_str(&reject_raw).expect("config should parse");
+    reject_config.validate().expect("config should validate");
+    let reject_engine = WafEngine::new(&reject_config).expect("WAF should compile");
+    let reject_decision = reject_engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        reject_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::BAD_REQUEST)
+    );
+}
+
+#[test]
+fn duplicate_metadata_get_all_exposes_bounded_values() {
+    let temp_dir = common::TempDir::new("waf-duplicate-get-all");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-duplicate-get-all");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "duplicate-get-all"
+phase = "request"
+priority = 10
+when = "Request.Headers.getAll('X-User').Count == 2 && Request.Headers.getAll('X-User').First == 'allowed' && Request.QueryParams.getAll('role').contains('admin') && Request.Cookies.getAll('session').Count == 2"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 409
+body = "duplicates visible"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let mut headers = HeaderMap::new();
+    headers.append(
+        http::header::HeaderName::from_static("x-user"),
+        HeaderValue::from_static("allowed"),
+    );
+    headers.append(
+        http::header::HeaderName::from_static("x-user"),
+        HeaderValue::from_static("admin"),
+    );
+    headers.append(
+        http::header::COOKIE,
+        HeaderValue::from_static("session=one"),
+    );
+    headers.append(
+        http::header::COOKIE,
+        HeaderValue::from_static("session=two"),
+    );
+    let method = Method::GET;
+    let uri: Uri = "/helpers?role=user&role=admin"
+        .parse()
+        .expect("URI should parse");
+    let tags = HashMap::new();
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::CONFLICT)
+    );
+}
+
+#[test]
 fn request_body_format_helper_can_reject_non_png_payload() {
     let temp_dir = common::TempDir::new("waf-request-body-png");
     let (cert_path, key_path) =
@@ -966,6 +1161,242 @@ value = "valid"
                 HeaderMutation::Set { name, value }
                     if name.as_str() == "x-person-proof" && value.as_bytes() == b"valid"
             ))
+    );
+}
+
+#[test]
+fn person_proof_success_tag_uses_verified_policy() {
+    let temp_dir = common::TempDir::new("waf-person-proof-tag-policy");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-tag-policy");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "weak-public-proof"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.startsWith('/public') && Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+success_tag = "WeakProof"
+
+[[waf.rules]]
+name = "admin-proof"
+phase = "request"
+priority = 20
+when = "Request.Http.Path.startsWith('/admin') && Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+success_tag = "AdminProof"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/admin".parse().expect("URI should parse");
+    let challenge_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+    let nonce = solve_pow_nonce(&token, 4);
+
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+    let solved_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert!(solved_decision.terminal.is_none());
+    assert_eq!(
+        solved_decision.tags,
+        vec![("AdminProof".to_string(), "valid".to_string())]
+    );
+}
+
+#[test]
+fn weaker_person_proof_does_not_satisfy_stricter_rule() {
+    let temp_dir = common::TempDir::new("waf-person-proof-policy-scope");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-policy-scope");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "low-proof"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.startsWith('/low') && Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+success_tag = "LowProof"
+
+[[waf.rules]]
+name = "admin-proof"
+phase = "request"
+priority = 20
+when = "Request.Http.Path.startsWith('/admin') && Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 6
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+success_tag = "AdminProof"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let low_uri: Uri = "/low".parse().expect("URI should parse");
+    let challenge_decision = engine.evaluate_request(request_input(
+        &method,
+        &low_uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let token = extract_person_proof_token(&challenge_decision.terminal.unwrap().body);
+    let nonce = solve_pow_nonce(&token, 4);
+
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={token}.{nonce}")).unwrap(),
+    );
+    let admin_uri: Uri = "/admin".parse().expect("URI should parse");
+    let admin_decision = engine.evaluate_request(request_input(
+        &method,
+        &admin_uri,
+        &solved_headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        admin_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert!(
+        admin_decision
+            .terminal
+            .as_ref()
+            .unwrap()
+            .body
+            .contains("oxibelt-person-proof-token")
+    );
+}
+
+#[test]
+fn person_proof_single_use_challenge_state_is_capped() {
+    let temp_dir = common::TempDir::new("waf-person-proof-reuse-cap");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-reuse-cap");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[waf.limits]
+max_person_proof_reuse_tokens = 1
+
+[[waf.rules]]
+name = "single-use-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+single_use = true
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let first = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        first.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let second = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        second.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::TOO_MANY_REQUESTS)
     );
 }
 

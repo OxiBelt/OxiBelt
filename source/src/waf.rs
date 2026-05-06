@@ -18,7 +18,9 @@ use crate::routes::normalize_host;
 
 mod person_proof;
 
-use person_proof::{PersonProofEngine, PersonProofRequestStatus, PersonProofState};
+use person_proof::{
+  PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafConfig {
@@ -28,6 +30,8 @@ pub struct WafConfig {
   pub mode: WafMode,
   #[serde(default)]
   pub fail_policy: WafFailPolicy,
+  #[serde(default)]
+  pub duplicate_metadata_policy: WafDuplicateMetadataPolicy,
   #[serde(default)]
   pub limits: WafLimits,
   #[serde(default)]
@@ -42,6 +46,7 @@ impl Default for WafConfig {
       enabled: false,
       mode: WafMode::Enforcing,
       fail_policy: WafFailPolicy::Closed,
+      duplicate_metadata_policy: WafDuplicateMetadataPolicy::FailClosed,
       limits: WafLimits::default(),
       rules: Vec::new(),
       pattern_sets: Vec::new(),
@@ -69,6 +74,15 @@ pub enum WafFailPolicy {
   #[default]
   Closed,
   Open,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WafDuplicateMetadataPolicy {
+  #[default]
+  FailClosed,
+  NullOnDuplicate,
+  RejectRequest,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -99,6 +113,8 @@ pub struct WafLimits {
   pub max_helper_pattern_count: usize,
   #[serde(default = "default_max_helper_result_bytes")]
   pub max_helper_result_bytes: usize,
+  #[serde(default = "default_max_person_proof_reuse_tokens")]
+  pub max_person_proof_reuse_tokens: usize,
 }
 
 impl Default for WafLimits {
@@ -117,6 +133,7 @@ impl Default for WafLimits {
       max_helper_items: default_max_helper_items(),
       max_helper_pattern_count: default_max_helper_pattern_count(),
       max_helper_result_bytes: default_max_helper_result_bytes(),
+      max_person_proof_reuse_tokens: default_max_person_proof_reuse_tokens(),
     }
   }
 }
@@ -392,6 +409,10 @@ fn load_external_rule(rule: &mut WafRuleConfig) -> anyhow::Result<()> {
 }
 
 pub fn validate_config(config: &Config) -> anyhow::Result<()> {
+  if config.waf.limits.max_person_proof_reuse_tokens == 0 {
+    bail!("waf.limits.max_person_proof_reuse_tokens must be greater than 0");
+  }
+
   let upstream_names = config
     .upstreams
     .iter()
@@ -817,6 +838,7 @@ pub struct WafEngine {
   enabled: bool,
   mode: WafMode,
   fail_policy: WafFailPolicy,
+  duplicate_metadata_policy: WafDuplicateMetadataPolicy,
   limits: WafLimits,
   pattern_sets: HashMap<String, CompiledPatternSet>,
   global_rules: Vec<CompiledRule>,
@@ -834,13 +856,24 @@ impl WafEngine {
     validate_config(config)?;
 
     let pattern_sets = compile_pattern_sets(&config.waf.pattern_sets, &config.waf.limits)?;
-    let global_rules = compile_rules(&config.waf.rules)?;
+    let global_rules = compile_rules(&config.waf.rules, "global")?;
     let mut route_rules = HashMap::new();
     for route in &config.routes {
-      route_rules.insert(route.name.clone(), compile_rules(&route.waf.rules)?);
+      route_rules.insert(
+        route.name.clone(),
+        compile_rules(&route.waf.rules, &format!("route:{}", route.name))?,
+      );
     }
-    let person_proof =
-      PersonProofEngine::from_config_with_previous(config, previous.map(|waf| &waf.person_proof))?;
+    let person_proof_policies = global_rules
+      .iter()
+      .chain(route_rules.values().flat_map(|rules| rules.iter()))
+      .flat_map(|rule| rule.person_proof_policies.iter().cloned())
+      .collect::<Vec<_>>();
+    let person_proof = PersonProofEngine::from_policies_with_previous(
+      person_proof_policies,
+      config.waf.limits.max_person_proof_reuse_tokens,
+      previous.map(|waf| &waf.person_proof),
+    )?;
     let person_proof_tcp_max_hop = if config.waf.enabled {
       person_proof.tcp_max_hop()
     } else {
@@ -851,6 +884,7 @@ impl WafEngine {
       enabled: config.waf.enabled,
       mode: config.waf.mode,
       fail_policy: config.waf.fail_policy,
+      duplicate_metadata_policy: config.waf.duplicate_metadata_policy,
       limits: config.waf.limits.clone(),
       pattern_sets,
       global_rules,
@@ -892,6 +926,18 @@ impl WafEngine {
   pub fn evaluate_request(&self, input: WafRequestInput<'_>) -> RequestWafDecision {
     if !self.enabled {
       return RequestWafDecision::default();
+    }
+
+    if self.duplicate_metadata_policy == WafDuplicateMetadataPolicy::RejectRequest
+      && request_metadata_has_duplicates(input)
+    {
+      return RequestWafDecision {
+        terminal: Some(WafTerminalResponse::new(
+          StatusCode::BAD_REQUEST,
+          "duplicate request metadata".to_string(),
+        )),
+        ..RequestWafDecision::default()
+      };
     }
 
     match self.evaluate_request_inner(input) {
@@ -949,6 +995,9 @@ impl WafEngine {
     let mut decision = RequestWafDecision::default();
     let mut active_tags = input.tags.to_owned();
     let person_proof = self.person_proof.evaluate_request(input);
+    if person_proof.rate_limited {
+      return Ok(person_proof_rate_limited_decision());
+    }
     if let Some(tag) = self.person_proof.success_tag_for(&person_proof) {
       record_request_tag(
         &mut decision,
@@ -963,6 +1012,7 @@ impl WafEngine {
 
     for rule in self.rules_for(input.route_name, WafPhase::Request) {
       tx.check_total()?;
+      let rule_person_proof = self.person_proof_status_for_rule(&person_proof, rule);
       let matched = {
         let request = WafRequestInput {
           tags: &active_tags,
@@ -976,9 +1026,10 @@ impl WafEngine {
           rule_tags: &[],
           request,
           response: None,
-          person_proof: &person_proof,
+          person_proof: &rule_person_proof,
           pattern_sets: &self.pattern_sets,
           limits: &self.limits,
+          duplicate_metadata_policy: self.duplicate_metadata_policy,
         };
         self.evaluate_rule(rule, &ctx, &mut tx)?
       };
@@ -1032,6 +1083,7 @@ impl WafEngine {
       person_proof: &person_proof,
       pattern_sets: &self.pattern_sets,
       limits: &self.limits,
+      duplicate_metadata_policy: self.duplicate_metadata_policy,
     };
 
     for rule in self.rules_for(input.request.route_name, WafPhase::Response) {
@@ -1099,6 +1151,25 @@ impl WafEngine {
     });
     rules
   }
+
+  fn person_proof_status_for_rule(
+    &self,
+    global_status: &PersonProofRequestStatus,
+    rule: &CompiledRule,
+  ) -> PersonProofRequestStatus {
+    if rule.person_proof_policies.is_empty() {
+      return global_status.clone();
+    }
+    if let Some(policy_key) = global_status.policy_key.as_deref()
+      && rule
+        .person_proof_policies
+        .iter()
+        .any(|policy| policy.key == policy_key)
+    {
+      return global_status.clone();
+    }
+    PersonProofRequestStatus::default()
+  }
 }
 
 fn compile_pattern_sets(
@@ -1125,13 +1196,22 @@ fn compile_pattern_sets(
   Ok(sets)
 }
 
-fn compile_rules(configs: &[WafRuleConfig]) -> anyhow::Result<Vec<CompiledRule>> {
+fn compile_rules(configs: &[WafRuleConfig], scope: &str) -> anyhow::Result<Vec<CompiledRule>> {
   configs
     .iter()
     .map(|rule| {
       let expression = Parser::new(rule.when.as_deref().unwrap_or_default())
         .parse()
         .with_context(|| format!("failed to compile WAF rule {}", rule.name))?;
+      let actions = compile_actions(rule, scope)
+        .with_context(|| format!("failed to compile WAF rule {} actions", rule.name))?;
+      let person_proof_policies = actions
+        .iter()
+        .filter_map(|action| match action {
+          CompiledAction::RequirePersonProof(policy) => Some(policy.clone()),
+          _ => None,
+        })
+        .collect();
       Ok(CompiledRule {
         name: rule.name.clone(),
         id: rule.id.clone().filter(|id| !id.is_empty()),
@@ -1142,17 +1222,19 @@ fn compile_rules(configs: &[WafRuleConfig]) -> anyhow::Result<Vec<CompiledRule>>
         requires_request_body_inspection: rule.phase == WafPhase::Request
           && expression.requires_request_body_inspection(),
         expression,
-        actions: compile_actions(&rule.actions)
-          .with_context(|| format!("failed to compile WAF rule {} actions", rule.name))?,
+        actions,
+        person_proof_policies,
       })
     })
     .collect()
 }
 
-fn compile_actions(configs: &[WafActionConfig]) -> anyhow::Result<Vec<CompiledAction>> {
-  configs
+fn compile_actions(rule: &WafRuleConfig, scope: &str) -> anyhow::Result<Vec<CompiledAction>> {
+  rule
+    .actions
     .iter()
-    .map(|action| match action {
+    .enumerate()
+    .map(|(action_index, action)| match action {
       WafActionConfig::EmitAccessLog { fields } => Ok(CompiledAction::EmitAccessLog {
         fields: fields
           .iter()
@@ -1166,9 +1248,55 @@ fn compile_actions(configs: &[WafActionConfig]) -> anyhow::Result<Vec<CompiledAc
           })
           .collect::<anyhow::Result<Vec<_>>>()?,
       }),
+      WafActionConfig::RequirePersonProof { .. } => Ok(CompiledAction::RequirePersonProof(
+        person_proof_policy_from_action(rule, scope, action_index, action),
+      )),
       action => Ok(CompiledAction::Config(action.clone())),
     })
     .collect()
+}
+
+fn person_proof_policy_from_action(
+  rule: &WafRuleConfig,
+  scope: &str,
+  action_index: usize,
+  action: &WafActionConfig,
+) -> PersonProofPolicy {
+  let WafActionConfig::RequirePersonProof {
+    algorithm,
+    difficulty,
+    ttl_seconds,
+    cookie,
+    token_bindings,
+    direct_peer_ipv4_prefix_bits,
+    direct_peer_ipv6_prefix_bits,
+    tcp_max_hop,
+    single_use,
+    success_tag,
+    status,
+  } = action
+  else {
+    unreachable!("person_proof_policy_from_action requires require_person_proof action");
+  };
+  let rule_key = rule
+    .id
+    .as_deref()
+    .filter(|id| !id.is_empty())
+    .unwrap_or(&rule.name);
+  PersonProofPolicy {
+    key: format!("{scope}:{rule_key}:{action_index}"),
+    algorithm: *algorithm,
+    difficulty: *difficulty,
+    ttl_seconds: *ttl_seconds,
+    cookie: cookie.clone(),
+    token_bindings: token_bindings.clone(),
+    direct_peer_ipv4_prefix_bits: *direct_peer_ipv4_prefix_bits,
+    direct_peer_ipv6_prefix_bits: *direct_peer_ipv6_prefix_bits,
+    tcp_max_hop: *tcp_max_hop,
+    single_use: *single_use,
+    success_tag: success_tag.clone(),
+    status: *status,
+  }
 }
 
 fn new_internal_rule_id() -> anyhow::Result<String> {
@@ -1210,11 +1338,13 @@ struct CompiledRule {
   requires_request_body_inspection: bool,
   expression: Expr,
   actions: Vec<CompiledAction>,
+  person_proof_policies: Vec<PersonProofPolicy>,
 }
 
 #[derive(Clone)]
 enum CompiledAction {
   Config(WafActionConfig),
+  RequirePersonProof(PersonProofPolicy),
   EmitAccessLog { fields: Vec<CompiledAccessLogField> },
 }
 
@@ -1339,6 +1469,16 @@ fn record_request_tag(
   decision.tags.push((key, value));
 }
 
+fn person_proof_rate_limited_decision() -> RequestWafDecision {
+  RequestWafDecision {
+    terminal: Some(WafTerminalResponse::new(
+      StatusCode::TOO_MANY_REQUESTS,
+      "person proof token capacity exhausted".to_string(),
+    )),
+    ..RequestWafDecision::default()
+  }
+}
+
 #[derive(Debug)]
 pub struct WafTerminalResponse {
   pub status: StatusCode,
@@ -1407,35 +1547,8 @@ fn apply_request_actions(
       CompiledAction::Config(WafActionConfig::RouteToUpstream { upstream }) => {
         decision.upstream_override = Some(upstream.clone());
       }
-      CompiledAction::Config(WafActionConfig::RequirePersonProof {
-        algorithm,
-        difficulty,
-        ttl_seconds,
-        cookie,
-        token_bindings,
-        direct_peer_ipv4_prefix_bits,
-        direct_peer_ipv6_prefix_bits,
-        tcp_max_hop,
-        single_use,
-        success_tag,
-        status,
-      }) => {
-        decision.terminal = Some(person_proof.issue_challenge(
-          input,
-          person_proof::PersonProofPolicy {
-            algorithm: *algorithm,
-            difficulty: *difficulty,
-            ttl_seconds: *ttl_seconds,
-            cookie: cookie.clone(),
-            token_bindings: token_bindings.clone(),
-            direct_peer_ipv4_prefix_bits: *direct_peer_ipv4_prefix_bits,
-            direct_peer_ipv6_prefix_bits: *direct_peer_ipv6_prefix_bits,
-            tcp_max_hop: *tcp_max_hop,
-            single_use: *single_use,
-            success_tag: success_tag.clone(),
-            status: *status,
-          },
-        )?);
+      CompiledAction::RequirePersonProof(policy) => {
+        decision.terminal = Some(person_proof.issue_challenge(input, policy.clone())?);
         return Ok(());
       }
       CompiledAction::Config(WafActionConfig::RouteToPool { .. })
@@ -1446,6 +1559,7 @@ fn apply_request_actions(
       | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. })
       | CompiledAction::Config(WafActionConfig::SetResponseHeader { .. })
       | CompiledAction::Config(WafActionConfig::RemoveResponseHeader { .. })
+      | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
       | CompiledAction::EmitAccessLog { .. } => {
         bail!("invalid request-phase WAF action in rule {}", rule.name);
       }
@@ -1508,6 +1622,7 @@ fn apply_response_actions(
       | CompiledAction::Config(WafActionConfig::RemoveRequestHeader { .. })
       | CompiledAction::Config(WafActionConfig::SetTag { .. })
       | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
+      | CompiledAction::RequirePersonProof(_)
       | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. }) => {
         bail!("invalid response-phase WAF action in rule {}", rule.name);
       }
@@ -1606,7 +1721,7 @@ impl AccessLogJsonValue {
         limits.max_helper_result_bytes,
       ))),
       Value::Null => Ok(Self::Null),
-      Value::Bytes(_) | Value::Object(_) => {
+      Value::Bytes(_) | Value::StringList(_) | Value::Object(_) => {
         bail!("emit_access_log fields must evaluate to Bool, Int, String, or Null")
       }
     }
@@ -1774,6 +1889,7 @@ struct EvalContext<'a> {
   person_proof: &'a PersonProofRequestStatus,
   pattern_sets: &'a HashMap<String, CompiledPatternSet>,
   limits: &'a WafLimits,
+  duplicate_metadata_policy: WafDuplicateMetadataPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -1895,8 +2011,15 @@ enum Value {
   Int(i64),
   String(String),
   Bytes(Vec<u8>),
+  StringList(BoundedStringList),
   Null,
   Object(ObjectRef),
+}
+
+#[derive(Debug, Clone)]
+struct BoundedStringList {
+  values: Vec<String>,
+  is_truncated: bool,
 }
 
 impl Value {
@@ -1962,6 +2085,10 @@ fn eval_ident(name: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
 }
 
 fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
+  if let Value::StringList(list) = value {
+    return eval_string_list_member(list, field);
+  }
+
   let object = match value {
     Value::Object(object) => object,
     Value::Null => bail!("attempted to access {field} on null"),
@@ -2015,7 +2142,7 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestClient, "SourceAddress") => {
       Ok(Value::String(ctx.request.peer_addr.to_string()))
     }
-    (ObjectRef::RequestClient, "UserAgent") => header_single(ctx.request.headers, USER_AGENT),
+    (ObjectRef::RequestClient, "UserAgent") => header_single(ctx.request.headers, USER_AGENT, ctx),
     (ObjectRef::RequestClient, "PersonProof") => {
       Ok(Value::Object(ObjectRef::RequestClientPersonProof))
     }
@@ -2333,6 +2460,7 @@ fn eval_call(
   match value {
     Value::String(text) => eval_string_call(&text, method, args, ctx, tx),
     Value::Bytes(bytes) => eval_bytes_call(&bytes, method, args),
+    Value::StringList(list) => eval_string_list_call(&list, method, args, ctx),
     Value::Object(ObjectRef::ContextRuleTags) => eval_rule_tag_call(ctx.rule_tags, method, args),
     Value::Object(ObjectRef::RequestHeaders) => {
       eval_header_call(ctx.request.headers, method, args, ctx)
@@ -2413,7 +2541,16 @@ fn eval_header_call(
     "get" => Ok(header_single(
       headers,
       header_name(expect_string_arg(args, 0)?)?,
+      ctx,
     )?),
+    "getAll" => Ok(Value::StringList(bounded_string_list(
+      headers
+        .get_all(header_name(expect_string_arg(args, 0)?)?)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| truncate_to_bytes(value, ctx.limits.max_header_value_bytes)),
+      ctx.limits,
+    ))),
     "anyNameMatches" => {
       let regex = header_name_regex(expect_string_arg(args, 0)?)?;
       Ok(Value::Bool(
@@ -2479,7 +2616,7 @@ fn eval_query_call(ctx: &EvalContext<'_>, method: &str, args: &[Value]) -> anyho
     .take(ctx.limits.max_helper_items)
     .map(|(name, value)| (name.into_owned(), value.into_owned()))
     .collect::<Vec<_>>();
-  eval_pair_map_call(&pairs, method, args)
+  eval_pair_map_call(&pairs, method, args, ctx)
 }
 
 fn eval_cookie_call(ctx: &EvalContext<'_>, method: &str, args: &[Value]) -> anyhow::Result<Value> {
@@ -2494,7 +2631,7 @@ fn eval_cookie_call(ctx: &EvalContext<'_>, method: &str, args: &[Value]) -> anyh
     .take(ctx.limits.max_helper_items)
     .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
     .collect::<Vec<_>>();
-  eval_pair_map_call(&pairs, method, args)
+  eval_pair_map_call(&pairs, method, args, ctx)
 }
 
 fn eval_tag_call(
@@ -2545,6 +2682,56 @@ fn eval_rule_tag_call(tags: &[String], method: &str, args: &[Value]) -> anyhow::
       Ok(Value::Bool(tags.iter().any(|tag| regex.is_match(tag))))
     }
     _ => bail!("unknown RuleTagSet method {method}"),
+  }
+}
+
+fn eval_string_list_member(list: BoundedStringList, field: &str) -> anyhow::Result<Value> {
+  match field {
+    "Count" => Ok(Value::Int(list.values.len() as i64)),
+    "IsTruncated" => Ok(Value::Bool(list.is_truncated)),
+    "First" => Ok(
+      list
+        .values
+        .first()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    _ => bail!("unknown BoundedStringList property {field}"),
+  }
+}
+
+fn eval_string_list_call(
+  list: &BoundedStringList,
+  method: &str,
+  args: &[Value],
+  ctx: &EvalContext<'_>,
+) -> anyhow::Result<Value> {
+  match method {
+    "contains" => {
+      let expected = expect_string_arg(args, 0)?;
+      Ok(Value::Bool(
+        list.values.iter().any(|value| value == expected),
+      ))
+    }
+    "containsAny" => {
+      let pattern_set = expect_string_arg(args, 0)?;
+      for value in &list.values {
+        if pattern_set_matches(ctx.pattern_sets, pattern_set, value)? {
+          return Ok(Value::Bool(true));
+        }
+      }
+      Ok(Value::Bool(false))
+    }
+    "matchesAny" => {
+      let pattern_set = expect_string_arg(args, 0)?;
+      for value in &list.values {
+        if pattern_set_matches(ctx.pattern_sets, pattern_set, value)? {
+          return Ok(Value::Bool(true));
+        }
+      }
+      Ok(Value::Bool(false))
+    }
+    _ => bail!("unknown BoundedStringList method {method}"),
   }
 }
 
@@ -2609,6 +2796,7 @@ fn eval_pair_map_call(
   pairs: &[(String, String)],
   method: &str,
   args: &[Value],
+  ctx: &EvalContext<'_>,
 ) -> anyhow::Result<Value> {
   match method {
     "count" => Ok(Value::Int(pairs.len() as i64)),
@@ -2618,13 +2806,17 @@ fn eval_pair_map_call(
     }
     "get" => {
       let name = expect_string_arg(args, 0)?;
-      Ok(
+      single_pair_value(pairs, name, ctx.duplicate_metadata_policy)
+    }
+    "getAll" => {
+      let name = expect_string_arg(args, 0)?;
+      Ok(Value::StringList(bounded_string_list(
         pairs
           .iter()
-          .find(|(key, _)| key == name)
-          .map(|(_, value)| Value::String(value.clone()))
-          .unwrap_or(Value::Null),
-      )
+          .filter(|(key, _)| key == name)
+          .map(|(_, value)| value.clone()),
+        ctx.limits,
+      )))
     }
     "anyNameMatches" => {
       let regex = Regex::new(expect_string_arg(args, 0)?)?;
@@ -2755,6 +2947,9 @@ fn values_equal(left: &Value, right: &Value) -> anyhow::Result<bool> {
     (Value::Int(left), Value::Int(right)) => Ok(left == right),
     (Value::String(left), Value::String(right)) => Ok(left == right),
     (Value::Bytes(left), Value::Bytes(right)) => Ok(left == right),
+    (Value::StringList(left), Value::StringList(right)) => {
+      Ok(left.values == right.values && left.is_truncated == right.is_truncated)
+    }
     (Value::Null, Value::Null) => Ok(true),
     (Value::Null, other) | (other, Value::Null) => Ok(other.is_null()),
     (Value::Object(_), Value::Object(_)) => Ok(true),
@@ -2791,14 +2986,121 @@ fn header_name(name: &str) -> anyhow::Result<HeaderName> {
   HeaderName::from_bytes(name.as_bytes()).context("invalid header name")
 }
 
-fn header_single(headers: &HeaderMap, name: HeaderName) -> anyhow::Result<Value> {
-  Ok(
-    headers
-      .get(name)
-      .and_then(|value| value.to_str().ok())
-      .map(|value| Value::String(value.to_string()))
-      .unwrap_or(Value::Null),
+fn header_single(
+  headers: &HeaderMap,
+  name: HeaderName,
+  ctx: &EvalContext<'_>,
+) -> anyhow::Result<Value> {
+  let values = headers
+    .get_all(name)
+    .iter()
+    .filter_map(|value| value.to_str().ok())
+    .collect::<Vec<_>>();
+  single_string_value(
+    values
+      .into_iter()
+      .map(|value| truncate_to_bytes(value, ctx.limits.max_header_value_bytes)),
+    ctx.duplicate_metadata_policy,
   )
+}
+
+fn single_pair_value(
+  pairs: &[(String, String)],
+  name: &str,
+  policy: WafDuplicateMetadataPolicy,
+) -> anyhow::Result<Value> {
+  single_string_value(
+    pairs
+      .iter()
+      .filter(|(key, _)| key == name)
+      .map(|(_, value)| value.clone()),
+    policy,
+  )
+}
+
+fn single_string_value<I>(values: I, policy: WafDuplicateMetadataPolicy) -> anyhow::Result<Value>
+where
+  I: IntoIterator<Item = String>,
+{
+  let mut values = values.into_iter();
+  let Some(first) = values.next() else {
+    return Ok(Value::Null);
+  };
+  if values.next().is_some() {
+    return match policy {
+      WafDuplicateMetadataPolicy::FailClosed | WafDuplicateMetadataPolicy::RejectRequest => {
+        bail!("duplicate request metadata value")
+      }
+      WafDuplicateMetadataPolicy::NullOnDuplicate => Ok(Value::Null),
+    };
+  }
+  Ok(Value::String(first))
+}
+
+fn bounded_string_list<I>(values: I, limits: &WafLimits) -> BoundedStringList
+where
+  I: IntoIterator<Item = String>,
+{
+  let mut result = Vec::new();
+  let mut total_bytes = 0usize;
+  let mut is_truncated = false;
+  for value in values {
+    if result.len() >= limits.max_helper_items {
+      is_truncated = true;
+      break;
+    }
+    let next_total = total_bytes.saturating_add(value.len());
+    if next_total > limits.max_helper_result_bytes {
+      is_truncated = true;
+      break;
+    }
+    total_bytes = next_total;
+    result.push(value);
+  }
+  BoundedStringList {
+    values: result,
+    is_truncated,
+  }
+}
+
+fn truncate_to_bytes(value: &str, max_bytes: usize) -> String {
+  if value.len() <= max_bytes {
+    return value.to_string();
+  }
+  let mut end = max_bytes;
+  while !value.is_char_boundary(end) {
+    end = end.saturating_sub(1);
+  }
+  value[..end].to_string()
+}
+
+fn request_metadata_has_duplicates(input: WafRequestInput<'_>) -> bool {
+  has_duplicate_names(
+    input
+      .headers
+      .iter()
+      .map(|(name, _)| name.as_str().to_string()),
+  ) || has_duplicate_names(
+    url::form_urlencoded::parse(input.uri.query().unwrap_or_default().as_bytes())
+      .map(|(name, _)| name.into_owned()),
+  ) || has_duplicate_names(
+    input
+      .headers
+      .get_all(COOKIE)
+      .iter()
+      .filter_map(|value| value.to_str().ok())
+      .flat_map(|value| value.split(';'))
+      .filter_map(|part| part.trim().split_once('='))
+      .map(|(name, _)| name.trim().to_string()),
+  )
+}
+
+fn has_duplicate_names<I>(names: I) -> bool
+where
+  I: IntoIterator<Item = String>,
+{
+  let mut seen = HashSet::new();
+  names.into_iter().any(|name| !seen.insert(name))
 }
 
 fn content_length(headers: &HeaderMap) -> i64 {
@@ -2981,6 +3283,9 @@ fn is_isobmff_with_brand(bytes: &[u8], brands: &[&[u8; 4]]) -> bool {
   } else {
     bytes.len().min(256)
   };
+  if limit <= 16 {
+    return false;
+  }
   bytes[16..limit]
     .chunks_exact(4)
     .any(|brand| brands.iter().any(|expected| brand == expected.as_slice()))
@@ -3187,6 +3492,19 @@ mod tests {
     assert!(!bytes_match_format(b"key: value\n", "yaml"));
     assert!(!bytes_match_format(b"LUKS\xba\xbe", "luks"));
     assert!(!bytes_match_format(b"OBJ text", "obj"));
+  }
+
+  #[test]
+  fn binary_format_helper_rejects_short_isobmff_without_panicking() {
+    for len in 12..=15 {
+      let mut bytes = vec![0u8; len];
+      bytes[4..8].copy_from_slice(b"ftyp");
+      bytes[8..12].copy_from_slice(b"nope");
+
+      assert!(!bytes_match_format(&bytes, "avif"));
+      assert!(!bytes_match_format(&bytes, "jpeg-xl"));
+      assert!(!bytes_match_format(&bytes, "av1"));
+    }
   }
 }
 
@@ -3635,6 +3953,10 @@ fn default_max_helper_pattern_count() -> usize {
 
 fn default_max_helper_result_bytes() -> usize {
   8_192
+}
+
+fn default_max_person_proof_reuse_tokens() -> usize {
+  4_096
 }
 
 fn default_person_proof_difficulty() -> u8 {

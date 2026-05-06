@@ -25,7 +25,7 @@ use self::headers::{
 };
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::response::{text_response, upstream_error_response, waf_terminal_response};
-use self::uri::rewrite_uri;
+use self::uri::{rewrite_uri, validate_downstream_path};
 use self::version::select_upstream_http_version;
 
 pub async fn handle(
@@ -100,6 +100,10 @@ where
 
   let host = extract_host(&request).unwrap_or_default();
   let path = request.uri().path().to_string();
+  if let Err(error) = validate_downstream_path(&path) {
+    warn!(error = %error, path = %path, "rejected unsafe downstream request path");
+    return text_response(StatusCode::BAD_REQUEST, "invalid request path");
+  }
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
   let request_version = request.version();
@@ -351,6 +355,13 @@ pub(crate) fn prepare_webtransport(
 ) -> Result<PreparedWebTransport, Box<Response<ProxyBody>>> {
   let host = extract_host(request).unwrap_or_default();
   let path = request.uri().path().to_string();
+  if let Err(error) = validate_downstream_path(&path) {
+    warn!(error = %error, path = %path, "rejected unsafe downstream WebTransport path");
+    return Err(Box::new(text_response(
+      StatusCode::BAD_REQUEST,
+      "invalid request path",
+    )));
+  }
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
   let request_headers = request.headers().clone();

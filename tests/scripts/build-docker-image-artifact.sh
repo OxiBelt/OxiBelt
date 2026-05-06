@@ -5,6 +5,31 @@ usage() {
   echo "usage: $0 <docker-platform> <artifact-arch> <output-dir>" >&2
 }
 
+default_oxibelt_source="https://github.com/OxiBelt/OxiBelt"
+
+sanitize_source_url() {
+  local source_url="$1"
+  source_url="${source_url%%#*}"
+  source_url="${source_url%%\?*}"
+  sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]+@#\1#' <<<"${source_url}"
+}
+
+detect_oxibelt_source() {
+  if [[ -n "${GITHUB_SERVER_URL:-}" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+    sanitize_source_url "${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}"
+    return
+  fi
+
+  local remote_url
+  remote_url="$(git -C "${repo_root}" config --get remote.origin.url 2>/dev/null || true)"
+  if [[ -n "${remote_url}" ]]; then
+    sanitize_source_url "${remote_url}"
+    return
+  fi
+
+  echo "${default_oxibelt_source}"
+}
+
 platform="${1:-}"
 artifact_arch="${2:-}"
 output_dir="${3:-}"
@@ -31,7 +56,7 @@ rust_target=""
 oxibelt_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/source/Cargo.toml" | head -n 1)"
 oxibelt_revision="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)"
 oxibelt_created="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-oxibelt_source="$(git -C "${repo_root}" config --get remote.origin.url 2>/dev/null || true)"
+oxibelt_source="$(detect_oxibelt_source)"
 
 if [[ -z "${oxibelt_version}" ]]; then
   oxibelt_version="dev"
@@ -42,7 +67,7 @@ if [[ -z "${oxibelt_revision}" ]]; then
 fi
 
 if [[ -z "${oxibelt_source}" ]]; then
-  oxibelt_source="https://github.com/OxiBelt/OxiBelt"
+  oxibelt_source="${default_oxibelt_source}"
 fi
 
 if [[ "${artifact_arch}" == "riscv64" ]]; then

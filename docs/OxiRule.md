@@ -578,7 +578,7 @@ status = 403
 
 The first cookie value set by the challenge page is a proof submission, not a clearance token. OxiBelt validates the submitted challenge token and nonce on the retried request. If the proof is correct and unexpired, OxiBelt appends a new `HttpOnly` clearance cookie in the response and forwards the request. Later requests present that clearance cookie; OxiBelt validates its signature and expiration without asking the client to recompute the proof.
 
-The server signs challenge and clearance tokens with a startup-local secret. Tokens are always bound to the configured cookie name, downstream host, HTTP method, challenge random value, difficulty, issue time, and expiration time. `token_bindings` adds configured client-context bindings. A valid proof or clearance sets `Request.Client.PersonProof.State` to `valid`; if `success_tag` is configured, request evaluation also emits that tag with value `valid`. The emitted tag is available through `Request.Tags` for later request-phase rules and for response-phase rules in the same transaction.
+The server signs challenge and clearance tokens with a startup-local secret. Tokens are always bound to the configured cookie name, the specific `require_person_proof` policy that issued them, downstream host, HTTP method, challenge random value, difficulty, issue time, and expiration time. `token_bindings` adds configured client-context bindings. A valid proof or clearance sets `Request.Client.PersonProof.State` to `valid` only for the issuing policy; if that policy has `success_tag` configured, request evaluation also emits that tag with value `valid`. The emitted tag is available through `Request.Tags` for later request-phase rules and for response-phase rules in the same transaction.
 
 `token_bindings` controls which request attributes must match when a proof or clearance token is reused:
 
@@ -594,7 +594,7 @@ The default `token_bindings` are `["user_agent", "route", "direct_peer_ip_networ
 
 When any Person proof policy sets `tcp_max_hop`, OxiBelt applies the strictest configured value listener-wide at accept time using Linux `IP_MINTTL` for IPv4 and `IPV6_MINHOPCOUNT` for IPv6. This is a GTSM-style control: packets whose TTL or hop limit indicates more hops than allowed are rejected before the HTTP request is processed. Because the HTTP route is not known until after TLS and request parsing, this enforcement is not route-local even when the `require_person_proof` action lives on a route rule. Very small values are strict and can block normal clients unless the client network intentionally sends a high TTL or hop limit.
 
-`single_use = true` tracks issued challenge and clearance tokens in OxiBelt memory. Challenge tokens and clearance tokens become single-use; each valid clearance request receives a rotated `HttpOnly` clearance cookie. This better limits copied-token reuse, but users may be challenged again when a browser sends concurrent requests with the same clearance or after OxiBelt restarts.
+`single_use = true` tracks issued challenge and clearance tokens in OxiBelt memory. Challenge tokens and clearance tokens become single-use; each valid clearance request receives a rotated `HttpOnly` clearance cookie. This state is capped by `waf.limits.max_person_proof_reuse_tokens`; when the cap is exhausted, OxiBelt fails closed with `429 Too Many Requests`. This better limits copied-token reuse, but users may be challenged again when a browser sends concurrent requests with the same clearance or after OxiBelt restarts.
 
 `token_validity_seconds` controls how long a challenge token and its resulting clearance may be used. `ttl_seconds` and `token_ttl_seconds` are accepted as compatibility aliases.
 
@@ -1012,6 +1012,7 @@ Request.Headers.anyValueContains('sqlmap')
 ```
 
 Header names are case-insensitive. Values returned to rules must respect `max_header_value_bytes` and `max_helper_result_bytes`.
+Single-value `get(...)` helpers follow `waf.duplicate_metadata_policy` when duplicate names are present. The default `fail_closed` policy treats duplicate single-value reads as a WAF evaluation failure; use `getAll(...)` when duplicate values are expected and should be inspected explicitly.
 
 ### 9.3 QueryParamMap helpers
 
@@ -1038,6 +1039,7 @@ Request.QueryParams.anyValueMatches('(?i)(union select|sleep\\()')
 Request.Cookies.count(): Int
 Request.Cookies.has(Name: String): Bool
 Request.Cookies.get(Name: String): String | Null
+Request.Cookies.getAll(Name: String): BoundedStringList
 Request.Cookies.anyNameMatches(Pattern: String): Bool
 Request.Cookies.anyValueContains(Value: String): Bool
 Request.Cookies.anyValueMatches(Pattern: String): Bool

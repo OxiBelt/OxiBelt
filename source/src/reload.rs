@@ -131,10 +131,10 @@ impl ReloadManager {
     }
 
     let snapshot = AppSnapshot::new_with_previous(config, Some(active.as_ref())).await?;
-    let pending = listeners.prepare(&snapshot, state.clone()).await?;
+    let pending = listeners.prepare(&snapshot).await?;
     state.replace(snapshot);
     let active = state.snapshot();
-    listeners.commit(pending, active.as_ref());
+    listeners.commit(pending, active.as_ref(), state.clone());
     self.mode = active.config.runtime.hot_reload.mode;
     self.poll_interval = Duration::from_millis(active.config.runtime.hot_reload.poll_interval_ms);
     self.last_fingerprints = fingerprints;
@@ -172,10 +172,10 @@ impl ReloadManager {
       waf: active.waf.clone(),
       access_logs: active.access_logs.clone(),
     };
-    let pending = listeners.prepare(&snapshot, state.clone()).await?;
+    let pending = listeners.prepare(&snapshot).await?;
     state.replace(snapshot);
     let active = state.snapshot();
-    listeners.commit(pending, active.as_ref());
+    listeners.commit(pending, active.as_ref(), state.clone());
     self.last_fingerprints = fingerprints;
     Ok(true)
   }

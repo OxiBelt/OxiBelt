@@ -7,9 +7,11 @@ use http::Request;
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
 use hyper::body::{Body, Frame, SizeHint};
+use tokio::sync::mpsc;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
+pub(crate) type ProxyBodyFrame = Result<Frame<Bytes>, BoxError>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedBody {
@@ -22,6 +24,11 @@ where
   E: std::error::Error + Send + Sync + 'static,
 {
   Box::new(error)
+}
+
+pub(crate) fn channel_body(capacity: usize) -> (mpsc::Sender<ProxyBodyFrame>, ProxyBody) {
+  let (sender, receiver) = mpsc::channel(capacity);
+  (sender, ChannelBody { receiver }.boxed())
 }
 
 pub(crate) async fn capture_prefix<B>(
@@ -98,6 +105,22 @@ where
 struct ReplayBody<B> {
   queued: VecDeque<Frame<Bytes>>,
   inner: Pin<Box<B>>,
+}
+
+struct ChannelBody {
+  receiver: mpsc::Receiver<ProxyBodyFrame>,
+}
+
+impl Body for ChannelBody {
+  type Data = Bytes;
+  type Error = BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    self.receiver.poll_recv(cx)
+  }
 }
 
 impl<B> Body for ReplayBody<B>

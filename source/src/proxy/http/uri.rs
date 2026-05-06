@@ -1,6 +1,28 @@
 use http::Uri;
 use url::Url;
 
+pub(crate) fn validate_downstream_path(path: &str) -> anyhow::Result<()> {
+  if path
+    .bytes()
+    .any(|byte| byte.is_ascii_control() || byte == b'\\')
+  {
+    anyhow::bail!("request path contains unsafe characters");
+  }
+
+  for segment in path.split('/') {
+    if matches!(segment, "." | "..") {
+      anyhow::bail!("request path contains dot segments");
+    }
+  }
+
+  let lower = path.to_ascii_lowercase();
+  if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+    anyhow::bail!("request path contains encoded dot or slash separators");
+  }
+
+  Ok(())
+}
+
 pub(crate) fn rewrite_uri(
   origin: &Url,
   route_prefix: &str,
@@ -69,5 +91,26 @@ mod tests {
       rewritten.to_string(),
       "https://backend.internal/root/users?id=1"
     );
+  }
+
+  #[test]
+  fn validate_downstream_path_rejects_route_bypass_segments() {
+    for path in [
+      "/safe/../admin",
+      "/safe/./admin",
+      "/safe/%2e%2e/admin",
+      "/safe/%2E/admin",
+      "/safe/%2f/admin",
+      "/safe/%5c/admin",
+      "/safe\\admin",
+    ] {
+      assert!(
+        validate_downstream_path(path).is_err(),
+        "expected {path} to be rejected"
+      );
+    }
+
+    validate_downstream_path("/safe/admin").unwrap();
+    validate_downstream_path("/safe/%20space").unwrap();
   }
 }

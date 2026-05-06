@@ -111,6 +111,11 @@ struct TcpListenerTask {
   task: JoinHandle<()>,
 }
 
+struct BoundTcpListener {
+  bind: SocketAddr,
+  listener: TcpListener,
+}
+
 struct Http3ListenerTask {
   bind: SocketAddr,
   endpoint: h3_quinn::quinn::Endpoint,
@@ -118,9 +123,14 @@ struct Http3ListenerTask {
   task: JoinHandle<()>,
 }
 
+struct BoundHttp3Listener {
+  bind: SocketAddr,
+  endpoint: h3_quinn::quinn::Endpoint,
+}
+
 pub(crate) struct PendingListenerUpdate {
-  tcp: Option<Option<TcpListenerTask>>,
-  http3: Option<Option<Http3ListenerTask>>,
+  tcp: Option<Option<BoundTcpListener>>,
+  http3: Option<Option<BoundHttp3Listener>>,
   refresh_http3_config: bool,
 }
 
@@ -135,24 +145,21 @@ impl ListenerSupervisor {
       http3: None,
       error_tx,
     };
-    let pending = supervisor.prepare(&snapshot, state).await?;
-    supervisor.commit(pending, &snapshot);
+    let pending = supervisor.prepare(&snapshot).await?;
+    supervisor.commit(pending, &snapshot, state);
     Ok(supervisor)
   }
 
   pub(crate) async fn prepare(
     &self,
     snapshot: &AppSnapshot,
-    state: AppHandle,
   ) -> anyhow::Result<PendingListenerUpdate> {
     let tcp = if snapshot.config.listeners.http1 || snapshot.config.listeners.http2 {
       let bind = snapshot.config.listeners.https_bind;
       if self.tcp.as_ref().map(|task| task.bind) == Some(bind) {
         None
       } else {
-        Some(Some(
-          start_tcp_listener(bind, state.clone(), self.error_tx.clone()).await?,
-        ))
+        Some(Some(bind_tcp_listener(bind).await?))
       }
     } else if self.tcp.is_some() {
       Some(None)
@@ -165,12 +172,7 @@ impl ListenerSupervisor {
       if self.http3.as_ref().map(|task| task.bind) == Some(bind) {
         (None, true)
       } else {
-        (
-          Some(Some(
-            start_http3_listener(bind, snapshot, state, self.error_tx.clone()).await?,
-          )),
-          false,
-        )
+        (Some(Some(bind_http3_listener(bind, snapshot)?)), false)
       }
     } else if self.http3.is_some() {
       (Some(None), false)
@@ -185,9 +187,15 @@ impl ListenerSupervisor {
     })
   }
 
-  pub(crate) fn commit(&mut self, pending: PendingListenerUpdate, snapshot: &AppSnapshot) {
+  pub(crate) fn commit(
+    &mut self,
+    pending: PendingListenerUpdate,
+    snapshot: &AppSnapshot,
+    state: AppHandle,
+  ) {
     match pending.tcp {
       Some(Some(tcp)) => {
+        let tcp = tcp.start(state.clone(), self.error_tx.clone());
         if let Some(old) = self.tcp.replace(tcp) {
           old.shutdown();
         }
@@ -201,6 +209,7 @@ impl ListenerSupervisor {
     }
     match pending.http3 {
       Some(Some(http3)) => {
+        let http3 = http3.start(state, self.error_tx.clone());
         if let Some(old) = self.http3.replace(http3) {
           old.shutdown();
         }
@@ -228,6 +237,27 @@ impl TcpListenerTask {
   }
 }
 
+impl BoundTcpListener {
+  fn start(
+    self,
+    state: AppHandle,
+    error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  ) -> TcpListenerTask {
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let bind = self.bind;
+    let task = tokio::spawn(async move {
+      if let Err(error) = serve_tcp(self.listener, state, shutdown_rx).await {
+        let _ = error_tx.send(error.context("downstream TCP HTTP listener failed"));
+      }
+    });
+    TcpListenerTask {
+      bind,
+      shutdown,
+      task,
+    }
+  }
+}
+
 impl Http3ListenerTask {
   fn shutdown(self) {
     let _ = self.shutdown.send(true);
@@ -236,25 +266,34 @@ impl Http3ListenerTask {
   }
 }
 
-async fn start_tcp_listener(
-  bind: SocketAddr,
-  state: AppHandle,
-  error_tx: mpsc::UnboundedSender<anyhow::Error>,
-) -> anyhow::Result<TcpListenerTask> {
+impl BoundHttp3Listener {
+  fn start(
+    self,
+    state: AppHandle,
+    error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  ) -> Http3ListenerTask {
+    let task_endpoint = self.endpoint.clone();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let bind = self.bind;
+    let task = tokio::spawn(async move {
+      if let Err(error) = serve_http3(task_endpoint, state, shutdown_rx).await {
+        let _ = error_tx.send(error.context("downstream HTTP/3 listener failed"));
+      }
+    });
+    Http3ListenerTask {
+      bind,
+      endpoint: self.endpoint,
+      shutdown,
+      task,
+    }
+  }
+}
+
+async fn bind_tcp_listener(bind: SocketAddr) -> anyhow::Result<BoundTcpListener> {
   let listener = TcpListener::bind(bind)
     .await
     .with_context(|| format!("failed to bind downstream listener to {bind}"))?;
-  let (shutdown, shutdown_rx) = watch::channel(false);
-  let task = tokio::spawn(async move {
-    if let Err(error) = serve_tcp(listener, state, shutdown_rx).await {
-      let _ = error_tx.send(error.context("downstream TCP HTTP listener failed"));
-    }
-  });
-  Ok(TcpListenerTask {
-    bind,
-    shutdown,
-    task,
-  })
+  Ok(BoundTcpListener { bind, listener })
 }
 
 async fn serve_tcp(
@@ -296,31 +335,17 @@ async fn serve_tcp(
   }
 }
 
-async fn start_http3_listener(
+fn bind_http3_listener(
   bind: SocketAddr,
   snapshot: &AppSnapshot,
-  state: AppHandle,
-  error_tx: mpsc::UnboundedSender<anyhow::Error>,
-) -> anyhow::Result<Http3ListenerTask> {
+) -> anyhow::Result<BoundHttp3Listener> {
   let server_config = snapshot
     .quic_server_config
     .clone()
     .ok_or_else(|| anyhow::anyhow!("HTTP/3 listener is enabled without QUIC server config"))?;
   let endpoint = h3_quinn::quinn::Endpoint::server(server_config, bind)
     .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))?;
-  let task_endpoint = endpoint.clone();
-  let (shutdown, shutdown_rx) = watch::channel(false);
-  let task = tokio::spawn(async move {
-    if let Err(error) = serve_http3(task_endpoint, state, shutdown_rx).await {
-      let _ = error_tx.send(error.context("downstream HTTP/3 listener failed"));
-    }
-  });
-  Ok(Http3ListenerTask {
-    bind,
-    endpoint,
-    shutdown,
-    task,
-  })
+  Ok(BoundHttp3Listener { bind, endpoint })
 }
 
 async fn serve_http3(

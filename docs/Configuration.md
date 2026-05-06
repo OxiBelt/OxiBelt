@@ -261,7 +261,7 @@ CLI values override TOML values. When a CLI value differs from TOML, OxiBelt emi
 
 Reload apply behavior is failure-safe. Invalid TOML, invalid rules, invalid certificate/key pairs, unreadable files, failed upstream client construction, failed database access-log setup, and failed listener binds all leave the previous active state in place. Reload failure diagnostics are emitted with `warn!` to stdout.
 
-In `full` mode, listener bind or protocol changes are supervised. If TCP or UDP bind settings change, OxiBelt starts replacement listeners before committing the new snapshot. If the replacement listener cannot bind, the old listeners and old configuration remain active. If HTTP/3 remains on the same bind address, new QUIC connections receive the reloaded server TLS configuration without rebinding the endpoint.
+In `full` mode, listener bind or protocol changes are supervised. If TCP or UDP bind settings change, OxiBelt binds replacement listeners before committing the new snapshot, but starts their accept loops only after the new snapshot is active. If the replacement listener cannot bind, the old listeners and old configuration remain active. If HTTP/3 remains on the same bind address, new QUIC connections receive the reloaded server TLS configuration without rebinding the endpoint.
 
 OxiBelt tracks both configured logical paths and validated canonical paths for reloadable files. This lets certificate renewals that update a stable symlink, for example `fullchain.pem -> archive/example/fullchain42.pem`, be detected and revalidated safely. Keep renewed certificate, private-key, OCSP, and OxiRule files inside their purpose-specific directories so path validation continues to pass after reload.
 
@@ -363,6 +363,7 @@ When compression is enabled, OxiBelt advertises supported upstream response enco
 enabled = true
 mode = "enforcing"      # enforcing | monitor
 fail_policy = "closed"  # closed | open
+duplicate_metadata_policy = "fail_closed"
 ```
 
 `enabled` controls whether WAF rules are evaluated.
@@ -378,6 +379,14 @@ Failure policies:
 - `open`: allow the transaction to continue when WAF execution fails.
 
 Security-sensitive deployments should prefer `fail_policy = "closed"`.
+
+`duplicate_metadata_policy` controls single-value OxiRule helpers such as `Request.Headers.get(...)`, `Request.QueryParams.get(...)`, and `Request.Cookies.get(...)` when attacker-controlled metadata contains duplicate names:
+
+- `fail_closed` rejects through the WAF failure policy when a requested name has more than one value. This is the default.
+- `null_on_duplicate` returns `null` for duplicate names.
+- `reject_request` rejects requests with any duplicate request header, query parameter, or cookie name before rule evaluation with `400 Bad Request`.
+
+Use `getAll(...)` helpers when a rule intentionally needs to inspect duplicate values.
 
 ### 8.1 WAF limits
 
@@ -396,9 +405,10 @@ max_regex_runtime_ms = 2
 max_helper_items = 128
 max_helper_pattern_count = 32
 max_helper_result_bytes = 8192
+max_person_proof_reuse_tokens = 4096
 ```
 
-These limits constrain OxiRule parsing, evaluation, helper scans, derived strings, body inspection, binary format signature checks, regex use, and mutations.
+These limits constrain OxiRule parsing, evaluation, helper scans, derived strings, body inspection, binary format signature checks, regex use, mutations, and single-use Person proof token state.
 
 ### 8.2 Pattern sets
 
@@ -497,6 +507,7 @@ success_tag = "PersonProof"
 
 `require_person_proof` is documented in [OxiRule.md](OxiRule.md#require_person_proof). It is a defense-in-depth anti-automation challenge, not authentication and not a complete denial-of-service defense.
 When `success_tag` is set, a validated proof or clearance emits that transaction tag with value `valid`, making it available to later request-phase rules and response-phase rules through `Request.Tags`.
+Challenge and clearance tokens are bound to the specific `require_person_proof` policy that issued them. A proof for one rule does not satisfy a different rule that uses the same cookie.
 
 ## 9. Upstreams
 
@@ -634,7 +645,7 @@ Configuration validation rejects:
 - OCSP `static_file` mode without `response_file`.
 - Enabled `database.access_log` without a connection URL source, target table, or valid TLS/CA settings.
 - Reserved but unimplemented HTTP/3 modes.
-- Invalid WAF rules, pattern sets, actions, phases, expressions, or budgets.
+- Invalid WAF rules, pattern sets, actions, phases, expressions, duplicate metadata policy, or budgets.
 
 ## 12. Complete Minimal Example
 
@@ -690,6 +701,7 @@ table = "oxibelt_access_log"
 enabled = false
 mode = "enforcing"
 fail_policy = "closed"
+duplicate_metadata_policy = "fail_closed"
 
 [[upstreams]]
 name = "app"

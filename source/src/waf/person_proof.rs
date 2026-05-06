@@ -10,10 +10,8 @@ use ring::digest;
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
 
-use crate::config::Config;
-
 use super::{
-  HeaderMutation, PersonProofAlgorithm, PersonProofTokenBinding, WafActionConfig, WafRequestInput,
+  HeaderMutation, PersonProofAlgorithm, PersonProofTokenBinding, WafRequestInput,
   WafTerminalResponse,
 };
 
@@ -22,10 +20,12 @@ pub(super) struct PersonProofEngine {
   secret: [u8; 32],
   policies: Vec<PersonProofPolicy>,
   active_reuse_tokens: Arc<Mutex<HashMap<String, i64>>>,
+  max_reuse_tokens: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct PersonProofPolicy {
+  pub key: String,
   pub algorithm: PersonProofAlgorithm,
   pub difficulty: u8,
   pub ttl_seconds: u64,
@@ -65,7 +65,8 @@ pub(super) struct PersonProofRequestStatus {
   pub difficulty: Option<u8>,
   pub issued_at_unix_ms: Option<i64>,
   pub expires_at_unix_ms: Option<i64>,
-  cookie: Option<String>,
+  pub policy_key: Option<String>,
+  pub rate_limited: bool,
   clearance: Option<PersonProofClearance>,
 }
 
@@ -92,15 +93,17 @@ impl Default for PersonProofRequestStatus {
       difficulty: None,
       issued_at_unix_ms: None,
       expires_at_unix_ms: None,
-      cookie: None,
+      policy_key: None,
+      rate_limited: false,
       clearance: None,
     }
   }
 }
 
 impl PersonProofEngine {
-  pub(super) fn from_config_with_previous(
-    config: &Config,
+  pub(super) fn from_policies_with_previous(
+    policies: Vec<PersonProofPolicy>,
+    max_reuse_tokens: usize,
     previous: Option<&Self>,
   ) -> anyhow::Result<Self> {
     let mut secret = [0u8; 32];
@@ -114,16 +117,11 @@ impl PersonProofEngine {
       Arc::new(Mutex::new(HashMap::new()))
     };
 
-    let mut policies = Vec::new();
-    collect_policies(&config.waf.rules, &mut policies);
-    for route in &config.routes {
-      collect_policies(&route.waf.rules, &mut policies);
-    }
-
     Ok(Self {
       secret,
       policies,
       active_reuse_tokens,
+      max_reuse_tokens,
     })
   }
 
@@ -147,14 +145,15 @@ impl PersonProofEngine {
         Ok(status) if status.state == PersonProofState::Valid => return status,
         Ok(status) if status.state == PersonProofState::Expired => expired = Some(status),
         Ok(status) => failed = Some(status),
-        Err(_) => {
+        Err(error) => {
           failed = Some(PersonProofRequestStatus {
             state: PersonProofState::Failed,
             method: Some(policy.algorithm.as_str()),
             difficulty: Some(policy.difficulty),
             issued_at_unix_ms: None,
             expires_at_unix_ms: None,
-            cookie: Some(policy.cookie.clone()),
+            policy_key: Some(policy.key.clone()),
+            rate_limited: is_reuse_capacity_error(&error),
             clearance: None,
           });
         }
@@ -171,11 +170,11 @@ impl PersonProofEngine {
     if status.state != PersonProofState::Valid {
       return None;
     }
-    let cookie = status.cookie.as_ref()?;
+    let policy_key = status.policy_key.as_ref()?;
     self
       .policies
       .iter()
-      .find(|policy| &policy.cookie == cookie)
+      .find(|policy| &policy.key == policy_key)
       .and_then(|policy| policy.success_tag.as_deref())
   }
 
@@ -211,8 +210,13 @@ impl PersonProofEngine {
       .context("person proof expiration overflow")?;
     let random = random_hex(16)?;
     let token = self.sign_token(input, &policy, now, expires, &random);
-    if policy.single_use {
-      self.remember_reuse_token(&challenge_reuse_key(&token), expires, now)?;
+    if policy.single_use
+      && let Err(error) = self.remember_reuse_token(&challenge_reuse_key(&token), expires, now)
+    {
+      if is_reuse_capacity_error(&error) {
+        return Ok(person_proof_rate_limited_response());
+      }
+      return Err(error);
     }
     let csp_nonce = random_hex(16)?;
     let body = challenge_html(&policy, &token, expires, &csp_nonce);
@@ -296,7 +300,8 @@ impl PersonProofEngine {
       difficulty: Some(fields.difficulty),
       issued_at_unix_ms: Some(fields.issued),
       expires_at_unix_ms: Some(fields.expires),
-      cookie: Some(policy.cookie.clone()),
+      policy_key: Some(policy.key.clone()),
+      rate_limited: false,
       clearance: None,
     };
 
@@ -445,7 +450,8 @@ impl PersonProofEngine {
       difficulty: Some(fields.difficulty),
       issued_at_unix_ms: Some(fields.issued),
       expires_at_unix_ms: Some(fields.expires),
-      cookie: Some(policy.cookie.clone()),
+      policy_key: Some(policy.key.clone()),
+      rate_limited: false,
       clearance: None,
     };
 
@@ -478,6 +484,9 @@ impl PersonProofEngine {
       .lock()
       .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
     purge_expired_reuse_tokens(&mut active, now);
+    if !active.contains_key(key) && active.len() >= self.max_reuse_tokens {
+      bail!("{PERSON_PROOF_REUSE_CAPACITY_ERROR}");
+    }
     active.insert(key.to_string(), expires);
     Ok(())
   }
@@ -492,39 +501,19 @@ impl PersonProofEngine {
   }
 }
 
-fn collect_policies(rules: &[super::WafRuleConfig], policies: &mut Vec<PersonProofPolicy>) {
-  for rule in rules {
-    for action in &rule.actions {
-      if let WafActionConfig::RequirePersonProof {
-        algorithm,
-        difficulty,
-        ttl_seconds,
-        cookie,
-        token_bindings,
-        direct_peer_ipv4_prefix_bits,
-        direct_peer_ipv6_prefix_bits,
-        tcp_max_hop,
-        single_use,
-        success_tag,
-        status,
-      } = action
-      {
-        policies.push(PersonProofPolicy {
-          algorithm: *algorithm,
-          difficulty: *difficulty,
-          ttl_seconds: *ttl_seconds,
-          cookie: cookie.clone(),
-          token_bindings: token_bindings.clone(),
-          direct_peer_ipv4_prefix_bits: *direct_peer_ipv4_prefix_bits,
-          direct_peer_ipv6_prefix_bits: *direct_peer_ipv6_prefix_bits,
-          tcp_max_hop: *tcp_max_hop,
-          single_use: *single_use,
-          success_tag: success_tag.clone(),
-          status: *status,
-        });
-      }
-    }
-  }
+const PERSON_PROOF_REUSE_CAPACITY_ERROR: &str = "person proof reuse token capacity exhausted";
+
+fn is_reuse_capacity_error(error: &anyhow::Error) -> bool {
+  error
+    .to_string()
+    .contains(PERSON_PROOF_REUSE_CAPACITY_ERROR)
+}
+
+fn person_proof_rate_limited_response() -> WafTerminalResponse {
+  WafTerminalResponse::new(
+    StatusCode::TOO_MANY_REQUESTS,
+    "person proof token capacity exhausted".to_string(),
+  )
 }
 
 fn token_payload(
@@ -537,8 +526,9 @@ fn token_payload(
 ) -> String {
   let token_bindings = token_binding_payload(input, policy);
   format!(
-    "v1\n{}\n{issued}\n{expires}\n{difficulty}\n{}\n{}\n{}\n{token_bindings}\n{random}",
+    "v1\n{}\n{}\n{issued}\n{expires}\n{difficulty}\n{}\n{}\n{}\n{token_bindings}\n{random}",
     policy.algorithm.as_str(),
+    policy.key,
     policy.cookie,
     input.downstream_host,
     input.method.as_str()
@@ -552,8 +542,9 @@ fn clearance_payload(
 ) -> String {
   let token_bindings = token_binding_payload(input, policy);
   format!(
-    "clearance\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{token_bindings}\n{}",
+    "clearance\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{token_bindings}\n{}",
     policy.algorithm.as_str(),
+    policy.key,
     policy.cookie,
     input.downstream_host,
     input.method.as_str(),
