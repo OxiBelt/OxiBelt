@@ -602,6 +602,123 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "protocol-operations",
+            "generic-upgrade",
+            "generic HTTP/1.1 upgrade tunnels bytes to the selected upstream",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(upgrade_client_request "example.test" "/app/generic-upgrade" "matrix-upgrade" "hello-upgrade" 101)"
+  assert_response_jq "${response}" '.body == "upgraded:hello-upgrade"'
+  assert_response_jq "${response}" '.headers.upgrade == "matrix-upgrade"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-operations",
+            "connect-tunnel",
+            "HTTP/1.1 CONNECT tunnels only to the route-selected upstream origin",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(connect_tunnel_request "example.test" "/origin/connect-tunnel?case=connect" 200)"
+  assert_response_jq "${response}" '.body | fromjson | .upstream == "http-upstream"'
+  assert_response_jq "${response}" '.body | fromjson | .path == "/origin/connect-tunnel?case=connect"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-operations",
+            "stream-listener",
+            "TCP stream listener proxies raw HTTP to a fixed target",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(plain_client_request_on_port 15432 "stream.example.test" "/stream/direct?case=tcp" 200)"
+  assert_response_jq "${response}" '.body | fromjson | .upstream == "http-upstream"'
+  assert_response_jq "${response}" '.body | fromjson | .path == "/stream/direct?case=tcp"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-operations",
+            "proxy-protocol-egress-v1",
+            "TCP upstream PROXY protocol egress writes the client address before HTTP",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/proxy-egress" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+  assert_body_jq "${response}" '.proxy_protocol_line | startswith("PROXY TCP4 ")'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-operations",
+            "grpc-web-h2c",
+            "gRPC-Web requests are translated to HTTP/2 cleartext upstreams",
+            ExpectStart::Success,
+            Needs {
+                h2c_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request_with_headers "example.test" "/grpc.Matrix/Unary" 200 "POST" "abcde" "Content-Type: application/grpc-web+proto" "X-Grpc-Web: 1")"
+  assert_response_jq "${response}" '.headers["content-type"] == "application/grpc-web"'
+  assert_response_jq "${response}" '.body | contains("h2c-upstream")'
+  assert_response_jq "${response}" '.body | contains("application/grpc")'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-operations",
+            "grpc-active-health",
+            "active gRPC health checks can probe an HTTP/2 upstream pool",
+            ExpectStart::Success,
+            Needs {
+                h2c_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  sleep 2
+  local response
+  response="$(client_request "example.test" "/app/grpc-health" 200)"
+  assert_body_jq "${response}" '.upstream == "h2c-upstream" and .request_version == "HTTP/2.0"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "upstream-pools",
             "round-robin",
             "routes can select upstream pools with round-robin balancing",

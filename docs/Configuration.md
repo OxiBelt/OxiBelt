@@ -264,6 +264,9 @@ websocket = true
 generic_http_upgrade = false
 connect_tunneling = false
 
+[proxy.grpc_web]
+enabled = false
+
 [proxy.retry]
 enabled = false
 tries = 2
@@ -284,10 +287,10 @@ trailers = "pass"    # pass | drop
 
 `trusted_ca_certs` adds upstream TLS trust roots from the cert directory. `forwarded_headers.mode = "overwrite"` replaces inbound forwarding metadata; `append` preserves and extends the inbound `X-Forwarded-For` chain. `real_ip` affects the client IP used by rate limiting and WAF evaluation only when the direct peer is trusted.
 
+`generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
+
 Reserved or constrained values:
 
-- `proxy.upgrades.generic_http_upgrade = true` is rejected.
-- `proxy.upgrades.connect_tunneling = true` is rejected.
 - `proxy.http.early_hints = "pass"` is rejected.
 - Disk buffering is not implemented; `max_temp_file_bytes` must be `0`.
 
@@ -482,13 +485,14 @@ preserve_host = false
 websocket = true
 webrtc = true
 webtransport = true
+proxy_protocol_egress = "off" # off | v1 | v2
 
 [upstreams.tls.ech]
 mode = "disabled" # disabled | grease | config_list
 # config_list_file = "app.echconfiglist"
 ```
 
-Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes.
+Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection.
 
 ```toml
 [[upstream_pools]]
@@ -510,12 +514,15 @@ backup = false
 [upstream_pools.health_check]
 enabled = true
 mode = "passive" # passive | active
+protocol = "http" # http | grpc
 path = "/health"
 interval_ms = 10000
 timeout_ms = 2000
 healthy_threshold = 2
 unhealthy_threshold = 3
 expected_status = [200]
+grpc_service = ""
+grpc_expected_statuses = ["SERVING"]
 ```
 
 Pool names and upstream names are separate namespaces. `sticky_cookie` is reserved and rejected. `algorithm = "hash"` requires `hash_key`. Pool servers must use `http://` or `https://`, and server weights must be greater than zero.
@@ -530,9 +537,15 @@ path_prefix = "/v1"
 replace_prefix_with = "/"
 upstream = "app"
 # upstream_pool = "app-pool"
+# upstream_http_version = "h2" # h1 | h2 | h3
+# generic_http_upgrade = false
+# connect_tunneling = false
+# grpc_web = false
 # cache = "default"
 # compression = "default" # default | off | named policy
 ```
+
+`upstream_http_version` is a route-level backend protocol override and must not exceed the selected upstream capability. HTTP/3 overrides are rejected for upstream-pool routes and for upstreams with PROXY protocol egress enabled.
 
 Fields:
 
@@ -545,6 +558,20 @@ Fields:
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
+
+## TCP Stream Listeners
+
+```toml
+[[stream_listeners]]
+name = "postgres"
+bind = "0.0.0.0:15432"
+target = "db.internal.example:5432"
+connect_timeout_ms = 3000
+idle_timeout_ms = 75000
+proxy_protocol_egress = "off" # off | v1 | v2
+```
+
+Stream listeners proxy raw TCP from a dedicated bind address to a single `host:port` target. They do not perform HTTP routing, TLS termination, or SNI routing.
 
 Route-level WAF example:
 
@@ -578,7 +605,7 @@ Configuration validation rejects:
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
 - TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, or reserved live OCSP mode.
-- Reserved proxy upgrade, CONNECT, early-hints, disk-buffering, or sticky-cookie settings.
+- Reserved early-hints, disk-buffering, or sticky-cookie settings.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.
 
 ## Minimal Example

@@ -26,6 +26,7 @@ use crate::proxy::{http, http3};
 use crate::proxy_protocol;
 use crate::reload::{ReloadManager, ReloadTrigger};
 use crate::state::{AppHandle, AppSnapshot};
+use crate::stream::{BoundStreamListener, StreamListenerTask};
 use crate::tcp_hop;
 use crate::waf::WafTlsMetadata;
 
@@ -254,6 +255,7 @@ pub(crate) struct ListenerSupervisor {
   tcp: Option<TcpListenerTask>,
   http: Option<TcpListenerTask>,
   http3: Option<Http3ListenerTask>,
+  streams: Vec<StreamListenerTask>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
 }
 
@@ -291,6 +293,7 @@ pub(crate) struct PendingListenerUpdate {
   tcp: Option<Option<BoundTcpListener>>,
   http: Option<Option<BoundTcpListener>>,
   http3: Option<Option<BoundHttp3Listener>>,
+  streams: Option<Vec<BoundStreamListener>>,
   refresh_http3_config: bool,
 }
 
@@ -304,6 +307,7 @@ impl ListenerSupervisor {
       tcp: None,
       http: None,
       http3: None,
+      streams: Vec::new(),
       error_tx,
     };
     let pending = supervisor.prepare(&snapshot).await?;
@@ -360,10 +364,32 @@ impl ListenerSupervisor {
       (None, false)
     };
 
+    let desired_streams = snapshot
+      .config
+      .stream_listeners
+      .iter()
+      .map(|listener| (listener.name.clone(), listener.bind))
+      .collect::<Vec<_>>();
+    let current_streams = self
+      .streams
+      .iter()
+      .map(|listener| (listener.name.clone(), listener.bind))
+      .collect::<Vec<_>>();
+    let streams = if desired_streams != current_streams {
+      let mut bound = Vec::with_capacity(snapshot.config.stream_listeners.len());
+      for listener in &snapshot.config.stream_listeners {
+        bound.push(BoundStreamListener::bind(listener.clone()).await?);
+      }
+      Some(bound)
+    } else {
+      None
+    };
+
     Ok(PendingListenerUpdate {
       tcp,
       http,
       http3,
+      streams,
       refresh_http3_config,
     })
   }
@@ -421,6 +447,16 @@ impl ListenerSupervisor {
         }
       }
       None => {}
+    }
+    if let Some(streams) = pending.streams {
+      let old = std::mem::take(&mut self.streams);
+      for task in old {
+        task.shutdown();
+      }
+      self.streams = streams
+        .into_iter()
+        .map(|stream| stream.start(self.error_tx.clone()))
+        .collect();
     }
   }
 }
@@ -810,6 +846,7 @@ async fn handle_plain_http_connection(
     .keep_alive(true);
   builder
     .serve_connection(TokioIo::new(stream), service)
+    .with_upgrades()
     .await
     .map_err(|error| {
       error!(peer = %peer_addr, error = %error, "plain HTTP downstream connection failed");

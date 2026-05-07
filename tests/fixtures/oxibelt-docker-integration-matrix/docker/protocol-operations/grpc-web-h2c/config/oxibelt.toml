@@ -1,0 +1,50 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[proxy.grpc_web]
+enabled = true
+
+[[upstreams]]
+name = "h2c-upstream"
+origin = "http://mock-h2c:18082/h2c-origin"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[routes]]
+name = "grpc-web-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "h2c-upstream"
+grpc_web = true
+upstream_http_version = "h2"

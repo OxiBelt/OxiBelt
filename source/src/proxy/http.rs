@@ -1,13 +1,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Body, Incoming};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-use crate::config::{HttpVersion, UpstreamConfig};
+use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::pools::PoolSelection;
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
 use crate::waf::{
@@ -17,6 +20,7 @@ use crate::waf::{
 
 pub(crate) mod body;
 pub(crate) mod compression;
+pub(crate) mod grpc_web;
 pub(crate) mod headers;
 pub(crate) mod request;
 pub(crate) mod response;
@@ -84,7 +88,7 @@ async fn handle_inner<B>(
   state: AppHandle,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
-  reject_connect: bool,
+  _reject_connect: bool,
   downstream_scheme: &'static str,
 ) -> Response<ProxyBody>
 where
@@ -93,19 +97,6 @@ where
 {
   let state = state.snapshot();
   state.metrics.record_request();
-
-  if request.method() == Method::CONNECT {
-    if !reject_connect {
-      return text_response(
-        StatusCode::BAD_REQUEST,
-        "unexpected HTTP/3 CONNECT request outside WebTransport handling",
-      );
-    }
-    return text_response(
-      StatusCode::METHOD_NOT_ALLOWED,
-      "CONNECT tunneling is not implemented in this build",
-    );
-  }
 
   let host = extract_host(&request).unwrap_or_default();
   let path = request.uri().path().to_string();
@@ -150,9 +141,10 @@ where
   let request = request
     .map(|body| Limited::new(body, state.config.limits.max_request_body_bytes as usize).boxed());
 
-  let (request, captured_body) = if state
-    .waf
-    .requires_request_body_inspection(&resolved.route.name)
+  let (request, captured_body) = if request_method != Method::CONNECT
+    && state
+      .waf
+      .requires_request_body_inspection(&resolved.route.name)
   {
     match capture_prefix(request, state.config.waf.limits.max_body_inspection_bytes).await {
       Ok(result) => {
@@ -191,6 +183,19 @@ where
 
   if let Some(terminal) = request_waf.terminal {
     return waf_terminal_response(terminal, &request_waf.response_header_mutations);
+  }
+
+  if request_method == Method::CONNECT {
+    return handle_connect_request(
+      request,
+      &state,
+      &resolved,
+      client_addr,
+      &host,
+      &request_waf,
+      request_version,
+    )
+    .await;
   }
 
   if is_upgrade_request(&request) {
@@ -255,16 +260,40 @@ where
     resolved.upstream.expect("validated route upstream")
   };
 
-  let upstream_version = select_upstream_http_version(
-    state.config.proxy.auto_upgrade.enabled,
-    state.config.proxy.auto_upgrade.max_http_version,
-    upstream.max_http_version,
-  );
+  let mut upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
+    select_upstream_http_version(
+      state.config.proxy.auto_upgrade.enabled,
+      state.config.proxy.auto_upgrade.max_http_version,
+      upstream.max_http_version,
+    )
+  });
+  let grpc_web_mode = if state.config.proxy.grpc_web.enabled && resolved.route.grpc_web {
+    grpc_web::request_mode(&request_headers)
+  } else {
+    None
+  };
+  if grpc_web_mode.is_some() {
+    if upstream.max_http_version < HttpVersion::H2 {
+      return text_response(
+        StatusCode::BAD_GATEWAY,
+        "gRPC-Web upstream requires HTTP/2 support",
+      );
+    }
+    upstream_version = HttpVersion::H2;
+  }
 
   if upstream_version == HttpVersion::H3 && upstream.origin.scheme() != "https" {
     return text_response(
       StatusCode::BAD_GATEWAY,
       "upstream HTTP/3 requires https origin",
+    );
+  }
+  if upstream_version == HttpVersion::H3
+    && upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
+  {
+    return text_response(
+      StatusCode::BAD_GATEWAY,
+      "PROXY protocol egress is not supported for HTTP/3 upstream",
     );
   }
 
@@ -292,7 +321,19 @@ where
     upstream_version,
     waf_mutations: &request_waf.request_header_mutations,
   };
-  let outbound = rebuild_request(request, rebuild);
+  let mut outbound = rebuild_request(request, rebuild);
+  if let Some(mode) = grpc_web_mode {
+    grpc_web::rewrite_request_headers(outbound.headers_mut(), mode);
+    let (parts, body) = outbound.into_parts();
+    let body = match grpc_web::decode_request_body(body, mode).await {
+      Ok(body) => body,
+      Err(error) => {
+        warn!(error = %error, "failed to prepare gRPC-Web upstream request");
+        return text_response(StatusCode::BAD_REQUEST, "invalid gRPC-Web request body");
+      }
+    };
+    outbound = Request::from_parts(parts, body);
+  }
 
   let cache_enabled_for_route = resolved.route.cache.as_deref() == Some("default")
     && state.cache.enabled()
@@ -387,26 +428,31 @@ where
       }
     }
   } else {
-    let Some(client) = state.clients.for_upstream_version(
-      &upstream.name,
-      upstream.origin.scheme(),
-      upstream_version,
-    ) else {
-      warn!(
-          upstream = %upstream.name,
-          "missing upstream client pool"
-      );
-      return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
+    let result = if upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off {
+      let Some(client) = state.clients.for_upstream_version(
+        &upstream.name,
+        upstream.origin.scheme(),
+        upstream_version,
+      ) else {
+        warn!(
+            upstream = %upstream.name,
+            "missing upstream client pool"
+        );
+        return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
+      };
+      send_with_retry(
+        client,
+        outbound,
+        upstream,
+        &state,
+        state.config.proxy.retry.enabled && is_idempotent(&request_method),
+      )
+      .await
+    } else {
+      send_one_shot_with_proxy_protocol(outbound, upstream, &state, upstream_version, client_addr)
+        .await
     };
-    match send_with_retry(
-      client,
-      outbound,
-      upstream,
-      &state,
-      state.config.proxy.retry.enabled && is_idempotent(&request_method),
-    )
-    .await
-    {
+    match result {
       Ok(response) => response.map(|body| body.map_err(boxed_error).boxed()),
       Err(error) => {
         state.pools.report_failure(&upstream.name);
@@ -441,6 +487,11 @@ where
   state.pools.report_success(&upstream.name);
   drop(pool_selection);
 
+  let upstream_response = if let Some(mode) = grpc_web_mode {
+    grpc_web::encode_response(upstream_response, mode)
+  } else {
+    upstream_response
+  };
   let (mut parts, body) = upstream_response.into_parts();
   strip_hop_by_hop_headers(&mut parts.headers);
   if state.config.proxy.http.trailers == crate::config::TrailerMode::Drop {
@@ -505,6 +556,220 @@ where
   response
 }
 
+struct SelectedUpstream<'a> {
+  upstream: &'a UpstreamConfig,
+  pool_selection: Option<PoolSelection>,
+}
+
+fn select_request_upstream<'a>(
+  state: &'a AppSnapshot,
+  resolved: &crate::routes::ResolvedRoute<'a>,
+  client_addr: std::net::SocketAddr,
+  downstream_host: &str,
+  uri: &http::Uri,
+  request_waf: &crate::waf::RequestWafDecision,
+) -> Result<SelectedUpstream<'a>, Box<Response<ProxyBody>>> {
+  if let Some(upstream_name) = request_waf.upstream_override.as_deref() {
+    return state
+      .upstreams
+      .iter()
+      .find(|upstream| upstream.name == upstream_name)
+      .map(|upstream| SelectedUpstream {
+        upstream,
+        pool_selection: None,
+      })
+      .ok_or_else(|| {
+        Box::new(text_response(
+          StatusCode::BAD_GATEWAY,
+          "WAF selected an unknown upstream",
+        ))
+      });
+  }
+
+  if let Some(pool_name) = request_waf
+    .upstream_pool_override
+    .as_deref()
+    .or(resolved.route.upstream_pool.as_deref())
+  {
+    let selection = state
+      .pools
+      .select(
+        pool_name,
+        client_addr.ip(),
+        &format!("{downstream_host}{uri}"),
+        request_waf.load_balancing_policy.as_deref(),
+      )
+      .map_err(|_| {
+        Box::new(text_response(
+          StatusCode::BAD_GATEWAY,
+          "no available upstream pool server",
+        ))
+      })?;
+    let name = selection.upstream_name.clone();
+    let upstream = state
+      .upstreams
+      .iter()
+      .find(|upstream| upstream.name == name)
+      .expect("pool selected synthetic upstream");
+    return Ok(SelectedUpstream {
+      upstream,
+      pool_selection: Some(selection),
+    });
+  }
+
+  Ok(SelectedUpstream {
+    upstream: resolved.upstream.expect("validated route upstream"),
+    pool_selection: None,
+  })
+}
+
+async fn handle_connect_request(
+  mut request: Request<ProxyBody>,
+  state: &Arc<AppSnapshot>,
+  resolved: &crate::routes::ResolvedRoute<'_>,
+  client_addr: std::net::SocketAddr,
+  downstream_host: &str,
+  request_waf: &crate::waf::RequestWafDecision,
+  request_version: http::Version,
+) -> Response<ProxyBody> {
+  if !state.config.proxy.upgrades.connect_tunneling || !resolved.route.connect_tunneling {
+    return text_response(
+      StatusCode::METHOD_NOT_ALLOWED,
+      "CONNECT tunneling is disabled for this route",
+    );
+  }
+
+  let selected = match select_request_upstream(
+    state.as_ref(),
+    resolved,
+    client_addr,
+    downstream_host,
+    request.uri(),
+    request_waf,
+  ) {
+    Ok(selected) => selected,
+    Err(response) => return *response,
+  };
+  let upstream = selected.upstream.clone();
+  let pool_report = state.pools.clone();
+  let pool_selection = selected.pool_selection;
+
+  if request_version == http::Version::HTTP_11 || request_version == http::Version::HTTP_10 {
+    let downstream_upgrade = hyper::upgrade::on(&mut request);
+    tokio::spawn(async move {
+      let result = async {
+        let downstream = downstream_upgrade.await?;
+        let mut downstream = TokioIo::new(downstream);
+        let mut upstream_stream = dial_tunnel_upstream(&upstream, client_addr).await?;
+        tokio::io::copy_bidirectional(&mut downstream, &mut upstream_stream).await?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+      }
+      .await;
+      if result.is_ok() {
+        pool_report.report_success(&upstream.name);
+      } else {
+        pool_report.report_failure(&upstream.name);
+      }
+      drop(pool_selection);
+    });
+    return Response::builder()
+      .status(StatusCode::OK)
+      .body(full_body(bytes::Bytes::new()))
+      .expect("CONNECT response should build");
+  }
+
+  match dial_tunnel_upstream(&upstream, client_addr).await {
+    Ok(upstream_stream) => {
+      let body = bridge_connect_body(request.into_body(), upstream_stream);
+      drop(pool_selection);
+      Response::builder()
+        .status(StatusCode::OK)
+        .body(body)
+        .expect("CONNECT response should build")
+    }
+    Err(error) => {
+      pool_report.report_failure(&upstream.name);
+      warn!(upstream = %upstream.name, error = %error, "failed to establish CONNECT tunnel");
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "failed to establish CONNECT tunnel",
+      )
+    }
+  }
+}
+
+fn bridge_connect_body(mut downstream_body: ProxyBody, upstream: TcpStream) -> ProxyBody {
+  let (body_sender, body) = body::channel_body(16);
+  let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
+
+  tokio::spawn(async move {
+    while let Some(frame) = downstream_body.frame().await {
+      let frame = match frame {
+        Ok(frame) => frame,
+        Err(_) => break,
+      };
+      if let Ok(data) = frame.into_data()
+        && upstream_writer.write_all(&data).await.is_err()
+      {
+        break;
+      }
+    }
+    let _ = upstream_writer.shutdown().await;
+  });
+
+  tokio::spawn(async move {
+    let mut buffer = vec![0u8; 16 * 1024];
+    loop {
+      match upstream_reader.read(&mut buffer).await {
+        Ok(0) => break,
+        Ok(read) => {
+          if body_sender
+            .send(Ok(hyper::body::Frame::data(bytes::Bytes::copy_from_slice(
+              &buffer[..read],
+            ))))
+            .await
+            .is_err()
+          {
+            break;
+          }
+        }
+        Err(error) => {
+          let _ = body_sender
+            .send(Err(boxed_error(std::io::Error::other(format!(
+              "failed to read CONNECT upstream: {error}"
+            )))))
+            .await;
+          break;
+        }
+      }
+    }
+  });
+
+  body
+}
+
+async fn dial_tunnel_upstream(
+  upstream: &UpstreamConfig,
+  client_addr: std::net::SocketAddr,
+) -> anyhow::Result<TcpStream> {
+  let remote_addr = resolve_upstream_tcp_addr(&upstream.origin).await?;
+  let mut stream = tokio::time::timeout(
+    Duration::from_millis(upstream.connect_timeout_ms),
+    TcpStream::connect(remote_addr),
+  )
+  .await
+  .context("upstream tunnel connect timed out")??;
+  crate::proxy_protocol_egress::write_header(
+    &mut stream,
+    upstream.proxy_protocol_egress,
+    client_addr,
+    remote_addr,
+  )
+  .await
+  .context("failed to write upstream PROXY protocol egress header")?;
+  Ok(stream)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_upgrade_request(
   mut request: Request<ProxyBody>,
@@ -515,7 +780,21 @@ async fn handle_upgrade_request(
   downstream_scheme: &str,
   request_waf: &crate::waf::RequestWafDecision,
 ) -> Option<Response<ProxyBody>> {
-  if !state.config.proxy.upgrades.websocket || !is_websocket_upgrade(&request) {
+  if request.version() != http::Version::HTTP_11 {
+    return Some(text_response(
+      StatusCode::NOT_IMPLEMENTED,
+      "HTTP upgrade tunneling requires HTTP/1.1 downstream",
+    ));
+  }
+
+  let websocket_upgrade = is_websocket_upgrade(&request);
+  let generic_upgrade = !websocket_upgrade
+    && state.config.proxy.upgrades.generic_http_upgrade
+    && resolved.route.generic_http_upgrade;
+  if websocket_upgrade && !state.config.proxy.upgrades.websocket {
+    return None;
+  }
+  if !websocket_upgrade && !generic_upgrade {
     return None;
   }
 
@@ -565,7 +844,7 @@ async fn handle_upgrade_request(
     resolved.upstream.expect("validated route upstream")
   };
 
-  if !upstream.websocket {
+  if websocket_upgrade && !upstream.websocket {
     return Some(text_response(
       StatusCode::BAD_GATEWAY,
       "selected upstream does not allow WebSocket",
@@ -622,14 +901,14 @@ async fn handle_upgrade_request(
       state.pools.report_failure(&upstream.name);
       return Some(text_response(
         StatusCode::BAD_GATEWAY,
-        &format!("upstream WebSocket request failed: {error}"),
+        &format!("upstream upgrade request failed: {error}"),
       ));
     }
     Err(_) => {
       state.pools.report_failure(&upstream.name);
       return Some(text_response(
         StatusCode::BAD_GATEWAY,
-        "upstream WebSocket request timed out",
+        "upstream upgrade request timed out",
       ));
     }
   };
@@ -730,6 +1009,112 @@ async fn send_with_retry(
       upstream.request_timeout_ms
     ),
   }
+}
+
+async fn send_one_shot_with_proxy_protocol(
+  request: Request<ProxyBody>,
+  upstream: &UpstreamConfig,
+  state: &AppSnapshot,
+  upstream_version: HttpVersion,
+  client_addr: std::net::SocketAddr,
+) -> anyhow::Result<Response<Incoming>> {
+  if upstream_version == HttpVersion::H3 {
+    anyhow::bail!("PROXY protocol egress is not supported for HTTP/3 upstream");
+  }
+  let remote_addr = resolve_upstream_tcp_addr(&upstream.origin).await?;
+  let mut stream = tokio::time::timeout(
+    Duration::from_millis(upstream.connect_timeout_ms),
+    TcpStream::connect(remote_addr),
+  )
+  .await
+  .context("upstream connect timed out")??;
+  crate::proxy_protocol_egress::write_header(
+    &mut stream,
+    upstream.proxy_protocol_egress,
+    client_addr,
+    remote_addr,
+  )
+  .await
+  .context("failed to write upstream PROXY protocol egress header")?;
+
+  if upstream.origin.scheme() == "https" {
+    let mut tls_config = crate::tls::build_upstream_client_config(
+      &state.config.proxy.trusted_ca_certs,
+      &upstream.tls.ech,
+    )
+    .context("failed to build one-shot upstream TLS config")?;
+    tls_config.alpn_protocols = vec![upstream_version.as_alpn().to_vec()];
+    let host = upstream
+      .origin
+      .host_str()
+      .ok_or_else(|| anyhow::anyhow!("upstream origin has no host: {}", upstream.origin))?
+      .to_string();
+    let server_name = rustls::pki_types::ServerName::try_from(host)
+      .map_err(|error| anyhow::anyhow!("invalid upstream TLS server name: {error}"))?;
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(tls_config))
+      .connect(server_name, stream)
+      .await
+      .context("upstream TLS handshake failed")?;
+    send_one_shot_over_io(tls, request, upstream_version).await
+  } else {
+    send_one_shot_over_io(stream, request, upstream_version).await
+  }
+}
+
+async fn send_one_shot_over_io<I>(
+  io: I,
+  request: Request<ProxyBody>,
+  upstream_version: HttpVersion,
+) -> anyhow::Result<Response<Incoming>>
+where
+  I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+  match upstream_version {
+    HttpVersion::H1 => {
+      let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+        .await
+        .context("failed to establish one-shot HTTP/1.1 upstream connection")?;
+      tokio::spawn(async move {
+        if let Err(error) = connection.await {
+          warn!(error = %error, "one-shot HTTP/1.1 upstream connection failed");
+        }
+      });
+      sender
+        .send_request(request)
+        .await
+        .context("one-shot HTTP/1.1 upstream request failed")
+    }
+    HttpVersion::H2 => {
+      let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(io))
+          .await
+          .context("failed to establish one-shot HTTP/2 upstream connection")?;
+      tokio::spawn(async move {
+        if let Err(error) = connection.await {
+          warn!(error = %error, "one-shot HTTP/2 upstream connection failed");
+        }
+      });
+      sender
+        .send_request(request)
+        .await
+        .context("one-shot HTTP/2 upstream request failed")
+    }
+    HttpVersion::H3 => anyhow::bail!("one-shot HTTP/3 upstream is not supported"),
+  }
+}
+
+async fn resolve_upstream_tcp_addr(origin: &url::Url) -> anyhow::Result<std::net::SocketAddr> {
+  let port = origin
+    .port_or_known_default()
+    .ok_or_else(|| anyhow::anyhow!("upstream origin has no port: {origin}"))?;
+  let host = origin
+    .host_str()
+    .ok_or_else(|| anyhow::anyhow!("upstream origin has no host: {origin}"))?;
+  tokio::net::lookup_host((host, port))
+    .await
+    .with_context(|| format!("failed to resolve upstream host {host}:{port}"))?
+    .next()
+    .ok_or_else(|| anyhow::anyhow!("upstream host resolved no addresses: {host}:{port}"))
 }
 
 fn parts_clone(parts: &http::request::Parts) -> http::request::Parts {

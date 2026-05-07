@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use anyhow::bail;
 
 use crate::config::{
-  HttpVersion, LoadBalancingAlgorithm, UpstreamConfig, UpstreamPoolConfig, UpstreamTlsConfig,
+  HealthCheckProtocol, HttpVersion, LoadBalancingAlgorithm, ProxyProtocolEgressMode,
+  UpstreamConfig, UpstreamPoolConfig, UpstreamTlsConfig,
 };
 
 #[derive(Debug)]
@@ -87,7 +88,9 @@ impl PoolState {
           .map(|(index, server)| UpstreamConfig {
             name: synthetic_upstream_name(&pool.name, index),
             origin: server.origin.clone(),
-            max_http_version: if server.origin.scheme() == "http" {
+            max_http_version: if server.origin.scheme() == "http"
+              && pool.health_check.protocol != HealthCheckProtocol::Grpc
+            {
               HttpVersion::H1
             } else {
               HttpVersion::H2
@@ -101,6 +104,7 @@ impl PoolState {
             websocket: true,
             webrtc: true,
             webtransport: true,
+            proxy_protocol_egress: ProxyProtocolEgressMode::Off,
             tls: UpstreamTlsConfig::default(),
           })
       })

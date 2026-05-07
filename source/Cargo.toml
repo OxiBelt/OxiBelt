@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 async-compression = { version = "0.4", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
+base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"

@@ -112,7 +112,7 @@ mod tests {
   use url::Url;
 
   use super::*;
-  use crate::config::{HttpVersion, RouteConfig, UpstreamConfig};
+  use crate::config::{HttpVersion, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig};
 
   fn upstream(name: &str) -> UpstreamConfig {
     UpstreamConfig {
@@ -128,6 +128,7 @@ mod tests {
       websocket: true,
       webrtc: true,
       webtransport: true,
+      proxy_protocol_egress: ProxyProtocolEgressMode::Off,
       tls: Default::default(),
     }
   }
@@ -142,6 +143,10 @@ mod tests {
         replace_prefix_with: None,
         upstream: Some("wild".into()),
         upstream_pool: None,
+        upstream_http_version: None,
+        generic_http_upgrade: false,
+        connect_tunneling: false,
+        grpc_web: false,
         cache: None,
         compression: None,
         waf: Default::default(),
@@ -153,6 +158,10 @@ mod tests {
         replace_prefix_with: None,
         upstream: Some("exact".into()),
         upstream_pool: None,
+        upstream_http_version: None,
+        generic_http_upgrade: false,
+        connect_tunneling: false,
+        grpc_web: false,
         cache: None,
         compression: None,
         waf: Default::default(),
@@ -175,6 +184,10 @@ mod tests {
         replace_prefix_with: None,
         upstream: Some("root".into()),
         upstream_pool: None,
+        upstream_http_version: None,
+        generic_http_upgrade: false,
+        connect_tunneling: false,
+        grpc_web: false,
         cache: None,
         compression: None,
         waf: Default::default(),
@@ -186,6 +199,10 @@ mod tests {
         replace_prefix_with: None,
         upstream: Some("api".into()),
         upstream_pool: None,
+        upstream_http_version: None,
+        generic_http_upgrade: false,
+        connect_tunneling: false,
+        grpc_web: false,
         cache: None,
         compression: None,
         waf: Default::default(),

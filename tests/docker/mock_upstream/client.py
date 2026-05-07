@@ -100,6 +100,77 @@ def request_with_proxy_protocol(args, target_path, host_header, headers, body):
   finally:
     sock.close()
 
+def read_http_response(sock):
+  response = http.client.HTTPResponse(sock)
+  response.begin()
+  response_body = response.read().decode("utf-8", "replace")
+  return response, response_body
+
+
+def perform_connect_tunnel(args, host_header, target_path):
+  sock = socket.create_connection((args.target_host, args.port), timeout=args.timeout)
+  try:
+    if args.scheme == "https":
+      context = ssl.create_default_context(cafile=args.ca_file) if args.ca_file else ssl.create_default_context()
+      sock = context.wrap_socket(sock, server_hostname=args.target_host)
+
+    request = (
+      f"CONNECT {host_header}:443 HTTP/1.1\r\n"
+      f"Host: {host_header}:443\r\n"
+      "Content-Length: 0\r\n"
+      "\r\n"
+    ).encode("ascii")
+    sock.sendall(request)
+    response = http.client.HTTPResponse(sock)
+    response.begin()
+    if response.status != 200:
+      return response, response.read().decode("utf-8", "replace")
+
+    tunneled = (
+      f"GET {target_path} HTTP/1.1\r\n"
+      "Host: tunnel-upstream\r\n"
+      "Connection: close\r\n"
+      "Content-Length: 0\r\n"
+      "\r\n"
+    ).encode("ascii")
+    sock.sendall(tunneled)
+    return read_http_response(sock)
+  finally:
+    sock.close()
+
+
+def perform_upgrade(args, host_header, target_path, headers, body):
+  sock = socket.create_connection((args.target_host, args.port), timeout=args.timeout)
+  try:
+    if args.scheme == "https":
+      context = ssl.create_default_context(cafile=args.ca_file) if args.ca_file else ssl.create_default_context()
+      sock = context.wrap_socket(sock, server_hostname=args.target_host)
+
+    upgrade_token = args.upgrade_token
+    request_lines = [
+      f"GET {target_path} HTTP/1.1",
+      f"Host: {host_header}",
+      "Connection: Upgrade",
+      f"Upgrade: {upgrade_token}",
+      "Content-Length: 0",
+    ]
+    for name, value in headers.items():
+      if name.lower() not in {"host", "connection", "upgrade", "content-length"}:
+        request_lines.append(f"{name}: {value}")
+    sock.sendall(("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8"))
+
+    response = http.client.HTTPResponse(sock)
+    response.begin()
+    if response.status != 101:
+      response.read()
+      return response, ""
+    sock.sendall(body)
+    sock.settimeout(args.timeout)
+    upgraded = sock.recv(4096).decode("utf-8", "replace")
+    return response, upgraded
+  finally:
+    sock.close()
+
 
 def main() -> int:
   parser = argparse.ArgumentParser()
@@ -114,6 +185,8 @@ def main() -> int:
   parser.add_argument("--port", type=int, default=TARGET_PORT)
   parser.add_argument("--scheme", choices=("http", "https"), default="https")
   parser.add_argument("--proxy-protocol-line")
+  parser.add_argument("--connect-tunnel", action="store_true")
+  parser.add_argument("--upgrade-token")
   parser.add_argument("--dump-response-json", action="store_true")
   parser.add_argument("--expect-status", type=int)
   parser.add_argument("--timeout", type=float, default=5.0)
@@ -153,7 +226,21 @@ def main() -> int:
       headers[name] = value
 
     body = args.body.encode("utf-8")
-    if args.proxy_protocol_line:
+    if args.connect_tunnel:
+      response, response_body = perform_connect_tunnel(
+        args,
+        host_header,
+        target_path,
+      )
+    elif args.upgrade_token:
+      response, response_body = perform_upgrade(
+        args,
+        host_header,
+        target_path,
+        headers,
+        body,
+      )
+    elif args.proxy_protocol_line:
       response, response_body = request_with_proxy_protocol(
         args,
         target_path,

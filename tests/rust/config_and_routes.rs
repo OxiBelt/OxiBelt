@@ -5,7 +5,7 @@ use std::path::Path;
 
 use oxibelt::config::{
     CompressionConfig, Config, DatabaseTlsMode, ForwardedHeaderMode, HotReloadMode, OcspMode,
-    RuntimeOverrides, UpstreamEchMode,
+    ProxyProtocolEgressMode, RuntimeOverrides, UpstreamEchMode,
 };
 
 #[test]
@@ -23,6 +23,120 @@ fn config_parses_trusted_upstream_ca_certificates() {
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
     assert_eq!(config.proxy.trusted_ca_certs, vec![ca_path]);
+}
+
+#[test]
+fn protocol_operations_defaults_are_disabled() {
+    let temp_dir = common::TempDir::new("protocol-defaults");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "protocol-defaults");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(!config.proxy.upgrades.generic_http_upgrade);
+    assert!(!config.proxy.upgrades.connect_tunneling);
+    assert!(!config.proxy.grpc_web.enabled);
+    assert!(!config.routes[0].generic_http_upgrade);
+    assert!(!config.routes[0].connect_tunneling);
+    assert!(!config.routes[0].grpc_web);
+    assert_eq!(
+        config.upstreams[0].proxy_protocol_egress,
+        ProxyProtocolEgressMode::Off
+    );
+    assert!(config.stream_listeners.is_empty());
+}
+
+#[test]
+fn route_protocol_operations_require_global_enablement() {
+    let temp_dir = common::TempDir::new("protocol-enable");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "protocol-enable");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        "upstream = \"app\"\nconnect_tunneling = true",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("route-only CONNECT should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("connect_tunneling but proxy.upgrades.connect_tunneling is false"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn proxy_protocol_egress_rejects_http3_upstream() {
+    let temp_dir = common::TempDir::new("proxy-egress-h3");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "proxy-egress-h3");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("max_http_version = \"h2\"", "max_http_version = \"h3\"")
+        .replace(
+            "webtransport = true",
+            "webtransport = true\nproxy_protocol_egress = \"v1\"",
+        );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("HTTP/3 PROXY egress should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot enable proxy_protocol_egress with max_http_version"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn stream_listener_validates_target_shape() {
+    let temp_dir = common::TempDir::new("stream-target");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "stream-target");
+    let raw = format!(
+        r#"
+{}
+
+[[stream_listeners]]
+name = "db"
+bind = "127.0.0.1:15432"
+target = "db.internal.example:5432"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("stream listener should validate");
+}
+
+#[test]
+fn invalid_stream_listener_target_is_rejected() {
+    let temp_dir = common::TempDir::new("stream-target-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "stream-target-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[[stream_listeners]]
+name = "db"
+bind = "127.0.0.1:15432"
+target = "db.internal.example"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("stream target should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("target must be in host:port form"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

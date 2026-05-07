@@ -55,11 +55,14 @@ Upstream protocol support:
 - HTTP/2 over `http://` uses h2c with prior knowledge.
 - HTTP/3 requires an `https://` upstream origin.
 - `proxy.auto_upgrade` controls the maximum upstream HTTP version OxiBelt may select.
+- Route-level `upstream_http_version` can override backend protocol selection within the selected upstream capability.
+- PROXY protocol egress is supported only for TCP-based upstream connections and stream proxy targets, not HTTP/3/QUIC upstreams.
 
 Upgrade and extended protocol behavior:
 
 - WebSocket tunneling is implemented for HTTP/1.1 upgrade routes.
-- Generic HTTP upgrade and CONNECT tunneling are reserved.
+- Generic HTTP/1.1 upgrade and CONNECT tunneling are implemented when both global and route-level policy enables them.
+- CONNECT tunneling targets the selected route upstream origin, not the downstream request target.
 - WebTransport forwarding is supported for downstream HTTP/3 extended CONNECT requests when the selected upstream also uses HTTP/3 and has `webtransport = true`.
 - WebTransport stream and datagram payload inspection is outside the current WAF implementation.
 - WebRTC media forwarding is not implemented; signaling HTTP requests can still be routed and inspected as ordinary HTTP traffic.
@@ -177,7 +180,7 @@ The current implementation intentionally leaves these as future work:
 - Request-wide structured access logging outside OxiRule `emit_access_log`.
 - Sticky-cookie upstream sessions.
 - WebRTC media forwarding.
-- Generic HTTP upgrade and CONNECT tunneling.
+- TCP stream proxying, generic HTTP upgrade, CONNECT tunneling, gRPC health checks, gRPC-Web translation, and PROXY protocol egress for TCP upstreams.
 - Passing `103 Early Hints`.
 - Streaming-safe WAF text scanning helpers such as `Body.contains`, `Body.matches`, and `Body.scan`.
 - Response body byte inspection.

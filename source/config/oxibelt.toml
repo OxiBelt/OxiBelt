@@ -66,6 +66,9 @@ websocket = true
 generic_http_upgrade = false
 connect_tunneling = false
 
+[proxy.grpc_web]
+enabled = false
+
 [proxy.retry]
 enabled = false
 tries = 2
@@ -199,6 +202,7 @@ preserve_host = false
 websocket = true
 webrtc = true
 webtransport = true
+proxy_protocol_egress = "off"
 
 [upstreams.tls.ech]
 mode = "disabled"
@@ -208,6 +212,9 @@ name = "app-root"
 hosts = ["example.com", "www.example.com"]
 path_prefix = "/"
 upstream = "app"
+generic_http_upgrade = false
+connect_tunneling = false
+grpc_web = false
 
 [[routes]]
 name = "api-v1"
@@ -215,3 +222,6 @@ hosts = ["api.example.com"]
 path_prefix = "/v1"
 replace_prefix_with = "/"
 upstream = "app"
+generic_http_upgrade = false
+connect_tunneling = false
+grpc_web = false

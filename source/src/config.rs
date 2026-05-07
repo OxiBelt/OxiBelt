@@ -43,6 +43,9 @@ pub struct Config {
   pub upstreams: Vec<UpstreamConfig>,
   #[serde(default)]
   pub upstream_pools: Vec<UpstreamPoolConfig>,
+  #[serde(default)]
+  pub stream_listeners: Vec<StreamListenerConfig>,
+  #[serde(default)]
   pub routes: Vec<RouteConfig>,
   #[serde(default)]
   pub waf: WafConfig,
@@ -191,6 +194,7 @@ impl Config {
       && self.database == other.database
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools
+      && self.stream_listeners == other.stream_listeners
       && routes_without_waf_are_equivalent(&self.routes, &other.routes)
   }
 
@@ -362,11 +366,11 @@ impl Config {
       bail!("this build is configured for Linux only");
     }
 
-    if self.upstreams.is_empty() && self.upstream_pools.is_empty() {
+    if !self.routes.is_empty() && self.upstreams.is_empty() && self.upstream_pools.is_empty() {
       bail!("at least one upstream or upstream pool must be configured");
     }
 
-    if self.routes.is_empty() {
+    if self.routes.is_empty() && self.stream_listeners.is_empty() {
       bail!("at least one route must be configured");
     }
 
@@ -392,6 +396,14 @@ impl Config {
       if upstream.max_http_version == HttpVersion::H3 && upstream.origin.scheme() != "https" {
         bail!(
           "upstream {} must use https:// origin when max_http_version = \"h3\"",
+          upstream.name
+        );
+      }
+      if upstream.max_http_version == HttpVersion::H3
+        && upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
+      {
+        bail!(
+          "upstream {} cannot enable proxy_protocol_egress with max_http_version = \"h3\"",
           upstream.name
         );
       }
@@ -474,6 +486,14 @@ impl Config {
           )
         })?;
       }
+      if pool.health_check.protocol == HealthCheckProtocol::Grpc
+        && pool.health_check.grpc_expected_statuses.is_empty()
+      {
+        bail!(
+          "upstream pool {} health_check.grpc_expected_statuses must not be empty",
+          pool.name
+        );
+      }
     }
 
     let compression_policy_names = self
@@ -546,7 +566,61 @@ impl Config {
           compression
         );
       }
+      if route.grpc_web && !self.proxy.grpc_web.enabled {
+        bail!(
+          "route {} enables grpc_web but proxy.grpc_web.enabled is false",
+          route.name
+        );
+      }
+      if route.generic_http_upgrade && !self.proxy.upgrades.generic_http_upgrade {
+        bail!(
+          "route {} enables generic_http_upgrade but proxy.upgrades.generic_http_upgrade is false",
+          route.name
+        );
+      }
+      if route.connect_tunneling && !self.proxy.upgrades.connect_tunneling {
+        bail!(
+          "route {} enables connect_tunneling but proxy.upgrades.connect_tunneling is false",
+          route.name
+        );
+      }
+      if let Some(route_version) = route.upstream_http_version {
+        match (&route.upstream, &route.upstream_pool) {
+          (Some(upstream_name), None) => {
+            let upstream = self
+              .upstreams
+              .iter()
+              .find(|item| item.name == *upstream_name)
+              .expect("validated route upstream");
+            if route_version > upstream.max_http_version {
+              bail!(
+                "route {} upstream_http_version cannot exceed upstream {} max_http_version",
+                route.name,
+                upstream.name
+              );
+            }
+            if route_version == HttpVersion::H3
+              && upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
+            {
+              bail!(
+                "route {} cannot select HTTP/3 when upstream {} has proxy_protocol_egress enabled",
+                route.name,
+                upstream.name
+              );
+            }
+          }
+          (None, Some(_)) if route_version == HttpVersion::H3 => {
+            bail!(
+              "route {} cannot set upstream_http_version = \"h3\" for upstream_pool routes",
+              route.name
+            );
+          }
+          _ => {}
+        }
+      }
     }
+
+    self.validate_stream_listeners()?;
 
     match self.tls.ocsp.mode {
       OcspMode::Disabled => {}
@@ -626,12 +700,6 @@ impl Config {
     if self.proxy.http.early_hints == EarlyHintsMode::Pass {
       bail!("proxy.http.early_hints = \"pass\" is reserved but not implemented yet");
     }
-    if self.proxy.upgrades.generic_http_upgrade {
-      bail!("proxy.upgrades.generic_http_upgrade is reserved but not implemented yet");
-    }
-    if self.proxy.upgrades.connect_tunneling {
-      bail!("proxy.upgrades.connect_tunneling is reserved but not implemented yet");
-    }
     if self.proxy.retry.tries == 0 {
       bail!("proxy.retry.tries must be greater than 0");
     }
@@ -644,6 +712,34 @@ impl Config {
     for cidr in &self.proxy.real_ip.trusted_proxies {
       crate::identity::Cidr::parse(cidr)
         .with_context(|| format!("invalid proxy.real_ip.trusted_proxies entry {cidr}"))?;
+    }
+    Ok(())
+  }
+
+  fn validate_stream_listeners(&self) -> anyhow::Result<()> {
+    let mut names = HashSet::new();
+    let mut binds = HashSet::new();
+    for listener in &self.stream_listeners {
+      if listener.name.trim().is_empty() {
+        bail!("stream listener name must not be empty");
+      }
+      if !names.insert(listener.name.clone()) {
+        bail!("duplicate stream listener name: {}", listener.name);
+      }
+      if !binds.insert(listener.bind) {
+        bail!(
+          "duplicate stream listener bind {} on listener {}",
+          listener.bind,
+          listener.name
+        );
+      }
+      if listener.connect_timeout_ms == 0 || listener.idle_timeout_ms == 0 {
+        bail!(
+          "stream listener {} timeout values must be greater than 0",
+          listener.name
+        );
+      }
+      validate_stream_target(&listener.name, &listener.target)?;
     }
     Ok(())
   }
@@ -767,6 +863,45 @@ fn validate_route_path_value(
   Ok(())
 }
 
+fn validate_stream_target(listener_name: &str, target: &str) -> anyhow::Result<()> {
+  let (host, port) = parse_stream_target(target)
+    .with_context(|| format!("stream listener {listener_name} target must be in host:port form"))?;
+  if host.trim().is_empty() {
+    bail!("stream listener {listener_name} target host must not be empty");
+  }
+  if port == 0 {
+    bail!("stream listener {listener_name} target port must be greater than 0");
+  }
+  Ok(())
+}
+
+pub fn parse_stream_target(target: &str) -> anyhow::Result<(String, u16)> {
+  if let Some(stripped) = target.strip_prefix('[') {
+    let Some(end) = stripped.find(']') else {
+      bail!("missing closing ']' in IPv6 stream target");
+    };
+    let host = stripped[..end].to_string();
+    let port = stripped
+      .get(end + 1..)
+      .and_then(|rest| rest.strip_prefix(':'))
+      .ok_or_else(|| anyhow!("missing port in stream target"))?
+      .parse::<u16>()
+      .context("invalid stream target port")?;
+    return Ok((host, port));
+  }
+
+  let (host, port) = target
+    .rsplit_once(':')
+    .ok_or_else(|| anyhow!("missing port in stream target"))?;
+  if host.contains(':') {
+    bail!("IPv6 stream targets must use [addr]:port form");
+  }
+  Ok((
+    host.to_string(),
+    port.parse::<u16>().context("invalid stream target port")?,
+  ))
+}
+
 fn validate_compression_statuses(field_name: &str, statuses: &[u16]) -> anyhow::Result<()> {
   if statuses.is_empty() {
     bail!("{field_name} must include at least one status");
@@ -825,6 +960,10 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.replace_prefix_with == right.replace_prefix_with
         && left.upstream == right.upstream
         && left.upstream_pool == right.upstream_pool
+        && left.upstream_http_version == right.upstream_http_version
+        && left.generic_http_upgrade == right.generic_http_upgrade
+        && left.connect_tunneling == right.connect_tunneling
+        && left.grpc_web == right.grpc_web
         && left.cache == right.cache
         && left.compression == right.compression
     })
@@ -930,6 +1069,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "routes",
       "runtime",
       "security",
+      "stream_listeners",
       "tls",
       "upstream_pools",
       "upstreams",
@@ -971,6 +1111,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "auto_upgrade",
       "buffering",
       "forwarded_headers",
+      "grpc_web",
       "http",
       "real_ip",
       "retry",
@@ -987,6 +1128,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "trusted_proxies",
     ][..],
     "proxy.upgrades" => &["connect_tunneling", "generic_http_upgrade", "websocket"][..],
+    "proxy.grpc_web" => &["enabled"][..],
     "proxy.retry" => &[
       "enabled",
       "on",
@@ -1083,6 +1225,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "name",
       "origin",
       "preserve_host",
+      "proxy_protocol_egress",
       "read_timeout_ms",
       "request_timeout_ms",
       "send_timeout_ms",
@@ -1111,6 +1254,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "path",
       "timeout_ms",
       "unhealthy_threshold",
+      "protocol",
+      "grpc_expected_statuses",
+      "grpc_service",
     ][..],
     "upstream_pools.servers" => &["backup", "max_conns", "origin", "weight"][..],
     "routes" => &[
@@ -1120,9 +1266,21 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "name",
       "path_prefix",
       "replace_prefix_with",
+      "connect_tunneling",
+      "generic_http_upgrade",
+      "grpc_web",
       "upstream",
+      "upstream_http_version",
       "upstream_pool",
       "waf",
+    ][..],
+    "stream_listeners" => &[
+      "bind",
+      "connect_timeout_ms",
+      "idle_timeout_ms",
+      "name",
+      "proxy_protocol_egress",
+      "target",
     ][..],
     "rate_limits" => &["burst", "key", "mode", "name", "rate", "status"][..],
     "connection_limits" => &["key", "limit", "name", "status"][..],
@@ -1824,6 +1982,8 @@ pub struct ProxyConfig {
   #[serde(default)]
   pub upgrades: ProxyUpgradesConfig,
   #[serde(default)]
+  pub grpc_web: ProxyGrpcWebConfig,
+  #[serde(default)]
   pub retry: ProxyRetryConfig,
   #[serde(default)]
   pub buffering: ProxyBufferingConfig,
@@ -1902,6 +2062,12 @@ pub struct ProxyUpgradesConfig {
   pub generic_http_upgrade: bool,
   #[serde(default)]
   pub connect_tunneling: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+pub struct ProxyGrpcWebConfig {
+  #[serde(default)]
+  pub enabled: bool,
 }
 
 impl Default for ProxyUpgradesConfig {
@@ -2582,7 +2748,18 @@ pub struct UpstreamConfig {
   #[serde(default = "default_true")]
   pub webtransport: bool,
   #[serde(default)]
+  pub proxy_protocol_egress: ProxyProtocolEgressMode,
+  #[serde(default)]
   pub tls: UpstreamTlsConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyProtocolEgressMode {
+  #[default]
+  Off,
+  V1,
+  V2,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -2661,6 +2838,12 @@ pub struct UpstreamPoolHealthCheckConfig {
   pub unhealthy_threshold: u32,
   #[serde(default = "default_health_check_expected_status")]
   pub expected_status: Vec<u16>,
+  #[serde(default)]
+  pub protocol: HealthCheckProtocol,
+  #[serde(default)]
+  pub grpc_service: String,
+  #[serde(default = "default_grpc_health_expected_statuses")]
+  pub grpc_expected_statuses: Vec<GrpcHealthServingStatus>,
 }
 
 impl Default for UpstreamPoolHealthCheckConfig {
@@ -2674,8 +2857,28 @@ impl Default for UpstreamPoolHealthCheckConfig {
       healthy_threshold: default_health_check_healthy_threshold(),
       unhealthy_threshold: default_health_check_unhealthy_threshold(),
       expected_status: default_health_check_expected_status(),
+      protocol: HealthCheckProtocol::Http,
+      grpc_service: String::new(),
+      grpc_expected_statuses: default_grpc_health_expected_statuses(),
     }
   }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthCheckProtocol {
+  #[default]
+  Http,
+  Grpc,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum GrpcHealthServingStatus {
+  Unknown,
+  Serving,
+  NotServing,
+  ServiceUnknown,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -2776,11 +2979,32 @@ pub struct RouteConfig {
   #[serde(default)]
   pub upstream_pool: Option<String>,
   #[serde(default)]
+  pub upstream_http_version: Option<HttpVersion>,
+  #[serde(default)]
+  pub generic_http_upgrade: bool,
+  #[serde(default)]
+  pub connect_tunneling: bool,
+  #[serde(default)]
+  pub grpc_web: bool,
+  #[serde(default)]
   pub cache: Option<String>,
   #[serde(default)]
   pub compression: Option<String>,
   #[serde(default)]
   pub waf: RouteWafConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct StreamListenerConfig {
+  pub name: String,
+  pub bind: SocketAddr,
+  pub target: String,
+  #[serde(default = "default_connect_timeout_ms")]
+  pub connect_timeout_ms: u64,
+  #[serde(default = "default_client_idle_timeout_ms")]
+  pub idle_timeout_ms: u64,
+  #[serde(default)]
+  pub proxy_protocol_egress: ProxyProtocolEgressMode,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
@@ -3036,6 +3260,10 @@ fn default_health_check_unhealthy_threshold() -> u32 {
 
 fn default_health_check_expected_status() -> Vec<u16> {
   vec![200, 204]
+}
+
+fn default_grpc_health_expected_statuses() -> Vec<GrpcHealthServingStatus> {
+  vec![GrpcHealthServingStatus::Serving]
 }
 
 fn default_database_access_log_max_connections() -> u32 {

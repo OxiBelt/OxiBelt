@@ -10,12 +10,29 @@ TLS_KEY_FILE = os.environ.get("TLS_KEY_FILE")
 TLS_ENABLED = bool(TLS_CERT_FILE and TLS_KEY_FILE)
 UPSTREAM_NAME = os.environ.get("UPSTREAM_NAME", "mock-upstream")
 UPSTREAM_MARKER = "mock-upstream"
+ACCEPT_PROXY_PROTOCOL = os.environ.get("ACCEPT_PROXY_PROTOCOL", "0") == "1"
 
 
 class EchoHandler(BaseHTTPRequestHandler):
   protocol_version = "HTTP/1.1"
 
+  def setup(self):
+    super().setup()
+    self.proxy_protocol_line = None
+    if not ACCEPT_PROXY_PROTOCOL:
+      return
+    try:
+      peeked = self.rfile.peek(5)
+    except (AttributeError, OSError):
+      return
+    if not peeked.startswith(b"PROXY"):
+      return
+    line = self.rfile.readline(108)
+    self.proxy_protocol_line = line.decode("ascii", "replace").rstrip("\r\n")
+
   def do_GET(self):
+    if self._handle_upgrade():
+      return
     self._handle()
 
   def do_POST(self):
@@ -43,6 +60,7 @@ class EchoHandler(BaseHTTPRequestHandler):
       "request_version": self.request_version,
       "headers": {key.lower(): value for key, value in self.headers.items()},
       "body": body,
+      "proxy_protocol_line": self.proxy_protocol_line,
     }
     encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
     self.send_response(status)
@@ -53,6 +71,21 @@ class EchoHandler(BaseHTTPRequestHandler):
     self.send_header("content-length", str(len(encoded)))
     self.end_headers()
     self.wfile.write(encoded)
+
+  def _handle_upgrade(self):
+    upgrade = self.headers.get("upgrade")
+    connection = self.headers.get("connection", "")
+    if not upgrade or "upgrade" not in connection.lower():
+      return False
+
+    self.send_response_only(101, "Switching Protocols")
+    self.send_header("Connection", "Upgrade")
+    self.send_header("Upgrade", upgrade)
+    self.end_headers()
+    self.connection.settimeout(5.0)
+    data = self.connection.recv(4096)
+    self.connection.sendall(b"upgraded:" + data)
+    return True
 
 
 def main():

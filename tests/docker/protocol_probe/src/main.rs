@@ -321,6 +321,9 @@ async fn echo_upstream_request(
     scheme: Arc<str>,
 ) -> Response<Full<Bytes>> {
     let (parts, body) = request.into_parts();
+    if parts.uri.path() == "/grpc.health.v1.Health/Check" {
+        return grpc_health_response();
+    }
     let status = status_from_path(parts.uri.path()).unwrap_or(StatusCode::OK);
     let body_bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
@@ -347,6 +350,20 @@ async fn echo_upstream_request(
       "body": body_text,
     });
     json_response(status, payload.to_string(), Some(upstream_name.as_ref()))
+}
+
+fn grpc_health_response() -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::from_static(&[
+        0, 0, 0, 0, 2, 0x08, 1,
+    ])));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+    response
+        .headers_mut()
+        .insert(HeaderName::from_static("grpc-status"), HeaderValue::from_static("0"));
+    response
 }
 
 fn status_from_path(path: &str) -> Option<StatusCode> {

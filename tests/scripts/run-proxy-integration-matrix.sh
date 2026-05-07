@@ -281,6 +281,96 @@ proxy_protocol_client_request() {
   fail_with_diagnostics "PROXY protocol request did not reach expected status ${expect_status}"
 }
 
+upgrade_client_request() {
+  local host="$1"
+  local path="$2"
+  local token="$3"
+  local body="$4"
+  local expect_status="$5"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-upgrade-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --entrypoint python \
+      "${mock_image}" \
+      /opt/mock_upstream/client.py \
+      --scheme https \
+      --path "${path}" \
+      --host "${host}" \
+      --port 8443 \
+      --method GET \
+      --body "${body}" \
+      --ca-file /tmp/proxy-ca.pem \
+      --upgrade-token "${token}" \
+      --dump-response-json \
+      --expect-status "${expect_status}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "upgrade client request failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "upgrade request did not reach expected status ${expect_status}"
+}
+
+connect_tunnel_request() {
+  local host="$1"
+  local tunneled_path="$2"
+  local expect_status="$3"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-connect-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --entrypoint python \
+      "${mock_image}" \
+      /opt/mock_upstream/client.py \
+      --scheme https \
+      --path "${tunneled_path}" \
+      --host "${host}" \
+      --port 8443 \
+      --method GET \
+      --body "" \
+      --ca-file /tmp/proxy-ca.pem \
+      --connect-tunnel \
+      --dump-response-json \
+      --expect-status "${expect_status}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "CONNECT tunnel request failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "CONNECT tunnel did not reach expected status ${expect_status}"
+}
+
 reload_proxy() {
   docker kill --signal HUP "${proxy_container}" >/dev/null
 }
@@ -577,6 +667,7 @@ if [[ "${CASE_NEED_HTTP_UPSTREAM}" == "1" ]]; then
     --network-alias mock-http \
     -e LISTEN_PORT=18080 \
     -e UPSTREAM_NAME=http-upstream \
+    -e ACCEPT_PROXY_PROTOCOL=1 \
     "${mock_image}" >/dev/null
 fi
 
@@ -588,6 +679,7 @@ if [[ "${CASE_NEED_ALT_UPSTREAM}" == "1" ]]; then
     --network-alias mock-alt \
     -e LISTEN_PORT=18081 \
     -e UPSTREAM_NAME=alt-upstream \
+    -e ACCEPT_PROXY_PROTOCOL=1 \
     "${mock_image}" >/dev/null
 fi
 
