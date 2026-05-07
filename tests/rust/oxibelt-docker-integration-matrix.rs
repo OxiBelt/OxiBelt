@@ -33,6 +33,7 @@ struct Needs {
     alt_upstream: bool,
     h2_upstream: bool,
     h2c_upstream: bool,
+    h3_upstream: bool,
     protocol_probe: bool,
     pq_probe: bool,
     postgres: bool,
@@ -186,6 +187,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     manifest.push_str(&format!(
         "CASE_NEED_H2C_UPSTREAM={}\n",
         bool_env(case.needs.h2c_upstream)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_H3_UPSTREAM={}\n",
+        bool_env(case.needs.h3_upstream)
     ));
     manifest.push_str(&format!(
         "CASE_NEED_PROTOCOL_PROBE={}\n",
@@ -1549,6 +1554,159 @@ run_case_checks() {
     and .path == "/h2c-origin/app/downstream-h2-upstream-h2c"
     and .headers["x-forwarded-proto"] == "https"
     and .headers["x-forwarded-host"] == "example.test"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "downstream-h2-upstream-h3-pooled",
+            "downstream HTTP/2 forwards sequential requests over one pooled HTTP/3 upstream connection",
+            ExpectStart::Success,
+            Needs {
+                h3_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second first_id second_id
+  first="$(protocol_probe_client "h2" "example.test" "/app/pooled-first" 200)"
+  second="$(protocol_probe_client "h2" "example.test" "/app/pooled-second" 200)"
+  assert_body_jq "${first}" '.upstream == "h3-upstream"
+    and .scheme == "https"
+    and .request_version == "HTTP/3.0"
+    and .path == "/h3-origin/app/pooled-first"'
+  assert_body_jq "${second}" '.path == "/h3-origin/app/pooled-second"'
+  first_id="$(jq -r '.body | fromjson | .connection_id' <<<"${first}")"
+  second_id="$(jq -r '.body | fromjson | .connection_id' <<<"${second}")"
+  if [[ "${first_id}" != "${second_id}" ]]; then
+    echo "expected pooled upstream H3 connection id to be reused; got ${first_id} then ${second_id}" >&2
+    fail_with_diagnostics "upstream H3 pool did not reuse the connection"
+  fi
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "downstream-h2-upstream-h3-pooled-reconnect",
+            "pooled upstream HTTP/3 entries are discarded and reconnected after the upstream closes",
+            ExpectStart::Success,
+            Needs {
+                h3_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second first_instance second_instance
+  first="$(protocol_probe_client "h2" "example.test" "/app/reconnect-before" 200)"
+  assert_body_jq "${first}" '.upstream == "h3-upstream"
+    and .scheme == "https"
+    and .request_version == "HTTP/3.0"
+    and .path == "/h3-origin/app/reconnect-before"'
+
+  docker restart "${h3_container}" >/dev/null
+
+  second="$(protocol_probe_client "h2" "example.test" "/app/reconnect-after" 200)"
+  assert_body_jq "${second}" '.upstream == "h3-upstream"
+    and .scheme == "https"
+    and .request_version == "HTTP/3.0"
+    and .path == "/h3-origin/app/reconnect-after"'
+  first_instance="$(jq -r '.body | fromjson | .instance_id' <<<"${first}")"
+  second_instance="$(jq -r '.body | fromjson | .instance_id' <<<"${second}")"
+  if [[ "${first_instance}" == "${second_instance}" ]]; then
+    echo "expected pooled upstream H3 request to reach a restarted upstream instance; got ${first_instance}" >&2
+    fail_with_diagnostics "upstream H3 pool did not reconnect after upstream restart"
+  fi
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "alt-svc-https-response",
+            "HTTPS HTTP/1.1 and HTTP/2 responses advertise HTTP/3 with Alt-Svc",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local h1 h2
+  h1="$(client_request "example.test" "/app/alt-svc-h1" 200)"
+  assert_response_jq "${h1}" '.headers["alt-svc"] == "h3=\":8443\"; ma=86400"'
+  h2="$(protocol_probe_client "h2" "example.test" "/app/alt-svc-h2" 200)"
+  assert_response_jq "${h2}" '.headers["alt-svc"] == "h3=\":8443\"; ma=86400"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "alt-svc-skip-rules",
+            "Alt-Svc is not advertised on plain HTTP, downstream HTTP/3, or 101 responses",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local plain h3 upgrade
+  plain="$(plain_client_request "example.test" "/app/plain-alt-svc-skip" 200)"
+  assert_response_jq "${plain}" '.headers["alt-svc"] == null'
+
+  h3="$(protocol_probe_client "h3" "example.test" "/app/h3-alt-svc-skip" 200)"
+  assert_response_jq "${h3}" '.headers["alt-svc"] == null'
+
+  upgrade="$(upgrade_client_request "example.test" "/app/upgrade-alt-svc-skip" "matrix-upgrade" "hello-upgrade" 101)"
+  assert_response_jq "${upgrade}" '.headers["alt-svc"] == null'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "downstream-h3-retry",
+            "downstream HTTP/3 requests succeed when QUIC Retry is enabled",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h3" "example.test" "/app/retry-enabled" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h3"'
+  assert_body_jq "${response}" '.path == "/origin/app/retry-enabled"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "downstream-h3-zero-rtt-policy",
+            "HTTP/3 early-data policy allows safe methods and rejects unsafe methods",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local get_response post_response
+  get_response="$(protocol_probe_client_with_headers "h3" "example.test" "/app/early-get" 200 "GET" "" "Early-Data: 1")"
+  assert_body_jq "${get_response}" '.path == "/origin/app/early-get"'
+  post_response="$(protocol_probe_client_with_headers "h3" "example.test" "/app/early-post" 425 "POST" "unsafe" "Early-Data: 1")"
+  assert_response_jq "${post_response}" '.status == 425'
 }
 "#,
             None,

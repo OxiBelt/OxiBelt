@@ -239,6 +239,48 @@ mode = "disabled" # disabled | static_file | live_fetch
 
 `cert_chain` and `private_key` are required. `tls.client_auth.ca_certs` is required when client authentication mode is not `off`. `tls.ocsp.mode = "static_file"` requires `response_file`; `live_fetch` is reserved and rejected. HTTP/3 requires `tls.min_version = "tls1.3"`.
 
+## QUIC Sections
+
+```toml
+[quic]
+retry = false
+zero_rtt = "off" # off | safe_methods
+# host_key_file = "quic-host-key.b64"
+
+[quic.alt_svc]
+enabled = true
+max_age_seconds = 86400
+persist = false
+
+[quic.transport]
+max_concurrent_bidi_streams = 100
+max_concurrent_uni_streams = 100
+idle_timeout_ms = 30000
+datagram_receive_buffer_bytes = 1048576
+datagram_send_buffer_bytes = 1048576
+max_udp_payload_size = 1472
+gso = true
+
+[quic.socket]
+receive_buffer_bytes = 0
+send_buffer_bytes = 0
+
+[quic.upstream_pool]
+enabled = true
+max_connections_per_upstream = 1
+max_lifetime_ms = 600000
+```
+
+`retry = true` enables QUIC Retry/address validation for unvalidated downstream HTTP/3 connection attempts. `zero_rtt = "safe_methods"` enables QUIC TLS early data and rejects unsafe early-data requests with `425 Too Early`; only `GET` and `HEAD` are accepted.
+
+`host_key_file` is optional and is resolved under the cert directory. It must contain base64 for exactly 64 random bytes. OxiBelt derives QUIC stateless reset and Retry/validation token keys from this material. The file is included in runtime reload fingerprints and in downstream TLS reload inputs.
+
+When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/1.1 and HTTP/2 responses advertise `Alt-Svc: h3=":<https port>"; ma=<max_age_seconds>`. `persist = true` appends `; persist=1`. OxiBelt does not add `Alt-Svc` to downstream HTTP/3 responses, plain HTTP responses, or `101 Switching Protocols`.
+
+`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to the UDP socket. Other QUIC transport and pool numeric values must be greater than zero; `max_udp_payload_size` must be in the QUIC-valid range `1200..=65527`.
+
+The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
+
 ## Proxy Sections
 
 ```toml

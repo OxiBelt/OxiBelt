@@ -44,6 +44,34 @@ verify_depth = 4
 [tls.ocsp]
 mode = "disabled"
 
+[quic]
+retry = false
+zero_rtt = "off"
+# host_key_file = "quic-host-key.b64"
+
+[quic.alt_svc]
+enabled = true
+max_age_seconds = 86400
+persist = false
+
+[quic.transport]
+max_concurrent_bidi_streams = 100
+max_concurrent_uni_streams = 100
+idle_timeout_ms = 30000
+datagram_receive_buffer_bytes = 1048576
+datagram_send_buffer_bytes = 1048576
+max_udp_payload_size = 1472
+gso = true
+
+[quic.socket]
+receive_buffer_bytes = 0
+send_buffer_bytes = 0
+
+[quic.upstream_pool]
+enabled = true
+max_connections_per_upstream = 1
+max_lifetime_ms = 600000
+
 [proxy]
 trusted_ca_certs = []
 

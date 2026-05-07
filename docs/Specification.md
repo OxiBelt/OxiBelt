@@ -47,6 +47,10 @@ Downstream protocol support:
 - Deployments that enable HTTP/3 must expose the HTTPS bind address for both TCP and UDP.
 - Downstream HTTP/3 always requires TLS 1.3.
 - The same downstream client certificate policy is enforced for TCP TLS and HTTP/3/QUIC listeners.
+- QUIC Retry/address validation can be enabled with `quic.retry`.
+- HTTPS HTTP/1.1 and HTTP/2 responses advertise HTTP/3 with `Alt-Svc` when downstream HTTP/3 and `quic.alt_svc.enabled` are both enabled. OxiBelt does not add that header on HTTP/3, plain HTTP, or `101 Switching Protocols` responses.
+- QUIC 0-RTT is disabled by default. `quic.zero_rtt = "safe_methods"` enables early data and only permits early-data `GET` and `HEAD`; unsafe methods receive `425 Too Early`.
+- `quic.host_key_file` provides shared host key material for stateless reset and Retry/validation tokens. It is cert-directory relative and hot-reload tracked.
 
 Upstream protocol support:
 
@@ -54,6 +58,7 @@ Upstream protocol support:
 - HTTP/2 over `https://` uses TLS ALPN.
 - HTTP/2 over `http://` uses h2c with prior knowledge.
 - HTTP/3 requires an `https://` upstream origin.
+- Ordinary upstream HTTP/3 forwarding uses a per-upstream QUIC connection pool and multiplexes requests over pooled HTTP/3 connections. WebTransport uses a dedicated upstream QUIC connection per session.
 - `proxy.auto_upgrade` controls the maximum upstream HTTP version OxiBelt may select.
 - Route-level `upstream_http_version` can override backend protocol selection within the selected upstream capability.
 - PROXY protocol egress is supported only for TCP-based upstream connections and stream proxy targets, not HTTP/3/QUIC upstreams.

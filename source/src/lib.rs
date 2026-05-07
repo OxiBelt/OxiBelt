@@ -21,6 +21,7 @@ pub mod pools;
 pub mod proxy;
 pub mod proxy_protocol;
 pub mod proxy_protocol_egress;
+pub mod quic;
 pub mod reload;
 pub mod routes;
 pub mod runtime;

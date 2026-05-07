@@ -104,6 +104,7 @@ impl ReloadManager {
       upstreams: active.upstreams.clone(),
       config,
       clients: active.clients.clone(),
+      h3_clients: active.h3_clients.clone(),
       limits: active.limits.clone(),
       pools: active.pools.clone(),
       cache: active.cache.clone(),
@@ -163,7 +164,10 @@ impl ReloadManager {
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to rebuild downstream TLS config")?;
     let quic_server_config = if config.listeners.http3 {
-      Some(tls::build_quic_server_config(&config.tls).context("failed to rebuild QUIC TLS config")?)
+      Some(
+        tls::build_quic_server_config(&config.tls, &config.quic)
+          .context("failed to rebuild QUIC TLS config")?,
+      )
     } else {
       None
     };
@@ -172,6 +176,7 @@ impl ReloadManager {
       upstreams: active.upstreams.clone(),
       config,
       clients: active.clients.clone(),
+      h3_clients: active.h3_clients.clone(),
       limits: active.limits.clone(),
       pools: active.pools.clone(),
       cache: active.cache.clone(),
@@ -224,8 +229,16 @@ fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
     .as_ref()
     .map(|path| canonicalize_under_base("tls.ocsp.response_file", cert_dir, path))
     .transpose()?;
+  let quic_host_key_file = config
+    .source_paths
+    .quic_host_key_file
+    .as_ref()
+    .map(|path| canonicalize_under_base("quic.host_key_file", cert_dir, path))
+    .transpose()?;
 
   let old_tls = config.tls.clone();
+  let mut old_quic = config.quic.clone();
+  old_quic.host_key_file = quic_host_key_file;
   config.tls = TlsConfig {
     cert_chain: canonicalize_under_base("tls.cert_chain", cert_dir, cert_chain)?,
     private_key: canonicalize_under_base("tls.private_key", cert_dir, private_key)?,
@@ -239,6 +252,7 @@ fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
       response_file: ocsp,
     },
   };
+  config.quic = old_quic;
   Ok(())
 }
 

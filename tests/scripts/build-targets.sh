@@ -36,6 +36,9 @@ rustup target add "${gnu_target}" "${musl_target}"
 if [[ "${musl_target}" == "x86_64-unknown-linux-musl" ]] && command -v musl-gcc >/dev/null 2>&1; then
   export CC_x86_64_unknown_linux_musl="musl-gcc"
   export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="musl-gcc"
+elif [[ "${musl_target}" == "x86_64-unknown-linux-musl" ]] && ! command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
+  echo "x86_64-unknown-linux-musl requires musl-gcc or x86_64-linux-musl-gcc (install musl-tools or set CC_x86_64_unknown_linux_musl)." >&2
+  exit 1
 fi
 
 if [[ "${gnu_target}" == "riscv64gc-unknown-linux-gnu" ]] && command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then

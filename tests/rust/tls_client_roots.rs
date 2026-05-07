@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use h3_quinn::quinn::Endpoint;
 use oxibelt::config::{
-    ListenerConfig, OcspConfig, ProxyProtocolConfig, TlsClientAuthConfig, TlsClientAuthMode,
-    TlsConfig, TlsVersion, UpstreamEchConfig, UpstreamEchMode,
+    ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, TlsClientAuthConfig,
+    TlsClientAuthMode, TlsConfig, TlsVersion, UpstreamEchConfig, UpstreamEchMode,
 };
 use oxibelt::tls;
 
@@ -105,7 +105,7 @@ fn quic_server_config_rejects_invalid_client_auth_roots() {
         },
     );
 
-    let error = tls::build_quic_server_config(&tls_config)
+    let error = tls::build_quic_server_config(&tls_config, &QuicConfig::default())
         .expect_err("QUIC client auth must validate configured CA roots");
     assert!(
         error
@@ -175,7 +175,7 @@ async fn quic_connect_without_client_certificate(
     tls_config: &TlsConfig,
     trusted_server_root: &Path,
 ) -> Result<(), String> {
-    let server_config = tls::build_quic_server_config(tls_config)
+    let server_config = tls::build_quic_server_config(tls_config, &QuicConfig::default())
         .map_err(|error| format!("failed to build QUIC server config: {error}"))?;
     let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())
         .map_err(|error| format!("failed to start QUIC server endpoint: {error}"))?;
@@ -186,6 +186,7 @@ async fn quic_connect_without_client_certificate(
     let client_config = tls::build_upstream_quic_client_config(
         &[trusted_server_root.to_path_buf()],
         &UpstreamEchConfig::default(),
+        &QuicConfig::default(),
     )
     .map_err(|error| format!("failed to build QUIC client config: {error}"))?;
     let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap())

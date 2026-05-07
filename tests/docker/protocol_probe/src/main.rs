@@ -6,11 +6,14 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
 use bytes::{Buf, Bytes, BytesMut};
-use h3_quinn::quinn::crypto::rustls::QuicClientConfig;
-use h3_quinn::quinn::{ClientConfig as QuinnClientConfig, Endpoint};
+use h3_quinn::quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use h3_quinn::quinn::{
+    ClientConfig as QuinnClientConfig, Endpoint, ServerConfig as QuinnServerConfig,
+};
 use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::{BodyExt, Full};
@@ -57,6 +60,13 @@ struct H2cUpstreamArgs {
     name: String,
 }
 
+struct H3UpstreamArgs {
+    listen: SocketAddr,
+    cert: String,
+    key: String,
+    name: String,
+}
+
 struct DownstreamArgs {
     protocol: DownstreamProtocol,
     host: String,
@@ -66,6 +76,7 @@ struct DownstreamArgs {
     path: String,
     method: Method,
     body: String,
+    headers: HeaderMap,
     ca_cert: String,
     expect_status: Option<u16>,
 }
@@ -81,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
     match command.as_str() {
         "h2-upstream" => serve_h2_upstream(parse_h2_upstream_args(args)?).await,
         "h2c-upstream" => serve_h2c_upstream(parse_h2c_upstream_args(args)?).await,
+        "h3-upstream" => serve_h3_upstream(parse_h3_upstream_args(args)?).await,
         "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
         _ => {
             usage();
@@ -91,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]"
+    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-status <status>]"
   );
 }
 
@@ -147,6 +159,16 @@ fn parse_h2c_upstream_args(
     })
 }
 
+fn parse_h3_upstream_args(args: impl Iterator<Item = String>) -> anyhow::Result<H3UpstreamArgs> {
+    let parsed = parse_h2_upstream_args(args)?;
+    Ok(H3UpstreamArgs {
+        listen: parsed.listen,
+        cert: parsed.cert,
+        key: parsed.key,
+        name: parsed.name,
+    })
+}
+
 fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<DownstreamArgs> {
     let mut protocol = None;
     let mut host = None;
@@ -156,6 +178,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     let mut path = None;
     let mut method = Method::GET;
     let mut body = String::new();
+    let mut headers = HeaderMap::new();
     let mut ca_cert = None;
     let mut expect_status = None;
 
@@ -172,6 +195,15 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
             "--path" => path = Some(validate_origin_form_path(&value)?),
             "--method" => method = value.parse().context("invalid --method value")?,
             "--body" => body = value,
+            "--header" => {
+                let (name, value) = value
+                    .split_once(':')
+                    .ok_or_else(|| anyhow!("invalid --header value; expected name:value"))?;
+                headers.insert(
+                    HeaderName::try_from(name.trim()).context("invalid --header name")?,
+                    HeaderValue::from_str(value.trim()).context("invalid --header value")?,
+                );
+            }
             "--ca-cert" => ca_cert = Some(value),
             "--expect-status" => {
                 expect_status = Some(value.parse().context("invalid --expect-status value")?);
@@ -190,6 +222,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         path: path.ok_or_else(|| anyhow!("--path is required"))?,
         method,
         body,
+        headers,
         ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
         expect_status,
     })
@@ -315,6 +348,170 @@ async fn handle_h2c_upstream_connection(
     Ok(())
 }
 
+async fn serve_h3_upstream(args: H3UpstreamArgs) -> anyhow::Result<()> {
+    let mut server_config = ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .context("failed to configure upstream QUIC TLS versions")?
+    .with_no_client_auth()
+    .with_single_cert(
+        load_certs(Path::new(&args.cert))?,
+        load_private_key(Path::new(&args.key))?,
+    )
+    .context("failed to configure upstream QUIC certificate")?;
+    server_config.alpn_protocols = vec![b"h3".to_vec()];
+    let quic_crypto =
+        QuicServerConfig::try_from(server_config).context("failed to build QUIC server config")?;
+    let mut quic_server_config = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
+    let mut transport = h3_quinn::quinn::TransportConfig::default();
+    transport.datagram_receive_buffer_size(Some(1024 * 1024));
+    transport.datagram_send_buffer_size(1024 * 1024);
+    quic_server_config.transport_config(Arc::new(transport));
+    let endpoint = Endpoint::server(quic_server_config, args.listen)
+        .with_context(|| format!("failed to bind h3 upstream to {}", args.listen))?;
+    let upstream_name = Arc::<str>::from(args.name);
+    let scheme = Arc::<str>::from("https");
+    let instance_id = Arc::<str>::from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before Unix epoch")?
+            .as_nanos()
+            .to_string(),
+    );
+
+    loop {
+        let Some(incoming) = endpoint.accept().await else {
+            return Ok(());
+        };
+        let upstream_name = upstream_name.clone();
+        let scheme = scheme.clone();
+        let instance_id = instance_id.clone();
+        tokio::spawn(async move {
+            match incoming.await {
+                Ok(connection) => {
+                    let connection_id = connection.stable_id();
+                    if let Err(error) = handle_h3_upstream_connection(
+                        connection,
+                        upstream_name,
+                        scheme,
+                        instance_id,
+                        connection_id,
+                    )
+                    .await
+                    {
+                        eprintln!("h3 upstream connection {connection_id} failed: {error:#}");
+                    }
+                }
+                Err(error) => eprintln!("h3 upstream accept failed: {error:#}"),
+            }
+        });
+    }
+}
+
+async fn handle_h3_upstream_connection(
+    connection: h3_quinn::quinn::Connection,
+    upstream_name: Arc<str>,
+    scheme: Arc<str>,
+    instance_id: Arc<str>,
+    connection_id: usize,
+) -> anyhow::Result<()> {
+    let quic_connection = h3_quinn::Connection::new(connection);
+    let mut h3_connection = h3::server::builder()
+        .build(quic_connection)
+        .await
+        .context("failed to establish upstream HTTP/3 connection")?;
+
+    loop {
+        let Some(resolver) = h3_connection
+            .accept()
+            .await
+            .context("failed to accept upstream HTTP/3 request")?
+        else {
+            return Ok(());
+        };
+        let (request, mut stream) = resolver
+            .resolve_request()
+            .await
+            .context("failed to resolve upstream HTTP/3 request")?;
+        let response = echo_h3_upstream_request(
+            request,
+            &mut stream,
+            upstream_name.clone(),
+            scheme.clone(),
+            instance_id.clone(),
+            connection_id,
+        )
+        .await;
+        let (parts, body) = response.into_parts();
+        let body = body
+            .collect()
+            .await
+            .expect("Full body is infallible")
+            .to_bytes();
+        stream
+            .send_response(Response::from_parts(parts, ()))
+            .await
+            .context("failed to send upstream HTTP/3 response headers")?;
+        if !body.is_empty() {
+            stream
+                .send_data(body)
+                .await
+                .context("failed to send upstream HTTP/3 response body")?;
+        }
+        stream
+            .finish()
+            .await
+            .context("failed to finish upstream HTTP/3 response")?;
+    }
+}
+
+async fn echo_h3_upstream_request(
+    request: Request<()>,
+    stream: &mut h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    upstream_name: Arc<str>,
+    scheme: Arc<str>,
+    instance_id: Arc<str>,
+    connection_id: usize,
+) -> Response<Full<Bytes>> {
+    let (parts, _) = request.into_parts();
+    let status = status_from_path(parts.uri.path()).unwrap_or(StatusCode::OK);
+    let mut body_bytes = BytesMut::new();
+    loop {
+        match stream.recv_data().await {
+            Ok(Some(mut chunk)) => {
+                let len = chunk.remaining();
+                body_bytes.extend_from_slice(&chunk.copy_to_bytes(len));
+            }
+            Ok(None) => break,
+            Err(error) => {
+                return text_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("failed to read upstream HTTP/3 request body: {error}"),
+                );
+            }
+        }
+    }
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let payload = serde_json::json!({
+      "upstream": upstream_name.as_ref(),
+      "scheme": scheme.as_ref(),
+      "method": parts.method.as_str(),
+      "path": path,
+      "request_version": version_label(Version::HTTP_3),
+      "headers": header_json(&parts.headers),
+      "body": body_text,
+      "instance_id": instance_id.as_ref(),
+      "connection_id": connection_id,
+    });
+    json_response(status, payload.to_string(), Some(upstream_name.as_ref()))
+}
+
 async fn echo_upstream_request(
     request: Request<Incoming>,
     upstream_name: Arc<str>,
@@ -353,16 +550,15 @@ async fn echo_upstream_request(
 }
 
 fn grpc_health_response() -> Response<Full<Bytes>> {
-    let mut response = Response::new(Full::new(Bytes::from_static(&[
-        0, 0, 0, 0, 2, 0x08, 1,
-    ])));
+    let mut response = Response::new(Full::new(Bytes::from_static(&[0, 0, 0, 0, 2, 0x08, 1])));
     *response.status_mut() = StatusCode::OK;
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
-    response
-        .headers_mut()
-        .insert(HeaderName::from_static("grpc-status"), HeaderValue::from_static("0"));
+    response.headers_mut().insert(
+        HeaderName::from_static("grpc-status"),
+        HeaderValue::from_static("0"),
+    );
     response
 }
 
@@ -544,13 +740,15 @@ fn downstream_request<B>(
     let uri: Uri = format!("https://{}{}", args.authority, args.path)
         .parse()
         .context("failed to build request URI")?;
-    Request::builder()
+    let mut request = Request::builder()
         .method(args.method.clone())
         .uri(uri)
         .version(version)
-        .header(CONTENT_LENGTH, args.body.len().to_string())
-        .body(body)
-        .map_err(Into::into)
+        .header(CONTENT_LENGTH, args.body.len().to_string());
+    for (name, value) in &args.headers {
+        request = request.header(name, value);
+    }
+    request.body(body).map_err(Into::into)
 }
 
 async fn resolve_remote_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {

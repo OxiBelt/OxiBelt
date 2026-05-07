@@ -3,17 +3,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
 use h3_quinn::quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use h3_quinn::quinn::{
-  ClientConfig as QuinnClientConfig, ServerConfig as QuinnServerConfig, TransportConfig,
-};
+use h3_quinn::quinn::{ClientConfig as QuinnClientConfig, ServerConfig as QuinnServerConfig};
 use rustls::client::{EchConfig, EchGreaseConfig, EchMode};
 use rustls::crypto::hpke::Hpke;
 use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 
 use crate::config::{
-  ListenerConfig, OcspMode, TlsClientAuthConfig, TlsClientAuthMode, TlsConfig, TlsVersion,
-  UpstreamEchConfig, UpstreamEchMode, canonicalize_existing_file,
+  ListenerConfig, OcspMode, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig, TlsClientAuthMode,
+  TlsConfig, TlsVersion, UpstreamEchConfig, UpstreamEchMode, canonicalize_existing_file,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
@@ -60,7 +58,10 @@ pub fn build_server_config(
   Ok(Arc::new(server_config))
 }
 
-pub fn build_quic_server_config(tls: &TlsConfig) -> anyhow::Result<QuinnServerConfig> {
+pub fn build_quic_server_config(
+  tls: &TlsConfig,
+  quic: &QuicConfig,
+) -> anyhow::Result<QuinnServerConfig> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let certs = load_certs(&tls.cert_chain)?;
   let key = load_private_key(&tls.private_key)?;
@@ -77,12 +78,15 @@ pub fn build_quic_server_config(tls: &TlsConfig) -> anyhow::Result<QuinnServerCo
     None => builder.with_no_client_auth(),
   }
   .with_cert_resolver(Arc::new(cert_resolver));
+  if quic.zero_rtt == QuicZeroRttMode::SafeMethods {
+    server_config.max_early_data_size = u32::MAX;
+  }
   server_config.alpn_protocols = vec![b"h3".to_vec()];
 
   let quic_crypto =
     QuicServerConfig::try_from(server_config).context("failed to build QUIC server TLS config")?;
   let mut quic_config = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
-  quic_config.transport_config(quic_transport_config());
+  crate::quic::apply_server_config(quic, &mut quic_config)?;
   Ok(quic_config)
 }
 
@@ -111,6 +115,7 @@ pub fn build_upstream_client_config(
 pub fn build_upstream_quic_client_config(
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,
+  quic: &QuicConfig,
 ) -> anyhow::Result<QuinnClientConfig> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let roots = load_upstream_root_store(extra_root_certificates)?;
@@ -131,15 +136,8 @@ pub fn build_upstream_quic_client_config(
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC client TLS config")?;
   let mut quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
-  quic_config.transport_config(quic_transport_config());
+  quic_config.transport_config(crate::quic::transport_config(quic)?);
   Ok(quic_config)
-}
-
-fn quic_transport_config() -> Arc<TransportConfig> {
-  let mut transport = TransportConfig::default();
-  transport.datagram_receive_buffer_size(Some(1024 * 1024));
-  transport.datagram_send_buffer_size(1024 * 1024);
-  Arc::new(transport)
 }
 
 fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {

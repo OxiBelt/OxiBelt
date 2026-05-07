@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use http::{Method, Request, Response, StatusCode};
+use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Body, Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -533,6 +533,13 @@ where
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
+  apply_alt_svc_header(
+    &mut parts.headers,
+    parts.status,
+    state.as_ref(),
+    downstream_scheme,
+    request_version,
+  );
 
   let response = maybe_cache_response(
     Response::from_parts(parts, body),
@@ -554,6 +561,48 @@ where
   );
   state.metrics.record_response(response.status());
   response
+}
+
+fn apply_alt_svc_header(
+  headers: &mut HeaderMap,
+  status: StatusCode,
+  state: &AppSnapshot,
+  downstream_scheme: &str,
+  request_version: http::Version,
+) {
+  if !should_add_alt_svc(status, state, downstream_scheme, request_version) {
+    return;
+  }
+  if let Ok(value) = HeaderValue::from_str(&alt_svc_header_value(
+    state.config.listeners.https_bind.port(),
+    &state.config.quic.alt_svc,
+  )) {
+    headers.insert(http::header::ALT_SVC, value);
+  }
+}
+
+fn should_add_alt_svc(
+  status: StatusCode,
+  state: &AppSnapshot,
+  downstream_scheme: &str,
+  request_version: http::Version,
+) -> bool {
+  state.config.listeners.http3
+    && state.config.quic.alt_svc.enabled
+    && downstream_scheme == "https"
+    && matches!(
+      request_version,
+      http::Version::HTTP_10 | http::Version::HTTP_11 | http::Version::HTTP_2
+    )
+    && status != StatusCode::SWITCHING_PROTOCOLS
+}
+
+fn alt_svc_header_value(https_port: u16, config: &crate::config::QuicAltSvcConfig) -> String {
+  let mut value = format!("h3=\":{https_port}\"; ma={}", config.max_age_seconds);
+  if config.persist {
+    value.push_str("; persist=1");
+  }
+  value
 }
 
 struct SelectedUpstream<'a> {
@@ -1531,6 +1580,58 @@ mod tests {
       .header("wt-available-protocols", "\"chat\", data")
       .body(())
       .expect("request should build")
+  }
+
+  #[test]
+  fn alt_svc_header_value_formats_persist() {
+    let config = crate::config::QuicAltSvcConfig {
+      enabled: true,
+      max_age_seconds: 60,
+      persist: true,
+    };
+
+    assert_eq!(
+      alt_svc_header_value(8443, &config),
+      "h3=\":8443\"; ma=60; persist=1"
+    );
+  }
+
+  #[tokio::test]
+  async fn alt_svc_applies_only_to_https_h1_h2_non_switching_responses() {
+    let temp_dir = common::TempDir::new("alt-svc-helper");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "alt-svc-helper");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+      "http3 = false",
+      "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 120\npersist = false",
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
+
+    assert!(should_add_alt_svc(
+      StatusCode::OK,
+      &state,
+      "https",
+      http::Version::HTTP_2
+    ));
+    assert!(!should_add_alt_svc(
+      StatusCode::OK,
+      &state,
+      "https",
+      http::Version::HTTP_3
+    ));
+    assert!(!should_add_alt_svc(
+      StatusCode::OK,
+      &state,
+      "http",
+      http::Version::HTTP_2
+    ));
+    assert!(!should_add_alt_svc(
+      StatusCode::SWITCHING_PROTOCOLS,
+      &state,
+      "https",
+      http::Version::HTTP_11
+    ));
   }
 
   #[tokio::test]

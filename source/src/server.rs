@@ -587,8 +587,7 @@ fn bind_http3_listener(
     .quic_server_config
     .clone()
     .ok_or_else(|| anyhow::anyhow!("HTTP/3 listener is enabled without QUIC server config"))?;
-  let endpoint = h3_quinn::quinn::Endpoint::server(server_config, bind)
-    .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))?;
+  let endpoint = crate::quic::bind_server_endpoint(bind, server_config, &snapshot.config.quic)?;
   Ok(BoundHttp3Listener { bind, endpoint })
 }
 
@@ -615,6 +614,12 @@ async fn serve_http3(
             let Some(connecting) = connecting else {
                 return Ok(());
             };
+            if state.snapshot().config.quic.retry && !connecting.remote_address_validated() && connecting.may_retry() {
+                if let Err(error) = connecting.retry() {
+                    warn!(error = %error, "failed to send QUIC Retry packet");
+                }
+                continue;
+            }
             let connection_state = state.clone();
             tokio::spawn(async move {
                 match connecting.await {

@@ -3,9 +3,10 @@ mod common;
 
 use std::path::Path;
 
+use base64::Engine;
 use oxibelt::config::{
     CompressionConfig, Config, DatabaseTlsMode, ForwardedHeaderMode, HotReloadMode, OcspMode,
-    ProxyProtocolEgressMode, RuntimeOverrides, UpstreamEchMode,
+    ProxyProtocolEgressMode, QuicZeroRttMode, RuntimeOverrides, UpstreamEchMode,
 };
 
 #[test]
@@ -46,6 +47,153 @@ fn protocol_operations_defaults_are_disabled() {
         ProxyProtocolEgressMode::Off
     );
     assert!(config.stream_listeners.is_empty());
+}
+
+#[test]
+fn quic_defaults_are_parsed() {
+    let temp_dir = common::TempDir::new("quic-defaults");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "quic-defaults");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(!config.quic.retry);
+    assert_eq!(config.quic.zero_rtt, QuicZeroRttMode::Off);
+    assert!(config.quic.alt_svc.enabled);
+    assert_eq!(config.quic.alt_svc.max_age_seconds, 86_400);
+    assert_eq!(config.quic.transport.max_concurrent_bidi_streams, 100);
+    assert_eq!(
+        config.quic.transport.datagram_receive_buffer_bytes,
+        1024 * 1024
+    );
+    assert_eq!(config.quic.transport.max_udp_payload_size, 1472);
+    assert_eq!(config.quic.socket.receive_buffer_bytes, 0);
+    assert!(config.quic.upstream_pool.enabled);
+}
+
+#[test]
+fn quic_custom_values_are_parsed() {
+    let temp_dir = common::TempDir::new("quic-custom");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "quic-custom");
+    let raw = format!(
+        r#"
+{}
+
+[quic]
+retry = true
+zero_rtt = "safe_methods"
+
+[quic.alt_svc]
+enabled = false
+max_age_seconds = 42
+persist = true
+
+[quic.transport]
+max_concurrent_bidi_streams = 8
+max_concurrent_uni_streams = 9
+idle_timeout_ms = 1234
+datagram_receive_buffer_bytes = 2048
+datagram_send_buffer_bytes = 4096
+max_udp_payload_size = 1300
+gso = false
+
+[quic.socket]
+receive_buffer_bytes = 8192
+send_buffer_bytes = 16384
+
+[quic.upstream_pool]
+enabled = false
+max_connections_per_upstream = 2
+max_lifetime_ms = 7777
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(config.quic.retry);
+    assert_eq!(config.quic.zero_rtt, QuicZeroRttMode::SafeMethods);
+    assert!(!config.quic.alt_svc.enabled);
+    assert_eq!(config.quic.alt_svc.max_age_seconds, 42);
+    assert!(config.quic.alt_svc.persist);
+    assert_eq!(config.quic.transport.max_concurrent_bidi_streams, 8);
+    assert_eq!(config.quic.transport.max_concurrent_uni_streams, 9);
+    assert_eq!(config.quic.transport.idle_timeout_ms, 1234);
+    assert_eq!(config.quic.socket.receive_buffer_bytes, 8192);
+    assert!(!config.quic.upstream_pool.enabled);
+}
+
+#[test]
+fn quic_invalid_numeric_values_are_rejected() {
+    let temp_dir = common::TempDir::new("quic-invalid-numeric");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "quic-invalid-numeric");
+    let raw = format!(
+        r#"
+{}
+
+[quic.transport]
+idle_timeout_ms = 0
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid QUIC numeric value should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("quic.transport numeric values must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn config_load_resolves_quic_host_key_under_cert_directory() {
+    let temp_dir = common::TempDir::new("quic-host-key");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "quic-host-key");
+    let host_key_path = cert_dir.join("quic-host-key.b64");
+    std::fs::write(
+        &host_key_path,
+        base64::engine::general_purpose::STANDARD.encode([9u8; 64]),
+    )
+    .expect("failed to write host key");
+    let cert_file = cert_path.file_name().unwrap().to_string_lossy();
+    let key_file = key_path.file_name().unwrap().to_string_lossy();
+    let config_path = config_dir.join("oxibelt.toml");
+    let raw = format!(
+        r#"
+{}
+
+[quic]
+host_key_file = "quic-host-key.b64"
+"#,
+        common::minimal_config_toml_with_paths(&cert_file, &key_file)
+    );
+    std::fs::write(&config_path, raw).expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load");
+    let expected_host_key_path = host_key_path.canonicalize().unwrap();
+
+    assert_eq!(
+        config.quic.host_key_file.as_deref(),
+        Some(expected_host_key_path.as_path())
+    );
+    assert!(
+        config
+            .source_paths
+            .downstream_tls_reload_files()
+            .contains(&host_key_path)
+    );
 }
 
 #[test]

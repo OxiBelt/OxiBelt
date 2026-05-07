@@ -1,5 +1,7 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
@@ -10,10 +12,11 @@ use h3_webtransport::server::{AcceptedBi, WebTransportSession};
 use http_body_util::BodyExt;
 use hyper::body::Frame;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::oneshot;
+use tokio::sync::{Mutex, oneshot};
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::config::UpstreamConfig;
+use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::body::{ProxyBody, boxed_error, channel_body};
 use crate::proxy::http::response::text_response;
@@ -24,8 +27,211 @@ use crate::tls;
 type H3BidiStream = h3_quinn::BidiStream<Bytes>;
 type H3RequestStream = h3::server::RequestStream<H3BidiStream, Bytes>;
 type H3WebTransportSession = WebTransportSession<h3_quinn::Connection, Bytes>;
+type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
 const H3_BODY_CHANNEL_CAPACITY: usize = 16;
+
+#[derive(Clone, Default)]
+pub(crate) struct UpstreamH3Pools {
+  by_upstream: HashMap<String, Arc<UpstreamH3Pool>>,
+}
+
+impl UpstreamH3Pools {
+  pub(crate) fn new(upstreams: &[UpstreamConfig], config: &Config) -> anyhow::Result<Self> {
+    if !config.quic.upstream_pool.enabled {
+      return Ok(Self::default());
+    }
+
+    let mut by_upstream = HashMap::new();
+    for upstream in upstreams {
+      if upstream.max_http_version != HttpVersion::H3 {
+        continue;
+      }
+      let quic_config = tls::build_upstream_quic_client_config(
+        &config.proxy.trusted_ca_certs,
+        &upstream.tls.ech,
+        &config.quic,
+      )
+      .with_context(|| format!("failed to build upstream HTTP/3 pool for {}", upstream.name))?;
+      by_upstream.insert(
+        upstream.name.clone(),
+        Arc::new(UpstreamH3Pool {
+          client_config: quic_config,
+          quic_config: config.quic.clone(),
+          entries: Mutex::new(HashMap::new()),
+        }),
+      );
+    }
+
+    Ok(Self { by_upstream })
+  }
+
+  pub(crate) fn for_upstream(&self, upstream_name: &str) -> Option<Arc<UpstreamH3Pool>> {
+    self.by_upstream.get(upstream_name).cloned()
+  }
+}
+
+pub(crate) struct UpstreamH3Pool {
+  client_config: h3_quinn::quinn::ClientConfig,
+  quic_config: crate::config::QuicConfig,
+  entries: Mutex<HashMap<H3PoolKey, Arc<PooledH3Connection>>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct H3PoolKey {
+  remote_addr: SocketAddr,
+  server_name: String,
+}
+
+struct PooledH3Connection {
+  _endpoint: h3_quinn::quinn::Endpoint,
+  connection: h3_quinn::quinn::Connection,
+  send_request: H3SendRequest,
+  created_at: Instant,
+  last_used: std::sync::Mutex<Instant>,
+  driver_task: JoinHandle<()>,
+}
+
+impl PooledH3Connection {
+  fn usable(&self, upstream: &UpstreamConfig, quic_config: &crate::config::QuicConfig) -> bool {
+    self.connection.close_reason().is_none()
+      && self.created_at.elapsed()
+        < Duration::from_millis(quic_config.upstream_pool.max_lifetime_ms)
+      && self
+        .last_used
+        .lock()
+        .expect("pooled H3 connection last_used lock poisoned")
+        .elapsed()
+        < Duration::from_millis(upstream.idle_timeout_ms)
+  }
+
+  fn mark_used(&self) {
+    *self
+      .last_used
+      .lock()
+      .expect("pooled H3 connection last_used lock poisoned") = Instant::now();
+  }
+}
+
+impl Drop for PooledH3Connection {
+  fn drop(&mut self) {
+    self.connection.close(0u32.into(), b"pool entry dropped");
+    self.driver_task.abort();
+  }
+}
+
+impl UpstreamH3Pool {
+  async fn forward_request(
+    self: Arc<Self>,
+    request: Request<ProxyBody>,
+    upstream: &UpstreamConfig,
+  ) -> anyhow::Result<Response<ProxyBody>> {
+    let uri = request.uri().clone();
+    let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
+    let key = H3PoolKey {
+      remote_addr,
+      server_name,
+    };
+    let send_request = self.send_request_for(key.clone(), upstream).await?;
+    match send_h3_request(send_request, request, &uri).await {
+      Ok(response) => Ok(response),
+      Err(error) => {
+        self.remove_entry(&key).await;
+        Err(error)
+      }
+    }
+  }
+
+  async fn send_request_for(
+    &self,
+    key: H3PoolKey,
+    upstream: &UpstreamConfig,
+  ) -> anyhow::Result<H3SendRequest> {
+    let mut entries = self.entries.lock().await;
+    if let Some(entry) = entries.get(&key).cloned() {
+      if entry.usable(upstream, &self.quic_config) {
+        entry.mark_used();
+        return Ok(entry.send_request.clone());
+      }
+      entries.remove(&key);
+    }
+
+    if entries.len() >= self.quic_config.upstream_pool.max_connections_per_upstream
+      && let Some(oldest_key) = entries
+        .iter()
+        .min_by_key(|(_, entry)| {
+          *entry
+            .last_used
+            .lock()
+            .expect("pooled H3 connection last_used lock poisoned")
+        })
+        .map(|(key, _)| key.clone())
+    {
+      entries.remove(&oldest_key);
+    }
+
+    let connected = connect_h3_upstream(
+      key.server_name.clone(),
+      key.remote_addr,
+      self.client_config.clone(),
+      &self.quic_config,
+    )
+    .await?;
+    let entry = Arc::new(PooledH3Connection {
+      _endpoint: connected.endpoint,
+      connection: connected.connection,
+      send_request: connected.send_request,
+      created_at: Instant::now(),
+      last_used: std::sync::Mutex::new(Instant::now()),
+      driver_task: connected.driver_task,
+    });
+    let send_request = entry.send_request.clone();
+    entries.insert(key, entry);
+    Ok(send_request)
+  }
+
+  async fn remove_entry(&self, key: &H3PoolKey) {
+    self.entries.lock().await.remove(key);
+  }
+}
+
+struct ConnectedH3Upstream {
+  endpoint: h3_quinn::quinn::Endpoint,
+  connection: h3_quinn::quinn::Connection,
+  send_request: H3SendRequest,
+  driver_task: JoinHandle<()>,
+}
+
+async fn connect_h3_upstream(
+  server_name: String,
+  remote_addr: SocketAddr,
+  quic_config: h3_quinn::quinn::ClientConfig,
+  oxibelt_quic_config: &crate::config::QuicConfig,
+) -> anyhow::Result<ConnectedH3Upstream> {
+  let endpoint = crate::quic::bind_client_endpoint(remote_addr, oxibelt_quic_config)?;
+  let quinn_connection = endpoint
+    .connect_with(quic_config, remote_addr, &server_name)
+    .with_context(|| format!("failed to start upstream HTTP/3 connection to {server_name}"))?
+    .await
+    .with_context(|| format!("failed to connect upstream HTTP/3 to {server_name}"))?;
+  let connection = quinn_connection.clone();
+  let h3_connection = h3_quinn::Connection::new(quinn_connection);
+  let (mut driver, send_request) = h3::client::builder()
+    .enable_datagram(true)
+    .enable_extended_connect(true)
+    .build(h3_connection)
+    .await
+    .context("failed to establish upstream HTTP/3 connection")?;
+  let driver_task = tokio::spawn(async move {
+    let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+  });
+  Ok(ConnectedH3Upstream {
+    endpoint,
+    connection,
+    send_request,
+    driver_task,
+  })
+}
 
 pub(crate) async fn handle_downstream_connection(
   connection: h3_quinn::quinn::Connection,
@@ -56,6 +262,11 @@ pub(crate) async fn handle_downstream_connection(
       .resolve_request()
       .await
       .context("failed to resolve downstream HTTP/3 request")?;
+
+    if rejects_unsafe_early_data(&request, state.snapshot().config.quic.zero_rtt) {
+      respond_to_h3_request(stream, text_response(StatusCode::TOO_EARLY, "too early")).await?;
+      continue;
+    }
 
     if is_webtransport_request(&request) {
       let prepared = match http_proxy::prepare_webtransport(
@@ -123,30 +334,39 @@ pub(crate) async fn forward_request(
   upstream: &UpstreamConfig,
   state: &AppSnapshot,
 ) -> anyhow::Result<Response<ProxyBody>> {
-  let quic_config =
-    tls::build_upstream_quic_client_config(&state.config.proxy.trusted_ca_certs, &upstream.tls.ech)
-      .with_context(|| format!("failed to build upstream QUIC client for {}", upstream.name))?;
   let uri = request.uri().clone();
-  let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
-  let endpoint = h3_quinn::quinn::Endpoint::client(client_bind_addr(remote_addr))
-    .context("failed to create upstream QUIC endpoint")?;
-  let quinn_connection = endpoint
-    .connect_with(quic_config, remote_addr, &server_name)
-    .with_context(|| format!("failed to start upstream HTTP/3 connection to {server_name}"))?
-    .await
-    .with_context(|| format!("failed to connect upstream HTTP/3 to {server_name}"))?;
-  let close_connection = quinn_connection.clone();
-  let h3_connection = h3_quinn::Connection::new(quinn_connection);
-  let (mut driver, mut send_request) = h3::client::builder()
-    .enable_datagram(true)
-    .enable_extended_connect(true)
-    .build(h3_connection)
-    .await
-    .context("failed to establish upstream HTTP/3 connection")?;
-  let driver_task = tokio::spawn(async move {
-    let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
-  });
+  if let Some(pool) = state.h3_clients.for_upstream(&upstream.name) {
+    return pool.forward_request(request, upstream).await;
+  }
 
+  let quic_config = tls::build_upstream_quic_client_config(
+    &state.config.proxy.trusted_ca_certs,
+    &upstream.tls.ech,
+    &state.config.quic,
+  )
+  .with_context(|| format!("failed to build upstream QUIC client for {}", upstream.name))?;
+  let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
+  let connected =
+    connect_h3_upstream(server_name, remote_addr, quic_config, &state.config.quic).await?;
+  let close_connection = connected.connection.clone();
+  let endpoint = connected.endpoint.clone();
+  let driver_task = connected.driver_task;
+
+  let response = send_h3_request(connected.send_request, request, &uri).await?;
+  let (parts, body) = response.into_parts();
+  let close_body = wrap_body_close_connection(body, move || {
+    close_connection.close(0u32.into(), b"request complete");
+    driver_task.abort();
+    drop(endpoint);
+  });
+  Ok(Response::from_parts(parts, close_body))
+}
+
+async fn send_h3_request(
+  mut send_request: H3SendRequest,
+  request: Request<ProxyBody>,
+  uri: &http::Uri,
+) -> anyhow::Result<Response<ProxyBody>> {
   let (parts, mut body) = request.into_parts();
   let h3_request = Request::from_parts(parts, ());
   let mut stream = send_request
@@ -211,12 +431,24 @@ pub(crate) async fn forward_request(
         }
       }
     }
-
-    close_connection.close(0u32.into(), b"request complete");
-    let _ = driver_task.await;
-    drop(endpoint);
   });
   Ok(Response::from_parts(parts, body))
+}
+
+fn wrap_body_close_connection<F>(mut body: ProxyBody, close: F) -> ProxyBody
+where
+  F: FnOnce() + Send + 'static,
+{
+  let (body_sender, wrapped) = channel_body(H3_BODY_CHANNEL_CAPACITY);
+  tokio::spawn(async move {
+    while let Some(frame) = body.frame().await {
+      if body_sender.send(frame).await.is_err() {
+        break;
+      }
+    }
+    close();
+  });
+  wrapped
 }
 
 async fn handle_h3_request(
@@ -320,6 +552,7 @@ async fn connect_upstream_webtransport(
   let quic_config = tls::build_upstream_quic_client_config(
     &state.config.proxy.trusted_ca_certs,
     &prepared.upstream.tls.ech,
+    &state.config.quic,
   )
   .with_context(|| {
     format!(
@@ -333,7 +566,7 @@ async fn connect_upstream_webtransport(
     request = request.with_protocols(prepared.protocols.clone());
   }
   let (server_name, remote_addr) = resolve_upstream_addr(&prepared.target_url).await?;
-  let endpoint = web_transport_quinn::quinn::Endpoint::client(client_bind_addr(remote_addr))
+  let endpoint = crate::quic::bind_client_endpoint(remote_addr, &state.config.quic)
     .context("failed to create upstream WebTransport endpoint")?;
   let connection = endpoint
     .connect_with(quic_config, remote_addr, &server_name)
@@ -524,19 +757,24 @@ async fn resolve_upstream_addr(origin: &url::Url) -> anyhow::Result<(String, Soc
   Ok((host, remote))
 }
 
-fn client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
-  match remote_addr.ip() {
-    IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-    IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-  }
-}
-
 fn is_webtransport_request(request: &Request<()>) -> bool {
   request.method() == Method::CONNECT
     && request
       .extensions()
       .get::<Protocol>()
       .is_some_and(|protocol| protocol == &Protocol::WEB_TRANSPORT)
+}
+
+fn rejects_unsafe_early_data(
+  request: &Request<()>,
+  zero_rtt: crate::config::QuicZeroRttMode,
+) -> bool {
+  zero_rtt == crate::config::QuicZeroRttMode::SafeMethods
+    && request
+      .headers()
+      .get("early-data")
+      .is_some_and(|value| value.as_bytes() == b"1")
+    && !matches!(request.method(), &Method::GET | &Method::HEAD)
 }
 
 #[cfg(test)]
@@ -564,5 +802,37 @@ mod tests {
       .unwrap();
 
     assert!(!is_webtransport_request(&request));
+  }
+
+  #[test]
+  fn zero_rtt_policy_rejects_non_safe_early_data_methods() {
+    let request = Request::builder()
+      .method(Method::POST)
+      .uri("https://example.com/upload")
+      .header("early-data", "1")
+      .body(())
+      .unwrap();
+
+    assert!(rejects_unsafe_early_data(
+      &request,
+      crate::config::QuicZeroRttMode::SafeMethods
+    ));
+  }
+
+  #[test]
+  fn zero_rtt_policy_allows_safe_early_data_methods() {
+    for method in [Method::GET, Method::HEAD] {
+      let request = Request::builder()
+        .method(method)
+        .uri("https://example.com/read")
+        .header("early-data", "1")
+        .body(())
+        .unwrap();
+
+      assert!(!rejects_unsafe_early_data(
+        &request,
+        crate::config::QuicZeroRttMode::SafeMethods
+      ));
+    }
   }
 }

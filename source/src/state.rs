@@ -18,6 +18,7 @@ use crate::limits::LimitState;
 use crate::metrics::Metrics;
 use crate::pools::PoolState;
 use crate::proxy::http::compression::CompressionState;
+use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
 use crate::tls;
 use crate::waf::WafEngine;
@@ -111,6 +112,7 @@ pub struct AppSnapshot {
   pub route_table: RouteTable,
   pub upstreams: Vec<UpstreamConfig>,
   pub clients: UpstreamClientPools,
+  pub(crate) h3_clients: UpstreamH3Pools,
   pub limits: Arc<LimitState>,
   pub pools: Arc<PoolState>,
   pub cache: Arc<ResponseCache>,
@@ -136,6 +138,8 @@ impl AppSnapshot {
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs)
       .context("failed to build upstream HTTP clients")?;
+    let h3_clients =
+      UpstreamH3Pools::new(&upstreams, &config).context("failed to build upstream HTTP/3 pools")?;
     let limits = LimitState::new();
     let pools = PoolState::new(&config.upstream_pools);
     let cache = ResponseCache::new(&config.cache).context("failed to build response cache")?;
@@ -144,7 +148,10 @@ impl AppSnapshot {
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to build downstream TLS config")?;
     let quic_server_config = if config.listeners.http3 {
-      Some(tls::build_quic_server_config(&config.tls).context("failed to build QUIC TLS config")?)
+      Some(
+        tls::build_quic_server_config(&config.tls, &config.quic)
+          .context("failed to build QUIC TLS config")?,
+      )
     } else {
       None
     };
@@ -159,6 +166,7 @@ impl AppSnapshot {
       route_table,
       upstreams,
       clients,
+      h3_clients,
       limits,
       pools,
       cache,

@@ -20,6 +20,8 @@ pub struct Config {
   pub listeners: ListenerConfig,
   pub tls: TlsConfig,
   #[serde(default)]
+  pub quic: QuicConfig,
+  #[serde(default)]
   pub proxy: ProxyConfig,
   #[serde(default)]
   pub limits: LimitsConfig,
@@ -63,6 +65,7 @@ pub struct ConfigSourcePaths {
   pub downstream_tls_cert_chain: Option<PathBuf>,
   pub downstream_tls_private_key: Option<PathBuf>,
   pub downstream_tls_ocsp_response_file: Option<PathBuf>,
+  pub quic_host_key_file: Option<PathBuf>,
   pub oxirule_files: Vec<PathBuf>,
 }
 
@@ -182,6 +185,7 @@ impl Config {
       && self.runtime == other.runtime
       && self.listeners == other.listeners
       && self.tls == other.tls
+      && self.quic == other.quic
       && self.proxy == other.proxy
       && self.limits == other.limits
       && self.rate_limits == other.rate_limits
@@ -283,6 +287,24 @@ impl Config {
         Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .collect::<anyhow::Result<_>>()?;
+    self.quic.host_key_file = self
+      .quic
+      .host_key_file
+      .take()
+      .map(|path| {
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          "quic.host_key_file",
+          &path_roots.cert_dir,
+          &path,
+        )?;
+        self.source_paths.remember_runtime_file(logical.clone());
+        self
+          .source_paths
+          .remember_downstream_tls_file(logical.clone());
+        self.source_paths.quic_host_key_file = Some(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
+      })
+      .transpose()?;
     for upstream in &mut self.upstreams {
       for path in upstream.tls.resolve_relative_paths(&path_roots.cert_dir)? {
         self.source_paths.remember_runtime_file(path);
@@ -361,6 +383,7 @@ impl Config {
     self.validate_metrics_and_health()?;
     self.validate_security_headers()?;
     self.validate_tls()?;
+    self.quic.validate()?;
 
     if self.runtime.linux_only && !cfg!(target_os = "linux") {
       bail!("this build is configured for Linux only");
@@ -1065,6 +1088,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "logging",
       "metrics",
       "proxy",
+      "quic",
       "rate_limits",
       "routes",
       "runtime",
@@ -1107,6 +1131,27 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "tls.ocsp" => &["mode", "response_file"][..],
     "tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
+    "quic" => &[
+      "alt_svc",
+      "host_key_file",
+      "retry",
+      "socket",
+      "transport",
+      "upstream_pool",
+      "zero_rtt",
+    ][..],
+    "quic.alt_svc" => &["enabled", "max_age_seconds", "persist"][..],
+    "quic.transport" => &[
+      "datagram_receive_buffer_bytes",
+      "datagram_send_buffer_bytes",
+      "gso",
+      "idle_timeout_ms",
+      "max_concurrent_bidi_streams",
+      "max_concurrent_uni_streams",
+      "max_udp_payload_size",
+    ][..],
+    "quic.socket" => &["receive_buffer_bytes", "send_buffer_bytes"][..],
+    "quic.upstream_pool" => &["enabled", "max_connections_per_upstream", "max_lifetime_ms"][..],
     "proxy" => &[
       "auto_upgrade",
       "buffering",
@@ -1969,6 +2014,152 @@ pub enum OcspMode {
   Disabled,
   StaticFile,
   LiveFetch,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct QuicConfig {
+  #[serde(default)]
+  pub retry: bool,
+  #[serde(default)]
+  pub zero_rtt: QuicZeroRttMode,
+  #[serde(default)]
+  pub host_key_file: Option<PathBuf>,
+  #[serde(default)]
+  pub alt_svc: QuicAltSvcConfig,
+  #[serde(default)]
+  pub transport: QuicTransportConfig,
+  #[serde(default)]
+  pub socket: QuicSocketConfig,
+  #[serde(default)]
+  pub upstream_pool: QuicUpstreamPoolConfig,
+}
+
+impl Default for QuicConfig {
+  fn default() -> Self {
+    Self {
+      retry: false,
+      zero_rtt: QuicZeroRttMode::Off,
+      host_key_file: None,
+      alt_svc: QuicAltSvcConfig::default(),
+      transport: QuicTransportConfig::default(),
+      socket: QuicSocketConfig::default(),
+      upstream_pool: QuicUpstreamPoolConfig::default(),
+    }
+  }
+}
+
+impl QuicConfig {
+  pub fn validate(&self) -> anyhow::Result<()> {
+    if self.alt_svc.max_age_seconds == 0 {
+      bail!("quic.alt_svc.max_age_seconds must be greater than 0");
+    }
+    if self.transport.max_concurrent_bidi_streams == 0
+      || self.transport.max_concurrent_uni_streams == 0
+      || self.transport.idle_timeout_ms == 0
+      || self.transport.datagram_receive_buffer_bytes == 0
+      || self.transport.datagram_send_buffer_bytes == 0
+    {
+      bail!("quic.transport numeric values must be greater than 0");
+    }
+    if !(1200..=65_527).contains(&self.transport.max_udp_payload_size) {
+      bail!("quic.transport.max_udp_payload_size must be between 1200 and 65527");
+    }
+    if self.upstream_pool.max_connections_per_upstream == 0 {
+      bail!("quic.upstream_pool.max_connections_per_upstream must be greater than 0");
+    }
+    if self.upstream_pool.max_lifetime_ms == 0 {
+      bail!("quic.upstream_pool.max_lifetime_ms must be greater than 0");
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuicZeroRttMode {
+  #[default]
+  Off,
+  SafeMethods,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct QuicAltSvcConfig {
+  #[serde(default = "default_true")]
+  pub enabled: bool,
+  #[serde(default = "default_quic_alt_svc_max_age_seconds")]
+  pub max_age_seconds: u64,
+  #[serde(default)]
+  pub persist: bool,
+}
+
+impl Default for QuicAltSvcConfig {
+  fn default() -> Self {
+    Self {
+      enabled: true,
+      max_age_seconds: default_quic_alt_svc_max_age_seconds(),
+      persist: false,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct QuicTransportConfig {
+  #[serde(default = "default_quic_max_concurrent_streams")]
+  pub max_concurrent_bidi_streams: u64,
+  #[serde(default = "default_quic_max_concurrent_streams")]
+  pub max_concurrent_uni_streams: u64,
+  #[serde(default = "default_quic_idle_timeout_ms")]
+  pub idle_timeout_ms: u64,
+  #[serde(default = "default_quic_datagram_buffer_bytes")]
+  pub datagram_receive_buffer_bytes: usize,
+  #[serde(default = "default_quic_datagram_buffer_bytes")]
+  pub datagram_send_buffer_bytes: usize,
+  #[serde(default = "default_quic_max_udp_payload_size")]
+  pub max_udp_payload_size: u16,
+  #[serde(default = "default_true")]
+  pub gso: bool,
+}
+
+impl Default for QuicTransportConfig {
+  fn default() -> Self {
+    Self {
+      max_concurrent_bidi_streams: default_quic_max_concurrent_streams(),
+      max_concurrent_uni_streams: default_quic_max_concurrent_streams(),
+      idle_timeout_ms: default_quic_idle_timeout_ms(),
+      datagram_receive_buffer_bytes: default_quic_datagram_buffer_bytes(),
+      datagram_send_buffer_bytes: default_quic_datagram_buffer_bytes(),
+      max_udp_payload_size: default_quic_max_udp_payload_size(),
+      gso: true,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct QuicSocketConfig {
+  #[serde(default)]
+  pub receive_buffer_bytes: usize,
+  #[serde(default)]
+  pub send_buffer_bytes: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct QuicUpstreamPoolConfig {
+  #[serde(default = "default_true")]
+  pub enabled: bool,
+  #[serde(default = "default_quic_upstream_pool_max_connections")]
+  pub max_connections_per_upstream: usize,
+  #[serde(default = "default_quic_upstream_pool_max_lifetime_ms")]
+  pub max_lifetime_ms: u64,
+}
+
+impl Default for QuicUpstreamPoolConfig {
+  fn default() -> Self {
+    Self {
+      enabled: true,
+      max_connections_per_upstream: default_quic_upstream_pool_max_connections(),
+      max_lifetime_ms: default_quic_upstream_pool_max_lifetime_ms(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -3057,6 +3248,34 @@ fn default_request_timeout_ms() -> u64 {
 
 fn default_proxy_max_http_version() -> HttpVersion {
   HttpVersion::H2
+}
+
+fn default_quic_alt_svc_max_age_seconds() -> u64 {
+  86_400
+}
+
+fn default_quic_max_concurrent_streams() -> u64 {
+  100
+}
+
+fn default_quic_idle_timeout_ms() -> u64 {
+  30_000
+}
+
+fn default_quic_datagram_buffer_bytes() -> usize {
+  1024 * 1024
+}
+
+fn default_quic_max_udp_payload_size() -> u16 {
+  1472
+}
+
+fn default_quic_upstream_pool_max_connections() -> usize {
+  1
+}
+
+fn default_quic_upstream_pool_max_lifetime_ms() -> u64 {
+  600_000
 }
 
 fn default_compression_min_size_bytes() -> u64 {

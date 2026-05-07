@@ -1389,6 +1389,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde",
+ "socket2",
  "sqlx",
  "tokio",
  "tokio-rustls",
