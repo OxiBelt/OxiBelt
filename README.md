@@ -1,99 +1,117 @@
-# OxiBelt Proxy
+# OxiBelt
 
-This is the initial implementation of a Rust-based reverse proxy.
+OxiBelt is a Rust reverse proxy for Linux edge deployments. It terminates downstream TLS, routes HTTP traffic by host and path, forwards to HTTP/1.1, HTTP/2, or HTTP/3 upstreams, and can apply OxiRule WAF policy on the request and response path.
 
-Current implementation scope:
+The current implementation is a production-oriented foundation: configuration is TOML, state is process-local, Docker is the canonical release environment, and the default runtime assumptions fit non-root containers with read-only root filesystems.
 
-- Linux-only build guards
-- Architecture guards for `x86_64`, `aarch64`, and `riscv64`
-- TLS termination based on `rustls` + the `aws-lc-rs` provider
-- Static file-based OCSP stapling
-- Upstream TLS 1.3 ECH support for GREASE and configured ECHConfigList modes
-- Downstream HTTP/1.1 and HTTP/2
-- Upstream HTTP/1.1 and HTTP/2
-- Optional downstream HTTP/3 and upstream HTTP/3 forwarding
-- WebSocket upgrade tunneling for HTTP/1.1 routes
-- Client/header/body/connection/rate limits, trusted real-IP handling, and PROXY protocol intake
-- Upstream pools with local load-balancing state and passive health marking
-- Optional HTTP redirect listener, local health endpoint, and Prometheus-style metrics endpoint
-- Route opt-in memory/tmpfs-validated response cache
-- Routing based on hostname + path prefix
-- Streaming HTTP body forwarding
-- HTTP/2-based gRPC proxy paths
-- Compression negotiation passthrough for `zstd`, `gzip`, and `deflate`
-- Initial OxiRule WAF support for request/response rules, header mutation, tags, request rejection, upstream-error response policy, and response replacement
-- Runtime hot reload for OxiRule policy, full configuration, and downstream TLS certificate renewal paths
-- TOML configuration file
-- Assumptions aligned with non-root / `readonlyRootFilesystem` operation in Alpine containers
+## Capabilities
 
-Items intentionally left out of this initial implementation:
+- Downstream HTTP/1.1 and HTTP/2 over TCP, with optional HTTP/3 over QUIC.
+- Upstream HTTP/1.1, HTTP/2, and HTTP/3 forwarding.
+- TLS termination with `rustls`, `aws-lc-rs`, TLS 1.3 defaults, client certificate authentication, static OCSP stapling, and preferred post-quantum key exchange support.
+- Upstream TLS 1.3 ECH in GREASE or configured `ECHConfigList` mode.
+- Host and path-prefix routing, prefix replacement, upstream pools, local load-balancing state, and passive or active health marking.
+- WebSocket tunneling for HTTP/1.1 upgrade routes and WebTransport forwarding over HTTP/3.
+- Forwarded-header normalization, trusted real-IP handling, PROXY protocol intake, rate limits, connection limits, request limits, and bounded response cache support.
+- OxiRule request and response WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, and structured access logs.
+- Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload.
 
-- WebRTC forwarding
-- ACME HTTP-01 challenge handling
-- New request-wide `[access_log]` structured logging
-- OCSP live fetch / refresh worker
-- Streaming-safe WAF body content inspection
-- Sticky-cookie upstream sessions
-- Passing 103 Early Hints
+See [docs/Specification.md](docs/Specification.md) for the compact behavior spec and current non-goals.
 
-Current constraints:
-
-- `aws-lc-rs` is used as the crypto provider
-- `X25519MLKEM768` is enabled and preferred in the default rustls key exchange group order
-- ECH is currently supported where OxiBelt acts as an upstream TLS client; downstream ECH termination depends on server-side ECH support in the TLS provider
-- The project now targets Rust 1.95
-
-In other words, this commit is meant to be a production-oriented foundation for an edge reverse proxy while keeping ACME and request-wide access logging as separate future work.
-
-## Basic Run
+## Quick Start
 
 From the repository root:
 
-```bash
+```sh
 cargo run --manifest-path source/Cargo.toml -- --config source/config/oxibelt.toml
 ```
-Or from `source/`
-```bash
+
+Or from `source/`:
+
+```sh
 cd source
 cargo run -- --config config/oxibelt.toml
 ```
 
-Hot reload is disabled by default. It can be enabled in TOML with `[runtime.hot_reload]` or overridden at startup:
+Validate a configuration without starting listeners:
 
-```bash
+```sh
+cargo run --manifest-path source/Cargo.toml -- \
+  --config source/config/oxibelt.toml \
+  --check
+```
+
+Print the merged, redacted effective configuration:
+
+```sh
+cargo run --manifest-path source/Cargo.toml -- \
+  --config source/config/oxibelt.toml \
+  --dump-effective-config
+```
+
+Enable hot reload at startup:
+
+```sh
 cargo run --manifest-path source/Cargo.toml -- \
   --config source/config/oxibelt.toml \
   --hot-reload-mode full \
   --hot-reload-poll-interval-ms 1000
 ```
 
-Send `SIGHUP` to trigger an immediate reload check; otherwise OxiBelt polls reload-relevant files at the configured interval.
+Send `SIGHUP` to trigger an immediate reload check when hot reload is enabled.
 
 ## Documentation
 
-- [OxiBelt configuration](docs/Configuration.md)
-- [OxiRule WAF specification](docs/OxiRule.md)
+- [Technical specification](docs/Specification.md): proxy behavior, request pipeline, runtime model, security posture, and non-goals.
+- [Configuration reference](docs/Configuration.md): TOML sections, includes, path rules, validation, and examples.
+- [OxiRule WAF reference](docs/OxiRule.md): rule shape, expression language, actions, object model, helpers, and examples.
+- [OxiRule examples](docs/example/OxiRule.md): cookbook-style request, response, routing, Person proof, and access-log rules.
 
-## Default Port Strategy
+The default example configuration is [source/config/oxibelt.toml](source/config/oxibelt.toml).
 
-- The default internal container port is `8443`
-- External `443 -> 8443` forwarding is assumed
-- The application does not assume root privileges or Linux capabilities
-- It does not require disk writes by default
+## Project Layout
 
-## Release Container Image
+```text
+source/                         Rust reverse proxy crate
+source/src/proxy/http.rs         HTTP reverse proxy behavior
+source/src/tls.rs                TLS configuration and client/server setup
+source/src/config.rs             Configuration loading and validation
+source/src/routes.rs             Route matching logic
+source/config/oxibelt.toml       Example/default configuration
+source/ops/Dockerfile.alpine     Release Docker image
+tests/rust/                      Rust integration tests
+tests/docker/                    Docker test services and probes
+tests/scripts/                   Build and integration orchestration
+docs/                            Specification and references
+```
 
-From the repository root:
+Root-level documentation uses root-relative paths. If a command must run from `source/`, the command block says so explicitly.
 
-```bash
+## Docker Image
+
+Build the release image from the repository root:
+
+```sh
 docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
-The Alpine image is the canonical release image. It runs as UID/GID `10001:10001`, exposes `8443/tcp`, and uses OCI image labels for version, source, revision, and creation metadata when those build arguments are provided. CI image artifacts are built with `tests/scripts/build-docker-image-artifact.sh`.
+The Alpine image runs as UID/GID `10001:10001`, exposes `8443/tcp`, and expects its default entry configuration at:
 
-The bundled `/etc/oxibelt/config/oxibelt.toml` is an example/default configuration. For production, mount environment-specific configuration, certificate material, and external OxiRule files into the purpose-specific directories:
+```text
+/etc/oxibelt/config/oxibelt.toml
+```
 
-```bash
+The standard container layout is:
+
+```text
+/etc/oxibelt/config   OxiBelt TOML configuration and included modules
+/etc/oxibelt/cert     TLS certificates, private keys, CA roots, OCSP, ECH files
+/etc/oxibelt/oxirule  External .oxirule.toml rule files
+```
+
+Example hardened local run:
+
+```sh
 docker run --rm -p 8443:8443 \
   --read-only \
   --cap-drop=ALL \
@@ -104,15 +122,29 @@ docker run --rm -p 8443:8443 \
   oxibelt
 ```
 
-Mounted files must be readable by container UID `10001`; for private keys, prefer ownership or group permissions over broad world-readable permissions.
+Mounted files must be readable by UID `10001`. For private keys, prefer ownership or group permissions over broad world-readable permissions.
 
-For certificate renewal workflows, mount stable certificate/key paths under `/etc/oxibelt/cert` and enable `runtime.hot_reload.mode = "downstream_tls"` or `full`. OxiBelt tracks symlink target changes so Let's Encrypt-style renewals can be imported without restarting the process.
+For certificate renewal workflows, mount stable certificate/key paths under `/etc/oxibelt/cert` and enable `runtime.hot_reload.mode = "downstream_tls"` or `full`. OxiBelt tracks symlink target changes so renewed certificate files can be imported without restarting the process.
 
-## Test Assets
+## Local Checks
 
-- Rust integration tests live under `tests/rust` and are wired into Cargo from `source/Cargo.toml`
-- Docker-based HTTP/HTTPS verification assets live under `tests/docker`
-- `tests/scripts/build-targets.sh` verifies both GNU and musl builds for the current Linux architecture
-- `riscv64gc-unknown-linux-musl` uses `aws-lc-rs` bindgen during dependency builds, so `clang/libclang` must be available when targeting it
-- `tests/scripts/run-proxy-integration.sh` generates fresh TLS material for every run, exercises real HTTP + HTTPS proxying, proves that both `X25519` and `X25519MLKEM768` negotiate with the current `aws-lc-rs`-based server, and verifies HTTPS upstream proxying with ECH GREASE enabled
-- The Docker and WebDriver matrices include hot reload coverage for OxiRule-only reload, downstream TLS-only reload, full config/TLS/listener rebind, and browser-visible reload behavior in Chromium and Firefox
+Recommended Rust checks from the repository root:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
+
+Docker and integration checks:
+
+```sh
+tests/scripts/build-targets.sh
+tests/scripts/run-proxy-integration.sh
+```
+
+`tests/scripts/run-proxy-integration.sh` generates fresh TLS material for each run and cleans up test resources. The Docker matrix also covers reload behavior and browser-visible behavior where applicable.
+
+## Current Non-Goals
+
+The current implementation intentionally leaves ACME HTTP-01 handling, live OCSP fetch/refresh, request-wide structured access logging outside OxiRule, sticky-cookie upstream sessions, WebRTC media forwarding, streaming-safe WAF text scanning, and passing `103 Early Hints` as future work. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
