@@ -60,6 +60,10 @@ name = "tls_client_roots"
 path = "../tests/rust/tls_client_roots.rs"
 
 [[test]]
+name = "stream_listener_limits"
+path = "../tests/rust/stream_listener_limits.rs"
+
+[[test]]
 name = "pq_negotiation_support"
 path = "../tests/rust/pq_negotiation_support.rs"
 

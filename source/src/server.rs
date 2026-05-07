@@ -430,7 +430,7 @@ impl ListenerSupervisor {
     }
     match pending.http3 {
       Some(Some(http3)) => {
-        let http3 = http3.start(state, self.error_tx.clone());
+        let http3 = http3.start(state.clone(), self.error_tx.clone());
         if let Some(old) = self.http3.replace(http3) {
           old.shutdown();
         }
@@ -455,7 +455,7 @@ impl ListenerSupervisor {
       }
       self.streams = streams
         .into_iter()
-        .map(|stream| stream.start(self.error_tx.clone()))
+        .map(|stream| stream.start(state.clone(), self.error_tx.clone()))
         .collect();
     }
   }

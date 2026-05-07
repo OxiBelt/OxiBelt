@@ -9,7 +9,9 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::{StreamListenerConfig, parse_stream_target};
+use crate::limits::ConnectionPermit;
 use crate::proxy_protocol_egress;
+use crate::state::AppHandle;
 
 pub(crate) struct StreamListenerTask {
   pub(crate) name: String,
@@ -41,13 +43,19 @@ impl BoundStreamListener {
     Ok(Self { config, listener })
   }
 
-  pub(crate) fn start(self, error_tx: mpsc::UnboundedSender<anyhow::Error>) -> StreamListenerTask {
+  pub(crate) fn start(
+    self,
+    state: AppHandle,
+    error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  ) -> StreamListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let name = self.config.name.clone();
     let bind = self.config.bind;
     let task_name = name.clone();
     let task = tokio::spawn(async move {
-      if let Err(error) = serve_stream_listener(self.listener, self.config, shutdown_rx).await {
+      if let Err(error) =
+        serve_stream_listener(self.listener, self.config, state, shutdown_rx).await
+      {
         let _ = error_tx.send(error.context(format!("stream listener {task_name} failed")));
       }
     });
@@ -63,6 +71,7 @@ impl BoundStreamListener {
 async fn serve_stream_listener(
   listener: TcpListener,
   config: StreamListenerConfig,
+  state: AppHandle,
   mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
   let bind = listener
@@ -88,8 +97,16 @@ async fn serve_stream_listener(
           }
         };
         let connection_config = config.clone();
+        let permit = match acquire_connection_permit(&state, peer_addr) {
+          Ok(permit) => permit,
+          Err(error) => {
+            warn!(name = %config.name, peer = %peer_addr, error = %error, "stream connection rejected");
+            continue;
+          }
+        };
         tokio::spawn(async move {
-          if let Err(error) = proxy_stream_connection(downstream, peer_addr, connection_config).await {
+          let result = proxy_stream_connection(downstream, peer_addr, connection_config, permit).await;
+          if let Err(error) = result {
             warn!(peer = %peer_addr, error = %error, "stream proxy connection failed");
           }
         });
@@ -102,6 +119,7 @@ async fn proxy_stream_connection(
   downstream: TcpStream,
   peer_addr: SocketAddr,
   config: StreamListenerConfig,
+  _permit: ConnectionPermit,
 ) -> anyhow::Result<()> {
   let (host, port) = parse_stream_target(&config.target)?;
   let remote_addr = resolve_target_addr(&host, port).await?;
@@ -128,6 +146,21 @@ async fn proxy_stream_connection(
     Duration::from_millis(config.idle_timeout_ms),
   )
   .await
+}
+
+fn acquire_connection_permit(
+  state: &AppHandle,
+  peer_addr: SocketAddr,
+) -> anyhow::Result<ConnectionPermit> {
+  let snapshot = state.snapshot();
+  snapshot
+    .limits
+    .acquire_connection(
+      peer_addr.ip(),
+      &snapshot.config.limits,
+      &snapshot.config.connection_limits,
+    )
+    .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))
 }
 
 pub(crate) async fn resolve_target_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {

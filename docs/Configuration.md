@@ -370,7 +370,7 @@ limit = 64
 status = 429
 ```
 
-Limit values must be greater than zero. Rate and connection limit state is process-local.
+Limit values must be greater than zero. Rate and connection limit state is process-local. `max_connections`, `max_connections_per_ip`, and `[[connection_limits]]` apply to downstream HTTP/HTTPS and TCP stream listener connections.
 
 ```toml
 [cache]
@@ -613,7 +613,7 @@ idle_timeout_ms = 75000
 proxy_protocol_egress = "off" # off | v1 | v2
 ```
 
-Stream listeners proxy raw TCP from a dedicated bind address to a single `host:port` target. They do not perform HTTP routing, TLS termination, or SNI routing.
+Stream listeners proxy raw TCP from a dedicated bind address to a single `host:port` target. They do not perform HTTP routing, TLS termination, SNI routing, HTTP rate limiting, or WAF inspection, but their downstream connections are counted by the global connection limits.
 
 Route-level WAF example:
 
