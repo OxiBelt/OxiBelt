@@ -1,4 +1,5 @@
 import argparse
+import base64
 import http.client
 import json
 import re
@@ -95,16 +96,14 @@ def request_with_proxy_protocol(args, target_path, host_header, headers, body):
 
     response = http.client.HTTPResponse(sock)
     response.begin()
-    response_body = response.read().decode("utf-8", "replace")
-    return response, response_body
+    return response, response.read()
   finally:
     sock.close()
 
 def read_http_response(sock):
   response = http.client.HTTPResponse(sock)
   response.begin()
-  response_body = response.read().decode("utf-8", "replace")
-  return response, response_body
+  return response, response.read()
 
 
 def perform_connect_tunnel(args, host_header, target_path):
@@ -124,7 +123,7 @@ def perform_connect_tunnel(args, host_header, target_path):
     response = http.client.HTTPResponse(sock)
     response.begin()
     if response.status != 200:
-      return response, response.read().decode("utf-8", "replace")
+      return response, response.read()
 
     tunneled = (
       f"GET {target_path} HTTP/1.1\r\n"
@@ -163,10 +162,10 @@ def perform_upgrade(args, host_header, target_path, headers, body):
     response.begin()
     if response.status != 101:
       response.read()
-      return response, ""
+      return response, b""
     sock.sendall(body)
     sock.settimeout(args.timeout)
-    upgraded = sock.recv(4096).decode("utf-8", "replace")
+    upgraded = sock.recv(4096)
     return response, upgraded
   finally:
     sock.close()
@@ -227,13 +226,13 @@ def main() -> int:
 
     body = args.body.encode("utf-8")
     if args.connect_tunnel:
-      response, response_body = perform_connect_tunnel(
+      response, response_body_bytes = perform_connect_tunnel(
         args,
         host_header,
         target_path,
       )
     elif args.upgrade_token:
-      response, response_body = perform_upgrade(
+      response, response_body_bytes = perform_upgrade(
         args,
         host_header,
         target_path,
@@ -241,7 +240,7 @@ def main() -> int:
         body,
       )
     elif args.proxy_protocol_line:
-      response, response_body = request_with_proxy_protocol(
+      response, response_body_bytes = request_with_proxy_protocol(
         args,
         target_path,
         host_header,
@@ -277,13 +276,15 @@ def main() -> int:
         connection.putheader("Content-Length", str(len(body)))
       connection.endheaders(body)
       response = connection.getresponse()
-      response_body = response.read().decode("utf-8", "replace")
+      response_body_bytes = response.read()
+    response_body = response_body_bytes.decode("utf-8", "replace")
     if args.dump_response_json:
       sys.stdout.write(json.dumps({
         "status": response.status,
         "reason": response.reason,
         "headers": {key.lower(): value for key, value in response.getheaders()},
         "body": response_body,
+        "body_base64": base64.b64encode(response_body_bytes).decode("ascii"),
       }, sort_keys=True))
     else:
       sys.stdout.write(response_body)
