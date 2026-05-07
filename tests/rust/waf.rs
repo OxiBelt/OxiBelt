@@ -782,9 +782,16 @@ value = "no-store"
             &tags,
             "203.0.113.10:49152".parse().unwrap(),
         ),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
         status: StatusCode::INTERNAL_SERVER_ERROR,
         headers: &response_headers,
         upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
         upstream_error: None,
     });
 
@@ -868,9 +875,16 @@ value = "Context.RuleName"
             &tags,
             "203.0.113.10:49152".parse().unwrap(),
         ),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
         status: StatusCode::CREATED,
         headers: &response_headers,
         upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
         upstream_error: None,
     });
 
@@ -887,6 +901,160 @@ value = "Context.RuleName"
     assert!(line.contains("\"matched_rule\":\"stdout-access\""));
     assert!(!line.contains("\"client_ip\":"));
     assert!(!line.contains("\"waf_rule_tags\":"));
+}
+
+#[test]
+fn access_log_can_emit_runtime_metadata_and_json_collections() {
+    let temp_dir = common::TempDir::new("waf-access-log-json");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-access-log-json");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "json-access"
+phase = "response"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+
+[[waf.rules.actions.fields]]
+name = "request_id"
+value = "Request.Id"
+
+[[waf.rules.actions.fields]]
+name = "response_id"
+value = "Response.Id"
+
+[[waf.rules.actions.fields]]
+name = "transaction_id"
+value = "Context.TransactionId"
+
+[[waf.rules.actions.fields]]
+name = "request_received"
+value = "Request.ReceivedAtUnixMs"
+
+[[waf.rules.actions.fields]]
+name = "response_received"
+value = "Response.ReceivedAtUnixMs"
+
+[[waf.rules.actions.fields]]
+name = "multi_header"
+value = "Request.Headers.getAll('X-Multi')"
+
+[[waf.rules.actions.fields]]
+name = "request_headers"
+value = "Request.Headers"
+
+[[waf.rules.actions.fields]]
+name = "query"
+value = "Request.QueryParams"
+
+[[waf.rules.actions.fields]]
+name = "request_http"
+value = "Request.Http"
+
+[[waf.rules.actions.fields]]
+name = "first_byte_ms"
+value = "Response.Upstream.FirstByteTimeMs"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let mut request_headers = HeaderMap::new();
+    request_headers.append("x-multi", HeaderValue::from_static("one"));
+    request_headers.append("x-multi", HeaderValue::from_static("two"));
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/search?q=one&q=two".parse().expect("URI should parse");
+    let response_headers = HeaderMap::new();
+
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(
+            &method,
+            &uri,
+            &request_headers,
+            &tags,
+            "203.0.113.10:49152".parse().unwrap(),
+        ),
+        response_id: "test-response-json-id",
+        received_at_unix_ms: 1_700_000_000_321,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        upstream_name: "app",
+        upstream_pool: Some("main-pool"),
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(42),
+        upstream_error: None,
+    });
+
+    assert_eq!(response_decision.access_logs.len(), 1);
+    let line = response_decision.access_logs[0].to_json_line();
+    assert!(line.contains("\"scope\":\"waf\""));
+    assert!(line.contains("\"request_id\":\"test-request-id\""));
+    assert!(line.contains("\"response_id\":\"test-response-json-id\""));
+    assert!(line.contains("\"transaction_id\":\"test-transaction-id\""));
+    assert!(line.contains("\"request_received\":1700000000000"));
+    assert!(line.contains("\"response_received\":1700000000321"));
+    assert!(
+        line.contains("\"multi_header\":{\"values\":[\"one\",\"two\"],\"is_truncated\":false}")
+    );
+    assert!(line.contains("\"x-multi\":[\"one\",\"two\"]"));
+    assert!(line.contains("\"query\":{\"q\":[\"one\",\"two\"]}"));
+    assert!(line.contains("\"request_http\":{"));
+    assert!(line.contains("\"first_byte_ms\":42"));
+}
+
+#[test]
+fn access_log_rejects_request_body_bytes_fields() {
+    let temp_dir = common::TempDir::new("waf-access-log-body-bytes");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-access-log-body-bytes");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "bad-access"
+phase = "response"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+
+[[waf.rules.actions.fields]]
+name = "body_bytes"
+value = "Request.Body.Bytes.size()"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("request body bytes should fail");
+    assert!(
+        error.to_string().contains("cannot read request body bytes"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -2423,6 +2591,9 @@ fn request_input_with_transport<'a>(
     tls: &'a WafTlsMetadata,
 ) -> WafRequestInput<'a> {
     WafRequestInput {
+        request_id: "test-request-id",
+        transaction_id: "test-transaction-id",
+        received_at_unix_ms: 1_700_000_000_000,
         method,
         uri,
         version: http::Version::HTTP_11,
@@ -2430,6 +2601,7 @@ fn request_input_with_transport<'a>(
         body: None,
         peer_addr,
         downstream_host: "example.com",
+        downstream_scheme: "https",
         route_name: "app-root",
         tcp_max_hop,
         tls,
@@ -2451,6 +2623,9 @@ fn request_input_with_protocol_and_network<'a>(
     transport_network: WafTransportNetwork,
 ) -> WafRequestInput<'a> {
     WafRequestInput {
+        request_id: "test-request-id",
+        transaction_id: "test-transaction-id",
+        received_at_unix_ms: 1_700_000_000_000,
         method,
         uri,
         version: http::Version::HTTP_3,
@@ -2458,6 +2633,7 @@ fn request_input_with_protocol_and_network<'a>(
         body: None,
         peer_addr,
         downstream_host: "example.com",
+        downstream_scheme: "https",
         route_name: "app-root",
         tcp_max_hop: None,
         tls,

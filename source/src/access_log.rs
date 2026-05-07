@@ -7,27 +7,48 @@ use sqlx::{Pool, Postgres, QueryBuilder};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::config::{DatabaseAccessLogConfig, DatabaseTlsMode};
-use crate::waf::AccessLogRecord;
+use crate::config::{DatabaseAccessLogConfig, DatabaseTlsMode, LoggingAccessLogConfig};
+use crate::waf::{
+  AccessLogRecord, CompiledAccessLogFields, WafEngine, WafResponseInput, compile_access_log_fields,
+};
 
 #[derive(Clone)]
 pub struct AccessLogSinks {
+  stdout: bool,
   database: Option<DatabaseAccessLogSink>,
 }
 
 impl AccessLogSinks {
+  pub fn disabled() -> Self {
+    Self {
+      stdout: false,
+      database: None,
+    }
+  }
+
   pub async fn new(config: &DatabaseAccessLogConfig) -> anyhow::Result<Self> {
+    Self::new_with_options(config, true, "OxiRule access log", "database.access_log").await
+  }
+
+  pub async fn new_with_options(
+    config: &DatabaseAccessLogConfig,
+    stdout: bool,
+    label: &'static str,
+    config_prefix: &'static str,
+  ) -> anyhow::Result<Self> {
     let database = if config.enabled {
-      Some(DatabaseAccessLogSink::connect(config).await?)
+      Some(DatabaseAccessLogSink::connect(config, label, config_prefix).await?)
     } else {
       None
     };
 
-    Ok(Self { database })
+    Ok(Self { stdout, database })
   }
 
   pub fn emit(&self, record: &AccessLogRecord) {
-    record.emit_stdout();
+    if self.stdout {
+      record.emit_stdout();
+    }
 
     if let Some(database) = &self.database {
       database.enqueue(record.clone());
@@ -41,27 +62,31 @@ struct DatabaseAccessLogSink {
 }
 
 impl DatabaseAccessLogSink {
-  async fn connect(config: &DatabaseAccessLogConfig) -> anyhow::Result<Self> {
+  async fn connect(
+    config: &DatabaseAccessLogConfig,
+    label: &'static str,
+    config_prefix: &'static str,
+  ) -> anyhow::Result<Self> {
     let connection_url = config
-      .connection_url()?
-      .ok_or_else(|| anyhow!("database.access_log connection URL is required when enabled"))?;
+      .connection_url_with_prefix(config_prefix)?
+      .ok_or_else(|| anyhow!("{label} connection URL is required when enabled"))?;
     let table = config
-      .table_name()?
-      .ok_or_else(|| anyhow!("database.access_log.table is required when enabled"))?;
+      .table_name_with_prefix(config_prefix)?
+      .ok_or_else(|| anyhow!("{label} table is required when enabled"))?;
     let pool = connect_pool(config, &connection_url)
       .await
-      .context("failed to connect database.access_log PostgreSQL pool")?;
+      .with_context(|| format!("failed to connect {label} PostgreSQL pool"))?;
 
     validate_table(&pool, &table).await.with_context(|| {
       format!(
-        "failed to validate database.access_log table {}",
+        "failed to validate {label} table {}",
         config.table.as_deref().unwrap_or("<missing>")
       )
     })?;
 
     let (sender, receiver) = mpsc::channel(config.queue_capacity);
-    tokio::spawn(run_database_writer(pool, table, receiver));
-    info!("database access log sink initialized");
+    tokio::spawn(run_database_writer(pool, table, label, receiver));
+    info!(label, "database access log sink initialized");
 
     Ok(Self { sender })
   }
@@ -129,11 +154,56 @@ async fn validate_table(pool: &Pool<Postgres>, table: &str) -> anyhow::Result<()
 async fn run_database_writer(
   pool: Pool<Postgres>,
   table: String,
+  label: &'static str,
   mut receiver: mpsc::Receiver<AccessLogRecord>,
 ) {
   while let Some(record) = receiver.recv().await {
     if let Err(error) = insert_record(&pool, &table, &record).await {
-      warn!(error = %error, "failed to write OxiRule access log to PostgreSQL");
+      warn!(error = %error, label, "failed to write access log to PostgreSQL");
+    }
+  }
+}
+
+#[derive(Clone)]
+pub struct SystemAccessLog {
+  enabled: bool,
+  fields: CompiledAccessLogFields,
+  sinks: AccessLogSinks,
+}
+
+impl SystemAccessLog {
+  pub async fn new(config: &LoggingAccessLogConfig) -> anyhow::Result<Self> {
+    let fields = compile_access_log_fields("logging.access_log", &config.fields)?;
+    let sinks = if config.enabled {
+      AccessLogSinks::new_with_options(
+        &config.database,
+        config.stdout,
+        "system access log",
+        "logging.access_log.database",
+      )
+      .await?
+    } else {
+      AccessLogSinks::disabled()
+    };
+
+    Ok(Self {
+      enabled: config.enabled,
+      fields,
+      sinks,
+    })
+  }
+
+  pub fn enabled(&self) -> bool {
+    self.enabled
+  }
+
+  pub fn emit(&self, waf: &WafEngine, input: WafResponseInput<'_>) {
+    if !self.enabled {
+      return;
+    }
+    match waf.build_system_access_log(&self.fields, input) {
+      Ok(record) => self.sinks.emit(&record),
+      Err(error) => warn!(error = %error, "failed to build system access log record"),
     }
   }
 }

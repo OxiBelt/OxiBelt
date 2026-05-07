@@ -7,7 +7,7 @@ use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
 use url::Url;
 
-use crate::waf::{RouteWafConfig, WafConfig};
+use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Config {
@@ -318,6 +318,15 @@ impl Config {
     {
       self.source_paths.remember_runtime_file(path);
     }
+    for path in self
+      .logging
+      .access_log
+      .database
+      .tls
+      .resolve_relative_paths(&path_roots.cert_dir)?
+    {
+      self.source_paths.remember_runtime_file(path);
+    }
     self.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     for route in &mut self.routes {
       route.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
@@ -384,6 +393,7 @@ impl Config {
     self.validate_security_headers()?;
     self.validate_tls()?;
     self.quic.validate()?;
+    self.logging.validate()?;
 
     if self.runtime.linux_only && !cfg!(target_os = "linux") {
       bail!("this build is configured for Linux only");
@@ -1100,7 +1110,20 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "waf",
     ][..],
     "config" => &["strict_unknown_fields", "warn_on_deprecated_fields"][..],
-    "logging" => &["level"][..],
+    "logging" => &["access_log", "level"][..],
+    "logging.access_log" => &["database", "enabled", "fields", "stdout"][..],
+    "logging.access_log.fields" => &["expression", "name", "value"][..],
+    "logging.access_log.database" => &[
+      "connect_timeout_ms",
+      "connection_url",
+      "connection_url_env",
+      "enabled",
+      "max_connections",
+      "queue_capacity",
+      "table",
+      "tls",
+    ][..],
+    "logging.access_log.database.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "runtime" => &[
       "hot_reload",
       "linux_only",
@@ -1339,6 +1362,14 @@ fn redact_effective_toml(value: &mut toml::Value) {
     .get_mut("database")
     .and_then(|database| database.get_mut("access_log"))
     .and_then(|access_log| access_log.get_mut("connection_url"))
+  {
+    *connection_url = toml::Value::String("<redacted>".to_string());
+  }
+  if let Some(connection_url) = value
+    .get_mut("logging")
+    .and_then(|logging| logging.get_mut("access_log"))
+    .and_then(|access_log| access_log.get_mut("database"))
+    .and_then(|database| database.get_mut("connection_url"))
   {
     *connection_url = toml::Value::String("<redacted>".to_string());
   }
@@ -1773,12 +1804,52 @@ fn validate_postgres_identifier(field_name: &str, value: &str) -> anyhow::Result
 pub struct LoggingConfig {
   #[serde(default = "default_log_level")]
   pub level: String,
+  #[serde(default)]
+  pub access_log: LoggingAccessLogConfig,
 }
 
 impl Default for LoggingConfig {
   fn default() -> Self {
     Self {
       level: default_log_level(),
+      access_log: LoggingAccessLogConfig::default(),
+    }
+  }
+}
+
+impl LoggingConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.level.trim().is_empty() {
+      bail!("logging.level must not be empty");
+    }
+    crate::waf::validate_access_log_field_configs("logging.access_log", &self.access_log.fields)?;
+    self
+      .access_log
+      .database
+      .validate_with_prefix("logging.access_log.database")?;
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct LoggingAccessLogConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_true")]
+  pub stdout: bool,
+  #[serde(default = "default_system_access_log_field_configs")]
+  pub fields: Vec<AccessLogFieldConfig>,
+  #[serde(default)]
+  pub database: DatabaseAccessLogConfig,
+}
+
+impl Default for LoggingAccessLogConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      stdout: true,
+      fields: default_system_access_log_field_configs(),
+      database: DatabaseAccessLogConfig::default(),
     }
   }
 }
@@ -2751,27 +2822,31 @@ impl Default for DatabaseAccessLogConfig {
 
 impl DatabaseAccessLogConfig {
   fn validate(&self) -> anyhow::Result<()> {
+    self.validate_with_prefix("database.access_log")
+  }
+
+  pub(crate) fn validate_with_prefix(&self, prefix: &str) -> anyhow::Result<()> {
     validate_optional_non_empty(
-      "database.access_log.connection_url",
+      &format!("{prefix}.connection_url"),
       self.connection_url.as_deref(),
     )?;
     validate_optional_non_empty(
-      "database.access_log.connection_url_env",
+      &format!("{prefix}.connection_url_env"),
       self.connection_url_env.as_deref(),
     )?;
     if let Some(table) = &self.table {
-      validate_postgres_identifier_path("database.access_log.table", table)?;
+      validate_postgres_identifier_path(&format!("{prefix}.table"), table)?;
     }
     if self.max_connections == 0 {
-      bail!("database.access_log.max_connections must be greater than 0");
+      bail!("{prefix}.max_connections must be greater than 0");
     }
     if self.connect_timeout_ms == 0 {
-      bail!("database.access_log.connect_timeout_ms must be greater than 0");
+      bail!("{prefix}.connect_timeout_ms must be greater than 0");
     }
     if self.queue_capacity == 0 {
-      bail!("database.access_log.queue_capacity must be greater than 0");
+      bail!("{prefix}.queue_capacity must be greater than 0");
     }
-    self.tls.validate()?;
+    self.tls.validate_with_prefix(&format!("{prefix}.tls"))?;
 
     if !self.enabled {
       return Ok(());
@@ -2779,38 +2854,37 @@ impl DatabaseAccessLogConfig {
 
     match (&self.connection_url, &self.connection_url_env) {
       (Some(_), Some(_)) => {
-        bail!("database.access_log must set only one of connection_url or connection_url_env")
+        bail!("{prefix} must set only one of connection_url or connection_url_env")
       }
       (None, None) => {
-        bail!("database.access_log requires connection_url or connection_url_env when enabled=true")
+        bail!("{prefix} requires connection_url or connection_url_env when enabled=true")
       }
       _ => {}
     }
     if self.table.is_none() {
-      bail!("database.access_log.table is required when enabled=true");
+      bail!("{prefix}.table is required when enabled=true");
     }
 
     Ok(())
   }
 
-  pub(crate) fn connection_url(&self) -> anyhow::Result<Option<String>> {
+  pub(crate) fn connection_url_with_prefix(&self, prefix: &str) -> anyhow::Result<Option<String>> {
     if let Some(env_name) = &self.connection_url_env {
-      let value = std::env::var(env_name).with_context(|| {
-        format!("failed to read database.access_log.connection_url_env {env_name}")
-      })?;
+      let value = std::env::var(env_name)
+        .with_context(|| format!("failed to read {prefix}.connection_url_env {env_name}"))?;
       if value.trim().is_empty() {
-        bail!("database.access_log.connection_url_env {env_name} resolved to an empty value");
+        bail!("{prefix}.connection_url_env {env_name} resolved to an empty value");
       }
       return Ok(Some(value));
     }
     Ok(self.connection_url.clone())
   }
 
-  pub(crate) fn table_name(&self) -> anyhow::Result<Option<String>> {
+  pub(crate) fn table_name_with_prefix(&self, prefix: &str) -> anyhow::Result<Option<String>> {
     self
       .table
       .as_deref()
-      .map(|table| quote_postgres_identifier_path("database.access_log.table", table))
+      .map(|table| quote_postgres_identifier_path(&format!("{prefix}.table"), table))
       .transpose()
   }
 }
@@ -2883,22 +2957,20 @@ impl DatabaseTlsConfig {
     Ok(source_paths)
   }
 
-  fn validate(&self) -> anyhow::Result<()> {
+  fn validate_with_prefix(&self, prefix: &str) -> anyhow::Result<()> {
     if self.ca_cert.is_some() && self.mode != DatabaseTlsMode::VerifyFull {
-      bail!(
-        "database.access_log.tls.ca_cert is only valid when database.access_log.tls.mode is \"verify_full\""
-      );
+      bail!("{prefix}.ca_cert is only valid when {prefix}.mode is \"verify_full\"");
     }
     match (&self.client_cert, &self.client_key) {
       (Some(_), Some(_)) if self.mode == DatabaseTlsMode::VerifyFull => {}
       (Some(_), Some(_)) => bail!(
-        "database.access_log.tls.client_cert and client_key are only valid when database.access_log.tls.mode is \"verify_full\""
+        "{prefix}.client_cert and client_key are only valid when {prefix}.mode is \"verify_full\""
       ),
       (Some(_), None) => {
-        bail!("database.access_log.tls.client_key is required when client_cert is configured")
+        bail!("{prefix}.client_key is required when client_cert is configured")
       }
       (None, Some(_)) => {
-        bail!("database.access_log.tls.client_cert is required when client_key is configured")
+        bail!("{prefix}.client_cert is required when client_key is configured")
       }
       (None, None) => {}
     }
@@ -3224,6 +3296,49 @@ fn default_true() -> bool {
 
 fn default_log_level() -> String {
   "info".to_string()
+}
+
+fn default_system_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
+  [
+    ("request_id", "Request.Id"),
+    ("response_id", "Response.Id"),
+    ("transaction_id", "Context.TransactionId"),
+    ("method", "Request.Http.Method"),
+    ("uri", "Request.Http.Uri"),
+    ("path", "Request.Http.Path"),
+    ("query", "Request.Http.Query"),
+    ("request_version", "Request.Http.Version"),
+    ("host", "Request.Http.Host"),
+    ("user_agent", "Request.Headers.get('User-Agent')"),
+    ("client_ip", "Request.Client.Ip"),
+    ("client_port", "Request.Client.Port"),
+    ("protocol", "Request.Protocol"),
+    ("transport", "Request.Transport.Network"),
+    ("tls", "Request.Tls.Enabled"),
+    ("route", "Context.RouteName"),
+    ("status", "Response.Http.Status"),
+    ("reason", "Response.Http.Reason"),
+    ("response_body_bytes", "Response.Body.Size"),
+    ("upstream", "Response.Upstream.Name"),
+    ("upstream_pool", "Response.Upstream.Pool"),
+    ("upstream_scheme", "Response.Upstream.Scheme"),
+    (
+      "upstream_connect_time_ms",
+      "Response.Upstream.ConnectTimeMs",
+    ),
+    (
+      "upstream_first_byte_time_ms",
+      "Response.Upstream.FirstByteTimeMs",
+    ),
+    ("request_received_at_unix_ms", "Request.ReceivedAtUnixMs"),
+    ("response_received_at_unix_ms", "Response.ReceivedAtUnixMs"),
+  ]
+  .into_iter()
+  .map(|(name, value)| AccessLogFieldConfig {
+    name: name.to_string(),
+    value: value.to_string(),
+  })
+  .collect()
 }
 
 fn default_hot_reload_poll_interval_ms() -> u64 {

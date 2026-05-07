@@ -11,7 +11,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use std::time::Duration;
 
-use crate::access_log::AccessLogSinks;
+use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::cache::ResponseCache;
 use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::limits::LimitState;
@@ -122,6 +122,7 @@ pub struct AppSnapshot {
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub waf: WafEngine,
   pub access_logs: AccessLogSinks,
+  pub system_access_log: SystemAccessLog,
 }
 
 impl AppSnapshot {
@@ -164,6 +165,9 @@ impl AppSnapshot {
     let access_logs = AccessLogSinks::new(&config.database.access_log)
       .await
       .context("failed to build access log sinks")?;
+    let system_access_log = SystemAccessLog::new(&config.logging.access_log)
+      .await
+      .context("failed to build system access log")?;
 
     Ok(Self {
       config,
@@ -180,6 +184,7 @@ impl AppSnapshot {
       quic_server_config,
       waf,
       access_logs,
+      system_access_log,
     })
   }
 }

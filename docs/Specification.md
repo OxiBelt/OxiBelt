@@ -148,7 +148,8 @@ Operational endpoints are optional:
 
 - `[health]` exposes local readiness and liveness endpoints.
 - `[metrics]` exposes Prometheus-style metrics.
-- OxiRule `emit_access_log` writes newline-delimited JSON to stdout and can optionally mirror records to PostgreSQL.
+- `[logging.access_log]` emits request-wide newline-delimited JSON access logs with `scope = "system"` and can use its own stdout and PostgreSQL sinks.
+- OxiRule `emit_access_log` writes newline-delimited JSON with `scope = "waf"` to stdout and can optionally mirror records to PostgreSQL through the separate `[database.access_log]` sink.
 
 ## Configuration and Path Model
 
@@ -182,7 +183,6 @@ The current implementation intentionally leaves these as future work:
 
 - ACME HTTP-01 challenge handling.
 - Live OCSP fetch and refresh workers.
-- Request-wide structured access logging outside OxiRule `emit_access_log`.
 - Sticky-cookie upstream sessions.
 - WebRTC media forwarding.
 - TCP stream proxying, generic HTTP upgrade, CONNECT tunneling, gRPC health checks, gRPC-Web translation, and PROXY protocol egress for TCP upstreams.

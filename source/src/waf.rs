@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::net::IpAddr;
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use http::header::{COOKIE, HeaderName, HeaderValue, USER_AGENT};
+use http::header::{COOKIE, HeaderName, HeaderValue, SET_COOKIE, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use regex::{Regex, RegexBuilder};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -605,7 +605,10 @@ fn validate_actions(
       }
       WafActionConfig::EmitAccessLog { fields } => {
         require_phase(rule, WafPhase::Response, "emit_access_log")?;
-        validate_access_log_fields(rule, fields)?;
+        validate_access_log_field_configs(
+          &format!("WAF rule {} emit_access_log", rule.name),
+          fields,
+        )?;
       }
       WafActionConfig::RouteToUpstream { upstream } => {
         require_phase(rule, WafPhase::Request, "route_to_upstream")?;
@@ -713,50 +716,32 @@ fn validate_header_name(name: &str) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn validate_access_log_fields(
-  rule: &WafRuleConfig,
+pub fn validate_access_log_field_configs(
+  label: &str,
   fields: &[AccessLogFieldConfig],
 ) -> anyhow::Result<()> {
   if fields.is_empty() {
-    bail!(
-      "WAF rule {} emit_access_log must define at least one field",
-      rule.name
-    );
+    bail!("{label} must define at least one field");
   }
 
   let mut names = HashSet::new();
   for field in fields {
-    validate_access_log_field_name(&rule.name, &field.name)?;
+    validate_access_log_field_name(label, &field.name)?;
     if matches!(field.name.as_str(), "event" | "timestamp_unix_ms") {
-      bail!(
-        "WAF rule {} emit_access_log field {} uses a reserved field name",
-        rule.name,
-        field.name
-      );
+      bail!("{label} field {} uses a reserved field name", field.name);
     }
     if !names.insert(field.name.as_str()) {
-      bail!(
-        "WAF rule {} emit_access_log contains duplicate field {}",
-        rule.name,
-        field.name
-      );
+      bail!("{label} contains duplicate field {}", field.name);
     }
-    let expression = Parser::new(&field.value).parse().with_context(|| {
-      format!(
-        "failed to parse WAF rule {} emit_access_log field {}",
-        rule.name, field.name
-      )
-    })?;
-    expression.validate_for_phase(rule.phase).with_context(|| {
-      format!(
-        "invalid WAF rule {} emit_access_log field {}",
-        rule.name, field.name
-      )
-    })?;
+    let expression = Parser::new(&field.value)
+      .parse()
+      .with_context(|| format!("failed to parse {label} field {}", field.name))?;
+    expression
+      .validate_for_phase(WafPhase::Response)
+      .with_context(|| format!("invalid {label} field {}", field.name))?;
     if expression.requires_request_body_inspection() {
       bail!(
-        "WAF rule {} emit_access_log field {} cannot read request body bytes",
-        rule.name,
+        "{label} field {} cannot read request body bytes",
         field.name
       );
     }
@@ -765,14 +750,14 @@ fn validate_access_log_fields(
   Ok(())
 }
 
-fn validate_access_log_field_name(rule_name: &str, field_name: &str) -> anyhow::Result<()> {
+fn validate_access_log_field_name(label: &str, field_name: &str) -> anyhow::Result<()> {
   if field_name.is_empty()
     || field_name.len() > 64
     || !field_name
       .bytes()
       .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
   {
-    bail!("WAF rule {rule_name} emit_access_log field names must match [A-Za-z0-9_.-]{{1,64}}");
+    bail!("{label} field names must match [A-Za-z0-9_.-]{{1,64}}");
   }
   Ok(())
 }
@@ -1007,6 +992,29 @@ impl WafEngine {
         }
       },
     }
+  }
+
+  pub fn build_system_access_log(
+    &self,
+    fields: &CompiledAccessLogFields,
+    input: WafResponseInput<'_>,
+  ) -> anyhow::Result<AccessLogRecord> {
+    let mut tx = TransactionBudget::new(&self.limits);
+    let person_proof = self.person_proof.evaluate_request(input.request);
+    let ctx = EvalContext {
+      phase: WafPhase::Response,
+      mode: self.mode,
+      rule_name: "",
+      rule_id: None,
+      rule_tags: &[],
+      request: input.request,
+      response: Some(input),
+      person_proof: &person_proof,
+      pattern_sets: &self.pattern_sets,
+      limits: &self.limits,
+      duplicate_metadata_policy: self.duplicate_metadata_policy,
+    };
+    AccessLogRecord::from_fields(&fields.fields, &ctx, &mut tx, "system")
   }
 
   fn evaluate_request_inner(
@@ -1278,6 +1286,30 @@ fn compile_actions(rule: &WafRuleConfig, scope: &str) -> anyhow::Result<Vec<Comp
     .collect()
 }
 
+#[derive(Clone)]
+pub struct CompiledAccessLogFields {
+  fields: Vec<CompiledAccessLogField>,
+}
+
+pub fn compile_access_log_fields(
+  label: &str,
+  fields: &[AccessLogFieldConfig],
+) -> anyhow::Result<CompiledAccessLogFields> {
+  validate_access_log_field_configs(label, fields)?;
+  let fields = fields
+    .iter()
+    .map(|field| {
+      Ok(CompiledAccessLogField {
+        name: field.name.clone(),
+        expression: Parser::new(&field.value)
+          .parse()
+          .with_context(|| format!("failed to compile {label} field {}", field.name))?,
+      })
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
+  Ok(CompiledAccessLogFields { fields })
+}
+
 fn person_proof_policy_from_action(
   rule: &WafRuleConfig,
   scope: &str,
@@ -1322,10 +1354,18 @@ fn person_proof_policy_from_action(
 }
 
 fn new_internal_rule_id() -> anyhow::Result<String> {
+  new_uuid_like_id("WAF internal rule id")
+}
+
+pub fn new_access_log_id() -> String {
+  new_uuid_like_id("access log id").unwrap_or_else(|_| format!("fallback-{}", current_unix_ms()))
+}
+
+fn new_uuid_like_id(label: &str) -> anyhow::Result<String> {
   let mut bytes = [0u8; 16];
   SystemRandom::new()
     .fill(&mut bytes)
-    .map_err(|_| anyhow!("failed to generate WAF internal rule id"))?;
+    .map_err(|_| anyhow!("failed to generate {label}"))?;
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   Ok(format!(
@@ -1384,6 +1424,9 @@ enum CompiledPatternSet {
 
 #[derive(Debug, Clone, Copy)]
 pub struct WafRequestInput<'a> {
+  pub request_id: &'a str,
+  pub transaction_id: &'a str,
+  pub received_at_unix_ms: u64,
   pub method: &'a Method,
   pub uri: &'a Uri,
   pub version: Version,
@@ -1391,6 +1434,7 @@ pub struct WafRequestInput<'a> {
   pub body: Option<WafBodyInput<'a>>,
   pub peer_addr: std::net::SocketAddr,
   pub downstream_host: &'a str,
+  pub downstream_scheme: &'a str,
   pub route_name: &'a str,
   pub tcp_max_hop: Option<u8>,
   pub tls: &'a WafTlsMetadata,
@@ -1453,9 +1497,16 @@ impl WafTransportNetwork {
 #[derive(Debug, Clone, Copy)]
 pub struct WafResponseInput<'a> {
   pub request: WafRequestInput<'a>,
+  pub response_id: &'a str,
+  pub received_at_unix_ms: u64,
+  pub version: Version,
   pub status: StatusCode,
   pub headers: &'a HeaderMap,
   pub upstream_name: &'a str,
+  pub upstream_pool: Option<&'a str>,
+  pub upstream_scheme: &'a str,
+  pub upstream_connect_time_ms: Option<u64>,
+  pub upstream_first_byte_time_ms: Option<u64>,
   pub upstream_error: Option<WafUpstreamError<'a>>,
 }
 
@@ -1638,9 +1689,12 @@ fn apply_response_actions(
           response: Some(input),
           ..*ctx
         };
-        decision
-          .access_logs
-          .push(AccessLogRecord::from_fields(fields, &action_ctx, tx)?);
+        decision.access_logs.push(AccessLogRecord::from_fields(
+          fields,
+          &action_ctx,
+          tx,
+          "waf",
+        )?);
       }
       CompiledAction::Config(WafActionConfig::Reject { .. })
       | CompiledAction::Config(WafActionConfig::RouteToPool { .. })
@@ -1676,6 +1730,8 @@ enum AccessLogJsonValue {
   Bool(bool),
   Int(i64),
   String(String),
+  Array(Vec<AccessLogJsonValue>),
+  Object(Vec<(String, AccessLogJsonValue)>),
   Null,
 }
 
@@ -1686,6 +1742,7 @@ impl AccessLogRecord {
     fields: &[CompiledAccessLogField],
     ctx: &EvalContext<'_>,
     tx: &mut TransactionBudget,
+    scope: &str,
   ) -> anyhow::Result<Self> {
     let values = fields
       .iter()
@@ -1696,10 +1753,20 @@ impl AccessLogRecord {
           .with_context(|| format!("failed to evaluate emit_access_log field {}", field.name))?;
         Ok(AccessLogFieldValue {
           name: field.name.clone(),
-          value: AccessLogJsonValue::from_value(value, ctx.limits)?,
+          value: AccessLogJsonValue::from_value(value, ctx)?,
         })
       })
       .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut values = values;
+    if !values.iter().any(|field| field.name == "scope") {
+      values.insert(
+        0,
+        AccessLogFieldValue {
+          name: "scope".to_string(),
+          value: AccessLogJsonValue::String(scope.to_string()),
+        },
+      );
+    }
 
     Ok(Self {
       timestamp_unix_ms: current_unix_ms(),
@@ -1740,23 +1807,280 @@ impl AccessLogRecord {
 }
 
 impl AccessLogJsonValue {
-  fn from_value(value: Value, limits: &WafLimits) -> anyhow::Result<Self> {
+  fn from_value(value: Value, ctx: &EvalContext<'_>) -> anyhow::Result<Self> {
     match value {
       Value::Bool(value) => Ok(Self::Bool(value)),
       Value::Int(value) => Ok(Self::Int(value)),
       Value::String(value) => Ok(Self::String(truncate_log_string(
         &value,
-        limits.max_helper_result_bytes,
+        ctx.limits.max_helper_result_bytes,
       ))),
+      Value::StringList(list) => Ok(Self::bounded_string_list(list, ctx.limits)),
+      Value::Object(object) => Self::from_object(object, ctx),
       Value::Null => Ok(Self::Null),
-      Value::Bytes(_) | Value::StringList(_) | Value::Object(_) => {
-        bail!("emit_access_log fields must evaluate to Bool, Int, String, or Null")
+      Value::Bytes(_) => bail!("emit_access_log fields cannot write raw Bytes"),
+    }
+  }
+
+  fn bounded_string_list(list: BoundedStringList, limits: &WafLimits) -> Self {
+    Self::Object(vec![
+      (
+        "values".to_string(),
+        Self::Array(
+          list
+            .values
+            .into_iter()
+            .map(|value| Self::String(truncate_log_string(&value, limits.max_helper_result_bytes)))
+            .collect(),
+        ),
+      ),
+      ("is_truncated".to_string(), Self::Bool(list.is_truncated)),
+    ])
+  }
+
+  fn from_object(object: ObjectRef, ctx: &EvalContext<'_>) -> anyhow::Result<Self> {
+    match object {
+      ObjectRef::RequestHeaders => Ok(header_map_json(ctx.request.headers, ctx.limits)),
+      ObjectRef::ResponseHeaders => Ok(header_map_json(
+        ctx.response.context("missing response context")?.headers,
+        ctx.limits,
+      )),
+      ObjectRef::RequestQueryParams => Ok(pair_map_json(
+        query_pairs(ctx.request.uri, ctx.limits),
+        ctx.limits,
+      )),
+      ObjectRef::RequestCookies => Ok(pair_map_json(
+        cookie_pairs(ctx.request.headers, ctx.limits),
+        ctx.limits,
+      )),
+      ObjectRef::RequestTags => Ok(string_map_json(ctx.request.tags, ctx.limits)),
+      ObjectRef::ContextRuleTags => Ok(Self::Array(
+        ctx
+          .rule_tags
+          .iter()
+          .take(ctx.limits.max_helper_items)
+          .map(|tag| Self::String(truncate_log_string(tag, ctx.limits.max_helper_result_bytes)))
+          .collect(),
+      )),
+      ObjectRef::RequestHttp => object_members_json(
+        object,
+        &[
+          "Version", "Method", "Scheme", "Host", "Path", "Query", "Uri",
+        ],
+        ctx,
+      ),
+      ObjectRef::RequestClient => object_members_json(
+        object,
+        &[
+          "Kind",
+          "Ip",
+          "Port",
+          "SourceAddress",
+          "UserAgent",
+          "GeoCountry",
+          "Asn",
+        ],
+        ctx,
+      ),
+      ObjectRef::RequestTransport => object_members_json(
+        object,
+        &["Network", "RemoteIp", "RemotePort", "IsEncrypted"],
+        ctx,
+      ),
+      ObjectRef::RequestTransportTcp => {
+        object_members_json(object, &["Sni", "Alpn", "MaxHop", "Mss", "RttMs"], ctx)
+      }
+      ObjectRef::RequestTransportUdp => object_members_json(
+        object,
+        &["DatagramSize", "QuicDetected", "ConnectionId"],
+        ctx,
+      ),
+      ObjectRef::RequestTls | ObjectRef::ResponseTls => object_members_json(
+        object,
+        &[
+          "Enabled",
+          "Version",
+          "CipherSuite",
+          "Sni",
+          "Alpn",
+          "Fingerprint",
+          "FingerprintScheme",
+          "ClientCertificatePresent",
+        ],
+        ctx,
+      ),
+      ObjectRef::RequestBody | ObjectRef::ResponseBody => {
+        object_members_json(object, &["Size", "IsTruncated", "Text"], ctx)
+      }
+      ObjectRef::RequestClientPersonProof => object_members_json(
+        object,
+        &[
+          "State",
+          "Method",
+          "Difficulty",
+          "IssuedAtUnixMs",
+          "ExpiresAtUnixMs",
+        ],
+        ctx,
+      ),
+      ObjectRef::RequestClientAgent => object_members_json(
+        object,
+        &["Verified", "Kind", "Provider", "Model", "AuthMethod"],
+        ctx,
+      ),
+      ObjectRef::RequestClientBot => object_members_json(
+        object,
+        &["Disposition", "Malicious", "Score", "Reason"],
+        ctx,
+      ),
+      ObjectRef::ResponseHttp => object_members_json(object, &["Version", "Status", "Reason"], ctx),
+      ObjectRef::ResponseTransport => object_members_json(object, &["Network", "IsEncrypted"], ctx),
+      ObjectRef::ResponseUpstream => object_members_json(
+        object,
+        &[
+          "Name",
+          "Pool",
+          "Scheme",
+          "ConnectTimeMs",
+          "FirstByteTimeMs",
+          "Error",
+        ],
+        ctx,
+      ),
+      ObjectRef::ResponseUpstreamError => object_members_json(object, &["Code", "Message"], ctx),
+      ObjectRef::ResponseCookies => Ok(header_cookie_json(
+        ctx.response.context("missing response context")?.headers,
+        ctx.limits,
+      )),
+      ObjectRef::ResponseTags => Ok(Self::Object(Vec::new())),
+      ObjectRef::RequestTokenBindings => object_members_json(
+        object,
+        &[
+          "UserAgent",
+          "TlsFingerprint",
+          "Route",
+          "DirectPeerIpNetworkPrefix",
+          "TcpMaxHop",
+        ],
+        ctx,
+      ),
+      ObjectRef::Context | ObjectRef::Request | ObjectRef::Response => {
+        bail!("top-level OxiRule objects cannot be written as access-log fields")
       }
     }
   }
 }
 
-fn current_unix_ms() -> u64 {
+fn object_members_json(
+  object: ObjectRef,
+  fields: &[&str],
+  ctx: &EvalContext<'_>,
+) -> anyhow::Result<AccessLogJsonValue> {
+  let mut values = Vec::new();
+  for field in fields {
+    let value = eval_member(Value::Object(object), field, ctx)?;
+    values.push((
+      field.to_ascii_lowercase(),
+      AccessLogJsonValue::from_value(value, ctx)?,
+    ));
+  }
+  Ok(AccessLogJsonValue::Object(values))
+}
+
+fn header_map_json(headers: &HeaderMap, limits: &WafLimits) -> AccessLogJsonValue {
+  let mut fields: BTreeMap<String, Vec<AccessLogJsonValue>> = BTreeMap::new();
+  for (name, value) in headers.iter().take(limits.max_helper_items) {
+    let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
+    fields
+      .entry(name.as_str().to_ascii_lowercase())
+      .or_default()
+      .push(AccessLogJsonValue::String(truncate_log_string(
+        &value,
+        limits.max_header_value_bytes,
+      )));
+  }
+  AccessLogJsonValue::Object(collapse_json_map(fields))
+}
+
+fn pair_map_json(pairs: Vec<(String, String)>, limits: &WafLimits) -> AccessLogJsonValue {
+  let mut fields: BTreeMap<String, Vec<AccessLogJsonValue>> = BTreeMap::new();
+  for (name, value) in pairs.into_iter().take(limits.max_helper_items) {
+    fields
+      .entry(truncate_log_string(&name, limits.max_helper_result_bytes))
+      .or_default()
+      .push(AccessLogJsonValue::String(truncate_log_string(
+        &value,
+        limits.max_helper_result_bytes,
+      )));
+  }
+  AccessLogJsonValue::Object(collapse_json_map(fields))
+}
+
+fn string_map_json(values: &HashMap<String, String>, limits: &WafLimits) -> AccessLogJsonValue {
+  let mut fields = values
+    .iter()
+    .take(limits.max_helper_items)
+    .map(|(name, value)| {
+      (
+        truncate_log_string(name, limits.max_helper_result_bytes),
+        AccessLogJsonValue::String(truncate_log_string(value, limits.max_helper_result_bytes)),
+      )
+    })
+    .collect::<Vec<_>>();
+  fields.sort_by(|left, right| left.0.cmp(&right.0));
+  AccessLogJsonValue::Object(fields)
+}
+
+fn collapse_json_map(
+  fields: BTreeMap<String, Vec<AccessLogJsonValue>>,
+) -> Vec<(String, AccessLogJsonValue)> {
+  fields
+    .into_iter()
+    .map(|(name, mut values)| {
+      let value = if values.len() == 1 {
+        values.pop().expect("single value is present")
+      } else {
+        AccessLogJsonValue::Array(values)
+      };
+      (name, value)
+    })
+    .collect()
+}
+
+fn query_pairs(uri: &Uri, limits: &WafLimits) -> Vec<(String, String)> {
+  url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+    .take(limits.max_helper_items)
+    .map(|(name, value)| (name.into_owned(), value.into_owned()))
+    .collect()
+}
+
+fn cookie_pairs(headers: &HeaderMap, limits: &WafLimits) -> Vec<(String, String)> {
+  headers
+    .get_all(COOKIE)
+    .iter()
+    .filter_map(|value| value.to_str().ok())
+    .flat_map(|value| value.split(';'))
+    .filter_map(|part| part.trim().split_once('='))
+    .take(limits.max_helper_items)
+    .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
+    .collect()
+}
+
+fn header_cookie_json(headers: &HeaderMap, limits: &WafLimits) -> AccessLogJsonValue {
+  AccessLogJsonValue::bounded_string_list(
+    bounded_string_list(
+      headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| truncate_to_bytes(value, limits.max_header_value_bytes)),
+      limits,
+    ),
+    limits,
+  )
+}
+
+pub fn current_unix_ms() -> u64 {
   SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
@@ -1807,6 +2131,59 @@ fn push_json_value_field(
       let _ = write!(out, "{value}");
     }
     AccessLogJsonValue::String(value) => push_json_string(out, value),
+    AccessLogJsonValue::Array(values) => {
+      out.push('[');
+      let mut first = true;
+      for value in values {
+        if first {
+          first = false;
+        } else {
+          out.push(',');
+        }
+        push_json_value(out, value);
+      }
+      out.push(']');
+    }
+    AccessLogJsonValue::Object(fields) => {
+      out.push('{');
+      let mut first = true;
+      for (name, value) in fields {
+        push_json_value_field(out, &mut first, name, value);
+      }
+      out.push('}');
+    }
+    AccessLogJsonValue::Null => out.push_str("null"),
+  }
+}
+
+fn push_json_value(out: &mut String, value: &AccessLogJsonValue) {
+  match value {
+    AccessLogJsonValue::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+    AccessLogJsonValue::Int(value) => {
+      let _ = write!(out, "{value}");
+    }
+    AccessLogJsonValue::String(value) => push_json_string(out, value),
+    AccessLogJsonValue::Array(values) => {
+      out.push('[');
+      let mut first = true;
+      for value in values {
+        if first {
+          first = false;
+        } else {
+          out.push(',');
+        }
+        push_json_value(out, value);
+      }
+      out.push(']');
+    }
+    AccessLogJsonValue::Object(fields) => {
+      out.push('{');
+      let mut first = true;
+      for (name, value) in fields {
+        push_json_value_field(out, &mut first, name, value);
+      }
+      out.push('}');
+    }
     AccessLogJsonValue::Null => out.push_str("null"),
   }
 }
@@ -2136,14 +2513,22 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         .unwrap_or(Value::Null),
     ),
     (ObjectRef::Context, "RuleTags") => Ok(Value::Object(ObjectRef::ContextRuleTags)),
-    (ObjectRef::Context, "RouteName") => Ok(Value::String(ctx.request.route_name.to_string())),
-    (ObjectRef::Context, "TransactionId") => Ok(Value::String(String::new())),
+    (ObjectRef::Context, "RouteName") => Ok(if ctx.request.route_name.is_empty() {
+      Value::Null
+    } else {
+      Value::String(ctx.request.route_name.to_string())
+    }),
+    (ObjectRef::Context, "TransactionId") => {
+      Ok(Value::String(ctx.request.transaction_id.to_string()))
+    }
     (ObjectRef::Context, "Mode") => Ok(Value::String(match ctx.mode {
       WafMode::Enforcing => "enforcing".to_string(),
       WafMode::Monitor => "monitor".to_string(),
     })),
-    (ObjectRef::Request, "Id") => Ok(Value::String(String::new())),
-    (ObjectRef::Request, "ReceivedAtUnixMs") => Ok(Value::Int(0)),
+    (ObjectRef::Request, "Id") => Ok(Value::String(ctx.request.request_id.to_string())),
+    (ObjectRef::Request, "ReceivedAtUnixMs") => Ok(Value::Int(
+      i64::try_from(ctx.request.received_at_unix_ms).unwrap_or(i64::MAX),
+    )),
     (ObjectRef::Request, "Protocol") => {
       Ok(Value::String(ctx.request.protocol.as_str().to_string()))
     }
@@ -2279,7 +2664,9 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestHttp, "Method") => {
       Ok(Value::String(ctx.request.method.as_str().to_string()))
     }
-    (ObjectRef::RequestHttp, "Scheme") => Ok(Value::String("https".to_string())),
+    (ObjectRef::RequestHttp, "Scheme") => {
+      Ok(Value::String(ctx.request.downstream_scheme.to_string()))
+    }
     (ObjectRef::RequestHttp, "Host") => Ok(Value::String(ctx.request.downstream_host.to_string())),
     (ObjectRef::RequestHttp, "Path") => Ok(Value::String(ctx.request.uri.path().to_string())),
     (ObjectRef::RequestHttp, "Query") => Ok(Value::String(
@@ -2380,8 +2767,22 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestTokenBindings, "TcpMaxHop") => Ok(Value::String(
       request_token_binding_value(ctx.request, PersonProofTokenBinding::TcpMaxHop),
     )),
-    (ObjectRef::Response, "Id") => Ok(Value::String(String::new())),
-    (ObjectRef::Response, "ReceivedAtUnixMs") => Ok(Value::Int(0)),
+    (ObjectRef::Response, "Id") => Ok(Value::String(
+      ctx
+        .response
+        .context("missing response context")?
+        .response_id
+        .to_string(),
+    )),
+    (ObjectRef::Response, "ReceivedAtUnixMs") => Ok(Value::Int(
+      i64::try_from(
+        ctx
+          .response
+          .context("missing response context")?
+          .received_at_unix_ms,
+      )
+      .unwrap_or(i64::MAX),
+    )),
     (ObjectRef::Response, "Protocol") => Ok(Value::String(
       ctx
         .response
@@ -2399,7 +2800,9 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::Response, "Tls") => Ok(Value::Object(ObjectRef::ResponseTls)),
     (ObjectRef::Response, "Transport") => Ok(Value::Object(ObjectRef::ResponseTransport)),
     (ObjectRef::Response, "Upstream") => Ok(Value::Object(ObjectRef::ResponseUpstream)),
-    (ObjectRef::ResponseHttp, "Version") => Ok(Value::String("1.1".to_string())),
+    (ObjectRef::ResponseHttp, "Version") => Ok(Value::String(version_string(
+      ctx.response.context("missing response context")?.version,
+    ))),
     (ObjectRef::ResponseHttp, "Status") => Ok(Value::Int(
       ctx
         .response
@@ -2423,14 +2826,54 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     ))),
     (ObjectRef::ResponseBody, "IsTruncated") => Ok(Value::Bool(false)),
     (ObjectRef::ResponseBody, "Text") | (ObjectRef::ResponseBody, "Bytes") => Ok(Value::Null),
-    (ObjectRef::ResponseUpstream, "Name") => Ok(Value::String(
+    (ObjectRef::ResponseUpstream, "Name") => {
+      let upstream_name = ctx
+        .response
+        .context("missing response context")?
+        .upstream_name;
+      Ok(if upstream_name.is_empty() {
+        Value::Null
+      } else {
+        Value::String(upstream_name.to_string())
+      })
+    }
+    (ObjectRef::ResponseUpstream, "Pool") => Ok(
       ctx
         .response
         .context("missing response context")?
-        .upstream_name
-        .to_string(),
-    )),
-    (ObjectRef::ResponseUpstream, "Pool") => Ok(Value::String(String::new())),
+        .upstream_pool
+        .map(|pool| Value::String(pool.to_string()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::ResponseUpstream, "Scheme") => {
+      let upstream_scheme = ctx
+        .response
+        .context("missing response context")?
+        .upstream_scheme;
+      Ok(if upstream_scheme.is_empty() {
+        Value::Null
+      } else {
+        Value::String(upstream_scheme.to_string())
+      })
+    }
+    (ObjectRef::ResponseUpstream, "ConnectTimeMs") => Ok(
+      ctx
+        .response
+        .context("missing response context")?
+        .upstream_connect_time_ms
+        .and_then(|value| i64::try_from(value).ok())
+        .map(Value::Int)
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::ResponseUpstream, "FirstByteTimeMs") => Ok(
+      ctx
+        .response
+        .context("missing response context")?
+        .upstream_first_byte_time_ms
+        .and_then(|value| i64::try_from(value).ok())
+        .map(Value::Int)
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::ResponseUpstream, "Error") => {
       if ctx
         .response
@@ -3903,6 +4346,9 @@ fn validate_identifier(identifier: &str) -> anyhow::Result<()> {
 
 fn default_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
   [
+    ("request_id", "Request.Id"),
+    ("response_id", "Response.Id"),
+    ("transaction_id", "Context.TransactionId"),
     ("method", "Request.Http.Method"),
     ("uri", "Request.Http.Uri"),
     ("path", "Request.Http.Path"),
@@ -3920,8 +4366,20 @@ fn default_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
     ("reason", "Response.Http.Reason"),
     ("response_body_bytes", "Response.Body.Size"),
     ("upstream", "Response.Upstream.Name"),
+    ("upstream_pool", "Response.Upstream.Pool"),
+    ("upstream_scheme", "Response.Upstream.Scheme"),
+    (
+      "upstream_connect_time_ms",
+      "Response.Upstream.ConnectTimeMs",
+    ),
+    (
+      "upstream_first_byte_time_ms",
+      "Response.Upstream.FirstByteTimeMs",
+    ),
     ("waf_rule", "Context.RuleName"),
     ("waf_rule_id", "Context.RuleId"),
+    ("request_received_at_unix_ms", "Request.ReceivedAtUnixMs"),
+    ("response_received_at_unix_ms", "Response.ReceivedAtUnixMs"),
   ]
   .into_iter()
   .map(|(name, value)| AccessLogFieldConfig {

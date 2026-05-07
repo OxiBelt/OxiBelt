@@ -361,9 +361,9 @@ name = "status"
 value = "Response.Http.Status"
 ```
 
-The emitted newline-delimited JSON object always includes `event = "oxibelt.access"` and `timestamp_unix_ms`. If `database.access_log.enabled = true`, OxiBelt also writes the same record to the configured PostgreSQL table.
+The emitted newline-delimited JSON object always includes `event = "oxibelt.access"`, `timestamp_unix_ms`, and `scope = "waf"` unless a field named `scope` is explicitly configured. If `database.access_log.enabled = true`, OxiBelt also writes the same record to the configured PostgreSQL table.
 
-Field `value` may also be written as `expression`. Field expressions may read response-phase `Request`, `Response`, and `Context` values. They must evaluate to `Bool`, `Int`, `String`, or `Null`. Field names must match `[A-Za-z0-9_.-]{1,64}` and may not be `event` or `timestamp_unix_ms`. Fields that read request body bytes are rejected.
+Field `value` may also be written as `expression`. Field expressions may read response-phase `Request`, `Response`, and `Context` values. They may evaluate to scalar JSON values (`Bool`, `Int`, `String`, or `Null`) or bounded JSON collections/objects exposed by the OxiRule object model, such as `Request.Headers`, `Request.QueryParams`, `Request.Cookies`, `Request.Tags`, `Context.RuleTags`, or `Request.Headers.getAll(...)`. Field names must match `[A-Za-z0-9_.-]{1,64}` and may not be `event` or `timestamp_unix_ms`. Fields that read request body bytes are rejected.
 
 If `fields` is omitted, OxiBelt emits the default access-log field set.
 
@@ -519,6 +519,8 @@ Current implementation notes:
 
 - TCP request rules expose TCP transport metadata; HTTP/3 and WebTransport request rules expose UDP/QUIC metadata.
 - HTTP/3 TLS fingerprints use the `quinn-rustls-quic-v2` scheme.
+- `Request.Id`, `Response.Id`, `Context.TransactionId`, request/response receive timestamps, and upstream first-byte timing are populated for HTTP request-wide and OxiRule access-log contexts.
+- Upstream connect timing is populated only where the proxy can measure it directly; otherwise it evaluates to `null`.
 - Some local endpoint fields, connection IDs, byte counters, UDP datagram sizes, TCP MSS, and RTT fields are reserved and may evaluate to `null`.
 
 ## Bounded Helpers

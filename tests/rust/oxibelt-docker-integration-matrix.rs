@@ -632,6 +632,31 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "ops",
+            "system-access-log-stdout",
+            "system-wide access log emits structured stdout records without WAF rules",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response logs matching
+  response="$(client_request "example.test" "/app/system-log?case=stdout" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/system-log?case=stdout"'
+
+  logs="$(docker logs "${proxy_container}" 2>&1 || true)"
+  matching="$(grep -F '"scope":"system"' <<<"${logs}" | grep -F '"path":"/app/system-log"' | grep -F '"status":200' || true)"
+  if [[ -z "${matching}" ]]; then
+    echo "${logs}" >&2
+    fail_with_diagnostics "expected system access log JSON on stdout"
+  fi
+}
+"#,
+            None,
+        ),
+        docker_case(
             "limits",
             "request-body-limit",
             "configured request body limit rejects oversized requests before upstream forwarding",
@@ -867,6 +892,30 @@ run_case_checks() {
   count="$(postgres_query "SELECT count(*) FROM oxibelt_access_log WHERE event = 'oxibelt.access' AND record->>'path' = '/app/db-log' AND record->>'status' = '200' AND record->>'route' = 'main-route';")"
   if [[ "${count}" != "1" ]]; then
     fail_with_diagnostics "expected one PostgreSQL access log row, got ${count}"
+  fi
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "database-access-log",
+            "system-postgres",
+            "system-wide access logs use a separate PostgreSQL sink",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                postgres: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response count
+  response="$(client_request "example.test" "/app/system-db-log?case=postgres" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/system-db-log?case=postgres"'
+
+  count="$(postgres_query "SELECT count(*) FROM oxibelt_access_log WHERE event = 'oxibelt.access' AND record->>'scope' = 'system' AND record->>'path' = '/app/system-db-log' AND record->>'status' = '200' AND record->>'route' = 'main-route';")"
+  if [[ "${count}" != "1" ]]; then
+    fail_with_diagnostics "expected one system PostgreSQL access log row, got ${count}"
   fi
 }
 "#,

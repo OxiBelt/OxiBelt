@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
@@ -15,7 +15,7 @@ use crate::pools::PoolSelection;
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
 use crate::waf::{
   WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
-  WafTransportNetwork, apply_header_mutations, request_protocol,
+  WafTransportNetwork, WafUpstreamError, apply_header_mutations, request_protocol,
 };
 
 pub(crate) mod body;
@@ -35,6 +35,142 @@ use self::request::{RebuildRequestOptions, rebuild_request};
 use self::response::{text_response, upstream_error_response, waf_terminal_response};
 use self::uri::{rewrite_uri, validate_downstream_path};
 use self::version::select_upstream_http_version;
+
+struct SystemAccessLogContext {
+  request_id: String,
+  response_id: String,
+  transaction_id: String,
+  request_received_at_unix_ms: u64,
+  response_received_at_unix_ms: u64,
+  method: Method,
+  uri: http::Uri,
+  version: http::Version,
+  headers: HeaderMap,
+  client_addr: std::net::SocketAddr,
+  downstream_host: String,
+  downstream_scheme: &'static str,
+  route_name: String,
+  tcp_max_hop: Option<u8>,
+  tls: Arc<WafTlsMetadata>,
+  protocol: WafProtocol,
+  transport_network: WafTransportNetwork,
+  tags: std::collections::HashMap<String, String>,
+  upstream_name: String,
+  upstream_pool: Option<String>,
+  upstream_scheme: String,
+  upstream_connect_time_ms: Option<u64>,
+  upstream_first_byte_time_ms: Option<u64>,
+  upstream_error_code: Option<String>,
+  upstream_error_message: Option<String>,
+}
+
+impl SystemAccessLogContext {
+  fn new<B>(
+    request: &Request<B>,
+    peer_addr: std::net::SocketAddr,
+    tcp_max_hop: Option<u8>,
+    tls: Arc<WafTlsMetadata>,
+    protocol: WafProtocol,
+    transport_network: WafTransportNetwork,
+    downstream_scheme: &'static str,
+  ) -> Self {
+    Self {
+      request_id: crate::waf::new_access_log_id(),
+      response_id: crate::waf::new_access_log_id(),
+      transaction_id: crate::waf::new_access_log_id(),
+      request_received_at_unix_ms: crate::waf::current_unix_ms(),
+      response_received_at_unix_ms: 0,
+      method: request.method().clone(),
+      uri: request.uri().clone(),
+      version: request.version(),
+      headers: request.headers().clone(),
+      client_addr: peer_addr,
+      downstream_host: extract_host(request).unwrap_or_default(),
+      downstream_scheme,
+      route_name: String::new(),
+      tcp_max_hop,
+      tls,
+      protocol,
+      transport_network,
+      tags: std::collections::HashMap::new(),
+      upstream_name: String::new(),
+      upstream_pool: None,
+      upstream_scheme: String::new(),
+      upstream_connect_time_ms: None,
+      upstream_first_byte_time_ms: None,
+      upstream_error_code: None,
+      upstream_error_message: None,
+    }
+  }
+
+  fn request_input(&self) -> WafRequestInput<'_> {
+    WafRequestInput {
+      request_id: &self.request_id,
+      transaction_id: &self.transaction_id,
+      received_at_unix_ms: self.request_received_at_unix_ms,
+      method: &self.method,
+      uri: &self.uri,
+      version: self.version,
+      headers: &self.headers,
+      body: None,
+      peer_addr: self.client_addr,
+      downstream_host: &self.downstream_host,
+      downstream_scheme: self.downstream_scheme,
+      route_name: &self.route_name,
+      tcp_max_hop: self.tcp_max_hop,
+      tls: self.tls.as_ref(),
+      protocol: self.protocol,
+      transport_network: self.transport_network,
+      tags: &self.tags,
+    }
+  }
+
+  fn response_input<'a>(&'a self, response: &'a Response<ProxyBody>) -> WafResponseInput<'a> {
+    let upstream_error = self
+      .upstream_error_code
+      .as_deref()
+      .zip(self.upstream_error_message.as_deref())
+      .map(|(code, message)| WafUpstreamError { code, message });
+    WafResponseInput {
+      request: self.request_input(),
+      response_id: &self.response_id,
+      received_at_unix_ms: self.response_received_at_unix_ms,
+      version: response.version(),
+      status: response.status(),
+      headers: response.headers(),
+      upstream_name: &self.upstream_name,
+      upstream_pool: self.upstream_pool.as_deref(),
+      upstream_scheme: &self.upstream_scheme,
+      upstream_connect_time_ms: self.upstream_connect_time_ms,
+      upstream_first_byte_time_ms: self.upstream_first_byte_time_ms,
+      upstream_error,
+    }
+  }
+
+  fn record_upstream_error(&mut self, code: &str, message: &str) {
+    self.upstream_error_code = Some(code.to_string());
+    self.upstream_error_message = Some(message.to_string());
+  }
+}
+
+fn emit_system_access_log(
+  state: &AppSnapshot,
+  context: &mut SystemAccessLogContext,
+  response: &Response<ProxyBody>,
+) {
+  if !state.system_access_log.enabled() {
+    return;
+  }
+  if context.response_received_at_unix_ms == 0 {
+    context.response_received_at_unix_ms = crate::waf::current_unix_ms();
+  }
+  let input = context.response_input(response);
+  state.system_access_log.emit(&state.waf, input);
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+  started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
 
 pub async fn handle(
   request: Request<Incoming>,
@@ -96,9 +232,53 @@ where
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
   let state = state.snapshot();
+  let mut access_log = SystemAccessLogContext::new(
+    &request,
+    peer_addr,
+    tcp_max_hop,
+    tls.clone(),
+    protocol,
+    transport_network,
+    downstream_scheme,
+  );
+  let response = handle_inner_impl(
+    request,
+    peer_addr,
+    tcp_max_hop,
+    tls,
+    state.clone(),
+    protocol,
+    transport_network,
+    _reject_connect,
+    downstream_scheme,
+    &mut access_log,
+  )
+  .await;
+  emit_system_access_log(state.as_ref(), &mut access_log, &response);
+  response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_inner_impl<B>(
+  request: Request<B>,
+  peer_addr: std::net::SocketAddr,
+  tcp_max_hop: Option<u8>,
+  tls: Arc<WafTlsMetadata>,
+  state: Arc<AppSnapshot>,
+  protocol: WafProtocol,
+  transport_network: WafTransportNetwork,
+  _reject_connect: bool,
+  downstream_scheme: &'static str,
+  access_log: &mut SystemAccessLogContext,
+) -> Response<ProxyBody>
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
+  B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
+{
   state.metrics.record_request();
 
   let host = extract_host(&request).unwrap_or_default();
+  access_log.downstream_host = host.clone();
   let path = request.uri().path().to_string();
   if let Err((status, message)) = validate_request_limits(&request, &state.config.limits) {
     return text_response(status, message);
@@ -126,6 +306,7 @@ where
       );
     }
   };
+  access_log.client_addr = client_addr;
 
   if let Some(status) = state
     .limits
@@ -137,6 +318,7 @@ where
   let Some(resolved) = state.route_table.resolve(&host, &path, &state.upstreams) else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
+  access_log.route_name = resolved.route.name.clone();
 
   let request = request
     .map(|body| Limited::new(body, state.config.limits.max_request_body_bytes as usize).boxed());
@@ -162,6 +344,9 @@ where
   let request_body = captured_body.as_ref().map(waf_body_input);
 
   let request_waf = state.waf.evaluate_request(WafRequestInput {
+    request_id: &access_log.request_id,
+    transaction_id: &access_log.transaction_id,
+    received_at_unix_ms: access_log.request_received_at_unix_ms,
     method: &request_method,
     uri: &request_uri,
     version: request_version,
@@ -169,6 +354,7 @@ where
     body: request_body,
     peer_addr: client_addr,
     downstream_host: &host,
+    downstream_scheme,
     route_name: &resolved.route.name,
     tcp_max_hop,
     tls: tls.as_ref(),
@@ -180,6 +366,7 @@ where
   for (key, value) in &request_waf.tags {
     tags.insert(key.clone(), value.clone());
   }
+  access_log.tags = tags.clone();
 
   if let Some(terminal) = request_waf.terminal {
     return waf_terminal_response(terminal, &request_waf.response_header_mutations);
@@ -194,6 +381,7 @@ where
       &host,
       &request_waf,
       request_version,
+      access_log,
     )
     .await;
   }
@@ -207,6 +395,7 @@ where
       &host,
       downstream_scheme,
       &request_waf,
+      access_log,
     )
     .await
     {
@@ -244,6 +433,7 @@ where
     ) {
       Ok(selection) => {
         let name = selection.upstream_name.clone();
+        access_log.upstream_pool = Some(selection.pool_name.clone());
         pool_selection = Some(selection);
         state
           .upstreams
@@ -259,6 +449,8 @@ where
   } else {
     resolved.upstream.expect("validated route upstream")
   };
+  access_log.upstream_name = upstream.name.clone();
+  access_log.upstream_scheme = upstream.origin.scheme().to_string();
 
   let mut upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
     select_upstream_http_version(
@@ -368,6 +560,7 @@ where
       "proxying downstream request"
   );
 
+  let upstream_started_at = Instant::now();
   let upstream_response = if upstream_version == HttpVersion::H3 {
     match tokio::time::timeout(
       Duration::from_millis(upstream.request_timeout_ms),
@@ -378,6 +571,8 @@ where
       Err(_) => {
         state.pools.report_failure(&upstream.name);
         warn!(upstream = %upstream.name, "upstream HTTP/3 request timed out");
+        access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+        access_log.record_upstream_error("read_timeout", "upstream request timed out");
         return upstream_error_response(
           &state,
           &resolved.route.name,
@@ -394,11 +589,20 @@ where
           request_body,
           &tags,
           &upstream.name,
+          upstream.origin.scheme(),
+          access_log.upstream_pool.as_deref(),
+          access_log.upstream_connect_time_ms,
+          access_log.upstream_first_byte_time_ms,
+          "read_timeout",
           "upstream request timed out",
           &request_waf.response_header_mutations,
+          access_log,
         );
       }
-      Ok(Ok(response)) => response,
+      Ok(Ok(response)) => {
+        access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+        response
+      }
       Ok(Err(error)) => {
         state.pools.report_failure(&upstream.name);
         warn!(
@@ -406,6 +610,8 @@ where
             upstream = %upstream.name,
             "upstream HTTP/3 request failed"
         );
+        access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+        access_log.record_upstream_error("connect_error", &error.to_string());
         return upstream_error_response(
           &state,
           &resolved.route.name,
@@ -422,8 +628,14 @@ where
           request_body,
           &tags,
           &upstream.name,
+          upstream.origin.scheme(),
+          access_log.upstream_pool.as_deref(),
+          access_log.upstream_connect_time_ms,
+          access_log.upstream_first_byte_time_ms,
+          "connect_error",
           &error.to_string(),
           &request_waf.response_header_mutations,
+          access_log,
         );
       }
     }
@@ -453,7 +665,10 @@ where
         .await
     };
     match result {
-      Ok(response) => response.map(|body| body.map_err(boxed_error).boxed()),
+      Ok(response) => {
+        access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+        response.map(|body| body.map_err(boxed_error).boxed())
+      }
       Err(error) => {
         state.pools.report_failure(&upstream.name);
         warn!(
@@ -462,6 +677,14 @@ where
             upstream = %upstream.name,
             "upstream request failed"
         );
+        access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+        let error_message = error.to_string();
+        let error_code = if error_message.contains("timed out") {
+          "read_timeout"
+        } else {
+          "connect_error"
+        };
+        access_log.record_upstream_error(error_code, &error_message);
         return upstream_error_response(
           &state,
           &resolved.route.name,
@@ -478,8 +701,14 @@ where
           request_body,
           &tags,
           &upstream.name,
-          &error.to_string(),
+          upstream.origin.scheme(),
+          access_log.upstream_pool.as_deref(),
+          access_log.upstream_connect_time_ms,
+          access_log.upstream_first_byte_time_ms,
+          error_code,
+          &error_message,
           &request_waf.response_header_mutations,
+          access_log,
         );
       }
     }
@@ -501,7 +730,11 @@ where
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
   if state.waf.has_response_rules(&resolved.route.name) {
+    access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
     let request_input = WafRequestInput {
+      request_id: &access_log.request_id,
+      transaction_id: &access_log.transaction_id,
+      received_at_unix_ms: access_log.request_received_at_unix_ms,
       method: &request_method,
       uri: &request_uri,
       version: request_version,
@@ -509,6 +742,7 @@ where
       body: request_body,
       peer_addr: client_addr,
       downstream_host: &host,
+      downstream_scheme,
       route_name: &resolved.route.name,
       tcp_max_hop,
       tls: tls.as_ref(),
@@ -518,9 +752,16 @@ where
     };
     let response_waf = state.waf.evaluate_response(WafResponseInput {
       request: request_input,
+      response_id: &access_log.response_id,
+      received_at_unix_ms: access_log.response_received_at_unix_ms,
+      version: parts.version,
       status: parts.status,
       headers: &parts.headers,
       upstream_name: &upstream.name,
+      upstream_pool: access_log.upstream_pool.as_deref(),
+      upstream_scheme: upstream.origin.scheme(),
+      upstream_connect_time_ms: access_log.upstream_connect_time_ms,
+      upstream_first_byte_time_ms: access_log.upstream_first_byte_time_ms,
       upstream_error: None,
     });
     for access_log in &response_waf.access_logs {
@@ -672,6 +913,7 @@ fn select_request_upstream<'a>(
   })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connect_request(
   mut request: Request<ProxyBody>,
   state: &Arc<AppSnapshot>,
@@ -680,6 +922,7 @@ async fn handle_connect_request(
   downstream_host: &str,
   request_waf: &crate::waf::RequestWafDecision,
   request_version: http::Version,
+  access_log: &mut SystemAccessLogContext,
 ) -> Response<ProxyBody> {
   if !state.config.proxy.upgrades.connect_tunneling || !resolved.route.connect_tunneling {
     return text_response(
@@ -700,6 +943,12 @@ async fn handle_connect_request(
     Err(response) => return *response,
   };
   let upstream = selected.upstream.clone();
+  access_log.upstream_name = upstream.name.clone();
+  access_log.upstream_scheme = upstream.origin.scheme().to_string();
+  access_log.upstream_pool = selected
+    .pool_selection
+    .as_ref()
+    .map(|selection| selection.pool_name.clone());
   let pool_report = state.pools.clone();
   let pool_selection = selected.pool_selection;
 
@@ -739,6 +988,7 @@ async fn handle_connect_request(
     Err(error) => {
       pool_report.report_failure(&upstream.name);
       warn!(upstream = %upstream.name, error = %error, "failed to establish CONNECT tunnel");
+      access_log.record_upstream_error("connect_error", &error.to_string());
       text_response(
         StatusCode::BAD_GATEWAY,
         "failed to establish CONNECT tunnel",
@@ -828,6 +1078,7 @@ async fn handle_upgrade_request(
   downstream_host: &str,
   downstream_scheme: &str,
   request_waf: &crate::waf::RequestWafDecision,
+  access_log: &mut SystemAccessLogContext,
 ) -> Option<Response<ProxyBody>> {
   if request.version() != http::Version::HTTP_11 {
     return Some(text_response(
@@ -875,6 +1126,7 @@ async fn handle_upgrade_request(
     ) {
       Ok(selection) => {
         let name = selection.upstream_name.clone();
+        access_log.upstream_pool = Some(selection.pool_name.clone());
         pool_selection = Some(selection);
         state
           .upstreams
@@ -892,6 +1144,8 @@ async fn handle_upgrade_request(
   } else {
     resolved.upstream.expect("validated route upstream")
   };
+  access_log.upstream_name = upstream.name.clone();
+  access_log.upstream_scheme = upstream.origin.scheme().to_string();
 
   if websocket_upgrade && !upstream.websocket {
     return Some(text_response(
@@ -939,15 +1193,21 @@ async fn handle_upgrade_request(
       "upstream client is not configured",
     ));
   };
+  let upstream_started_at = Instant::now();
   let mut upstream_response = match tokio::time::timeout(
     Duration::from_millis(upstream.request_timeout_ms),
     client.request(outbound),
   )
   .await
   {
-    Ok(Ok(response)) => response,
+    Ok(Ok(response)) => {
+      access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+      response
+    }
     Ok(Err(error)) => {
       state.pools.report_failure(&upstream.name);
+      access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+      access_log.record_upstream_error("connect_error", &error.to_string());
       return Some(text_response(
         StatusCode::BAD_GATEWAY,
         &format!("upstream upgrade request failed: {error}"),
@@ -955,6 +1215,8 @@ async fn handle_upgrade_request(
     }
     Err(_) => {
       state.pools.report_failure(&upstream.name);
+      access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+      access_log.record_upstream_error("read_timeout", "upstream upgrade request timed out");
       return Some(text_response(
         StatusCode::BAD_GATEWAY,
         "upstream upgrade request timed out",
@@ -1384,6 +1646,9 @@ pub(crate) fn prepare_webtransport(
   };
 
   let request_waf = state.waf.evaluate_request(WafRequestInput {
+    request_id: "",
+    transaction_id: "",
+    received_at_unix_ms: crate::waf::current_unix_ms(),
     method: &request_method,
     uri: &request_uri,
     version: http::Version::HTTP_3,
@@ -1391,6 +1656,7 @@ pub(crate) fn prepare_webtransport(
     body: None,
     peer_addr,
     downstream_host: &host,
+    downstream_scheme: "https",
     route_name: &resolved.route.name,
     tcp_max_hop: None,
     tls,

@@ -34,6 +34,7 @@ struct PoolServerRuntime {
 }
 
 pub struct PoolSelection {
+  pub pool_name: String,
   pub upstream_name: String,
   server: Arc<PoolServerRuntime>,
 }
@@ -137,6 +138,7 @@ impl PoolState {
 
     server.active.fetch_add(1, Ordering::Relaxed);
     Ok(PoolSelection {
+      pool_name: pool_name.to_string(),
       upstream_name: server.upstream_name.clone(),
       server,
     })

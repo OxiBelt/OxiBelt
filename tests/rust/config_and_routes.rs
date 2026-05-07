@@ -51,6 +51,137 @@ fn protocol_operations_defaults_are_disabled() {
 }
 
 #[test]
+fn system_access_log_defaults_to_disabled_stdout() {
+    let temp_dir = common::TempDir::new("system-access-log-default");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "system-access-log-default");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(!config.logging.access_log.enabled);
+    assert!(config.logging.access_log.stdout);
+    assert!(!config.logging.access_log.fields.is_empty());
+    assert!(!config.logging.access_log.database.enabled);
+}
+
+#[test]
+fn system_access_log_accepts_stdout_only_custom_fields() {
+    let temp_dir = common::TempDir::new("system-access-log-stdout");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "system-access-log-stdout");
+    let raw = format!(
+        r#"
+{}
+
+[logging.access_log]
+enabled = true
+stdout = true
+
+[[logging.access_log.fields]]
+name = "method"
+value = "Request.Http.Method"
+
+[[logging.access_log.fields]]
+name = "status"
+expression = "Response.Http.Status"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(config.logging.access_log.enabled);
+    assert_eq!(config.logging.access_log.fields.len(), 2);
+}
+
+#[test]
+fn system_access_log_has_separate_database_config() {
+    let temp_dir = common::TempDir::new("system-access-log-db");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "system-access-log-db");
+    let raw = format!(
+        r#"
+{}
+
+[logging.access_log]
+enabled = true
+stdout = false
+
+[logging.access_log.database]
+enabled = true
+connection_url = "postgres://oxibelt:oxibelt@example.invalid:5432/oxibelt"
+table = "system_access_log"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(config.logging.access_log.database.enabled);
+    assert_eq!(
+        config.logging.access_log.database.table.as_deref(),
+        Some("system_access_log")
+    );
+    assert!(!config.database.access_log.enabled);
+}
+
+#[test]
+fn system_access_log_rejects_duplicate_and_reserved_fields() {
+    let temp_dir = common::TempDir::new("system-access-log-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "system-access-log-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[logging.access_log]
+enabled = true
+
+[[logging.access_log.fields]]
+name = "event"
+value = "Request.Http.Method"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("reserved field should fail");
+    assert!(
+        error.to_string().contains("uses a reserved field name"),
+        "unexpected error: {error}"
+    );
+
+    let raw = format!(
+        r#"
+{}
+
+[logging.access_log]
+enabled = true
+
+[[logging.access_log.fields]]
+name = "method"
+value = "Request.Http.Method"
+
+[[logging.access_log.fields]]
+name = "method"
+value = "Response.Http.Status"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("duplicate field should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("contains duplicate field method"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn quic_defaults_are_parsed() {
     let temp_dir = common::TempDir::new("quic-defaults");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "quic-defaults");

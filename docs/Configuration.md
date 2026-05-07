@@ -56,6 +56,10 @@ include = ["conf.d/*.toml"]
 
 [config]
 [logging]
+[logging.access_log]
+[[logging.access_log.fields]]
+[logging.access_log.database]
+[logging.access_log.database.tls]
 [runtime]
 [runtime.hot_reload]
 [listeners]
@@ -172,9 +176,33 @@ warn_on_deprecated_fields = true
 
 [logging]
 level = "info"
+
+[logging.access_log]
+enabled = false
+stdout = true
 ```
 
 `strict_unknown_fields` defaults to `true`; unknown keys fail startup after includes are merged. `level` is passed to the tracing filter and defaults to `info`.
+
+`logging.access_log` enables request-wide structured access logs without requiring an OxiRule `emit_access_log` action. When enabled, OxiBelt emits one newline-delimited JSON record for each finalized HTTP response with `event = "oxibelt.access"` and `scope = "system"`. The default fields include request/response IDs, transaction ID, method, URI, client IP, route, status, upstream name, and upstream timing fields.
+
+Custom fields use the same expression syntax as OxiRule access-log fields:
+
+```toml
+[logging.access_log]
+enabled = true
+stdout = true
+
+[[logging.access_log.fields]]
+name = "method"
+value = "Request.Http.Method"
+
+[[logging.access_log.fields]]
+name = "status"
+expression = "Response.Http.Status"
+```
+
+`[logging.access_log.database]` has the same shape as `[database.access_log]`, but it is a separate sink used only for system-wide access logs.
 
 ```toml
 [runtime]
@@ -447,7 +475,7 @@ mode = "off" # off | verify_full
 # client_key = "postgres-client.key"
 ```
 
-This optional PostgreSQL sink mirrors OxiRule `emit_access_log` records. When enabled, exactly one of `connection_url` or `connection_url_env` is required, and `table` is required.
+This optional PostgreSQL sink mirrors OxiRule `emit_access_log` records. It does not receive request-wide system access logs; use `[logging.access_log.database]` for that separate sink. When enabled, exactly one of `connection_url` or `connection_url_env` is required, and `table` is required.
 
 The target table must already exist:
 
@@ -655,6 +683,10 @@ Configuration validation rejects:
 ```toml
 [logging]
 level = "info"
+
+[logging.access_log]
+enabled = false
+stdout = true
 
 [runtime]
 linux_only = true

@@ -114,6 +114,7 @@ impl ReloadManager {
       quic_server_config: active.quic_server_config.clone(),
       waf,
       access_logs: active.access_logs.clone(),
+      system_access_log: active.system_access_log.clone(),
     };
     state.replace(snapshot);
     self.last_fingerprints = fingerprints;
@@ -190,6 +191,7 @@ impl ReloadManager {
       quic_server_config,
       waf: active.waf.clone(),
       access_logs: active.access_logs.clone(),
+      system_access_log: active.system_access_log.clone(),
     };
     let pending = listeners.prepare(&snapshot).await?;
     state.replace(snapshot);

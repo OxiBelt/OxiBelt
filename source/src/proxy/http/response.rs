@@ -9,6 +9,7 @@ use crate::waf::{
   WafTlsMetadata, WafTransportNetwork, WafUpstreamError, apply_header_mutations,
 };
 
+use super::SystemAccessLogContext;
 use super::body::{BoxError, ProxyBody};
 
 pub(crate) fn text_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
@@ -31,7 +32,7 @@ pub(crate) fn waf_terminal_response(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn upstream_error_response(
+pub(super) fn upstream_error_response(
   state: &AppSnapshot,
   route_name: &str,
   request_method: &Method,
@@ -47,8 +48,14 @@ pub(crate) fn upstream_error_response(
   request_body: Option<WafBodyInput<'_>>,
   tags: &std::collections::HashMap<String, String>,
   upstream_name: &str,
+  upstream_scheme: &str,
+  upstream_pool: Option<&str>,
+  upstream_connect_time_ms: Option<u64>,
+  upstream_first_byte_time_ms: Option<u64>,
+  upstream_error_code: &str,
   error_message: &str,
   request_response_mutations: &[HeaderMutation],
+  access_log: &SystemAccessLogContext,
 ) -> Response<ProxyBody> {
   let mut response = text_response(StatusCode::BAD_GATEWAY, "upstream request failed");
   apply_header_mutations(response.headers_mut(), request_response_mutations);
@@ -57,6 +64,9 @@ pub(crate) fn upstream_error_response(
   }
 
   let request = WafRequestInput {
+    request_id: &access_log.request_id,
+    transaction_id: &access_log.transaction_id,
+    received_at_unix_ms: access_log.request_received_at_unix_ms,
     method: request_method,
     uri: request_uri,
     version: request_version,
@@ -64,6 +74,7 @@ pub(crate) fn upstream_error_response(
     body: request_body,
     peer_addr,
     downstream_host,
+    downstream_scheme: access_log.downstream_scheme,
     route_name,
     tcp_max_hop,
     tls,
@@ -73,11 +84,18 @@ pub(crate) fn upstream_error_response(
   };
   let response_waf = state.waf.evaluate_response(WafResponseInput {
     request,
+    response_id: &access_log.response_id,
+    received_at_unix_ms: crate::waf::current_unix_ms(),
+    version: http::Version::HTTP_11,
     status: StatusCode::BAD_GATEWAY,
     headers: response.headers(),
     upstream_name,
+    upstream_pool,
+    upstream_scheme,
+    upstream_connect_time_ms,
+    upstream_first_byte_time_ms,
     upstream_error: Some(WafUpstreamError {
-      code: "connect_error",
+      code: upstream_error_code,
       message: error_message,
     }),
   });
