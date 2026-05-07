@@ -8,6 +8,7 @@ use hyper_util::rt::TokioIo;
 use tracing::{debug, warn};
 
 use crate::config::{HttpVersion, UpstreamConfig};
+use crate::pools::PoolSelection;
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
 use crate::waf::{
   WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
@@ -902,6 +903,7 @@ pub(crate) struct PreparedWebTransport {
   pub(crate) headers: http::HeaderMap,
   pub(crate) protocols: Vec<String>,
   pub(crate) upstream: UpstreamConfig,
+  _pool_selection: Option<PoolSelection>,
 }
 
 pub(crate) fn prepare_webtransport(
@@ -958,6 +960,7 @@ pub(crate) fn prepare_webtransport(
     )));
   }
 
+  let mut pool_selection = None;
   let upstream = if let Some(upstream_name) = request_waf.upstream_override.as_deref() {
     match state
       .upstreams
@@ -970,6 +973,34 @@ pub(crate) fn prepare_webtransport(
         return Err(Box::new(text_response(
           StatusCode::BAD_GATEWAY,
           "WAF selected an unknown upstream",
+        )));
+      }
+    }
+  } else if let Some(pool_name) = request_waf
+    .upstream_pool_override
+    .as_deref()
+    .or(resolved.route.upstream_pool.as_deref())
+  {
+    match state.pools.select(
+      pool_name,
+      peer_addr.ip(),
+      &format!("{host}{}", request.uri()),
+      request_waf.load_balancing_policy.as_deref(),
+    ) {
+      Ok(selection) => {
+        let name = selection.upstream_name.clone();
+        pool_selection = Some(selection);
+        state
+          .upstreams
+          .iter()
+          .find(|upstream| upstream.name == name)
+          .expect("pool selected synthetic upstream")
+      }
+      Err(error) => {
+        warn!(error = %error, pool = %pool_name, "failed to select upstream pool server");
+        return Err(Box::new(text_response(
+          StatusCode::BAD_GATEWAY,
+          "no available upstream pool server",
         )));
       }
     }
@@ -1043,6 +1074,7 @@ pub(crate) fn prepare_webtransport(
     headers,
     protocols,
     upstream: upstream.clone(),
+    _pool_selection: pool_selection,
   })
 }
 
@@ -1065,5 +1097,150 @@ fn waf_body_input(body: &CapturedBody) -> WafBodyInput<'_> {
   WafBodyInput {
     bytes: body.bytes.as_ref(),
     is_truncated: body.is_truncated,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  use http::header::HOST;
+  use pretty_assertions::assert_eq;
+
+  use super::*;
+  use crate::config::Config;
+
+  fn parse_config(raw: &str) -> Config {
+    let config: Config = toml::from_str(raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    config
+  }
+
+  fn webtransport_request() -> Request<()> {
+    Request::builder()
+      .method(Method::CONNECT)
+      .version(http::Version::HTTP_3)
+      .uri("https://example.com/session?token=1")
+      .header(HOST, "example.com")
+      .header("wt-available-protocols", "\"chat\", data")
+      .body(())
+      .expect("request should build")
+  }
+
+  #[tokio::test]
+  async fn prepare_webtransport_selects_direct_upstream() {
+    let temp_dir = common::TempDir::new("direct-webtransport");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "direct-webtransport");
+    let raw = format!(
+      r#"
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "{cert}"
+private_key = "{key}"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h3"
+
+[[upstreams]]
+name = "app"
+origin = "https://app.example/origin"
+max_http_version = "h3"
+webtransport = true
+
+[[routes]]
+name = "direct-route"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+"#,
+      cert = cert_path.display(),
+      key = key_path.display(),
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
+
+    let prepared = prepare_webtransport(
+      &webtransport_request(),
+      "203.0.113.10:45678".parse().unwrap(),
+      &WafTlsMetadata::default(),
+      &state,
+    )
+    .expect("direct WebTransport route should prepare");
+
+    assert_eq!(prepared.upstream.name, "app");
+    assert_eq!(
+      prepared.target_url.as_str(),
+      "https://app.example/origin/session?token=1"
+    );
+    assert_eq!(prepared.protocols, vec!["chat", "data"]);
+  }
+
+  #[tokio::test]
+  async fn prepare_webtransport_pool_route_returns_bad_gateway_without_panicking() {
+    let temp_dir = common::TempDir::new("pool-webtransport");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "pool-webtransport");
+    let raw = format!(
+      r#"
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "{cert}"
+private_key = "{key}"
+
+[tls.ocsp]
+mode = "disabled"
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "round_robin"
+
+[[upstream_pools.servers]]
+origin = "https://app-a.example/origin"
+
+[[routes]]
+name = "pool-route"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream_pool = "app-pool"
+"#,
+      cert = cert_path.display(),
+      key = key_path.display(),
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
+
+    let response = match prepare_webtransport(
+      &webtransport_request(),
+      "203.0.113.10:45678".parse().unwrap(),
+      &WafTlsMetadata::default(),
+      &state,
+    ) {
+      Ok(_) => panic!("pool route should be rejected with a response, not panic"),
+      Err(response) => response,
+    };
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
   }
 }
