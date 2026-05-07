@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+async-compression = { version = "0.4", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"
@@ -30,6 +31,7 @@ serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
+tokio-util = { version = "0.7", features = ["io"] }
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "std"] }

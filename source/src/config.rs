@@ -352,6 +352,7 @@ impl Config {
     self.runtime.hot_reload.validate()?;
     self.validate_limits()?;
     self.validate_proxy()?;
+    self.validate_compression()?;
     self.validate_cache()?;
     self.validate_metrics_and_health()?;
     self.validate_security_headers()?;
@@ -475,6 +476,13 @@ impl Config {
       }
     }
 
+    let compression_policy_names = self
+      .compression
+      .policies
+      .iter()
+      .map(|policy| policy.name.as_str())
+      .collect::<HashSet<_>>();
+
     let mut route_names = HashSet::new();
     for route in &self.routes {
       if route.name.trim().is_empty() {
@@ -526,6 +534,17 @@ impl Config {
         && cache != "default"
       {
         bail!("route {} references unknown cache {}", route.name, cache);
+      }
+      if let Some(compression) = &route.compression
+        && compression != "default"
+        && compression != "off"
+        && !compression_policy_names.contains(compression.as_str())
+      {
+        bail!(
+          "route {} references unknown compression policy {}",
+          route.name,
+          compression
+        );
       }
     }
 
@@ -629,6 +648,34 @@ impl Config {
     Ok(())
   }
 
+  fn validate_compression(&self) -> anyhow::Result<()> {
+    validate_compression_statuses("compression.statuses", &self.compression.statuses)?;
+    validate_compression_mime_types("compression.mime_types", &self.compression.mime_types)?;
+
+    let mut names = HashSet::new();
+    for policy in &self.compression.policies {
+      if policy.name.trim().is_empty() {
+        bail!("compression policy name must not be empty");
+      }
+      if matches!(policy.name.as_str(), "default" | "off") {
+        bail!("compression policy name {} is reserved", policy.name);
+      }
+      if !names.insert(policy.name.as_str()) {
+        bail!("duplicate compression policy name {}", policy.name);
+      }
+      validate_compression_statuses(
+        &format!("compression policy {} statuses", policy.name),
+        &policy.statuses,
+      )?;
+      validate_compression_mime_types(
+        &format!("compression policy {} mime_types", policy.name),
+        &policy.mime_types,
+      )?;
+    }
+
+    Ok(())
+  }
+
   fn validate_cache(&self) -> anyhow::Result<()> {
     if self.cache.max_size_bytes == 0 {
       bail!("cache.max_size_bytes must be greater than 0");
@@ -720,6 +767,55 @@ fn validate_route_path_value(
   Ok(())
 }
 
+fn validate_compression_statuses(field_name: &str, statuses: &[u16]) -> anyhow::Result<()> {
+  if statuses.is_empty() {
+    bail!("{field_name} must include at least one status");
+  }
+  for status in statuses {
+    http::StatusCode::from_u16(*status)
+      .with_context(|| format!("{field_name} contains invalid status {status}"))?;
+  }
+  Ok(())
+}
+
+fn validate_compression_mime_types(field_name: &str, mime_types: &[String]) -> anyhow::Result<()> {
+  if mime_types.is_empty() {
+    bail!("{field_name} must include at least one MIME pattern");
+  }
+  for mime_type in mime_types {
+    validate_compression_mime_type(field_name, mime_type)?;
+  }
+  Ok(())
+}
+
+fn validate_compression_mime_type(field_name: &str, mime_type: &str) -> anyhow::Result<()> {
+  if mime_type.trim() != mime_type || mime_type.is_empty() {
+    bail!("{field_name} contains an empty or padded MIME pattern");
+  }
+  if mime_type.bytes().any(|byte| byte.is_ascii_control()) {
+    bail!("{field_name} contains a control character in {mime_type}");
+  }
+  let Some((type_part, subtype_part)) = mime_type.split_once('/') else {
+    bail!("{field_name} MIME pattern {mime_type} must contain '/'");
+  };
+  if type_part.is_empty() || subtype_part.is_empty() {
+    bail!("{field_name} MIME pattern {mime_type} must have type and subtype");
+  }
+  if type_part.contains('*') && type_part != "*" {
+    bail!("{field_name} MIME pattern {mime_type} has invalid wildcard type");
+  }
+  if type_part == "*" && subtype_part != "*" {
+    bail!("{field_name} MIME pattern {mime_type} must use */* for wildcard type");
+  }
+  if subtype_part.matches('*').count() > 1 {
+    bail!("{field_name} MIME pattern {mime_type} has too many wildcards");
+  }
+  if subtype_part.contains('*') && subtype_part != "*" && !subtype_part.starts_with("*+") {
+    bail!("{field_name} MIME pattern {mime_type} has invalid wildcard subtype");
+  }
+  Ok(())
+}
+
 fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]) -> bool {
   left.len() == right.len()
     && left.iter().zip(right).all(|(left, right)| {
@@ -730,6 +826,7 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.upstream == right.upstream
         && left.upstream_pool == right.upstream_pool
         && left.cache == right.cache
+        && left.compression == right.compression
     })
 }
 
@@ -920,7 +1017,29 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "response_send_timeout_ms",
       "tls_handshake_timeout_ms",
     ][..],
-    "compression" => &["deflate", "enabled", "gzip", "zstd"][..],
+    "compression" => &[
+      "br",
+      "deflate",
+      "enabled",
+      "gzip",
+      "max_concurrent_responses",
+      "mime_types",
+      "min_size_bytes",
+      "policies",
+      "statuses",
+      "zstd",
+    ][..],
+    "compression.policies" => &[
+      "br",
+      "deflate",
+      "enabled",
+      "gzip",
+      "mime_types",
+      "min_size_bytes",
+      "name",
+      "statuses",
+      "zstd",
+    ][..],
     "cache" => &[
       "cache_key",
       "cache_methods",
@@ -996,6 +1115,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "upstream_pools.servers" => &["backup", "max_conns", "origin", "weight"][..],
     "routes" => &[
       "cache",
+      "compression",
       "hosts",
       "name",
       "path_prefix",
@@ -1916,6 +2036,39 @@ pub struct CompressionConfig {
   pub deflate: bool,
   #[serde(default = "default_true")]
   pub zstd: bool,
+  #[serde(default = "default_true")]
+  pub br: bool,
+  #[serde(default = "default_compression_min_size_bytes")]
+  pub min_size_bytes: u64,
+  #[serde(default = "default_compression_statuses")]
+  pub statuses: Vec<u16>,
+  #[serde(default = "default_compression_mime_types")]
+  pub mime_types: Vec<String>,
+  #[serde(default)]
+  pub max_concurrent_responses: usize,
+  #[serde(default)]
+  pub policies: Vec<CompressionPolicyConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CompressionPolicyConfig {
+  pub name: String,
+  #[serde(default = "default_true")]
+  pub enabled: bool,
+  #[serde(default = "default_true")]
+  pub gzip: bool,
+  #[serde(default = "default_true")]
+  pub deflate: bool,
+  #[serde(default = "default_true")]
+  pub zstd: bool,
+  #[serde(default = "default_true")]
+  pub br: bool,
+  #[serde(default = "default_compression_min_size_bytes")]
+  pub min_size_bytes: u64,
+  #[serde(default = "default_compression_statuses")]
+  pub statuses: Vec<u16>,
+  #[serde(default = "default_compression_mime_types")]
+  pub mime_types: Vec<String>,
 }
 
 impl CompressionConfig {
@@ -1925,6 +2078,9 @@ impl CompressionConfig {
     }
 
     let mut values = Vec::new();
+    if self.br {
+      values.push("br");
+    }
     if self.zstd {
       values.push("zstd");
     }
@@ -1950,6 +2106,12 @@ impl Default for CompressionConfig {
       gzip: true,
       deflate: true,
       zstd: true,
+      br: true,
+      min_size_bytes: default_compression_min_size_bytes(),
+      statuses: default_compression_statuses(),
+      mime_types: default_compression_mime_types(),
+      max_concurrent_responses: 0,
+      policies: Vec::new(),
     }
   }
 }
@@ -2616,6 +2778,8 @@ pub struct RouteConfig {
   #[serde(default)]
   pub cache: Option<String>,
   #[serde(default)]
+  pub compression: Option<String>,
+  #[serde(default)]
   pub waf: RouteWafConfig,
 }
 
@@ -2669,6 +2833,29 @@ fn default_request_timeout_ms() -> u64 {
 
 fn default_proxy_max_http_version() -> HttpVersion {
   HttpVersion::H2
+}
+
+fn default_compression_min_size_bytes() -> u64 {
+  1_024
+}
+
+fn default_compression_statuses() -> Vec<u16> {
+  vec![200]
+}
+
+fn default_compression_mime_types() -> Vec<String> {
+  [
+    "text/*",
+    "application/json",
+    "application/*+json",
+    "application/javascript",
+    "application/xml",
+    "application/*+xml",
+    "image/svg+xml",
+  ]
+  .into_iter()
+  .map(str::to_string)
+  .collect()
 }
 
 fn default_tls_min_version() -> TlsVersion {

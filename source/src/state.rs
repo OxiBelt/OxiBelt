@@ -17,6 +17,7 @@ use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
 use crate::pools::PoolState;
+use crate::proxy::http::compression::CompressionState;
 use crate::routes::RouteTable;
 use crate::tls;
 use crate::waf::WafEngine;
@@ -113,6 +114,7 @@ pub struct AppSnapshot {
   pub limits: Arc<LimitState>,
   pub pools: Arc<PoolState>,
   pub cache: Arc<ResponseCache>,
+  pub(crate) compression: Arc<CompressionState>,
   pub metrics: Arc<Metrics>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
@@ -137,6 +139,7 @@ impl AppSnapshot {
     let limits = LimitState::new();
     let pools = PoolState::new(&config.upstream_pools);
     let cache = ResponseCache::new(&config.cache).context("failed to build response cache")?;
+    let compression = CompressionState::new(&config.compression);
     let metrics = Metrics::new();
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to build downstream TLS config")?;
@@ -159,6 +162,7 @@ impl AppSnapshot {
       limits,
       pools,
       cache,
+      compression,
       metrics,
       tls_server_config,
       quic_server_config,

@@ -143,6 +143,7 @@ mod tests {
         upstream: Some("wild".into()),
         upstream_pool: None,
         cache: None,
+        compression: None,
         waf: Default::default(),
       },
       RouteConfig {
@@ -153,6 +154,7 @@ mod tests {
         upstream: Some("exact".into()),
         upstream_pool: None,
         cache: None,
+        compression: None,
         waf: Default::default(),
       },
     ];
@@ -174,6 +176,7 @@ mod tests {
         upstream: Some("root".into()),
         upstream_pool: None,
         cache: None,
+        compression: None,
         waf: Default::default(),
       },
       RouteConfig {
@@ -184,6 +187,7 @@ mod tests {
         upstream: Some("api".into()),
         upstream_pool: None,
         cache: None,
+        compression: None,
         waf: Default::default(),
       },
     ];

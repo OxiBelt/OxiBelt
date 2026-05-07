@@ -104,6 +104,19 @@ enabled = true
 gzip = true
 deflate = true
 zstd = true
+br = true
+min_size_bytes = 1024
+statuses = [200]
+mime_types = [
+  "text/*",
+  "application/json",
+  "application/*+json",
+  "application/javascript",
+  "application/xml",
+  "application/*+xml",
+  "image/svg+xml",
+]
+max_concurrent_responses = 0
 
 [cache]
 enabled = false

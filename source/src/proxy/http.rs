@@ -16,6 +16,7 @@ use crate::waf::{
 };
 
 pub(crate) mod body;
+pub(crate) mod compression;
 pub(crate) mod headers;
 pub(crate) mod request;
 pub(crate) mod response;
@@ -305,7 +306,14 @@ where
     &request_uri,
   ) {
     state.metrics.record_cache_hit();
-    return response;
+    return compression::maybe_compress_response(
+      response,
+      &request_method,
+      &request_headers,
+      resolved.route.compression.as_deref(),
+      &state.config.compression,
+      &state.compression,
+    );
   }
   if cache_enabled_for_route {
     state.metrics.record_cache_miss();
@@ -485,6 +493,14 @@ where
     &request_uri,
   )
   .await;
+  let response = compression::maybe_compress_response(
+    response,
+    &request_method,
+    &request_headers,
+    resolved.route.compression.as_deref(),
+    &state.config.compression,
+    &state.compression,
+  );
   state.metrics.record_response(response.status());
   response
 }

@@ -1,4 +1,4 @@
-use http::header::{ACCEPT_ENCODING, HOST, HeaderValue};
+use http::header::{ACCEPT_ENCODING, HOST};
 use http::{Request, Uri};
 use http_body_util::BodyExt;
 use hyper::body::Body;
@@ -47,11 +47,8 @@ where
     options.forwarded_header_mode,
   );
 
-  if !parts.headers.contains_key(ACCEPT_ENCODING)
-    && let Some(accept_encoding) = options.compression.accept_encoding_value()
-    && let Ok(value) = HeaderValue::from_str(&accept_encoding)
-  {
-    parts.headers.insert(ACCEPT_ENCODING, value);
+  if options.compression.enabled {
+    parts.headers.remove(ACCEPT_ENCODING);
   }
 
   apply_header_mutations(&mut parts.headers, options.waf_mutations);

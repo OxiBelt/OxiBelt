@@ -73,6 +73,7 @@ include = ["conf.d/*.toml"]
 [proxy.http]
 [limits]
 [compression]
+[[compression.policies]]
 [cache]
 [metrics]
 [health]
@@ -364,7 +365,22 @@ enabled = true
 gzip = true
 deflate = true
 zstd = true
+br = true
+min_size_bytes = 1024
+statuses = [200]
+mime_types = [
+  "text/*",
+  "application/json",
+  "application/*+json",
+  "application/javascript",
+  "application/xml",
+  "application/*+xml",
+  "image/svg+xml",
+]
+max_concurrent_responses = 0
 ```
+
+Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate`. OxiBelt only compresses downstream responses when the client permits an enabled encoding, the response is not already encoded, the status/MIME/size policy matches, and HTTP semantics such as `Cache-Control: no-transform` and range responses allow transformation. `max_concurrent_responses = 0` uses an automatic CPU budget.
 
 `cache.store = "tmpfs"` validates `tmpfs_dir` when cache is enabled. Health paths must start with `/`.
 
@@ -515,6 +531,7 @@ replace_prefix_with = "/"
 upstream = "app"
 # upstream_pool = "app-pool"
 # cache = "default"
+# compression = "default" # default | off | named policy
 ```
 
 Fields:
@@ -525,6 +542,7 @@ Fields:
 - `replace_prefix_with`: optional upstream path prefix replacement.
 - `upstream` or `upstream_pool`: exactly one target.
 - `cache`: optional cache reference; currently only `default` is accepted.
+- `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
 
@@ -607,6 +625,11 @@ enabled = true
 gzip = true
 deflate = true
 zstd = true
+br = true
+min_size_bytes = 1024
+statuses = [200]
+mime_types = ["text/*", "application/json", "application/*+json"]
+max_concurrent_responses = 0
 
 [database.access_log]
 enabled = false

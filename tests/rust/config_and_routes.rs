@@ -728,11 +728,76 @@ fn compression_header_order_remains_stable() {
         gzip: true,
         deflate: true,
         zstd: true,
+        br: true,
+        ..CompressionConfig::default()
     };
 
     assert_eq!(
         config.accept_encoding_value().as_deref(),
-        Some("zstd, gzip, deflate")
+        Some("br, zstd, gzip, deflate")
+    );
+}
+
+#[test]
+fn compression_defaults_enable_downstream_algorithms_and_policy_fields() {
+    let temp_dir = common::TempDir::new("compression-defaults");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "compression-defaults");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert!(config.compression.gzip);
+    assert!(config.compression.deflate);
+    assert!(config.compression.zstd);
+    assert!(config.compression.br);
+    assert_eq!(config.compression.min_size_bytes, 1024);
+    assert_eq!(config.compression.statuses, vec![200]);
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn routes_validate_named_compression_policies() {
+    let temp_dir = common::TempDir::new("compression-policy");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "compression-policy");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        "upstream = \"app\"\ncompression = \"json-only\"",
+    ) + r#"
+
+[[compression.policies]]
+name = "json-only"
+gzip = true
+deflate = false
+zstd = true
+br = true
+mime_types = ["application/json", "application/*+json"]
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn routes_reject_unknown_compression_policies() {
+    let temp_dir = common::TempDir::new("compression-policy-unknown");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "compression-policy-unknown");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        "upstream = \"app\"\ncompression = \"missing\"",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("route app-root references unknown compression policy missing"),
+        "unexpected error: {error}"
     );
 }
 
