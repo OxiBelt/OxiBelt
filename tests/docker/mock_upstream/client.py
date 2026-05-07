@@ -27,6 +27,15 @@ def validate_header_name(raw_name: str) -> str:
   return name
 
 
+def validate_http_token(raw_value: str, field_name: str) -> str:
+  value = raw_value.strip()
+  if not value:
+    raise ValueError(f"{field_name} must not be empty")
+  if not HEADER_NAME_RE.fullmatch(value):
+    raise ValueError(f"invalid {field_name} {raw_value!r}")
+  return value
+
+
 def validate_header_value(raw_value: str) -> str:
   value = raw_value.strip()
   if "\r" in value or "\n" in value or "\0" in value:
@@ -68,35 +77,76 @@ def validate_host_header(raw_host: str) -> str:
 
   return raw_host
 
-def request_with_proxy_protocol(args, target_path, host_header, headers, body):
+
+def validate_proxy_protocol_line(raw_line: str) -> str:
+  if not raw_line:
+    raise ValueError("PROXY protocol line must not be empty")
+  if "\r" in raw_line or "\n" in raw_line or "\0" in raw_line:
+    raise ValueError("PROXY protocol line must not contain control characters")
+  try:
+    raw_line.encode("ascii")
+  except UnicodeEncodeError as error:
+    raise ValueError("PROXY protocol line must be ASCII") from error
+  if not raw_line.startswith("PROXY "):
+    raise ValueError("PROXY protocol line must start with 'PROXY '")
+  return raw_line
+
+
+def create_tls_context(ca_file):
+  if ca_file:
+    context = ssl.create_default_context(cafile=ca_file)
+  else:
+    context = ssl.create_default_context()
+  context.minimum_version = ssl.TLSVersion.TLSv1_2
+  context.options |= ssl.OP_NO_COMPRESSION
+  return context
+
+
+def open_proxy_socket(args, proxy_protocol_line=None):
   sock = socket.create_connection((args.target_host, args.port), timeout=args.timeout)
   try:
-    sock.sendall((args.proxy_protocol_line + "\r\n").encode("ascii"))
+    if proxy_protocol_line:
+      sock.sendall((proxy_protocol_line + "\r\n").encode("ascii"))
     if args.scheme == "https":
-      if args.ca_file:
-        context = ssl.create_default_context(cafile=args.ca_file)
-      else:
-        context = ssl.create_default_context()
-      sock = context.wrap_socket(sock, server_hostname=args.target_host)
+      sock = create_tls_context(args.ca_file).wrap_socket(sock, server_hostname=args.target_host)
+    return sock
+  except Exception:
+    sock.close()
+    raise
 
-    request_lines = [
-      f"{args.method} {target_path} HTTP/1.1",
-      f"Host: {host_header}",
-    ]
-    has_content_length = False
-    for name, value in headers.items():
-      if name.lower() == "content-length":
-        has_content_length = True
-      request_lines.append(f"{name}: {value}")
-    if not has_content_length:
-      request_lines.append(f"Content-Length: {len(body)}")
-    request_lines.append("Connection: close")
-    request = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8") + body
-    sock.sendall(request)
 
-    response = http.client.HTTPResponse(sock)
-    response.begin()
-    return response, response.read()
+def send_http_request(sock, method, target_path, host_header, headers, body):
+  request_lines = [
+    f"{method} {target_path} HTTP/1.1",
+    f"Host: {host_header}",
+  ]
+  has_content_length = False
+  for name, value in headers.items():
+    if name.lower() == "host":
+      continue
+    if name.lower() == "content-length":
+      has_content_length = True
+    request_lines.append(f"{name}: {value}")
+  if not has_content_length:
+    request_lines.append(f"Content-Length: {len(body)}")
+  request_lines.append("Connection: close")
+  request = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8") + body
+  sock.sendall(request)
+  return read_http_response(sock)
+
+
+def request_direct(args, target_path, host_header, headers, body):
+  sock = open_proxy_socket(args)
+  try:
+    return send_http_request(sock, args.method, target_path, host_header, headers, body)
+  finally:
+    sock.close()
+
+
+def request_with_proxy_protocol(args, target_path, host_header, headers, body):
+  sock = open_proxy_socket(args, args.proxy_protocol_line)
+  try:
+    return send_http_request(sock, args.method, target_path, host_header, headers, body)
   finally:
     sock.close()
 
@@ -107,12 +157,8 @@ def read_http_response(sock):
 
 
 def perform_connect_tunnel(args, host_header, target_path):
-  sock = socket.create_connection((args.target_host, args.port), timeout=args.timeout)
+  sock = open_proxy_socket(args)
   try:
-    if args.scheme == "https":
-      context = ssl.create_default_context(cafile=args.ca_file) if args.ca_file else ssl.create_default_context()
-      sock = context.wrap_socket(sock, server_hostname=args.target_host)
-
     request = (
       f"CONNECT {host_header}:443 HTTP/1.1\r\n"
       f"Host: {host_header}:443\r\n"
@@ -139,12 +185,8 @@ def perform_connect_tunnel(args, host_header, target_path):
 
 
 def perform_upgrade(args, host_header, target_path, headers, body):
-  sock = socket.create_connection((args.target_host, args.port), timeout=args.timeout)
+  sock = open_proxy_socket(args)
   try:
-    if args.scheme == "https":
-      context = ssl.create_default_context(cafile=args.ca_file) if args.ca_file else ssl.create_default_context()
-      sock = context.wrap_socket(sock, server_hostname=args.target_host)
-
     upgrade_token = args.upgrade_token
     request_lines = [
       f"GET {target_path} HTTP/1.1",
@@ -192,6 +234,11 @@ def main() -> int:
   args = parser.parse_args()
 
   try:
+    args.method = validate_http_token(args.method, "HTTP method")
+    if args.upgrade_token:
+      args.upgrade_token = validate_http_token(args.upgrade_token, "Upgrade token")
+    if args.proxy_protocol_line:
+      args.proxy_protocol_line = validate_proxy_protocol_line(args.proxy_protocol_line)
     if args.path:
       target_path = validate_origin_form_path(args.path)
     elif args.target:
@@ -203,12 +250,6 @@ def main() -> int:
     sys.stderr.write(f"{error}\n")
     return 2
 
-  if args.ca_file:
-    context = ssl.create_default_context(cafile=args.ca_file)
-  else:
-    context = ssl.create_default_context()
-
-  connection = None
   try:
     headers = {"Host": host_header}
     for item in args.header:
@@ -248,35 +289,13 @@ def main() -> int:
         body,
       )
     else:
-      if args.scheme == "https":
-        connection = http.client.HTTPSConnection(
-          args.target_host,
-          args.port,
-          context=context,
-          timeout=args.timeout,
-        )
-      else:
-        connection = http.client.HTTPConnection(
-          args.target_host,
-          args.port,
-          timeout=args.timeout,
-        )
-      connection.putrequest(
-        args.method,
+      response, response_body_bytes = request_direct(
+        args,
         target_path,
-        skip_host=True,
-        skip_accept_encoding=True,
+        host_header,
+        headers,
+        body,
       )
-      has_content_length = False
-      for name, value in headers.items():
-        if name.lower() == "content-length":
-          has_content_length = True
-        connection.putheader(name, value)
-      if not has_content_length:
-        connection.putheader("Content-Length", str(len(body)))
-      connection.endheaders(body)
-      response = connection.getresponse()
-      response_body_bytes = response.read()
     response_body = response_body_bytes.decode("utf-8", "replace")
     if args.dump_response_json:
       sys.stdout.write(json.dumps({
@@ -294,9 +313,9 @@ def main() -> int:
     if 200 <= response.status < 400:
       return 0
     return 1
-  finally:
-    if connection:
-      connection.close()
+  except OSError as error:
+    sys.stderr.write(f"{error}\n")
+    return 1
 
 
 if __name__ == "__main__":

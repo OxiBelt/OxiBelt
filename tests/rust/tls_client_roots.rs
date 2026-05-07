@@ -105,7 +105,7 @@ fn quic_server_config_rejects_invalid_client_auth_roots() {
         },
     );
 
-    let error = tls::build_quic_server_config(&tls_config, &QuicConfig::default())
+    let error = tls::build_quic_server_config(&tls_config, &QuicConfig::default(), None)
         .expect_err("QUIC client auth must validate configured CA roots");
     assert!(
         error
@@ -175,7 +175,7 @@ async fn quic_connect_without_client_certificate(
     tls_config: &TlsConfig,
     trusted_server_root: &Path,
 ) -> Result<(), String> {
-    let server_config = tls::build_quic_server_config(tls_config, &QuicConfig::default())
+    let server_config = tls::build_quic_server_config(tls_config, &QuicConfig::default(), None)
         .map_err(|error| format!("failed to build QUIC server config: {error}"))?;
     let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())
         .map_err(|error| format!("failed to start QUIC server endpoint: {error}"))?;

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,7 @@ impl UpstreamH3Pools {
         Arc::new(UpstreamH3Pool {
           client_config: quic_config,
           quic_config: config.quic.clone(),
+          quic_host_key_base_dir: config.source_paths.cert_dir.clone(),
           entries: Mutex::new(HashMap::new()),
         }),
       );
@@ -74,6 +76,7 @@ impl UpstreamH3Pools {
 pub(crate) struct UpstreamH3Pool {
   client_config: h3_quinn::quinn::ClientConfig,
   quic_config: crate::config::QuicConfig,
+  quic_host_key_base_dir: Option<PathBuf>,
   entries: Mutex<HashMap<H3PoolKey, Arc<PooledH3Connection>>>,
 }
 
@@ -175,6 +178,7 @@ impl UpstreamH3Pool {
       key.remote_addr,
       self.client_config.clone(),
       &self.quic_config,
+      self.quic_host_key_base_dir.as_deref(),
     )
     .await?;
     let entry = Arc::new(PooledH3Connection {
@@ -207,8 +211,10 @@ async fn connect_h3_upstream(
   remote_addr: SocketAddr,
   quic_config: h3_quinn::quinn::ClientConfig,
   oxibelt_quic_config: &crate::config::QuicConfig,
+  quic_host_key_base_dir: Option<&Path>,
 ) -> anyhow::Result<ConnectedH3Upstream> {
-  let endpoint = crate::quic::bind_client_endpoint(remote_addr, oxibelt_quic_config)?;
+  let endpoint =
+    crate::quic::bind_client_endpoint(remote_addr, oxibelt_quic_config, quic_host_key_base_dir)?;
   let quinn_connection = endpoint
     .connect_with(quic_config, remote_addr, &server_name)
     .with_context(|| format!("failed to start upstream HTTP/3 connection to {server_name}"))?
@@ -346,8 +352,14 @@ pub(crate) async fn forward_request(
   )
   .with_context(|| format!("failed to build upstream QUIC client for {}", upstream.name))?;
   let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
-  let connected =
-    connect_h3_upstream(server_name, remote_addr, quic_config, &state.config.quic).await?;
+  let connected = connect_h3_upstream(
+    server_name,
+    remote_addr,
+    quic_config,
+    &state.config.quic,
+    state.config.source_paths.cert_dir.as_deref(),
+  )
+  .await?;
   let close_connection = connected.connection.clone();
   let endpoint = connected.endpoint.clone();
   let driver_task = connected.driver_task;
@@ -566,8 +578,12 @@ async fn connect_upstream_webtransport(
     request = request.with_protocols(prepared.protocols.clone());
   }
   let (server_name, remote_addr) = resolve_upstream_addr(&prepared.target_url).await?;
-  let endpoint = crate::quic::bind_client_endpoint(remote_addr, &state.config.quic)
-    .context("failed to create upstream WebTransport endpoint")?;
+  let endpoint = crate::quic::bind_client_endpoint(
+    remote_addr,
+    &state.config.quic,
+    state.config.source_paths.cert_dir.as_deref(),
+  )
+  .context("failed to create upstream WebTransport endpoint")?;
   let connection = endpoint
     .connect_with(quic_config, remote_addr, &server_name)
     .with_context(|| format!("failed to start upstream WebTransport connection to {server_name}"))?

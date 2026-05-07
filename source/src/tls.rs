@@ -61,6 +61,7 @@ pub fn build_server_config(
 pub fn build_quic_server_config(
   tls: &TlsConfig,
   quic: &QuicConfig,
+  quic_host_key_base_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<QuinnServerConfig> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let certs = load_certs(&tls.cert_chain)?;
@@ -86,7 +87,7 @@ pub fn build_quic_server_config(
   let quic_crypto =
     QuicServerConfig::try_from(server_config).context("failed to build QUIC server TLS config")?;
   let mut quic_config = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
-  crate::quic::apply_server_config(quic, &mut quic_config)?;
+  crate::quic::apply_server_config(quic, quic_host_key_base_dir, &mut quic_config)?;
   Ok(quic_config)
 }
 

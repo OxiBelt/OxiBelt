@@ -149,8 +149,12 @@ impl AppSnapshot {
       .context("failed to build downstream TLS config")?;
     let quic_server_config = if config.listeners.http3 {
       Some(
-        tls::build_quic_server_config(&config.tls, &config.quic)
-          .context("failed to build QUIC TLS config")?,
+        tls::build_quic_server_config(
+          &config.tls,
+          &config.quic,
+          config.source_paths.cert_dir.as_deref(),
+        )
+        .context("failed to build QUIC TLS config")?,
       )
     } else {
       None

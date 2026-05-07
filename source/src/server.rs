@@ -587,7 +587,12 @@ fn bind_http3_listener(
     .quic_server_config
     .clone()
     .ok_or_else(|| anyhow::anyhow!("HTTP/3 listener is enabled without QUIC server config"))?;
-  let endpoint = crate::quic::bind_server_endpoint(bind, server_config, &snapshot.config.quic)?;
+  let endpoint = crate::quic::bind_server_endpoint(
+    bind,
+    server_config,
+    &snapshot.config.quic,
+    snapshot.config.source_paths.cert_dir.as_deref(),
+  )?;
   Ok(BoundHttp3Listener { bind, endpoint })
 }
 

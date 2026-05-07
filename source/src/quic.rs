@@ -12,7 +12,7 @@ use h3_quinn::quinn::{
 use ring::{aead, hkdf, hmac};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use crate::config::{QuicConfig, QuicSocketConfig};
+use crate::config::{QuicConfig, QuicSocketConfig, canonicalize_existing_file};
 
 const QUIC_HOST_KEY_BYTES: usize = 64;
 const QUIC_HOST_KEY_RESET_LABEL: &[u8] = b"oxibelt quic stateless reset v1";
@@ -38,8 +38,11 @@ pub fn transport_config(config: &QuicConfig) -> anyhow::Result<Arc<TransportConf
   Ok(Arc::new(transport))
 }
 
-pub fn endpoint_config(config: &QuicConfig) -> anyhow::Result<EndpointConfig> {
-  let reset_key = quic_host_key(config)?
+pub fn endpoint_config(
+  config: &QuicConfig,
+  host_key_base_dir: Option<&Path>,
+) -> anyhow::Result<EndpointConfig> {
+  let reset_key = quic_host_key(config, host_key_base_dir)?
     .map(|key| Arc::new(ResetHmacKey::new(key.reset_key)) as Arc<dyn HmacKey>);
   let mut endpoint = match reset_key {
     Some(key) => EndpointConfig::new(key),
@@ -53,9 +56,10 @@ pub fn endpoint_config(config: &QuicConfig) -> anyhow::Result<EndpointConfig> {
 
 pub fn apply_server_config(
   config: &QuicConfig,
+  host_key_base_dir: Option<&Path>,
   server_config: &mut ServerConfig,
 ) -> anyhow::Result<()> {
-  if let Some(key) = quic_host_key(config)? {
+  if let Some(key) = quic_host_key(config, host_key_base_dir)? {
     server_config.token_key(Arc::new(RetryTokenKey::new(key.token_key)));
   }
   server_config.transport_config(transport_config(config)?);
@@ -66,10 +70,11 @@ pub fn bind_server_endpoint(
   bind: SocketAddr,
   server_config: ServerConfig,
   config: &QuicConfig,
+  host_key_base_dir: Option<&Path>,
 ) -> anyhow::Result<Endpoint> {
   let socket = bind_udp_socket(bind, &config.socket)?;
   Endpoint::new(
-    endpoint_config(config)?,
+    endpoint_config(config, host_key_base_dir)?,
     Some(server_config),
     socket,
     Arc::new(TokioRuntime),
@@ -80,10 +85,11 @@ pub fn bind_server_endpoint(
 pub fn bind_client_endpoint(
   remote_addr: SocketAddr,
   config: &QuicConfig,
+  host_key_base_dir: Option<&Path>,
 ) -> anyhow::Result<Endpoint> {
   let socket = bind_udp_socket(client_bind_addr(remote_addr), &config.socket)?;
   Endpoint::new(
-    endpoint_config(config)?,
+    endpoint_config(config, host_key_base_dir)?,
     None,
     socket,
     Arc::new(TokioRuntime),
@@ -98,15 +104,30 @@ pub fn client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
   }
 }
 
-pub fn load_host_key(path: &Path) -> anyhow::Result<[u8; QUIC_HOST_KEY_BYTES]> {
-  let raw = std::fs::read_to_string(path)
-    .with_context(|| format!("failed to read QUIC host key file {}", path.display()))?;
+pub fn load_host_key(base_dir: &Path, path: &Path) -> anyhow::Result<[u8; QUIC_HOST_KEY_BYTES]> {
+  let canonical_base_dir = base_dir.canonicalize().with_context(|| {
+    format!(
+      "failed to resolve QUIC host key base directory {}",
+      base_dir.display()
+    )
+  })?;
+  let canonical_path = canonicalize_existing_file("quic.host_key_file", path)?;
+  if !canonical_path.starts_with(&canonical_base_dir) {
+    bail!("quic.host_key_file must stay within the configured certificate directory");
+  }
+
+  let raw = std::fs::read_to_string(&canonical_path).with_context(|| {
+    format!(
+      "failed to read QUIC host key file {}",
+      canonical_path.display()
+    )
+  })?;
   let decoded = base64::engine::general_purpose::STANDARD
     .decode(raw.trim())
     .with_context(|| {
       format!(
         "failed to decode base64 QUIC host key from {}",
-        path.display()
+        canonical_path.display()
       )
     })?;
   if decoded.len() != QUIC_HOST_KEY_BYTES {
@@ -145,11 +166,17 @@ struct DerivedHostKey {
   token_key: [u8; 32],
 }
 
-fn quic_host_key(config: &QuicConfig) -> anyhow::Result<Option<DerivedHostKey>> {
+fn quic_host_key(
+  config: &QuicConfig,
+  host_key_base_dir: Option<&Path>,
+) -> anyhow::Result<Option<DerivedHostKey>> {
   let Some(path) = &config.host_key_file else {
     return Ok(None);
   };
-  let key = load_host_key(path)?;
+  let base_dir = host_key_base_dir.ok_or_else(|| {
+    anyhow::anyhow!("quic.host_key_file requires a configured certificate directory")
+  })?;
+  let key = load_host_key(base_dir, path)?;
   Ok(Some(DerivedHostKey {
     reset_key: derive_host_key(&key, QUIC_HOST_KEY_RESET_LABEL)?,
     token_key: derive_host_key(&key, QUIC_HOST_KEY_TOKEN_LABEL)?,
@@ -246,45 +273,5 @@ impl AeadKey for RetryAeadKey {
       .0
       .open_in_place(nonce, aead::Aad::from(additional_data), data)
       .map_err(|_| CryptoError)
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn load_host_key_accepts_exactly_64_base64_bytes() {
-    let dir = std::env::temp_dir().join(format!("oxibelt-quic-host-key-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("key.b64");
-    let bytes = [7u8; QUIC_HOST_KEY_BYTES];
-    std::fs::write(
-      &path,
-      base64::engine::general_purpose::STANDARD.encode(bytes),
-    )
-    .unwrap();
-
-    assert_eq!(load_host_key(&path).unwrap(), bytes);
-    let _ = std::fs::remove_dir_all(dir);
-  }
-
-  #[test]
-  fn load_host_key_rejects_wrong_length() {
-    let dir = std::env::temp_dir().join(format!(
-      "oxibelt-quic-host-key-short-{}",
-      std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("key.b64");
-    std::fs::write(
-      &path,
-      base64::engine::general_purpose::STANDARD.encode([1u8; 63]),
-    )
-    .unwrap();
-
-    let error = load_host_key(&path).unwrap_err();
-    assert!(error.to_string().contains("exactly 64"));
-    let _ = std::fs::remove_dir_all(dir);
   }
 }

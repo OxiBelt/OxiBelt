@@ -8,6 +8,7 @@ use oxibelt::config::{
     CompressionConfig, Config, DatabaseTlsMode, ForwardedHeaderMode, HotReloadMode, OcspMode,
     ProxyProtocolEgressMode, QuicZeroRttMode, RuntimeOverrides, UpstreamEchMode,
 };
+use oxibelt::quic::load_host_key;
 
 #[test]
 fn config_parses_trusted_upstream_ca_certificates() {
@@ -193,6 +194,67 @@ host_key_file = "quic-host-key.b64"
             .source_paths
             .downstream_tls_reload_files()
             .contains(&host_key_path)
+    );
+}
+
+#[test]
+fn quic_host_key_loader_accepts_key_under_base_directory() {
+    let temp_dir = common::TempDir::new("quic-host-key-load");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    let host_key_path = cert_dir.join("quic-host-key.b64");
+    let bytes = [7u8; 64];
+    std::fs::write(
+        &host_key_path,
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    )
+    .expect("failed to write host key");
+
+    assert_eq!(
+        load_host_key(&cert_dir, &host_key_path).expect("host key should load"),
+        bytes
+    );
+}
+
+#[test]
+fn quic_host_key_loader_rejects_wrong_length() {
+    let temp_dir = common::TempDir::new("quic-host-key-short");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    let host_key_path = cert_dir.join("quic-host-key.b64");
+    std::fs::write(
+        &host_key_path,
+        base64::engine::general_purpose::STANDARD.encode([1u8; 63]),
+    )
+    .expect("failed to write host key");
+
+    let error = load_host_key(&cert_dir, &host_key_path).expect_err("short key should fail");
+
+    assert!(
+        error.to_string().contains("exactly 64"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn quic_host_key_loader_rejects_path_outside_base_directory() {
+    let temp_dir = common::TempDir::new("quic-host-key-outside");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    let outside_path = temp_dir.path().join("outside.b64");
+    std::fs::write(
+        &outside_path,
+        base64::engine::general_purpose::STANDARD.encode([3u8; 64]),
+    )
+    .expect("failed to write outside host key");
+
+    let error = load_host_key(&cert_dir, &outside_path).expect_err("outside key should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("configured certificate directory"),
+        "unexpected error: {error}"
     );
 }
 

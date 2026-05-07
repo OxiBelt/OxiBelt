@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -11,6 +12,7 @@ TLS_ENABLED = bool(TLS_CERT_FILE and TLS_KEY_FILE)
 UPSTREAM_NAME = os.environ.get("UPSTREAM_NAME", "mock-upstream")
 UPSTREAM_MARKER = "mock-upstream"
 ACCEPT_PROXY_PROTOCOL = os.environ.get("ACCEPT_PROXY_PROTOCOL", "0") == "1"
+HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
 class EchoHandler(BaseHTTPRequestHandler):
@@ -77,6 +79,9 @@ class EchoHandler(BaseHTTPRequestHandler):
     connection = self.headers.get("connection", "")
     if not upgrade or "upgrade" not in connection.lower():
       return False
+    if not HTTP_TOKEN_RE.fullmatch(upgrade):
+      self.send_error(400, "invalid Upgrade token")
+      return True
 
     self.send_response_only(101, "Switching Protocols")
     self.send_header("Connection", "Upgrade")
