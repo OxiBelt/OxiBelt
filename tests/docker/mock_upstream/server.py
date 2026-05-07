@@ -70,6 +70,14 @@ class EchoHandler(BaseHTTPRequestHandler):
     self.send_header("x-upstream-marker", UPSTREAM_MARKER)
     if query.get("set_cookie"):
       self.send_header("set-cookie", "upstream_session=present; Path=/")
+    cache_control = {
+      "private": "private",
+      "no-store": "no-store",
+      "private-no-store": "private, no-store",
+      "public": "public, max-age=60",
+    }.get(query.get("cache_control", [""])[0])
+    if cache_control:
+      self.send_header("cache-control", cache_control)
     self.send_header("content-length", str(len(encoded)))
     self.end_headers()
     self.wfile.write(encoded)

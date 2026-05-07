@@ -6,8 +6,9 @@ use async_compression::tokio::bufread::{BrotliEncoder, GzipEncoder, ZlibEncoder,
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::header::{
-  ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE,
-  ETAG, HeaderMap, HeaderValue, RANGE, TRAILER, VARY,
+  ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE,
+  CONTENT_TYPE, COOKIE, ETAG, HeaderMap, HeaderValue, PROXY_AUTHORIZATION, RANGE, SET_COOKIE,
+  TRAILER, VARY,
 };
 use http::{Method, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
@@ -140,6 +141,9 @@ pub(crate) fn maybe_compress_response(
   if request_headers.contains_key(RANGE) {
     return response;
   }
+  if request_has_sensitive_credentials(request_headers) {
+    return response;
+  }
   let Some(encoding) = negotiate_encoding(request_headers, &policy) else {
     return response;
   };
@@ -192,7 +196,7 @@ fn response_is_eligible(
   if headers.contains_key(CONTENT_RANGE) || headers.contains_key(TRAILER) {
     return false;
   }
-  if has_no_transform(headers) {
+  if has_no_transform(headers) || response_has_sensitive_context(headers) {
     return false;
   }
   if known_content_length(headers).is_some_and(|length| length < policy.min_size_bytes) {
@@ -205,6 +209,18 @@ fn response_is_eligible(
     .mime_types
     .iter()
     .any(|pattern| mime_pattern_matches(pattern, &content_type))
+}
+
+fn request_has_sensitive_credentials(headers: &HeaderMap) -> bool {
+  headers.contains_key(COOKIE)
+    || headers.contains_key(AUTHORIZATION)
+    || headers.contains_key(PROXY_AUTHORIZATION)
+}
+
+fn response_has_sensitive_context(headers: &HeaderMap) -> bool {
+  headers.contains_key(SET_COOKIE)
+    || has_cache_control_directive(headers, "private")
+    || has_cache_control_directive(headers, "no-store")
 }
 
 fn negotiate_encoding(
@@ -273,6 +289,10 @@ fn has_non_identity_content_encoding(headers: &HeaderMap) -> bool {
 }
 
 fn has_no_transform(headers: &HeaderMap) -> bool {
+  has_cache_control_directive(headers, "no-transform")
+}
+
+fn has_cache_control_directive(headers: &HeaderMap, name: &str) -> bool {
   headers
     .get_all(CACHE_CONTROL)
     .iter()
@@ -284,7 +304,7 @@ fn has_no_transform(headers: &HeaderMap) -> bool {
         .split_once('=')
         .map(|(name, _)| name.trim())
         .unwrap_or(directive)
-        .eq_ignore_ascii_case("no-transform")
+        .eq_ignore_ascii_case(name)
     })
 }
 
@@ -437,7 +457,10 @@ impl AsyncRead for ProxyBodyReader {
 
 #[cfg(test)]
 mod tests {
-  use http::header::{ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_TYPE};
+  use http::header::{
+    ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
+    COOKIE, PROXY_AUTHORIZATION, SET_COOKIE,
+  };
   use http_body_util::Full;
   use tokio::io::AsyncReadExt;
 
@@ -448,6 +471,34 @@ mod tests {
   fn default_policy() -> EffectiveCompressionPolicy<'static> {
     let config = Box::leak(Box::new(CompressionConfig::default()));
     EffectiveCompressionPolicy::from_default(config)
+  }
+
+  fn eligible_response() -> Response<ProxyBody> {
+    let body = Bytes::from("compressible ".repeat(200));
+    let proxy_body = Full::new(body.clone())
+      .map_err(|never| -> BoxError { match never {} })
+      .boxed();
+    let mut response = Response::new(proxy_body);
+    response.headers_mut().insert(
+      CONTENT_TYPE,
+      HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+      CONTENT_LENGTH,
+      HeaderValue::from_str(&body.len().to_string()).unwrap(),
+    );
+    response
+  }
+
+  fn gzip_request_headers() -> HeaderMap {
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    request_headers
+  }
+
+  fn assert_response_is_not_compressed(response: &Response<ProxyBody>) {
+    assert!(!response.headers().contains_key(CONTENT_ENCODING));
+    assert!(response.headers().contains_key(CONTENT_LENGTH));
   }
 
   #[test]
@@ -495,6 +546,34 @@ mod tests {
   }
 
   #[test]
+  fn response_eligibility_rejects_secret_bearing_headers() {
+    let policy = default_policy();
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("2048"));
+    assert!(response_is_eligible(&headers, StatusCode::OK, &policy));
+
+    headers.insert(SET_COOKIE, HeaderValue::from_static("session=present"));
+    assert!(!response_is_eligible(&headers, StatusCode::OK, &policy));
+
+    headers.remove(SET_COOKIE);
+    headers.insert(
+      CACHE_CONTROL,
+      HeaderValue::from_static("public, max-age=60"),
+    );
+    assert!(response_is_eligible(&headers, StatusCode::OK, &policy));
+
+    headers.insert(
+      CACHE_CONTROL,
+      HeaderValue::from_static("private=\"set-cookie\""),
+    );
+    assert!(!response_is_eligible(&headers, StatusCode::OK, &policy));
+
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    assert!(!response_is_eligible(&headers, StatusCode::OK, &policy));
+  }
+
+  #[test]
   fn mime_patterns_match_suffix_and_tree_wildcards() {
     assert!(mime_pattern_matches("text/*", "text/plain"));
     assert!(mime_pattern_matches(
@@ -523,6 +602,51 @@ mod tests {
     weaken_strong_etag(&mut headers);
 
     assert_eq!(headers.get(ETAG).unwrap(), "W/\"abc\"");
+  }
+
+  #[test]
+  fn compression_skips_authenticated_requests() {
+    let config = CompressionConfig::default();
+    let state = CompressionState::new(&config);
+
+    let mut cookie_headers = gzip_request_headers();
+    cookie_headers.insert(COOKIE, HeaderValue::from_static("session=secret"));
+    let response = maybe_compress_response(
+      eligible_response(),
+      &Method::GET,
+      &cookie_headers,
+      None,
+      &config,
+      &state,
+    );
+    assert_response_is_not_compressed(&response);
+
+    let mut authorization_headers = gzip_request_headers();
+    authorization_headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
+    let response = maybe_compress_response(
+      eligible_response(),
+      &Method::GET,
+      &authorization_headers,
+      None,
+      &config,
+      &state,
+    );
+    assert_response_is_not_compressed(&response);
+
+    let mut proxy_authorization_headers = gzip_request_headers();
+    proxy_authorization_headers.insert(
+      PROXY_AUTHORIZATION,
+      HeaderValue::from_static("Basic secret"),
+    );
+    let response = maybe_compress_response(
+      eligible_response(),
+      &Method::GET,
+      &proxy_authorization_headers,
+      None,
+      &config,
+      &state,
+    );
+    assert_response_is_not_compressed(&response);
   }
 
   #[tokio::test]
