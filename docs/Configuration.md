@@ -362,7 +362,7 @@ response_file = "ocsp.der"
 
 `response_file` is required when `mode = "static_file"` and must resolve to an existing regular file under the cert directory.
 
-TCP TLS can be configured for TLS 1.2 through TLS 1.3. HTTP/3 always requires TLS 1.3. Client certificate authentication can be optional or required when `tls.client_auth.ca_certs` names CA files under the cert directory.
+TCP TLS can be configured for TLS 1.2 through TLS 1.3. HTTP/3 always requires TLS 1.3. Client certificate authentication can be optional or required when `tls.client_auth.ca_certs` names CA files under the cert directory, and the same downstream client authentication policy is enforced for TCP TLS and HTTP/3/QUIC listeners.
 
 ## 6. Proxy
 

@@ -12,8 +12,8 @@ use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 
 use crate::config::{
-  ListenerConfig, OcspMode, TlsClientAuthMode, TlsConfig, TlsVersion, UpstreamEchConfig,
-  UpstreamEchMode, canonicalize_existing_file,
+  ListenerConfig, OcspMode, TlsClientAuthConfig, TlsClientAuthMode, TlsConfig, TlsVersion,
+  UpstreamEchConfig, UpstreamEchMode, canonicalize_existing_file,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
@@ -38,21 +38,9 @@ pub fn build_server_config(
   let builder = ServerConfig::builder_with_provider(provider.clone())
     .with_protocol_versions(&versions)
     .context("failed to configure TLS versions")?;
-  let mut server_config = match tls.client_auth.mode {
-    TlsClientAuthMode::Off => builder.with_no_client_auth(),
-    TlsClientAuthMode::Optional | TlsClientAuthMode::Require => {
-      let roots = load_client_auth_root_store(&tls.client_auth.ca_certs)?;
-      let mut verifier =
-        rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider);
-      if tls.client_auth.mode == TlsClientAuthMode::Optional {
-        verifier = verifier.allow_unauthenticated();
-      }
-      builder.with_client_cert_verifier(
-        verifier
-          .build()
-          .context("failed to build downstream client certificate verifier")?,
-      )
-    }
+  let mut server_config = match downstream_client_cert_verifier(&tls.client_auth, provider)? {
+    Some(verifier) => builder.with_client_cert_verifier(verifier),
+    None => builder.with_no_client_auth(),
   }
   .with_cert_resolver(Arc::new(cert_resolver));
   if !tls.session_tickets {
@@ -81,11 +69,14 @@ pub fn build_quic_server_config(tls: &TlsConfig) -> anyhow::Result<QuinnServerCo
   certified_key.ocsp = load_ocsp_response(tls)?;
 
   let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
-  let mut server_config = ServerConfig::builder_with_provider(provider)
+  let builder = ServerConfig::builder_with_provider(provider.clone())
     .with_protocol_versions(&[&rustls::version::TLS13])
-    .context("failed to configure QUIC TLS versions")?
-    .with_no_client_auth()
-    .with_cert_resolver(Arc::new(cert_resolver));
+    .context("failed to configure QUIC TLS versions")?;
+  let mut server_config = match downstream_client_cert_verifier(&tls.client_auth, provider)? {
+    Some(verifier) => builder.with_client_cert_verifier(verifier),
+    None => builder.with_no_client_auth(),
+  }
+  .with_cert_resolver(Arc::new(cert_resolver));
   server_config.alpn_protocols = vec![b"h3".to_vec()];
 
   let quic_crypto =
@@ -275,6 +266,27 @@ fn load_client_auth_root_store(paths: &[std::path::PathBuf]) -> anyhow::Result<R
     }
   }
   Ok(roots)
+}
+
+fn downstream_client_cert_verifier(
+  client_auth: &TlsClientAuthConfig,
+  provider: Arc<rustls::crypto::CryptoProvider>,
+) -> anyhow::Result<Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>> {
+  match client_auth.mode {
+    TlsClientAuthMode::Off => Ok(None),
+    TlsClientAuthMode::Optional | TlsClientAuthMode::Require => {
+      let roots = load_client_auth_root_store(&client_auth.ca_certs)?;
+      let mut verifier =
+        rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider);
+      if client_auth.mode == TlsClientAuthMode::Optional {
+        verifier = verifier.allow_unauthenticated();
+      }
+      verifier
+        .build()
+        .context("failed to build downstream client certificate verifier")
+        .map(Some)
+    }
+  }
 }
 
 fn tls_protocol_versions(

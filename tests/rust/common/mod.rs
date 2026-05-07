@@ -78,6 +78,81 @@ pub fn create_self_signed_cert(dir: &Path, common_name: &str) -> (PathBuf, PathB
     (cert_path, key_path)
 }
 
+#[allow(dead_code)]
+pub fn create_ca_signed_server_cert(
+    dir: &Path,
+    common_name: &str,
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+) -> (PathBuf, PathBuf) {
+    let common_name = safe_test_path_component(common_name, "certificate common name");
+    let dir = safe_existing_test_dir(dir);
+    let ca_cert_path = ca_cert_path.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "failed to resolve CA certificate {}: {error}",
+            ca_cert_path.display()
+        )
+    });
+    let ca_key_path = ca_key_path.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "failed to resolve CA key {}: {error}",
+            ca_key_path.display()
+        )
+    });
+    let id = next_test_id();
+    let key_path = dir.join(format!("server-{id}.key"));
+    let cert_path = dir.join(format!("server-{id}.pem"));
+    let csr_path = dir.join(format!("server-{id}.csr"));
+    let config_path = dir.join(format!("server-{id}.cnf"));
+
+    fs::write(
+        &config_path,
+        format!(
+            "[req]\ndistinguished_name = req_distinguished_name\nreq_extensions = req_ext\nprompt = no\n\n[req_distinguished_name]\nCN = {common_name}\n\n[req_ext]\nsubjectAltName = @alt_names\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\nextendedKeyUsage = serverAuth\n\n[alt_names]\nDNS.1 = {common_name}\n"
+        ),
+    )
+    .unwrap_or_else(|error| panic!("failed to write {}: {error}", config_path.display()));
+
+    let csr_args = [
+        OsStr::new("req"),
+        OsStr::new("-newkey"),
+        OsStr::new("rsa:2048"),
+        OsStr::new("-sha256"),
+        OsStr::new("-nodes"),
+        OsStr::new("-config"),
+        config_path.as_os_str(),
+        OsStr::new("-keyout"),
+        key_path.as_os_str(),
+        OsStr::new("-out"),
+        csr_path.as_os_str(),
+    ];
+    run_command("openssl", &csr_args);
+
+    let sign_args = [
+        OsStr::new("x509"),
+        OsStr::new("-req"),
+        OsStr::new("-in"),
+        csr_path.as_os_str(),
+        OsStr::new("-CA"),
+        ca_cert_path.as_os_str(),
+        OsStr::new("-CAkey"),
+        ca_key_path.as_os_str(),
+        OsStr::new("-CAcreateserial"),
+        OsStr::new("-days"),
+        OsStr::new("1"),
+        OsStr::new("-sha256"),
+        OsStr::new("-extfile"),
+        config_path.as_os_str(),
+        OsStr::new("-extensions"),
+        OsStr::new("req_ext"),
+        OsStr::new("-out"),
+        cert_path.as_os_str(),
+    ];
+    run_command("openssl", &sign_args);
+
+    (cert_path, key_path)
+}
+
 fn next_test_id() -> u64 {
     NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
 }
