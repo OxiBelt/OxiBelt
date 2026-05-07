@@ -1731,7 +1731,7 @@ run_case_checks() {
         docker_case(
             "protocol-proxying",
             "downstream-h3-zero-rtt-policy",
-            "HTTP/3 early-data policy allows safe methods and rejects unsafe methods",
+            "HTTP/3 early-data policy ignores spoofed Early-Data headers",
             ExpectStart::Success,
             Needs {
                 http_upstream: true,
@@ -1743,8 +1743,8 @@ run_case_checks() {
   local get_response post_response
   get_response="$(protocol_probe_client_with_headers "h3" "example.test" "/app/early-get" 200 "GET" "" "Early-Data: 1")"
   assert_body_jq "${get_response}" '.path == "/origin/app/early-get"'
-  post_response="$(protocol_probe_client_with_headers "h3" "example.test" "/app/early-post" 425 "POST" "unsafe" "Early-Data: 1")"
-  assert_response_jq "${post_response}" '.status == 425'
+  post_response="$(protocol_probe_client_with_headers "h3" "example.test" "/app/early-post" 200 "POST" "unsafe" "Early-Data: 1")"
+  assert_body_jq "${post_response}" '.path == "/origin/app/early-post" and .method == "POST"'
 }
 "#,
             None,

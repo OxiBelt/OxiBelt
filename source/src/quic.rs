@@ -14,6 +14,8 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::config::{QuicConfig, QuicSocketConfig, canonicalize_existing_file};
 
+pub(crate) mod h3;
+
 const QUIC_HOST_KEY_BYTES: usize = 64;
 const QUIC_HOST_KEY_RESET_LABEL: &[u8] = b"oxibelt quic stateless reset v1";
 const QUIC_HOST_KEY_TOKEN_LABEL: &[u8] = b"oxibelt quic retry token v1";

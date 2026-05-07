@@ -49,7 +49,7 @@ Downstream protocol support:
 - The same downstream client certificate policy is enforced for TCP TLS and HTTP/3/QUIC listeners.
 - QUIC Retry/address validation can be enabled with `quic.retry`.
 - HTTPS HTTP/1.1 and HTTP/2 responses advertise HTTP/3 with `Alt-Svc` when downstream HTTP/3 and `quic.alt_svc.enabled` are both enabled. OxiBelt does not add that header on HTTP/3, plain HTTP, or `101 Switching Protocols` responses.
-- QUIC 0-RTT is disabled by default. `quic.zero_rtt = "safe_methods"` enables early data and only permits early-data `GET` and `HEAD`; unsafe methods receive `425 Too Early`.
+- QUIC 0-RTT is disabled by default. `quic.zero_rtt = "safe_methods"` enables early data and only permits transport-verified early-data `GET` and `HEAD`; unsafe methods received as QUIC 0-RTT receive `425 Too Early`.
 - `quic.host_key_file` provides shared host key material for stateless reset and Retry/validation tokens. It is cert-directory relative and hot-reload tracked.
 
 Upstream protocol support:

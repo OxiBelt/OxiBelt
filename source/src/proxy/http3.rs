@@ -25,9 +25,9 @@ use crate::server::downstream_quic_tls_metadata;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::tls;
 
-type H3BidiStream = h3_quinn::BidiStream<Bytes>;
+type H3BidiStream = crate::quic::h3::BidiStream<Bytes>;
 type H3RequestStream = h3::server::RequestStream<H3BidiStream, Bytes>;
-type H3WebTransportSession = WebTransportSession<h3_quinn::Connection, Bytes>;
+type H3WebTransportSession = WebTransportSession<crate::quic::h3::Connection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
 const H3_BODY_CHANNEL_CAPACITY: usize = 16;
@@ -245,7 +245,8 @@ pub(crate) async fn handle_downstream_connection(
 ) -> anyhow::Result<()> {
   let peer_addr = connection.remote_address();
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
-  let quic_connection = h3_quinn::Connection::new(connection);
+  let early_data = crate::quic::h3::EarlyDataTracker::default();
+  let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
   let mut h3_connection = h3::server::builder()
     .enable_extended_connect(true)
     .enable_datagram(true)
@@ -268,8 +269,13 @@ pub(crate) async fn handle_downstream_connection(
       .resolve_request()
       .await
       .context("failed to resolve downstream HTTP/3 request")?;
+    let is_early_data = early_data.take(stream.id());
 
-    if rejects_unsafe_early_data(&request, state.snapshot().config.quic.zero_rtt) {
+    if rejects_unsafe_early_data(
+      &request,
+      state.snapshot().config.quic.zero_rtt,
+      is_early_data,
+    ) {
       respond_to_h3_request(stream, text_response(StatusCode::TOO_EARLY, "too early")).await?;
       continue;
     }
@@ -784,12 +790,10 @@ fn is_webtransport_request(request: &Request<()>) -> bool {
 fn rejects_unsafe_early_data(
   request: &Request<()>,
   zero_rtt: crate::config::QuicZeroRttMode,
+  is_early_data: bool,
 ) -> bool {
   zero_rtt == crate::config::QuicZeroRttMode::SafeMethods
-    && request
-      .headers()
-      .get("early-data")
-      .is_some_and(|value| value.as_bytes() == b"1")
+    && is_early_data
     && !matches!(request.method(), &Method::GET | &Method::HEAD)
 }
 
@@ -825,13 +829,13 @@ mod tests {
     let request = Request::builder()
       .method(Method::POST)
       .uri("https://example.com/upload")
-      .header("early-data", "1")
       .body(())
       .unwrap();
 
     assert!(rejects_unsafe_early_data(
       &request,
-      crate::config::QuicZeroRttMode::SafeMethods
+      crate::config::QuicZeroRttMode::SafeMethods,
+      true
     ));
   }
 
@@ -841,14 +845,45 @@ mod tests {
       let request = Request::builder()
         .method(method)
         .uri("https://example.com/read")
-        .header("early-data", "1")
         .body(())
         .unwrap();
 
       assert!(!rejects_unsafe_early_data(
         &request,
-        crate::config::QuicZeroRttMode::SafeMethods
+        crate::config::QuicZeroRttMode::SafeMethods,
+        true
       ));
     }
+  }
+
+  #[test]
+  fn zero_rtt_policy_ignores_spoofed_early_data_header_after_handshake() {
+    let request = Request::builder()
+      .method(Method::POST)
+      .uri("https://example.com/upload")
+      .header("early-data", "1")
+      .body(())
+      .unwrap();
+
+    assert!(!rejects_unsafe_early_data(
+      &request,
+      crate::config::QuicZeroRttMode::SafeMethods,
+      false
+    ));
+  }
+
+  #[test]
+  fn zero_rtt_policy_is_disabled_when_zero_rtt_is_off() {
+    let request = Request::builder()
+      .method(Method::POST)
+      .uri("https://example.com/upload")
+      .body(())
+      .unwrap();
+
+    assert!(!rejects_unsafe_early_data(
+      &request,
+      crate::config::QuicZeroRttMode::Off,
+      true
+    ));
   }
 }
