@@ -576,7 +576,7 @@ POST /cache/purge?policy=default&scheme=https&host=example.test&uri=/path
 POST /cache/purge-prefix?policy=default&scheme=https&host=example.test&path_prefix=/assets/
 ```
 
-Health paths must start with `/`. When WAF is enabled, metrics include `oxibelt_waf_rule_hits_total{scope,route,phase,mode,rule_name,rule_id}` for active global and route rules, including zero-hit rules.
+Health paths must start with `/`. Prometheus metrics omit detailed WAF rule names, IDs, modes, routes, and per-rule hit counters because the metrics listener is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoint for that rule-level data.
 
 ## Database Access Log Sink
 

@@ -208,10 +208,7 @@ fn ops_response(
   match kind {
     OpsKind::Metrics => {
       let snapshot = state.snapshot();
-      let waf_rule_hits = snapshot.waf.rule_hit_snapshots();
-      let body = snapshot
-        .metrics
-        .prometheus(snapshot.cache.stats(), &waf_rule_hits);
+      let body = snapshot.metrics.prometheus(snapshot.cache.stats());
       text_response(StatusCode::OK, &body)
     }
     OpsKind::Health => {

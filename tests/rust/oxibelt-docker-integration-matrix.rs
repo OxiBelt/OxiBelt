@@ -2117,7 +2117,7 @@ run_case_checks() {
         docker_case(
             "waf-request",
             "rule-mode-hit-counters",
-            "rule-level WAF modes expose per-rule hit telemetry",
+            "rule-level WAF modes expose per-rule hit telemetry only through admin",
             ExpectStart::Success,
             Needs {
                 http_upstream: true,
@@ -2133,9 +2133,12 @@ run_case_checks() {
   assert_response_jq "${response}" '.body == "blocked by rule"'
 
   metrics="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
-  assert_response_jq "${metrics}" '.body | contains("oxibelt_waf_rule_hits_total")'
-  assert_response_jq "${metrics}" '.body | contains("scope=\"global\",route=\"\",phase=\"request\",mode=\"monitor\",rule_name=\"shadow-path\",rule_id=\"shadow-path\"} 1")'
-  assert_response_jq "${metrics}" '.body | contains("scope=\"global\",route=\"\",phase=\"request\",mode=\"enforcing\",rule_name=\"block-path\",rule_id=\"block-path\"} 1")'
+  assert_response_jq "${metrics}" '.body | contains("oxibelt_requests_total")'
+  assert_response_jq "${metrics}" '.body | contains("oxibelt_waf_rule_hits_total") | not'
+  assert_response_jq "${metrics}" '.body | contains("rule_name") | not'
+  assert_response_jq "${metrics}" '.body | contains("rule_id") | not'
+  assert_response_jq "${metrics}" '.body | contains("shadow-path") | not'
+  assert_response_jq "${metrics}" '.body | contains("block-path") | not'
 
   admin="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/waf/rule-hits" 200 "GET" "" "Authorization: Bearer matrix-viewer-token")"
   assert_body_jq "${admin}" '([.rules[] | select(.scope == "global" and .route == null and .phase == "request" and .name == "shadow-path" and .id == "shadow-path" and .effective_mode == "monitor" and .hits == 1)] | length) == 1'
