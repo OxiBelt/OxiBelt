@@ -15,6 +15,7 @@ use tracing::{debug, warn};
 
 use crate::config::{Config, resolve_existing_local_config_file_path_with_logical};
 use crate::routes::normalize_host;
+use crate::shared_state::SharedState;
 
 mod person_proof;
 
@@ -856,10 +857,14 @@ pub struct WafEngine {
 
 impl WafEngine {
   pub fn new(config: &Config) -> anyhow::Result<Self> {
-    Self::new_with_previous(config, None)
+    Self::new_with_previous(config, None, None)
   }
 
-  pub fn new_with_previous(config: &Config, previous: Option<&Self>) -> anyhow::Result<Self> {
+  pub fn new_with_previous(
+    config: &Config,
+    previous: Option<&Self>,
+    shared_state: Option<std::sync::Arc<SharedState>>,
+  ) -> anyhow::Result<Self> {
     validate_config(config)?;
 
     let pattern_sets = compile_pattern_sets(&config.waf.pattern_sets, &config.waf.limits)?;
@@ -880,6 +885,7 @@ impl WafEngine {
       person_proof_policies,
       config.waf.limits.max_person_proof_reuse_tokens,
       previous.map(|waf| &waf.person_proof),
+      shared_state,
     )?;
     let person_proof_tcp_max_hop = if config.waf.enabled {
       person_proof.tcp_max_hop()
@@ -1021,7 +1027,6 @@ impl WafEngine {
     &self,
     input: WafRequestInput<'_>,
   ) -> anyhow::Result<RequestWafDecision> {
-    let mut tx = TransactionBudget::new(&self.limits);
     let mut decision = RequestWafDecision::default();
     let mut active_tags = input.tags.to_owned();
     let person_proof = self.person_proof.evaluate_request(input);
@@ -1040,6 +1045,7 @@ impl WafEngine {
       decision.response_header_mutations.push(mutation);
     }
 
+    let mut tx = TransactionBudget::new(&self.limits);
     for rule in self.rules_for(input.route_name, WafPhase::Request) {
       tx.check_total()?;
       let rule_person_proof = self.person_proof_status_for_rule(&person_proof, rule);
@@ -1099,9 +1105,9 @@ impl WafEngine {
     &self,
     input: WafResponseInput<'_>,
   ) -> anyhow::Result<ResponseWafDecision> {
-    let mut tx = TransactionBudget::new(&self.limits);
     let mut decision = ResponseWafDecision::default();
     let person_proof = self.person_proof.evaluate_request(input.request);
+    let mut tx = TransactionBudget::new(&self.limits);
     let ctx = EvalContext {
       phase: WafPhase::Response,
       mode: self.mode,

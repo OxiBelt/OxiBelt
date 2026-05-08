@@ -76,6 +76,9 @@ include = ["conf.d/*.toml"]
 [proxy.buffering]
 [proxy.http]
 [limits]
+[shared_state]
+[[shared_state.backends]]
+[shared_state.backends.tls]
 [compression]
 [[compression.policies]]
 [cache]
@@ -404,7 +407,41 @@ limit = 64
 status = 429
 ```
 
-Limit values must be greater than zero. Rate and connection limit state is process-local. `max_connections`, `max_connections_per_ip`, and `[[connection_limits]]` apply to downstream HTTP/HTTPS and TCP stream listener connections. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
+Limit values must be greater than zero. Rate and connection limit state is process-local by default. When `[shared_state].enabled = true` and the relevant feature maps to a backend, rate token buckets and downstream connection leases are shared across instances. `max_connections`, `max_connections_per_ip`, and `[[connection_limits]]` apply to downstream HTTP/HTTPS and TCP stream listener connections. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
+
+```toml
+[shared_state]
+enabled = false
+namespace = "oxibelt"
+instance_id_env = "OXIBELT_INSTANCE_ID"
+default_backend = "cluster"
+operation_timeout_ms = 500
+connection_lease_ms = 120000
+cache_lock_ms = 10000
+rate_limits_backend = "cluster"
+connection_limits_backend = "cluster"
+person_proof_backend = "cluster"
+upstream_health_backend = "cluster"
+cache_backend = "cluster"
+reload_backend = "cluster"
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "redis" # redis | postgres
+connection_url_env = "OXIBELT_SHARED_STATE_URL"
+max_connections = 4
+connect_timeout_ms = 3000
+
+[shared_state.backends.tls]
+mode = "off" # off | verify_full, PostgreSQL only
+# ca_cert = "postgres-ca.pem"
+# client_cert = "postgres-client.pem"
+# client_key = "postgres-client.key"
+```
+
+Shared state is opt-in. If it is disabled, features keep their local in-process behavior. When it is enabled, an omitted feature mapping uses `default_backend`, or the first configured backend when `default_backend` is not set. Backends are named, and each feature maps to one backend; OxiBelt does not mirror writes or fall back through backend chains. Exactly one of `connection_url` or `connection_url_env` is required per backend. Effective config dumps redact shared-state `connection_url` values.
+
+Redis backends target Redis-protocol compatible Redis, Valkey, and KeyDB single-endpoint deployments. PostgreSQL backends create OxiBelt-managed shared-state tables at startup. Security-sensitive operations such as rate limits, connection leases, and Person proof fail closed when the configured shared backend errors. Shared cache operations fall back to the local/no-shared-cache path for the current request.
 
 ```toml
 [cache]
@@ -502,7 +539,7 @@ max_concurrent_responses = 0
 
 Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate`. OxiBelt only compresses downstream responses when the client permits an enabled encoding, the request does not carry `Cookie`, `Authorization`, or `Proxy-Authorization`, the response is not already encoded or secret-bearing, the status/MIME/size policy matches, and HTTP semantics such as `Cache-Control: no-transform` and range responses allow transformation. Responses with `Set-Cookie`, `Cache-Control: private`, or `Cache-Control: no-store` are not compressed. `max_concurrent_responses = 0` uses an automatic CPU budget.
 
-`cache.store = "tmpfs"` validates `tmpfs_dir` under `/dev/shm` when cache is enabled. `disk` and `memory_then_disk` require an explicit writable `disk_dir` and `disk_max_size_bytes`; OxiBelt does not choose a disk path implicitly. If `memory_then_disk` omits `memory_max_size_bytes`, OxiBelt uses `memory_auto_fraction` of the detected cgroup/container memory limit, falling back to system memory. `cache_key` supports `{scheme}`, `{host}`, `{uri}`, `{path}`, `{query}`, `{query:name}`, `{header:Name}`, and `{cookie:name}`. Named cache policies are selected by `routes.cache`; `default` refers to the top-level `[cache]` policy. Policy rules select storage after the upstream response MIME type is known.
+`cache.store = "tmpfs"` validates `tmpfs_dir` under `/dev/shm` when cache is enabled. `disk` and `memory_then_disk` require an explicit writable `disk_dir` and `disk_max_size_bytes`; OxiBelt does not choose a disk path implicitly. If `memory_then_disk` omits `memory_max_size_bytes`, OxiBelt uses `memory_auto_fraction` of the detected cgroup/container memory limit, falling back to system memory. `cache_key` supports `{scheme}`, `{host}`, `{uri}`, `{path}`, `{query}`, `{query:name}`, `{header:Name}`, and `{cookie:name}`. Named cache policies are selected by `routes.cache`; `default` refers to the top-level `[cache]` policy. Policy rules select storage after the upstream response MIME type is known. When `cache_backend` maps to a shared backend, the configured local cache remains L1 and the shared backend stores full cacheable objects, metadata, fill locks, and purge-visible L2 entries.
 
 The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on upstream error, serve cached byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`.
 

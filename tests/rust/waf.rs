@@ -2264,7 +2264,7 @@ body = "reloaded"
     reloaded_config
         .validate()
         .expect("reloaded config should validate");
-    let reloaded_engine = WafEngine::new_with_previous(&reloaded_config, Some(&engine))
+    let reloaded_engine = WafEngine::new_with_previous(&reloaded_config, Some(&engine), None)
         .expect("reloaded WAF should compile");
 
     let mut clearance_headers = HeaderMap::new();

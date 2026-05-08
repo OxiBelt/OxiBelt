@@ -6,7 +6,8 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use http::StatusCode;
 
-use crate::config::{ConnectionLimitConfig, LimitsConfig, RateLimitConfig};
+use crate::config::{ConnectionLimitConfig, LimitKey, LimitMode, LimitsConfig, RateLimitConfig};
+use crate::shared_state::{ConnectionScope, SharedState};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ParsedRate {
@@ -34,10 +35,17 @@ pub fn parse_rate(raw: &str) -> anyhow::Result<ParsedRate> {
   })
 }
 
+impl ParsedRate {
+  pub fn per_second(self) -> f64 {
+    self.per_second
+  }
+}
+
 #[derive(Debug)]
 pub struct LimitState {
   connections: Mutex<ConnectionCounts>,
   rates: Mutex<HashMap<(String, String), TokenBucket>>,
+  shared_state: Option<Arc<SharedState>>,
 }
 
 #[derive(Debug, Default)]
@@ -54,10 +62,11 @@ struct TokenBucket {
 }
 
 impl LimitState {
-  pub fn new() -> Arc<Self> {
+  pub fn new(shared_state: Option<Arc<SharedState>>) -> Arc<Self> {
     Arc::new(Self {
       connections: Mutex::new(ConnectionCounts::default()),
       rates: Mutex::new(HashMap::new()),
+      shared_state,
     })
   }
 
@@ -67,6 +76,51 @@ impl LimitState {
     limits: &LimitsConfig,
     connection_limits: &[ConnectionLimitConfig],
   ) -> Result<ConnectionPermit, StatusCode> {
+    if let Some(shared) = &self.shared_state
+      && shared.has_connection_limits()
+    {
+      let mut owned_scopes = vec!["total".to_string(), format!("ip:{ip}")];
+      for limit in connection_limits {
+        owned_scopes.push(format!("named:{}:{ip}", limit.name));
+      }
+      let mut scopes = vec![
+        ConnectionScope {
+          key: owned_scopes[0].as_str(),
+          limit: limits.max_connections,
+          status: StatusCode::SERVICE_UNAVAILABLE,
+        },
+        ConnectionScope {
+          key: owned_scopes[1].as_str(),
+          limit: limits.max_connections_per_ip,
+          status: StatusCode::TOO_MANY_REQUESTS,
+        },
+      ];
+      for (index, limit) in connection_limits.iter().enumerate() {
+        scopes.push(ConnectionScope {
+          key: owned_scopes[index + 2].as_str(),
+          limit: limit.limit,
+          status: StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
+        });
+      }
+      let acquired = shared.acquire_connections(&scopes);
+      drop(scopes);
+      return match acquired {
+        Ok(None) => Ok(ConnectionPermit {
+          state: self.clone(),
+          ip,
+          names: connection_limits
+            .iter()
+            .map(|limit| limit.name.clone())
+            .collect(),
+          shared_scopes: owned_scopes,
+        }),
+        Ok(Some(status)) => Err(status),
+        Err(error) => {
+          tracing::warn!(error = %error, "shared connection limit backend failed closed");
+          Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+      };
+    }
     let mut counts = self
       .connections
       .lock()
@@ -95,6 +149,7 @@ impl LimitState {
         .iter()
         .map(|limit| limit.name.clone())
         .collect(),
+      shared_scopes: Vec::new(),
     })
   }
 
@@ -103,6 +158,33 @@ impl LimitState {
     ip: IpAddr,
     rate_limits: &[RateLimitConfig],
   ) -> Option<StatusCode> {
+    if let Some(shared) = &self.shared_state
+      && shared.has_rate_limits()
+    {
+      for limit in rate_limits {
+        let Ok(rate) = parse_rate(&limit.rate) else {
+          return Some(StatusCode::INTERNAL_SERVER_ERROR);
+        };
+        let key = match limit.key {
+          LimitKey::ClientIp => ip.to_string(),
+        };
+        match shared.take_rate_token(&limit.name, &key, rate, limit.burst) {
+          Ok(true) => {}
+          Ok(false) => {
+            if limit.mode == LimitMode::Enforcing {
+              return Some(
+                StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
+              );
+            }
+          }
+          Err(error) => {
+            tracing::warn!(error = %error, "shared rate limit backend failed closed");
+            return Some(StatusCode::SERVICE_UNAVAILABLE);
+          }
+        }
+      }
+      return None;
+    }
     let now = Instant::now();
     let mut buckets = self.rates.lock().expect("rate limit lock poisoned");
     for limit in rate_limits {
@@ -118,7 +200,7 @@ impl LimitState {
       let elapsed = now.duration_since(bucket.last).as_secs_f64();
       bucket.tokens = (bucket.tokens + elapsed * rate.per_second).min(burst);
       bucket.last = now;
-      if bucket.tokens < 1.0 {
+      if bucket.tokens < 1.0 && limit.mode == LimitMode::Enforcing {
         return Some(StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS));
       }
       bucket.tokens -= 1.0;
@@ -137,17 +219,28 @@ impl LimitState {
       decrement_or_remove(&mut counts.named, &(name.clone(), ip));
     }
   }
+
+  fn release_shared_connection(&self, scopes: &[String]) {
+    if let Some(shared) = &self.shared_state {
+      shared.release_connections(scopes);
+    }
+  }
 }
 
 pub struct ConnectionPermit {
   state: Arc<LimitState>,
   ip: IpAddr,
   names: Vec<String>,
+  shared_scopes: Vec<String>,
 }
 
 impl Drop for ConnectionPermit {
   fn drop(&mut self) {
-    self.state.release_connection(self.ip, &self.names);
+    if self.shared_scopes.is_empty() {
+      self.state.release_connection(self.ip, &self.names);
+    } else {
+      self.state.release_shared_connection(&self.shared_scopes);
+    }
   }
 }
 
@@ -172,5 +265,40 @@ mod tests {
     assert!((parse_rate("10r/s").unwrap().per_second - 10.0).abs() < f64::EPSILON);
     assert!((parse_rate("60r/m").unwrap().per_second - 1.0).abs() < f64::EPSILON);
     assert!(parse_rate("10/s").is_err());
+  }
+
+  #[test]
+  fn shared_state_enforces_rate_and_connection_limits_across_instances() {
+    let shared = SharedState::test_memory("limit-test");
+    let first = LimitState::new(Some(shared.clone()));
+    let second = LimitState::new(Some(shared));
+    let ip = "203.0.113.10".parse().unwrap();
+    let rate_limits = [RateLimitConfig {
+      name: "per-ip".to_string(),
+      key: LimitKey::ClientIp,
+      rate: "1r/h".to_string(),
+      burst: 1,
+      mode: LimitMode::Enforcing,
+      status: 429,
+    }];
+
+    assert_eq!(first.check_rate_limits(ip, &rate_limits), None);
+    assert_eq!(
+      second.check_rate_limits(ip, &rate_limits),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+
+    let limits = LimitsConfig {
+      max_connections: 1,
+      max_connections_per_ip: 1,
+      ..LimitsConfig::default()
+    };
+    let permit = first.acquire_connection(ip, &limits, &[]).unwrap();
+    assert_eq!(
+      second.acquire_connection(ip, &limits, &[]).err(),
+      Some(StatusCode::SERVICE_UNAVAILABLE)
+    );
+    drop(permit);
+    assert!(second.acquire_connection(ip, &limits, &[]).is_ok());
   }
 }

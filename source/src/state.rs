@@ -20,6 +20,7 @@ use crate::pools::PoolState;
 use crate::proxy::http::compression::CompressionState;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
+use crate::shared_state::SharedState;
 use crate::tls;
 use crate::waf::WafEngine;
 
@@ -118,6 +119,7 @@ pub struct AppSnapshot {
   pub cache: Arc<ResponseCache>,
   pub(crate) compression: Arc<CompressionState>,
   pub metrics: Arc<Metrics>,
+  pub shared_state: Option<Arc<SharedState>>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
@@ -142,11 +144,17 @@ impl AppSnapshot {
       .context("failed to build upstream HTTP clients")?;
     let h3_clients =
       UpstreamH3Pools::new(&upstreams, &config).context("failed to build upstream HTTP/3 pools")?;
-    let limits = LimitState::new();
-    let pools = PoolState::new(&config.upstream_pools);
-    let cache = ResponseCache::new(&config.cache).context("failed to build response cache")?;
+    let shared_state = SharedState::new(&config)
+      .await
+      .context("failed to build shared state")?;
+    let limits = LimitState::new(shared_state.clone());
+    let pools = PoolState::new(&config.upstream_pools, shared_state.clone());
+    let cache = ResponseCache::new(&config.cache, shared_state.clone())
+      .context("failed to build response cache")?;
     let compression = CompressionState::new(&config.compression);
-    let metrics = Metrics::new();
+    let metrics = previous
+      .map(|snapshot| snapshot.metrics.clone())
+      .unwrap_or_default();
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to build downstream TLS config")?;
     let admin_tls_server_config = if config.admin.enabled && config.admin.tls.enabled {
@@ -169,8 +177,12 @@ impl AppSnapshot {
     } else {
       None
     };
-    let waf = WafEngine::new_with_previous(&config, previous.map(|snapshot| &snapshot.waf))
-      .context("failed to build WAF engine")?;
+    let waf = WafEngine::new_with_previous(
+      &config,
+      previous.map(|snapshot| &snapshot.waf),
+      shared_state.clone(),
+    )
+    .context("failed to build WAF engine")?;
     let access_logs = AccessLogSinks::new(&config.database.access_log)
       .await
       .context("failed to build access log sinks")?;
@@ -189,6 +201,7 @@ impl AppSnapshot {
       cache,
       compression,
       metrics,
+      shared_state,
       tls_server_config,
       admin_tls_server_config,
       quic_server_config,

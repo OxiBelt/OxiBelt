@@ -10,10 +10,12 @@ use crate::config::{
   HealthCheckProtocol, HttpVersion, LoadBalancingAlgorithm, ProxyProtocolEgressMode,
   UpstreamConfig, UpstreamPoolConfig, UpstreamTlsConfig,
 };
+use crate::shared_state::SharedState;
 
 #[derive(Debug)]
 pub struct PoolState {
   pools: HashMap<String, Arc<PoolRuntime>>,
+  shared_state: Option<Arc<SharedState>>,
 }
 
 #[derive(Debug)]
@@ -22,6 +24,7 @@ struct PoolRuntime {
   servers: Vec<Arc<PoolServerRuntime>>,
   round_robin: AtomicUsize,
   random: AtomicUsize,
+  shared_state: Option<Arc<SharedState>>,
 }
 
 #[derive(Debug)]
@@ -37,16 +40,22 @@ pub struct PoolSelection {
   pub pool_name: String,
   pub upstream_name: String,
   server: Arc<PoolServerRuntime>,
+  shared_state: Option<Arc<SharedState>>,
 }
 
 impl Drop for PoolSelection {
   fn drop(&mut self) {
     self.server.active.fetch_sub(1, Ordering::Relaxed);
+    if let Some(shared) = &self.shared_state
+      && let Err(error) = shared.pool_active_add(&self.upstream_name, -1)
+    {
+      tracing::warn!(error = %error, upstream = %self.upstream_name, "failed to release shared upstream active count");
+    }
   }
 }
 
 impl PoolState {
-  pub fn new(configs: &[UpstreamPoolConfig]) -> Arc<Self> {
+  pub fn new(configs: &[UpstreamPoolConfig], shared_state: Option<Arc<SharedState>>) -> Arc<Self> {
     let pools = configs
       .iter()
       .map(|config| {
@@ -71,11 +80,15 @@ impl PoolState {
             servers,
             round_robin: AtomicUsize::new(0),
             random: AtomicUsize::new(0x9e37_79b9),
+            shared_state: shared_state.clone(),
           }),
         )
       })
       .collect();
-    Arc::new(Self { pools })
+    Arc::new(Self {
+      pools,
+      shared_state,
+    })
   }
 
   pub fn synthetic_upstreams(configs: &[UpstreamPoolConfig]) -> Vec<UpstreamConfig> {
@@ -138,15 +151,33 @@ impl PoolState {
     .ok_or_else(|| anyhow::anyhow!("upstream pool {pool_name} has no available servers"))?;
 
     server.active.fetch_add(1, Ordering::Relaxed);
+    if let Some(shared) = &self.shared_state
+      && let Err(error) = shared.pool_active_add(&server.upstream_name, 1)
+    {
+      tracing::warn!(error = %error, upstream = %server.upstream_name, "failed to update shared upstream active count");
+    }
     Ok(PoolSelection {
       pool_name: pool_name.to_string(),
       upstream_name: server.upstream_name.clone(),
       server,
+      shared_state: self.shared_state.clone(),
     })
   }
 
   pub fn report_success(&self, upstream_name: &str) {
     if let Some((pool, server)) = self.find_pool_server(upstream_name) {
+      if let Some(shared) = &self.shared_state
+        && let Ok(Some(healthy)) = shared.pool_report(
+          upstream_name,
+          true,
+          pool.config.health_check.enabled,
+          pool.config.health_check.healthy_threshold,
+          pool.config.health_check.unhealthy_threshold,
+        )
+      {
+        server.healthy.store(healthy, Ordering::Relaxed);
+        return;
+      }
       server.consecutive_failures.store(0, Ordering::Relaxed);
       let successes = server.consecutive_successes.fetch_add(1, Ordering::Relaxed) + 1;
       if !pool.config.health_check.enabled
@@ -159,6 +190,18 @@ impl PoolState {
 
   pub fn report_failure(&self, upstream_name: &str) {
     if let Some((pool, server)) = self.find_pool_server(upstream_name) {
+      if let Some(shared) = &self.shared_state
+        && let Ok(Some(healthy)) = shared.pool_report(
+          upstream_name,
+          false,
+          pool.config.health_check.enabled,
+          pool.config.health_check.healthy_threshold,
+          pool.config.health_check.unhealthy_threshold,
+        )
+      {
+        server.healthy.store(healthy, Ordering::Relaxed);
+        return;
+      }
       server.consecutive_successes.store(0, Ordering::Relaxed);
       let failures = server.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
       if pool.config.health_check.enabled
@@ -207,7 +250,7 @@ fn select_round_robin(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>>
 fn select_least_conn(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>> {
   available_servers(pool)
     .into_iter()
-    .min_by_key(|server| server.active.load(Ordering::Relaxed))
+    .min_by_key(|server| active_count(pool, server))
 }
 
 fn select_random(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>> {
@@ -246,8 +289,7 @@ fn weighted_available(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
   }
   if result.is_empty() {
     for (index, server) in pool.servers.iter().enumerate() {
-      if pool.config.servers[index].backup && server_capacity_available(&pool.config, index, server)
-      {
+      if pool.config.servers[index].backup && server_capacity_available(pool, index, server) {
         result.push(server.clone());
       }
     }
@@ -271,7 +313,7 @@ fn available_servers(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
     .iter()
     .enumerate()
     .filter(|(index, server)| {
-      pool.config.servers[*index].backup && server_capacity_available(&pool.config, *index, server)
+      pool.config.servers[*index].backup && server_capacity_available(pool, *index, server)
     })
     .map(|(_, server)| server.clone())
     .collect()
@@ -283,17 +325,35 @@ fn server_available(
   server: &Arc<PoolServerRuntime>,
 ) -> bool {
   !pool.config.servers[index].backup
-    && server.healthy.load(Ordering::Relaxed)
-    && server_capacity_available(&pool.config, index, server)
+    && server_healthy(pool, server)
+    && server_capacity_available(pool, index, server)
 }
 
 fn server_capacity_available(
-  config: &UpstreamPoolConfig,
+  pool: &PoolRuntime,
   index: usize,
   server: &Arc<PoolServerRuntime>,
 ) -> bool {
-  let max_conns = config.servers[index].max_conns;
-  max_conns == 0 || server.active.load(Ordering::Relaxed) < max_conns
+  let max_conns = pool.config.servers[index].max_conns;
+  max_conns == 0 || active_count(pool, server) < max_conns
+}
+
+fn active_count(pool: &PoolRuntime, server: &PoolServerRuntime) -> usize {
+  if let Some(shared) = &pool.shared_state
+    && let Ok(Some(active)) = shared.pool_active(&server.upstream_name)
+  {
+    return active;
+  }
+  server.active.load(Ordering::Relaxed)
+}
+
+fn server_healthy(pool: &PoolRuntime, server: &PoolServerRuntime) -> bool {
+  if let Some(shared) = &pool.shared_state
+    && let Ok(Some(healthy)) = shared.pool_health(&server.upstream_name)
+  {
+    return healthy;
+  }
+  server.healthy.load(Ordering::Relaxed)
 }
 
 pub(crate) fn synthetic_upstream_name(pool: &str, index: usize) -> String {
@@ -333,7 +393,7 @@ mod tests {
 
   #[test]
   fn round_robin_rotates_pool_servers() {
-    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::RoundRobin)]);
+    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::RoundRobin)], None);
 
     let first = state
       .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
@@ -351,7 +411,7 @@ mod tests {
   fn max_conns_excludes_busy_pool_server() {
     let mut pool = test_pool(LoadBalancingAlgorithm::LeastConn);
     pool.servers[0].max_conns = 1;
-    let state = PoolState::new(&[pool]);
+    let state = PoolState::new(&[pool], None);
 
     let first = state
       .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
@@ -362,5 +422,38 @@ mod tests {
       .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
       .unwrap();
     assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 1));
+  }
+
+  #[test]
+  fn shared_state_coordinates_pool_active_counts_and_health() {
+    let shared = SharedState::test_memory("pool-test");
+    let mut pool = test_pool(LoadBalancingAlgorithm::LeastConn);
+    pool.servers[0].max_conns = 1;
+    pool.health_check.enabled = true;
+    pool.health_check.healthy_threshold = 1;
+    pool.health_check.unhealthy_threshold = 1;
+    let first_state = PoolState::new(&[pool.clone()], Some(shared.clone()));
+    let second_state = PoolState::new(&[pool], Some(shared));
+
+    let first = first_state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .unwrap();
+    assert_eq!(first.upstream_name, synthetic_upstream_name("app-pool", 0));
+
+    let second = second_state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .unwrap();
+    assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 1));
+    drop(second);
+    drop(first);
+
+    first_state.report_failure(&synthetic_upstream_name("app-pool", 0));
+    let after_failure = second_state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .unwrap();
+    assert_eq!(
+      after_failure.upstream_name,
+      synthetic_upstream_name("app-pool", 1)
+    );
   }
 }

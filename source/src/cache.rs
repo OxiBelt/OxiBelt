@@ -17,6 +17,7 @@ use tokio::sync::Notify;
 use tracing::warn;
 
 use crate::config::{CacheConfig, CachePolicyConfig, CacheStore, default_cache_tmpfs_dir};
+use crate::shared_state::{SharedCacheEntry, SharedCacheLock, SharedState, SharedVaryMatcher};
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
@@ -50,6 +51,7 @@ pub struct CacheFillGuard {
   cache: Weak<ResponseCache>,
   key: String,
   notify: Arc<Notify>,
+  _shared_lock: Option<SharedCacheLock>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,10 +178,14 @@ pub struct ResponseCache {
   tmpfs_dir: Option<PathBuf>,
   disk_dir: Option<PathBuf>,
   inner: Mutex<CacheInner>,
+  shared_state: Option<Arc<SharedState>>,
 }
 
 impl ResponseCache {
-  pub fn new(config: &CacheConfig) -> anyhow::Result<Arc<Self>> {
+  pub fn new(
+    config: &CacheConfig,
+    shared_state: Option<Arc<SharedState>>,
+  ) -> anyhow::Result<Arc<Self>> {
     let tmpfs_dir = if config.enabled && config.store == CacheStore::Tmpfs {
       let dir = config
         .tmpfs_dir
@@ -226,6 +232,7 @@ impl ResponseCache {
       tmpfs_dir,
       disk_dir,
       inner: Mutex::new(CacheInner::default()),
+      shared_state,
     });
     cache.load_disk_entries();
     Ok(cache)
@@ -275,7 +282,11 @@ impl ResponseCache {
           && entry.uri == ctx.uri.to_string()
           && vary_matches(&entry.vary, ctx.request_headers)
       })
-      .map(|(key, _)| key.clone())?;
+      .map(|(key, _)| key.clone());
+    let Some(key) = key else {
+      drop(inner);
+      return self.lookup_shared(&policy.name, &base_key, ctx);
+    };
 
     let expired = inner
       .entries
@@ -308,6 +319,55 @@ impl ResponseCache {
     Some(CacheLookup::Fresh(cache_entry))
   }
 
+  fn lookup_shared(
+    &self,
+    policy: &str,
+    base_key: &str,
+    ctx: CacheLookupContext<'_>,
+  ) -> Option<CacheLookup> {
+    let shared = self.shared_state.as_ref()?;
+    if !shared.has_cache() {
+      return None;
+    }
+    match shared.cache_lookup(
+      policy,
+      ctx.scheme,
+      ctx.host,
+      base_key,
+      ctx.method,
+      ctx.request_headers,
+      request_no_cache(ctx.request_headers),
+    ) {
+      Ok(Some(lookup)) => {
+        self.promote_shared_lookup(ctx, &lookup);
+        Some(lookup)
+      }
+      Ok(None) => None,
+      Err(error) => {
+        warn!(error = %error, "shared cache lookup failed; falling back to local miss");
+        None
+      }
+    }
+  }
+
+  fn promote_shared_lookup(&self, ctx: CacheLookupContext<'_>, lookup: &CacheLookup) {
+    let entry = match lookup {
+      CacheLookup::Fresh(entry) | CacheLookup::Stale(entry) => entry.clone(),
+      CacheLookup::Revalidate(revalidation) => revalidation.entry.clone(),
+    };
+    self.insert(
+      CacheInsertContext {
+        policy_name: ctx.policy_name,
+        scheme: ctx.scheme,
+        host: ctx.host,
+        method: ctx.method,
+        uri: ctx.uri,
+        request_headers: ctx.request_headers,
+      },
+      entry,
+    );
+  }
+
   pub fn begin_fill(self: &Arc<Self>, ctx: CacheLookupContext<'_>) -> Option<CacheFillPermit> {
     if !self.config.lock {
       return None;
@@ -319,6 +379,19 @@ impl ResponseCache {
       return None;
     }
     let key = self.fill_key(ctx)?;
+    let shared_lock = self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+      .and_then(|shared| shared.cache_try_lock(&key));
+    if self
+      .shared_state
+      .as_ref()
+      .is_some_and(|shared| shared.has_cache())
+      && shared_lock.is_none()
+    {
+      return None;
+    }
     let mut inner = self.inner.lock().expect("cache lock poisoned");
     if let Some(notify) = inner.inflight.get(&key) {
       return Some(CacheFillPermit::Follower(CacheFillWaiter {
@@ -331,6 +404,7 @@ impl ResponseCache {
       cache: Arc::downgrade(self),
       key,
       notify,
+      _shared_lock: shared_lock,
     }))
   }
 
@@ -397,6 +471,12 @@ impl ResponseCache {
         return;
       }
     }
+    if let Some(shared) = &self.shared_state
+      && shared.has_cache()
+      && let Some(shared_entry) = shared_cache_entry(&stored)
+    {
+      shared.cache_put(&shared_entry);
+    }
     add_size(&mut inner, &stored);
     inner.order.push_back(variant_key.clone());
     inner.entries.insert(variant_key, stored);
@@ -443,6 +523,12 @@ impl ResponseCache {
       remove_entry(&mut inner, &key);
     }
     count
+      + self
+        .shared_state
+        .as_ref()
+        .filter(|shared| shared.has_cache())
+        .map(|shared| shared.cache_purge_exact(policy, scheme, host, uri))
+        .unwrap_or(0)
   }
 
   pub fn purge_prefix(&self, policy: &str, scheme: &str, host: &str, path_prefix: &str) -> usize {
@@ -467,6 +553,12 @@ impl ResponseCache {
       remove_entry(&mut inner, &key);
     }
     count
+      + self
+        .shared_state
+        .as_ref()
+        .filter(|shared| shared.has_cache())
+        .map(|shared| shared.cache_purge_prefix(policy, scheme, host, path_prefix))
+        .unwrap_or(0)
   }
 
   pub fn stats(&self) -> CacheStats {
@@ -1174,6 +1266,48 @@ fn remove_entry(inner: &mut CacheInner, key: &str) {
   }
 }
 
+fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
+  let body = match &entry.body {
+    StoredBody::Memory(body) => body.to_vec(),
+    StoredBody::Tmpfs(path) | StoredBody::Disk(path) => std::fs::read(path).ok()?,
+  };
+  Some(SharedCacheEntry {
+    policy: entry.policy.clone(),
+    base_key: entry.base_key.clone(),
+    variant_key: entry.variant_key.clone(),
+    scheme: entry.scheme.clone(),
+    host: entry.host.clone(),
+    uri: entry.uri.clone(),
+    status: entry.status.as_u16(),
+    headers: entry
+      .headers
+      .iter()
+      .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+      .collect(),
+    body,
+    expires_at_ms: system_time_ms(entry.expires_at),
+    stale_if_error_until_ms: entry.stale_if_error_until.map(system_time_ms),
+    stale_while_revalidate_until_ms: entry.stale_while_revalidate_until.map(system_time_ms),
+    must_revalidate: entry.must_revalidate,
+    vary: entry
+      .vary
+      .iter()
+      .map(|item| SharedVaryMatcher {
+        name: item.name.clone(),
+        value: item.value.clone(),
+      })
+      .collect(),
+  })
+}
+
+fn system_time_ms(time: SystemTime) -> i64 {
+  time
+    .duration_since(UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_millis()
+    .min(i64::MAX as u128) as i64
+}
+
 impl StoredEntry {
   fn to_cache_entry(&self) -> Option<CacheEntry> {
     let body = match &self.body {
@@ -1471,7 +1605,7 @@ mod tests {
       enabled: true,
       ..CacheConfig::default()
     };
-    let cache = ResponseCache::new(&config).unwrap();
+    let cache = ResponseCache::new(&config, None).unwrap();
     let uri = "/asset/app.css?v=1".parse::<Uri>().unwrap();
     let headers = HeaderMap::new();
     let ctx = CacheLookupContext {
@@ -1502,5 +1636,60 @@ mod tests {
       cache.begin_fill(ctx).unwrap(),
       CacheFillPermit::Leader(_)
     ));
+  }
+
+  #[test]
+  fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
+    let shared = crate::shared_state::SharedState::test_memory("cache-test");
+    let config = CacheConfig {
+      enabled: true,
+      ..CacheConfig::default()
+    };
+    let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+    let second = ResponseCache::new(&config, Some(shared)).unwrap();
+    let uri = "/asset/app.css?body=shared".parse::<Uri>().unwrap();
+    let headers = HeaderMap::new();
+    let ctx = CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &headers,
+    };
+
+    first.insert(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &headers,
+      },
+      CacheEntry {
+        status: StatusCode::OK,
+        headers: HeaderMap::new(),
+        body: Bytes::from_static(b"shared-cache"),
+      },
+    );
+
+    match second.lookup(ctx.clone()) {
+      Some(CacheLookup::Fresh(entry)) => {
+        assert_eq!(entry.body, Bytes::from_static(b"shared-cache"))
+      }
+      other => panic!("expected shared cache hit, got {other:?}"),
+    }
+
+    assert_eq!(
+      second.purge_exact(
+        "default",
+        "https",
+        "example.test",
+        "/asset/app.css?body=shared"
+      ),
+      2
+    );
+    assert!(second.lookup(ctx).is_none());
   }
 }

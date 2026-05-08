@@ -303,7 +303,7 @@ Tag keys and Person proof `success_tag` values must match `[A-Za-z0-9-]{1,32}`. 
 
 The supported algorithm is `pow_sha256_v1`: the client computes a nonce such that `SHA-256(challenge || "." || nonce)` has the configured number of leading zero bits. If the proof is valid and unexpired, OxiBelt appends an `HttpOnly` clearance cookie and forwards the request. Later requests validate the signed clearance cookie instead of recomputing proof.
 
-Tokens are signed with a startup-local secret and are bound to the cookie name, issuing policy, downstream host, HTTP method, challenge value, difficulty, issue time, expiration time, and configured `token_bindings`.
+Tokens are signed with a startup-local secret by default, or a shared cluster secret when `[shared_state].person_proof_backend` is configured. They are bound to the cookie name, issuing policy, downstream host, HTTP method, challenge value, difficulty, issue time, expiration time, and configured `token_bindings`.
 
 Supported token bindings:
 
@@ -317,7 +317,7 @@ Defaults are `["user_agent", "route", "direct_peer_ip_network_prefix"]`, `/24` f
 
 When any policy sets `tcp_max_hop`, OxiBelt applies the strictest configured value listener-wide at accept time using Linux `IP_MINTTL` for IPv4 and `IPV6_MINHOPCOUNT` for IPv6. This is not route-local because the route is not known until after TLS and request parsing.
 
-`single_use = true` tracks challenge and clearance reuse in memory and rotates the clearance cookie after each valid request. The state is bounded by `waf.limits.max_person_proof_reuse_tokens`; exhaustion fails closed with `429 Too Many Requests`.
+`single_use = true` tracks challenge and clearance reuse in memory by default, or in the configured Person proof shared backend when shared state is enabled. It rotates the clearance cookie after each valid request. Local in-memory state is bounded by `waf.limits.max_person_proof_reuse_tokens`; exhaustion fails closed with `429 Too Many Requests`.
 
 Validation constraints:
 

@@ -39,6 +39,8 @@ struct Needs {
     pq_probe: bool,
     postgres: bool,
     postgres_mtls: bool,
+    redis: bool,
+    second_proxy: bool,
 }
 
 fn main() -> Result<()> {
@@ -212,6 +214,11 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     manifest.push_str(&format!(
         "CASE_NEED_POSTGRES_MTLS={}\n",
         bool_env(case.needs.postgres_mtls)
+    ));
+    manifest.push_str(&format!("CASE_NEED_REDIS={}\n", bool_env(case.needs.redis)));
+    manifest.push_str(&format!(
+        "CASE_NEED_SECOND_PROXY={}\n",
+        bool_env(case.needs.second_proxy)
     ));
     manifest.push_str(&format!(
         "CASE_EXPECT_FAILURE_CONTAINS={}\n",
@@ -411,6 +418,202 @@ fn json_escape(value: &str) -> String {
         })
         .collect()
 }
+
+const SHARED_STATE_REDIS_CHECKS: &str = r#"
+run_case_checks() {
+  assert_redis_reload_generation
+  assert_shared_rate_limit
+  assert_shared_person_proof
+  assert_shared_pool_health
+  assert_shared_cache
+}
+
+assert_redis_reload_generation() {
+  local keys
+  keys="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli KEYS "matrix-shared:reload:instance:*"; else redis-cli KEYS "matrix-shared:reload:instance:*"; fi')"
+  if ! grep -F 'matrix-shared:reload:instance:proxy-a' <<<"${keys}" >/dev/null ||
+     ! grep -F 'matrix-shared:reload:instance:proxy-b' <<<"${keys}" >/dev/null; then
+    echo "${keys}" >&2
+    fail_with_diagnostics "expected reload heartbeat records for both proxy instances in Redis"
+  fi
+}
+
+assert_shared_rate_limit() {
+  local first second
+  first="$(client_request_with_headers "example.test" "/app/rate" 200 "GET" "" "X-Forwarded-For: 203.0.113.10")"
+  assert_body_jq "${first}" '.path == "/origin/app/rate"'
+
+  second="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.10")"
+  assert_response_jq "${second}" '.body == "rate limit exceeded"'
+}
+
+assert_shared_person_proof() {
+  local challenge cookie allowed replay
+  challenge="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.20")"
+  assert_response_jq "${challenge}" '.body | contains("person-proof")'
+  cookie="$(solve_person_proof_cookie "${challenge}")"
+
+  allowed="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/proof" 200 "GET" "" "X-Forwarded-For: 203.0.113.21" "Cookie: ${cookie}")"
+  assert_body_jq "${allowed}" '.path == "/origin/app/proof"'
+
+  replay="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.22" "Cookie: ${cookie}")"
+  assert_response_jq "${replay}" '.body | contains("person-proof")'
+}
+
+solve_person_proof_cookie() {
+  local response="$1"
+  jq -r '.body' <<<"${response}" | python3 -c '
+import hashlib
+import re
+import sys
+
+body = sys.stdin.read()
+token = re.search(r"name=\"oxibelt-person-proof-token\" content=\"([^\"]+)\"", body).group(1)
+difficulty = int(re.search(r"(\d+) leading zero bits", body).group(1))
+
+def leading_zero_bits(data):
+    total = 0
+    for byte in hashlib.sha256(data).digest():
+        if byte == 0:
+            total += 8
+        else:
+            return total + 8 - byte.bit_length()
+    return total
+
+nonce = 0
+while True:
+    if leading_zero_bits(f"{token}.{nonce}".encode("utf-8")) >= difficulty:
+        print(f"__matrix_person_proof={token}.{nonce}")
+        break
+    nonce += 1
+'
+}
+
+assert_shared_pool_health() {
+  local failed recovered
+  docker rm -f "${alt_container}" >/dev/null
+
+  failed="$(client_request_with_headers "example.test" "/pool/shared-health" 502 "GET" "" "X-Forwarded-For: 203.0.113.30")"
+  assert_response_jq "${failed}" '.body == "upstream request failed"'
+
+  recovered="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/pool/shared-health" 200 "GET" "" "X-Forwarded-For: 203.0.113.31")"
+  assert_body_jq "${recovered}" '.upstream == "http-upstream" and .path == "/origin/pool/shared-health"'
+}
+
+assert_shared_cache() {
+  local seed hit purge miss
+  seed="$(client_request_with_headers "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.40")"
+  assert_response_jq "${seed}" '.body == "shared-cache"'
+
+  docker rm -f "${http_container}" >/dev/null
+
+  hit="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.41")"
+  assert_response_jq "${hit}" '.body == "shared-cache"'
+
+  purge="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/shared-cache%3Fbody%3Dshared-cache%26cache_control%3Dpublic%26content_type%3Dtext/plain" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${purge}" '.body == "purged=2\n"'
+
+  miss="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 502 "GET" "" "X-Forwarded-For: 203.0.113.42")"
+  assert_response_jq "${miss}" '.status == 502'
+}
+"#;
+
+const SHARED_STATE_POSTGRES_CHECKS: &str = r#"
+run_case_checks() {
+  assert_postgres_reload_generation
+  assert_shared_rate_limit
+  assert_shared_person_proof
+  assert_shared_pool_health
+  assert_shared_cache
+}
+
+assert_postgres_reload_generation() {
+  local count
+  count="$(postgres_query "SELECT count(*) FROM oxibelt_shared_state WHERE key IN ('matrix-shared:reload:instance:proxy-a', 'matrix-shared:reload:instance:proxy-b');")"
+  if [[ "${count}" != "2" ]]; then
+    fail_with_diagnostics "expected reload heartbeat rows for both proxy instances in PostgreSQL, got ${count}"
+  fi
+}
+
+assert_shared_rate_limit() {
+  local first second
+  first="$(client_request_with_headers "example.test" "/app/rate" 200 "GET" "" "X-Forwarded-For: 203.0.113.10")"
+  assert_body_jq "${first}" '.path == "/origin/app/rate"'
+
+  second="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.10")"
+  assert_response_jq "${second}" '.body == "rate limit exceeded"'
+}
+
+assert_shared_person_proof() {
+  local challenge cookie allowed replay
+  challenge="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.20")"
+  assert_response_jq "${challenge}" '.body | contains("person-proof")'
+  cookie="$(solve_person_proof_cookie "${challenge}")"
+
+  allowed="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/proof" 200 "GET" "" "X-Forwarded-For: 203.0.113.21" "Cookie: ${cookie}")"
+  assert_body_jq "${allowed}" '.path == "/origin/app/proof"'
+
+  replay="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.22" "Cookie: ${cookie}")"
+  assert_response_jq "${replay}" '.body | contains("person-proof")'
+}
+
+solve_person_proof_cookie() {
+  local response="$1"
+  jq -r '.body' <<<"${response}" | python3 -c '
+import hashlib
+import re
+import sys
+
+body = sys.stdin.read()
+token = re.search(r"name=\"oxibelt-person-proof-token\" content=\"([^\"]+)\"", body).group(1)
+difficulty = int(re.search(r"(\d+) leading zero bits", body).group(1))
+
+def leading_zero_bits(data):
+    total = 0
+    for byte in hashlib.sha256(data).digest():
+        if byte == 0:
+            total += 8
+        else:
+            return total + 8 - byte.bit_length()
+    return total
+
+nonce = 0
+while True:
+    if leading_zero_bits(f"{token}.{nonce}".encode("utf-8")) >= difficulty:
+        print(f"__matrix_person_proof={token}.{nonce}")
+        break
+    nonce += 1
+'
+}
+
+assert_shared_pool_health() {
+  local failed recovered
+  docker rm -f "${alt_container}" >/dev/null
+
+  failed="$(client_request_with_headers "example.test" "/pool/shared-health" 502 "GET" "" "X-Forwarded-For: 203.0.113.30")"
+  assert_response_jq "${failed}" '.body == "upstream request failed"'
+
+  recovered="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/pool/shared-health" 200 "GET" "" "X-Forwarded-For: 203.0.113.31")"
+  assert_body_jq "${recovered}" '.upstream == "http-upstream" and .path == "/origin/pool/shared-health"'
+}
+
+assert_shared_cache() {
+  local seed hit purge miss
+  seed="$(client_request_with_headers "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.40")"
+  assert_response_jq "${seed}" '.body == "shared-cache"'
+
+  docker rm -f "${http_container}" >/dev/null
+
+  hit="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.41")"
+  assert_response_jq "${hit}" '.body == "shared-cache"'
+
+  purge="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/shared-cache%3Fbody%3Dshared-cache%26cache_control%3Dpublic%26content_type%3Dtext/plain" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${purge}" '.body == "purged=2\n"'
+
+  miss="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 502 "GET" "" "X-Forwarded-For: 203.0.113.42")"
+  assert_response_jq "${miss}" '.status == 502'
+}
+"#;
 
 fn docker_cases() -> Vec<DockerCase> {
     vec![
@@ -1161,6 +1364,36 @@ run_case_checks() {
   fi
 }
 "#,
+            None,
+        ),
+        docker_case(
+            "shared-state",
+            "redis-valkey-cluster-state",
+            "Redis/Valkey shared state coordinates two proxy instances",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                redis: true,
+                second_proxy: true,
+                ..Needs::default()
+            },
+            SHARED_STATE_REDIS_CHECKS,
+            None,
+        ),
+        docker_case(
+            "shared-state",
+            "postgres-cluster-state",
+            "PostgreSQL shared state coordinates representative cluster paths",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                postgres: true,
+                second_proxy: true,
+                ..Needs::default()
+            },
+            SHARED_STATE_POSTGRES_CHECKS,
             None,
         ),
         docker_case(

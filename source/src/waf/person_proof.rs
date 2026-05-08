@@ -14,6 +14,7 @@ use super::{
   HeaderMutation, PersonProofAlgorithm, PersonProofTokenBinding, WafRequestInput,
   WafTerminalResponse,
 };
+use crate::shared_state::SharedState;
 
 #[derive(Clone)]
 pub(super) struct PersonProofEngine {
@@ -21,6 +22,7 @@ pub(super) struct PersonProofEngine {
   policies: Vec<PersonProofPolicy>,
   active_reuse_tokens: Arc<Mutex<HashMap<String, i64>>>,
   max_reuse_tokens: usize,
+  shared_state: Option<Arc<SharedState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +107,7 @@ impl PersonProofEngine {
     policies: Vec<PersonProofPolicy>,
     max_reuse_tokens: usize,
     previous: Option<&Self>,
+    shared_state: Option<Arc<SharedState>>,
   ) -> anyhow::Result<Self> {
     let mut secret = [0u8; 32];
     let active_reuse_tokens = if let Some(previous) = previous {
@@ -116,12 +119,18 @@ impl PersonProofEngine {
         .map_err(|_| anyhow!("failed to generate WAF person proof secret"))?;
       Arc::new(Mutex::new(HashMap::new()))
     };
+    if let Some(shared) = &shared_state
+      && let Some(shared_secret) = shared.person_proof_secret()?
+    {
+      secret = shared_secret;
+    }
 
     Ok(Self {
       secret,
       policies,
       active_reuse_tokens,
       max_reuse_tokens,
+      shared_state,
     })
   }
 
@@ -479,6 +488,12 @@ impl PersonProofEngine {
   }
 
   fn remember_reuse_token(&self, key: &str, expires: i64, now: i64) -> anyhow::Result<()> {
+    if let Some(shared) = &self.shared_state {
+      if !shared.person_proof_remember(key, expires)? {
+        bail!("person proof token is already active");
+      }
+      return Ok(());
+    }
     let mut active = self
       .active_reuse_tokens
       .lock()
@@ -492,6 +507,9 @@ impl PersonProofEngine {
   }
 
   fn consume_reuse_token(&self, key: &str, now: i64) -> anyhow::Result<bool> {
+    if let Some(shared) = &self.shared_state {
+      return shared.person_proof_consume(key);
+    }
     let mut active = self
       .active_reuse_tokens
       .lock()
@@ -815,4 +833,36 @@ fn remaining_seconds(now_unix_ms: i64, expires_unix_ms: i64) -> u64 {
     .try_into()
     .map(|millis: u64| millis.div_ceil(1000))
     .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn shared_state_shares_secret_and_single_use_replay_state() {
+    let shared = SharedState::test_memory("person-proof-test");
+    let first =
+      PersonProofEngine::from_policies_with_previous(Vec::new(), 16, None, Some(shared.clone()))
+        .unwrap();
+    let second =
+      PersonProofEngine::from_policies_with_previous(Vec::new(), 16, None, Some(shared)).unwrap();
+
+    assert_eq!(first.secret, second.secret);
+
+    let now = now_unix_ms().unwrap();
+    first
+      .remember_reuse_token("challenge:test-token", now + 60_000, now)
+      .unwrap();
+    assert!(
+      second
+        .consume_reuse_token("challenge:test-token", now)
+        .unwrap()
+    );
+    assert!(
+      !first
+        .consume_reuse_token("challenge:test-token", now)
+        .unwrap()
+    );
+  }
 }

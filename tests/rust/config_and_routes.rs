@@ -7,7 +7,7 @@ use base64::Engine;
 use oxibelt::config::{
     AdminTransportMode, CacheStore, CompressionConfig, Config, DatabaseTlsMode,
     ForwardedHeaderMode, HotReloadMode, OcspMode, ProxyProtocolEgressMode, QuicZeroRttMode,
-    RuntimeOverrides, UpstreamEchMode,
+    RuntimeOverrides, SharedStateBackendKind, UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
 
@@ -203,6 +203,120 @@ disk_max_size_bytes = 1048576
         error.to_string().contains("cache.disk_dir is required"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn shared_state_config_parses_feature_mapped_redis_and_postgres_backends() {
+    let temp_dir = common::TempDir::new("shared-state-config");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "shared-state");
+    let raw = format!(
+        r#"
+{}
+
+[shared_state]
+enabled = true
+namespace = "matrix"
+default_backend = "redis-main"
+rate_limits_backend = "redis-main"
+connection_limits_backend = "redis-main"
+person_proof_backend = "postgres-main"
+upstream_health_backend = "redis-main"
+cache_backend = "postgres-main"
+reload_backend = "postgres-main"
+operation_timeout_ms = 250
+connection_lease_ms = 30000
+cache_lock_ms = 5000
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+max_connections = 2
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config.validate().expect("config should validate");
+    assert!(config.shared_state.enabled);
+    assert_eq!(
+        config.shared_state.backends[0].kind,
+        SharedStateBackendKind::Redis
+    );
+    assert_eq!(
+        config.shared_state.backends[1].kind,
+        SharedStateBackendKind::Postgres
+    );
+    assert_eq!(
+        config.shared_state.person_proof_backend.as_deref(),
+        Some("postgres-main")
+    );
+}
+
+#[test]
+fn shared_state_rejects_unknown_feature_backend() {
+    let temp_dir = common::TempDir::new("shared-state-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "shared-state-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[shared_state]
+enabled = true
+default_backend = "redis-main"
+cache_backend = "missing"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("unknown backend should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("shared_state.cache_backend references unknown"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn effective_config_dump_redacts_shared_state_connection_urls() {
+    let temp_dir = common::TempDir::new("shared-redacted");
+    let config_path = write_loadable_config(&temp_dir, "shared-redacted", |raw| {
+        raw.replace(
+            "[[upstreams]]",
+            r#"[shared_state]
+enabled = true
+default_backend = "redis-main"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://:secret@redis.example:6379/0"
+
+[[upstreams]]"#,
+        )
+    });
+
+    let redacted =
+        toml::to_string_pretty(&Config::load_effective_toml_redacted(&config_path).unwrap())
+            .expect("redacted TOML should serialize");
+
+    assert!(redacted.contains("connection_url = \"<redacted>\""));
+    assert!(!redacted.contains("secret@redis.example"));
 }
 
 #[test]

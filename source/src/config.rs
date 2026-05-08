@@ -44,6 +44,8 @@ pub struct Config {
   #[serde(default)]
   pub database: DatabaseConfig,
   #[serde(default)]
+  pub shared_state: SharedStateConfig,
+  #[serde(default)]
   pub upstreams: Vec<UpstreamConfig>,
   #[serde(default)]
   pub upstream_pools: Vec<UpstreamPoolConfig>,
@@ -199,6 +201,7 @@ impl Config {
       && self.health == other.health
       && self.security == other.security
       && self.database == other.database
+      && self.shared_state == other.shared_state
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools
       && self.stream_listeners == other.stream_listeners
@@ -330,6 +333,11 @@ impl Config {
     {
       self.source_paths.remember_runtime_file(path);
     }
+    for backend in &mut self.shared_state.backends {
+      for path in backend.tls.resolve_relative_paths(&path_roots.cert_dir)? {
+        self.source_paths.remember_runtime_file(path);
+      }
+    }
     for path in self
       .admin
       .tls
@@ -419,6 +427,7 @@ impl Config {
     }
 
     self.database.validate()?;
+    self.shared_state.validate()?;
 
     let mut upstream_names = HashSet::new();
     for upstream in &self.upstreams {
@@ -1326,6 +1335,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "routes",
       "runtime",
       "security",
+      "shared_state",
       "stream_listeners",
       "tls",
       "upstream_pools",
@@ -1550,6 +1560,32 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "tls",
     ][..],
     "database.access_log.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
+    "shared_state" => &[
+      "backends",
+      "cache_backend",
+      "cache_lock_ms",
+      "connection_lease_ms",
+      "connection_limits_backend",
+      "default_backend",
+      "enabled",
+      "instance_id_env",
+      "namespace",
+      "operation_timeout_ms",
+      "person_proof_backend",
+      "rate_limits_backend",
+      "reload_backend",
+      "upstream_health_backend",
+    ][..],
+    "shared_state.backends" => &[
+      "connect_timeout_ms",
+      "connection_url",
+      "connection_url_env",
+      "kind",
+      "max_connections",
+      "name",
+      "tls",
+    ][..],
+    "shared_state.backends.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "upstreams" => &[
       "connect_timeout_ms",
       "first_byte_timeout_ms",
@@ -1649,6 +1685,17 @@ fn redact_effective_toml(value: &mut toml::Value) {
     .and_then(|database| database.get_mut("connection_url"))
   {
     *connection_url = toml::Value::String("<redacted>".to_string());
+  }
+  if let Some(backends) = value
+    .get_mut("shared_state")
+    .and_then(|shared_state| shared_state.get_mut("backends"))
+    .and_then(toml::Value::as_array_mut)
+  {
+    for backend in backends {
+      if let Some(connection_url) = backend.get_mut("connection_url") {
+        *connection_url = toml::Value::String("<redacted>".to_string());
+      }
+    }
   }
 }
 
@@ -3289,6 +3336,215 @@ impl DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SharedStateConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_shared_state_namespace")]
+  pub namespace: String,
+  #[serde(default = "default_shared_state_instance_id_env")]
+  pub instance_id_env: String,
+  #[serde(default)]
+  pub default_backend: Option<String>,
+  #[serde(default = "default_shared_state_operation_timeout_ms")]
+  pub operation_timeout_ms: u64,
+  #[serde(default = "default_shared_state_connection_lease_ms")]
+  pub connection_lease_ms: u64,
+  #[serde(default = "default_shared_state_cache_lock_ms")]
+  pub cache_lock_ms: u64,
+  #[serde(default)]
+  pub rate_limits_backend: Option<String>,
+  #[serde(default)]
+  pub connection_limits_backend: Option<String>,
+  #[serde(default)]
+  pub person_proof_backend: Option<String>,
+  #[serde(default)]
+  pub upstream_health_backend: Option<String>,
+  #[serde(default)]
+  pub cache_backend: Option<String>,
+  #[serde(default)]
+  pub reload_backend: Option<String>,
+  #[serde(default)]
+  pub backends: Vec<SharedStateBackendConfig>,
+}
+
+impl Default for SharedStateConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      namespace: default_shared_state_namespace(),
+      instance_id_env: default_shared_state_instance_id_env(),
+      default_backend: None,
+      operation_timeout_ms: default_shared_state_operation_timeout_ms(),
+      connection_lease_ms: default_shared_state_connection_lease_ms(),
+      cache_lock_ms: default_shared_state_cache_lock_ms(),
+      rate_limits_backend: None,
+      connection_limits_backend: None,
+      person_proof_backend: None,
+      upstream_health_backend: None,
+      cache_backend: None,
+      reload_backend: None,
+      backends: Vec::new(),
+    }
+  }
+}
+
+impl SharedStateConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if !self.enabled {
+      return Ok(());
+    }
+    validate_optional_non_empty("shared_state.namespace", Some(&self.namespace))?;
+    validate_optional_non_empty("shared_state.instance_id_env", Some(&self.instance_id_env))?;
+    if self.operation_timeout_ms == 0 || self.connection_lease_ms == 0 || self.cache_lock_ms == 0 {
+      bail!("shared_state timeout and lease values must be greater than 0");
+    }
+    if self.backends.is_empty() {
+      bail!("shared_state.backends must include at least one backend when enabled=true");
+    }
+    let mut names = HashSet::new();
+    for backend in &self.backends {
+      backend.validate()?;
+      if !names.insert(backend.name.as_str()) {
+        bail!("duplicate shared_state backend name {}", backend.name);
+      }
+    }
+    for (field, name) in [
+      (
+        "shared_state.default_backend",
+        self.default_backend.as_deref(),
+      ),
+      (
+        "shared_state.rate_limits_backend",
+        self.rate_limits_backend.as_deref(),
+      ),
+      (
+        "shared_state.connection_limits_backend",
+        self.connection_limits_backend.as_deref(),
+      ),
+      (
+        "shared_state.person_proof_backend",
+        self.person_proof_backend.as_deref(),
+      ),
+      (
+        "shared_state.upstream_health_backend",
+        self.upstream_health_backend.as_deref(),
+      ),
+      ("shared_state.cache_backend", self.cache_backend.as_deref()),
+      (
+        "shared_state.reload_backend",
+        self.reload_backend.as_deref(),
+      ),
+    ] {
+      if let Some(name) = name
+        && !names.contains(name)
+      {
+        bail!("{field} references unknown shared_state backend {name}");
+      }
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SharedStateBackendConfig {
+  pub name: String,
+  pub kind: SharedStateBackendKind,
+  #[serde(default)]
+  pub connection_url: Option<String>,
+  #[serde(default)]
+  pub connection_url_env: Option<String>,
+  #[serde(default = "default_shared_state_max_connections")]
+  pub max_connections: u32,
+  #[serde(default = "default_database_access_log_connect_timeout_ms")]
+  pub connect_timeout_ms: u64,
+  #[serde(default)]
+  pub tls: DatabaseTlsConfig,
+}
+
+impl SharedStateBackendConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    validate_optional_non_empty(
+      &format!("shared_state.backends.{}.connection_url", self.name),
+      self.connection_url.as_deref(),
+    )?;
+    validate_optional_non_empty(
+      &format!("shared_state.backends.{}.connection_url_env", self.name),
+      self.connection_url_env.as_deref(),
+    )?;
+    if self.name.trim().is_empty() {
+      bail!("shared_state backend name must not be empty");
+    }
+    if !self
+      .name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+      bail!("shared_state backend name must contain only ASCII letters, digits, '.', '_' or '-'");
+    }
+    if self.max_connections == 0 || self.connect_timeout_ms == 0 {
+      bail!(
+        "shared_state backend {} numeric values must be greater than 0",
+        self.name
+      );
+    }
+    match (&self.connection_url, &self.connection_url_env) {
+      (Some(_), Some(_)) => {
+        bail!(
+          "shared_state backend {} must set only one of connection_url or connection_url_env",
+          self.name
+        )
+      }
+      (None, None) => {
+        bail!(
+          "shared_state backend {} requires connection_url or connection_url_env",
+          self.name
+        )
+      }
+      _ => {}
+    }
+    if self.kind == SharedStateBackendKind::Redis
+      && (self.tls.ca_cert.is_some()
+        || self.tls.client_cert.is_some()
+        || self.tls.client_key.is_some()
+        || self.tls.mode != DatabaseTlsMode::Off)
+    {
+      bail!(
+        "shared_state Redis backend {} does not support tls settings",
+        self.name
+      );
+    }
+    if self.kind == SharedStateBackendKind::Postgres {
+      self
+        .tls
+        .validate_with_prefix(&format!("shared_state.backends.{}.tls", self.name))?;
+    }
+    Ok(())
+  }
+
+  pub(crate) fn connection_url_with_prefix(&self, prefix: &str) -> anyhow::Result<String> {
+    if let Some(env_name) = &self.connection_url_env {
+      let value = std::env::var(env_name)
+        .with_context(|| format!("failed to read {prefix}.connection_url_env {env_name}"))?;
+      if value.trim().is_empty() {
+        bail!("{prefix}.connection_url_env {env_name} resolved to an empty value");
+      }
+      return Ok(value);
+    }
+    self
+      .connection_url
+      .clone()
+      .ok_or_else(|| anyhow!("{prefix}.connection_url is required"))
+  }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedStateBackendKind {
+  Redis,
+  Postgres,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DatabaseAccessLogConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -4188,4 +4444,28 @@ fn default_database_access_log_connect_timeout_ms() -> u64 {
 
 fn default_database_access_log_queue_capacity() -> usize {
   1024
+}
+
+fn default_shared_state_namespace() -> String {
+  "oxibelt".to_string()
+}
+
+fn default_shared_state_instance_id_env() -> String {
+  "OXIBELT_INSTANCE_ID".to_string()
+}
+
+fn default_shared_state_operation_timeout_ms() -> u64 {
+  500
+}
+
+fn default_shared_state_connection_lease_ms() -> u64 {
+  120_000
+}
+
+fn default_shared_state_cache_lock_ms() -> u64 {
+  10_000
+}
+
+fn default_shared_state_max_connections() -> u32 {
+  4
 }

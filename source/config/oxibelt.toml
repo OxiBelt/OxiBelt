@@ -228,6 +228,34 @@ mode = "off"
 # client_cert = "postgres-client.pem"
 # client_key = "postgres-client.key"
 
+[shared_state]
+enabled = false
+namespace = "oxibelt"
+instance_id_env = "OXIBELT_INSTANCE_ID"
+# default_backend = "cluster"
+operation_timeout_ms = 500
+connection_lease_ms = 120000
+cache_lock_ms = 10000
+# rate_limits_backend = "cluster"
+# connection_limits_backend = "cluster"
+# person_proof_backend = "cluster"
+# upstream_health_backend = "cluster"
+# cache_backend = "cluster"
+# reload_backend = "cluster"
+
+# [[shared_state.backends]]
+# name = "cluster"
+# kind = "redis" # redis | postgres
+# connection_url_env = "OXIBELT_SHARED_STATE_URL"
+# max_connections = 4
+# connect_timeout_ms = 3000
+#
+# [shared_state.backends.tls]
+# mode = "off" # PostgreSQL only: off | verify_full
+# ca_cert = "postgres-ca.pem"
+# client_cert = "postgres-client.pem"
+# client_key = "postgres-client.key"
+
 [waf]
 enabled = false
 mode = "enforcing"

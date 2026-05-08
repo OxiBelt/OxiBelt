@@ -97,7 +97,7 @@ impl ReloadManager {
       return Ok(false);
     }
 
-    let waf = WafEngine::new_with_previous(&config, Some(&active.waf))
+    let waf = WafEngine::new_with_previous(&config, Some(&active.waf), active.shared_state.clone())
       .context("failed to rebuild WAF engine")?;
     let snapshot = AppSnapshot {
       route_table: RouteTable::new(config.routes.clone()),
@@ -110,6 +110,7 @@ impl ReloadManager {
       cache: active.cache.clone(),
       compression: active.compression.clone(),
       metrics: active.metrics.clone(),
+      shared_state: active.shared_state.clone(),
       tls_server_config: active.tls_server_config.clone(),
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config: active.quic_server_config.clone(),
@@ -188,6 +189,7 @@ impl ReloadManager {
       cache: active.cache.clone(),
       compression: active.compression.clone(),
       metrics: active.metrics.clone(),
+      shared_state: active.shared_state.clone(),
       tls_server_config,
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config,

@@ -26,9 +26,11 @@ mock_image="oxibelt/mock-upstream:${run_id}"
 pq_probe_image="oxibelt/pq-probe:${run_id}"
 protocol_probe_image="oxibelt/protocol-probe:${run_id}"
 postgres_image="oxibelt/postgres:${run_id}"
+redis_image="${OXIBELT_REDIS_IMAGE:-valkey/valkey:8-alpine}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy-matrix:${run_id}}"
 remove_proxy_image=0
 proxy_container="oxibelt-proxy-${run_id}"
+proxy_b_container="oxibelt-proxy-b-${run_id}"
 http_container="oxibelt-http-${run_id}"
 https_container="oxibelt-https-${run_id}"
 alt_container="oxibelt-alt-${run_id}"
@@ -37,6 +39,7 @@ h2c_container="oxibelt-h2c-${run_id}"
 h1_stall_container="oxibelt-h1-stall-${run_id}"
 h3_container="oxibelt-h3-${run_id}"
 postgres_container="oxibelt-postgres-${run_id}"
+redis_container="oxibelt-redis-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
@@ -67,6 +70,7 @@ source "${case_dir}/manifest.env"
 collect_diagnostics() {
   mkdir -p "${logs_dir}"
   docker logs "${proxy_container}" >"${logs_dir}/proxy.log" 2>&1 || true
+  docker logs "${proxy_b_container}" >"${logs_dir}/proxy-b.log" 2>&1 || true
   docker logs "${http_container}" >"${logs_dir}/mock-http.log" 2>&1 || true
   docker logs "${https_container}" >"${logs_dir}/mock-https.log" 2>&1 || true
   docker logs "${alt_container}" >"${logs_dir}/mock-alt.log" 2>&1 || true
@@ -75,6 +79,7 @@ collect_diagnostics() {
   docker logs "${h1_stall_container}" >"${logs_dir}/mock-h1-stall.log" 2>&1 || true
   docker logs "${h3_container}" >"${logs_dir}/mock-h3.log" 2>&1 || true
   docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
+  docker logs "${redis_container}" >"${logs_dir}/redis.log" 2>&1 || true
 
   if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
@@ -113,6 +118,10 @@ client_request() {
   client_request_on_port 8443 "$1" "$2" "$3" "GET" ""
 }
 
+client_request_to_target() {
+  client_request_with_headers_to_target "$1" 8443 "$2" "$3" "$4" "GET" ""
+}
+
 client_request_on_port() {
   local port="$1"
   shift
@@ -121,6 +130,62 @@ client_request_on_port() {
 
 client_request_with_headers() {
   client_request_with_headers_on_port 8443 "$@"
+}
+
+client_request_with_headers_to_target() {
+  local target_host="$1"
+  local proxy_port="$2"
+  shift 2
+  local host="$1"
+  local path="$2"
+  local expect_status="$3"
+  local method="$4"
+  local body="$5"
+  shift 5
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --entrypoint python \
+      "${mock_image}" \
+      /opt/mock_upstream/client.py \
+      --target-host "${target_host}" \
+      --path "${path}" \
+      --host "${host}" \
+      --port "${proxy_port}" \
+      --method "${method}" \
+      --body "${body}" \
+      --ca-file /tmp/proxy-ca.pem \
+      --dump-response-json \
+      --expect-status "${expect_status}" \
+      "${header_args[@]}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "client request to ${target_host} failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "client request to ${target_host} did not reach expected status ${expect_status}"
 }
 
 client_request_with_headers_on_port() {
@@ -232,6 +297,10 @@ plain_client_request() {
   plain_client_request_on_port 8080 "$1" "$2" "$3" "GET" ""
 }
 
+plain_client_request_to_target() {
+  plain_client_request_with_headers_to_target "$1" 8080 "$2" "$3" "$4" "GET" ""
+}
+
 plain_client_request_on_port() {
   local port="$1"
   shift
@@ -289,6 +358,61 @@ plain_client_request_with_headers_on_port() {
   echo "plain client request failed after retries with status ${status}" >&2
   echo "${output}" >&2
   fail_with_diagnostics "plain client request did not reach expected status ${expect_status}"
+}
+
+plain_client_request_with_headers_to_target() {
+  local target_host="$1"
+  local proxy_port="$2"
+  shift 2
+  local host="$1"
+  local path="$2"
+  local expect_status="$3"
+  local method="$4"
+  local body="$5"
+  shift 5
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-plain-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --entrypoint python \
+      "${mock_image}" \
+      /opt/mock_upstream/client.py \
+      --target-host "${target_host}" \
+      --scheme http \
+      --path "${path}" \
+      --host "${host}" \
+      --port "${proxy_port}" \
+      --method "${method}" \
+      --body "${body}" \
+      --dump-response-json \
+      --expect-status "${expect_status}" \
+      "${header_args[@]}" >/dev/null
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "plain client request to ${target_host} failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "plain client request to ${target_host} did not reach expected status ${expect_status}"
 }
 
 proxy_protocol_client_request() {
@@ -586,6 +710,10 @@ postgres_is_ready() {
   docker exec "${postgres_container}" pg_isready -h 127.0.0.1 -U oxibelt -d oxibelt >/dev/null 2>&1
 }
 
+redis_is_ready() {
+  docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli ping; else redis-cli ping; fi' 2>/dev/null | grep -F PONG >/dev/null
+}
+
 run_pq_probe() {
   local group="$1"
   local container_name="oxibelt-pq-${group}-${run_id}"
@@ -662,6 +790,7 @@ extendedKeyUsage = serverAuth
 [alt_names]
 DNS.1 = proxy
 DNS.2 = localhost
+DNS.3 = proxy-b
 IP.1 = 127.0.0.1
 EOF
 
@@ -807,6 +936,25 @@ if [[ "${CASE_NEED_POSTGRES}" == "1" ]]; then
     -t "${postgres_image}" \
     -f "${repo_root}/tests/docker/postgres/Dockerfile" \
     "${repo_root}/tests/docker/postgres" >/dev/null
+fi
+
+if [[ "${CASE_NEED_REDIS}" == "1" ]]; then
+  docker run -d \
+    --name "${redis_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-redis \
+    "${redis_image}" >/dev/null
+
+  for _attempt in $(seq 1 30); do
+    if redis_is_ready; then
+      break
+    fi
+    sleep 1
+  done
+  if ! redis_is_ready; then
+    fail_with_diagnostics "Redis/Valkey did not become ready"
+  fi
 fi
 
 if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
@@ -977,11 +1125,28 @@ docker create \
   --network "${network_name}" \
   --network-alias proxy \
   -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
+  -e OXIBELT_INSTANCE_ID=proxy-a \
   "${proxy_image}" >/dev/null
 docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
 docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
 if [[ -d "${case_dir}/oxirule" ]]; then
   docker cp "${case_dir}/oxirule/." "${proxy_container}:/etc/oxibelt/oxirule"
+fi
+
+if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then
+  docker create \
+    --name "${proxy_b_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias proxy-b \
+    -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
+    -e OXIBELT_INSTANCE_ID=proxy-b \
+    "${proxy_image}" >/dev/null
+  docker cp "${case_dir}/config/." "${proxy_b_container}:/etc/oxibelt/config"
+  docker cp "${cert_dir}/." "${proxy_b_container}:/etc/oxibelt/cert"
+  if [[ -d "${case_dir}/oxirule" ]]; then
+    docker cp "${case_dir}/oxirule/." "${proxy_b_container}:/etc/oxibelt/oxirule"
+  fi
 fi
 
 if [[ "${CASE_EXPECT_START}" == "failure" ]]; then
@@ -1005,9 +1170,15 @@ if [[ "${CASE_EXPECT_START}" == "failure" ]]; then
 fi
 
 docker start "${proxy_container}" >/dev/null
+if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then
+  docker start "${proxy_b_container}" >/dev/null
+fi
 sleep 1
 if [[ "$(docker inspect -f '{{.State.Running}}' "${proxy_container}" 2>/dev/null || echo false)" != "true" ]]; then
   fail_with_diagnostics "proxy exited during startup for ${category}/${case_name}"
+fi
+if [[ "${CASE_NEED_SECOND_PROXY}" == "1" && "$(docker inspect -f '{{.State.Running}}' "${proxy_b_container}" 2>/dev/null || echo false)" != "true" ]]; then
+  fail_with_diagnostics "second proxy exited during startup for ${category}/${case_name}"
 fi
 
 if [[ -s "${case_dir}/checks.sh" ]]; then

@@ -26,6 +26,7 @@ pub mod reload;
 pub mod routes;
 pub mod runtime;
 pub mod server;
+pub mod shared_state;
 pub mod state;
 pub mod stream;
 mod tcp_hop;
