@@ -496,14 +496,31 @@ while True:
 }
 
 assert_shared_pool_health() {
-  local failed recovered
+  local attempt recovered state
   docker rm -f "${alt_container}" >/dev/null
 
-  failed="$(client_request_with_headers "example.test" "/pool/shared-health" 502 "GET" "" "X-Forwarded-For: 203.0.113.30")"
-  assert_response_jq "${failed}" '.body == "upstream request failed"'
+  for attempt in $(seq 1 6); do
+    probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" >/dev/null 2>&1 || true
+    if shared_pool_alt_unhealthy_on_proxy_b; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! shared_pool_alt_unhealthy_on_proxy_b; then
+    state="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/upstream-pools/shared-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    echo "${state}" >&2
+    fail_with_diagnostics "expected shared pool health to mark alt server unhealthy"
+  fi
 
   recovered="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/pool/shared-health" 200 "GET" "" "X-Forwarded-For: 203.0.113.31")"
   assert_body_jq "${recovered}" '.upstream == "http-upstream" and .path == "/origin/pool/shared-health"'
+}
+
+shared_pool_alt_unhealthy_on_proxy_b() {
+  local state
+  state="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/upstream-pools/shared-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  jq -e '.body | fromjson | ([.servers[] | select(.id == "0" and .healthy == false)] | length) == 1' <<<"${state}" >/dev/null
 }
 
 assert_shared_cache_uri_isolation() {
@@ -603,14 +620,31 @@ while True:
 }
 
 assert_shared_pool_health() {
-  local failed recovered
+  local attempt recovered state
   docker rm -f "${alt_container}" >/dev/null
 
-  failed="$(client_request_with_headers "example.test" "/pool/shared-health" 502 "GET" "" "X-Forwarded-For: 203.0.113.30")"
-  assert_response_jq "${failed}" '.body == "upstream request failed"'
+  for attempt in $(seq 1 6); do
+    probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" >/dev/null 2>&1 || true
+    if shared_pool_alt_unhealthy_on_proxy_b; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! shared_pool_alt_unhealthy_on_proxy_b; then
+    state="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/upstream-pools/shared-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    echo "${state}" >&2
+    fail_with_diagnostics "expected shared pool health to mark alt server unhealthy"
+  fi
 
   recovered="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/pool/shared-health" 200 "GET" "" "X-Forwarded-For: 203.0.113.31")"
   assert_body_jq "${recovered}" '.upstream == "http-upstream" and .path == "/origin/pool/shared-health"'
+}
+
+shared_pool_alt_unhealthy_on_proxy_b() {
+  local state
+  state="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/upstream-pools/shared-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  jq -e '.body | fromjson | ([.servers[] | select(.id == "0" and .healthy == false)] | length) == 1' <<<"${state}" >/dev/null
 }
 
 assert_shared_cache_uri_isolation() {

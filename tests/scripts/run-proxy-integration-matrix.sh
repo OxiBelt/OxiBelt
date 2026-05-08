@@ -245,6 +245,46 @@ client_request_with_headers_on_port() {
   fail_with_diagnostics "client request did not reach expected status ${expect_status}"
 }
 
+probe_client_request_with_headers() {
+  local host="$1"
+  local path="$2"
+  local method="$3"
+  local body="$4"
+  shift 4
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  local output=""
+  local status=0
+  local client_container=""
+
+  client_container="oxibelt-probe-client-${run_id}-${RANDOM}"
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
+    /opt/mock_upstream/client.py \
+    --path "${path}" \
+    --host "${host}" \
+    --port 8443 \
+    --method "${method}" \
+    --body "${body}" \
+    --ca-file /tmp/proxy-ca.pem \
+    --dump-response-json \
+    "${header_args[@]}" >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+  output="$(docker start -a "${client_container}" 2>&1)" || status=$?
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  printf '%s' "${output}"
+  return "${status}"
+}
+
 slow_body_client_request() {
   local host="$1"
   local path="$2"
