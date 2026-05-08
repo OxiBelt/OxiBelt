@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
@@ -289,30 +290,64 @@ fn default_discovered_weight() -> u32 {
   1
 }
 
-#[derive(Debug, Clone, Copy)]
-enum DnsQueryType {
-  A = 1,
-  Aaaa = 28,
-  Srv = 33,
+const DNS_CLASS_IN: u16 = 1;
+const DNS_TYPE_A: u16 = 1;
+const DNS_TYPE_CNAME: u16 = 5;
+const DNS_TYPE_AAAA: u16 = 28;
+const DNS_TYPE_SRV: u16 = 33;
+const DNS_DEFAULT_TTL_MS: u64 = 30_000;
+
+#[derive(Debug)]
+struct DnsQuery {
+  id: u16,
+  name: String,
+  query_type: DnsQueryType,
+  packet: Vec<u8>,
 }
 
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DnsQueryType {
+  A = DNS_TYPE_A,
+  Aaaa = DNS_TYPE_AAAA,
+  Srv = DNS_TYPE_SRV,
+}
+
+#[derive(Debug, PartialEq)]
 enum DnsAnswer {
   Ip(IpAddr),
   Srv(SrvRecord),
 }
 
+#[derive(Debug, Clone, PartialEq)]
 struct SrvRecord {
   priority: u16,
   port: u16,
   target: String,
 }
 
+#[derive(Debug)]
+struct ParsedDnsRecord {
+  owner: String,
+  record_type: u16,
+  ttl: u32,
+  data: ParsedDnsRecordData,
+}
+
+#[derive(Debug)]
+enum ParsedDnsRecordData {
+  Ip(IpAddr),
+  Srv(SrvRecord),
+  Cname(String),
+  Other,
+}
+
 async fn lookup_dns(name: &str, query_type: DnsQueryType) -> anyhow::Result<(Vec<DnsAnswer>, u64)> {
   let query = build_dns_query(name, query_type)?;
   let mut last_error = None;
   for server in dns_nameservers() {
-    match query_nameserver(server, &query).await {
-      Ok(response) => return parse_dns_response(&response, query_type),
+    match query_nameserver(server, &query.packet).await {
+      Ok(response) => return parse_dns_response(&response, &query),
       Err(error) => last_error = Some(error),
     }
   }
@@ -351,30 +386,30 @@ fn dns_nameservers() -> Vec<SocketAddr> {
     .collect()
 }
 
-fn build_dns_query(name: &str, query_type: DnsQueryType) -> anyhow::Result<Vec<u8>> {
-  let id = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .subsec_nanos() as u16;
-  let mut query = Vec::new();
-  query.extend_from_slice(&id.to_be_bytes());
-  query.extend_from_slice(&0x0100_u16.to_be_bytes());
-  query.extend_from_slice(&1_u16.to_be_bytes());
-  query.extend_from_slice(&0_u16.to_be_bytes());
-  query.extend_from_slice(&0_u16.to_be_bytes());
-  query.extend_from_slice(&0_u16.to_be_bytes());
-  encode_dns_name(name, &mut query)?;
-  query.extend_from_slice(&(query_type as u16).to_be_bytes());
-  query.extend_from_slice(&1_u16.to_be_bytes());
-  Ok(query)
+fn build_dns_query(name: &str, query_type: DnsQueryType) -> anyhow::Result<DnsQuery> {
+  let name = canonical_dns_name(name)?;
+  let id = random_dns_transaction_id()?;
+  let mut packet = Vec::new();
+  packet.extend_from_slice(&id.to_be_bytes());
+  packet.extend_from_slice(&0x0100_u16.to_be_bytes());
+  packet.extend_from_slice(&1_u16.to_be_bytes());
+  packet.extend_from_slice(&0_u16.to_be_bytes());
+  packet.extend_from_slice(&0_u16.to_be_bytes());
+  packet.extend_from_slice(&0_u16.to_be_bytes());
+  encode_dns_name(&name, &mut packet)?;
+  packet.extend_from_slice(&(query_type as u16).to_be_bytes());
+  packet.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+  Ok(DnsQuery {
+    id,
+    name,
+    query_type,
+    packet,
+  })
 }
 
 fn encode_dns_name(name: &str, out: &mut Vec<u8>) -> anyhow::Result<()> {
-  let trimmed = name.trim_end_matches('.');
-  if trimmed.is_empty() {
-    bail!("DNS name must not be empty");
-  }
-  for label in trimmed.split('.') {
+  let name = canonical_dns_name(name)?;
+  for label in name.split('.') {
     if label.is_empty() || label.len() > 63 {
       bail!("DNS name contains an invalid label");
     }
@@ -385,25 +420,71 @@ fn encode_dns_name(name: &str, out: &mut Vec<u8>) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn parse_dns_response(
-  response: &[u8],
-  query_type: DnsQueryType,
-) -> anyhow::Result<(Vec<DnsAnswer>, u64)> {
+fn random_dns_transaction_id() -> anyhow::Result<u16> {
+  let mut bytes = [0_u8; 2];
+  SystemRandom::new()
+    .fill(&mut bytes)
+    .map_err(|_| anyhow!("failed to generate DNS transaction ID"))?;
+  Ok(u16::from_be_bytes(bytes))
+}
+
+fn canonical_dns_name(name: &str) -> anyhow::Result<String> {
+  let trimmed = name.trim_end_matches('.');
+  if trimmed.is_empty() {
+    bail!("DNS name must not be empty");
+  }
+  for label in trimmed.split('.') {
+    if label.is_empty() || label.len() > 63 {
+      bail!("DNS name contains an invalid label");
+    }
+  }
+  Ok(trimmed.to_ascii_lowercase())
+}
+
+fn parse_dns_response(response: &[u8], query: &DnsQuery) -> anyhow::Result<(Vec<DnsAnswer>, u64)> {
   if response.len() < 12 {
     bail!("DNS response is too short");
   }
+  let id = read_u16(response, 0)?;
+  if id != query.id {
+    bail!("DNS response transaction ID does not match query");
+  }
+  let flags = read_u16(response, 2)?;
+  if flags & 0x8000 == 0 {
+    bail!("DNS packet is not a response");
+  }
+  if flags & 0x7800 != 0 {
+    bail!("DNS response opcode is not a standard query");
+  }
+  if flags & 0x0200 != 0 {
+    bail!("DNS response is truncated");
+  }
+  if flags & 0x000f != 0 {
+    bail!("DNS response returned error code {}", flags & 0x000f);
+  }
   let qdcount = read_u16(response, 4)? as usize;
   let ancount = read_u16(response, 6)? as usize;
+  let nscount = read_u16(response, 8)? as usize;
+  let arcount = read_u16(response, 10)? as usize;
+  if qdcount != 1 {
+    bail!("DNS response question count does not match query");
+  }
   let mut offset = 12;
-  for _ in 0..qdcount {
-    read_dns_name(response, &mut offset)?;
-    offset += 4;
+  let question_name = canonical_dns_name(&read_dns_name(response, &mut offset)?)?;
+  let question_type = read_u16(response, offset)?;
+  offset += 2;
+  let question_class = read_u16(response, offset)?;
+  offset += 2;
+  if question_name != query.name
+    || question_type != query.query_type as u16
+    || question_class != DNS_CLASS_IN
+  {
+    bail!("DNS response question does not match query");
   }
 
-  let mut answers = Vec::new();
-  let mut min_ttl_ms = 30_000_u64;
+  let mut records = Vec::new();
   for _ in 0..ancount {
-    read_dns_name(response, &mut offset)?;
+    let owner = canonical_dns_name(&read_dns_name(response, &mut offset)?)?;
     let record_type = read_u16(response, offset)?;
     offset += 2;
     let class = read_u16(response, offset)?;
@@ -416,41 +497,123 @@ fn parse_dns_response(
     offset = offset
       .checked_add(rdlen)
       .ok_or_else(|| anyhow!("DNS response offset overflow"))?;
-    if offset > response.len() || class != 1 {
+    if offset > response.len() {
+      bail!("DNS response is truncated");
+    }
+    if class != DNS_CLASS_IN {
       continue;
     }
-    min_ttl_ms = min_ttl_ms.min(u64::from(ttl).saturating_mul(1_000));
-    match (query_type, record_type, rdlen) {
-      (DnsQueryType::A, 1, 4) => {
-        answers.push(DnsAnswer::Ip(IpAddr::V4(Ipv4Addr::new(
-          response[rdata],
-          response[rdata + 1],
-          response[rdata + 2],
-          response[rdata + 3],
-        ))));
-      }
-      (DnsQueryType::Aaaa, 28, 16) => {
+    let data = match (record_type, rdlen) {
+      (DNS_TYPE_A, 4) => ParsedDnsRecordData::Ip(IpAddr::V4(Ipv4Addr::new(
+        response[rdata],
+        response[rdata + 1],
+        response[rdata + 2],
+        response[rdata + 3],
+      ))),
+      (DNS_TYPE_AAAA, 16) => {
         let octets: [u8; 16] = response[rdata..rdata + 16]
           .try_into()
           .expect("slice length checked");
-        answers.push(DnsAnswer::Ip(IpAddr::V6(Ipv6Addr::from(octets))));
+        ParsedDnsRecordData::Ip(IpAddr::V6(Ipv6Addr::from(octets)))
       }
-      (DnsQueryType::Srv, 33, len) if len >= 6 => {
+      (DNS_TYPE_CNAME, len) if len > 0 => {
+        let mut target_offset = rdata;
+        let target = read_dns_name(response, &mut target_offset)?;
+        if target_offset > offset {
+          bail!("DNS CNAME record is truncated");
+        }
+        ParsedDnsRecordData::Cname(canonical_dns_name(&target)?)
+      }
+      (DNS_TYPE_SRV, len) if len >= 6 => {
         let priority = read_u16(response, rdata)?;
         let _weight = read_u16(response, rdata + 2)?;
         let port = read_u16(response, rdata + 4)?;
         let mut target_offset = rdata + 6;
         let target = read_dns_name(response, &mut target_offset)?;
-        answers.push(DnsAnswer::Srv(SrvRecord {
+        if target_offset > offset {
+          bail!("DNS SRV record is truncated");
+        }
+        ParsedDnsRecordData::Srv(SrvRecord {
           priority,
           port,
-          target,
-        }));
+          target: canonical_dns_name(&target)?,
+        })
+      }
+      _ => ParsedDnsRecordData::Other,
+    };
+    records.push(ParsedDnsRecord {
+      owner,
+      record_type,
+      ttl,
+      data,
+    });
+  }
+  skip_dns_records(response, &mut offset, nscount + arcount)?;
+
+  let (accepted_names, mut min_ttl_ms) = verified_answer_names(&query.name, &records);
+  let mut answers = Vec::new();
+  for record in records {
+    if !accepted_names.contains(&record.owner) {
+      continue;
+    }
+    match (query.query_type, record.record_type, record.data) {
+      (DnsQueryType::A, DNS_TYPE_A, ParsedDnsRecordData::Ip(IpAddr::V4(ip))) => {
+        min_ttl_ms = min_ttl_ms.min(u64::from(record.ttl).saturating_mul(1_000));
+        answers.push(DnsAnswer::Ip(IpAddr::V4(ip)));
+      }
+      (DnsQueryType::Aaaa, DNS_TYPE_AAAA, ParsedDnsRecordData::Ip(IpAddr::V6(ip))) => {
+        min_ttl_ms = min_ttl_ms.min(u64::from(record.ttl).saturating_mul(1_000));
+        answers.push(DnsAnswer::Ip(IpAddr::V6(ip)));
+      }
+      (DnsQueryType::Srv, DNS_TYPE_SRV, ParsedDnsRecordData::Srv(srv_record)) => {
+        min_ttl_ms = min_ttl_ms.min(u64::from(record.ttl).saturating_mul(1_000));
+        answers.push(DnsAnswer::Srv(srv_record));
       }
       _ => {}
     }
   }
   Ok((answers, min_ttl_ms))
+}
+
+fn verified_answer_names(query_name: &str, records: &[ParsedDnsRecord]) -> (HashSet<String>, u64) {
+  let mut accepted_names = HashSet::from([query_name.to_string()]);
+  let mut min_ttl_ms = DNS_DEFAULT_TTL_MS;
+  let mut changed = true;
+  while changed {
+    changed = false;
+    for record in records {
+      let ParsedDnsRecordData::Cname(target) = &record.data else {
+        continue;
+      };
+      if !accepted_names.contains(&record.owner) {
+        continue;
+      }
+      min_ttl_ms = min_ttl_ms.min(u64::from(record.ttl).saturating_mul(1_000));
+      if accepted_names.insert(target.clone()) {
+        changed = true;
+      }
+    }
+  }
+  (accepted_names, min_ttl_ms)
+}
+
+fn skip_dns_records(response: &[u8], offset: &mut usize, count: usize) -> anyhow::Result<()> {
+  for _ in 0..count {
+    read_dns_name(response, offset)?;
+    *offset = offset
+      .checked_add(8)
+      .ok_or_else(|| anyhow!("DNS response offset overflow"))?;
+    read_u16(response, *offset)?;
+    let rdlen = read_u16(response, *offset)? as usize;
+    *offset = offset
+      .checked_add(2)
+      .and_then(|value| value.checked_add(rdlen))
+      .ok_or_else(|| anyhow!("DNS response offset overflow"))?;
+    if *offset > response.len() {
+      bail!("DNS response is truncated");
+    }
+  }
+  Ok(())
 }
 
 fn read_dns_name(response: &[u8], offset: &mut usize) -> anyhow::Result<String> {
@@ -472,6 +635,9 @@ fn read_dns_name(response: &[u8], offset: &mut usize) -> anyhow::Result<String> 
       cursor = pointer;
       jumped = true;
       continue;
+    }
+    if len & 0xc0 != 0 {
+      bail!("DNS label has invalid length bits");
     }
     cursor += 1;
     if len == 0 {
@@ -512,4 +678,265 @@ fn read_u32(input: &[u8], offset: usize) -> anyhow::Result<u32> {
   Ok(u32::from_be_bytes(
     bytes.try_into().expect("slice length checked"),
   ))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn test_query(name: &str, query_type: DnsQueryType) -> DnsQuery {
+    DnsQuery {
+      id: 0x1234,
+      name: canonical_dns_name(name).expect("valid test DNS name"),
+      query_type,
+      packet: Vec::new(),
+    }
+  }
+
+  fn response_start(
+    id: u16,
+    flags: u16,
+    question_name: &str,
+    question_type: DnsQueryType,
+    question_class: u16,
+    answer_count: u16,
+  ) -> Vec<u8> {
+    let mut response = Vec::new();
+    response.extend_from_slice(&id.to_be_bytes());
+    response.extend_from_slice(&flags.to_be_bytes());
+    response.extend_from_slice(&1_u16.to_be_bytes());
+    response.extend_from_slice(&answer_count.to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    encode_dns_name(question_name, &mut response).expect("valid question name");
+    response.extend_from_slice(&(question_type as u16).to_be_bytes());
+    response.extend_from_slice(&question_class.to_be_bytes());
+    response
+  }
+
+  fn add_record(response: &mut Vec<u8>, owner: &str, record_type: u16, ttl: u32, rdata: &[u8]) {
+    encode_dns_name(owner, response).expect("valid owner name");
+    response.extend_from_slice(&record_type.to_be_bytes());
+    response.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+    response.extend_from_slice(&ttl.to_be_bytes());
+    response.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+    response.extend_from_slice(rdata);
+  }
+
+  fn add_a(response: &mut Vec<u8>, owner: &str, ttl: u32, ip: Ipv4Addr) {
+    add_record(response, owner, DNS_TYPE_A, ttl, &ip.octets());
+  }
+
+  fn add_cname(response: &mut Vec<u8>, owner: &str, ttl: u32, target: &str) {
+    let mut rdata = Vec::new();
+    encode_dns_name(target, &mut rdata).expect("valid CNAME target");
+    add_record(response, owner, DNS_TYPE_CNAME, ttl, &rdata);
+  }
+
+  fn add_srv(response: &mut Vec<u8>, owner: &str, ttl: u32, port: u16, target: &str) {
+    let mut rdata = Vec::new();
+    rdata.extend_from_slice(&10_u16.to_be_bytes());
+    rdata.extend_from_slice(&5_u16.to_be_bytes());
+    rdata.extend_from_slice(&port.to_be_bytes());
+    encode_dns_name(target, &mut rdata).expect("valid SRV target");
+    add_record(response, owner, DNS_TYPE_SRV, ttl, &rdata);
+  }
+
+  #[test]
+  fn upstream_discovery_dns_response_accepts_matching_a_and_ttl() {
+    let query = test_query("App.Example.", DnsQueryType::A);
+    let mut response = response_start(
+      query.id,
+      0x8180,
+      "app.example",
+      DnsQueryType::A,
+      DNS_CLASS_IN,
+      1,
+    );
+    add_a(
+      &mut response,
+      "app.example",
+      12,
+      Ipv4Addr::new(192, 0, 2, 10),
+    );
+
+    let (answers, ttl_ms) = parse_dns_response(&response, &query).expect("valid DNS response");
+
+    assert_eq!(ttl_ms, 12_000);
+    assert_eq!(
+      answers,
+      vec![DnsAnswer::Ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)))]
+    );
+  }
+
+  #[test]
+  fn upstream_discovery_dns_response_rejects_mismatched_transaction_id() {
+    let query = test_query("app.example", DnsQueryType::A);
+    let response = response_start(
+      0x9999,
+      0x8180,
+      "app.example",
+      DnsQueryType::A,
+      DNS_CLASS_IN,
+      0,
+    );
+
+    let error = parse_dns_response(&response, &query).expect_err("mismatched ID must fail");
+
+    assert!(error.to_string().contains("transaction ID"));
+  }
+
+  #[test]
+  fn upstream_discovery_dns_response_rejects_mismatched_question() {
+    let query = test_query("app.example", DnsQueryType::A);
+    let wrong_name = response_start(
+      query.id,
+      0x8180,
+      "other.example",
+      DnsQueryType::A,
+      DNS_CLASS_IN,
+      0,
+    );
+    let wrong_type = response_start(
+      query.id,
+      0x8180,
+      "app.example",
+      DnsQueryType::Aaaa,
+      DNS_CLASS_IN,
+      0,
+    );
+    let wrong_class = response_start(query.id, 0x8180, "app.example", DnsQueryType::A, 3, 0);
+
+    for response in [wrong_name, wrong_type, wrong_class] {
+      let error = parse_dns_response(&response, &query).expect_err("question mismatch must fail");
+      assert!(error.to_string().contains("question"));
+    }
+  }
+
+  #[test]
+  fn upstream_discovery_dns_response_rejects_unsuccessful_or_truncated_response() {
+    let query = test_query("app.example", DnsQueryType::A);
+    let nxdomain = response_start(
+      query.id,
+      0x8183,
+      "app.example",
+      DnsQueryType::A,
+      DNS_CLASS_IN,
+      0,
+    );
+    let truncated = response_start(
+      query.id,
+      0x8380,
+      "app.example",
+      DnsQueryType::A,
+      DNS_CLASS_IN,
+      0,
+    );
+
+    assert!(parse_dns_response(&nxdomain, &query).is_err());
+    assert!(parse_dns_response(&truncated, &query).is_err());
+  }
+
+  #[test]
+  fn upstream_discovery_dns_response_ignores_wrong_owner_ip_and_srv_answers() {
+    let query = test_query("app.example", DnsQueryType::A);
+    let mut response = response_start(
+      query.id,
+      0x8180,
+      "app.example",
+      DnsQueryType::A,
+      DNS_CLASS_IN,
+      1,
+    );
+    add_a(
+      &mut response,
+      "attacker.example",
+      1,
+      Ipv4Addr::new(203, 0, 113, 66),
+    );
+
+    let (answers, ttl_ms) =
+      parse_dns_response(&response, &query).expect("wrong-owner A should be ignored");
+
+    assert!(answers.is_empty());
+    assert_eq!(ttl_ms, DNS_DEFAULT_TTL_MS);
+
+    let srv_query = test_query("_app._tcp.example", DnsQueryType::Srv);
+    let mut srv_response = response_start(
+      srv_query.id,
+      0x8180,
+      "_app._tcp.example",
+      DnsQueryType::Srv,
+      DNS_CLASS_IN,
+      1,
+    );
+    add_srv(
+      &mut srv_response,
+      "_attacker._tcp.example",
+      1,
+      18080,
+      "attacker.example",
+    );
+
+    let (answers, ttl_ms) =
+      parse_dns_response(&srv_response, &srv_query).expect("wrong-owner SRV should be ignored");
+
+    assert!(answers.is_empty());
+    assert_eq!(ttl_ms, DNS_DEFAULT_TTL_MS);
+  }
+
+  #[test]
+  fn upstream_discovery_dns_response_accepts_verified_cname_chain() {
+    let query = test_query("app.example", DnsQueryType::A);
+    let mut response = response_start(
+      query.id,
+      0x8180,
+      "app.example",
+      DnsQueryType::A,
+      DNS_CLASS_IN,
+      2,
+    );
+    add_cname(&mut response, "app.example", 30, "alias.example");
+    add_a(
+      &mut response,
+      "alias.example",
+      5,
+      Ipv4Addr::new(198, 51, 100, 10),
+    );
+
+    let (answers, ttl_ms) =
+      parse_dns_response(&response, &query).expect("valid CNAME chain should resolve");
+
+    assert_eq!(ttl_ms, 5_000);
+    assert_eq!(
+      answers,
+      vec![DnsAnswer::Ip(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)))]
+    );
+  }
+
+  #[test]
+  fn upstream_discovery_dns_response_rejects_unverified_cname_chain() {
+    let query = test_query("app.example", DnsQueryType::A);
+    let mut response = response_start(
+      query.id,
+      0x8180,
+      "app.example",
+      DnsQueryType::A,
+      DNS_CLASS_IN,
+      2,
+    );
+    add_cname(&mut response, "attacker.example", 1, "alias.example");
+    add_a(
+      &mut response,
+      "alias.example",
+      1,
+      Ipv4Addr::new(203, 0, 113, 66),
+    );
+
+    let (answers, ttl_ms) =
+      parse_dns_response(&response, &query).expect("unverified CNAME chain should be ignored");
+
+    assert!(answers.is_empty());
+    assert_eq!(ttl_ms, DNS_DEFAULT_TTL_MS);
+  }
 }

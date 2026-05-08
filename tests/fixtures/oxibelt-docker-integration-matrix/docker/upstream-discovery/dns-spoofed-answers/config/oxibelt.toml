@@ -1,0 +1,75 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "plaintext_allowlist"
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+[[upstream_pools]]
+name = "spoof-pool"
+algorithm = "round_robin"
+
+[[upstream_pools.servers]]
+id = "static"
+origin = "http://mock-http:18080/origin"
+
+[[upstream_pools.discovery]]
+provider = "dns"
+name = "spoofed.discovery.test"
+record_type = "a"
+port = 18080
+refresh_interval_ms = 500
+min_ttl_ms = 200
+
+[[upstream_pools]]
+name = "valid-dns-pool"
+algorithm = "round_robin"
+
+[[upstream_pools.discovery]]
+provider = "dns"
+name = "valid.discovery.test"
+record_type = "a"
+port = 18080
+refresh_interval_ms = 500
+min_ttl_ms = 200
+
+[[routes]]
+name = "spoof-route"
+hosts = ["spoof.example.test"]
+path_prefix = "/"
+upstream_pool = "spoof-pool"
+
+[[routes]]
+name = "valid-dns-route"
+hosts = ["valid.example.test"]
+path_prefix = "/"
+upstream_pool = "valid-dns-pool"

@@ -748,7 +748,7 @@ Dynamic discovery applies to `upstream_pools` only. `provider = "file"` reads a 
 }
 ```
 
-`provider = "dns"` resolves `name` using `record_type = "a"`, `"aaaa"`, `"a_aaaa"`, or `"srv"`. A/AAAA discovery requires `port`; SRV discovery uses the SRV target port. DNS refresh uses the lower of the configured `refresh_interval_ms` and the observed DNS TTL, bounded by `min_ttl_ms`. `kubernetes`, `consul`, and `etcd` are reserved provider names and are rejected in this version.
+`provider = "dns"` resolves `name` using `record_type = "a"`, `"aaaa"`, `"a_aaaa"`, or `"srv"`. A/AAAA discovery requires `port`; SRV discovery uses the SRV target port. DNS refresh uses the lower of the configured `refresh_interval_ms` and the observed DNS TTL, bounded by `min_ttl_ms`. DNS discovery rejects unsuccessful responses and responses whose transaction ID, question, answer owner, or verified CNAME chain does not match the active query. `kubernetes`, `consul`, and `etcd` are reserved provider names and are rejected in this version.
 
 ## Routes
 

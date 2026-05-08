@@ -23,6 +23,7 @@ postgres_tls_dir="${work_dir}/postgres-tls"
 logs_dir="${work_dir}/logs"
 network_name="oxibelt-matrix-${run_id}"
 mock_image="oxibelt/mock-upstream:${run_id}"
+mock_dns_image="oxibelt/mock-dns:${run_id}"
 pq_probe_image="oxibelt/pq-probe:${run_id}"
 protocol_probe_image="oxibelt/protocol-probe:${run_id}"
 postgres_image="oxibelt/postgres:${run_id}"
@@ -38,6 +39,7 @@ h2_container="oxibelt-h2-${run_id}"
 h2c_container="oxibelt-h2c-${run_id}"
 h1_stall_container="oxibelt-h1-stall-${run_id}"
 h3_container="oxibelt-h3-${run_id}"
+dns_container="oxibelt-dns-${run_id}"
 postgres_container="oxibelt-postgres-${run_id}"
 redis_container="oxibelt-redis-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
@@ -45,7 +47,7 @@ test_label="oxibelt.test.run=${run_id}"
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker rmi -f "${mock_image}" "${pq_probe_image}" "${protocol_probe_image}" "${postgres_image}" >/dev/null 2>&1 || true
+  docker rmi -f "${mock_image}" "${mock_dns_image}" "${pq_probe_image}" "${protocol_probe_image}" "${postgres_image}" >/dev/null 2>&1 || true
   if [[ "${remove_proxy_image}" == "1" ]]; then
     docker rmi -f "${proxy_image}" >/dev/null 2>&1 || true
   fi
@@ -78,6 +80,7 @@ collect_diagnostics() {
   docker logs "${h2c_container}" >"${logs_dir}/mock-h2c.log" 2>&1 || true
   docker logs "${h1_stall_container}" >"${logs_dir}/mock-h1-stall.log" 2>&1 || true
   docker logs "${h3_container}" >"${logs_dir}/mock-h3.log" 2>&1 || true
+  docker logs "${dns_container}" >"${logs_dir}/mock-dns.log" 2>&1 || true
   docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
   docker logs "${redis_container}" >"${logs_dir}/redis.log" 2>&1 || true
 
@@ -917,6 +920,13 @@ if [[ "${CASE_EXPECT_START}" == "success" || "${CASE_NEED_HTTP_UPSTREAM}" == "1"
     "${repo_root}/tests/docker/mock_upstream" >/dev/null
 fi
 
+if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
+  docker build \
+    -t "${mock_dns_image}" \
+    -f "${repo_root}/tests/docker/mock_dns/Dockerfile" \
+    "${repo_root}/tests/docker/mock_dns" >/dev/null
+fi
+
 if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
   docker build \
     -t "${pq_probe_image}" \
@@ -1064,6 +1074,33 @@ if [[ "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then
   docker start "${h3_container}" >/dev/null
 fi
 
+proxy_dns_args=()
+if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
+  if [[ "${CASE_NEED_HTTP_UPSTREAM}" != "1" ]]; then
+    fail_with_diagnostics "DNS server matrix cases require the HTTP upstream"
+  fi
+  http_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${http_container}")"
+  if [[ -z "${http_container_ip}" ]]; then
+    fail_with_diagnostics "failed to inspect mock HTTP upstream IP for DNS case"
+  fi
+  docker run -d \
+    --name "${dns_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-dns \
+    -e VALID_A_NAME=valid.discovery.test \
+    -e VALID_A_IP="${http_container_ip}" \
+    -e SPOOF_A_NAME=spoofed.discovery.test \
+    -e SPOOF_A_IP=203.0.113.66 \
+    "${mock_dns_image}" >/dev/null
+  dns_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${dns_container}")"
+  if [[ -z "${dns_container_ip}" ]]; then
+    fail_with_diagnostics "failed to inspect mock DNS server IP"
+  fi
+  proxy_dns_args+=(--dns "${dns_container_ip}" --add-host "mock-http:${http_container_ip}")
+  sleep 1
+fi
+
 if [[ "${CASE_NEED_POSTGRES}" == "1" ]]; then
   cat >"${work_dir}/postgres-init.sql" <<'EOF'
 CREATE TABLE oxibelt_access_log (
@@ -1128,6 +1165,7 @@ docker create \
   -e OXIBELT_VIEWER_TOKEN=matrix-viewer-token \
   -e OXIBELT_UPSTREAM_TOKEN=matrix-upstream-token \
   -e OXIBELT_INSTANCE_ID=proxy-a \
+  "${proxy_dns_args[@]}" \
   "${proxy_image}" >/dev/null
 docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
 docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
@@ -1145,6 +1183,7 @@ if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then
     -e OXIBELT_VIEWER_TOKEN=matrix-viewer-token \
     -e OXIBELT_UPSTREAM_TOKEN=matrix-upstream-token \
     -e OXIBELT_INSTANCE_ID=proxy-b \
+    "${proxy_dns_args[@]}" \
     "${proxy_image}" >/dev/null
   docker cp "${case_dir}/config/." "${proxy_b_container}:/etc/oxibelt/config"
   docker cp "${cert_dir}/." "${proxy_b_container}:/etc/oxibelt/cert"
