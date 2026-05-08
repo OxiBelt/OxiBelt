@@ -251,6 +251,8 @@ pub enum WafActionConfig {
     rate: String,
     #[serde(default)]
     burst: u32,
+    #[serde(default = "crate::limits::default_rate_limit_max_buckets")]
+    max_buckets: usize,
     #[serde(default = "default_waf_rate_limit_status")]
     status: u16,
     #[serde(default)]
@@ -718,6 +720,7 @@ fn validate_actions(
         key,
         token_header,
         rate,
+        max_buckets,
         status,
         ..
       } => {
@@ -727,6 +730,12 @@ fn validate_actions(
         }
         crate::limits::parse_rate(rate)
           .with_context(|| format!("invalid WAF rule {} rate_limit rate", rule.name))?;
+        if *max_buckets == 0 {
+          bail!(
+            "WAF rule {} rate_limit max_buckets must be greater than 0",
+            rule.name
+          );
+        }
         validate_status(*status, &rule.name)?;
         if let Some(token_header) = token_header {
           if !key.uses_access_token() {
@@ -1864,6 +1873,7 @@ fn apply_request_actions(
         token_header,
         rate,
         burst,
+        max_buckets,
         status,
         body,
       }) => {
@@ -1879,6 +1889,7 @@ fn apply_request_actions(
           token_header: token_header.as_deref(),
           rate,
           burst: *burst,
+          max_buckets: *max_buckets,
           mode: LimitMode::Enforcing,
           status: *status,
         };

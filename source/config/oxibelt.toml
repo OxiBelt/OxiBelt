@@ -142,6 +142,7 @@ max_request_body_bytes = 10485760
 # key = "client_ip"
 # rate = "10r/s"
 # burst = 50
+# max_buckets = 16384
 # mode = "enforcing"
 # status = 429
 #
@@ -152,6 +153,7 @@ max_request_body_bytes = 10485760
 # token_header = "X-Api-Token"
 # rate = "60r/m"
 # burst = 60
+# max_buckets = 16384
 # status = 429
 
 [compression]

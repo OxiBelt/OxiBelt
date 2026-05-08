@@ -136,7 +136,7 @@ See [OxiRule.md](OxiRule.md) for the full rule reference.
 
 ## Runtime and Operations
 
-Runtime state is process-local unless `[shared_state].enabled = true`. With shared state disabled, cache indexes and locks, upstream health state, rate and connection limits, and Person proof single-use token state stay inside one process.
+Runtime state is process-local unless `[shared_state].enabled = true`. With shared state disabled, cache indexes and locks, upstream health state, rate and connection limits, and Person proof single-use token state stay inside one process. Local rate-limit bucket maps are bounded per configured limit by `max_buckets`; new identities fail closed in enforcing mode after the cap until refilled buckets can be reclaimed.
 
 When shared state is enabled, each feature maps to one configured Redis/Valkey-compatible or PostgreSQL backend. Rate limits use distributed token buckets keyed by client IP, route, path, or hashed access token according to configuration; connection limits use TTL-backed leases; Person proof can share its HMAC secret and single-use replay store; upstream pool health and active counts can be shared for selection; cache keeps local storage as L1 and uses the shared backend as L2 for cacheable objects, metadata, fill locks, and purges; reload writes per-instance heartbeat records with config generation metadata. Security-sensitive backend failures fail closed. Shared cache backend failures fall back to local/no shared cache for that request.
 

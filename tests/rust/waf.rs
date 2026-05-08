@@ -2903,6 +2903,44 @@ rate = "1r/s"
 }
 
 #[test]
+fn validation_rejects_rate_limit_action_zero_max_buckets() {
+    let temp_dir = common::TempDir::new("waf-rate-limit-zero-buckets");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rate-limit-zero-buckets");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "zero-rate-buckets"
+phase = "request"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "bad-bucket-cap"
+rate = "1r/s"
+max_buckets = 0
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("WAF should reject zero rate-limit max_buckets");
+    assert!(
+        error
+            .to_string()
+            .contains("WAF rule zero-rate-buckets rate_limit max_buckets must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn validation_rejects_unsafe_person_proof_difficulty() {
     let temp_dir = common::TempDir::new("waf-person-proof-invalid-config");
     let (cert_path, key_path) =

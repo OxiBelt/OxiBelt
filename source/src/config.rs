@@ -772,6 +772,12 @@ impl Config {
       }
       crate::limits::parse_rate(&rate_limit.rate)
         .with_context(|| format!("invalid rate_limits {} rate", rate_limit.name))?;
+      if rate_limit.max_buckets == 0 {
+        bail!(
+          "rate limit {} max_buckets must be greater than 0",
+          rate_limit.name
+        );
+      }
       http::StatusCode::from_u16(rate_limit.status)
         .with_context(|| format!("rate limit {} has invalid status", rate_limit.name))?;
       if let Some(token_header) = &rate_limit.token_header {
@@ -1831,6 +1837,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "rate_limits" => &[
       "burst",
       "key",
+      "max_buckets",
       "mode",
       "name",
       "rate",
@@ -3130,6 +3137,8 @@ pub struct RateLimitConfig {
   pub rate: String,
   #[serde(default)]
   pub burst: u32,
+  #[serde(default = "crate::limits::default_rate_limit_max_buckets")]
+  pub max_buckets: usize,
   #[serde(default)]
   pub mode: LimitMode,
   #[serde(default = "default_rate_limit_status")]

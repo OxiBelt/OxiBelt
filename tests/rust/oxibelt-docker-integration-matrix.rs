@@ -988,6 +988,30 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "limits",
+            "rate-limit-bucket-cap",
+            "local rate-limit bucket caps reject attacker-controlled token/path churn",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second repeated
+  first="$(client_request_with_headers "example.test" "/app/rate-a" 200 "GET" "" "Authorization: Bearer first-token")"
+  assert_body_jq "${first}" '.path == "/origin/app/rate-a"'
+
+  second="$(client_request_with_headers "example.test" "/app/rate-b" 429 "GET" "" "Authorization: Bearer second-token")"
+  assert_response_jq "${second}" '.body == "rate limit exceeded"'
+
+  repeated="$(client_request_with_headers "example.test" "/app/rate-a" 429 "GET" "" "Authorization: Bearer first-token")"
+  assert_response_jq "${repeated}" '.body == "rate limit exceeded"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "timeouts",
             "route-first-byte-timeout",
             "route-level upstream first-byte timeout can fail one route while another succeeds",

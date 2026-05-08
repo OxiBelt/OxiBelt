@@ -317,6 +317,7 @@ routes = ["app-root"]
 token_header = "X-Api-Token"
 rate = "10r/m"
 burst = 10
+max_buckets = 256
 status = 429
 "#,
         common::minimal_config_toml(&cert_path, &key_path)
@@ -330,6 +331,7 @@ status = 429
         config.rate_limits[0].token_header.as_deref(),
         Some("X-Api-Token")
     );
+    assert_eq!(config.rate_limits[0].max_buckets, 256);
 }
 
 #[test]
@@ -358,6 +360,34 @@ rate = "10r/m"
         error
             .to_string()
             .contains("rate limit unknown-route references unknown route missing-route"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rate_limit_config_rejects_zero_max_buckets() {
+    let temp_dir = common::TempDir::new("rate-limit-zero-buckets");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "rate-limit-zero-buckets");
+    let raw = format!(
+        r#"
+{}
+
+[[rate_limits]]
+name = "zero-buckets"
+key = "access_token"
+rate = "10r/m"
+max_buckets = 0
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("zero max_buckets should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("rate limit zero-buckets max_buckets must be greater than 0"),
         "unexpected error: {error}"
     );
 }

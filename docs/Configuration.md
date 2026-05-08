@@ -398,6 +398,7 @@ name = "per-ip"
 key = "client_ip"
 rate = "10r/s"
 burst = 50
+max_buckets = 16384
 mode = "enforcing" # enforcing | monitor
 status = 429
 
@@ -408,6 +409,7 @@ routes = ["api"]
 token_header = "X-Api-Token"
 rate = "60r/m"
 burst = 60
+max_buckets = 16384
 status = 429
 
 [[connection_limits]]
@@ -417,7 +419,7 @@ limit = 64
 status = 429
 ```
 
-Limit values must be greater than zero. Rate limit keys are `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, and `access_token_path`; `client-ip` style spellings are accepted as compatibility aliases. `routes` restricts a rate limit to named routes. Access-token limits read `Authorization: Bearer <token>` first and then optional `token_header`; token values are hashed before storage, and missing tokens fall back to the client IP bucket. Rate and connection limit state is process-local by default. When `[shared_state].enabled = true` and the relevant feature maps to a backend, route rate token buckets, WAF `rate_limit` action buckets, and downstream connection leases are shared across instances. This shared rate-limit path supports both Redis-compatible and PostgreSQL backends. `max_connections` applies at downstream accept time. `max_connections_per_ip` and `[[connection_limits]]` use the configured `connection_limit_identity`: `proxy_protocol` counts the direct peer or trusted PROXY protocol source for the whole connection, `first_request_real_ip` binds the connection to the first trusted Real-IP header value, and `per_request_real_ip` acquires a lease per HTTP request until its response body finishes. For HTTP/1 CONNECT and Upgrade tunnels, Real-IP connection leases remain held until the upgraded tunnel closes. TCP stream listeners use direct peer IPs. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
+Limit values must be greater than zero. Rate limit keys are `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, and `access_token_path`; `client-ip` style spellings are accepted as compatibility aliases. `routes` restricts a rate limit to named routes. Access-token limits read `Authorization: Bearer <token>` first and then optional `token_header`; token values are hashed before storage, and missing tokens fall back to the client IP bucket. `max_buckets` caps the number of local process buckets kept for a single rate limit, defaults to `16384`, and should be lowered for attacker-controlled key modes when a route expects low identity cardinality. In process-local enforcing mode, a request that would create a new bucket after the cap is reached is rejected with the rate limit status until an existing bucket has fully refilled and can be reclaimed; monitor mode stops adding new buckets after the cap. Rate and connection limit state is process-local by default. When `[shared_state].enabled = true` and the relevant feature maps to a backend, route rate token buckets, WAF `rate_limit` action buckets, and downstream connection leases are shared across instances. This shared rate-limit path supports both Redis-compatible and PostgreSQL backends. `max_connections` applies at downstream accept time. `max_connections_per_ip` and `[[connection_limits]]` use the configured `connection_limit_identity`: `proxy_protocol` counts the direct peer or trusted PROXY protocol source for the whole connection, `first_request_real_ip` binds the connection to the first trusted Real-IP header value, and `per_request_real_ip` acquires a lease per HTTP request until its response body finishes. For HTTP/1 CONNECT and Upgrade tunnels, Real-IP connection leases remain held until the upgraded tunnel closes. TCP stream listeners use direct peer IPs. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
 
 ```toml
 [shared_state]

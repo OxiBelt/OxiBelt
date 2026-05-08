@@ -13,6 +13,12 @@ use crate::config::{
 };
 use crate::shared_state::{ConnectionScope, SharedState};
 
+pub const DEFAULT_RATE_LIMIT_MAX_BUCKETS: usize = 16_384;
+
+pub fn default_rate_limit_max_buckets() -> usize {
+  DEFAULT_RATE_LIMIT_MAX_BUCKETS
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ParsedRate {
   per_second: f64,
@@ -80,6 +86,7 @@ pub struct RateLimitCheck<'a> {
   pub token_header: Option<&'a str>,
   pub rate: &'a str,
   pub burst: u32,
+  pub max_buckets: usize,
   pub mode: LimitMode,
   pub status: u16,
 }
@@ -92,6 +99,7 @@ impl<'a> From<&'a RateLimitConfig> for RateLimitCheck<'a> {
       token_header: limit.token_header.as_deref(),
       rate: &limit.rate,
       burst: limit.burst,
+      max_buckets: limit.max_buckets,
       mode: limit.mode,
       status: limit.status,
     }
@@ -369,23 +377,27 @@ impl LimitState {
       }
       return None;
     }
+    let burst = f64::from(limit.burst.max(1));
     let now = Instant::now();
     let mut buckets = self.rates.lock().expect("rate limit lock poisoned");
-    let burst = f64::from(limit.burst.max(1));
-    let bucket = buckets
-      .entry((limit.name.to_string(), key))
-      .or_insert(TokenBucket {
-        tokens: burst,
-        last: now,
-      });
-    let elapsed = now.duration_since(bucket.last).as_secs_f64();
-    bucket.tokens = (bucket.tokens + elapsed * rate.per_second).min(burst);
-    bucket.last = now;
-    if bucket.tokens < 1.0 && limit.mode == LimitMode::Enforcing {
-      return Some(StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS));
+    let bucket_key = (limit.name.to_string(), key);
+    if let Some(bucket) = buckets.get_mut(&bucket_key) {
+      return take_local_rate_token(bucket, now, rate, burst, limit.mode, limit.status);
     }
-    bucket.tokens -= 1.0;
-    None
+
+    prune_refilled_rate_buckets(&mut buckets, limit.name, now, rate.per_second, burst);
+    if rate_limit_bucket_count(&buckets, limit.name) >= limit.max_buckets.max(1) {
+      if limit.mode == LimitMode::Enforcing {
+        return Some(rate_limit_status(limit.status));
+      }
+      return None;
+    }
+
+    let bucket = buckets.entry(bucket_key).or_insert(TokenBucket {
+      tokens: burst,
+      last: now,
+    });
+    take_local_rate_token(bucket, now, rate, burst, limit.mode, limit.status)
   }
 
   fn release_connection(&self, release: &LocalConnectionRelease) {
@@ -458,6 +470,63 @@ fn rate_limit_applies_after_route(limit: &RateLimitConfig, route_name: &str) -> 
     return false;
   }
   limit.routes.is_empty() || limit.routes.iter().any(|route| route == route_name)
+}
+
+fn take_local_rate_token(
+  bucket: &mut TokenBucket,
+  now: Instant,
+  rate: ParsedRate,
+  burst: f64,
+  mode: LimitMode,
+  status: u16,
+) -> Option<StatusCode> {
+  let elapsed = now.duration_since(bucket.last).as_secs_f64();
+  bucket.tokens = (bucket.tokens + elapsed * rate.per_second).min(burst);
+  bucket.last = now;
+  if bucket.tokens < 1.0 && mode == LimitMode::Enforcing {
+    return Some(rate_limit_status(status));
+  }
+  bucket.tokens -= 1.0;
+  None
+}
+
+fn prune_refilled_rate_buckets(
+  buckets: &mut HashMap<(String, String), TokenBucket>,
+  limit_name: &str,
+  now: Instant,
+  rate_per_second: f64,
+  burst: f64,
+) {
+  buckets.retain(|(bucket_limit_name, _), bucket| {
+    bucket_limit_name != limit_name || !bucket_refills_to_burst(bucket, now, rate_per_second, burst)
+  });
+}
+
+fn bucket_refills_to_burst(
+  bucket: &TokenBucket,
+  now: Instant,
+  rate_per_second: f64,
+  burst: f64,
+) -> bool {
+  if bucket.tokens >= burst {
+    return true;
+  }
+  let elapsed = now.duration_since(bucket.last).as_secs_f64();
+  bucket.tokens + elapsed * rate_per_second >= burst
+}
+
+fn rate_limit_bucket_count(
+  buckets: &HashMap<(String, String), TokenBucket>,
+  limit_name: &str,
+) -> usize {
+  buckets
+    .keys()
+    .filter(|(bucket_limit_name, _)| bucket_limit_name == limit_name)
+    .count()
+}
+
+fn rate_limit_status(status: u16) -> StatusCode {
+  StatusCode::from_u16(status).unwrap_or(StatusCode::TOO_MANY_REQUESTS)
 }
 
 fn rate_limit_key(
@@ -549,6 +618,7 @@ where
 mod tests {
   use super::*;
   use crate::config::LimitKey;
+  use std::time::Duration;
 
   #[test]
   fn parses_rates() {
@@ -622,6 +692,7 @@ mod tests {
       token_header: None,
       rate: "1r/h".to_string(),
       burst: 1,
+      max_buckets: default_rate_limit_max_buckets(),
       mode: LimitMode::Enforcing,
       status: 429,
     }];
@@ -665,6 +736,7 @@ mod tests {
       token_header: None,
       rate: "1r/h".to_string(),
       burst: 1,
+      max_buckets: default_rate_limit_max_buckets(),
       mode: LimitMode::Enforcing,
       status: 429,
     }];
@@ -685,6 +757,7 @@ mod tests {
       token_header: None,
       rate: "1r/h".to_string(),
       burst: 1,
+      max_buckets: default_rate_limit_max_buckets(),
       mode: LimitMode::Enforcing,
       status: 429,
     }];
@@ -751,6 +824,7 @@ mod tests {
       token_header: None,
       rate: "1r/h".to_string(),
       burst: 1,
+      max_buckets: default_rate_limit_max_buckets(),
       mode: LimitMode::Enforcing,
       status: 429,
     }];
@@ -779,5 +853,123 @@ mod tests {
       fallback_state.check_route_rate_limits(fallback_context, &limit),
       Some(StatusCode::TOO_MANY_REQUESTS)
     );
+  }
+
+  #[test]
+  fn local_rate_limit_rejects_new_bucket_when_max_buckets_exhausted() {
+    let state = LimitState::new(None);
+    let ip = "203.0.113.10".parse().unwrap();
+    let limit = [RateLimitConfig {
+      name: "per-token".to_string(),
+      key: RateLimitKey::AccessToken,
+      routes: Vec::new(),
+      token_header: None,
+      rate: "1r/h".to_string(),
+      burst: 1,
+      max_buckets: 1,
+      mode: LimitMode::Enforcing,
+      status: 429,
+    }];
+    let mut token_a = HeaderMap::new();
+    token_a.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
+    let mut token_b = HeaderMap::new();
+    token_b.insert(AUTHORIZATION, "Bearer token-b".parse().unwrap());
+
+    assert_eq!(
+      state.check_route_rate_limits(
+        RateLimitContext::route(ip, "app", "/tokens", &token_a),
+        &limit
+      ),
+      None
+    );
+    assert_eq!(state.rates.lock().unwrap().len(), 1);
+    assert_eq!(
+      state.check_route_rate_limits(
+        RateLimitContext::route(ip, "app", "/tokens", &token_b),
+        &limit
+      ),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    assert_eq!(state.rates.lock().unwrap().len(), 1);
+  }
+
+  #[test]
+  fn local_rate_limit_monitor_mode_does_not_grow_after_bucket_cap() {
+    let state = LimitState::new(None);
+    let ip = "203.0.113.10".parse().unwrap();
+    let limit = [RateLimitConfig {
+      name: "per-token-monitor".to_string(),
+      key: RateLimitKey::AccessToken,
+      routes: Vec::new(),
+      token_header: None,
+      rate: "1r/h".to_string(),
+      burst: 1,
+      max_buckets: 1,
+      mode: LimitMode::Monitor,
+      status: 429,
+    }];
+    let mut token_a = HeaderMap::new();
+    token_a.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
+    let mut token_b = HeaderMap::new();
+    token_b.insert(AUTHORIZATION, "Bearer token-b".parse().unwrap());
+
+    assert_eq!(
+      state.check_route_rate_limits(
+        RateLimitContext::route(ip, "app", "/tokens", &token_a),
+        &limit
+      ),
+      None
+    );
+    assert_eq!(
+      state.check_route_rate_limits(
+        RateLimitContext::route(ip, "app", "/tokens", &token_b),
+        &limit
+      ),
+      None
+    );
+    assert_eq!(state.rates.lock().unwrap().len(), 1);
+  }
+
+  #[test]
+  fn local_rate_limit_prunes_refilled_buckets_before_enforcing_cap() {
+    let state = LimitState::new(None);
+    let ip = "203.0.113.10".parse().unwrap();
+    let headers = HeaderMap::new();
+    let limit = [RateLimitConfig {
+      name: "per-path".to_string(),
+      key: RateLimitKey::ClientIpPath,
+      routes: Vec::new(),
+      token_header: None,
+      rate: "1r/s".to_string(),
+      burst: 1,
+      max_buckets: 1,
+      mode: LimitMode::Enforcing,
+      status: 429,
+    }];
+
+    assert_eq!(
+      state.check_route_rate_limits(
+        RateLimitContext::route(ip, "app", "/first", &headers),
+        &limit
+      ),
+      None
+    );
+    {
+      let mut buckets = state.rates.lock().unwrap();
+      for bucket in buckets.values_mut() {
+        bucket.last = bucket.last.checked_sub(Duration::from_secs(2)).unwrap();
+      }
+    }
+
+    assert_eq!(
+      state.check_route_rate_limits(
+        RateLimitContext::route(ip, "app", "/second", &headers),
+        &limit
+      ),
+      None
+    );
+    let buckets = state.rates.lock().unwrap();
+    assert_eq!(buckets.len(), 1);
+    assert!(buckets.keys().any(|(_, key)| key.ends_with(":/second")));
   }
 }
