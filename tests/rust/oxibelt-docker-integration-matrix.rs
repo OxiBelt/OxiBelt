@@ -496,19 +496,31 @@ while True:
 }
 
 assert_shared_pool_health() {
-  local attempt recovered state
+  local attempt observed_failure recovered state proxy_a_state response
+  observed_failure=0
   docker rm -f "${alt_container}" >/dev/null
 
-  for attempt in $(seq 1 6); do
-    probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" >/dev/null 2>&1 || true
+  for attempt in $(seq 1 12); do
+    response="$(probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" 2>/dev/null)" || true
+    if jq -e '.status == 502' <<<"${response}" >/dev/null 2>&1; then
+      observed_failure=1
+    fi
     if shared_pool_alt_unhealthy_on_proxy_b; then
       break
+    fi
+    if [[ "${observed_failure}" == "1" ]]; then
+      restart_primary_proxy
+      observed_failure=0
     fi
     sleep 1
   done
 
   if ! shared_pool_alt_unhealthy_on_proxy_b; then
     state="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/upstream-pools/shared-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    proxy_a_state="$(plain_client_request_with_headers_to_target "proxy" 9092 "proxy" "/admin/v1/upstream-pools/shared-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    echo "proxy-a shared pool state:" >&2
+    echo "${proxy_a_state}" >&2
+    echo "proxy-b shared pool state:" >&2
     echo "${state}" >&2
     fail_with_diagnostics "expected shared pool health to mark alt server unhealthy"
   fi
@@ -620,19 +632,31 @@ while True:
 }
 
 assert_shared_pool_health() {
-  local attempt recovered state
+  local attempt observed_failure recovered state proxy_a_state response
+  observed_failure=0
   docker rm -f "${alt_container}" >/dev/null
 
-  for attempt in $(seq 1 6); do
-    probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" >/dev/null 2>&1 || true
+  for attempt in $(seq 1 12); do
+    response="$(probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" 2>/dev/null)" || true
+    if jq -e '.status == 502' <<<"${response}" >/dev/null 2>&1; then
+      observed_failure=1
+    fi
     if shared_pool_alt_unhealthy_on_proxy_b; then
       break
+    fi
+    if [[ "${observed_failure}" == "1" ]]; then
+      restart_primary_proxy
+      observed_failure=0
     fi
     sleep 1
   done
 
   if ! shared_pool_alt_unhealthy_on_proxy_b; then
     state="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/upstream-pools/shared-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    proxy_a_state="$(plain_client_request_with_headers_to_target "proxy" 9092 "proxy" "/admin/v1/upstream-pools/shared-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    echo "proxy-a shared pool state:" >&2
+    echo "${proxy_a_state}" >&2
+    echo "proxy-b shared pool state:" >&2
     echo "${state}" >&2
     fail_with_diagnostics "expected shared pool health to mark alt server unhealthy"
   fi
