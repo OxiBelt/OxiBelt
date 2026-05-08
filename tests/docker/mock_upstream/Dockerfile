@@ -1,4 +1,4 @@
-FROM python:3.12-alpine3.23
+FROM python:3.14-alpine3.23
 
 WORKDIR /opt/mock_upstream
 RUN mkdir -p /tls
