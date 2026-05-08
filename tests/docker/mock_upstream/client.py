@@ -192,20 +192,25 @@ def read_http_response(sock, hold_after_headers_ms=0):
   return response, response.read()
 
 
-def perform_connect_tunnel(args, host_header, target_path):
+def perform_connect_tunnel(args, host_header, target_path, headers):
   sock = open_proxy_socket(args)
   try:
-    request = (
-      f"CONNECT {host_header}:443 HTTP/1.1\r\n"
-      f"Host: {host_header}:443\r\n"
-      "Content-Length: 0\r\n"
-      "\r\n"
-    ).encode("ascii")
+    request_lines = [
+      f"CONNECT {host_header}:443 HTTP/1.1",
+      f"Host: {host_header}:443",
+      "Content-Length: 0",
+    ]
+    for name, value in headers:
+      if name.lower() not in {"host", "content-length"}:
+        request_lines.append(f"{name}: {value}")
+    request = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8")
     sock.sendall(request)
     response = http.client.HTTPResponse(sock)
     response.begin()
     if response.status != 200:
       return response, response.read()
+    if args.hold_after_headers_ms > 0:
+      time.sleep(args.hold_after_headers_ms / 1000.0)
 
     tunneled = (
       f"GET {target_path} HTTP/1.1\r\n"
@@ -239,8 +244,9 @@ def perform_upgrade(args, host_header, target_path, headers, body):
     response = http.client.HTTPResponse(sock)
     response.begin()
     if response.status != 101:
-      response.read()
-      return response, b""
+      return response, response.read()
+    if args.hold_after_headers_ms > 0:
+      time.sleep(args.hold_after_headers_ms / 1000.0)
     sock.sendall(body)
     sock.settimeout(args.timeout)
     upgraded = sock.recv(4096)
@@ -310,6 +316,7 @@ def main() -> int:
         args,
         host_header,
         target_path,
+        headers,
       )
     elif args.upgrade_token:
       response, response_body_bytes = perform_upgrade(

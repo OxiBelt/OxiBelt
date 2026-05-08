@@ -608,12 +608,106 @@ wait_holding_client() {
   docker rm -f "${HOLDING_CLIENT_CONTAINER}" >/dev/null 2>&1 || true
 }
 
-upgrade_client_request() {
+start_holding_upgrade_client_request_with_headers() {
   local host="$1"
   local path="$2"
   local token="$3"
   local body="$4"
   local expect_status="$5"
+  local hold_ms="$6"
+  shift 6
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  HOLDING_CLIENT_CONTAINER="oxibelt-holding-upgrade-client-${run_id}-${RANDOM}"
+  HOLDING_CLIENT_LOG="${logs_dir}/${HOLDING_CLIENT_CONTAINER}.log"
+  docker create \
+    --name "${HOLDING_CLIENT_CONTAINER}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
+    /opt/mock_upstream/client.py \
+    --scheme https \
+    --path "${path}" \
+    --host "${host}" \
+    --port 8443 \
+    --method GET \
+    --body "${body}" \
+    --ca-file /tmp/proxy-ca.pem \
+    --upgrade-token "${token}" \
+    --dump-response-json \
+    --expect-status "${expect_status}" \
+    --hold-after-headers-ms "${hold_ms}" \
+    --timeout 15 \
+    "${header_args[@]}" >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${HOLDING_CLIENT_CONTAINER}:/tmp/proxy-ca.pem"
+
+  docker start -a "${HOLDING_CLIENT_CONTAINER}" >"${HOLDING_CLIENT_LOG}" 2>&1 &
+  HOLDING_CLIENT_PID=$!
+  sleep 1
+}
+
+start_holding_connect_tunnel_request_with_headers() {
+  local host="$1"
+  local tunneled_path="$2"
+  local expect_status="$3"
+  local hold_ms="$4"
+  shift 4
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  HOLDING_CLIENT_CONTAINER="oxibelt-holding-connect-client-${run_id}-${RANDOM}"
+  HOLDING_CLIENT_LOG="${logs_dir}/${HOLDING_CLIENT_CONTAINER}.log"
+  docker create \
+    --name "${HOLDING_CLIENT_CONTAINER}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
+    /opt/mock_upstream/client.py \
+    --scheme https \
+    --path "${tunneled_path}" \
+    --host "${host}" \
+    --port 8443 \
+    --method GET \
+    --body "" \
+    --ca-file /tmp/proxy-ca.pem \
+    --connect-tunnel \
+    --dump-response-json \
+    --expect-status "${expect_status}" \
+    --hold-after-headers-ms "${hold_ms}" \
+    --timeout 15 \
+    "${header_args[@]}" >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${HOLDING_CLIENT_CONTAINER}:/tmp/proxy-ca.pem"
+
+  docker start -a "${HOLDING_CLIENT_CONTAINER}" >"${HOLDING_CLIENT_LOG}" 2>&1 &
+  HOLDING_CLIENT_PID=$!
+  sleep 1
+}
+
+upgrade_client_request() {
+  upgrade_client_request_with_headers "$1" "$2" "$3" "$4" "$5"
+}
+
+upgrade_client_request_with_headers() {
+  local host="$1"
+  local path="$2"
+  local token="$3"
+  local body="$4"
+  local expect_status="$5"
+  shift 5
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
   local output=""
   local status=0
   local client_container=""
@@ -636,7 +730,8 @@ upgrade_client_request() {
       --ca-file /tmp/proxy-ca.pem \
       --upgrade-token "${token}" \
       --dump-response-json \
-      --expect-status "${expect_status}" >/dev/null
+      --expect-status "${expect_status}" \
+      "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
     if output="$(docker start -a "${client_container}" 2>&1)"; then
@@ -655,9 +750,19 @@ upgrade_client_request() {
 }
 
 connect_tunnel_request() {
+  connect_tunnel_request_with_headers "$1" "$2" "$3"
+}
+
+connect_tunnel_request_with_headers() {
   local host="$1"
   local tunneled_path="$2"
   local expect_status="$3"
+  shift 3
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
   local output=""
   local status=0
   local client_container=""
@@ -680,7 +785,8 @@ connect_tunnel_request() {
       --ca-file /tmp/proxy-ca.pem \
       --connect-tunnel \
       --dump-response-json \
-      --expect-status "${expect_status}" >/dev/null
+      --expect-status "${expect_status}" \
+      "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
     if output="$(docker start -a "${client_container}" 2>&1)"; then

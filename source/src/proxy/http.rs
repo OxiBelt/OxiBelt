@@ -521,6 +521,8 @@ where
       &host,
       &request_waf,
       request_version,
+      connection_limit_context.as_ref(),
+      request_connection_permit,
       access_log,
     )
     .await;
@@ -535,6 +537,8 @@ where
       &host,
       downstream_scheme,
       &request_waf,
+      connection_limit_context.as_ref(),
+      request_connection_permit,
       access_log,
     )
     .await
@@ -1192,6 +1196,23 @@ fn with_connection_permit(
   Response::from_parts(parts, body::with_drop_guard(body, permit))
 }
 
+struct TunnelConnectionLimitHold {
+  _request_permit: Option<ConnectionPermit>,
+  _first_request_context: Option<ConnectionLimitContext>,
+}
+
+impl TunnelConnectionLimitHold {
+  fn capture(
+    request_permit: &mut Option<ConnectionPermit>,
+    first_request_context: Option<&ConnectionLimitContext>,
+  ) -> Self {
+    Self {
+      _request_permit: request_permit.take(),
+      _first_request_context: first_request_context.cloned(),
+    }
+  }
+}
+
 fn error_indicates_body_timeout(error: &anyhow::Error, kind: BodyTimeoutKind) -> bool {
   error.chain().any(|cause| {
     cause
@@ -1277,6 +1298,8 @@ async fn handle_connect_request(
   downstream_host: &str,
   request_waf: &crate::waf::RequestWafDecision,
   request_version: http::Version,
+  connection_limit_context: Option<&ConnectionLimitContext>,
+  request_connection_permit: &mut Option<ConnectionPermit>,
   access_log: &mut SystemAccessLogContext,
 ) -> Response<ProxyBody> {
   if !state.config.proxy.upgrades.connect_tunneling || !resolved.route.connect_tunneling {
@@ -1310,7 +1333,10 @@ async fn handle_connect_request(
 
   if request_version == http::Version::HTTP_11 || request_version == http::Version::HTTP_10 {
     let downstream_upgrade = hyper::upgrade::on(&mut request);
+    let connection_limit_hold =
+      TunnelConnectionLimitHold::capture(request_connection_permit, connection_limit_context);
     tokio::spawn(async move {
+      let _connection_limit_hold = connection_limit_hold;
       let result = async {
         let downstream = downstream_upgrade.await?;
         let downstream = TokioIo::new(downstream);
@@ -1517,6 +1543,8 @@ async fn handle_upgrade_request(
   downstream_host: &str,
   downstream_scheme: &str,
   request_waf: &crate::waf::RequestWafDecision,
+  connection_limit_context: Option<&ConnectionLimitContext>,
+  request_connection_permit: &mut Option<ConnectionPermit>,
   access_log: &mut SystemAccessLogContext,
 ) -> Option<Response<ProxyBody>> {
   if request.version() != http::Version::HTTP_11 {
@@ -1674,7 +1702,10 @@ async fn handle_upgrade_request(
   let upstream_upgrade = hyper::upgrade::on(&mut upstream_response);
   let pool_report = state.pools.clone();
   let upstream_name = upstream.name.clone();
+  let connection_limit_hold =
+    TunnelConnectionLimitHold::capture(request_connection_permit, connection_limit_context);
   tokio::spawn(async move {
+    let _connection_limit_hold = connection_limit_hold;
     let result = async {
       let downstream = downstream_upgrade.await?;
       let upstream = upstream_upgrade.await?;
@@ -2371,6 +2402,58 @@ mod tests {
       alt_svc_header_value(8443, &config),
       "h3=\":8443\"; ma=60; persist=1"
     );
+  }
+
+  #[test]
+  fn tunnel_connection_limit_hold_keeps_request_permit_until_drop() {
+    let limits = crate::config::LimitsConfig {
+      max_connections: 10,
+      max_connections_per_ip: 1,
+      ..crate::config::LimitsConfig::default()
+    };
+    let limit_state = crate::limits::LimitState::new(None);
+    let ip = "203.0.113.10".parse().unwrap();
+    let mut request_permit = Some(
+      limit_state
+        .acquire_ip_connection(ip, &limits, &[])
+        .expect("initial request permit should be acquired"),
+    );
+
+    let hold = TunnelConnectionLimitHold::capture(&mut request_permit, None);
+
+    assert!(request_permit.is_none());
+    assert_eq!(
+      limit_state.acquire_ip_connection(ip, &limits, &[]).err(),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    drop(hold);
+    assert!(limit_state.acquire_ip_connection(ip, &limits, &[]).is_ok());
+  }
+
+  #[test]
+  fn tunnel_connection_limit_hold_keeps_first_request_context_until_drop() {
+    let limits = crate::config::LimitsConfig {
+      max_connections: 10,
+      max_connections_per_ip: 1,
+      ..crate::config::LimitsConfig::default()
+    };
+    let limit_state = crate::limits::LimitState::new(None);
+    let ip = "203.0.113.11".parse().unwrap();
+    let context = ConnectionLimitContext::default();
+    context
+      .bind_first_request(|| limit_state.acquire_ip_connection(ip, &limits, &[]))
+      .expect("first request context should bind");
+    let mut request_permit = None;
+
+    let hold = TunnelConnectionLimitHold::capture(&mut request_permit, Some(&context));
+    drop(context);
+
+    assert_eq!(
+      limit_state.acquire_ip_connection(ip, &limits, &[]).err(),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    drop(hold);
+    assert!(limit_state.acquire_ip_connection(ip, &limits, &[]).is_ok());
   }
 
   #[test]
