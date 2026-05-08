@@ -227,7 +227,7 @@ Reload modes:
 - `off`: no reload.
 - `oxirule`: reload only WAF-owned configuration and external rule files.
 - `downstream_tls`: reload the current downstream certificate, key, and static OCSP response.
-- `full`: reload OxiRule policy, TOML configuration, upstream clients, access-log sinks, downstream TLS material, and listener bind/protocol settings.
+- `full`: reload OxiRule policy, TOML configuration, upstream clients, access-log sinks, downstream TLS material, downstream listener bind/protocol settings, and admin listener enable/bind settings.
 
 Reload failures keep the previous active state.
 
@@ -506,7 +506,7 @@ Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate
 
 The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on upstream error, serve cached byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`.
 
-`[admin]` exposes operations APIs such as cache purge. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>` from `bearer_token_env`, even when mTLS is enabled.
+`[admin]` exposes operations APIs such as cache purge. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>` from `bearer_token_env`, even when mTLS is enabled. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
 
 Admin purge endpoints:
 

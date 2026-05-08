@@ -141,7 +141,7 @@ Hot reload modes:
 - `off`: no runtime reload.
 - `oxirule`: reload WAF-owned configuration and external OxiRule files only.
 - `downstream_tls`: reload the current downstream certificate, private key, and static OCSP response.
-- `full`: reload OxiRule, TOML configuration, upstream clients, access-log sinks, downstream TLS material, and listener bind/protocol settings.
+- `full`: reload OxiRule, TOML configuration, upstream clients, access-log sinks, downstream TLS material, downstream listener bind/protocol settings, and admin listener enable/bind settings.
 
 Reload apply behavior is failure-safe: invalid TOML, invalid rules, invalid certificate/key pairs, unreadable files, failed upstream client setup, failed database access-log setup, or failed listener binds leave the previous active state in place.
 
@@ -149,7 +149,7 @@ Operational endpoints are optional:
 
 - `[health]` exposes local readiness and liveness endpoints.
 - `[metrics]` exposes Prometheus-style metrics.
-- `[admin]` exposes authenticated operations APIs such as cache purge on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist.
+- `[admin]` exposes authenticated operations APIs such as cache purge on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist. Full hot reload starts, stops, or rebinds this listener when admin listener settings change.
 - `[logging.access_log]` emits request-wide newline-delimited JSON access logs with `scope = "system"` and can use its own stdout and PostgreSQL sinks.
 - OxiRule `emit_access_log` writes newline-delimited JSON with `scope = "waf"` to stdout and can optionally mirror records to PostgreSQL through the separate `[database.access_log]` sink.
 

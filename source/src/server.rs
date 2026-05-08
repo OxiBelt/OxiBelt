@@ -119,25 +119,6 @@ impl OpsTasks {
         }
       }));
     }
-    if snapshot.config.admin.enabled {
-      let listener = TcpListener::bind(snapshot.config.admin.bind)
-        .await
-        .with_context(|| {
-          format!(
-            "failed to bind admin listener to {}",
-            snapshot.config.admin.bind
-          )
-        })?;
-      let (tx, rx) = watch::channel(false);
-      shutdown.push(tx);
-      let task_state = state.clone();
-      let task_error = error_tx.clone();
-      tasks.push(tokio::spawn(async move {
-        if let Err(error) = serve_admin_listener(listener, task_state, rx).await {
-          let _ = task_error.send(error.context("admin listener failed"));
-        }
-      }));
-    }
     let (tx, rx) = watch::channel(false);
     shutdown.push(tx);
     let task_state = state;
@@ -232,6 +213,7 @@ fn ops_response(
 
 async fn serve_admin_listener(
   listener: TcpListener,
+  configured_bind: SocketAddr,
   state: AppHandle,
   mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -258,7 +240,7 @@ async fn serve_admin_listener(
         };
         let state = state.clone();
         tokio::spawn(async move {
-          if let Err(error) = handle_admin_connection(stream, peer_addr, state).await {
+          if let Err(error) = handle_admin_connection(stream, peer_addr, configured_bind, state).await {
             warn!(peer = %peer_addr, error = %error, "admin connection failed");
           }
         });
@@ -270,29 +252,41 @@ async fn serve_admin_listener(
 async fn handle_admin_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
+  listener_bind: SocketAddr,
   state: AppHandle,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
+  if !admin_listener_current(&snapshot, listener_bind) {
+    bail!("admin listener is no longer current");
+  }
   let plaintext_allowed = admin_plaintext_allowed(&snapshot, peer_addr);
-  match snapshot.config.admin.transport {
-    AdminTransportMode::Tls => handle_admin_tls_connection(stream, peer_addr, state).await,
+  let transport = snapshot.config.admin.transport;
+  drop(snapshot);
+  match transport {
+    AdminTransportMode::Tls => {
+      handle_admin_tls_connection(stream, peer_addr, listener_bind, state).await
+    }
     AdminTransportMode::Plaintext => {
-      handle_admin_plaintext_connection(stream, peer_addr, state).await
+      handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state).await
     }
     AdminTransportMode::PlaintextAllowlist if plaintext_allowed => {
-      handle_admin_plaintext_connection(stream, peer_addr, state).await
+      handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state).await
     }
     AdminTransportMode::PlaintextAllowlist => {
       bail!("admin plaintext connection from {peer_addr} is not allowlisted");
     }
     AdminTransportMode::Auto => {
       if plaintext_allowed && !tcp_stream_starts_with_tls(&stream).await {
-        handle_admin_plaintext_connection(stream, peer_addr, state).await
+        handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state).await
       } else {
-        handle_admin_tls_connection(stream, peer_addr, state).await
+        handle_admin_tls_connection(stream, peer_addr, listener_bind, state).await
       }
     }
   }
+}
+
+fn admin_listener_current(snapshot: &AppSnapshot, listener_bind: SocketAddr) -> bool {
+  snapshot.config.admin.enabled && snapshot.config.admin.bind == listener_bind
 }
 
 async fn tcp_stream_starts_with_tls(stream: &TcpStream) -> bool {
@@ -313,6 +307,7 @@ fn admin_plaintext_allowed(snapshot: &AppSnapshot, peer_addr: SocketAddr) -> boo
 async fn handle_admin_tls_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
+  listener_bind: SocketAddr,
   state: AppHandle,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
@@ -329,20 +324,36 @@ async fn handle_admin_tls_connection(
   .await
   .context("admin TLS handshake timed out")?
   .context("admin TLS handshake failed")?;
-  serve_admin_http1(TokioIo::new(tls_stream), peer_addr, state, "https").await
+  serve_admin_http1(
+    TokioIo::new(tls_stream),
+    peer_addr,
+    listener_bind,
+    state,
+    "https",
+  )
+  .await
 }
 
 async fn handle_admin_plaintext_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
+  listener_bind: SocketAddr,
   state: AppHandle,
 ) -> anyhow::Result<()> {
-  serve_admin_http1(TokioIo::new(stream), peer_addr, state, "http").await
+  serve_admin_http1(
+    TokioIo::new(stream),
+    peer_addr,
+    listener_bind,
+    state,
+    "http",
+  )
+  .await
 }
 
 async fn serve_admin_http1<I>(
   io: TokioIo<I>,
   peer_addr: SocketAddr,
+  listener_bind: SocketAddr,
   state: AppHandle,
   scheme: &'static str,
 ) -> anyhow::Result<()>
@@ -351,7 +362,15 @@ where
 {
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
-    async move { Ok::<_, Infallible>(admin_response(request, state, peer_addr, scheme)) }
+    async move {
+      Ok::<_, Infallible>(admin_response(
+        request,
+        state,
+        peer_addr,
+        listener_bind,
+        scheme,
+      ))
+    }
   });
   hyper::server::conn::http1::Builder::new()
     .serve_connection(io, service)
@@ -363,15 +382,19 @@ fn admin_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
   peer_addr: SocketAddr,
+  listener_bind: SocketAddr,
   scheme: &'static str,
 ) -> Response<ProxyBody> {
-  if !admin_authorized(&request, &state.snapshot().config.admin.bearer_token_env) {
+  let snapshot = state.snapshot();
+  if !admin_listener_current(&snapshot, listener_bind) {
+    return text_response(StatusCode::NOT_FOUND, "not found");
+  }
+  if !admin_authorized(&request, &snapshot.config.admin.bearer_token_env) {
     return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
   }
   if request.method() != ::http::Method::POST {
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
   }
-  let snapshot = state.snapshot();
   let query = request.uri().query().unwrap_or_default();
   let params = url::form_urlencoded::parse(query.as_bytes())
     .into_owned()
@@ -468,6 +491,7 @@ pub(crate) struct ListenerSupervisor {
   tcp: Option<TcpListenerTask>,
   http: Option<TcpListenerTask>,
   http3: Option<Http3ListenerTask>,
+  admin: Option<AdminListenerTask>,
   streams: Vec<StreamListenerTask>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
 }
@@ -502,10 +526,22 @@ struct BoundHttp3Listener {
   endpoint: h3_quinn::quinn::Endpoint,
 }
 
+struct AdminListenerTask {
+  bind: SocketAddr,
+  shutdown: watch::Sender<bool>,
+  task: JoinHandle<()>,
+}
+
+struct BoundAdminListener {
+  bind: SocketAddr,
+  listener: TcpListener,
+}
+
 pub(crate) struct PendingListenerUpdate {
   tcp: Option<Option<BoundTcpListener>>,
   http: Option<Option<BoundTcpListener>>,
   http3: Option<Option<BoundHttp3Listener>>,
+  admin: Option<Option<BoundAdminListener>>,
   streams: Option<Vec<BoundStreamListener>>,
   refresh_http3_config: bool,
 }
@@ -520,6 +556,7 @@ impl ListenerSupervisor {
       tcp: None,
       http: None,
       http3: None,
+      admin: None,
       streams: Vec::new(),
       error_tx,
     };
@@ -577,6 +614,19 @@ impl ListenerSupervisor {
       (None, false)
     };
 
+    let admin = if snapshot.config.admin.enabled {
+      let bind = snapshot.config.admin.bind;
+      if self.admin.as_ref().map(|task| task.bind) == Some(bind) {
+        None
+      } else {
+        Some(Some(bind_admin_listener(bind).await?))
+      }
+    } else if self.admin.is_some() {
+      Some(None)
+    } else {
+      None
+    };
+
     let desired_streams = snapshot
       .config
       .stream_listeners
@@ -602,6 +652,7 @@ impl ListenerSupervisor {
       tcp,
       http,
       http3,
+      admin,
       streams,
       refresh_http3_config,
     })
@@ -661,6 +712,20 @@ impl ListenerSupervisor {
       }
       None => {}
     }
+    match pending.admin {
+      Some(Some(admin)) => {
+        let admin = admin.start(state.clone(), self.error_tx.clone());
+        if let Some(old) = self.admin.replace(admin) {
+          old.shutdown();
+        }
+      }
+      Some(None) => {
+        if let Some(old) = self.admin.take() {
+          old.shutdown();
+        }
+      }
+      None => {}
+    }
     if let Some(streams) = pending.streams {
       let old = std::mem::take(&mut self.streams);
       for task in old {
@@ -670,6 +735,26 @@ impl ListenerSupervisor {
         .into_iter()
         .map(|stream| stream.start(state.clone(), self.error_tx.clone()))
         .collect();
+    }
+  }
+}
+
+impl Drop for ListenerSupervisor {
+  fn drop(&mut self) {
+    if let Some(task) = self.tcp.take() {
+      task.shutdown();
+    }
+    if let Some(task) = self.http.take() {
+      task.shutdown();
+    }
+    if let Some(task) = self.http3.take() {
+      task.shutdown();
+    }
+    if let Some(task) = self.admin.take() {
+      task.shutdown();
+    }
+    for task in std::mem::take(&mut self.streams) {
+      task.shutdown();
     }
   }
 }
@@ -734,6 +819,34 @@ impl BoundHttp3Listener {
   }
 }
 
+impl AdminListenerTask {
+  fn shutdown(self) {
+    let _ = self.shutdown.send(true);
+    self.task.abort();
+  }
+}
+
+impl BoundAdminListener {
+  fn start(
+    self,
+    state: AppHandle,
+    error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  ) -> AdminListenerTask {
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let bind = self.bind;
+    let task = tokio::spawn(async move {
+      if let Err(error) = serve_admin_listener(self.listener, bind, state, shutdown_rx).await {
+        let _ = error_tx.send(error.context("admin listener failed"));
+      }
+    });
+    AdminListenerTask {
+      bind,
+      shutdown,
+      task,
+    }
+  }
+}
+
 async fn bind_tcp_listener(
   bind: SocketAddr,
   kind: TcpListenerKind,
@@ -746,6 +859,13 @@ async fn bind_tcp_listener(
     kind,
     listener,
   })
+}
+
+async fn bind_admin_listener(bind: SocketAddr) -> anyhow::Result<BoundAdminListener> {
+  let listener = TcpListener::bind(bind)
+    .await
+    .with_context(|| format!("failed to bind admin listener to {bind}"))?;
+  Ok(BoundAdminListener { bind, listener })
 }
 
 async fn serve_tcp(
@@ -1333,6 +1453,284 @@ fn unique_nonempty(values: impl IntoIterator<Item = String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  use std::path::Path;
+  use std::time::Instant;
+
+  use crate::config::Config;
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  const ADMIN_TOKEN_ENV: &str = "PATH";
+
+  #[tokio::test]
+  async fn admin_listener_disabled_config_does_not_serve_stale_requests() {
+    let temp_dir = common::TempDir::new("admin-listener-disabled");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "admin-listener-disabled");
+    let config = admin_listener_config(&cert_path, &key_path, false, None);
+    let state = AppHandle::new(
+      AppSnapshot::new(config)
+        .await
+        .expect("snapshot should initialize"),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("admin listener should bind");
+    let addr = listener
+      .local_addr()
+      .expect("admin listener address should be available");
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let task = tokio::spawn(serve_admin_listener(listener, addr, state, shutdown_rx));
+
+    match admin_purge_response(addr).await {
+      Ok(response) => assert!(
+        !response.contains("purged="),
+        "disabled admin listener must not serve purge requests: {response:?}"
+      ),
+      Err(error)
+        if matches!(
+          error.kind(),
+          std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::UnexpectedEof
+        ) => {}
+      Err(error) => panic!("unexpected stale admin connection error: {error}"),
+    }
+    let _ = shutdown.send(true);
+    task.abort();
+  }
+
+  #[tokio::test]
+  async fn admin_listener_supervisor_rebinds_admin_port_on_reload() {
+    let temp_dir = common::TempDir::new("admin-listener-rebind");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "admin-listener-rebind");
+    let (old_admin, new_admin) = unused_loopback_ports().await;
+    let initial_config = admin_listener_config(&cert_path, &key_path, true, Some(old_admin));
+    let state = AppHandle::new(
+      AppSnapshot::new(initial_config)
+        .await
+        .expect("initial snapshot should initialize"),
+    );
+    let (error_tx, _error_rx) = mpsc::unbounded_channel();
+    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx)
+      .await
+      .expect("listener supervisor should start");
+
+    let response = admin_purge_response_with_retry(old_admin).await;
+    assert!(
+      response.starts_with("HTTP/1.1 200 OK"),
+      "old admin listener should serve before reload: {response:?}"
+    );
+    let mut stale_connection = TcpStream::connect(old_admin)
+      .await
+      .expect("stale admin connection should open before reload");
+    write_admin_purge_request_headers(&mut stale_connection)
+      .await
+      .expect("stale admin request headers should write before reload");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let active = state.snapshot();
+    let reloaded_config = admin_listener_config(&cert_path, &key_path, true, Some(new_admin));
+    let reloaded = AppSnapshot::new_with_previous(reloaded_config, Some(active.as_ref()))
+      .await
+      .expect("reloaded snapshot should initialize");
+    let pending = supervisor
+      .prepare(&reloaded)
+      .await
+      .expect("admin rebind should prepare");
+    state.replace(reloaded);
+    let active = state.snapshot();
+    supervisor.commit(pending, active.as_ref(), state.clone());
+
+    let response = admin_purge_response_with_retry(new_admin).await;
+    assert!(
+      response.starts_with("HTTP/1.1 200 OK"),
+      "new admin listener should serve after reload: {response:?}"
+    );
+    let stale_response = finish_admin_purge_response_on_stream(stale_connection)
+      .await
+      .expect("stale admin connection should receive a response after rebind");
+    assert!(
+      stale_response.starts_with("HTTP/1.1 404 Not Found"),
+      "stale admin connection should stop serving after rebind: {stale_response:?}"
+    );
+    assert_tcp_connect_fails(old_admin).await;
+  }
+
+  #[tokio::test]
+  async fn admin_listener_supervisor_stops_admin_port_when_disabled() {
+    let temp_dir = common::TempDir::new("admin-listener-disable-reload");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "admin-listener-disable-reload");
+    let admin_addr = unused_loopback_port().await;
+    let initial_config = admin_listener_config(&cert_path, &key_path, true, Some(admin_addr));
+    let state = AppHandle::new(
+      AppSnapshot::new(initial_config)
+        .await
+        .expect("initial snapshot should initialize"),
+    );
+    let (error_tx, _error_rx) = mpsc::unbounded_channel();
+    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx)
+      .await
+      .expect("listener supervisor should start");
+
+    let response = admin_purge_response_with_retry(admin_addr).await;
+    assert!(
+      response.starts_with("HTTP/1.1 200 OK"),
+      "admin listener should serve before disable reload: {response:?}"
+    );
+
+    let active = state.snapshot();
+    let disabled_config = admin_listener_config(&cert_path, &key_path, false, Some(admin_addr));
+    let reloaded = AppSnapshot::new_with_previous(disabled_config, Some(active.as_ref()))
+      .await
+      .expect("disabled snapshot should initialize");
+    let pending = supervisor
+      .prepare(&reloaded)
+      .await
+      .expect("admin disable should prepare");
+    state.replace(reloaded);
+    let active = state.snapshot();
+    supervisor.commit(pending, active.as_ref(), state.clone());
+
+    assert_tcp_connect_fails(admin_addr).await;
+  }
+
+  fn admin_listener_config(
+    cert_path: &Path,
+    key_path: &Path,
+    enabled: bool,
+    admin_bind: Option<SocketAddr>,
+  ) -> Config {
+    let mut raw = common::minimal_config_toml(cert_path, key_path)
+      .replace("unprivileged_mode = true", "unprivileged_mode = false")
+      .replace(
+        "https_bind = \"127.0.0.1:8443\"",
+        "https_bind = \"127.0.0.1:0\"",
+      );
+    raw.push_str(&format!(
+      r#"
+
+[admin]
+enabled = {enabled}
+bearer_token_env = "{ADMIN_TOKEN_ENV}"
+transport = "plaintext_allowlist"
+"#
+    ));
+    if let Some(admin_bind) = admin_bind {
+      raw.push_str(&format!("bind = \"{admin_bind}\"\n"));
+    }
+    parse_test_config(&raw)
+  }
+
+  fn parse_test_config(raw: &str) -> Config {
+    let config: Config = toml::from_str(raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    config
+  }
+
+  async fn unused_loopback_ports() -> (SocketAddr, SocketAddr) {
+    let first = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("first ephemeral port should bind");
+    let second = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("second ephemeral port should bind");
+    let first_addr = first
+      .local_addr()
+      .expect("first ephemeral address should be available");
+    let second_addr = second
+      .local_addr()
+      .expect("second ephemeral address should be available");
+    (first_addr, second_addr)
+  }
+
+  async fn unused_loopback_port() -> SocketAddr {
+    unused_loopback_ports().await.0
+  }
+
+  async fn admin_purge_response_with_retry(addr: SocketAddr) -> String {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+      match admin_purge_response(addr).await {
+        Ok(response) if response.starts_with("HTTP/1.1 200 OK") => return response,
+        Ok(response) if Instant::now() >= deadline => {
+          panic!("admin listener did not return 200 before deadline: {response:?}")
+        }
+        Err(error) if Instant::now() >= deadline => {
+          panic!("admin listener did not become ready before deadline: {error}")
+        }
+        Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+      }
+    }
+  }
+
+  async fn admin_purge_response(addr: SocketAddr) -> std::io::Result<String> {
+    let stream = TcpStream::connect(addr).await?;
+    admin_purge_response_on_stream(stream).await
+  }
+
+  async fn admin_purge_response_on_stream(mut stream: TcpStream) -> std::io::Result<String> {
+    write_admin_purge_request_headers(&mut stream).await?;
+    finish_admin_purge_response_on_stream(stream).await
+  }
+
+  async fn write_admin_purge_request_headers(stream: &mut TcpStream) -> std::io::Result<()> {
+    let token = admin_test_token()?;
+    let request_headers = format!(
+      "POST /cache/purge?policy=default&scheme=http&host=example.com&uri=/ HTTP/1.1\r\n\
+       Host: admin\r\n\
+       Authorization: Bearer {token}\r\n\
+       Content-Length: 0\r\n\
+       Connection: close\r\n"
+    );
+    stream.write_all(request_headers.as_bytes()).await
+  }
+
+  async fn finish_admin_purge_response_on_stream(mut stream: TcpStream) -> std::io::Result<String> {
+    stream.write_all(b"\r\n").await?;
+    let mut response = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+      .await
+      .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "admin response timed out")
+      })??;
+    let _ = read;
+    Ok(String::from_utf8_lossy(&response).into_owned())
+  }
+
+  fn admin_test_token() -> std::io::Result<String> {
+    std::env::var(ADMIN_TOKEN_ENV).map_err(|error| {
+      std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("{ADMIN_TOKEN_ENV} is required for admin listener tests: {error}"),
+      )
+    })
+  }
+
+  async fn assert_tcp_connect_fails(addr: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+      match tokio::time::timeout(Duration::from_millis(100), TcpStream::connect(addr)).await {
+        Ok(Ok(stream)) => {
+          drop(stream);
+          if Instant::now() >= deadline {
+            panic!("TCP listener at {addr} stayed reachable");
+          }
+          tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(Err(_)) | Err(_) => return,
+      }
+    }
+  }
 
   #[test]
   fn tls_fingerprint_payload_includes_client_hello_and_selected_tls_metadata() {
