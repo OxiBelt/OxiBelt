@@ -1048,6 +1048,65 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "proxy-identity",
+            "connection-limit-first-request-real-ip",
+            "first-request Real-IP connection limits use trusted forwarded client IPs",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local same other after
+  start_holding_client_request_with_headers \
+    "proxy" 8443 "https" "" \
+    "example.test" "/app/hold-first?body_delay_ms=3000" 200 4000 \
+    "X-Forwarded-For: 203.0.113.10"
+
+  same="$(client_request_with_headers "example.test" "/app/same-client" 429 "GET" "" "X-Forwarded-For: 203.0.113.10")"
+  assert_response_jq "${same}" '.body == "connection limit exceeded"'
+
+  other="$(client_request_with_headers "example.test" "/app/other-client" 200 "GET" "" "X-Forwarded-For: 203.0.113.11")"
+  assert_body_jq "${other}" '.path == "/origin/app/other-client"'
+
+  wait_holding_client
+
+  after="$(client_request_with_headers "example.test" "/app/after-release" 200 "GET" "" "X-Forwarded-For: 203.0.113.10")"
+  assert_body_jq "${after}" '.path == "/origin/app/after-release"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-identity",
+            "connection-limit-per-request-real-ip",
+            "per-request Real-IP connection limits release after response body completion",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local same after
+  start_holding_client_request_with_headers \
+    "proxy" 8443 "https" "" \
+    "example.test" "/app/hold-per-request?body_delay_ms=3000" 200 4000 \
+    "X-Forwarded-For: 203.0.113.20"
+
+  same="$(client_request_with_headers "example.test" "/app/same-client" 429 "GET" "" "X-Forwarded-For: 203.0.113.20")"
+  assert_response_jq "${same}" '.body == "connection limit exceeded"'
+
+  wait_holding_client
+
+  after="$(client_request_with_headers "example.test" "/app/after-release" 200 "GET" "" "X-Forwarded-For: 203.0.113.20")"
+  assert_body_jq "${after}" '.path == "/origin/app/after-release"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "proxy-protocol",
             "trusted-v1",
             "trusted PROXY protocol v1 source address reaches request WAF rules",
@@ -1058,6 +1117,35 @@ run_case_checks() {
   local response
   response="$(proxy_protocol_client_request "PROXY TCP4 203.0.113.10 192.0.2.10 45678 443" "example.test" "/app/proxy-protocol" 409)"
   assert_response_jq "${response}" '.body == "proxy protocol source blocked"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-protocol",
+            "connection-limit-source-ip",
+            "PROXY protocol source IP is used for downstream connection limits",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local same other
+  start_holding_client_request_with_headers \
+    "proxy" 8443 "https" "PROXY TCP4 203.0.113.30 192.0.2.10 45678 443" \
+    "example.test" "/app/hold-proxy?body_delay_ms=3000" 200 4000
+
+  if same="$(probe_proxy_protocol_client_request "PROXY TCP4 203.0.113.30 192.0.2.10 45679 443" "example.test" "/app/same-client" 2>/dev/null)"; then
+    echo "${same}" >&2
+    fail_with_diagnostics "same PROXY source IP unexpectedly reached the proxy while the first connection was held"
+  fi
+
+  other="$(proxy_protocol_client_request "PROXY TCP4 203.0.113.31 192.0.2.10 45680 443" "example.test" "/app/other-client" 200)"
+  assert_body_jq "${other}" '.path == "/origin/app/other-client"'
+
+  wait_holding_client
 }
 "#,
             None,

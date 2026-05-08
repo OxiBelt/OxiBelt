@@ -116,7 +116,17 @@ def open_proxy_socket(args, proxy_protocol_line=None):
     raise
 
 
-def send_http_request(sock, method, target_path, host_header, headers, body, slow_body_delay_ms=0):
+def send_http_request(
+  sock,
+  method,
+  target_path,
+  host_header,
+  headers,
+  body,
+  connection,
+  slow_body_delay_ms=0,
+  hold_after_headers_ms=0,
+):
   request_lines = [
     f"{method} {target_path} HTTP/1.1",
     f"Host: {host_header}",
@@ -130,13 +140,13 @@ def send_http_request(sock, method, target_path, host_header, headers, body, slo
     request_lines.append(f"{name}: {value}")
   if not has_content_length:
     request_lines.append(f"Content-Length: {len(body)}")
-  request_lines.append("Connection: close")
+  request_lines.append(f"Connection: {connection}")
   head = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8")
   sock.sendall(head)
   if slow_body_delay_ms > 0 and body:
     time.sleep(slow_body_delay_ms / 1000.0)
   sock.sendall(body)
-  return read_http_response(sock)
+  return read_http_response(sock, hold_after_headers_ms)
 
 
 def request_direct(args, target_path, host_header, headers, body):
@@ -149,7 +159,9 @@ def request_direct(args, target_path, host_header, headers, body):
       host_header,
       headers,
       body,
+      args.connection,
       args.slow_body_delay_ms,
+      args.hold_after_headers_ms,
     )
   finally:
     sock.close()
@@ -165,14 +177,18 @@ def request_with_proxy_protocol(args, target_path, host_header, headers, body):
       host_header,
       headers,
       body,
+      args.connection,
       args.slow_body_delay_ms,
+      args.hold_after_headers_ms,
     )
   finally:
     sock.close()
 
-def read_http_response(sock):
+def read_http_response(sock, hold_after_headers_ms=0):
   response = http.client.HTTPResponse(sock)
   response.begin()
+  if hold_after_headers_ms > 0:
+    time.sleep(hold_after_headers_ms / 1000.0)
   return response, response.read()
 
 
@@ -251,7 +267,9 @@ def main() -> int:
   parser.add_argument("--dump-response-json", action="store_true")
   parser.add_argument("--expect-status", type=int)
   parser.add_argument("--timeout", type=float, default=5.0)
+  parser.add_argument("--connection", choices=("close", "keep-alive"), default="close")
   parser.add_argument("--slow-body-delay-ms", type=int, default=0)
+  parser.add_argument("--hold-after-headers-ms", type=int, default=0)
   args = parser.parse_args()
 
   try:

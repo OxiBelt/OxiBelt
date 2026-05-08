@@ -56,6 +56,28 @@ struct ConnectionCounts {
 }
 
 #[derive(Debug)]
+struct ConnectionAcquireSpec {
+  key: String,
+  kind: ConnectionAcquireKind,
+  limit: usize,
+  status: StatusCode,
+}
+
+#[derive(Debug)]
+enum ConnectionAcquireKind {
+  Total,
+  Ip(IpAddr),
+  Named { name: String, ip: IpAddr },
+}
+
+#[derive(Debug, Default)]
+struct LocalConnectionRelease {
+  total: bool,
+  ip: Option<IpAddr>,
+  names: Vec<String>,
+}
+
+#[derive(Debug)]
 struct TokenBucket {
   tokens: f64,
   last: Instant,
@@ -70,48 +92,100 @@ impl LimitState {
     })
   }
 
+  pub fn acquire_global_connection(
+    self: &Arc<Self>,
+    limits: &LimitsConfig,
+  ) -> Result<ConnectionPermit, StatusCode> {
+    self.acquire_scopes(vec![ConnectionAcquireSpec {
+      key: "total".to_string(),
+      kind: ConnectionAcquireKind::Total,
+      limit: limits.max_connections,
+      status: StatusCode::SERVICE_UNAVAILABLE,
+    }])
+  }
+
+  pub fn acquire_ip_connection(
+    self: &Arc<Self>,
+    ip: IpAddr,
+    limits: &LimitsConfig,
+    connection_limits: &[ConnectionLimitConfig],
+  ) -> Result<ConnectionPermit, StatusCode> {
+    let mut specs = vec![ConnectionAcquireSpec {
+      key: format!("ip:{ip}"),
+      kind: ConnectionAcquireKind::Ip(ip),
+      limit: limits.max_connections_per_ip,
+      status: StatusCode::TOO_MANY_REQUESTS,
+    }];
+    specs.extend(connection_limits.iter().map(|limit| ConnectionAcquireSpec {
+      key: format!("named:{}:{ip}", limit.name),
+      kind: ConnectionAcquireKind::Named {
+        name: limit.name.clone(),
+        ip,
+      },
+      limit: limit.limit,
+      status: StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
+    }));
+    self.acquire_scopes(specs)
+  }
+
   pub fn acquire_connection(
     self: &Arc<Self>,
     ip: IpAddr,
     limits: &LimitsConfig,
     connection_limits: &[ConnectionLimitConfig],
   ) -> Result<ConnectionPermit, StatusCode> {
+    let mut specs = vec![
+      ConnectionAcquireSpec {
+        key: "total".to_string(),
+        kind: ConnectionAcquireKind::Total,
+        limit: limits.max_connections,
+        status: StatusCode::SERVICE_UNAVAILABLE,
+      },
+      ConnectionAcquireSpec {
+        key: format!("ip:{ip}"),
+        kind: ConnectionAcquireKind::Ip(ip),
+        limit: limits.max_connections_per_ip,
+        status: StatusCode::TOO_MANY_REQUESTS,
+      },
+    ];
+    specs.extend(connection_limits.iter().map(|limit| ConnectionAcquireSpec {
+      key: format!("named:{}:{ip}", limit.name),
+      kind: ConnectionAcquireKind::Named {
+        name: limit.name.clone(),
+        ip,
+      },
+      limit: limit.limit,
+      status: StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
+    }));
+    self.acquire_scopes(specs)
+  }
+
+  fn acquire_scopes(
+    self: &Arc<Self>,
+    specs: Vec<ConnectionAcquireSpec>,
+  ) -> Result<ConnectionPermit, StatusCode> {
     if let Some(shared) = &self.shared_state
       && shared.has_connection_limits()
     {
-      let mut owned_scopes = vec!["total".to_string(), format!("ip:{ip}")];
-      for limit in connection_limits {
-        owned_scopes.push(format!("named:{}:{ip}", limit.name));
-      }
-      let mut scopes = vec![
-        ConnectionScope {
-          key: owned_scopes[0].as_str(),
-          limit: limits.max_connections,
-          status: StatusCode::SERVICE_UNAVAILABLE,
-        },
-        ConnectionScope {
-          key: owned_scopes[1].as_str(),
-          limit: limits.max_connections_per_ip,
-          status: StatusCode::TOO_MANY_REQUESTS,
-        },
-      ];
-      for (index, limit) in connection_limits.iter().enumerate() {
-        scopes.push(ConnectionScope {
-          key: owned_scopes[index + 2].as_str(),
-          limit: limit.limit,
-          status: StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
-        });
-      }
+      let owned_scopes = specs
+        .iter()
+        .map(|spec| spec.key.clone())
+        .collect::<Vec<_>>();
+      let scopes = specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| ConnectionScope {
+          key: owned_scopes[index].as_str(),
+          limit: spec.limit,
+          status: spec.status,
+        })
+        .collect::<Vec<_>>();
       let acquired = shared.acquire_connections(&scopes);
       drop(scopes);
       return match acquired {
         Ok(None) => Ok(ConnectionPermit {
           state: self.clone(),
-          ip,
-          names: connection_limits
-            .iter()
-            .map(|limit| limit.name.clone())
-            .collect(),
+          local_release: LocalConnectionRelease::default(),
           shared_scopes: owned_scopes,
         }),
         Ok(Some(status)) => Err(status),
@@ -125,30 +199,46 @@ impl LimitState {
       .connections
       .lock()
       .expect("connection limit lock poisoned");
-    if counts.total >= limits.max_connections {
-      return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    if counts.per_ip.get(&ip).copied().unwrap_or(0) >= limits.max_connections_per_ip {
-      return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    for limit in connection_limits {
-      let key = (limit.name.clone(), ip);
-      if counts.named.get(&key).copied().unwrap_or(0) >= limit.limit {
-        return Err(StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS));
+    for spec in &specs {
+      match &spec.kind {
+        ConnectionAcquireKind::Total => {
+          if counts.total >= spec.limit {
+            return Err(spec.status);
+          }
+        }
+        ConnectionAcquireKind::Ip(ip) => {
+          if counts.per_ip.get(ip).copied().unwrap_or(0) >= spec.limit {
+            return Err(spec.status);
+          }
+        }
+        ConnectionAcquireKind::Named { name, ip } => {
+          if counts.named.get(&(name.clone(), *ip)).copied().unwrap_or(0) >= spec.limit {
+            return Err(spec.status);
+          }
+        }
       }
     }
-    counts.total += 1;
-    *counts.per_ip.entry(ip).or_insert(0) += 1;
-    for limit in connection_limits {
-      *counts.named.entry((limit.name.clone(), ip)).or_insert(0) += 1;
+    let mut local_release = LocalConnectionRelease::default();
+    for spec in specs {
+      match spec.kind {
+        ConnectionAcquireKind::Total => {
+          counts.total += 1;
+          local_release.total = true;
+        }
+        ConnectionAcquireKind::Ip(ip) => {
+          *counts.per_ip.entry(ip).or_insert(0) += 1;
+          local_release.ip = Some(ip);
+        }
+        ConnectionAcquireKind::Named { name, ip } => {
+          *counts.named.entry((name.clone(), ip)).or_insert(0) += 1;
+          local_release.ip = Some(ip);
+          local_release.names.push(name);
+        }
+      }
     }
     Ok(ConnectionPermit {
       state: self.clone(),
-      ip,
-      names: connection_limits
-        .iter()
-        .map(|limit| limit.name.clone())
-        .collect(),
+      local_release,
       shared_scopes: Vec::new(),
     })
   }
@@ -208,15 +298,19 @@ impl LimitState {
     None
   }
 
-  fn release_connection(&self, ip: IpAddr, names: &[String]) {
+  fn release_connection(&self, release: &LocalConnectionRelease) {
     let mut counts = self
       .connections
       .lock()
       .expect("connection limit lock poisoned");
-    counts.total = counts.total.saturating_sub(1);
-    decrement_or_remove(&mut counts.per_ip, &ip);
-    for name in names {
-      decrement_or_remove(&mut counts.named, &(name.clone(), ip));
+    if release.total {
+      counts.total = counts.total.saturating_sub(1);
+    }
+    if let Some(ip) = release.ip {
+      decrement_or_remove(&mut counts.per_ip, &ip);
+      for name in &release.names {
+        decrement_or_remove(&mut counts.named, &(name.clone(), ip));
+      }
     }
   }
 
@@ -229,18 +323,39 @@ impl LimitState {
 
 pub struct ConnectionPermit {
   state: Arc<LimitState>,
-  ip: IpAddr,
-  names: Vec<String>,
+  local_release: LocalConnectionRelease,
   shared_scopes: Vec<String>,
 }
 
 impl Drop for ConnectionPermit {
   fn drop(&mut self) {
     if self.shared_scopes.is_empty() {
-      self.state.release_connection(self.ip, &self.names);
+      self.state.release_connection(&self.local_release);
     } else {
       self.state.release_shared_connection(&self.shared_scopes);
     }
+  }
+}
+
+#[derive(Clone, Default)]
+pub struct ConnectionLimitContext {
+  first_request: Arc<Mutex<Option<ConnectionPermit>>>,
+}
+
+impl ConnectionLimitContext {
+  pub fn bind_first_request<F>(&self, acquire: F) -> Result<(), StatusCode>
+  where
+    F: FnOnce() -> Result<ConnectionPermit, StatusCode>,
+  {
+    let mut first_request = self
+      .first_request
+      .lock()
+      .expect("first request connection limit lock poisoned");
+    if first_request.is_some() {
+      return Ok(());
+    }
+    *first_request = Some(acquire()?);
+    Ok(())
   }
 }
 
@@ -265,6 +380,58 @@ mod tests {
     assert!((parse_rate("10r/s").unwrap().per_second - 10.0).abs() < f64::EPSILON);
     assert!((parse_rate("60r/m").unwrap().per_second - 1.0).abs() < f64::EPSILON);
     assert!(parse_rate("10/s").is_err());
+  }
+
+  #[test]
+  fn split_connection_permits_release_independent_scopes() {
+    let state = LimitState::new(None);
+    let ip = "203.0.113.10".parse().unwrap();
+    let other_ip = "203.0.113.11".parse().unwrap();
+    let limits = LimitsConfig {
+      max_connections: 1,
+      max_connections_per_ip: 1,
+      ..LimitsConfig::default()
+    };
+
+    let total = state.acquire_global_connection(&limits).unwrap();
+    assert_eq!(
+      state.acquire_global_connection(&limits).err(),
+      Some(StatusCode::SERVICE_UNAVAILABLE)
+    );
+    let ip_permit = state.acquire_ip_connection(ip, &limits, &[]).unwrap();
+    assert_eq!(
+      state.acquire_ip_connection(ip, &limits, &[]).err(),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    let _other_ip_permit = state.acquire_ip_connection(other_ip, &limits, &[]).unwrap();
+    drop(ip_permit);
+    drop(total);
+    assert!(state.acquire_global_connection(&limits).is_ok());
+  }
+
+  #[test]
+  fn split_connection_permits_enforce_named_limits_per_ip() {
+    let state = LimitState::new(None);
+    let ip = "203.0.113.10".parse().unwrap();
+    let limits = LimitsConfig {
+      max_connections: 10,
+      max_connections_per_ip: 10,
+      ..LimitsConfig::default()
+    };
+    let named = [ConnectionLimitConfig {
+      name: "per-client".to_string(),
+      key: LimitKey::ClientIp,
+      limit: 1,
+      status: 409,
+    }];
+
+    let permit = state.acquire_ip_connection(ip, &limits, &named).unwrap();
+    assert_eq!(
+      state.acquire_ip_connection(ip, &limits, &named).err(),
+      Some(StatusCode::CONFLICT)
+    );
+    drop(permit);
+    assert!(state.acquire_ip_connection(ip, &limits, &named).is_ok());
   }
 
   #[test]
@@ -293,12 +460,19 @@ mod tests {
       max_connections_per_ip: 1,
       ..LimitsConfig::default()
     };
-    let permit = first.acquire_connection(ip, &limits, &[]).unwrap();
+    let total = first.acquire_global_connection(&limits).unwrap();
     assert_eq!(
-      second.acquire_connection(ip, &limits, &[]).err(),
+      second.acquire_global_connection(&limits).err(),
       Some(StatusCode::SERVICE_UNAVAILABLE)
     );
-    drop(permit);
-    assert!(second.acquire_connection(ip, &limits, &[]).is_ok());
+    assert!(second.acquire_ip_connection(ip, &limits, &[]).is_ok());
+    drop(total);
+    let ip_permit = first.acquire_ip_connection(ip, &limits, &[]).unwrap();
+    assert_eq!(
+      second.acquire_ip_connection(ip, &limits, &[]).err(),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    drop(ip_permit);
+    assert!(second.acquire_global_connection(&limits).is_ok());
   }
 }

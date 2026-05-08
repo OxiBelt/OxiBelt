@@ -23,11 +23,11 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
 use crate::config::{
-  AdminConfig, AdminRole, AdminTransportMode, RuntimeOverrides, UpstreamPoolServerConfig,
-  UpstreamPoolServerSource, UpstreamPoolServerState,
+  AdminConfig, AdminRole, AdminTransportMode, ConnectionLimitIdentityMode, HttpListenerMode,
+  RuntimeOverrides, UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
 };
 use crate::identity::Cidr;
-use crate::limits::ConnectionPermit;
+use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::pool_health;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
@@ -1583,13 +1583,22 @@ async fn handle_connection(
   state: AppHandle,
 ) -> anyhow::Result<()> {
   let handshake_state = state.snapshot();
-  let _permit = acquire_connection_permit(&handshake_state, peer_addr)?;
+  let _global_permit = acquire_global_connection_permit(&handshake_state)?;
   let (stream, peer_addr) = proxy_protocol::accept_proxy_header(
     stream,
     peer_addr,
     &handshake_state.config.listeners.proxy_protocol,
   )
   .await?;
+  let connection_limit_identity = handshake_state.config.limits.connection_limit_identity;
+  let _ip_permit = if connection_limit_identity == ConnectionLimitIdentityMode::ProxyProtocol {
+    Some(acquire_ip_connection_permit(&handshake_state, peer_addr)?)
+  } else {
+    None
+  };
+  let connection_limit_context = (connection_limit_identity
+    == ConnectionLimitIdentityMode::FirstRequestRealIp)
+    .then(ConnectionLimitContext::default);
   let tcp_max_hop = handshake_state.waf.person_proof_tcp_max_hop();
   if let Some(max_hop) = tcp_max_hop {
     tcp_hop::apply_tcp_max_hop(&stream, peer_addr.ip(), max_hop)
@@ -1628,6 +1637,7 @@ async fn handle_connection(
     let state = state.clone();
     let tls_metadata = tls_metadata.clone();
     let request_count = request_count.clone();
+    let connection_limit_context = connection_limit_context.clone();
     async move {
       Ok::<_, Infallible>(
         if request_count.fetch_add(1, Ordering::Relaxed)
@@ -1643,6 +1653,7 @@ async fn handle_connection(
             peer_addr,
             tcp_max_hop,
             tls_metadata,
+            connection_limit_context.clone(),
             state,
             "https",
           )
@@ -1701,11 +1712,23 @@ async fn handle_plain_http_connection(
   state: AppHandle,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
-  let _permit = acquire_connection_permit(&snapshot, peer_addr)?;
+  let _global_permit = acquire_global_connection_permit(&snapshot)?;
+  let connection_limit_identity = snapshot.config.limits.connection_limit_identity;
+  let proxy_mode = snapshot.config.listeners.http_mode == HttpListenerMode::Proxy;
+  let _ip_permit =
+    if connection_limit_identity == ConnectionLimitIdentityMode::ProxyProtocol || !proxy_mode {
+      Some(acquire_ip_connection_permit(&snapshot, peer_addr)?)
+    } else {
+      None
+    };
+  let connection_limit_context =
+    (connection_limit_identity == ConnectionLimitIdentityMode::FirstRequestRealIp && proxy_mode)
+      .then(ConnectionLimitContext::default);
   let request_count = Arc::new(AtomicUsize::new(0));
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
     let request_count = request_count.clone();
+    let connection_limit_context = connection_limit_context.clone();
     async move {
       let response = match state.snapshot().config.listeners.http_mode {
         crate::config::HttpListenerMode::RedirectToHttps => redirect_to_https(&request),
@@ -1723,6 +1746,7 @@ async fn handle_plain_http_connection(
               peer_addr,
               None,
               Arc::new(WafTlsMetadata::default()),
+              connection_limit_context.clone(),
               state,
               "http",
             )
@@ -1777,13 +1801,20 @@ fn redirect_to_https(request: &hyper::Request<Incoming>) -> Response<ProxyBody> 
   response
 }
 
-fn acquire_connection_permit(
+fn acquire_global_connection_permit(snapshot: &AppSnapshot) -> anyhow::Result<ConnectionPermit> {
+  snapshot
+    .limits
+    .acquire_global_connection(&snapshot.config.limits)
+    .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))
+}
+
+fn acquire_ip_connection_permit(
   snapshot: &AppSnapshot,
   peer_addr: SocketAddr,
 ) -> anyhow::Result<ConnectionPermit> {
   snapshot
     .limits
-    .acquire_connection(
+    .acquire_ip_connection(
       peer_addr.ip(),
       &snapshot.config.limits,
       &snapshot.config.connection_limits,

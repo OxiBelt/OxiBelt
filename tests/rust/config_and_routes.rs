@@ -5,10 +5,10 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-    AdminRole, AdminTransportMode, CacheStore, CompressionConfig, Config, DatabaseTlsMode,
-    DnsDiscoveryRecordType, ForwardedHeaderMode, HotReloadMode, OcspMode, ProxyProtocolEgressMode,
-    QuicZeroRttMode, RuntimeOverrides, SharedStateBackendKind, UpstreamDiscoveryProvider,
-    UpstreamEchMode,
+    AdminRole, AdminTransportMode, CacheStore, CompressionConfig, Config,
+    ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, ForwardedHeaderMode,
+    HotReloadMode, OcspMode, ProxyProtocolEgressMode, QuicZeroRttMode, RuntimeOverrides,
+    SharedStateBackendKind, UpstreamDiscoveryProvider, UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -51,6 +51,46 @@ fn protocol_operations_defaults_are_disabled() {
         ProxyProtocolEgressMode::Off
     );
     assert!(config.stream_listeners.is_empty());
+}
+
+#[test]
+fn connection_limit_identity_modes_parse() {
+    let temp_dir = common::TempDir::new("connection-limit-identity");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "connection-limit-identity");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let cases = [
+        ("proxy_protocol", ConnectionLimitIdentityMode::ProxyProtocol),
+        (
+            "first_request_real_ip",
+            ConnectionLimitIdentityMode::FirstRequestRealIp,
+        ),
+        (
+            "per_request_real_ip",
+            ConnectionLimitIdentityMode::PerRequestRealIp,
+        ),
+    ];
+
+    let default_config: Config = toml::from_str(&base).expect("config should parse");
+    assert_eq!(
+        default_config.limits.connection_limit_identity,
+        ConnectionLimitIdentityMode::ProxyProtocol
+    );
+
+    for (raw_mode, expected) in cases {
+        let raw = format!(
+            r#"
+{}
+
+[limits]
+connection_limit_identity = "{raw_mode}"
+"#,
+            base
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        config.validate().expect("config should validate");
+        assert_eq!(config.limits.connection_limit_identity, expected);
+    }
 }
 
 #[test]

@@ -121,6 +121,7 @@ trailers = "pass"
 [limits]
 max_connections = 65536
 max_connections_per_ip = 128
+connection_limit_identity = "proxy_protocol"
 max_requests_per_connection = 1000
 client_header_timeout_ms = 10000
 client_body_timeout_ms = 30000

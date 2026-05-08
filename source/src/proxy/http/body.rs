@@ -175,6 +175,17 @@ pub(crate) fn with_send_timeout(
   wrapped
 }
 
+pub(crate) fn with_drop_guard<T>(body: ProxyBody, guard: T) -> ProxyBody
+where
+  T: Send + Sync + Unpin + 'static,
+{
+  DropGuardBody {
+    body,
+    _guard: guard,
+  }
+  .boxed()
+}
+
 fn store_terminal_error(terminal_error: &TerminalBodyError, error: BoxError) {
   let mut terminal_error = terminal_error
     .lock()
@@ -266,6 +277,11 @@ struct ChannelBody {
   terminal_error: Option<TerminalBodyError>,
 }
 
+struct DropGuardBody<T> {
+  body: ProxyBody,
+  _guard: T,
+}
+
 impl ChannelBody {
   fn take_terminal_error(&self) -> Option<BoxError> {
     let terminal_error = self.terminal_error.as_ref()?;
@@ -292,6 +308,25 @@ impl Body for ChannelBody {
 
   fn size_hint(&self) -> SizeHint {
     self.size_hint.clone()
+  }
+}
+
+impl<T> Body for DropGuardBody<T>
+where
+  T: Send + Sync + Unpin + 'static,
+{
+  type Data = Bytes;
+  type Error = BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    Pin::new(&mut self.body).poll_frame(cx)
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    self.body.size_hint()
   }
 }
 

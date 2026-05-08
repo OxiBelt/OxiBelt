@@ -16,7 +16,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, warn};
 
-use crate::config::{Config, HttpVersion, UpstreamConfig};
+use crate::config::{Config, ConnectionLimitIdentityMode, HttpVersion, UpstreamConfig};
+use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{ProxyBody, boxed_error, channel_body};
@@ -254,6 +255,30 @@ pub(crate) async fn handle_downstream_connection(
   state: AppHandle,
 ) -> anyhow::Result<()> {
   let peer_addr = connection.remote_address();
+  let snapshot = state.snapshot();
+  let _global_permit = snapshot
+    .limits
+    .acquire_global_connection(&snapshot.config.limits)
+    .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))?;
+  let connection_limit_identity = snapshot.config.limits.connection_limit_identity;
+  let _ip_permit = if connection_limit_identity == ConnectionLimitIdentityMode::ProxyProtocol {
+    Some(
+      snapshot
+        .limits
+        .acquire_ip_connection(
+          peer_addr.ip(),
+          &snapshot.config.limits,
+          &snapshot.config.connection_limits,
+        )
+        .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))?,
+    )
+  } else {
+    None
+  };
+  let connection_limit_context = (connection_limit_identity
+    == ConnectionLimitIdentityMode::FirstRequestRealIp)
+    .then(ConnectionLimitContext::default);
+  drop(snapshot);
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
   let early_data = crate::quic::h3::EarlyDataTracker::default();
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
@@ -291,10 +316,11 @@ pub(crate) async fn handle_downstream_connection(
     }
 
     if is_webtransport_request(&request) {
-      let prepared = match http_proxy::prepare_webtransport(
+      let mut prepared = match http_proxy::prepare_webtransport(
         &request,
         peer_addr,
         tls_metadata.as_ref(),
+        connection_limit_context.clone(),
         state.snapshot().as_ref(),
       ) {
         Ok(prepared) => prepared,
@@ -333,8 +359,10 @@ pub(crate) async fn handle_downstream_connection(
         upstream_session,
         peer_addr,
         tls_metadata,
+        connection_limit_context.clone(),
         state,
         prepared.timeouts,
+        prepared.connection_limit_permit.take(),
       )
       .await?;
       return Ok(());
@@ -345,6 +373,7 @@ pub(crate) async fn handle_downstream_connection(
       stream,
       peer_addr,
       tls_metadata.clone(),
+      connection_limit_context.clone(),
       state.clone(),
     )
     .await?;
@@ -496,10 +525,18 @@ async fn handle_h3_request(
   stream: H3RequestStream,
   peer_addr: SocketAddr,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
 ) -> anyhow::Result<StatusCode> {
   let (request, stream_receiver) = stream_h3_request_body(request, stream);
-  let response = http_proxy::handle_http3(request, peer_addr, tls_metadata, state).await;
+  let response = http_proxy::handle_http3(
+    request,
+    peer_addr,
+    tls_metadata,
+    connection_limit_context,
+    state,
+  )
+  .await;
   let status = response.status();
   let stream = stream_receiver
     .await
@@ -644,13 +681,16 @@ async fn connect_upstream_webtransport(
   .context("upstream WebTransport CONNECT failed")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bridge_webtransport(
   downstream: H3WebTransportSession,
   upstream: web_transport_quinn::Session,
   peer_addr: SocketAddr,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
   timeouts: EffectiveTimeouts,
+  _connection_limit_permit: Option<ConnectionPermit>,
 ) -> anyhow::Result<()> {
   let downstream = Arc::new(downstream);
   let upstream = Arc::new(upstream);
@@ -661,6 +701,7 @@ async fn bridge_webtransport(
     upstream.clone(),
     peer_addr,
     tls_metadata,
+    connection_limit_context,
     state,
     activity_tx.clone(),
   ));
@@ -722,6 +763,7 @@ async fn bridge_downstream_bidi(
   upstream: Arc<web_transport_quinn::Session>,
   peer_addr: SocketAddr,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
   activity: mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
@@ -753,6 +795,7 @@ async fn bridge_downstream_bidi(
             stream,
             peer_addr,
             tls_metadata.clone(),
+            connection_limit_context.clone(),
             state.clone(),
           )
           .await?;

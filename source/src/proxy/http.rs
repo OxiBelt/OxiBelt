@@ -11,7 +11,11 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::config::{Config, HttpVersion, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig};
+use crate::config::{
+  Config, ConnectionLimitIdentityMode, HttpVersion, ProxyProtocolEgressMode, RouteConfig,
+  UpstreamConfig,
+};
+use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::pools::PoolSelection;
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
 use crate::waf::{
@@ -256,6 +260,7 @@ pub async fn handle(
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
   tls: Arc<WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
   downstream_scheme: &'static str,
 ) -> Response<ProxyBody> {
@@ -265,6 +270,7 @@ pub async fn handle(
     peer_addr,
     tcp_max_hop,
     tls,
+    connection_limit_context,
     state,
     protocol,
     WafTransportNetwork::Tcp,
@@ -278,6 +284,7 @@ pub(crate) async fn handle_http3(
   request: Request<ProxyBody>,
   peer_addr: std::net::SocketAddr,
   tls: Arc<WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
 ) -> Response<ProxyBody> {
   handle_inner(
@@ -285,6 +292,7 @@ pub(crate) async fn handle_http3(
     peer_addr,
     None,
     tls,
+    connection_limit_context,
     state,
     WafProtocol::Http,
     WafTransportNetwork::Udp,
@@ -300,6 +308,7 @@ async fn handle_inner<B>(
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
   tls: Arc<WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
@@ -320,19 +329,27 @@ where
     transport_network,
     downstream_scheme,
   );
+  let mut request_connection_permit = None;
   let response = handle_inner_impl(
     request,
     peer_addr,
     tcp_max_hop,
     tls,
+    connection_limit_context,
     state.clone(),
     protocol,
     transport_network,
     _reject_connect,
     downstream_scheme,
     &mut access_log,
+    &mut request_connection_permit,
   )
   .await;
+  let response = if let Some(permit) = request_connection_permit {
+    with_connection_permit(response, permit)
+  } else {
+    response
+  };
   emit_system_access_log(state.as_ref(), &mut access_log, &response);
   response
 }
@@ -343,12 +360,14 @@ async fn handle_inner_impl<B>(
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
   tls: Arc<WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
   state: Arc<AppSnapshot>,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
   _reject_connect: bool,
   downstream_scheme: &'static str,
   access_log: &mut SystemAccessLogContext,
+  request_connection_permit: &mut Option<ConnectionPermit>,
 ) -> Response<ProxyBody>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
@@ -386,6 +405,39 @@ where
     }
   };
   access_log.client_addr = client_addr;
+
+  match state.config.limits.connection_limit_identity {
+    ConnectionLimitIdentityMode::ProxyProtocol => {}
+    ConnectionLimitIdentityMode::FirstRequestRealIp => {
+      let acquire = || {
+        state.limits.acquire_ip_connection(
+          client_addr.ip(),
+          &state.config.limits,
+          &state.config.connection_limits,
+        )
+      };
+      let result = if let Some(context) = connection_limit_context.as_ref() {
+        context.bind_first_request(acquire)
+      } else {
+        acquire().map(|permit| {
+          *request_connection_permit = Some(permit);
+        })
+      };
+      if let Err(status) = result {
+        return text_response(status, "connection limit exceeded");
+      }
+    }
+    ConnectionLimitIdentityMode::PerRequestRealIp => {
+      match state.limits.acquire_ip_connection(
+        client_addr.ip(),
+        &state.config.limits,
+        &state.config.connection_limits,
+      ) {
+        Ok(permit) => *request_connection_permit = Some(permit),
+        Err(status) => return text_response(status, "connection limit exceeded"),
+      }
+    }
+  }
 
   if let Some(status) = state
     .limits
@@ -1130,6 +1182,14 @@ fn with_downstream_response_timeout(
     .insert(DownstreamResponseSendTimeout(timeout));
   let body = body::with_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
   Response::from_parts(parts, body)
+}
+
+fn with_connection_permit(
+  response: Response<ProxyBody>,
+  permit: ConnectionPermit,
+) -> Response<ProxyBody> {
+  let (parts, body) = response.into_parts();
+  Response::from_parts(parts, body::with_drop_guard(body, permit))
 }
 
 fn error_indicates_body_timeout(error: &anyhow::Error, kind: BodyTimeoutKind) -> bool {
@@ -2012,6 +2072,7 @@ pub(crate) struct PreparedWebTransport {
   pub(crate) protocols: Vec<String>,
   pub(crate) upstream: UpstreamConfig,
   pub(crate) timeouts: EffectiveTimeouts,
+  pub(crate) connection_limit_permit: Option<ConnectionPermit>,
   _pool_selection: Option<PoolSelection>,
 }
 
@@ -2019,6 +2080,7 @@ pub(crate) fn prepare_webtransport(
   request: &Request<()>,
   peer_addr: std::net::SocketAddr,
   tls: &WafTlsMetadata,
+  connection_limit_context: Option<ConnectionLimitContext>,
   state: &AppSnapshot,
 ) -> Result<PreparedWebTransport, Box<Response<ProxyBody>>> {
   let host = extract_host(request).unwrap_or_default();
@@ -2034,6 +2096,55 @@ pub(crate) fn prepare_webtransport(
   let request_uri = request.uri().clone();
   let request_headers = request.headers().clone();
   let mut tags = std::collections::HashMap::new();
+  let client_addr = match crate::identity::resolve_client_addr(
+    &request_headers,
+    peer_addr,
+    &state.config.proxy.real_ip,
+  ) {
+    Ok(addr) => addr,
+    Err(error) => {
+      warn!(error = %error, peer = %peer_addr, "rejected untrusted real IP metadata");
+      return Err(Box::new(text_response(
+        StatusCode::BAD_REQUEST,
+        "untrusted forwarded client IP metadata",
+      )));
+    }
+  };
+  let connection_limit_permit = match state.config.limits.connection_limit_identity {
+    ConnectionLimitIdentityMode::ProxyProtocol => None,
+    ConnectionLimitIdentityMode::FirstRequestRealIp => {
+      let acquire = || {
+        state.limits.acquire_ip_connection(
+          client_addr.ip(),
+          &state.config.limits,
+          &state.config.connection_limits,
+        )
+      };
+      if let Some(context) = connection_limit_context.as_ref() {
+        if let Err(status) = context.bind_first_request(acquire) {
+          return Err(Box::new(text_response(status, "connection limit exceeded")));
+        }
+        None
+      } else {
+        match acquire() {
+          Ok(permit) => Some(permit),
+          Err(status) => {
+            return Err(Box::new(text_response(status, "connection limit exceeded")));
+          }
+        }
+      }
+    }
+    ConnectionLimitIdentityMode::PerRequestRealIp => match state.limits.acquire_ip_connection(
+      client_addr.ip(),
+      &state.config.limits,
+      &state.config.connection_limits,
+    ) {
+      Ok(permit) => Some(permit),
+      Err(status) => {
+        return Err(Box::new(text_response(status, "connection limit exceeded")));
+      }
+    },
+  };
 
   let Some(resolved) = state.route_table.resolve(&host, &path, &state.upstreams) else {
     return Err(Box::new(text_response(
@@ -2096,7 +2207,7 @@ pub(crate) fn prepare_webtransport(
   {
     match state.pools.select(
       pool_name,
-      peer_addr.ip(),
+      client_addr.ip(),
       &format!("{host}{}", request.uri()),
       request_waf.load_balancing_policy.as_deref(),
     ) {
@@ -2174,7 +2285,7 @@ pub(crate) fn prepare_webtransport(
   }
   add_forwarded_headers(
     &mut headers,
-    peer_addr,
+    client_addr,
     &host,
     "https",
     state.config.proxy.forwarded_headers.mode,
@@ -2189,6 +2300,7 @@ pub(crate) fn prepare_webtransport(
     protocols,
     upstream: upstream.clone(),
     timeouts,
+    connection_limit_permit,
     _pool_selection: pool_selection,
   })
 }
@@ -2419,6 +2531,7 @@ upstream = "app"
       &webtransport_request(),
       "203.0.113.10:45678".parse().unwrap(),
       &WafTlsMetadata::default(),
+      None,
       &state,
     )
     .expect("direct WebTransport route should prepare");
@@ -2475,6 +2588,7 @@ upstream_pool = "app-pool"
       &webtransport_request(),
       "203.0.113.10:45678".parse().unwrap(),
       &WafTlsMetadata::default(),
+      None,
       &state,
     ) {
       Ok(_) => panic!("pool route should be rejected with a response, not panic"),

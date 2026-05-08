@@ -362,7 +362,7 @@ early_hints = "drop" # drop | pass
 trailers = "pass"    # pass | drop
 ```
 
-`trusted_ca_certs` adds upstream TLS trust roots from the cert directory. `forwarded_headers.mode = "overwrite"` replaces inbound forwarding metadata; `append` preserves and extends the inbound `X-Forwarded-For` chain. `real_ip` affects the client IP used by rate limiting and WAF evaluation only when the direct peer is trusted.
+`trusted_ca_certs` adds upstream TLS trust roots from the cert directory. `forwarded_headers.mode = "overwrite"` replaces inbound forwarding metadata; `append` preserves and extends the inbound `X-Forwarded-For` chain. `real_ip` affects the client IP used by rate limiting and WAF evaluation only when the direct peer is trusted, and can also drive connection limits when `limits.connection_limit_identity` selects a Real-IP mode.
 
 `generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
 
@@ -377,6 +377,7 @@ Reserved or constrained values:
 [limits]
 max_connections = 65536
 max_connections_per_ip = 128
+connection_limit_identity = "proxy_protocol" # proxy_protocol | first_request_real_ip | per_request_real_ip
 max_requests_per_connection = 1000
 client_header_timeout_ms = 10000
 client_body_timeout_ms = 30000
@@ -407,7 +408,7 @@ limit = 64
 status = 429
 ```
 
-Limit values must be greater than zero. Rate and connection limit state is process-local by default. When `[shared_state].enabled = true` and the relevant feature maps to a backend, rate token buckets and downstream connection leases are shared across instances. `max_connections`, `max_connections_per_ip`, and `[[connection_limits]]` apply to downstream HTTP/HTTPS and TCP stream listener connections. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
+Limit values must be greater than zero. Rate and connection limit state is process-local by default. When `[shared_state].enabled = true` and the relevant feature maps to a backend, rate token buckets and downstream connection leases are shared across instances. `max_connections` applies at downstream accept time. `max_connections_per_ip` and `[[connection_limits]]` use the configured `connection_limit_identity`: `proxy_protocol` counts the direct peer or trusted PROXY protocol source for the whole connection, `first_request_real_ip` binds the connection to the first trusted Real-IP header value, and `per_request_real_ip` acquires a lease per HTTP request until its response body finishes. TCP stream listeners use direct peer IPs. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
 
 ```toml
 [shared_state]

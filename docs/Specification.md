@@ -25,9 +25,9 @@ OxiBelt currently targets Rust 1.95 and uses `rustls` with the `aws-lc-rs` crypt
 At a high level, each HTTP transaction follows this order:
 
 1. Accept TCP or QUIC traffic from a downstream client.
-2. Apply listener-level checks such as PROXY protocol intake, connection limits, TLS handshake limits, and optional TCP max-hop policy.
+2. Apply listener-level checks such as the global connection limit, PROXY protocol intake, configured per-IP connection-limit identity, TLS handshake limits, and optional TCP max-hop policy.
 3. Terminate downstream TLS and collect transport metadata, including SNI, ALPN, client certificate presence, and QUIC metadata where available.
-4. Parse the HTTP request and normalize the client IP used for rate limits and WAF evaluation.
+4. Parse the HTTP request and normalize the client IP used for Real-IP connection-limit modes, rate limits, and WAF evaluation.
 5. Match a route by host and path prefix.
 6. Evaluate request-phase OxiRule rules when WAF is enabled.
 7. Select the configured upstream or upstream pool, optionally using request-phase routing actions.

@@ -503,6 +503,103 @@ proxy_protocol_client_request() {
   fail_with_diagnostics "PROXY protocol request did not reach expected status ${expect_status}"
 }
 
+probe_proxy_protocol_client_request() {
+  local proxy_line="$1"
+  local host="$2"
+  local path="$3"
+  local output=""
+  local status=0
+  local client_container="oxibelt-proxy-protocol-probe-${run_id}-${RANDOM}"
+
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
+    /opt/mock_upstream/client.py \
+    --scheme https \
+    --path "${path}" \
+    --host "${host}" \
+    --port 8443 \
+    --method GET \
+    --body "" \
+    --ca-file /tmp/proxy-ca.pem \
+    --proxy-protocol-line "${proxy_line}" \
+    --dump-response-json >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+  output="$(docker start -a "${client_container}" 2>&1)" || status=$?
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  printf '%s' "${output}"
+  return "${status}"
+}
+
+start_holding_client_request_with_headers() {
+  local target_host="$1"
+  local proxy_port="$2"
+  local scheme="$3"
+  local proxy_line="$4"
+  local host="$5"
+  local path="$6"
+  local expect_status="$7"
+  local hold_ms="$8"
+  shift 8
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  HOLDING_CLIENT_CONTAINER="oxibelt-holding-client-${run_id}-${RANDOM}"
+  HOLDING_CLIENT_LOG="${logs_dir}/${HOLDING_CLIENT_CONTAINER}.log"
+  local proxy_args=()
+  if [[ -n "${proxy_line}" ]]; then
+    proxy_args+=(--proxy-protocol-line "${proxy_line}")
+  fi
+  local ca_args=()
+  if [[ "${scheme}" == "https" ]]; then
+    ca_args+=(--ca-file /tmp/proxy-ca.pem)
+  fi
+
+  docker create \
+    --name "${HOLDING_CLIENT_CONTAINER}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
+    /opt/mock_upstream/client.py \
+    --target-host "${target_host}" \
+    --scheme "${scheme}" \
+    --path "${path}" \
+    --host "${host}" \
+    --port "${proxy_port}" \
+    --method GET \
+    --body "" \
+    --dump-response-json \
+    --expect-status "${expect_status}" \
+    --connection keep-alive \
+    --hold-after-headers-ms "${hold_ms}" \
+    --timeout 15 \
+    "${ca_args[@]}" \
+    "${proxy_args[@]}" \
+    "${header_args[@]}" >/dev/null
+  if [[ "${scheme}" == "https" ]]; then
+    docker cp "${cert_dir}/fullchain.pem" "${HOLDING_CLIENT_CONTAINER}:/tmp/proxy-ca.pem"
+  fi
+  docker start -a "${HOLDING_CLIENT_CONTAINER}" >"${HOLDING_CLIENT_LOG}" 2>&1 &
+  HOLDING_CLIENT_PID=$!
+  sleep 1
+}
+
+wait_holding_client() {
+  if ! wait "${HOLDING_CLIENT_PID}"; then
+    cat "${HOLDING_CLIENT_LOG}" >&2 || true
+    fail_with_diagnostics "holding client request failed"
+  fi
+  docker rm -f "${HOLDING_CLIENT_CONTAINER}" >/dev/null 2>&1 || true
+}
+
 upgrade_client_request() {
   local host="$1"
   local path="$2"

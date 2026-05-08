@@ -1566,6 +1566,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "client_body_timeout_ms",
       "client_header_timeout_ms",
       "client_idle_timeout_ms",
+      "connection_limit_identity",
       "max_connections",
       "max_connections_per_ip",
       "max_header_name_bytes",
@@ -3011,6 +3012,8 @@ pub struct LimitsConfig {
   pub max_connections: usize,
   #[serde(default = "default_max_connections_per_ip")]
   pub max_connections_per_ip: usize,
+  #[serde(default)]
+  pub connection_limit_identity: ConnectionLimitIdentityMode,
   #[serde(default = "default_max_requests_per_connection")]
   pub max_requests_per_connection: usize,
   #[serde(default = "default_client_header_timeout_ms")]
@@ -3046,6 +3049,7 @@ impl Default for LimitsConfig {
     Self {
       max_connections: default_max_connections(),
       max_connections_per_ip: default_max_connections_per_ip(),
+      connection_limit_identity: ConnectionLimitIdentityMode::default(),
       max_requests_per_connection: default_max_requests_per_connection(),
       client_header_timeout_ms: default_client_header_timeout_ms(),
       client_body_timeout_ms: default_client_body_timeout_ms(),
@@ -3062,6 +3066,15 @@ impl Default for LimitsConfig {
       max_request_body_bytes: default_max_request_body_bytes(),
     }
   }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionLimitIdentityMode {
+  #[default]
+  ProxyProtocol,
+  FirstRequestRealIp,
+  PerRequestRealIp,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
