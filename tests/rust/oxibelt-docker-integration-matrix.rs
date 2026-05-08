@@ -496,13 +496,14 @@ while True:
 }
 
 assert_shared_pool_health() {
-  local attempt observed_failure recovered state proxy_a_state response
+  local attempt observed_failure probe_status recovered state proxy_a_state response
   observed_failure=0
   docker rm -f "${alt_container}" >/dev/null
 
   for attempt in $(seq 1 12); do
-    response="$(probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" 2>/dev/null)" || true
-    if jq -e '.status == 502' <<<"${response}" >/dev/null 2>&1; then
+    probe_status=0
+    response="$(probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" 2>/dev/null)" || probe_status=$?
+    if [[ "${probe_status}" != "0" ]] || jq -e '.status == 502' <<<"${response}" >/dev/null 2>&1; then
       observed_failure=1
     fi
     if shared_pool_alt_unhealthy_on_proxy_b; then
@@ -632,13 +633,14 @@ while True:
 }
 
 assert_shared_pool_health() {
-  local attempt observed_failure recovered state proxy_a_state response
+  local attempt observed_failure probe_status recovered state proxy_a_state response
   observed_failure=0
   docker rm -f "${alt_container}" >/dev/null
 
   for attempt in $(seq 1 12); do
-    response="$(probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" 2>/dev/null)" || true
-    if jq -e '.status == 502' <<<"${response}" >/dev/null 2>&1; then
+    probe_status=0
+    response="$(probe_client_request_with_headers "example.test" "/pool/shared-health" "GET" "" "X-Forwarded-For: 203.0.113.$((130 + attempt))" 2>/dev/null)" || probe_status=$?
+    if [[ "${probe_status}" != "0" ]] || jq -e '.status == 502' <<<"${response}" >/dev/null 2>&1; then
       observed_failure=1
     fi
     if shared_pool_alt_unhealthy_on_proxy_b; then
