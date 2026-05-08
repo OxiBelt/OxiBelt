@@ -57,7 +57,12 @@ pub(super) fn upstream_error_response(
   request_response_mutations: &[HeaderMutation],
   access_log: &SystemAccessLogContext,
 ) -> Response<ProxyBody> {
-  let mut response = text_response(StatusCode::BAD_GATEWAY, "upstream request failed");
+  let status = if upstream_error_code.contains("timeout") {
+    StatusCode::GATEWAY_TIMEOUT
+  } else {
+    StatusCode::BAD_GATEWAY
+  };
+  let mut response = text_response(status, "upstream request failed");
   apply_header_mutations(response.headers_mut(), request_response_mutations);
   if !state.waf.has_response_rules(route_name) {
     return response;
@@ -87,7 +92,7 @@ pub(super) fn upstream_error_response(
     response_id: &access_log.response_id,
     received_at_unix_ms: crate::waf::current_unix_ms(),
     version: http::Version::HTTP_11,
-    status: StatusCode::BAD_GATEWAY,
+    status,
     headers: response.headers(),
     upstream_name,
     upstream_pool,

@@ -121,6 +121,7 @@ mod tests {
       max_http_version: HttpVersion::H2,
       connect_timeout_ms: 1_000,
       request_timeout_ms: 10_000,
+      first_byte_timeout_ms: 10_000,
       read_timeout_ms: 10_000,
       send_timeout_ms: 10_000,
       idle_timeout_ms: 75_000,
@@ -149,6 +150,7 @@ mod tests {
         grpc_web: false,
         cache: None,
         compression: None,
+        timeouts: Default::default(),
         waf: Default::default(),
       },
       RouteConfig {
@@ -164,6 +166,7 @@ mod tests {
         grpc_web: false,
         cache: None,
         compression: None,
+        timeouts: Default::default(),
         waf: Default::default(),
       },
     ];
@@ -190,6 +193,7 @@ mod tests {
         grpc_web: false,
         cache: None,
         compression: None,
+        timeouts: Default::default(),
         waf: Default::default(),
       },
       RouteConfig {
@@ -205,6 +209,7 @@ mod tests {
         grpc_web: false,
         cache: None,
         compression: None,
+        timeouts: Default::default(),
         waf: Default::default(),
       },
     ];

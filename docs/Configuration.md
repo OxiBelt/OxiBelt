@@ -374,6 +374,8 @@ max_requests_per_connection = 1000
 client_header_timeout_ms = 10000
 client_body_timeout_ms = 30000
 client_idle_timeout_ms = 75000
+websocket_idle_timeout_ms = 75000
+webtransport_idle_timeout_ms = 75000
 tls_handshake_timeout_ms = 10000
 response_send_timeout_ms = 60000
 max_headers = 128
@@ -398,7 +400,7 @@ limit = 64
 status = 429
 ```
 
-Limit values must be greater than zero. Rate and connection limit state is process-local. `max_connections`, `max_connections_per_ip`, and `[[connection_limits]]` apply to downstream HTTP/HTTPS and TCP stream listener connections.
+Limit values must be greater than zero. Rate and connection limit state is process-local. `max_connections`, `max_connections_per_ip`, and `[[connection_limits]]` apply to downstream HTTP/HTTPS and TCP stream listener connections. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
 
 ```toml
 [cache]
@@ -548,6 +550,7 @@ origin = "https://app.internal.example"
 max_http_version = "h2" # h1 | h2 | h3
 connect_timeout_ms = 3000
 request_timeout_ms = 30000
+first_byte_timeout_ms = 30000
 read_timeout_ms = 30000
 send_timeout_ms = 30000
 idle_timeout_ms = 75000
@@ -563,6 +566,8 @@ mode = "disabled" # disabled | grease | config_list
 ```
 
 Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection.
+
+`request_timeout_ms` is the compatibility upper bound for sending a request and receiving response headers. `first_byte_timeout_ms` separately controls the response-header/first-byte wait and is capped by `request_timeout_ms` when both are configured. `read_timeout_ms` is an upstream response body idle timeout. `send_timeout_ms` controls upstream request body send backpressure.
 
 ```toml
 [[upstream_pools]]
@@ -613,9 +618,22 @@ upstream = "app"
 # grpc_web = false
 # cache = "default"
 # compression = "default" # default | off | named policy
+
+[routes.timeouts]
+# client_body_timeout_ms = 15000
+# response_send_timeout_ms = 30000
+# websocket_idle_timeout_ms = 60000
+# webtransport_idle_timeout_ms = 60000
+# upstream_connect_timeout_ms = 1000
+# upstream_request_timeout_ms = 15000
+# upstream_first_byte_timeout_ms = 2000
+# upstream_read_timeout_ms = 10000
+# upstream_send_timeout_ms = 10000
 ```
 
 `upstream_http_version` is a route-level backend protocol override and must not exceed the selected upstream capability. HTTP/3 overrides are rejected for upstream-pool routes and for upstreams with PROXY protocol egress enabled.
+
+Route timeout overrides are optional. Omitted values inherit from `[limits]` for downstream behavior and from the selected `[[upstreams]]` entry for upstream behavior. TLS handshake and downstream header read timeouts are not route-level because route matching has not happened yet.
 
 Fields:
 

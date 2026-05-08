@@ -7,18 +7,18 @@ use std::time::{Duration, Instant};
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
 use bytes::{Buf, Bytes};
-use futures_util::future::select_all;
 use h3::ext::Protocol;
 use h3_webtransport::server::{AcceptedBi, WebTransportSession};
 use http_body_util::BodyExt;
 use hyper::body::Frame;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex, oneshot};
-use tokio::task::JoinHandle;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, warn};
 
 use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::proxy::http as http_proxy;
+use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{ProxyBody, boxed_error, channel_body};
 use crate::proxy::http::response::text_response;
 use crate::server::downstream_quic_tls_metadata;
@@ -128,6 +128,7 @@ impl UpstreamH3Pool {
     self: Arc<Self>,
     request: Request<ProxyBody>,
     upstream: &UpstreamConfig,
+    timeouts: EffectiveTimeouts,
   ) -> anyhow::Result<Response<ProxyBody>> {
     let uri = request.uri().clone();
     let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
@@ -135,8 +136,10 @@ impl UpstreamH3Pool {
       remote_addr,
       server_name,
     };
-    let send_request = self.send_request_for(key.clone(), upstream).await?;
-    match send_h3_request(send_request, request, &uri).await {
+    let send_request = self
+      .send_request_for(key.clone(), upstream, timeouts)
+      .await?;
+    match send_h3_request(send_request, request, &uri, timeouts).await {
       Ok(response) => Ok(response),
       Err(error) => {
         self.remove_entry(&key).await;
@@ -149,6 +152,7 @@ impl UpstreamH3Pool {
     &self,
     key: H3PoolKey,
     upstream: &UpstreamConfig,
+    timeouts: EffectiveTimeouts,
   ) -> anyhow::Result<H3SendRequest> {
     let mut entries = self.entries.lock().await;
     if let Some(entry) = entries.get(&key).cloned() {
@@ -179,6 +183,7 @@ impl UpstreamH3Pool {
       self.client_config.clone(),
       &self.quic_config,
       self.quic_host_key_base_dir.as_deref(),
+      timeouts.upstream_connect,
     )
     .await?;
     let entry = Arc::new(PooledH3Connection {
@@ -212,14 +217,19 @@ async fn connect_h3_upstream(
   quic_config: h3_quinn::quinn::ClientConfig,
   oxibelt_quic_config: &crate::config::QuicConfig,
   quic_host_key_base_dir: Option<&Path>,
+  connect_timeout: Duration,
 ) -> anyhow::Result<ConnectedH3Upstream> {
   let endpoint =
     crate::quic::bind_client_endpoint(remote_addr, oxibelt_quic_config, quic_host_key_base_dir)?;
-  let quinn_connection = endpoint
-    .connect_with(quic_config, remote_addr, &server_name)
-    .with_context(|| format!("failed to start upstream HTTP/3 connection to {server_name}"))?
-    .await
-    .with_context(|| format!("failed to connect upstream HTTP/3 to {server_name}"))?;
+  let quinn_connection = tokio::time::timeout(
+    connect_timeout,
+    endpoint
+      .connect_with(quic_config, remote_addr, &server_name)
+      .with_context(|| format!("failed to start upstream HTTP/3 connection to {server_name}"))?,
+  )
+  .await
+  .context("upstream HTTP/3 connect timed out")?
+  .with_context(|| format!("failed to connect upstream HTTP/3 to {server_name}"))?;
   let connection = quinn_connection.clone();
   let h3_connection = h3_quinn::Connection::new(quinn_connection);
   let (mut driver, send_request) = h3::client::builder()
@@ -324,6 +334,7 @@ pub(crate) async fn handle_downstream_connection(
         peer_addr,
         tls_metadata,
         state,
+        prepared.timeouts,
       )
       .await?;
       return Ok(());
@@ -345,10 +356,11 @@ pub(crate) async fn forward_request(
   request: Request<ProxyBody>,
   upstream: &UpstreamConfig,
   state: &AppSnapshot,
+  timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let uri = request.uri().clone();
   if let Some(pool) = state.h3_clients.for_upstream(&upstream.name) {
-    return pool.forward_request(request, upstream).await;
+    return pool.forward_request(request, upstream, timeouts).await;
   }
 
   let quic_config = tls::build_upstream_quic_client_config(
@@ -364,13 +376,14 @@ pub(crate) async fn forward_request(
     quic_config,
     &state.config.quic,
     state.config.source_paths.cert_dir.as_deref(),
+    timeouts.upstream_connect,
   )
   .await?;
   let close_connection = connected.connection.clone();
   let endpoint = connected.endpoint.clone();
   let driver_task = connected.driver_task;
 
-  let response = send_h3_request(connected.send_request, request, &uri).await?;
+  let response = send_h3_request(connected.send_request, request, &uri, timeouts).await?;
   let (parts, body) = response.into_parts();
   let close_body = wrap_body_close_connection(body, move || {
     close_connection.close(0u32.into(), b"request complete");
@@ -384,6 +397,7 @@ async fn send_h3_request(
   mut send_request: H3SendRequest,
   request: Request<ProxyBody>,
   uri: &http::Uri,
+  timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let (parts, mut body) = request.into_parts();
   let h3_request = Request::from_parts(parts, ());
@@ -398,37 +412,37 @@ async fn send_h3_request(
     })?;
     match frame.into_data() {
       Ok(data) => {
-        stream
-          .send_data(data)
+        tokio::time::timeout(timeouts.upstream_send, stream.send_data(data))
           .await
+          .context("upstream HTTP/3 request data send timed out")?
           .context("failed to send upstream HTTP/3 request data")?;
       }
       Err(frame) => {
         if let Ok(trailers) = frame.into_trailers() {
-          stream
-            .send_trailers(trailers)
+          tokio::time::timeout(timeouts.upstream_send, stream.send_trailers(trailers))
             .await
+            .context("upstream HTTP/3 request trailers send timed out")?
             .context("failed to send upstream HTTP/3 request trailers")?;
         }
       }
     }
   }
-  stream
-    .finish()
+  tokio::time::timeout(timeouts.upstream_send, stream.finish())
     .await
+    .context("upstream HTTP/3 request finish timed out")?
     .context("failed to finish upstream HTTP/3 request")?;
 
-  let response = stream
-    .recv_response()
+  let response = tokio::time::timeout(timeouts.upstream_first_byte, stream.recv_response())
     .await
+    .context("upstream HTTP/3 first byte timed out")?
     .context("failed to receive upstream HTTP/3 response")?;
 
   let (parts, _) = response.into_parts();
   let (body_sender, body) = channel_body(H3_BODY_CHANNEL_CAPACITY);
   tokio::spawn(async move {
     loop {
-      match stream.recv_data().await {
-        Ok(Some(mut chunk)) => {
+      match tokio::time::timeout(timeouts.upstream_read, stream.recv_data()).await {
+        Ok(Ok(Some(mut chunk))) => {
           let len = chunk.remaining();
           if body_sender
             .send(Ok(Frame::data(chunk.copy_to_bytes(len))))
@@ -438,12 +452,20 @@ async fn send_h3_request(
             break;
           }
         }
-        Ok(None) => break,
-        Err(error) => {
+        Ok(Ok(None)) => break,
+        Ok(Err(error)) => {
           let _ = body_sender
             .send(Err(boxed_error(std::io::Error::other(format!(
               "failed to receive upstream HTTP/3 response data: {error}"
             )))))
+            .await;
+          break;
+        }
+        Err(_) => {
+          let _ = body_sender
+            .send(Err(boxed_error(std::io::Error::other(
+              "upstream HTTP/3 response body read timed out",
+            ))))
             .await;
           break;
         }
@@ -527,6 +549,7 @@ async fn respond_to_h3_request(
   mut stream: H3RequestStream,
   response: Response<ProxyBody>,
 ) -> anyhow::Result<()> {
+  let response_send_timeout = http_proxy::downstream_response_send_timeout(&response);
   let (parts, mut body) = response.into_parts();
   let head = Response::from_parts(parts, ());
   stream
@@ -540,27 +563,38 @@ async fn respond_to_h3_request(
     })?;
     match frame.into_data() {
       Ok(data) => {
-        stream
-          .send_data(data)
+        maybe_timeout(response_send_timeout, stream.send_data(data))
           .await
           .context("failed to send downstream HTTP/3 response data")?;
       }
       Err(frame) => {
         if let Ok(trailers) = frame.into_trailers() {
-          stream
-            .send_trailers(trailers)
+          maybe_timeout(response_send_timeout, stream.send_trailers(trailers))
             .await
             .context("failed to send downstream HTTP/3 response trailers")?;
         }
       }
     }
   }
-  stream
-    .finish()
+  maybe_timeout(response_send_timeout, stream.finish())
     .await
     .context("failed to finish downstream HTTP/3 response")?;
 
   Ok(())
+}
+
+async fn maybe_timeout<F, T, E>(timeout: Option<Duration>, future: F) -> anyhow::Result<T>
+where
+  F: std::future::Future<Output = Result<T, E>>,
+  E: std::error::Error + Send + Sync + 'static,
+{
+  match timeout {
+    Some(timeout) => tokio::time::timeout(timeout, future)
+      .await
+      .context("downstream HTTP/3 response send timed out")?
+      .map_err(Into::into),
+    None => future.await.map_err(Into::into),
+  }
 }
 
 async fn connect_upstream_webtransport(
@@ -590,14 +624,24 @@ async fn connect_upstream_webtransport(
     state.config.source_paths.cert_dir.as_deref(),
   )
   .context("failed to create upstream WebTransport endpoint")?;
-  let connection = endpoint
-    .connect_with(quic_config, remote_addr, &server_name)
-    .with_context(|| format!("failed to start upstream WebTransport connection to {server_name}"))?
-    .await
-    .with_context(|| format!("failed to connect upstream WebTransport to {server_name}"))?;
-  web_transport_quinn::Session::connect(connection, request)
-    .await
-    .context("upstream WebTransport CONNECT failed")
+  let connection = tokio::time::timeout(
+    prepared.timeouts.upstream_connect,
+    endpoint
+      .connect_with(quic_config, remote_addr, &server_name)
+      .with_context(|| {
+        format!("failed to start upstream WebTransport connection to {server_name}")
+      })?,
+  )
+  .await
+  .context("upstream WebTransport connect timed out")?
+  .with_context(|| format!("failed to connect upstream WebTransport to {server_name}"))?;
+  tokio::time::timeout(
+    prepared.timeouts.upstream_first_byte,
+    web_transport_quinn::Session::connect(connection, request),
+  )
+  .await
+  .context("upstream WebTransport CONNECT timed out")?
+  .context("upstream WebTransport CONNECT failed")
 }
 
 async fn bridge_webtransport(
@@ -606,32 +650,71 @@ async fn bridge_webtransport(
   peer_addr: SocketAddr,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   state: AppHandle,
+  timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<()> {
   let downstream = Arc::new(downstream);
   let upstream = Arc::new(upstream);
-  let tasks = vec![
-    tokio::spawn(bridge_downstream_bidi(
-      downstream.clone(),
-      upstream.clone(),
-      peer_addr,
-      tls_metadata,
-      state,
-    )),
-    tokio::spawn(bridge_upstream_bidi(downstream.clone(), upstream.clone())),
-    tokio::spawn(bridge_downstream_uni(downstream.clone(), upstream.clone())),
-    tokio::spawn(bridge_upstream_uni(downstream.clone(), upstream.clone())),
-    tokio::spawn(bridge_downstream_datagrams(
-      downstream.clone(),
-      upstream.clone(),
-    )),
-    tokio::spawn(bridge_upstream_datagrams(downstream, upstream)),
-  ];
+  let (activity_tx, mut activity_rx) = mpsc::channel(64);
+  let mut tasks = JoinSet::new();
+  tasks.spawn(bridge_downstream_bidi(
+    downstream.clone(),
+    upstream.clone(),
+    peer_addr,
+    tls_metadata,
+    state,
+    activity_tx.clone(),
+  ));
+  tasks.spawn(bridge_upstream_bidi(
+    downstream.clone(),
+    upstream.clone(),
+    activity_tx.clone(),
+  ));
+  tasks.spawn(bridge_downstream_uni(
+    downstream.clone(),
+    upstream.clone(),
+    activity_tx.clone(),
+  ));
+  tasks.spawn(bridge_upstream_uni(
+    downstream.clone(),
+    upstream.clone(),
+    activity_tx.clone(),
+  ));
+  tasks.spawn(bridge_downstream_datagrams(
+    downstream.clone(),
+    upstream.clone(),
+    activity_tx.clone(),
+  ));
+  tasks.spawn(bridge_upstream_datagrams(
+    downstream,
+    upstream,
+    activity_tx.clone(),
+  ));
+  drop(activity_tx);
 
-  let (result, _index, remaining) = select_all(tasks).await;
-  for task in remaining {
-    task.abort();
+  let idle = tokio::time::sleep(timeouts.webtransport_idle);
+  tokio::pin!(idle);
+
+  loop {
+    tokio::select! {
+      result = tasks.join_next() => {
+        tasks.abort_all();
+        return match result {
+          Some(result) => result.context("WebTransport bridge task panicked")?,
+          None => Ok(()),
+        };
+      }
+      activity = activity_rx.recv() => {
+        if activity.is_none() {
+          return Ok(());
+        }
+        idle.as_mut().reset(tokio::time::Instant::now() + timeouts.webtransport_idle);
+      }
+      _ = &mut idle => {
+        tasks.abort_all();
+        return Err(anyhow::anyhow!("WebTransport bridge idle timeout elapsed"));
+      }
+    }
   }
-  result.context("WebTransport bridge task panicked")?
 }
 
 async fn bridge_downstream_bidi(
@@ -640,12 +723,19 @@ async fn bridge_downstream_bidi(
   peer_addr: SocketAddr,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   state: AppHandle,
+  activity: mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
   loop {
     match downstream.accept_bi().await? {
       Some(AcceptedBi::BidiStream(_session_id, stream)) => {
+        let _ = activity.try_send(());
         let (upstream_send, upstream_recv) = upstream.open_bi().await?;
-        tokio::spawn(copy_bidi_stream(stream, upstream_send, upstream_recv));
+        tokio::spawn(copy_bidi_stream(
+          stream,
+          upstream_send,
+          upstream_recv,
+          activity.clone(),
+        ));
       }
       Some(AcceptedBi::Request(request, stream)) => {
         if is_webtransport_request(&request) {
@@ -676,45 +766,66 @@ async fn bridge_downstream_bidi(
 async fn bridge_upstream_bidi(
   downstream: Arc<H3WebTransportSession>,
   upstream: Arc<web_transport_quinn::Session>,
+  activity: mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
   loop {
     let (upstream_send, upstream_recv) = upstream.accept_bi().await?;
+    let _ = activity.try_send(());
     let stream = downstream.open_bi(downstream.session_id()).await?;
-    tokio::spawn(copy_bidi_stream(stream, upstream_send, upstream_recv));
+    tokio::spawn(copy_bidi_stream(
+      stream,
+      upstream_send,
+      upstream_recv,
+      activity.clone(),
+    ));
   }
 }
 
 async fn bridge_downstream_uni(
   downstream: Arc<H3WebTransportSession>,
   upstream: Arc<web_transport_quinn::Session>,
+  activity: mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
   loop {
     let Some((_session_id, downstream_recv)) = downstream.accept_uni().await? else {
       return Ok(());
     };
+    let _ = activity.try_send(());
     let upstream_send = upstream.open_uni().await?;
-    tokio::spawn(copy_one_way(downstream_recv, upstream_send));
+    tokio::spawn(copy_one_way(
+      downstream_recv,
+      upstream_send,
+      activity.clone(),
+    ));
   }
 }
 
 async fn bridge_upstream_uni(
   downstream: Arc<H3WebTransportSession>,
   upstream: Arc<web_transport_quinn::Session>,
+  activity: mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
   loop {
     let upstream_recv = upstream.accept_uni().await?;
+    let _ = activity.try_send(());
     let downstream_send = downstream.open_uni(downstream.session_id()).await?;
-    tokio::spawn(copy_one_way(upstream_recv, downstream_send));
+    tokio::spawn(copy_one_way(
+      upstream_recv,
+      downstream_send,
+      activity.clone(),
+    ));
   }
 }
 
 async fn bridge_downstream_datagrams(
   downstream: Arc<H3WebTransportSession>,
   upstream: Arc<web_transport_quinn::Session>,
+  activity: mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
   let mut reader = downstream.datagram_reader();
   loop {
     let datagram = reader.read_datagram().await?;
+    let _ = activity.try_send(());
     let mut payload = datagram.into_payload();
     let len = payload.remaining();
     upstream.send_datagram(payload.copy_to_bytes(len))?;
@@ -724,10 +835,12 @@ async fn bridge_downstream_datagrams(
 async fn bridge_upstream_datagrams(
   downstream: Arc<H3WebTransportSession>,
   upstream: Arc<web_transport_quinn::Session>,
+  activity: mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
   let mut sender = downstream.datagram_sender();
   loop {
     let datagram = upstream.read_datagram().await?;
+    let _ = activity.try_send(());
     sender.send_datagram(datagram)?;
   }
 }
@@ -736,31 +849,38 @@ async fn copy_bidi_stream<D>(
   downstream: D,
   mut upstream_send: web_transport_quinn::SendStream,
   mut upstream_recv: web_transport_quinn::RecvStream,
+  activity: mpsc::Sender<()>,
 ) -> anyhow::Result<()>
 where
   D: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
   let (mut downstream_recv, mut downstream_send) = tokio::io::split(downstream);
-  let downstream_to_upstream = async {
-    tokio::io::copy(&mut downstream_recv, &mut upstream_send).await?;
-    upstream_send.shutdown().await
-  };
-  let upstream_to_downstream = async {
-    tokio::io::copy(&mut upstream_recv, &mut downstream_send).await?;
-    downstream_send.shutdown().await
-  };
+  let downstream_to_upstream =
+    copy_one_way(&mut downstream_recv, &mut upstream_send, activity.clone());
+  let upstream_to_downstream = copy_one_way(&mut upstream_recv, &mut downstream_send, activity);
   tokio::try_join!(downstream_to_upstream, upstream_to_downstream)?;
   Ok(())
 }
 
-async fn copy_one_way<R, W>(mut recv: R, mut send: W) -> anyhow::Result<()>
+async fn copy_one_way<R, W>(
+  mut recv: R,
+  mut send: W,
+  activity: mpsc::Sender<()>,
+) -> anyhow::Result<()>
 where
-  R: AsyncRead + Unpin + Send + 'static,
-  W: AsyncWrite + Unpin + Send + 'static,
+  R: AsyncRead + Unpin,
+  W: AsyncWrite + Unpin,
 {
-  tokio::io::copy(&mut recv, &mut send).await?;
-  send.shutdown().await?;
-  Ok(())
+  let mut buffer = vec![0u8; 16 * 1024];
+  loop {
+    let read = recv.read(&mut buffer).await?;
+    if read == 0 {
+      send.shutdown().await?;
+      return Ok(());
+    }
+    send.write_all(&buffer[..read]).await?;
+    let _ = activity.try_send(());
+  }
 }
 
 async fn resolve_upstream_addr(origin: &url::Url) -> anyhow::Result<(String, SocketAddr)> {

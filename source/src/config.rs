@@ -442,6 +442,18 @@ impl Config {
       }
 
       upstream.tls.validate(&upstream.name)?;
+      if upstream.connect_timeout_ms == 0
+        || upstream.request_timeout_ms == 0
+        || upstream.first_byte_timeout_ms == 0
+        || upstream.read_timeout_ms == 0
+        || upstream.send_timeout_ms == 0
+        || upstream.idle_timeout_ms == 0
+      {
+        bail!(
+          "upstream {} timeout values must be greater than 0",
+          upstream.name
+        );
+      }
     }
 
     let mut pool_names = HashSet::new();
@@ -651,6 +663,7 @@ impl Config {
           _ => {}
         }
       }
+      route.timeouts.validate(&route.name)?;
     }
 
     self.validate_stream_listeners()?;
@@ -681,6 +694,8 @@ impl Config {
       || self.limits.client_header_timeout_ms == 0
       || self.limits.client_body_timeout_ms == 0
       || self.limits.client_idle_timeout_ms == 0
+      || self.limits.websocket_idle_timeout_ms == 0
+      || self.limits.webtransport_idle_timeout_ms == 0
       || self.limits.tls_handshake_timeout_ms == 0
       || self.limits.response_send_timeout_ms == 0
       || self.limits.max_headers == 0
@@ -1226,6 +1241,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_uri_bytes",
       "response_send_timeout_ms",
       "tls_handshake_timeout_ms",
+      "websocket_idle_timeout_ms",
+      "webtransport_idle_timeout_ms",
     ][..],
     "compression" => &[
       "br",
@@ -1288,6 +1305,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "database.access_log.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "upstreams" => &[
       "connect_timeout_ms",
+      "first_byte_timeout_ms",
       "idle_timeout_ms",
       "max_http_version",
       "name",
@@ -1340,7 +1358,19 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "upstream",
       "upstream_http_version",
       "upstream_pool",
+      "timeouts",
       "waf",
+    ][..],
+    "routes.timeouts" => &[
+      "client_body_timeout_ms",
+      "response_send_timeout_ms",
+      "upstream_connect_timeout_ms",
+      "upstream_first_byte_timeout_ms",
+      "upstream_read_timeout_ms",
+      "upstream_request_timeout_ms",
+      "upstream_send_timeout_ms",
+      "websocket_idle_timeout_ms",
+      "webtransport_idle_timeout_ms",
     ][..],
     "stream_listeners" => &[
       "bind",
@@ -2558,6 +2588,10 @@ pub struct LimitsConfig {
   pub client_body_timeout_ms: u64,
   #[serde(default = "default_client_idle_timeout_ms")]
   pub client_idle_timeout_ms: u64,
+  #[serde(default = "default_client_idle_timeout_ms")]
+  pub websocket_idle_timeout_ms: u64,
+  #[serde(default = "default_client_idle_timeout_ms")]
+  pub webtransport_idle_timeout_ms: u64,
   #[serde(default = "default_tls_handshake_timeout_ms")]
   pub tls_handshake_timeout_ms: u64,
   #[serde(default = "default_response_send_timeout_ms")]
@@ -2585,6 +2619,8 @@ impl Default for LimitsConfig {
       client_header_timeout_ms: default_client_header_timeout_ms(),
       client_body_timeout_ms: default_client_body_timeout_ms(),
       client_idle_timeout_ms: default_client_idle_timeout_ms(),
+      websocket_idle_timeout_ms: default_client_idle_timeout_ms(),
+      webtransport_idle_timeout_ms: default_client_idle_timeout_ms(),
       tls_handshake_timeout_ms: default_tls_handshake_timeout_ms(),
       response_send_timeout_ms: default_response_send_timeout_ms(),
       max_headers: default_max_headers(),
@@ -2997,6 +3033,8 @@ pub struct UpstreamConfig {
   #[serde(default = "default_request_timeout_ms")]
   pub request_timeout_ms: u64,
   #[serde(default = "default_request_timeout_ms")]
+  pub first_byte_timeout_ms: u64,
+  #[serde(default = "default_request_timeout_ms")]
   pub read_timeout_ms: u64,
   #[serde(default = "default_request_timeout_ms")]
   pub send_timeout_ms: u64,
@@ -3254,7 +3292,64 @@ pub struct RouteConfig {
   #[serde(default)]
   pub compression: Option<String>,
   #[serde(default)]
+  pub timeouts: RouteTimeoutConfig,
+  #[serde(default)]
   pub waf: RouteWafConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteTimeoutConfig {
+  #[serde(default)]
+  pub client_body_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub response_send_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub websocket_idle_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub webtransport_idle_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub upstream_connect_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub upstream_request_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub upstream_first_byte_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub upstream_read_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub upstream_send_timeout_ms: Option<u64>,
+}
+
+impl RouteTimeoutConfig {
+  fn validate(&self, route_name: &str) -> anyhow::Result<()> {
+    for (field, value) in [
+      ("client_body_timeout_ms", self.client_body_timeout_ms),
+      ("response_send_timeout_ms", self.response_send_timeout_ms),
+      ("websocket_idle_timeout_ms", self.websocket_idle_timeout_ms),
+      (
+        "webtransport_idle_timeout_ms",
+        self.webtransport_idle_timeout_ms,
+      ),
+      (
+        "upstream_connect_timeout_ms",
+        self.upstream_connect_timeout_ms,
+      ),
+      (
+        "upstream_request_timeout_ms",
+        self.upstream_request_timeout_ms,
+      ),
+      (
+        "upstream_first_byte_timeout_ms",
+        self.upstream_first_byte_timeout_ms,
+      ),
+      ("upstream_read_timeout_ms", self.upstream_read_timeout_ms),
+      ("upstream_send_timeout_ms", self.upstream_send_timeout_ms),
+    ] {
+      if value == Some(0) {
+        bail!("route {route_name} timeouts.{field} must be greater than 0");
+      }
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

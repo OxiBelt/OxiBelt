@@ -6,6 +6,7 @@ import re
 import socket
 import ssl
 import sys
+import time
 import urllib.parse
 
 TARGET_HOST = "proxy"
@@ -115,7 +116,7 @@ def open_proxy_socket(args, proxy_protocol_line=None):
     raise
 
 
-def send_http_request(sock, method, target_path, host_header, headers, body):
+def send_http_request(sock, method, target_path, host_header, headers, body, slow_body_delay_ms=0):
   request_lines = [
     f"{method} {target_path} HTTP/1.1",
     f"Host: {host_header}",
@@ -130,15 +131,26 @@ def send_http_request(sock, method, target_path, host_header, headers, body):
   if not has_content_length:
     request_lines.append(f"Content-Length: {len(body)}")
   request_lines.append("Connection: close")
-  request = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8") + body
-  sock.sendall(request)
+  head = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8")
+  sock.sendall(head)
+  if slow_body_delay_ms > 0 and body:
+    time.sleep(slow_body_delay_ms / 1000.0)
+  sock.sendall(body)
   return read_http_response(sock)
 
 
 def request_direct(args, target_path, host_header, headers, body):
   sock = open_proxy_socket(args)
   try:
-    return send_http_request(sock, args.method, target_path, host_header, headers, body)
+    return send_http_request(
+      sock,
+      args.method,
+      target_path,
+      host_header,
+      headers,
+      body,
+      args.slow_body_delay_ms,
+    )
   finally:
     sock.close()
 
@@ -146,7 +158,15 @@ def request_direct(args, target_path, host_header, headers, body):
 def request_with_proxy_protocol(args, target_path, host_header, headers, body):
   sock = open_proxy_socket(args, args.proxy_protocol_line)
   try:
-    return send_http_request(sock, args.method, target_path, host_header, headers, body)
+    return send_http_request(
+      sock,
+      args.method,
+      target_path,
+      host_header,
+      headers,
+      body,
+      args.slow_body_delay_ms,
+    )
   finally:
     sock.close()
 
@@ -231,6 +251,7 @@ def main() -> int:
   parser.add_argument("--dump-response-json", action="store_true")
   parser.add_argument("--expect-status", type=int)
   parser.add_argument("--timeout", type=float, default=5.0)
+  parser.add_argument("--slow-body-delay-ms", type=int, default=0)
   args = parser.parse_args()
 
   try:

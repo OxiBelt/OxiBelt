@@ -98,6 +98,7 @@ impl PoolState {
             },
             connect_timeout_ms: 3_000,
             request_timeout_ms: 30_000,
+            first_byte_timeout_ms: 30_000,
             read_timeout_ms: 30_000,
             send_timeout_ms: 30_000,
             idle_timeout_ms: pool.keepalive.idle_timeout_ms,

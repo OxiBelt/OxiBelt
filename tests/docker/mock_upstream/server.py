@@ -2,6 +2,7 @@ import json
 import os
 import re
 import ssl
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -48,6 +49,8 @@ class EchoHandler(BaseHTTPRequestHandler):
     body = self.rfile.read(body_length).decode("utf-8", "replace") if body_length else ""
     parsed = urlsplit(self.path)
     query = parse_qs(parsed.query)
+    header_delay_ms = _query_int(query, "header_delay_ms", 0)
+    body_delay_ms = _query_int(query, "body_delay_ms", 0)
     status = 200
     if parsed.path.startswith("/status/"):
       try:
@@ -65,6 +68,8 @@ class EchoHandler(BaseHTTPRequestHandler):
       "proxy_protocol_line": self.proxy_protocol_line,
     }
     encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    if header_delay_ms > 0:
+      time.sleep(header_delay_ms / 1000.0)
     self.send_response(status)
     self.send_header("content-type", "application/json")
     self.send_header("x-upstream-marker", UPSTREAM_MARKER)
@@ -80,6 +85,8 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.send_header("cache-control", cache_control)
     self.send_header("content-length", str(len(encoded)))
     self.end_headers()
+    if body_delay_ms > 0:
+      time.sleep(body_delay_ms / 1000.0)
     self.wfile.write(encoded)
 
   def _handle_upgrade(self):
@@ -99,6 +106,13 @@ class EchoHandler(BaseHTTPRequestHandler):
     data = self.connection.recv(4096)
     self.connection.sendall(b"upgraded:" + data)
     return True
+
+
+def _query_int(query, key, default):
+  try:
+    return int(query.get(key, [str(default)])[0])
+  except (TypeError, ValueError):
+    return default
 
 
 def main():

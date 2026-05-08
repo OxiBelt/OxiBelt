@@ -679,6 +679,63 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "timeouts",
+            "route-first-byte-timeout",
+            "route-level upstream first-byte timeout can fail one route while another succeeds",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local short_response long_response
+  short_response="$(client_request "example.test" "/short/delay?header_delay_ms=1200" 504)"
+  assert_response_jq "${short_response}" '.body == "upstream request failed"'
+
+  long_response="$(client_request "example.test" "/long/delay?header_delay_ms=1200" 200)"
+  assert_body_jq "${long_response}" '.path == "/origin/app/delay?header_delay_ms=1200"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "timeouts",
+            "route-client-body-timeout",
+            "route-level client body timeout rejects a slow upload",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(slow_body_client_request "example.test" "/app/slow-upload" 408 "POST" "slow-body" 1200 "Content-Type: text/plain")"
+  assert_response_jq "${response}" '.body == "request body timed out"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "timeouts",
+            "route-upstream-read-timeout",
+            "route-level upstream read timeout fails a stalled buffered response",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/stalled-body?body_delay_ms=1200" 504)"
+  assert_response_jq "${response}" '.body == "upstream response body timed out"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "proxy-identity",
             "real-ip-waf",
             "trusted X-Forwarded-For real IP is used by request WAF rules",

@@ -51,6 +51,82 @@ fn protocol_operations_defaults_are_disabled() {
 }
 
 #[test]
+fn timeout_defaults_and_route_overrides_are_parsed() {
+    let temp_dir = common::TempDir::new("timeout-overrides");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "timeout-overrides");
+    let raw = format!(
+        r#"
+{}
+
+[limits]
+client_body_timeout_ms = 30000
+response_send_timeout_ms = 60000
+websocket_idle_timeout_ms = 75000
+webtransport_idle_timeout_ms = 75000
+
+[[routes]]
+name = "timeout-route"
+hosts = ["timeouts.example.com"]
+path_prefix = "/timeouts"
+upstream = "app"
+
+[routes.timeouts]
+client_body_timeout_ms = 15000
+response_send_timeout_ms = 30000
+websocket_idle_timeout_ms = 60000
+webtransport_idle_timeout_ms = 60000
+upstream_connect_timeout_ms = 1000
+upstream_request_timeout_ms = 15000
+upstream_first_byte_timeout_ms = 2000
+upstream_read_timeout_ms = 10000
+upstream_send_timeout_ms = 10000
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(config.limits.websocket_idle_timeout_ms, 75_000);
+    assert_eq!(config.limits.webtransport_idle_timeout_ms, 75_000);
+    assert_eq!(config.upstreams[0].first_byte_timeout_ms, 30_000);
+    let route = config
+        .routes
+        .iter()
+        .find(|route| route.name == "timeout-route")
+        .expect("route should exist");
+    assert_eq!(route.timeouts.client_body_timeout_ms, Some(15_000));
+    assert_eq!(route.timeouts.upstream_first_byte_timeout_ms, Some(2_000));
+}
+
+#[test]
+fn route_timeout_values_must_be_positive_when_configured() {
+    let temp_dir = common::TempDir::new("timeout-invalid");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "timeout-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[routes.timeouts]
+upstream_read_timeout_ms = 0
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("zero route timeout should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("timeouts.upstream_read_timeout_ms must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn system_access_log_defaults_to_disabled_stdout() {
     let temp_dir = common::TempDir::new("system-access-log-default");
     let (cert_path, key_path) =
