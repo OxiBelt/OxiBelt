@@ -63,6 +63,16 @@ fn system_access_log_defaults_to_disabled_stdout() {
     assert!(!config.logging.access_log.enabled);
     assert!(config.logging.access_log.stdout);
     assert!(!config.logging.access_log.fields.is_empty());
+    assert_eq!(
+        config
+            .logging
+            .access_log
+            .fields
+            .iter()
+            .find(|field| field.name == "user_agent")
+            .map(|field| field.value.as_str()),
+        Some("Request.Headers.getAll('User-Agent')")
+    );
     assert!(!config.logging.access_log.database.enabled);
 }
 

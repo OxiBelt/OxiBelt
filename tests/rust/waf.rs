@@ -8,7 +8,7 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::waf::{
     HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput, WafResponseInput,
-    WafTlsMetadata, WafTransportNetwork,
+    WafTlsMetadata, WafTransportNetwork, compile_access_log_fields,
 };
 use ring::digest;
 
@@ -901,6 +901,140 @@ value = "Context.RuleName"
     assert!(line.contains("\"matched_rule\":\"stdout-access\""));
     assert!(!line.contains("\"client_ip\":"));
     assert!(!line.contains("\"waf_rule_tags\":"));
+}
+
+#[test]
+fn system_access_log_default_fields_preserve_duplicate_user_agents() {
+    let temp_dir = common::TempDir::new("system-access-log-duplicate-ua");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "system-access-log-duplicate-ua");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let fields = compile_access_log_fields("logging.access_log", &config.logging.access_log.fields)
+        .expect("system access-log fields should compile");
+
+    let mut request_headers = HeaderMap::new();
+    request_headers.append(
+        http::header::USER_AGENT,
+        HeaderValue::from_static("first-agent"),
+    );
+    request_headers.append(
+        http::header::USER_AGENT,
+        HeaderValue::from_static("second-agent"),
+    );
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/search?q=one%20two".parse().expect("URI should parse");
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("12"));
+
+    let record = engine
+        .build_system_access_log(
+            &fields,
+            WafResponseInput {
+                request: request_input(
+                    &method,
+                    &uri,
+                    &request_headers,
+                    &tags,
+                    "203.0.113.10:49152".parse().unwrap(),
+                ),
+                response_id: "test-response-id",
+                received_at_unix_ms: 1_700_000_000_123,
+                version: http::Version::HTTP_11,
+                status: StatusCode::CREATED,
+                headers: &response_headers,
+                upstream_name: "app",
+                upstream_pool: None,
+                upstream_scheme: "http",
+                upstream_connect_time_ms: None,
+                upstream_first_byte_time_ms: Some(7),
+                upstream_error: None,
+            },
+        )
+        .expect("duplicate User-Agent should not suppress the system access log");
+
+    let line = record.to_json_line();
+    assert!(line.contains("\"scope\":\"system\""));
+    assert!(line.contains(
+        "\"user_agent\":{\"values\":[\"first-agent\",\"second-agent\"],\"is_truncated\":false}"
+    ));
+}
+
+#[test]
+fn default_emit_access_log_fields_preserve_duplicate_user_agents() {
+    let temp_dir = common::TempDir::new("waf-access-log-duplicate-ua");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-access-log-duplicate-ua");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "default-access"
+phase = "response"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let mut request_headers = HeaderMap::new();
+    request_headers.append(
+        http::header::USER_AGENT,
+        HeaderValue::from_static("first-agent"),
+    );
+    request_headers.append(
+        http::header::USER_AGENT,
+        HeaderValue::from_static("second-agent"),
+    );
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/search?q=one%20two".parse().expect("URI should parse");
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("12"));
+
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(
+            &method,
+            &uri,
+            &request_headers,
+            &tags,
+            "203.0.113.10:49152".parse().unwrap(),
+        ),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::CREATED,
+        headers: &response_headers,
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+
+    assert_eq!(response_decision.access_logs.len(), 1);
+    let line = response_decision.access_logs[0].to_json_line();
+    assert!(line.contains("\"scope\":\"waf\""));
+    assert!(line.contains(
+        "\"user_agent\":{\"values\":[\"first-agent\",\"second-agent\"],\"is_truncated\":false}"
+    ));
 }
 
 #[test]

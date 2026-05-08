@@ -643,7 +643,7 @@ value = "Request.Client.Ip"
 
 [[waf.rules.actions.fields]]
 name = "user_agent"
-value = "Request.Headers.get('User-Agent')"
+value = "Request.Headers.getAll('User-Agent')"
 
 [[waf.rules.actions.fields]]
 name = "tls_fingerprint"

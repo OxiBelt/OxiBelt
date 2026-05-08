@@ -365,7 +365,7 @@ The emitted newline-delimited JSON object always includes `event = "oxibelt.acce
 
 Field `value` may also be written as `expression`. Field expressions may read response-phase `Request`, `Response`, and `Context` values. They may evaluate to scalar JSON values (`Bool`, `Int`, `String`, or `Null`) or bounded JSON collections/objects exposed by the OxiRule object model, such as `Request.Headers`, `Request.QueryParams`, `Request.Cookies`, `Request.Tags`, `Context.RuleTags`, or `Request.Headers.getAll(...)`. Field names must match `[A-Za-z0-9_.-]{1,64}` and may not be `event` or `timestamp_unix_ms`. Fields that read request body bytes are rejected.
 
-If `fields` is omitted, OxiBelt emits the default access-log field set.
+If `fields` is omitted, OxiBelt emits the default access-log field set. In that default set, `user_agent` is a bounded collection from `Request.Headers.getAll('User-Agent')`, so duplicate `User-Agent` headers are preserved instead of failing the whole log record.
 
 ## Object Model
 

@@ -4355,7 +4355,7 @@ fn default_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
     ("query", "Request.Http.Query"),
     ("request_version", "Request.Http.Version"),
     ("host", "Request.Http.Host"),
-    ("user_agent", "Request.Headers.get('User-Agent')"),
+    ("user_agent", "Request.Headers.getAll('User-Agent')"),
     ("client_ip", "Request.Client.Ip"),
     ("client_port", "Request.Client.Port"),
     ("protocol", "Request.Protocol"),

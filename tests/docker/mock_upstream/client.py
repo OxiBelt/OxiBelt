@@ -121,7 +121,7 @@ def send_http_request(sock, method, target_path, host_header, headers, body):
     f"Host: {host_header}",
   ]
   has_content_length = False
-  for name, value in headers.items():
+  for name, value in headers:
     if name.lower() == "host":
       continue
     if name.lower() == "content-length":
@@ -195,7 +195,7 @@ def perform_upgrade(args, host_header, target_path, headers, body):
       f"Upgrade: {upgrade_token}",
       "Content-Length: 0",
     ]
-    for name, value in headers.items():
+    for name, value in headers:
       if name.lower() not in {"host", "connection", "upgrade", "content-length"}:
         request_lines.append(f"{name}: {value}")
     sock.sendall(("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8"))
@@ -251,7 +251,7 @@ def main() -> int:
     return 2
 
   try:
-    headers = {"Host": host_header}
+    headers = [("Host", host_header)]
     for item in args.header:
       if ":" not in item:
         sys.stderr.write(f"invalid header {item!r}; expected Name: value\n")
@@ -263,7 +263,7 @@ def main() -> int:
       except ValueError as error:
         sys.stderr.write(f"{error}\n")
         return 2
-      headers[name] = value
+      headers.append((name, value))
 
     body = args.body.encode("utf-8")
     if args.connect_tunnel:
