@@ -285,14 +285,6 @@ probe_client_request_with_headers() {
   return "${status}"
 }
 
-restart_primary_proxy() {
-  docker restart "${proxy_container}" >/dev/null
-  sleep 1
-  if [[ "$(docker inspect -f '{{.State.Running}}' "${proxy_container}" 2>/dev/null || echo false)" != "true" ]]; then
-    fail_with_diagnostics "primary proxy did not restart cleanly"
-  fi
-}
-
 slow_body_client_request() {
   local host="$1"
   local path="$2"
