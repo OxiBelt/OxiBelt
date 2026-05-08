@@ -10,8 +10,9 @@ use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 
 use crate::config::{
-  ListenerConfig, OcspMode, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig, TlsClientAuthMode,
-  TlsConfig, TlsVersion, UpstreamEchConfig, UpstreamEchMode, canonicalize_existing_file,
+  AdminTlsConfig, ListenerConfig, OcspMode, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
+  TlsClientAuthMode, TlsConfig, TlsVersion, UpstreamEchConfig, UpstreamEchMode,
+  canonicalize_existing_file,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
@@ -89,6 +90,99 @@ pub fn build_quic_server_config(
   let mut quic_config = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
   crate::quic::apply_server_config(quic, quic_host_key_base_dir, &mut quic_config)?;
   Ok(quic_config)
+}
+
+pub fn build_admin_server_config(tls: &AdminTlsConfig) -> anyhow::Result<Arc<ServerConfig>> {
+  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let mut certificates = Vec::new();
+  let mut default = None;
+  for (index, certificate) in tls.certificates.iter().enumerate() {
+    let certs = load_certs(&certificate.cert_chain)?;
+    let key = load_private_key(&certificate.private_key)?;
+    let certified_key = CertifiedKey::from_der(certs, key, &provider)
+      .context("failed to create admin rustls certified key")?;
+    let certified_key = Arc::new(certified_key);
+    if certificate.default || (tls.certificates.len() == 1 && index == 0) {
+      default = Some(certified_key.clone());
+    }
+    certificates.push(AdminCertificate {
+      server_names: certificate
+        .server_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect(),
+      certified_key,
+    });
+  }
+
+  let resolver = AdminCertResolver {
+    certificates,
+    default,
+    require_sni: tls.require_sni,
+    reject_unknown_sni: tls.reject_unknown_sni,
+  };
+  let versions = tls_protocol_versions(tls.min_version, tls.max_version);
+  let builder = ServerConfig::builder_with_provider(provider.clone())
+    .with_protocol_versions(&versions)
+    .context("failed to configure admin TLS versions")?;
+  let mut server_config = match downstream_client_cert_verifier(&tls.client_auth, provider)? {
+    Some(verifier) => builder.with_client_cert_verifier(verifier),
+    None => builder.with_no_client_auth(),
+  }
+  .with_cert_resolver(Arc::new(resolver));
+  if !tls.session_tickets {
+    server_config.send_tls13_tickets = 0;
+    server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+  }
+  server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+  Ok(Arc::new(server_config))
+}
+
+#[derive(Debug)]
+struct AdminCertificate {
+  server_names: Vec<String>,
+  certified_key: Arc<CertifiedKey>,
+}
+
+#[derive(Debug)]
+struct AdminCertResolver {
+  certificates: Vec<AdminCertificate>,
+  default: Option<Arc<CertifiedKey>>,
+  require_sni: bool,
+  reject_unknown_sni: bool,
+}
+
+impl rustls::server::ResolvesServerCert for AdminCertResolver {
+  fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+    let Some(server_name) = client_hello.server_name().map(str::to_ascii_lowercase) else {
+      return (!self.require_sni).then(|| self.default.clone()).flatten();
+    };
+    for certificate in &self.certificates {
+      if certificate
+        .server_names
+        .iter()
+        .any(|pattern| admin_sni_matches(pattern, &server_name))
+      {
+        return Some(certificate.certified_key.clone());
+      }
+    }
+    if self.reject_unknown_sni {
+      None
+    } else {
+      self.default.clone()
+    }
+  }
+}
+
+fn admin_sni_matches(pattern: &str, server_name: &str) -> bool {
+  if let Some(suffix) = pattern.strip_prefix("*.") {
+    let suffix = format!(".{suffix}");
+    let Some(prefix) = server_name.strip_suffix(&suffix) else {
+      return false;
+    };
+    return !prefix.is_empty() && !prefix.contains('.');
+  }
+  pattern == server_name
 }
 
 pub fn build_upstream_client_config(

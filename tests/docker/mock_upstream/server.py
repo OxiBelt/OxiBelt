@@ -57,6 +57,17 @@ class EchoHandler(BaseHTTPRequestHandler):
         status = int(parsed.path.split("/", 3)[2])
       except (IndexError, ValueError):
         status = 500
+    if "status" in query:
+      status = _query_int(query, "status", status)
+    etag = query.get("etag", [""])[0]
+    last_modified = query.get("last_modified", [""])[0]
+    if etag and self.headers.get("if-none-match") == etag:
+      self.send_response(304)
+      self.send_header("etag", etag)
+      if last_modified:
+        self.send_header("last-modified", last_modified)
+      self.end_headers()
+      return
     payload = {
       "upstream": UPSTREAM_NAME,
       "scheme": "https" if TLS_ENABLED else "http",
@@ -67,11 +78,11 @@ class EchoHandler(BaseHTTPRequestHandler):
       "body": body,
       "proxy_protocol_line": self.proxy_protocol_line,
     }
-    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    encoded = query.get("body", [""])[0].encode("utf-8") or json.dumps(payload, sort_keys=True).encode("utf-8")
     if header_delay_ms > 0:
       time.sleep(header_delay_ms / 1000.0)
     self.send_response(status)
-    self.send_header("content-type", "application/json")
+    self.send_header("content-type", query.get("content_type", ["application/json"])[0])
     self.send_header("x-upstream-marker", UPSTREAM_MARKER)
     if query.get("set_cookie"):
       self.send_header("set-cookie", "upstream_session=present; Path=/")
@@ -83,6 +94,16 @@ class EchoHandler(BaseHTTPRequestHandler):
     }.get(query.get("cache_control", [""])[0])
     if cache_control:
       self.send_header("cache-control", cache_control)
+    if etag:
+      self.send_header("etag", etag)
+    if last_modified:
+      self.send_header("last-modified", last_modified)
+    expires = query.get("expires", [""])[0]
+    if expires:
+      self.send_header("expires", expires)
+    vary = query.get("vary", [""])[0]
+    if vary:
+      self.send_header("vary", vary)
     self.send_header("content-length", str(len(encoded)))
     self.end_headers()
     if body_delay_ms > 0:

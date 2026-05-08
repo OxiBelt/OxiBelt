@@ -119,6 +119,7 @@ pub struct AppSnapshot {
   pub(crate) compression: Arc<CompressionState>,
   pub metrics: Arc<Metrics>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
+  pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub waf: WafEngine,
   pub access_logs: AccessLogSinks,
@@ -148,6 +149,14 @@ impl AppSnapshot {
     let metrics = Metrics::new();
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to build downstream TLS config")?;
+    let admin_tls_server_config = if config.admin.enabled && config.admin.tls.enabled {
+      Some(
+        tls::build_admin_server_config(&config.admin.tls)
+          .context("failed to build admin TLS config")?,
+      )
+    } else {
+      None
+    };
     let quic_server_config = if config.listeners.http3 {
       Some(
         tls::build_quic_server_config(
@@ -181,6 +190,7 @@ impl AppSnapshot {
       compression,
       metrics,
       tls_server_config,
+      admin_tls_server_config,
       quic_server_config,
       waf,
       access_logs,

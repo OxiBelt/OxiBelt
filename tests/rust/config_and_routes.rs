@@ -5,8 +5,9 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-    CompressionConfig, Config, DatabaseTlsMode, ForwardedHeaderMode, HotReloadMode, OcspMode,
-    ProxyProtocolEgressMode, QuicZeroRttMode, RuntimeOverrides, UpstreamEchMode,
+    AdminTransportMode, CacheStore, CompressionConfig, Config, DatabaseTlsMode,
+    ForwardedHeaderMode, HotReloadMode, OcspMode, ProxyProtocolEgressMode, QuicZeroRttMode,
+    RuntimeOverrides, UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
 
@@ -124,6 +125,184 @@ upstream_read_timeout_ms = 0
             .contains("timeouts.upstream_read_timeout_ms must be greater than 0"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn cache_policy_disk_and_memory_then_disk_config_parse() {
+    let temp_dir = common::TempDir::new("cache-policy");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "cache-policy");
+    let disk_dir = temp_dir.path().join("cache");
+    std::fs::create_dir_all(&disk_dir).expect("failed to create cache dir");
+    let raw = format!(
+        r#"
+{}
+
+[cache]
+enabled = true
+store = "memory_then_disk"
+disk_dir = "{}"
+max_size_bytes = 10485760
+memory_max_size_bytes = 1024
+disk_max_size_bytes = 1048576
+memory_auto_fraction = 0.5
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+cache_key = "{{scheme}}:{{host}}:{{path}}:{{query:v}}:{{header:Accept-Language}}"
+negative_statuses = [404]
+negative_ttl_seconds = 10
+
+[[cache.policies]]
+name = "assets"
+store = "disk"
+disk_max_size_bytes = 1048576
+
+[[cache.policies.rules]]
+mime_types = ["text/css", "image/*"]
+store = "disk"
+
+[[routes]]
+name = "cached-assets"
+hosts = ["assets.example.com"]
+path_prefix = "/assets"
+upstream = "app"
+cache = "assets"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path),
+        disk_dir.display()
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.cache.store, CacheStore::MemoryThenDisk);
+    assert_eq!(config.cache.policies[0].name, "assets");
+    assert_eq!(config.routes[1].cache.as_deref(), Some("assets"));
+}
+
+#[test]
+fn cache_disk_store_requires_explicit_disk_dir() {
+    let temp_dir = common::TempDir::new("cache-disk-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "cache-disk-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[cache]
+enabled = true
+store = "disk"
+disk_max_size_bytes = 1048576
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("disk cache without disk_dir should fail");
+    assert!(
+        error.to_string().contains("cache.disk_dir is required"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn admin_transport_plaintext_requires_explicit_insecure_opt_in() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+    }
+    let temp_dir = common::TempDir::new("admin-plaintext");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-plaintext");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+transport = "plaintext"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("plain admin transport should require opt-in");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.allow_insecure_plaintext must be true"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn admin_non_loopback_auto_requires_tls() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+    }
+    let temp_dir = common::TempDir::new("admin-auto");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-auto");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+transport = "auto"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("non-loopback auto admin transport should require TLS");
+    assert!(
+        error.to_string().contains("admin.tls.enabled must be true"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn admin_tls_sni_certificate_config_validates() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+    }
+    let temp_dir = common::TempDir::new("admin-tls");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-tls");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+transport = "auto"
+
+[admin.tls]
+enabled = true
+require_sni = true
+reject_unknown_sni = true
+
+[[admin.tls.certificates]]
+server_names = ["admin.example.com", "*.ops.example.com"]
+cert_chain = "{}"
+private_key = "{}"
+default = true
+"#,
+        common::minimal_config_toml(&cert_path, &key_path),
+        cert_path.display(),
+        key_path.display()
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert!(config.admin.tls.enabled);
+    assert_eq!(config.admin.transport, AdminTransportMode::Auto);
 }
 
 #[test]

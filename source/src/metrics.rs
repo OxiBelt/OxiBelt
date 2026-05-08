@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use http::StatusCode;
 
+use crate::cache::CacheStats;
+
 #[derive(Debug, Default)]
 pub struct Metrics {
   requests_total: AtomicU64,
@@ -10,6 +12,9 @@ pub struct Metrics {
   upstream_errors_total: AtomicU64,
   cache_hits_total: AtomicU64,
   cache_misses_total: AtomicU64,
+  cache_revalidations_total: AtomicU64,
+  cache_stale_served_total: AtomicU64,
+  cache_purges_total: AtomicU64,
 }
 
 impl Metrics {
@@ -36,14 +41,39 @@ impl Metrics {
     self.cache_misses_total.fetch_add(1, Ordering::Relaxed);
   }
 
-  pub fn prometheus(&self) -> String {
+  pub fn record_cache_revalidation(&self) {
+    self
+      .cache_revalidations_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_cache_stale(&self) {
+    self
+      .cache_stale_served_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_cache_purge(&self) {
+    self.cache_purges_total.fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn prometheus(&self, cache: CacheStats) -> String {
     format!(
-      "# TYPE oxibelt_requests_total counter\noxibelt_requests_total {}\n# TYPE oxibelt_responses_total counter\noxibelt_responses_total {}\n# TYPE oxibelt_upstream_errors_total counter\noxibelt_upstream_errors_total {}\n# TYPE oxibelt_cache_hits_total counter\noxibelt_cache_hits_total {}\n# TYPE oxibelt_cache_misses_total counter\noxibelt_cache_misses_total {}\n",
+      "# TYPE oxibelt_requests_total counter\noxibelt_requests_total {}\n# TYPE oxibelt_responses_total counter\noxibelt_responses_total {}\n# TYPE oxibelt_upstream_errors_total counter\noxibelt_upstream_errors_total {}\n# TYPE oxibelt_cache_hits_total counter\noxibelt_cache_hits_total {}\n# TYPE oxibelt_cache_misses_total counter\noxibelt_cache_misses_total {}\n# TYPE oxibelt_cache_revalidations_total counter\noxibelt_cache_revalidations_total {}\n# TYPE oxibelt_cache_stale_served_total counter\noxibelt_cache_stale_served_total {}\n# TYPE oxibelt_cache_purges_total counter\noxibelt_cache_purges_total {}\n# TYPE oxibelt_cache_memory_entries gauge\noxibelt_cache_memory_entries {}\n# TYPE oxibelt_cache_disk_entries gauge\noxibelt_cache_disk_entries {}\n# TYPE oxibelt_cache_tmpfs_entries gauge\noxibelt_cache_tmpfs_entries {}\n# TYPE oxibelt_cache_memory_bytes gauge\noxibelt_cache_memory_bytes {}\n# TYPE oxibelt_cache_disk_bytes gauge\noxibelt_cache_disk_bytes {}\n# TYPE oxibelt_cache_tmpfs_bytes gauge\noxibelt_cache_tmpfs_bytes {}\n",
       self.requests_total.load(Ordering::Relaxed),
       self.responses_total.load(Ordering::Relaxed),
       self.upstream_errors_total.load(Ordering::Relaxed),
       self.cache_hits_total.load(Ordering::Relaxed),
       self.cache_misses_total.load(Ordering::Relaxed),
+      self.cache_revalidations_total.load(Ordering::Relaxed),
+      self.cache_stale_served_total.load(Ordering::Relaxed),
+      self.cache_purges_total.load(Ordering::Relaxed),
+      cache.memory_entries,
+      cache.disk_entries,
+      cache.tmpfs_entries,
+      cache.memory_bytes,
+      cache.disk_bytes,
+      cache.tmpfs_bytes,
     )
   }
 }

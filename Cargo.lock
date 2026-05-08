@@ -1379,6 +1379,7 @@ dependencies = [
  "h3-webtransport",
  "http",
  "http-body-util",
+ "httpdate",
  "hyper",
  "hyper-rustls",
  "hyper-util",

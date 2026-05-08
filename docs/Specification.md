@@ -134,7 +134,7 @@ See [OxiRule.md](OxiRule.md) for the full rule reference.
 
 ## Runtime and Operations
 
-Runtime state is process-local. The cache is memory-backed or tmpfs-backed, upstream health state is local, rate and connection limits are local, and Person proof single-use token state is local.
+Runtime state is process-local. The cache can use memory, tmpfs, disk, or memory-then-disk storage, but its index, locks, and freshness decisions are still local to the process. Upstream health state, rate and connection limits, and Person proof single-use token state are local.
 
 Hot reload modes:
 
@@ -149,6 +149,7 @@ Operational endpoints are optional:
 
 - `[health]` exposes local readiness and liveness endpoints.
 - `[metrics]` exposes Prometheus-style metrics.
+- `[admin]` exposes authenticated operations APIs such as cache purge on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist.
 - `[logging.access_log]` emits request-wide newline-delimited JSON access logs with `scope = "system"` and can use its own stdout and PostgreSQL sinks.
 - OxiRule `emit_access_log` writes newline-delimited JSON with `scope = "waf"` to stdout and can optionally mirror records to PostgreSQL through the separate `[database.access_log]` sink.
 

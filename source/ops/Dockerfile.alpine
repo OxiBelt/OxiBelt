@@ -67,7 +67,8 @@ LABEL org.opencontainers.image.title="OxiBelt" \
 RUN apk add --no-cache ca-certificates libgcc && \
     addgroup -S oxibelt && \
     adduser -S -D -H -u 10001 -G oxibelt oxibelt && \
-    mkdir -p /etc/oxibelt/config /etc/oxibelt/cert /etc/oxibelt/oxirule
+    mkdir -p /etc/oxibelt/config /etc/oxibelt/cert /etc/oxibelt/oxirule /var/cache/oxibelt && \
+    chown oxibelt:oxibelt /var/cache/oxibelt
 
 WORKDIR /app
 COPY --from=builder /tmp/oxibelt /usr/local/bin/oxibelt
@@ -75,6 +76,7 @@ COPY source/config/oxibelt.toml /etc/oxibelt/config/oxibelt.toml
 
 RUN chmod 0755 /usr/local/bin/oxibelt && \
     chmod 0755 /etc/oxibelt /etc/oxibelt/config /etc/oxibelt/cert /etc/oxibelt/oxirule && \
+    chmod 0755 /var/cache/oxibelt && \
     chmod 0644 /etc/oxibelt/config/oxibelt.toml
 
 USER 10001:10001

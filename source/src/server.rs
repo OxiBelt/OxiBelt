@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ::http::{Response, StatusCode};
-use anyhow::Context;
+use anyhow::{Context, bail};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -15,9 +15,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::LazyConfigAcceptor;
+use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
-use crate::config::RuntimeOverrides;
+use crate::config::{AdminTransportMode, RuntimeOverrides};
+use crate::identity::Cidr;
 use crate::limits::ConnectionPermit;
 use crate::pool_health;
 use crate::proxy::http::body::ProxyBody;
@@ -110,10 +112,29 @@ impl OpsTasks {
       let (tx, rx) = watch::channel(false);
       shutdown.push(tx);
       let task_state = state.clone();
-      let task_error = error_tx;
+      let task_error = error_tx.clone();
       tasks.push(tokio::spawn(async move {
         if let Err(error) = serve_ops_listener(listener, task_state, rx, OpsKind::Health).await {
           let _ = task_error.send(error.context("health listener failed"));
+        }
+      }));
+    }
+    if snapshot.config.admin.enabled {
+      let listener = TcpListener::bind(snapshot.config.admin.bind)
+        .await
+        .with_context(|| {
+          format!(
+            "failed to bind admin listener to {}",
+            snapshot.config.admin.bind
+          )
+        })?;
+      let (tx, rx) = watch::channel(false);
+      shutdown.push(tx);
+      let task_state = state.clone();
+      let task_error = error_tx.clone();
+      tasks.push(tokio::spawn(async move {
+        if let Err(error) = serve_admin_listener(listener, task_state, rx).await {
+          let _ = task_error.send(error.context("admin listener failed"));
         }
       }));
     }
@@ -191,7 +212,8 @@ fn ops_response(
 ) -> Response<ProxyBody> {
   match kind {
     OpsKind::Metrics => {
-      let body = state.snapshot().metrics.prometheus();
+      let snapshot = state.snapshot();
+      let body = snapshot.metrics.prometheus(snapshot.cache.stats());
       text_response(StatusCode::OK, &body)
     }
     OpsKind::Health => {
@@ -206,6 +228,197 @@ fn ops_response(
       }
     }
   }
+}
+
+async fn serve_admin_listener(
+  listener: TcpListener,
+  state: AppHandle,
+  mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+  let bind = listener
+    .local_addr()
+    .context("failed to read admin listener address")?;
+  info!(bind = %bind, "admin listener started");
+  loop {
+    tokio::select! {
+      biased;
+      changed = shutdown.changed() => {
+        if changed.is_ok() && *shutdown.borrow() {
+          info!(bind = %bind, "admin listener stopped");
+        }
+        return Ok(());
+      }
+      accepted = listener.accept() => {
+        let (stream, peer_addr) = match accepted {
+          Ok(value) => value,
+          Err(error) => {
+            warn!(error = %error, "failed to accept admin connection");
+            continue;
+          }
+        };
+        let state = state.clone();
+        tokio::spawn(async move {
+          if let Err(error) = handle_admin_connection(stream, peer_addr, state).await {
+            warn!(peer = %peer_addr, error = %error, "admin connection failed");
+          }
+        });
+      }
+    }
+  }
+}
+
+async fn handle_admin_connection(
+  stream: TcpStream,
+  peer_addr: SocketAddr,
+  state: AppHandle,
+) -> anyhow::Result<()> {
+  let snapshot = state.snapshot();
+  let plaintext_allowed = admin_plaintext_allowed(&snapshot, peer_addr);
+  match snapshot.config.admin.transport {
+    AdminTransportMode::Tls => handle_admin_tls_connection(stream, peer_addr, state).await,
+    AdminTransportMode::Plaintext => {
+      handle_admin_plaintext_connection(stream, peer_addr, state).await
+    }
+    AdminTransportMode::PlaintextAllowlist if plaintext_allowed => {
+      handle_admin_plaintext_connection(stream, peer_addr, state).await
+    }
+    AdminTransportMode::PlaintextAllowlist => {
+      bail!("admin plaintext connection from {peer_addr} is not allowlisted");
+    }
+    AdminTransportMode::Auto => {
+      if plaintext_allowed && !tcp_stream_starts_with_tls(&stream).await {
+        handle_admin_plaintext_connection(stream, peer_addr, state).await
+      } else {
+        handle_admin_tls_connection(stream, peer_addr, state).await
+      }
+    }
+  }
+}
+
+async fn tcp_stream_starts_with_tls(stream: &TcpStream) -> bool {
+  let mut byte = [0_u8; 1];
+  matches!(stream.peek(&mut byte).await, Ok(1..) if byte[0] == 22)
+}
+
+fn admin_plaintext_allowed(snapshot: &AppSnapshot, peer_addr: SocketAddr) -> bool {
+  snapshot
+    .config
+    .admin
+    .plaintext_allowed_source_cidrs
+    .iter()
+    .filter_map(|raw| Cidr::parse(raw).ok())
+    .any(|cidr| cidr.contains(peer_addr.ip()))
+}
+
+async fn handle_admin_tls_connection(
+  stream: TcpStream,
+  peer_addr: SocketAddr,
+  state: AppHandle,
+) -> anyhow::Result<()> {
+  let snapshot = state.snapshot();
+  let config = snapshot
+    .admin_tls_server_config
+    .clone()
+    .ok_or_else(|| anyhow::anyhow!("admin TLS is not configured"))?;
+  drop(snapshot);
+  let acceptor = TlsAcceptor::from(config);
+  let tls_stream = tokio::time::timeout(
+    Duration::from_millis(state.snapshot().config.limits.tls_handshake_timeout_ms),
+    acceptor.accept(stream),
+  )
+  .await
+  .context("admin TLS handshake timed out")?
+  .context("admin TLS handshake failed")?;
+  serve_admin_http1(TokioIo::new(tls_stream), peer_addr, state, "https").await
+}
+
+async fn handle_admin_plaintext_connection(
+  stream: TcpStream,
+  peer_addr: SocketAddr,
+  state: AppHandle,
+) -> anyhow::Result<()> {
+  serve_admin_http1(TokioIo::new(stream), peer_addr, state, "http").await
+}
+
+async fn serve_admin_http1<I>(
+  io: TokioIo<I>,
+  peer_addr: SocketAddr,
+  state: AppHandle,
+  scheme: &'static str,
+) -> anyhow::Result<()>
+where
+  I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+  let service = service_fn(move |request: hyper::Request<Incoming>| {
+    let state = state.clone();
+    async move { Ok::<_, Infallible>(admin_response(request, state, peer_addr, scheme)) }
+  });
+  hyper::server::conn::http1::Builder::new()
+    .serve_connection(io, service)
+    .await
+    .map_err(|error| anyhow::anyhow!(error))
+}
+
+fn admin_response(
+  request: hyper::Request<Incoming>,
+  state: AppHandle,
+  peer_addr: SocketAddr,
+  scheme: &'static str,
+) -> Response<ProxyBody> {
+  if !admin_authorized(&request, &state.snapshot().config.admin.bearer_token_env) {
+    return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+  }
+  if request.method() != ::http::Method::POST {
+    return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+  }
+  let snapshot = state.snapshot();
+  let query = request.uri().query().unwrap_or_default();
+  let params = url::form_urlencoded::parse(query.as_bytes())
+    .into_owned()
+    .collect::<std::collections::HashMap<_, _>>();
+  let policy = params
+    .get("policy")
+    .map(String::as_str)
+    .unwrap_or("default");
+  let purge_scheme = params.get("scheme").map(String::as_str).unwrap_or(scheme);
+  let Some(host) = params.get("host").map(String::as_str) else {
+    return text_response(StatusCode::BAD_REQUEST, "missing host");
+  };
+  let purged = match request.uri().path() {
+    "/cache/purge" => {
+      let Some(uri) = params.get("uri").map(String::as_str) else {
+        return text_response(StatusCode::BAD_REQUEST, "missing uri");
+      };
+      snapshot.cache.purge_exact(policy, purge_scheme, host, uri)
+    }
+    "/cache/purge-prefix" => {
+      let Some(path_prefix) = params.get("path_prefix").map(String::as_str) else {
+        return text_response(StatusCode::BAD_REQUEST, "missing path_prefix");
+      };
+      snapshot
+        .cache
+        .purge_prefix(policy, purge_scheme, host, path_prefix)
+    }
+    _ => return text_response(StatusCode::NOT_FOUND, "not found"),
+  };
+  snapshot.metrics.record_cache_purge();
+  info!(peer = %peer_addr, policy, purged, "admin cache purge completed");
+  text_response(StatusCode::OK, &format!("purged={purged}\n"))
+}
+
+fn admin_authorized(request: &hyper::Request<Incoming>, bearer_token_env: &str) -> bool {
+  let Ok(expected) = std::env::var(bearer_token_env) else {
+    return false;
+  };
+  let Some(actual) = request
+    .headers()
+    .get(::http::header::AUTHORIZATION)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.strip_prefix("Bearer "))
+  else {
+    return false;
+  };
+  !expected.is_empty() && actual == expected
 }
 
 async fn serve_until_shutdown(

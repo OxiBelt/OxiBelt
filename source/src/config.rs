@@ -34,6 +34,8 @@ pub struct Config {
   #[serde(default)]
   pub cache: CacheConfig,
   #[serde(default)]
+  pub admin: AdminConfig,
+  #[serde(default)]
   pub metrics: MetricsConfig,
   #[serde(default)]
   pub health: HealthConfig,
@@ -192,6 +194,7 @@ impl Config {
       && self.connection_limits == other.connection_limits
       && self.compression == other.compression
       && self.cache == other.cache
+      && self.admin == other.admin
       && self.metrics == other.metrics
       && self.health == other.health
       && self.security == other.security
@@ -327,6 +330,13 @@ impl Config {
     {
       self.source_paths.remember_runtime_file(path);
     }
+    for path in self
+      .admin
+      .tls
+      .resolve_relative_paths(&path_roots.cert_dir)?
+    {
+      self.source_paths.remember_runtime_file(path);
+    }
     self.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     for route in &mut self.routes {
       route.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
@@ -389,6 +399,7 @@ impl Config {
     self.validate_proxy()?;
     self.validate_compression()?;
     self.validate_cache()?;
+    self.validate_admin()?;
     self.validate_metrics_and_health()?;
     self.validate_security_headers()?;
     self.validate_tls()?;
@@ -597,6 +608,11 @@ impl Config {
       }
       if let Some(cache) = &route.cache
         && cache != "default"
+        && !self
+          .cache
+          .policies
+          .iter()
+          .any(|policy| policy.name == *cache)
       {
         bail!("route {} references unknown cache {}", route.name, cache);
       }
@@ -824,6 +840,21 @@ impl Config {
     if self.cache.max_size_bytes == 0 {
       bail!("cache.max_size_bytes must be greater than 0");
     }
+    if let Some(memory_max_size_bytes) = self.cache.memory_max_size_bytes
+      && memory_max_size_bytes == 0
+    {
+      bail!("cache.memory_max_size_bytes must be greater than 0 when configured");
+    }
+    if let Some(disk_max_size_bytes) = self.cache.disk_max_size_bytes
+      && disk_max_size_bytes == 0
+    {
+      bail!("cache.disk_max_size_bytes must be greater than 0 when configured");
+    }
+    if !(0.0..=1.0).contains(&self.cache.memory_auto_fraction)
+      || self.cache.memory_auto_fraction == 0.0
+    {
+      bail!("cache.memory_auto_fraction must be greater than 0.0 and less than or equal to 1.0");
+    }
     if self.cache.default_ttl_seconds == 0 {
       bail!("cache.default_ttl_seconds must be greater than 0");
     }
@@ -835,7 +866,157 @@ impl Config {
         .unwrap_or_else(default_cache_tmpfs_dir);
       crate::cache::validate_tmpfs_dir(&dir)?;
     }
+    if self.cache.enabled && self.cache.store.uses_disk() {
+      let dir = self
+        .cache
+        .disk_dir
+        .as_ref()
+        .ok_or_else(|| anyhow!("cache.disk_dir is required when cache.store uses disk"))?;
+      crate::cache::validate_disk_dir(dir)?;
+      if self.cache.disk_max_size_bytes.is_none() {
+        bail!("cache.disk_max_size_bytes is required when cache.store uses disk");
+      }
+    }
+    for status in &self.cache.negative_statuses {
+      http::StatusCode::from_u16(*status)
+        .with_context(|| format!("cache.negative_statuses contains invalid status {status}"))?;
+    }
+    if !self.cache.negative_statuses.is_empty() && self.cache.negative_ttl_seconds == 0 {
+      bail!("cache.negative_ttl_seconds must be greater than 0 when negative_statuses is set");
+    }
+
+    let mut names = HashSet::new();
+    for policy in &self.cache.policies {
+      if policy.name.trim().is_empty() {
+        bail!("cache policy name must not be empty");
+      }
+      if policy.name == "default" {
+        bail!("cache policy name default is reserved");
+      }
+      if !names.insert(policy.name.as_str()) {
+        bail!("duplicate cache policy name {}", policy.name);
+      }
+      if let Some(default_ttl_seconds) = policy.default_ttl_seconds
+        && default_ttl_seconds == 0
+      {
+        bail!(
+          "cache policy {} default_ttl_seconds must be greater than 0",
+          policy.name
+        );
+      }
+      if let Some(memory_max_size_bytes) = policy.memory_max_size_bytes
+        && memory_max_size_bytes == 0
+      {
+        bail!(
+          "cache policy {} memory_max_size_bytes must be greater than 0",
+          policy.name
+        );
+      }
+      if let Some(disk_max_size_bytes) = policy.disk_max_size_bytes
+        && disk_max_size_bytes == 0
+      {
+        bail!(
+          "cache policy {} disk_max_size_bytes must be greater than 0",
+          policy.name
+        );
+      }
+      if policy.store == Some(CacheStore::Tmpfs) && self.cache.enabled {
+        let dir = self
+          .cache
+          .tmpfs_dir
+          .clone()
+          .unwrap_or_else(default_cache_tmpfs_dir);
+        crate::cache::validate_tmpfs_dir(&dir)?;
+      }
+      if policy.store.is_some_and(CacheStore::uses_disk) {
+        let dir = self
+          .cache
+          .disk_dir
+          .as_ref()
+          .ok_or_else(|| anyhow!("cache.disk_dir is required when cache policy uses disk"))?;
+        if self.cache.enabled {
+          crate::cache::validate_disk_dir(dir)?;
+        }
+        if policy
+          .disk_max_size_bytes
+          .or(self.cache.disk_max_size_bytes)
+          .is_none()
+        {
+          bail!(
+            "cache.disk_max_size_bytes or cache policy {} disk_max_size_bytes is required when policy uses disk",
+            policy.name
+          );
+        }
+      }
+      for rule in &policy.rules {
+        if rule.mime_types.is_empty() {
+          bail!(
+            "cache policy {} rule must include at least one MIME pattern",
+            policy.name
+          );
+        }
+        validate_compression_mime_types(
+          &format!("cache policy {} rule mime_types", policy.name),
+          &rule.mime_types,
+        )?;
+        if rule.store.uses_disk() {
+          let dir = self.cache.disk_dir.as_ref().ok_or_else(|| {
+            anyhow!("cache.disk_dir is required when cache policy rule uses disk")
+          })?;
+          if self.cache.enabled {
+            crate::cache::validate_disk_dir(dir)?;
+          }
+          if policy
+            .disk_max_size_bytes
+            .or(self.cache.disk_max_size_bytes)
+            .is_none()
+          {
+            bail!(
+              "cache.disk_max_size_bytes or cache policy {} disk_max_size_bytes is required when rule uses disk",
+              policy.name
+            );
+          }
+        }
+      }
+    }
     Ok(())
+  }
+
+  fn validate_admin(&self) -> anyhow::Result<()> {
+    if !self.admin.enabled {
+      return Ok(());
+    }
+    if self.admin.bearer_token_env.trim().is_empty() {
+      bail!("admin.bearer_token_env must not be empty when admin is enabled");
+    }
+    if std::env::var(&self.admin.bearer_token_env)
+      .ok()
+      .is_none_or(|token| token.is_empty())
+    {
+      bail!(
+        "admin bearer token environment variable {} must be set and non-empty",
+        self.admin.bearer_token_env
+      );
+    }
+    for cidr in &self.admin.plaintext_allowed_source_cidrs {
+      crate::identity::Cidr::parse(cidr)
+        .with_context(|| format!("invalid admin.plaintext_allowed_source_cidrs entry {cidr}"))?;
+    }
+    if self.admin.transport == AdminTransportMode::Plaintext && !self.admin.allow_insecure_plaintext
+    {
+      bail!("admin.allow_insecure_plaintext must be true when admin.transport = \"plaintext\"");
+    }
+    if matches!(
+      self.admin.transport,
+      AdminTransportMode::Auto | AdminTransportMode::Tls
+    ) && !self.admin.bind.ip().is_loopback()
+      && !self.admin.tls.enabled
+    {
+      bail!(
+        "admin.tls.enabled must be true for non-loopback admin.bind when admin.transport requires TLS"
+      );
+    }
+    self.admin.tls.validate()
   }
 
   fn validate_metrics_and_health(&self) -> anyhow::Result<()> {
@@ -999,6 +1180,32 @@ fn validate_compression_mime_type(field_name: &str, mime_type: &str) -> anyhow::
   Ok(())
 }
 
+fn validate_admin_server_name(name: &str) -> anyhow::Result<()> {
+  if name.trim() != name || name.is_empty() {
+    bail!("admin.tls certificate server name must not be empty or padded");
+  }
+  if name.bytes().any(|byte| byte.is_ascii_control()) {
+    bail!("admin.tls certificate server name {name} contains a control character");
+  }
+  let name = name.strip_prefix("*.").unwrap_or(name);
+  if name.is_empty() || name.contains('*') {
+    bail!("admin.tls certificate server name may only use a leftmost wildcard");
+  }
+  if name
+    .split('.')
+    .any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-'))
+  {
+    bail!("admin.tls certificate server name {name} is not a valid DNS pattern");
+  }
+  if !name
+    .bytes()
+    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+  {
+    bail!("admin.tls certificate server name {name} contains invalid characters");
+  }
+  Ok(())
+}
+
 fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]) -> bool {
   left.len() == right.len()
     && left.iter().zip(right).all(|(left, right)| {
@@ -1102,6 +1309,7 @@ fn join_key_path(parent: &str, key: &str) -> String {
 fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
   let keys = match path {
     "" => &[
+      "admin",
       "cache",
       "compression",
       "config",
@@ -1271,14 +1479,53 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "cache_key",
       "cache_methods",
       "default_ttl_seconds",
+      "disk_dir",
+      "disk_max_size_bytes",
       "enabled",
       "lock",
       "max_size_bytes",
+      "memory_auto_fraction",
+      "memory_max_size_bytes",
+      "negative_statuses",
+      "negative_ttl_seconds",
+      "policies",
       "respect_cache_control",
       "stale_if_error_seconds",
+      "stale_while_revalidate_seconds",
       "store",
       "tmpfs_dir",
     ][..],
+    "cache.policies" => &[
+      "cache_key",
+      "default_ttl_seconds",
+      "disk_max_size_bytes",
+      "memory_max_size_bytes",
+      "name",
+      "rules",
+      "store",
+    ][..],
+    "cache.policies.rules" => &["mime_types", "store"][..],
+    "admin" => &[
+      "allow_insecure_plaintext",
+      "bearer_token_env",
+      "bind",
+      "enabled",
+      "plaintext_allowed_source_cidrs",
+      "tls",
+      "transport",
+    ][..],
+    "admin.tls" => &[
+      "certificates",
+      "client_auth",
+      "enabled",
+      "max_version",
+      "min_version",
+      "reject_unknown_sni",
+      "require_sni",
+      "session_tickets",
+    ][..],
+    "admin.tls.certificates" => &["cert_chain", "default", "private_key", "server_names"][..],
+    "admin.tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
     "metrics" => &["bind", "enabled", "format"][..],
     "health" => &["bind", "enabled", "live_path", "ready_path"][..],
     "security" => &["headers"][..],
@@ -2680,8 +2927,16 @@ pub struct CacheConfig {
   pub store: CacheStore,
   #[serde(default)]
   pub tmpfs_dir: Option<PathBuf>,
+  #[serde(default)]
+  pub disk_dir: Option<PathBuf>,
   #[serde(default = "default_cache_max_size_bytes")]
   pub max_size_bytes: usize,
+  #[serde(default)]
+  pub memory_max_size_bytes: Option<usize>,
+  #[serde(default)]
+  pub disk_max_size_bytes: Option<usize>,
+  #[serde(default = "default_cache_memory_auto_fraction")]
+  pub memory_auto_fraction: f64,
   #[serde(default = "default_cache_default_ttl_seconds")]
   pub default_ttl_seconds: u64,
   #[serde(default = "default_cache_methods")]
@@ -2694,6 +2949,14 @@ pub struct CacheConfig {
   pub stale_if_error_seconds: u64,
   #[serde(default = "default_true")]
   pub lock: bool,
+  #[serde(default)]
+  pub stale_while_revalidate_seconds: u64,
+  #[serde(default)]
+  pub negative_statuses: Vec<u16>,
+  #[serde(default)]
+  pub negative_ttl_seconds: u64,
+  #[serde(default)]
+  pub policies: Vec<CachePolicyConfig>,
 }
 
 impl Default for CacheConfig {
@@ -2702,13 +2965,21 @@ impl Default for CacheConfig {
       enabled: false,
       store: CacheStore::Memory,
       tmpfs_dir: None,
+      disk_dir: None,
       max_size_bytes: default_cache_max_size_bytes(),
+      memory_max_size_bytes: None,
+      disk_max_size_bytes: None,
+      memory_auto_fraction: default_cache_memory_auto_fraction(),
       default_ttl_seconds: default_cache_default_ttl_seconds(),
       cache_methods: default_cache_methods(),
       cache_key: default_cache_key(),
       respect_cache_control: true,
       stale_if_error_seconds: 0,
       lock: true,
+      stale_while_revalidate_seconds: 0,
+      negative_statuses: Vec::new(),
+      negative_ttl_seconds: 0,
+      policies: Vec::new(),
     }
   }
 }
@@ -2719,6 +2990,202 @@ pub enum CacheStore {
   #[default]
   Memory,
   Tmpfs,
+  Disk,
+  MemoryThenDisk,
+}
+
+impl CacheStore {
+  pub fn uses_disk(self) -> bool {
+    matches!(self, Self::Disk | Self::MemoryThenDisk)
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CachePolicyConfig {
+  pub name: String,
+  #[serde(default)]
+  pub store: Option<CacheStore>,
+  #[serde(default)]
+  pub cache_key: Option<String>,
+  #[serde(default)]
+  pub default_ttl_seconds: Option<u64>,
+  #[serde(default)]
+  pub memory_max_size_bytes: Option<usize>,
+  #[serde(default)]
+  pub disk_max_size_bytes: Option<usize>,
+  #[serde(default)]
+  pub rules: Vec<CachePolicyRuleConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CachePolicyRuleConfig {
+  #[serde(default)]
+  pub mime_types: Vec<String>,
+  pub store: CacheStore,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AdminConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_admin_bind")]
+  pub bind: SocketAddr,
+  #[serde(default = "default_admin_bearer_token_env")]
+  pub bearer_token_env: String,
+  #[serde(default)]
+  pub transport: AdminTransportMode,
+  #[serde(default)]
+  pub allow_insecure_plaintext: bool,
+  #[serde(default = "default_admin_plaintext_allowed_source_cidrs")]
+  pub plaintext_allowed_source_cidrs: Vec<String>,
+  #[serde(default)]
+  pub tls: AdminTlsConfig,
+}
+
+impl Default for AdminConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      bind: default_admin_bind(),
+      bearer_token_env: default_admin_bearer_token_env(),
+      transport: AdminTransportMode::Auto,
+      allow_insecure_plaintext: false,
+      plaintext_allowed_source_cidrs: default_admin_plaintext_allowed_source_cidrs(),
+      tls: AdminTlsConfig::default(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminTransportMode {
+  #[default]
+  Auto,
+  Tls,
+  PlaintextAllowlist,
+  Plaintext,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AdminTlsConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_tls_min_version")]
+  pub min_version: TlsVersion,
+  #[serde(default = "default_tls_max_version")]
+  pub max_version: TlsVersion,
+  #[serde(default)]
+  pub session_tickets: bool,
+  #[serde(default = "default_true")]
+  pub require_sni: bool,
+  #[serde(default = "default_true")]
+  pub reject_unknown_sni: bool,
+  #[serde(default)]
+  pub certificates: Vec<AdminTlsCertificateConfig>,
+  #[serde(default)]
+  pub client_auth: TlsClientAuthConfig,
+}
+
+impl Default for AdminTlsConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      min_version: TlsVersion::Tls13,
+      max_version: TlsVersion::Tls13,
+      session_tickets: false,
+      require_sni: true,
+      reject_unknown_sni: true,
+      certificates: Vec::new(),
+      client_auth: TlsClientAuthConfig::default(),
+    }
+  }
+}
+
+impl AdminTlsConfig {
+  fn resolve_relative_paths(&mut self, cert_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut resolved_paths = Vec::new();
+    for certificate in &mut self.certificates {
+      let (cert_chain, cert_logical) = resolve_existing_local_config_file_path_with_logical(
+        "admin.tls.certificates.cert_chain",
+        cert_dir,
+        &certificate.cert_chain,
+      )?;
+      certificate.cert_chain = cert_chain;
+      resolved_paths.push(cert_logical);
+      let (private_key, key_logical) = resolve_existing_local_config_file_path_with_logical(
+        "admin.tls.certificates.private_key",
+        cert_dir,
+        &certificate.private_key,
+      )?;
+      certificate.private_key = private_key;
+      resolved_paths.push(key_logical);
+    }
+    self.client_auth.ca_certs = self
+      .client_auth
+      .ca_certs
+      .iter()
+      .map(|path| {
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          "admin.tls.client_auth.ca_certs",
+          cert_dir,
+          path,
+        )?;
+        resolved_paths.push(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
+      })
+      .collect::<anyhow::Result<_>>()?;
+    Ok(resolved_paths)
+  }
+
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.min_version > self.max_version {
+      bail!("admin.tls.min_version must be less than or equal to admin.tls.max_version");
+    }
+    if self.client_auth.mode != TlsClientAuthMode::Off && self.client_auth.ca_certs.is_empty() {
+      bail!("admin.tls.client_auth.ca_certs is required when client_auth mode is not off");
+    }
+    if !self.enabled {
+      return Ok(());
+    }
+    if self.certificates.is_empty() {
+      bail!(
+        "admin.tls.certificates must include at least one certificate when admin TLS is enabled"
+      );
+    }
+    let defaults = self
+      .certificates
+      .iter()
+      .filter(|certificate| certificate.default)
+      .count();
+    if self.certificates.len() > 1 && defaults != 1 {
+      bail!(
+        "exactly one admin.tls.certificates entry must set default = true when multiple certificates are configured"
+      );
+    }
+    let mut names = HashSet::new();
+    for certificate in &self.certificates {
+      if certificate.server_names.is_empty() {
+        bail!("admin.tls.certificates server_names must not be empty");
+      }
+      for name in &certificate.server_names {
+        validate_admin_server_name(name)?;
+        if !names.insert(name.to_ascii_lowercase()) {
+          bail!("duplicate admin.tls certificate server_name {name}");
+        }
+      }
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AdminTlsCertificateConfig {
+  #[serde(default)]
+  pub server_names: Vec<String>,
+  pub cert_chain: PathBuf,
+  pub private_key: PathBuf,
+  #[serde(default)]
+  pub default: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -3617,6 +4084,10 @@ fn default_cache_max_size_bytes() -> usize {
   1_073_741_824
 }
 
+fn default_cache_memory_auto_fraction() -> f64 {
+  0.5
+}
+
 fn default_cache_default_ttl_seconds() -> u64 {
   60
 }
@@ -3631,6 +4102,18 @@ fn default_cache_key() -> String {
 
 pub(crate) fn default_cache_tmpfs_dir() -> PathBuf {
   PathBuf::from("/dev/shm/oxibelt-cache")
+}
+
+fn default_admin_bind() -> SocketAddr {
+  "127.0.0.1:9092".parse().expect("valid admin bind default")
+}
+
+fn default_admin_bearer_token_env() -> String {
+  "OXIBELT_ADMIN_TOKEN".to_string()
+}
+
+fn default_admin_plaintext_allowed_source_cidrs() -> Vec<String> {
+  vec!["127.0.0.0/8".to_string(), "::1/128".to_string()]
 }
 
 fn default_metrics_bind() -> SocketAddr {

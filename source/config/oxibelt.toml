@@ -157,15 +157,42 @@ max_concurrent_responses = 0
 
 [cache]
 enabled = false
-store = "memory"
+store = "memory" # memory | tmpfs | disk | memory_then_disk
 tmpfs_dir = "/dev/shm/oxibelt-cache"
+# disk_dir = "/var/cache/oxibelt"
 max_size_bytes = 1073741824
+# memory_max_size_bytes = 536870912
+# disk_max_size_bytes = 10737418240
+memory_auto_fraction = 0.5
 default_ttl_seconds = 60
 cache_methods = ["GET", "HEAD"]
 cache_key = "{scheme}:{host}:{uri}"
 respect_cache_control = true
 stale_if_error_seconds = 30
+stale_while_revalidate_seconds = 30
 lock = true
+negative_statuses = []
+negative_ttl_seconds = 0
+
+[admin]
+enabled = false
+bind = "127.0.0.1:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "auto" # auto | tls | plaintext_allowlist | plaintext
+allow_insecure_plaintext = false
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
+
+[admin.tls]
+enabled = false
+min_version = "tls1.3"
+max_version = "tls1.3"
+session_tickets = false
+require_sni = true
+reject_unknown_sni = true
+
+[admin.tls.client_auth]
+mode = "off"
+ca_certs = []
 
 [metrics]
 enabled = false

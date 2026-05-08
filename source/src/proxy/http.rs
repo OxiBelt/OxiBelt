@@ -615,7 +615,7 @@ where
     };
     outbound = Request::from_parts(parts, body);
   }
-  let outbound = outbound.map(|body| {
+  let mut outbound = outbound.map(|body| {
     body::with_send_timeout(
       body,
       timeouts.upstream_send,
@@ -623,30 +623,141 @@ where
     )
   });
 
-  let cache_enabled_for_route = resolved.route.cache.as_deref() == Some("default")
-    && state.cache.enabled()
-    && state.cache.is_cacheable_method(&request_method);
-  if let Some(response) = cached_response(
-    &state,
-    resolved.route.cache.as_deref(),
-    downstream_scheme,
-    &host,
-    &request_method,
-    &request_uri,
-  ) {
-    state.metrics.record_cache_hit();
-    let response = compression::maybe_compress_response(
-      response,
-      &request_method,
-      &request_headers,
-      resolved.route.compression.as_deref(),
-      &state.config.compression,
-      &state.compression,
-    );
-    return with_downstream_response_timeout(response, timeouts.response_send);
-  }
-  if cache_enabled_for_route {
+  let cache_enabled_for_route = state
+    .cache
+    .policy_enabled(resolved.route.cache.as_deref(), &request_method);
+  let mut revalidation_entry = None;
+  let mut stale_on_error = None;
+  let mut _cache_fill_guard = None;
+  if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
+    policy_name: resolved.route.cache.as_deref(),
+    scheme: downstream_scheme,
+    host: &host,
+    method: &request_method,
+    uri: &request_uri,
+    request_headers: &request_headers,
+  }) {
+    match lookup {
+      crate::cache::CacheLookup::Fresh(entry) | crate::cache::CacheLookup::Stale(entry) => {
+        state.metrics.record_cache_hit();
+        let response = cached_entry_response(entry, &request_method, &request_headers);
+        let response = compression::maybe_compress_response(
+          response,
+          &request_method,
+          &request_headers,
+          resolved.route.compression.as_deref(),
+          &state.config.compression,
+          &state.compression,
+        );
+        return with_downstream_response_timeout(response, timeouts.response_send);
+      }
+      crate::cache::CacheLookup::Revalidate(revalidation) => {
+        state.metrics.record_cache_revalidation();
+        for (name, value) in &revalidation.request_headers {
+          outbound.headers_mut().insert(name.clone(), value.clone());
+        }
+        if revalidation.serve_stale_on_error {
+          stale_on_error = Some(revalidation.entry.clone());
+        }
+        revalidation_entry = Some(revalidation.entry);
+      }
+    }
+  } else if cache_enabled_for_route {
     state.metrics.record_cache_miss();
+  }
+
+  if cache_enabled_for_route {
+    loop {
+      let Some(permit) = state.cache.begin_fill(crate::cache::CacheLookupContext {
+        policy_name: resolved.route.cache.as_deref(),
+        scheme: downstream_scheme,
+        host: &host,
+        method: &request_method,
+        uri: &request_uri,
+        request_headers: &request_headers,
+      }) else {
+        break;
+      };
+      match permit {
+        crate::cache::CacheFillPermit::Leader(guard) => {
+          _cache_fill_guard = Some(guard);
+          if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
+            policy_name: resolved.route.cache.as_deref(),
+            scheme: downstream_scheme,
+            host: &host,
+            method: &request_method,
+            uri: &request_uri,
+            request_headers: &request_headers,
+          }) {
+            match lookup {
+              crate::cache::CacheLookup::Fresh(entry) | crate::cache::CacheLookup::Stale(entry) => {
+                state.metrics.record_cache_hit();
+                let response = cached_entry_response(entry, &request_method, &request_headers);
+                let response = compression::maybe_compress_response(
+                  response,
+                  &request_method,
+                  &request_headers,
+                  resolved.route.compression.as_deref(),
+                  &state.config.compression,
+                  &state.compression,
+                );
+                return with_downstream_response_timeout(response, timeouts.response_send);
+              }
+              crate::cache::CacheLookup::Revalidate(revalidation) => {
+                state.metrics.record_cache_revalidation();
+                for (name, value) in &revalidation.request_headers {
+                  outbound.headers_mut().insert(name.clone(), value.clone());
+                }
+                if revalidation.serve_stale_on_error {
+                  stale_on_error = Some(revalidation.entry.clone());
+                }
+                revalidation_entry = Some(revalidation.entry);
+              }
+            }
+          }
+          break;
+        }
+        crate::cache::CacheFillPermit::Follower(waiter) => {
+          waiter.wait().await;
+          if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
+            policy_name: resolved.route.cache.as_deref(),
+            scheme: downstream_scheme,
+            host: &host,
+            method: &request_method,
+            uri: &request_uri,
+            request_headers: &request_headers,
+          }) {
+            match lookup {
+              crate::cache::CacheLookup::Fresh(entry) | crate::cache::CacheLookup::Stale(entry) => {
+                state.metrics.record_cache_hit();
+                let response = cached_entry_response(entry, &request_method, &request_headers);
+                let response = compression::maybe_compress_response(
+                  response,
+                  &request_method,
+                  &request_headers,
+                  resolved.route.compression.as_deref(),
+                  &state.config.compression,
+                  &state.compression,
+                );
+                return with_downstream_response_timeout(response, timeouts.response_send);
+              }
+              crate::cache::CacheLookup::Revalidate(revalidation) => {
+                state.metrics.record_cache_revalidation();
+                for (name, value) in &revalidation.request_headers {
+                  outbound.headers_mut().insert(name.clone(), value.clone());
+                }
+                if revalidation.serve_stale_on_error {
+                  stale_on_error = Some(revalidation.entry.clone());
+                }
+                revalidation_entry = Some(revalidation.entry);
+              }
+            }
+          } else {
+            state.metrics.record_cache_miss();
+          }
+        }
+      }
+    }
   }
 
   debug!(
@@ -670,6 +781,10 @@ where
         warn!(upstream = %upstream.name, "upstream HTTP/3 request timed out");
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("read_timeout", "upstream request timed out");
+        if let Some(entry) = stale_on_error.clone() {
+          state.metrics.record_cache_stale();
+          return cached_entry_response(entry, &request_method, &request_headers);
+        }
         return upstream_error_response(
           &state,
           &resolved.route.name,
@@ -709,6 +824,10 @@ where
         );
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("connect_error", &error.to_string());
+        if let Some(entry) = stale_on_error.clone() {
+          state.metrics.record_cache_stale();
+          return cached_entry_response(entry, &request_method, &request_headers);
+        }
         return upstream_error_response(
           &state,
           &resolved.route.name,
@@ -792,6 +911,10 @@ where
           "connect_error"
         };
         access_log.record_upstream_error(error_code, &error_message);
+        if let Some(entry) = stale_on_error.clone() {
+          state.metrics.record_cache_stale();
+          return cached_entry_response(entry, &request_method, &request_headers);
+        }
         return upstream_error_response(
           &state,
           &resolved.route.name,
@@ -829,6 +952,43 @@ where
     upstream_response
   };
   let (mut parts, body) = upstream_response.into_parts();
+  if parts.status == StatusCode::NOT_MODIFIED
+    && let Some(entry) = revalidation_entry.clone()
+  {
+    let mut headers = entry.headers.clone();
+    merge_not_modified_headers(&mut headers, &parts.headers);
+    state.cache.update_from_not_modified(
+      crate::cache::CacheInsertContext {
+        policy_name: resolved.route.cache.as_deref(),
+        scheme: downstream_scheme,
+        host: &host,
+        method: &request_method,
+        uri: &request_uri,
+        request_headers: &request_headers,
+      },
+      &entry,
+      &parts.headers,
+    );
+    state.metrics.record_cache_hit();
+    let response = cached_entry_response(
+      crate::cache::CacheEntry {
+        status: entry.status,
+        headers,
+        body: entry.body,
+      },
+      &request_method,
+      &request_headers,
+    );
+    let response = compression::maybe_compress_response(
+      response,
+      &request_method,
+      &request_headers,
+      resolved.route.compression.as_deref(),
+      &state.config.compression,
+      &state.compression,
+    );
+    return with_downstream_response_timeout(response, timeouts.response_send);
+  }
   let body = body::with_read_timeout(
     body,
     timeouts.upstream_read,
@@ -902,6 +1062,7 @@ where
     &host,
     &request_method,
     &request_uri,
+    &request_headers,
   )
   .await;
   let response = compression::maybe_compress_response(
@@ -1763,29 +1924,19 @@ fn insert_header(headers: &mut http::HeaderMap, name: &'static str, value: &str)
   }
 }
 
-fn cached_response(
-  state: &AppSnapshot,
-  route_cache: Option<&str>,
-  scheme: &str,
-  host: &str,
+fn cached_entry_response(
+  entry: crate::cache::CacheEntry,
   method: &Method,
-  uri: &http::Uri,
-) -> Option<Response<ProxyBody>> {
-  if route_cache != Some("default")
-    || !state.cache.enabled()
-    || !state.cache.is_cacheable_method(method)
-  {
-    return None;
-  }
-  let key = state.cache.key(scheme, host, uri);
-  state.cache.get(&key).map(|entry| {
-    let mut response = Response::new(full_body(entry.body));
-    *response.status_mut() = entry.status;
-    *response.headers_mut() = entry.headers;
-    response
-  })
+  request_headers: &HeaderMap,
+) -> Response<ProxyBody> {
+  let entry = crate::cache::range_entry(entry, method, request_headers);
+  let mut response = Response::new(full_body(entry.body));
+  *response.status_mut() = entry.status;
+  *response.headers_mut() = entry.headers;
+  response
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn maybe_cache_response(
   response: Response<ProxyBody>,
   state: &AppSnapshot,
@@ -1794,11 +1945,9 @@ async fn maybe_cache_response(
   host: &str,
   method: &Method,
   uri: &http::Uri,
+  request_headers: &HeaderMap,
 ) -> Response<ProxyBody> {
-  if route_cache != Some("default")
-    || !state.cache.enabled()
-    || !state.cache.is_cacheable_method(method)
-  {
+  if !state.cache.policy_enabled(route_cache, method) {
     return response;
   }
   let (parts, body) = response.into_parts();
@@ -1812,9 +1961,15 @@ async fn maybe_cache_response(
   match body.collect().await {
     Ok(collected) => {
       let bytes = collected.to_bytes();
-      let key = state.cache.key(scheme, host, uri);
       state.cache.insert(
-        key,
+        crate::cache::CacheInsertContext {
+          policy_name: route_cache,
+          scheme,
+          host,
+          method,
+          uri,
+          request_headers,
+        },
         crate::cache::CacheEntry {
           status: parts.status,
           headers: parts.headers.clone(),
@@ -1831,6 +1986,17 @@ async fn maybe_cache_response(
       StatusCode::BAD_GATEWAY,
       &format!("failed to read upstream response body: {error}"),
     ),
+  }
+}
+
+fn merge_not_modified_headers(headers: &mut HeaderMap, not_modified: &HeaderMap) {
+  for (name, value) in not_modified {
+    if matches!(
+      name.as_str().to_ascii_lowercase().as_str(),
+      "cache-control" | "expires" | "etag" | "last-modified" | "vary"
+    ) {
+      headers.insert(name.clone(), value.clone());
+    }
   }
 }
 

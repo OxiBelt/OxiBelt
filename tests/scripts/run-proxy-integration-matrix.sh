@@ -912,6 +912,7 @@ docker create \
   --label "${test_label}" \
   --network "${network_name}" \
   --network-alias proxy \
+  -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
   "${proxy_image}" >/dev/null
 docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
 docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"

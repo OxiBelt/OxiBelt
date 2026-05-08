@@ -79,6 +79,10 @@ include = ["conf.d/*.toml"]
 [compression]
 [[compression.policies]]
 [cache]
+[admin]
+[admin.tls]
+[[admin.tls.certificates]]
+[admin.tls.client_auth]
 [metrics]
 [health]
 [security.headers]
@@ -405,15 +409,56 @@ Limit values must be greater than zero. Rate and connection limit state is proce
 ```toml
 [cache]
 enabled = false
-store = "memory" # memory | tmpfs
+store = "memory" # memory | tmpfs | disk | memory_then_disk
 tmpfs_dir = "/dev/shm/oxibelt-cache"
+# disk_dir = "/var/cache/oxibelt"
 max_size_bytes = 1073741824
+# memory_max_size_bytes = 536870912
+# disk_max_size_bytes = 10737418240
+memory_auto_fraction = 0.5
 default_ttl_seconds = 60
 cache_methods = ["GET", "HEAD"]
 cache_key = "{scheme}:{host}:{uri}"
 respect_cache_control = true
 stale_if_error_seconds = 30
+stale_while_revalidate_seconds = 30
 lock = true
+negative_statuses = []
+negative_ttl_seconds = 0
+
+[[cache.policies]]
+name = "assets"
+store = "memory_then_disk"
+
+[[cache.policies.rules]]
+mime_types = ["image/*", "text/css", "application/javascript"]
+store = "disk"
+
+[admin]
+enabled = false
+bind = "127.0.0.1:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "auto" # auto | tls | plaintext_allowlist | plaintext
+allow_insecure_plaintext = false
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
+
+[admin.tls]
+enabled = false
+min_version = "tls1.3"
+max_version = "tls1.3"
+session_tickets = false
+require_sni = true
+reject_unknown_sni = true
+
+[[admin.tls.certificates]]
+server_names = ["admin.example.com", "*.ops.example.com"]
+cert_chain = "admin-fullchain.pem"
+private_key = "admin-privkey.pem"
+default = true
+
+[admin.tls.client_auth]
+mode = "off"
+ca_certs = []
 
 [metrics]
 enabled = false
@@ -457,7 +502,20 @@ max_concurrent_responses = 0
 
 Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate`. OxiBelt only compresses downstream responses when the client permits an enabled encoding, the request does not carry `Cookie`, `Authorization`, or `Proxy-Authorization`, the response is not already encoded or secret-bearing, the status/MIME/size policy matches, and HTTP semantics such as `Cache-Control: no-transform` and range responses allow transformation. Responses with `Set-Cookie`, `Cache-Control: private`, or `Cache-Control: no-store` are not compressed. `max_concurrent_responses = 0` uses an automatic CPU budget.
 
-`cache.store = "tmpfs"` validates `tmpfs_dir` when cache is enabled. Health paths must start with `/`.
+`cache.store = "tmpfs"` validates `tmpfs_dir` under `/dev/shm` when cache is enabled. `disk` and `memory_then_disk` require an explicit writable `disk_dir` and `disk_max_size_bytes`; OxiBelt does not choose a disk path implicitly. If `memory_then_disk` omits `memory_max_size_bytes`, OxiBelt uses `memory_auto_fraction` of the detected cgroup/container memory limit, falling back to system memory. `cache_key` supports `{scheme}`, `{host}`, `{uri}`, `{path}`, `{query}`, `{query:name}`, `{header:Name}`, and `{cookie:name}`. Named cache policies are selected by `routes.cache`; `default` refers to the top-level `[cache]` policy. Policy rules select storage after the upstream response MIME type is known.
+
+The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on upstream error, serve cached byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`.
+
+`[admin]` exposes operations APIs such as cache purge. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>` from `bearer_token_env`, even when mTLS is enabled.
+
+Admin purge endpoints:
+
+```sh
+POST /cache/purge?policy=default&scheme=https&host=example.test&uri=/path
+POST /cache/purge-prefix?policy=default&scheme=https&host=example.test&path_prefix=/assets/
+```
+
+Health paths must start with `/`.
 
 ## Database Access Log Sink
 

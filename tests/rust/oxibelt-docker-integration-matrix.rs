@@ -933,6 +933,158 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "cache",
+            "http-semantics-revalidate",
+            "cache revalidates stale entries with ETag validators",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/revalidate?etag=matrix-v1&cache_control=public" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+
+  response="$(client_request_with_headers "example.test" "/app/revalidate?etag=matrix-v1&cache_control=public" 200 "GET" "" "Cache-Control: no-cache")"
+  assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/revalidate?etag=matrix-v1&cache_control=public"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "vary-header-isolation",
+            "cache keeps Vary header variants isolated",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second third
+  first="$(client_request_with_headers "example.test" "/app/vary?vary=X-Variant&cache_control=public" 200 "GET" "" "X-Variant: a")"
+  second="$(client_request_with_headers "example.test" "/app/vary?vary=X-Variant&cache_control=public" 200 "GET" "" "X-Variant: b")"
+  third="$(client_request_with_headers "example.test" "/app/vary?vary=X-Variant&cache_control=public" 200 "GET" "" "X-Variant: a")"
+  assert_body_jq "${first}" '.headers["x-variant"] == "a"'
+  assert_body_jq "${second}" '.headers["x-variant"] == "b"'
+  assert_body_jq "${third}" '.headers["x-variant"] == "a"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "range-hit",
+            "cache serves byte ranges from a stored full response",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/range?body=0123456789&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${response}" '.body == "0123456789"'
+  docker rm -f "${http_container}" >/dev/null
+  response="$(client_request_with_headers "example.test" "/app/range?body=0123456789&cache_control=public&content_type=text/plain" 206 "GET" "" "Range: bytes=2-5")"
+  assert_response_jq "${response}" '.body == "2345" and .headers["content-range"] == "bytes 2-5/10"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "memory-then-disk-fallback",
+            "memory_then_disk cache falls back to disk when memory budget is exhausted",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/hybrid?body=abcdefghijklmnopqrstuvwxyz&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${response}" '.body == "abcdefghijklmnopqrstuvwxyz"'
+  docker rm -f "${http_container}" >/dev/null
+  response="$(client_request "example.test" "/app/hybrid?body=abcdefghijklmnopqrstuvwxyz&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${response}" '.body == "abcdefghijklmnopqrstuvwxyz"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "disk-policy-by-mime",
+            "cache policy stores selected response MIME types on disk",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/assets/app.css?body=body-css&cache_control=public&content_type=text/css" 200)"
+  assert_response_jq "${response}" '.body == "body-css"'
+  docker rm -f "${http_container}" >/dev/null
+  response="$(client_request "example.test" "/assets/app.css?body=body-css&cache_control=public&content_type=text/css" 200)"
+  assert_response_jq "${response}" '.body == "body-css"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "admin-purge-tls-sni",
+            "admin API purges cache over TLS with SNI certificate selection",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/admin-purge?cache_control=public" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+  response="$(client_request_with_headers_on_port 9092 "proxy" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/admin-purge?cache_control=public" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${response}" '.body == "purged=1\n"'
+  docker rm -f "${http_container}" >/dev/null
+  response="$(client_request "example.test" "/app/admin-purge?cache_control=public" 502)"
+  assert_response_jq "${response}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "admin-purge-docker-plaintext-allowlist",
+            "admin API can allow plaintext purge from Docker bridge CIDRs",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/admin-plain-purge?cache_control=public" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/admin-plain-purge?cache_control=public" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${response}" '.body == "purged=1\n"'
+  docker rm -f "${http_container}" >/dev/null
+  response="$(client_request "example.test" "/app/admin-plain-purge?cache_control=public" 502)"
+  assert_response_jq "${response}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "database-access-log",
             "postgres-mtls",
             "OxiRule access logs are written to PostgreSQL over verified mTLS",
