@@ -345,6 +345,7 @@ impl SharedState {
     scheme: &str,
     host: &str,
     base_key: &str,
+    uri: &str,
     method: &Method,
     request_headers: &HeaderMap,
     request_no_cache: bool,
@@ -359,6 +360,7 @@ impl SharedState {
         || entry.scheme != scheme
         || entry.host != host
         || entry.base_key != base_key
+        || entry.uri != uri
         || !shared_vary_matches(&entry.vary, request_headers)
       {
         continue;

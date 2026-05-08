@@ -425,6 +425,7 @@ run_case_checks() {
   assert_shared_rate_limit
   assert_shared_person_proof
   assert_shared_pool_health
+  assert_shared_cache_uri_isolation
   assert_shared_cache
 }
 
@@ -500,6 +501,15 @@ assert_shared_pool_health() {
   assert_body_jq "${recovered}" '.upstream == "http-upstream" and .path == "/origin/pool/shared-health"'
 }
 
+assert_shared_cache_uri_isolation() {
+  local seed other
+  seed="$(client_request_with_headers "example.test" "/cache-key/shared-uri?body=secret-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.35")"
+  assert_response_jq "${seed}" '.body == "secret-cache"'
+
+  other="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/cache-key/shared-uri?body=other-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.36")"
+  assert_response_jq "${other}" '.body == "other-cache"'
+}
+
 assert_shared_cache() {
   local seed hit purge miss
   seed="$(client_request_with_headers "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.40")"
@@ -524,6 +534,7 @@ run_case_checks() {
   assert_shared_rate_limit
   assert_shared_person_proof
   assert_shared_pool_health
+  assert_shared_cache_uri_isolation
   assert_shared_cache
 }
 
@@ -595,6 +606,15 @@ assert_shared_pool_health() {
 
   recovered="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/pool/shared-health" 200 "GET" "" "X-Forwarded-For: 203.0.113.31")"
   assert_body_jq "${recovered}" '.upstream == "http-upstream" and .path == "/origin/pool/shared-health"'
+}
+
+assert_shared_cache_uri_isolation() {
+  local seed other
+  seed="$(client_request_with_headers "example.test" "/cache-key/shared-uri?body=secret-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.35")"
+  assert_response_jq "${seed}" '.body == "secret-cache"'
+
+  other="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/cache-key/shared-uri?body=other-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.36")"
+  assert_response_jq "${other}" '.body == "other-cache"'
 }
 
 assert_shared_cache() {

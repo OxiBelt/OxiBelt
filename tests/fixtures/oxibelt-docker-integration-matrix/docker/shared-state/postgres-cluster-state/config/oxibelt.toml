@@ -68,6 +68,10 @@ cache_methods = ["GET", "HEAD"]
 respect_cache_control = true
 lock = true
 
+[[cache.policies]]
+name = "path-only"
+cache_key = "{scheme}:{host}:{path}"
+
 [admin]
 enabled = true
 bind = "0.0.0.0:9092"
@@ -133,6 +137,13 @@ name = "pool-route"
 hosts = ["example.test"]
 path_prefix = "/pool"
 upstream_pool = "shared-pool"
+
+[[routes]]
+name = "cache-key-route"
+hosts = ["example.test"]
+path_prefix = "/cache-key"
+upstream = "http-upstream"
+cache = "path-only"
 
 [[routes]]
 name = "app-route"

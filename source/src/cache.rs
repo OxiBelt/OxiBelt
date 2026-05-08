@@ -329,11 +329,13 @@ impl ResponseCache {
     if !shared.has_cache() {
       return None;
     }
+    let uri = ctx.uri.to_string();
     match shared.cache_lookup(
       policy,
       ctx.scheme,
       ctx.host,
       base_key,
+      &uri,
       ctx.method,
       ctx.request_headers,
       request_no_cache(ctx.request_headers),
@@ -1691,5 +1693,61 @@ mod tests {
       2
     );
     assert!(second.lookup(ctx).is_none());
+  }
+
+  #[test]
+  fn shared_cache_requires_exact_uri_when_cache_key_collides() {
+    let shared = crate::shared_state::SharedState::test_memory("cache-uri-isolation");
+    let config = CacheConfig {
+      enabled: true,
+      cache_key: "{scheme}:{host}:{path}".to_string(),
+      ..CacheConfig::default()
+    };
+    let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+    let second = ResponseCache::new(&config, Some(shared)).unwrap();
+    let secret_uri = "/profile?token=secret".parse::<Uri>().unwrap();
+    let other_uri = "/profile?token=other".parse::<Uri>().unwrap();
+    let headers = HeaderMap::new();
+
+    first.insert(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &secret_uri,
+        request_headers: &headers,
+      },
+      CacheEntry {
+        status: StatusCode::OK,
+        headers: HeaderMap::new(),
+        body: Bytes::from_static(b"secret-token-response"),
+      },
+    );
+
+    let other_ctx = CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &other_uri,
+      request_headers: &headers,
+    };
+    assert!(second.lookup(other_ctx).is_none());
+
+    let secret_ctx = CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &secret_uri,
+      request_headers: &headers,
+    };
+    match second.lookup(secret_ctx) {
+      Some(CacheLookup::Fresh(entry)) => {
+        assert_eq!(entry.body, Bytes::from_static(b"secret-token-response"))
+      }
+      other => panic!("expected exact URI shared cache hit, got {other:?}"),
+    }
   }
 }
