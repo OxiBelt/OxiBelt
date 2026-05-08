@@ -2051,7 +2051,8 @@ mod tests {
     match admin_purge_response(addr).await {
       Ok(response) => assert!(
         !response.contains("purged="),
-        "disabled admin listener must not serve purge requests: {response:?}"
+        "disabled admin listener must not serve purge requests: {}",
+        log_safe_test_text(&response)
       ),
       Err(error)
         if matches!(
@@ -2060,7 +2061,10 @@ mod tests {
             | std::io::ErrorKind::ConnectionReset
             | std::io::ErrorKind::UnexpectedEof
         ) => {}
-      Err(error) => panic!("unexpected stale admin connection error: {error}"),
+      Err(error) => panic!(
+        "unexpected stale admin connection error kind: {:?}",
+        error.kind()
+      ),
     }
     let _ = shutdown.send(true);
     task.abort();
@@ -2086,7 +2090,8 @@ mod tests {
     let response = admin_purge_response_with_retry(old_admin).await;
     assert!(
       response.starts_with("HTTP/1.1 200 OK"),
-      "old admin listener should serve before reload: {response:?}"
+      "old admin listener should serve before reload: {}",
+      log_safe_test_text(&response)
     );
     let mut stale_connection = TcpStream::connect(old_admin)
       .await
@@ -2112,14 +2117,16 @@ mod tests {
     let response = admin_purge_response_with_retry(new_admin).await;
     assert!(
       response.starts_with("HTTP/1.1 200 OK"),
-      "new admin listener should serve after reload: {response:?}"
+      "new admin listener should serve after reload: {}",
+      log_safe_test_text(&response)
     );
     let stale_response = finish_admin_purge_response_on_stream(stale_connection)
       .await
       .expect("stale admin connection should receive a response after rebind");
     assert!(
       stale_response.starts_with("HTTP/1.1 404 Not Found"),
-      "stale admin connection should stop serving after rebind: {stale_response:?}"
+      "stale admin connection should stop serving after rebind: {}",
+      log_safe_test_text(&stale_response)
     );
     assert_tcp_connect_fails(old_admin).await;
   }
@@ -2144,7 +2151,8 @@ mod tests {
     let response = admin_purge_response_with_retry(admin_addr).await;
     assert!(
       response.starts_with("HTTP/1.1 200 OK"),
-      "admin listener should serve before disable reload: {response:?}"
+      "admin listener should serve before disable reload: {}",
+      log_safe_test_text(&response)
     );
 
     let active = state.snapshot();
@@ -2222,10 +2230,16 @@ transport = "plaintext_allowlist"
       match admin_purge_response(addr).await {
         Ok(response) if response.starts_with("HTTP/1.1 200 OK") => return response,
         Ok(response) if Instant::now() >= deadline => {
-          panic!("admin listener did not return 200 before deadline: {response:?}")
+          panic!(
+            "admin listener did not return 200 before deadline: {}",
+            log_safe_test_text(&response)
+          )
         }
         Err(error) if Instant::now() >= deadline => {
-          panic!("admin listener did not become ready before deadline: {error}")
+          panic!(
+            "admin listener did not become ready before deadline with error kind: {:?}",
+            error.kind()
+          )
         }
         Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
       }
@@ -2264,6 +2278,18 @@ transport = "plaintext_allowlist"
       })??;
     let _ = read;
     Ok(String::from_utf8_lossy(&response).into_owned())
+  }
+
+  fn log_safe_test_text(input: &str) -> String {
+    input.replace('\n', "\\n").replace('\r', "\\r")
+  }
+
+  #[test]
+  fn log_safe_test_text_escapes_line_breaks() {
+    assert_eq!(
+      log_safe_test_text("HTTP/1.1 500\r\nforged: true\nbody"),
+      "HTTP/1.1 500\\r\\nforged: true\\nbody"
+    );
   }
 
   fn admin_test_token() -> std::io::Result<String> {
