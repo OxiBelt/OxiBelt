@@ -13,6 +13,185 @@ use oxibelt::waf::{
 use ring::digest;
 
 #[test]
+fn rule_monitor_mode_overrides_global_enforcing_and_counts_hit() {
+    let temp_dir = common::TempDir::new("waf-rule-monitor-mode");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rule-monitor-mode");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "shadow-block"
+id = "shadow-block"
+mode = "monitor"
+phase = "request"
+priority = 10
+when = "Context.Mode == 'monitor'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "would block"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let decision = evaluate_simple_request(&engine, "/shadow");
+
+    assert!(decision.terminal.is_none());
+    let hit = only_rule_hit(&engine);
+    assert_eq!(hit.name, "shadow-block");
+    assert_eq!(hit.id.as_deref(), Some("shadow-block"));
+    assert_eq!(hit.effective_mode, "monitor");
+    assert_eq!(hit.hits, 1);
+}
+
+#[test]
+fn rule_enforcing_mode_overrides_global_monitor_and_counts_hit() {
+    let temp_dir = common::TempDir::new("waf-rule-enforcing-mode");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rule-enforcing-mode");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "monitor"
+
+[[waf.rules]]
+name = "enforced-block"
+id = "enforced-block"
+mode = "enforcing"
+phase = "request"
+priority = 10
+when = "Context.Mode == 'enforcing'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "blocked"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let decision = evaluate_simple_request(&engine, "/enforced");
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+    let hit = only_rule_hit(&engine);
+    assert_eq!(hit.effective_mode, "enforcing");
+    assert_eq!(hit.hits, 1);
+}
+
+#[test]
+fn rule_without_mode_inherits_global_mode() {
+    let temp_dir = common::TempDir::new("waf-rule-inherit-mode");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rule-inherit-mode");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "monitor"
+
+[[waf.rules]]
+name = "inherited-shadow"
+phase = "request"
+priority = 10
+when = "Context.Mode == 'monitor'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let decision = evaluate_simple_request(&engine, "/inherited");
+
+    assert!(decision.terminal.is_none());
+    let hit = only_rule_hit(&engine);
+    assert_eq!(hit.effective_mode, "monitor");
+    assert_eq!(hit.hits, 1);
+}
+
+#[test]
+fn rule_hit_snapshots_include_zero_hit_rules_deterministically() {
+    let temp_dir = common::TempDir::new("waf-rule-hit-snapshot");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rule-hit-snapshot");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "matched-rule"
+id = "matched-rule"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/matched'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+
+[[waf.rules]]
+name = "zero-rule"
+id = "zero-rule"
+mode = "monitor"
+phase = "request"
+priority = 20
+when = "Request.Http.Path == '/zero'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let _ = evaluate_simple_request(&engine, "/matched");
+    let snapshots = engine.rule_hit_snapshots();
+
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].name, "matched-rule");
+    assert_eq!(snapshots[0].scope, "global");
+    assert_eq!(snapshots[0].route, None);
+    assert_eq!(snapshots[0].phase, "request");
+    assert_eq!(snapshots[0].effective_mode, "enforcing");
+    assert_eq!(snapshots[0].hits, 1);
+    assert_eq!(snapshots[1].name, "zero-rule");
+    assert_eq!(snapshots[1].effective_mode, "monitor");
+    assert_eq!(snapshots[1].hits, 0);
+}
+
+#[test]
 fn request_rule_can_reject_by_path_and_client_cidr() {
     let temp_dir = common::TempDir::new("waf-reject");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-reject");
@@ -2636,6 +2815,26 @@ token_bindings = ["tcp_max_hop"]
         error.to_string().contains("requires tcp_max_hop"),
         "unexpected error: {error}"
     );
+}
+
+fn evaluate_simple_request(engine: &WafEngine, path: &str) -> oxibelt::waf::RequestWafDecision {
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = path.parse().expect("URI should parse");
+    engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ))
+}
+
+fn only_rule_hit(engine: &WafEngine) -> oxibelt::waf::WafRuleHitSnapshot {
+    let snapshots = engine.rule_hit_snapshots();
+    assert_eq!(snapshots.len(), 1);
+    snapshots.into_iter().next().expect("rule hit should exist")
 }
 
 fn request_input<'a>(

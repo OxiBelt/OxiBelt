@@ -208,7 +208,10 @@ fn ops_response(
   match kind {
     OpsKind::Metrics => {
       let snapshot = state.snapshot();
-      let body = snapshot.metrics.prometheus(snapshot.cache.stats());
+      let waf_rule_hits = snapshot.waf.rule_hit_snapshots();
+      let body = snapshot
+        .metrics
+        .prometheus(snapshot.cache.stats(), &waf_rule_hits);
       text_response(StatusCode::OK, &body)
     }
     OpsKind::Health => {
@@ -419,6 +422,10 @@ async fn admin_response(
     return response;
   }
 
+  if let Some(response) = admin_waf_response(snapshot.as_ref(), &actor, &method, &path) {
+    return response;
+  }
+
   if let Some(response) = admin_upstream_pools_response(
     request,
     state,
@@ -434,6 +441,30 @@ async fn admin_response(
   }
 
   text_response(StatusCode::NOT_FOUND, "not found")
+}
+
+fn admin_waf_response(
+  snapshot: &AppSnapshot,
+  actor: &AdminActor,
+  method: &::http::Method,
+  path: &str,
+) -> Option<Response<ProxyBody>> {
+  if path != "/admin/v1/waf/rule-hits" {
+    return None;
+  }
+  if !admin_actor_has_role(actor, AdminRole::Viewer) {
+    return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+  }
+  if *method != ::http::Method::GET {
+    return Some(text_response(
+      StatusCode::METHOD_NOT_ALLOWED,
+      "method not allowed",
+    ));
+  }
+  Some(json_response(
+    StatusCode::OK,
+    &json!({ "rules": snapshot.waf.rule_hit_snapshots() }),
+  ))
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,94 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[metrics]
+enabled = true
+bind = "0.0.0.0:9090"
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "plaintext_allowlist"
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+[[admin.rbac.tokens]]
+name = "viewer"
+bearer_token_env = "OXIBELT_VIEWER_TOKEN"
+roles = ["viewer"]
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "shadow-path"
+id = "shadow-path"
+mode = "monitor"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/app/shadow'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "would block"
+
+[[waf.rules]]
+name = "block-path"
+id = "block-path"
+phase = "request"
+priority = 20
+when = "Request.Http.Path == '/app/block'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "blocked by rule"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "http-upstream"

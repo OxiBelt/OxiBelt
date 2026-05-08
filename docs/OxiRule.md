@@ -9,7 +9,7 @@ OxiRule is OxiBelt's CEL-like, declarative WAF rule model. For proxy behavior an
 
 An OxiRule rule has:
 
-- Metadata: `name`, optional `id`, optional `tags`, `phase`, and `priority`.
+- Metadata: `name`, optional `id`, optional `tags`, optional `mode`, `phase`, and `priority`.
 - A side-effect-free boolean condition in `when`, or an external rule `path`.
 - One or more declarative `actions`.
 
@@ -20,6 +20,7 @@ Basic inline rule:
 name = "block-admin-from-public"
 id = "block-admin-public"
 tags = ["access-control", "admin"]
+mode = "monitor"
 phase = "request"
 priority = 100
 when = """
@@ -36,6 +37,8 @@ body = "Forbidden"
 `when` must evaluate to `Bool`. If it evaluates to `false`, the rule is skipped and no action from that rule executes.
 
 Public rule `id` values are optional but must be unique when non-empty. `id` and entries in `tags` must match `[A-Za-z0-9-]{0,32}`. OxiBelt also assigns each compiled rule an internal runtime UUID for diagnostics; that UUID is not configured and is not stable across restarts.
+
+Rule `mode` is optional and defaults to `[waf].mode`. A `monitor` rule counts and logs matches without applying actions. An `enforcing` rule applies actions normally, even when the global WAF mode is `monitor`.
 
 Rule metadata tags are available through `Context.RuleTags`. Transaction tags created by actions such as `set_tag` and `require_person_proof.success_tag` are available through `Request.Tags`.
 
@@ -378,7 +381,7 @@ Context.RuleId: String | Null
 Context.RuleTags: RuleTagSet
 Context.RouteName: String | Null
 Context.TransactionId: String
-Context.Mode: 'enforcing' | 'monitor'
+Context.Mode: 'enforcing' | 'monitor' # effective mode for the current rule, or global mode outside a rule
 ```
 
 ```text

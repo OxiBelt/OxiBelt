@@ -11,6 +11,7 @@ use oxibelt::config::{
     UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
+use oxibelt::waf::WafMode;
 
 #[test]
 fn config_parses_trusted_upstream_ca_certificates() {
@@ -2001,6 +2002,48 @@ body = "blocked"
 
     assert!(base.non_waf_equivalent(&changed));
     assert!(!base.waf_equivalent(&changed));
+}
+
+#[test]
+fn waf_rule_mode_parses_for_global_and_route_rules() {
+    let temp_dir = common::TempDir::new("waf-rule-mode-parse");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-rule-mode");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "shadow-global"
+mode = "monitor"
+phase = "request"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+
+[[upstreams]]"#,
+    ) + r#"
+[[routes.waf.rules]]
+name = "enforced-route"
+mode = "enforcing"
+phase = "request"
+priority = 10
+when = "true"
+
+[[routes.waf.rules.actions]]
+type = "reject"
+status = 403
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(config.waf.rules[0].mode, Some(WafMode::Monitor));
+    assert_eq!(config.routes[0].waf.rules[0].mode, Some(WafMode::Enforcing));
 }
 
 #[test]

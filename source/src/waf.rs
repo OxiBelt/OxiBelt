@@ -3,6 +3,8 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -10,7 +12,7 @@ use http::header::{COOKIE, HeaderName, HeaderValue, SET_COOKIE, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use regex::{Regex, RegexBuilder};
 use ring::rand::{SecureRandom, SystemRandom};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::config::{Config, resolve_existing_local_config_file_path_with_logical};
@@ -61,12 +63,21 @@ pub struct RouteWafConfig {
   pub rules: Vec<WafRuleConfig>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WafMode {
   #[default]
   Enforcing,
   Monitor,
+}
+
+impl WafMode {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Enforcing => "enforcing",
+      Self::Monitor => "monitor",
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -146,6 +157,8 @@ pub struct WafRuleConfig {
   pub id: Option<String>,
   #[serde(default)]
   pub tags: Vec<String>,
+  #[serde(default)]
+  pub mode: Option<WafMode>,
   pub phase: WafPhase,
   pub priority: i64,
   #[serde(default)]
@@ -160,11 +173,20 @@ pub struct WafRuleConfig {
   pub loaded_from_logical_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WafPhase {
   Request,
   Response,
+}
+
+impl WafPhase {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Request => "request",
+      Self::Response => "response",
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -867,13 +889,26 @@ impl WafEngine {
   ) -> anyhow::Result<Self> {
     validate_config(config)?;
 
+    let previous_counters = previous
+      .map(WafEngine::active_hit_counters)
+      .unwrap_or_default();
     let pattern_sets = compile_pattern_sets(&config.waf.pattern_sets, &config.waf.limits)?;
-    let global_rules = compile_rules(&config.waf.rules, "global")?;
+    let global_rules = compile_rules(
+      &config.waf.rules,
+      WafRuleScope::global(),
+      config.waf.mode,
+      &previous_counters,
+    )?;
     let mut route_rules = HashMap::new();
     for route in &config.routes {
       route_rules.insert(
         route.name.clone(),
-        compile_rules(&route.waf.rules, &format!("route:{}", route.name))?,
+        compile_rules(
+          &route.waf.rules,
+          WafRuleScope::route(&route.name),
+          config.waf.mode,
+          &previous_counters,
+        )?,
       );
     }
     let person_proof_policies = global_rules
@@ -913,6 +948,26 @@ impl WafEngine {
 
   pub fn enabled(&self) -> bool {
     self.enabled
+  }
+
+  pub fn rule_hit_snapshots(&self) -> Vec<WafRuleHitSnapshot> {
+    let mut snapshots = self
+      .global_rules
+      .iter()
+      .chain(self.route_rules.values().flat_map(|rules| rules.iter()))
+      .map(CompiledRule::hit_snapshot)
+      .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| {
+      left
+        .scope
+        .cmp(&right.scope)
+        .then_with(|| left.route.cmp(&right.route))
+        .then_with(|| left.phase.cmp(&right.phase))
+        .then_with(|| left.name.cmp(&right.name))
+        .then_with(|| left.id.cmp(&right.id))
+        .then_with(|| left.effective_mode.cmp(&right.effective_mode))
+    });
+    snapshots
   }
 
   pub fn has_response_rules(&self, route_name: &str) -> bool {
@@ -1056,7 +1111,7 @@ impl WafEngine {
         };
         let ctx = EvalContext {
           phase: WafPhase::Request,
-          mode: self.mode,
+          mode: rule.mode,
           rule_name: "",
           rule_id: None,
           rule_tags: &[],
@@ -1072,14 +1127,16 @@ impl WafEngine {
       if !matched {
         continue;
       }
+      rule.record_hit();
       debug!(
         rule = %rule.name,
         rule_id = rule.id.as_deref().unwrap_or_default(),
         internal_rule_id = %rule.internal_id,
+        mode = rule.mode.as_str(),
         phase = "request",
         "WAF rule matched"
       );
-      if self.mode == WafMode::Monitor {
+      if rule.mode == WafMode::Monitor {
         continue;
       }
       let previous_tag_count = decision.tags.len();
@@ -1108,34 +1165,36 @@ impl WafEngine {
     let mut decision = ResponseWafDecision::default();
     let person_proof = self.person_proof.evaluate_request(input.request);
     let mut tx = TransactionBudget::new(&self.limits);
-    let ctx = EvalContext {
-      phase: WafPhase::Response,
-      mode: self.mode,
-      rule_name: "",
-      rule_id: None,
-      rule_tags: &[],
-      request: input.request,
-      response: Some(input),
-      person_proof: &person_proof,
-      pattern_sets: &self.pattern_sets,
-      limits: &self.limits,
-      duplicate_metadata_policy: self.duplicate_metadata_policy,
-    };
 
     for rule in self.rules_for(input.request.route_name, WafPhase::Response) {
       tx.check_total()?;
+      let ctx = EvalContext {
+        phase: WafPhase::Response,
+        mode: rule.mode,
+        rule_name: "",
+        rule_id: None,
+        rule_tags: &[],
+        request: input.request,
+        response: Some(input),
+        person_proof: &person_proof,
+        pattern_sets: &self.pattern_sets,
+        limits: &self.limits,
+        duplicate_metadata_policy: self.duplicate_metadata_policy,
+      };
       let matched = self.evaluate_rule(rule, &ctx, &mut tx)?;
       if !matched {
         continue;
       }
+      rule.record_hit();
       debug!(
         rule = %rule.name,
         rule_id = rule.id.as_deref().unwrap_or_default(),
         internal_rule_id = %rule.internal_id,
+        mode = rule.mode.as_str(),
         phase = "response",
         "WAF rule matched"
       );
-      if self.mode == WafMode::Monitor {
+      if rule.mode == WafMode::Monitor {
         continue;
       }
       apply_response_actions(rule, &ctx, input, &mut decision, &mut tx)?;
@@ -1145,6 +1204,15 @@ impl WafEngine {
     }
 
     Ok(decision)
+  }
+
+  fn active_hit_counters(&self) -> HashMap<WafRuleHitKey, Arc<AtomicU64>> {
+    self
+      .global_rules
+      .iter()
+      .chain(self.route_rules.values().flat_map(|rules| rules.iter()))
+      .map(|rule| (rule.hit_key.clone(), rule.hit_counter.clone()))
+      .collect()
   }
 
   fn evaluate_rule(
@@ -1232,14 +1300,19 @@ fn compile_pattern_sets(
   Ok(sets)
 }
 
-fn compile_rules(configs: &[WafRuleConfig], scope: &str) -> anyhow::Result<Vec<CompiledRule>> {
+fn compile_rules(
+  configs: &[WafRuleConfig],
+  scope: WafRuleScope,
+  default_mode: WafMode,
+  previous_counters: &HashMap<WafRuleHitKey, Arc<AtomicU64>>,
+) -> anyhow::Result<Vec<CompiledRule>> {
   configs
     .iter()
     .map(|rule| {
       let expression = Parser::new(rule.when.as_deref().unwrap_or_default())
         .parse()
         .with_context(|| format!("failed to compile WAF rule {}", rule.name))?;
-      let actions = compile_actions(rule, scope)
+      let actions = compile_actions(rule, scope.person_proof_scope())
         .with_context(|| format!("failed to compile WAF rule {} actions", rule.name))?;
       let person_proof_policies = actions
         .iter()
@@ -1248,13 +1321,28 @@ fn compile_rules(configs: &[WafRuleConfig], scope: &str) -> anyhow::Result<Vec<C
           _ => None,
         })
         .collect();
+      let mode = rule.mode.unwrap_or(default_mode);
+      let hit_key = WafRuleHitKey {
+        scope: scope.label.to_string(),
+        route: scope.route.clone(),
+        phase: rule.phase,
+        name: rule.name.clone(),
+        id: rule.id.clone().filter(|id| !id.is_empty()),
+        mode,
+      };
+      let hit_counter = previous_counters.get(&hit_key).cloned().unwrap_or_default();
       Ok(CompiledRule {
         name: rule.name.clone(),
         id: rule.id.clone().filter(|id| !id.is_empty()),
         tags: rule.tags.clone(),
+        scope: scope.label.to_string(),
+        route: scope.route.clone(),
         internal_id: new_internal_rule_id()?,
         phase: rule.phase,
         priority: rule.priority,
+        mode,
+        hit_key,
+        hit_counter,
         requires_request_body_inspection: rule.phase == WafPhase::Request
           && expression.requires_request_body_inspection(),
         expression,
@@ -1263,6 +1351,35 @@ fn compile_rules(configs: &[WafRuleConfig], scope: &str) -> anyhow::Result<Vec<C
       })
     })
     .collect()
+}
+
+#[derive(Clone)]
+struct WafRuleScope {
+  label: &'static str,
+  route: Option<String>,
+  person_proof_scope: String,
+}
+
+impl WafRuleScope {
+  fn global() -> Self {
+    Self {
+      label: "global",
+      route: None,
+      person_proof_scope: "global".to_string(),
+    }
+  }
+
+  fn route(route_name: &str) -> Self {
+    Self {
+      label: "route",
+      route: Some(route_name.to_string()),
+      person_proof_scope: format!("route:{route_name}"),
+    }
+  }
+
+  fn person_proof_scope(&self) -> &str {
+    &self.person_proof_scope
+  }
 }
 
 fn compile_actions(rule: &WafRuleConfig, scope: &str) -> anyhow::Result<Vec<CompiledAction>> {
@@ -1395,18 +1512,62 @@ fn new_uuid_like_id(label: &str) -> anyhow::Result<String> {
   ))
 }
 
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct WafRuleHitKey {
+  scope: String,
+  route: Option<String>,
+  phase: WafPhase,
+  name: String,
+  id: Option<String>,
+  mode: WafMode,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct WafRuleHitSnapshot {
+  pub scope: String,
+  pub route: Option<String>,
+  pub phase: String,
+  pub name: String,
+  pub id: Option<String>,
+  pub effective_mode: String,
+  pub hits: u64,
+}
+
 #[derive(Clone)]
 struct CompiledRule {
   name: String,
   id: Option<String>,
   tags: Vec<String>,
+  scope: String,
+  route: Option<String>,
   internal_id: String,
   phase: WafPhase,
   priority: i64,
+  mode: WafMode,
+  hit_key: WafRuleHitKey,
+  hit_counter: Arc<AtomicU64>,
   requires_request_body_inspection: bool,
   expression: Expr,
   actions: Vec<CompiledAction>,
   person_proof_policies: Vec<PersonProofPolicy>,
+}
+
+impl CompiledRule {
+  fn record_hit(&self) {
+    self.hit_counter.fetch_add(1, Ordering::Relaxed);
+  }
+
+  fn hit_snapshot(&self) -> WafRuleHitSnapshot {
+    WafRuleHitSnapshot {
+      scope: self.scope.clone(),
+      route: self.route.clone(),
+      phase: self.phase.as_str().to_string(),
+      name: self.name.clone(),
+      id: self.id.clone(),
+      effective_mode: self.mode.as_str().to_string(),
+      hits: self.hit_counter.load(Ordering::Relaxed),
+    }
+  }
 }
 
 #[derive(Clone)]
@@ -2507,10 +2668,7 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
   };
 
   match (object, field) {
-    (ObjectRef::Context, "Phase") => Ok(Value::String(match ctx.phase {
-      WafPhase::Request => "request".to_string(),
-      WafPhase::Response => "response".to_string(),
-    })),
+    (ObjectRef::Context, "Phase") => Ok(Value::String(ctx.phase.as_str().to_string())),
     (ObjectRef::Context, "RuleName") => Ok(Value::String(ctx.rule_name.to_string())),
     (ObjectRef::Context, "RuleId") => Ok(
       ctx
@@ -2527,10 +2685,7 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::Context, "TransactionId") => {
       Ok(Value::String(ctx.request.transaction_id.to_string()))
     }
-    (ObjectRef::Context, "Mode") => Ok(Value::String(match ctx.mode {
-      WafMode::Enforcing => "enforcing".to_string(),
-      WafMode::Monitor => "monitor".to_string(),
-    })),
+    (ObjectRef::Context, "Mode") => Ok(Value::String(ctx.mode.as_str().to_string())),
     (ObjectRef::Request, "Id") => Ok(Value::String(ctx.request.request_id.to_string())),
     (ObjectRef::Request, "ReceivedAtUnixMs") => Ok(Value::Int(
       i64::try_from(ctx.request.received_at_unix_ms).unwrap_or(i64::MAX),

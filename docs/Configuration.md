@@ -552,6 +552,12 @@ The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag
 
 `admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and roles. Roles are `viewer`, `cache_operator`, `upstream_operator`, and `admin`; `admin` implies all scopes. Cache purge requires `cache_operator`; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
 
+Admin WAF telemetry endpoint:
+
+- `GET /admin/v1/waf/rule-hits`
+
+This endpoint requires `viewer` or `admin` and returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`.
+
 Admin upstream-pool endpoints:
 
 - `GET /admin/v1/upstream-pools`
@@ -569,7 +575,7 @@ POST /cache/purge?policy=default&scheme=https&host=example.test&uri=/path
 POST /cache/purge-prefix?policy=default&scheme=https&host=example.test&path_prefix=/assets/
 ```
 
-Health paths must start with `/`.
+Health paths must start with `/`. When WAF is enabled, metrics include `oxibelt_waf_rule_hits_total{scope,route,phase,mode,rule_name,rule_id}` for active global and route rules, including zero-hit rules.
 
 ## Database Access Log Sink
 
@@ -641,6 +647,7 @@ Inline global rules are configured under `[[waf.rules]]`; route-level rules use 
 name = "block-public-admin"
 id = "block-admin-public"
 tags = ["access-control", "admin"]
+mode = "monitor" # optional: enforcing | monitor; defaults to [waf].mode
 phase = "request"
 priority = 100
 when = "Request.Http.Path.startsWith('/admin')"
@@ -650,6 +657,8 @@ type = "reject"
 status = 403
 body = "Forbidden"
 ```
+
+`[waf].mode` sets the default mode for all rules. A rule-level `mode` overrides that default in both directions: `monitor` counts matches without applying actions, while `enforcing` applies actions normally.
 
 Rule syntax, actions, helpers, and Person proof settings are documented in [OxiRule.md](OxiRule.md).
 
