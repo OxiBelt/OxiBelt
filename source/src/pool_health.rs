@@ -31,7 +31,8 @@ pub(crate) async fn run_pool_health_checks(state: AppHandle, mut shutdown: watch
       }
 
       for index in 0..pool.servers.len() {
-        let upstream_name = crate::pools::synthetic_upstream_name(&pool.name, index);
+        let server_id = crate::config::upstream_pool_server_id(index, &pool.servers[index]);
+        let upstream_name = crate::pools::synthetic_upstream_name_for_id(&pool.name, &server_id);
         let due = next_checks.entry(upstream_name.clone()).or_insert(now);
         if *due > now {
           next_sleep = next_sleep.min(*due - now);

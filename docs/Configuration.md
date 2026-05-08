@@ -479,6 +479,11 @@ transport = "auto" # auto | tls | plaintext_allowlist | plaintext
 allow_insecure_plaintext = false
 plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
 
+[[admin.rbac.tokens]]
+name = "upstream-ops"
+bearer_token_env = "OXIBELT_UPSTREAM_TOKEN"
+roles = ["viewer", "upstream_operator"]
+
 [admin.tls]
 enabled = false
 min_version = "tls1.3"
@@ -543,7 +548,19 @@ Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate
 
 The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on upstream error, serve cached byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`.
 
-`[admin]` exposes operations APIs such as cache purge. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>` from `bearer_token_env`, even when mTLS is enabled. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
+`[admin]` exposes operations APIs such as cache purge and upstream-pool runtime control. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>`, even when mTLS is enabled.
+
+`admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and roles. Roles are `viewer`, `cache_operator`, `upstream_operator`, and `admin`; `admin` implies all scopes. Cache purge requires `cache_operator`; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
+
+Admin upstream-pool endpoints:
+
+- `GET /admin/v1/upstream-pools`
+- `GET /admin/v1/upstream-pools/{pool}`
+- `POST /admin/v1/upstream-pools/{pool}/servers`
+- `PATCH /admin/v1/upstream-pools/{pool}/servers/{server_id}`
+- `DELETE /admin/v1/upstream-pools/{pool}/servers/{server_id}`
+
+Runtime server mutation accepts JSON fields `id`, `origin`, `state`, `weight`, `backup`, and `max_conns` where applicable. `DELETE` is limited to servers created by the admin API. Every admin mutation emits a structured audit log with actor, peer, operation, target, outcome, and validation error when rejected.
 
 Admin purge endpoints:
 
@@ -676,10 +693,26 @@ idle_timeout_ms = 75000
 max_lifetime_ms = 300000
 
 [[upstream_pools.servers]]
+id = "app-1"
 origin = "https://app-1.internal.example"
 weight = 1
 max_conns = 1024
 backup = false
+state = "ready" # ready | drain | down | maintenance
+
+[[upstream_pools.discovery]]
+provider = "file"
+file = "discovery/app-pool.json"
+refresh_interval_ms = 5000
+
+[[upstream_pools.discovery]]
+provider = "dns"
+name = "app.internal.example"
+record_type = "a_aaaa" # a | aaaa | a_aaaa | srv
+scheme = "http"
+port = 8080
+refresh_interval_ms = 30000
+min_ttl_ms = 1000
 
 [upstream_pools.health_check]
 enabled = true
@@ -695,7 +728,27 @@ grpc_service = ""
 grpc_expected_statuses = ["SERVING"]
 ```
 
-Pool names and upstream names are separate namespaces. `sticky_cookie` is reserved and rejected. `algorithm = "hash"` requires `hash_key`. Pool servers must use `http://` or `https://`, and server weights must be greater than zero.
+Pool names and upstream names are separate namespaces. `sticky_cookie` is reserved and rejected. `algorithm = "hash"` requires `hash_key`. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
+
+Pool server `state` controls new request selection. `ready` accepts traffic. `drain`, `down`, and `maintenance` stop new selection while already selected in-flight requests finish naturally.
+
+Dynamic discovery applies to `upstream_pools` only. `provider = "file"` reads a JSON document from a path under the config directory, for example `source/config/discovery/app-pool.json` when running from the repository layout. The document shape is:
+
+```json
+{
+  "servers": [
+    {
+      "id": "app-2",
+      "origin": "http://app-2.internal.example:8080",
+      "weight": 1,
+      "max_conns": 1024,
+      "backup": false
+    }
+  ]
+}
+```
+
+`provider = "dns"` resolves `name` using `record_type = "a"`, `"aaaa"`, `"a_aaaa"`, or `"srv"`. A/AAAA discovery requires `port`; SRV discovery uses the SRV target port. DNS refresh uses the lower of the configured `refresh_interval_ms` and the observed DNS TTL, bounded by `min_ttl_ms`. `kubernetes`, `consul`, and `etcd` are reserved provider names and are rejected in this version.
 
 ## Routes
 

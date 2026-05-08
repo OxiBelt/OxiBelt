@@ -62,9 +62,11 @@ pub struct Config {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConfigSourcePaths {
   pub config_entry: Option<PathBuf>,
+  pub config_dir: Option<PathBuf>,
   pub cert_dir: Option<PathBuf>,
   pub config_files: Vec<PathBuf>,
   pub runtime_files: Vec<PathBuf>,
+  pub discovery_files: Vec<PathBuf>,
   pub downstream_tls_files: Vec<PathBuf>,
   pub downstream_tls_cert_chain: Option<PathBuf>,
   pub downstream_tls_private_key: Option<PathBuf>,
@@ -101,6 +103,10 @@ impl ConfigSourcePaths {
 
   fn remember_runtime_file(&mut self, path: PathBuf) {
     push_unique_path(&mut self.runtime_files, path);
+  }
+
+  fn remember_discovery_file(&mut self, path: PathBuf) {
+    push_unique_path(&mut self.discovery_files, path);
   }
 
   fn remember_downstream_tls_file(&mut self, path: PathBuf) {
@@ -213,6 +219,7 @@ impl Config {
   }
 
   fn resolve_relative_paths(&mut self, path_roots: &ConfigPathRoots) -> anyhow::Result<()> {
+    self.source_paths.config_dir = Some(path_roots.config_dir.clone());
     self.source_paths.cert_dir = Some(path_roots.cert_dir.clone());
     let (tls_cert_chain, tls_cert_chain_logical) =
       resolve_existing_local_config_file_path_with_logical(
@@ -336,6 +343,11 @@ impl Config {
     for backend in &mut self.shared_state.backends {
       for path in backend.tls.resolve_relative_paths(&path_roots.cert_dir)? {
         self.source_paths.remember_runtime_file(path);
+      }
+    }
+    for pool in &mut self.upstream_pools {
+      for path in pool.resolve_discovery_paths(&path_roots.config_dir)? {
+        self.source_paths.remember_discovery_file(path);
       }
     }
     for path in self
@@ -496,13 +508,25 @@ impl Config {
           pool.name
         );
       }
-      if pool.servers.is_empty() {
+      if pool.servers.is_empty() && pool.discovery.is_empty() {
         bail!(
-          "upstream pool {} must define at least one server",
+          "upstream pool {} must define at least one server or discovery provider",
           pool.name
         );
       }
-      for server in &pool.servers {
+      let mut server_ids = HashSet::new();
+      for (index, server) in pool.servers.iter().enumerate() {
+        let server_id = upstream_pool_server_id(index, server);
+        validate_runtime_identifier(
+          &format!("upstream pool {} server id", pool.name),
+          &server_id,
+        )?;
+        if !server_ids.insert(server_id.clone()) {
+          bail!(
+            "upstream pool {} has duplicate server id {server_id}",
+            pool.name
+          );
+        }
         if server.origin.scheme() != "http" && server.origin.scheme() != "https" {
           bail!(
             "upstream pool {} server origin must use http:// or https://, got {}",
@@ -517,6 +541,7 @@ impl Config {
           );
         }
       }
+      validate_pool_discovery(pool)?;
       if !pool.health_check.path.starts_with('/') {
         bail!(
           "upstream pool {} health_check.path must start with '/'",
@@ -1025,7 +1050,35 @@ impl Config {
         "admin.tls.enabled must be true for non-loopback admin.bind when admin.transport requires TLS"
       );
     }
+    self.validate_admin_rbac()?;
     self.admin.tls.validate()
+  }
+
+  fn validate_admin_rbac(&self) -> anyhow::Result<()> {
+    let mut names = HashSet::new();
+    for token in &self.admin.rbac.tokens {
+      validate_optional_non_empty("admin.rbac.tokens.name", Some(&token.name))?;
+      validate_optional_non_empty(
+        "admin.rbac.tokens.bearer_token_env",
+        Some(&token.bearer_token_env),
+      )?;
+      if !names.insert(token.name.as_str()) {
+        bail!("duplicate admin.rbac.tokens name {}", token.name);
+      }
+      if token.roles.is_empty() {
+        bail!("admin.rbac.tokens {} roles must not be empty", token.name);
+      }
+      if std::env::var(&token.bearer_token_env)
+        .ok()
+        .is_none_or(|value| value.is_empty())
+      {
+        bail!(
+          "admin RBAC bearer token environment variable {} must be set and non-empty",
+          token.bearer_token_env
+        );
+      }
+    }
+    Ok(())
   }
 
   fn validate_metrics_and_health(&self) -> anyhow::Result<()> {
@@ -1211,6 +1264,71 @@ fn validate_admin_server_name(name: &str) -> anyhow::Result<()> {
     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
   {
     bail!("admin.tls certificate server name {name} contains invalid characters");
+  }
+  Ok(())
+}
+
+fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Result<()> {
+  let mut providers = HashSet::new();
+  for discovery in &pool.discovery {
+    if !providers.insert(discovery.provider) {
+      bail!(
+        "upstream pool {} must not configure duplicate {:?} discovery providers",
+        pool.name,
+        discovery.provider
+      );
+    }
+    if discovery.refresh_interval_ms == 0 || discovery.min_ttl_ms == 0 {
+      bail!(
+        "upstream pool {} discovery refresh_interval_ms and min_ttl_ms must be greater than 0",
+        pool.name
+      );
+    }
+    match discovery.provider {
+      UpstreamDiscoveryProvider::Dns => {
+        let Some(name) = discovery.name.as_deref() else {
+          bail!("upstream pool {} DNS discovery requires name", pool.name);
+        };
+        validate_optional_non_empty("upstream_pools.discovery.name", Some(name))?;
+        if discovery.record_type != DnsDiscoveryRecordType::Srv && discovery.port.is_none() {
+          bail!(
+            "upstream pool {} DNS A/AAAA discovery requires port",
+            pool.name
+          );
+        }
+      }
+      UpstreamDiscoveryProvider::File => {
+        if discovery.file.is_none() {
+          bail!("upstream pool {} file discovery requires file", pool.name);
+        }
+      }
+      UpstreamDiscoveryProvider::Kubernetes
+      | UpstreamDiscoveryProvider::Consul
+      | UpstreamDiscoveryProvider::Etcd => {
+        bail!(
+          "upstream pool {} discovery provider {:?} is reserved and not implemented yet",
+          pool.name,
+          discovery.provider
+        );
+      }
+    }
+  }
+  Ok(())
+}
+
+pub(crate) fn upstream_pool_server_id(index: usize, server: &UpstreamPoolServerConfig) -> String {
+  server.id.clone().unwrap_or_else(|| index.to_string())
+}
+
+pub(crate) fn validate_runtime_identifier(field_name: &str, value: &str) -> anyhow::Result<()> {
+  if value.trim() != value || value.is_empty() {
+    bail!("{field_name} must not be empty or padded");
+  }
+  if !value
+    .bytes()
+    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+  {
+    bail!("{field_name} must contain only ASCII letters, digits, '-', '_' or '.'");
   }
   Ok(())
 }
@@ -1521,9 +1639,12 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "bind",
       "enabled",
       "plaintext_allowed_source_cidrs",
+      "rbac",
       "tls",
       "transport",
     ][..],
+    "admin.rbac" => &["tokens"][..],
+    "admin.rbac.tokens" => &["bearer_token_env", "name", "roles"][..],
     "admin.tls" => &[
       "certificates",
       "client_auth",
@@ -1607,11 +1728,22 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "upstreams.tls.ech" => &["config_list_file", "mode"][..],
     "upstream_pools" => &[
       "algorithm",
+      "discovery",
       "hash_key",
       "health_check",
       "keepalive",
       "name",
       "servers",
+    ][..],
+    "upstream_pools.discovery" => &[
+      "file",
+      "min_ttl_ms",
+      "name",
+      "port",
+      "provider",
+      "record_type",
+      "refresh_interval_ms",
+      "scheme",
     ][..],
     "upstream_pools.keepalive" => &["idle_timeout_ms", "max_idle", "max_lifetime_ms"][..],
     "upstream_pools.health_check" => &[
@@ -1627,7 +1759,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "grpc_expected_statuses",
       "grpc_service",
     ][..],
-    "upstream_pools.servers" => &["backup", "max_conns", "origin", "weight"][..],
+    "upstream_pools.servers" => &["backup", "id", "max_conns", "origin", "state", "weight"][..],
     "routes" => &[
       "cache",
       "compression",
@@ -1946,15 +2078,20 @@ fn config_base_dir(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 struct ConfigPathRoots {
+  config_dir: PathBuf,
   cert_dir: PathBuf,
   oxirule_dir: PathBuf,
 }
 
 fn config_path_roots(path: &Path) -> anyhow::Result<ConfigPathRoots> {
   let config_dir = config_base_dir(path)?;
-  let layout_root = config_dir.parent().unwrap_or_else(|| Path::new("."));
+  let layout_root = config_dir
+    .parent()
+    .unwrap_or_else(|| Path::new("."))
+    .to_path_buf();
 
   Ok(ConfigPathRoots {
+    config_dir,
     cert_dir: layout_root.join("cert"),
     oxirule_dir: layout_root.join("oxirule"),
   })
@@ -3087,6 +3224,8 @@ pub struct AdminConfig {
   pub plaintext_allowed_source_cidrs: Vec<String>,
   #[serde(default)]
   pub tls: AdminTlsConfig,
+  #[serde(default)]
+  pub rbac: AdminRbacConfig,
 }
 
 impl Default for AdminConfig {
@@ -3099,6 +3238,40 @@ impl Default for AdminConfig {
       allow_insecure_plaintext: false,
       plaintext_allowed_source_cidrs: default_admin_plaintext_allowed_source_cidrs(),
       tls: AdminTlsConfig::default(),
+      rbac: AdminRbacConfig::default(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct AdminRbacConfig {
+  #[serde(default)]
+  pub tokens: Vec<AdminRbacTokenConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AdminRbacTokenConfig {
+  pub name: String,
+  pub bearer_token_env: String,
+  pub roles: Vec<AdminRole>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminRole {
+  Viewer,
+  CacheOperator,
+  UpstreamOperator,
+  Admin,
+}
+
+impl AdminRole {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Viewer => "viewer",
+      Self::CacheOperator => "cache_operator",
+      Self::UpstreamOperator => "upstream_operator",
+      Self::Admin => "admin",
     }
   }
 }
@@ -3798,7 +3971,87 @@ pub struct UpstreamPoolConfig {
   #[serde(default)]
   pub servers: Vec<UpstreamPoolServerConfig>,
   #[serde(default)]
+  pub discovery: Vec<UpstreamPoolDiscoveryConfig>,
+  #[serde(default)]
   pub health_check: UpstreamPoolHealthCheckConfig,
+}
+
+impl UpstreamPoolConfig {
+  fn resolve_discovery_paths(&mut self, config_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut resolved_paths = Vec::new();
+    for discovery in &mut self.discovery {
+      if discovery.provider == UpstreamDiscoveryProvider::File {
+        let Some(path) = discovery.file.take() else {
+          continue;
+        };
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          "upstream_pools.discovery.file",
+          config_dir,
+          &path,
+        )?;
+        discovery.file = Some(resolved);
+        resolved_paths.push(logical);
+      }
+    }
+    Ok(resolved_paths)
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamPoolDiscoveryConfig {
+  pub provider: UpstreamDiscoveryProvider,
+  #[serde(default)]
+  pub name: Option<String>,
+  #[serde(default)]
+  pub file: Option<PathBuf>,
+  #[serde(default)]
+  pub record_type: DnsDiscoveryRecordType,
+  #[serde(default)]
+  pub scheme: DiscoveryUpstreamScheme,
+  #[serde(default)]
+  pub port: Option<u16>,
+  #[serde(default = "default_discovery_refresh_interval_ms")]
+  pub refresh_interval_ms: u64,
+  #[serde(default = "default_discovery_min_ttl_ms")]
+  pub min_ttl_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamDiscoveryProvider {
+  Dns,
+  File,
+  Kubernetes,
+  Consul,
+  Etcd,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsDiscoveryRecordType {
+  A,
+  Aaaa,
+  #[default]
+  #[serde(rename = "a_aaaa")]
+  AAndAaaa,
+  Srv,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiscoveryUpstreamScheme {
+  #[default]
+  Http,
+  Https,
+}
+
+impl DiscoveryUpstreamScheme {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Http => "http",
+      Self::Https => "https",
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -3835,6 +4088,8 @@ impl Default for UpstreamPoolKeepaliveConfig {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct UpstreamPoolServerConfig {
+  #[serde(default)]
+  pub id: Option<String>,
   pub origin: Url,
   #[serde(default = "default_pool_server_weight")]
   pub weight: u32,
@@ -3842,6 +4097,55 @@ pub struct UpstreamPoolServerConfig {
   pub max_conns: usize,
   #[serde(default)]
   pub backup: bool,
+  #[serde(default)]
+  pub state: UpstreamPoolServerState,
+  #[serde(skip)]
+  pub source: UpstreamPoolServerSource,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamPoolServerState {
+  #[default]
+  Ready,
+  Drain,
+  Down,
+  Maintenance,
+}
+
+impl UpstreamPoolServerState {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Ready => "ready",
+      Self::Drain => "drain",
+      Self::Down => "down",
+      Self::Maintenance => "maintenance",
+    }
+  }
+
+  pub fn accepts_new_requests(self) -> bool {
+    self == Self::Ready
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum UpstreamPoolServerSource {
+  #[default]
+  Static,
+  Dns,
+  File,
+  Admin,
+}
+
+impl UpstreamPoolServerSource {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Static => "static",
+      Self::Dns => "dns",
+      Self::File => "file",
+      Self::Admin => "admin",
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -4404,6 +4708,14 @@ fn default_pool_keepalive_max_lifetime_ms() -> u64 {
 
 fn default_pool_server_weight() -> u32 {
   1
+}
+
+fn default_discovery_refresh_interval_ms() -> u64 {
+  30_000
+}
+
+fn default_discovery_min_ttl_ms() -> u64 {
+  1_000
 }
 
 fn default_health_check_path() -> String {

@@ -5,10 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use anyhow::bail;
+use serde::Serialize;
 
 use crate::config::{
   HealthCheckProtocol, HttpVersion, LoadBalancingAlgorithm, ProxyProtocolEgressMode,
-  UpstreamConfig, UpstreamPoolConfig, UpstreamTlsConfig,
+  UpstreamConfig, UpstreamPoolConfig, UpstreamPoolServerConfig, UpstreamTlsConfig,
+  upstream_pool_server_id,
 };
 use crate::shared_state::SharedState;
 
@@ -29,6 +31,7 @@ struct PoolRuntime {
 
 #[derive(Debug)]
 struct PoolServerRuntime {
+  server_id: String,
   upstream_name: String,
   active: AtomicUsize,
   healthy: AtomicBool,
@@ -41,6 +44,27 @@ pub struct PoolSelection {
   pub upstream_name: String,
   server: Arc<PoolServerRuntime>,
   shared_state: Option<Arc<SharedState>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolRuntimeSnapshot {
+  pub name: String,
+  pub algorithm: String,
+  pub servers: Vec<PoolServerRuntimeSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolServerRuntimeSnapshot {
+  pub id: String,
+  pub upstream_name: String,
+  pub origin: String,
+  pub source: String,
+  pub state: String,
+  pub weight: u32,
+  pub max_conns: usize,
+  pub backup: bool,
+  pub active: usize,
+  pub healthy: bool,
 }
 
 impl Drop for PoolSelection {
@@ -64,8 +88,10 @@ impl PoolState {
           .iter()
           .enumerate()
           .map(|(index, _)| {
+            let server_id = upstream_pool_server_id(index, &config.servers[index]);
             Arc::new(PoolServerRuntime {
-              upstream_name: synthetic_upstream_name(&config.name, index),
+              upstream_name: synthetic_upstream_name_for_id(&config.name, &server_id),
+              server_id,
               active: AtomicUsize::new(0),
               healthy: AtomicBool::new(true),
               consecutive_successes: AtomicU32::new(0),
@@ -100,7 +126,10 @@ impl PoolState {
           .iter()
           .enumerate()
           .map(|(index, server)| UpstreamConfig {
-            name: synthetic_upstream_name(&pool.name, index),
+            name: synthetic_upstream_name_for_id(
+              &pool.name,
+              &upstream_pool_server_id(index, server),
+            ),
             origin: server.origin.clone(),
             max_http_version: if server.origin.scheme() == "http"
               && pool.health_check.protocol != HealthCheckProtocol::Grpc
@@ -162,6 +191,16 @@ impl PoolState {
       server,
       shared_state: self.shared_state.clone(),
     })
+  }
+
+  pub fn snapshots(&self) -> Vec<PoolRuntimeSnapshot> {
+    let mut snapshots = self.pools.values().map(pool_snapshot).collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.name.cmp(&right.name));
+    snapshots
+  }
+
+  pub fn snapshot(&self, pool_name: &str) -> Option<PoolRuntimeSnapshot> {
+    self.pools.get(pool_name).map(pool_snapshot)
   }
 
   pub fn report_success(&self, upstream_name: &str) {
@@ -282,14 +321,18 @@ fn weighted_available(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
     if !server_available(pool, index, server) {
       continue;
     }
-    let weight = pool.config.servers[index].weight;
+    let weight = server_config(pool, index).weight;
     for _ in 0..weight {
       result.push(server.clone());
     }
   }
   if result.is_empty() {
     for (index, server) in pool.servers.iter().enumerate() {
-      if pool.config.servers[index].backup && server_capacity_available(pool, index, server) {
+      let config = server_config(pool, index);
+      if config.backup
+        && config.state.accepts_new_requests()
+        && server_capacity_available(pool, index, server)
+      {
         result.push(server.clone());
       }
     }
@@ -313,7 +356,10 @@ fn available_servers(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
     .iter()
     .enumerate()
     .filter(|(index, server)| {
-      pool.config.servers[*index].backup && server_capacity_available(pool, *index, server)
+      let config = server_config(pool, *index);
+      config.backup
+        && config.state.accepts_new_requests()
+        && server_capacity_available(pool, *index, server)
     })
     .map(|(_, server)| server.clone())
     .collect()
@@ -324,7 +370,9 @@ fn server_available(
   index: usize,
   server: &Arc<PoolServerRuntime>,
 ) -> bool {
-  !pool.config.servers[index].backup
+  let config = server_config(pool, index);
+  !config.backup
+    && config.state.accepts_new_requests()
     && server_healthy(pool, server)
     && server_capacity_available(pool, index, server)
 }
@@ -347,6 +395,10 @@ fn active_count(pool: &PoolRuntime, server: &PoolServerRuntime) -> usize {
   server.active.load(Ordering::Relaxed)
 }
 
+fn server_config(pool: &PoolRuntime, index: usize) -> &UpstreamPoolServerConfig {
+  &pool.config.servers[index]
+}
+
 fn server_healthy(pool: &PoolRuntime, server: &PoolServerRuntime) -> bool {
   if let Some(shared) = &pool.shared_state
     && let Ok(Some(healthy)) = shared.pool_health(&server.upstream_name)
@@ -356,8 +408,42 @@ fn server_healthy(pool: &PoolRuntime, server: &PoolServerRuntime) -> bool {
   server.healthy.load(Ordering::Relaxed)
 }
 
+#[allow(dead_code)]
 pub(crate) fn synthetic_upstream_name(pool: &str, index: usize) -> String {
   format!("pool:{pool}:{index}")
+}
+
+pub(crate) fn synthetic_upstream_name_for_id(pool: &str, server_id: &str) -> String {
+  format!("pool:{pool}:{server_id}")
+}
+
+fn pool_snapshot(pool: &Arc<PoolRuntime>) -> PoolRuntimeSnapshot {
+  let mut servers = pool
+    .servers
+    .iter()
+    .enumerate()
+    .map(|(index, server)| {
+      let config = server_config(pool, index);
+      PoolServerRuntimeSnapshot {
+        id: server.server_id.clone(),
+        upstream_name: server.upstream_name.clone(),
+        origin: config.origin.to_string(),
+        source: config.source.as_str().to_string(),
+        state: config.state.as_str().to_string(),
+        weight: config.weight,
+        max_conns: config.max_conns,
+        backup: config.backup,
+        active: active_count(pool, server),
+        healthy: server_healthy(pool, server),
+      }
+    })
+    .collect::<Vec<_>>();
+  servers.sort_by(|left, right| left.id.cmp(&right.id));
+  PoolRuntimeSnapshot {
+    name: pool.config.name.clone(),
+    algorithm: format!("{:?}", pool.config.algorithm),
+    servers,
+  }
 }
 
 #[cfg(test)]
@@ -365,6 +451,7 @@ mod tests {
   use super::*;
   use crate::config::{
     UpstreamPoolHealthCheckConfig, UpstreamPoolKeepaliveConfig, UpstreamPoolServerConfig,
+    UpstreamPoolServerState,
   };
 
   fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig {
@@ -375,18 +462,25 @@ mod tests {
       keepalive: UpstreamPoolKeepaliveConfig::default(),
       servers: vec![
         UpstreamPoolServerConfig {
+          id: None,
           origin: "http://app-a.example".parse().unwrap(),
           weight: 1,
           max_conns: 0,
           backup: false,
+          state: Default::default(),
+          source: Default::default(),
         },
         UpstreamPoolServerConfig {
+          id: None,
           origin: "http://app-b.example".parse().unwrap(),
           weight: 1,
           max_conns: 0,
           backup: false,
+          state: Default::default(),
+          source: Default::default(),
         },
       ],
+      discovery: Vec::new(),
       health_check: UpstreamPoolHealthCheckConfig::default(),
     }
   }
@@ -422,6 +516,48 @@ mod tests {
       .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
       .unwrap();
     assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 1));
+  }
+
+  #[test]
+  fn runtime_state_excludes_servers_from_new_selection() {
+    let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
+    pool.servers[0].state = UpstreamPoolServerState::Drain;
+    pool.servers[1].state = UpstreamPoolServerState::Maintenance;
+    let state = PoolState::new(&[pool], None);
+
+    let error = match state.select("app-pool", "203.0.113.10".parse().unwrap(), "/", None) {
+      Ok(selection) => panic!(
+        "drain and maintenance servers should not be selected, got {}",
+        selection.upstream_name
+      ),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("no available servers"));
+  }
+
+  #[test]
+  fn runtime_weight_is_used_for_round_robin_selection() {
+    let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
+    pool.servers[0].weight = 2;
+    pool.servers[1].weight = 1;
+    let state = PoolState::new(&[pool], None);
+
+    let first = state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .unwrap();
+    assert_eq!(first.upstream_name, synthetic_upstream_name("app-pool", 0));
+    drop(first);
+
+    let second = state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .unwrap();
+    assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 0));
+    drop(second);
+
+    let third = state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .unwrap();
+    assert_eq!(third.upstream_name, synthetic_upstream_name("app-pool", 1));
   }
 
   #[test]

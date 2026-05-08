@@ -102,7 +102,9 @@ Targets may be:
 - A named `[[upstreams]]` entry.
 - A named `[[upstream_pools]]` entry.
 
-Upstream pools maintain local load-balancing state. Supported algorithms are `round_robin`, `least_conn`, `random`, `hash`, and `ip_hash`; `sticky_cookie` is reserved and rejected at startup. Pool health can be passive or active depending on configuration.
+Upstream pools maintain load-balancing state. Supported algorithms are `round_robin`, `least_conn`, `random`, `hash`, and `ip_hash`; `sticky_cookie` is reserved and rejected at startup. Pool health can be passive or active depending on configuration. Pool servers have stable IDs, source metadata, active counts, health state, and runtime state. `ready` servers accept new requests; `drain`, `down`, and `maintenance` servers do not receive new selections while existing in-flight requests complete.
+
+Dynamic upstream discovery is supported for upstream pools. File discovery polls a JSON server list under the config directory. DNS discovery supports A, AAAA, combined A/AAAA, and SRV records and schedules refreshes from configured refresh intervals and DNS TTLs. Discovery updates are staged: OxiBelt validates the generated pool and rebuilds upstream clients before atomically replacing the active pool view. Invalid discovery updates keep the previous active state.
 
 Host forwarding is controlled by each upstream's `preserve_host` setting:
 
@@ -151,7 +153,7 @@ Operational endpoints are optional:
 
 - `[health]` exposes local readiness and liveness endpoints.
 - `[metrics]` exposes Prometheus-style metrics.
-- `[admin]` exposes authenticated operations APIs such as cache purge on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist. Full hot reload starts, stops, or rebinds this listener when admin listener settings change.
+- `[admin]` exposes authenticated operations APIs such as cache purge and upstream-pool runtime control on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist. Admin RBAC maps bearer-token environment variables to `viewer`, `cache_operator`, `upstream_operator`, or `admin` roles; the legacy `admin.bearer_token_env` token has the `admin` role. Full hot reload starts, stops, or rebinds this listener when admin listener settings change.
 - `[logging.access_log]` emits request-wide newline-delimited JSON access logs with `scope = "system"` and can use its own stdout and PostgreSQL sinks.
 - OxiRule `emit_access_log` writes newline-delimited JSON with `scope = "waf"` to stdout and can optionally mirror records to PostgreSQL through the separate `[database.access_log]` sink.
 

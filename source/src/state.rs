@@ -210,6 +210,40 @@ impl AppSnapshot {
       system_access_log,
     })
   }
+
+  pub async fn new_with_updated_upstream_pools(
+    config: Config,
+    previous: &AppSnapshot,
+  ) -> anyhow::Result<Self> {
+    let route_table = RouteTable::new(config.routes.clone());
+    let mut upstreams = config.upstreams.clone();
+    upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
+    let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs)
+      .context("failed to build upstream HTTP clients")?;
+    let h3_clients =
+      UpstreamH3Pools::new(&upstreams, &config).context("failed to build upstream HTTP/3 pools")?;
+    let pools = PoolState::new(&config.upstream_pools, previous.shared_state.clone());
+
+    Ok(Self {
+      config,
+      route_table,
+      upstreams,
+      clients,
+      h3_clients,
+      limits: previous.limits.clone(),
+      pools,
+      cache: previous.cache.clone(),
+      compression: previous.compression.clone(),
+      metrics: previous.metrics.clone(),
+      shared_state: previous.shared_state.clone(),
+      tls_server_config: previous.tls_server_config.clone(),
+      admin_tls_server_config: previous.admin_tls_server_config.clone(),
+      quic_server_config: previous.quic_server_config.clone(),
+      waf: previous.waf.clone(),
+      access_logs: previous.access_logs.clone(),
+      system_access_log: previous.system_access_log.clone(),
+    })
+  }
 }
 
 fn build_clients(

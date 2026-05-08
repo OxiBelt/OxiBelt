@@ -5,9 +5,10 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-    AdminTransportMode, CacheStore, CompressionConfig, Config, DatabaseTlsMode,
-    ForwardedHeaderMode, HotReloadMode, OcspMode, ProxyProtocolEgressMode, QuicZeroRttMode,
-    RuntimeOverrides, SharedStateBackendKind, UpstreamEchMode,
+    AdminRole, AdminTransportMode, CacheStore, CompressionConfig, Config, DatabaseTlsMode,
+    DnsDiscoveryRecordType, ForwardedHeaderMode, HotReloadMode, OcspMode, ProxyProtocolEgressMode,
+    QuicZeroRttMode, RuntimeOverrides, SharedStateBackendKind, UpstreamDiscoveryProvider,
+    UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
 
@@ -417,6 +418,221 @@ default = true
     config.validate().expect("config should validate");
     assert!(config.admin.tls.enabled);
     assert_eq!(config.admin.transport, AdminTransportMode::Auto);
+}
+
+#[test]
+fn admin_rbac_tokens_parse_and_validate_roles() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+        std::env::set_var("OXIBELT_VIEWER_TOKEN_TEST", "viewer-secret");
+        std::env::set_var("OXIBELT_UPSTREAM_TOKEN_TEST", "upstream-secret");
+    }
+    let temp_dir = common::TempDir::new("admin-rbac");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-rbac");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[[admin.rbac.tokens]]
+name = "viewer"
+bearer_token_env = "OXIBELT_VIEWER_TOKEN_TEST"
+roles = ["viewer"]
+
+[[admin.rbac.tokens]]
+name = "upstream-ops"
+bearer_token_env = "OXIBELT_UPSTREAM_TOKEN_TEST"
+roles = ["upstream_operator", "cache_operator"]
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.admin.rbac.tokens[0].roles, vec![AdminRole::Viewer]);
+    assert_eq!(
+        config.admin.rbac.tokens[1].roles,
+        vec![AdminRole::UpstreamOperator, AdminRole::CacheOperator]
+    );
+}
+
+#[test]
+fn admin_rbac_rejects_duplicate_names_empty_roles_and_unknown_roles() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+        std::env::set_var("OXIBELT_VIEWER_TOKEN_TEST", "viewer-secret");
+    }
+    let temp_dir = common::TempDir::new("admin-rbac-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "admin-rbac-invalid");
+    let duplicate_raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[[admin.rbac.tokens]]
+name = "viewer"
+bearer_token_env = "OXIBELT_VIEWER_TOKEN_TEST"
+roles = ["viewer"]
+
+[[admin.rbac.tokens]]
+name = "viewer"
+bearer_token_env = "OXIBELT_VIEWER_TOKEN_TEST"
+roles = ["viewer"]
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&duplicate_raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("duplicate RBAC token names should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate admin.rbac.tokens name"),
+        "unexpected error: {error}"
+    );
+
+    let empty_roles_raw = duplicate_raw.replace("roles = [\"viewer\"]", "roles = []");
+    let config: Config = toml::from_str(&empty_roles_raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("empty RBAC token roles should be rejected");
+    assert!(
+        error.to_string().contains("roles must not be empty"),
+        "unexpected error: {error}"
+    );
+
+    let unknown_role_raw = duplicate_raw.replace("roles = [\"viewer\"]", "roles = [\"root\"]");
+    toml::from_str::<Config>(&unknown_role_raw).expect_err("unknown RBAC role should not parse");
+}
+
+#[test]
+fn upstream_pool_discovery_config_parses_dns_and_file_providers() {
+    let temp_dir = common::TempDir::new("pool-discovery");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "pool-discovery");
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "dynamic-pool"
+algorithm = "round_robin"
+
+[[upstream_pools.servers]]
+id = "static-a"
+origin = "http://static-a.example"
+weight = 2
+state = "maintenance"
+
+[[upstream_pools.discovery]]
+provider = "file"
+file = "discovery/app.json"
+refresh_interval_ms = 1000
+
+[[upstream_pools.discovery]]
+provider = "dns"
+name = "app.internal.example"
+record_type = "a_aaaa"
+scheme = "http"
+port = 8080
+refresh_interval_ms = 5000
+min_ttl_ms = 1000
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let pool = &config.upstream_pools[0];
+    assert_eq!(pool.discovery[0].provider, UpstreamDiscoveryProvider::File);
+    assert_eq!(pool.discovery[1].provider, UpstreamDiscoveryProvider::Dns);
+    assert_eq!(
+        pool.discovery[1].record_type,
+        DnsDiscoveryRecordType::AAndAaaa
+    );
+}
+
+#[test]
+fn upstream_pool_discovery_rejects_reserved_providers_and_bad_values() {
+    let temp_dir = common::TempDir::new("pool-discovery-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "pool-discovery-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "dynamic-pool"
+algorithm = "round_robin"
+
+[[upstream_pools.discovery]]
+provider = "consul"
+name = "app"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("reserved discovery provider should be rejected");
+    assert!(
+        error.to_string().contains("reserved and not implemented"),
+        "unexpected error: {error}"
+    );
+
+    let raw = raw
+        .replace("provider = \"consul\"", "provider = \"dns\"")
+        .replace("name = \"app\"", "name = \"app\"\nrefresh_interval_ms = 0");
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("zero discovery interval should be rejected");
+    assert!(
+        error.to_string().contains("must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn file_discovery_path_must_stay_under_config_directory() {
+    let temp_dir = common::TempDir::new("pool-discovery-path");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config dir");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert dir");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "pool-discovery-path");
+    std::fs::copy(cert_path, cert_dir.join("fullchain.pem")).expect("failed to copy cert");
+    std::fs::copy(key_path, cert_dir.join("privkey.pem")).expect("failed to copy key");
+    let config_path = config_dir.join("oxibelt.toml");
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "dynamic-pool"
+
+[[upstream_pools.discovery]]
+provider = "file"
+file = "../outside.json"
+"#,
+        common::minimal_config_toml_with_paths("fullchain.pem", "privkey.pem")
+    );
+    std::fs::write(&config_path, raw).expect("failed to write config");
+
+    let error = Config::load(&config_path)
+        .expect_err("file discovery path outside config dir should be rejected");
+    assert!(
+        error.to_string().contains("parent-directory"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

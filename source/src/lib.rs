@@ -31,6 +31,8 @@ pub mod state;
 pub mod stream;
 mod tcp_hop;
 pub mod tls;
+pub mod upstream_control;
+pub mod upstream_discovery;
 pub mod waf;
 
 use anyhow::Context;

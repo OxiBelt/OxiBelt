@@ -1125,6 +1125,8 @@ docker create \
   --network "${network_name}" \
   --network-alias proxy \
   -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
+  -e OXIBELT_VIEWER_TOKEN=matrix-viewer-token \
+  -e OXIBELT_UPSTREAM_TOKEN=matrix-upstream-token \
   -e OXIBELT_INSTANCE_ID=proxy-a \
   "${proxy_image}" >/dev/null
 docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
@@ -1140,6 +1142,8 @@ if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then
     --network "${network_name}" \
     --network-alias proxy-b \
     -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
+    -e OXIBELT_VIEWER_TOKEN=matrix-viewer-token \
+    -e OXIBELT_UPSTREAM_TOKEN=matrix-upstream-token \
     -e OXIBELT_INSTANCE_ID=proxy-b \
     "${proxy_image}" >/dev/null
   docker cp "${case_dir}/config/." "${proxy_b_container}:/etc/oxibelt/config"

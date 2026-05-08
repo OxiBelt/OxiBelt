@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "id": "file-alt",
+      "origin": "http://mock-alt:18081/alt"
+    }
+  ]
+}

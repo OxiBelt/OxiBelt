@@ -7,10 +7,14 @@ use std::time::Duration;
 
 use ::http::{Response, StatusCode};
 use anyhow::{Context, bail};
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use ring::digest;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -18,7 +22,10 @@ use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
-use crate::config::{AdminTransportMode, RuntimeOverrides};
+use crate::config::{
+  AdminConfig, AdminRole, AdminTransportMode, RuntimeOverrides, UpstreamPoolServerConfig,
+  UpstreamPoolServerSource, UpstreamPoolServerState,
+};
 use crate::identity::Cidr;
 use crate::limits::ConnectionPermit;
 use crate::pool_health;
@@ -30,6 +37,7 @@ use crate::reload::{ReloadManager, ReloadTrigger};
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::{BoundStreamListener, StreamListenerTask};
 use crate::tcp_hop;
+use crate::upstream_control;
 use crate::waf::WafTlsMetadata;
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
@@ -121,9 +129,15 @@ impl OpsTasks {
     }
     let (tx, rx) = watch::channel(false);
     shutdown.push(tx);
-    let task_state = state;
+    let task_state = state.clone();
     tasks.push(tokio::spawn(async move {
       pool_health::run_pool_health_checks(task_state, rx).await;
+    }));
+    let (tx, rx) = watch::channel(false);
+    shutdown.push(tx);
+    let task_state = state;
+    tasks.push(tokio::spawn(async move {
+      crate::upstream_discovery::run_dynamic_upstream_discovery(task_state, rx).await;
     }));
     Ok(Self { shutdown, tasks })
   }
@@ -363,13 +377,7 @@ where
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
     async move {
-      Ok::<_, Infallible>(admin_response(
-        request,
-        state,
-        peer_addr,
-        listener_bind,
-        scheme,
-      ))
+      Ok::<_, Infallible>(admin_response(request, state, peer_addr, listener_bind, scheme).await)
     }
   });
   hyper::server::conn::http1::Builder::new()
@@ -378,7 +386,7 @@ where
     .map_err(|error| anyhow::anyhow!(error))
 }
 
-fn admin_response(
+async fn admin_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
   peer_addr: SocketAddr,
@@ -389,59 +397,578 @@ fn admin_response(
   if !admin_listener_current(&snapshot, listener_bind) {
     return text_response(StatusCode::NOT_FOUND, "not found");
   }
-  if !admin_authorized(&request, &snapshot.config.admin.bearer_token_env) {
+  let Some(actor) = admin_actor(&request, &snapshot.config.admin) else {
     return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
-  }
-  if request.method() != ::http::Method::POST {
-    return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
-  }
-  let query = request.uri().query().unwrap_or_default();
+  };
+  let method = request.method().clone();
+  let uri = request.uri().clone();
+  let query = uri.query().unwrap_or_default();
   let params = url::form_urlencoded::parse(query.as_bytes())
     .into_owned()
     .collect::<std::collections::HashMap<_, _>>();
+  let path = uri.path().to_string();
+
+  if path == "/cache/purge" || path == "/cache/purge-prefix" {
+    if !admin_actor_has_role(&actor, AdminRole::CacheOperator) {
+      return text_response(StatusCode::FORBIDDEN, "forbidden");
+    }
+    if method != ::http::Method::POST {
+      return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+    }
+    let response = admin_cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &actor);
+    return response;
+  }
+
+  if let Some(response) = admin_upstream_pools_response(
+    request,
+    state,
+    snapshot.as_ref(),
+    peer_addr,
+    &actor,
+    &method,
+    &path,
+  )
+  .await
+  {
+    return response;
+  }
+
+  text_response(StatusCode::NOT_FOUND, "not found")
+}
+
+#[derive(Debug, Clone)]
+struct AdminActor {
+  name: String,
+  roles: Vec<AdminRole>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AdminAuditOutcome {
+  Applied,
+  Rejected,
+}
+
+impl AdminAuditOutcome {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Applied => "applied",
+      Self::Rejected => "rejected",
+    }
+  }
+}
+
+fn admin_cache_purge_response(
+  snapshot: &AppSnapshot,
+  params: &std::collections::HashMap<String, String>,
+  path: &str,
+  scheme: &'static str,
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+) -> Response<ProxyBody> {
   let policy = params
     .get("policy")
     .map(String::as_str)
     .unwrap_or("default");
   let purge_scheme = params.get("scheme").map(String::as_str).unwrap_or(scheme);
   let Some(host) = params.get("host").map(String::as_str) else {
+    admin_audit(
+      peer_addr,
+      actor,
+      "cache_purge",
+      None,
+      None,
+      AdminAuditOutcome::Rejected,
+      Some("missing host"),
+    );
     return text_response(StatusCode::BAD_REQUEST, "missing host");
   };
-  let purged = match request.uri().path() {
+  let purged = match path {
     "/cache/purge" => {
       let Some(uri) = params.get("uri").map(String::as_str) else {
+        admin_audit(
+          peer_addr,
+          actor,
+          "cache_purge",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing uri"),
+        );
         return text_response(StatusCode::BAD_REQUEST, "missing uri");
       };
       snapshot.cache.purge_exact(policy, purge_scheme, host, uri)
     }
     "/cache/purge-prefix" => {
       let Some(path_prefix) = params.get("path_prefix").map(String::as_str) else {
+        admin_audit(
+          peer_addr,
+          actor,
+          "cache_purge_prefix",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing path_prefix"),
+        );
         return text_response(StatusCode::BAD_REQUEST, "missing path_prefix");
       };
       snapshot
         .cache
         .purge_prefix(policy, purge_scheme, host, path_prefix)
     }
-    _ => return text_response(StatusCode::NOT_FOUND, "not found"),
+    _ => unreachable!("admin cache purge path checked before dispatch"),
   };
   snapshot.metrics.record_cache_purge();
-  info!(peer = %peer_addr, policy, purged, "admin cache purge completed");
+  admin_audit(
+    peer_addr,
+    actor,
+    if path == "/cache/purge" {
+      "cache_purge"
+    } else {
+      "cache_purge_prefix"
+    },
+    None,
+    None,
+    AdminAuditOutcome::Applied,
+    None,
+  );
+  info!(peer = %peer_addr, actor = %actor.name, policy, purged, "admin cache purge completed");
   text_response(StatusCode::OK, &format!("purged={purged}\n"))
 }
 
-fn admin_authorized(request: &hyper::Request<Incoming>, bearer_token_env: &str) -> bool {
-  let Ok(expected) = std::env::var(bearer_token_env) else {
-    return false;
+async fn admin_upstream_pools_response(
+  request: hyper::Request<Incoming>,
+  state: AppHandle,
+  snapshot: &AppSnapshot,
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  method: &::http::Method,
+  path: &str,
+) -> Option<Response<ProxyBody>> {
+  if path == "/admin/v1/upstream-pools" {
+    if !admin_actor_has_any_role(
+      actor,
+      &[
+        AdminRole::Viewer,
+        AdminRole::UpstreamOperator,
+        AdminRole::Admin,
+      ],
+    ) {
+      return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+    }
+    if *method != ::http::Method::GET {
+      return Some(text_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method not allowed",
+      ));
+    }
+    return Some(json_response(StatusCode::OK, &snapshot.pools.snapshots()));
+  }
+
+  let rest = path.strip_prefix("/admin/v1/upstream-pools/")?;
+  let segments = rest.split('/').collect::<Vec<_>>();
+  if segments.len() == 1 {
+    if !admin_actor_has_any_role(
+      actor,
+      &[
+        AdminRole::Viewer,
+        AdminRole::UpstreamOperator,
+        AdminRole::Admin,
+      ],
+    ) {
+      return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+    }
+    if *method != ::http::Method::GET {
+      return Some(text_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method not allowed",
+      ));
+    }
+    let Some(pool) = snapshot.pools.snapshot(segments[0]) else {
+      return Some(text_response(StatusCode::NOT_FOUND, "not found"));
+    };
+    return Some(json_response(StatusCode::OK, &pool));
+  }
+
+  if segments.len() == 2 && segments[1] == "servers" {
+    if !admin_actor_has_role(actor, AdminRole::UpstreamOperator) {
+      return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+    }
+    if *method != ::http::Method::POST {
+      return Some(text_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method not allowed",
+      ));
+    }
+    return Some(
+      admin_add_pool_server(request, &state, peer_addr, actor, segments[0].to_string()).await,
+    );
+  }
+
+  if segments.len() == 3 && segments[1] == "servers" {
+    if !admin_actor_has_role(actor, AdminRole::UpstreamOperator) {
+      return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+    }
+    return Some(
+      admin_mutate_pool_server(
+        request,
+        &state,
+        peer_addr,
+        actor,
+        method,
+        segments[0].to_string(),
+        segments[2].to_string(),
+      )
+      .await,
+    );
+  }
+
+  Some(text_response(StatusCode::NOT_FOUND, "not found"))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminAddPoolServerRequest {
+  id: String,
+  origin: url::Url,
+  #[serde(default = "default_admin_pool_server_weight")]
+  weight: u32,
+  #[serde(default)]
+  max_conns: usize,
+  #[serde(default)]
+  backup: bool,
+  #[serde(default)]
+  state: UpstreamPoolServerState,
+}
+
+fn default_admin_pool_server_weight() -> u32 {
+  1
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminPatchPoolServerRequest {
+  #[serde(default)]
+  state: Option<UpstreamPoolServerState>,
+  #[serde(default)]
+  weight: Option<u32>,
+  #[serde(default)]
+  max_conns: Option<usize>,
+  #[serde(default)]
+  backup: Option<bool>,
+}
+
+async fn admin_add_pool_server(
+  request: hyper::Request<Incoming>,
+  state: &AppHandle,
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  pool_name: String,
+) -> Response<ProxyBody> {
+  let body = match collect_admin_json::<AdminAddPoolServerRequest>(request).await {
+    Ok(body) => body,
+    Err(response) => {
+      admin_audit(
+        peer_addr,
+        actor,
+        "upstream_server_add",
+        Some(&pool_name),
+        None,
+        AdminAuditOutcome::Rejected,
+        Some("invalid request body"),
+      );
+      return response;
+    }
   };
-  let Some(actual) = request
+  let server_id = body.id.clone();
+  let result = upstream_control::apply_runtime_pool_update(state, |config| {
+    let pool = upstream_control::find_pool_mut(config, &pool_name)?;
+    upstream_control::ensure_unique_server_id(pool, &server_id)?;
+    let mut server = UpstreamPoolServerConfig {
+      id: Some(server_id.clone()),
+      origin: body.origin,
+      weight: body.weight,
+      max_conns: body.max_conns,
+      backup: body.backup,
+      state: body.state,
+      source: UpstreamPoolServerSource::Admin,
+    };
+    if server.weight == 0 {
+      bail!("upstream pool server weight must be greater than 0");
+    }
+    server.source = UpstreamPoolServerSource::Admin;
+    pool.servers.push(server);
+    Ok(())
+  })
+  .await;
+  match result {
+    Ok(()) => {
+      admin_audit(
+        peer_addr,
+        actor,
+        "upstream_server_add",
+        Some(&pool_name),
+        Some(&server_id),
+        AdminAuditOutcome::Applied,
+        None,
+      );
+      json_response(StatusCode::CREATED, &json!({ "ok": true }))
+    }
+    Err(error) => {
+      let message = error.to_string();
+      admin_audit(
+        peer_addr,
+        actor,
+        "upstream_server_add",
+        Some(&pool_name),
+        Some(&server_id),
+        AdminAuditOutcome::Rejected,
+        Some(&message),
+      );
+      text_response(StatusCode::BAD_REQUEST, &message)
+    }
+  }
+}
+
+async fn admin_mutate_pool_server(
+  request: hyper::Request<Incoming>,
+  state: &AppHandle,
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  method: &::http::Method,
+  pool_name: String,
+  server_id: String,
+) -> Response<ProxyBody> {
+  if *method == ::http::Method::PATCH {
+    return admin_patch_pool_server(request, state, peer_addr, actor, pool_name, server_id).await;
+  }
+  if *method == ::http::Method::DELETE {
+    return admin_delete_pool_server(state, peer_addr, actor, pool_name, server_id).await;
+  }
+  text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+}
+
+async fn admin_patch_pool_server(
+  request: hyper::Request<Incoming>,
+  state: &AppHandle,
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  pool_name: String,
+  server_id: String,
+) -> Response<ProxyBody> {
+  let body = match collect_admin_json::<AdminPatchPoolServerRequest>(request).await {
+    Ok(body) => body,
+    Err(response) => {
+      admin_audit(
+        peer_addr,
+        actor,
+        "upstream_server_patch",
+        Some(&pool_name),
+        Some(&server_id),
+        AdminAuditOutcome::Rejected,
+        Some("invalid request body"),
+      );
+      return response;
+    }
+  };
+  let result = upstream_control::apply_runtime_pool_update(state, |config| {
+    let pool = upstream_control::find_pool_mut(config, &pool_name)?;
+    let (_, server) = upstream_control::find_server_mut(pool, &server_id)?;
+    if let Some(state) = body.state {
+      server.state = state;
+    }
+    if let Some(weight) = body.weight {
+      if weight == 0 {
+        bail!("upstream pool server weight must be greater than 0");
+      }
+      server.weight = weight;
+    }
+    if let Some(max_conns) = body.max_conns {
+      server.max_conns = max_conns;
+    }
+    if let Some(backup) = body.backup {
+      server.backup = backup;
+    }
+    Ok(())
+  })
+  .await;
+  match result {
+    Ok(()) => {
+      admin_audit(
+        peer_addr,
+        actor,
+        "upstream_server_patch",
+        Some(&pool_name),
+        Some(&server_id),
+        AdminAuditOutcome::Applied,
+        None,
+      );
+      json_response(StatusCode::OK, &json!({ "ok": true }))
+    }
+    Err(error) => {
+      let message = error.to_string();
+      admin_audit(
+        peer_addr,
+        actor,
+        "upstream_server_patch",
+        Some(&pool_name),
+        Some(&server_id),
+        AdminAuditOutcome::Rejected,
+        Some(&message),
+      );
+      text_response(StatusCode::BAD_REQUEST, &message)
+    }
+  }
+}
+
+async fn admin_delete_pool_server(
+  state: &AppHandle,
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  pool_name: String,
+  server_id: String,
+) -> Response<ProxyBody> {
+  let result = upstream_control::apply_runtime_pool_update(state, |config| {
+    let pool = upstream_control::find_pool_mut(config, &pool_name)?;
+    let index = pool
+      .servers
+      .iter()
+      .enumerate()
+      .find(|(index, server)| crate::config::upstream_pool_server_id(*index, server) == server_id)
+      .map(|(index, _)| index)
+      .with_context(|| format!("unknown upstream pool server {server_id}"))?;
+    if pool.servers[index].source != UpstreamPoolServerSource::Admin {
+      bail!("only admin-managed upstream pool servers can be deleted");
+    }
+    pool.servers.remove(index);
+    Ok(())
+  })
+  .await;
+  match result {
+    Ok(()) => {
+      admin_audit(
+        peer_addr,
+        actor,
+        "upstream_server_delete",
+        Some(&pool_name),
+        Some(&server_id),
+        AdminAuditOutcome::Applied,
+        None,
+      );
+      json_response(StatusCode::OK, &json!({ "ok": true }))
+    }
+    Err(error) => {
+      let message = error.to_string();
+      admin_audit(
+        peer_addr,
+        actor,
+        "upstream_server_delete",
+        Some(&pool_name),
+        Some(&server_id),
+        AdminAuditOutcome::Rejected,
+        Some(&message),
+      );
+      text_response(StatusCode::BAD_REQUEST, &message)
+    }
+  }
+}
+
+async fn collect_admin_json<T>(request: hyper::Request<Incoming>) -> Result<T, Response<ProxyBody>>
+where
+  T: for<'de> Deserialize<'de>,
+{
+  let bytes = request
+    .into_body()
+    .collect()
+    .await
+    .map_err(|_| text_response(StatusCode::BAD_REQUEST, "failed to read request body"))?
+    .to_bytes();
+  if bytes.len() > 64 * 1024 {
+    return Err(text_response(
+      StatusCode::PAYLOAD_TOO_LARGE,
+      "request body is too large",
+    ));
+  }
+  serde_json::from_slice(&bytes)
+    .map_err(|_| text_response(StatusCode::BAD_REQUEST, "invalid JSON request body"))
+}
+
+fn admin_actor(request: &hyper::Request<Incoming>, config: &AdminConfig) -> Option<AdminActor> {
+  let actual = request
     .headers()
     .get(::http::header::AUTHORIZATION)
     .and_then(|value| value.to_str().ok())
-    .and_then(|value| value.strip_prefix("Bearer "))
-  else {
-    return false;
-  };
-  !expected.is_empty() && actual == expected
+    .and_then(|value| value.strip_prefix("Bearer "))?;
+  if std::env::var(&config.bearer_token_env)
+    .ok()
+    .is_some_and(|expected| !expected.is_empty() && expected == actual)
+  {
+    return Some(AdminActor {
+      name: "admin".to_string(),
+      roles: vec![AdminRole::Admin],
+    });
+  }
+  for token in &config.rbac.tokens {
+    if std::env::var(&token.bearer_token_env)
+      .ok()
+      .is_some_and(|expected| !expected.is_empty() && expected == actual)
+    {
+      return Some(AdminActor {
+        name: token.name.clone(),
+        roles: token.roles.clone(),
+      });
+    }
+  }
+  None
+}
+
+fn admin_actor_has_role(actor: &AdminActor, role: AdminRole) -> bool {
+  actor.roles.contains(&AdminRole::Admin) || actor.roles.contains(&role)
+}
+
+fn admin_actor_has_any_role(actor: &AdminActor, roles: &[AdminRole]) -> bool {
+  actor.roles.contains(&AdminRole::Admin) || roles.iter().any(|role| actor.roles.contains(role))
+}
+
+fn admin_audit(
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  operation: &'static str,
+  pool: Option<&str>,
+  server: Option<&str>,
+  outcome: AdminAuditOutcome,
+  error: Option<&str>,
+) {
+  info!(
+    event = "oxibelt.admin.audit",
+    peer = %peer_addr,
+    actor = %actor.name,
+    roles = ?actor.roles.iter().map(|role| role.as_str()).collect::<Vec<_>>(),
+    operation,
+    pool,
+    server,
+    outcome = outcome.as_str(),
+    error,
+    "admin operation audit"
+  );
+}
+
+fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<ProxyBody> {
+  match serde_json::to_vec(value) {
+    Ok(bytes) => {
+      let body = http_body_util::Full::new(bytes::Bytes::from(bytes))
+        .map_err(|never| -> crate::proxy::http::body::BoxError { match never {} })
+        .boxed();
+      let mut response = Response::new(body);
+      *response.status_mut() = status;
+      response.headers_mut().insert(
+        ::http::header::CONTENT_TYPE,
+        ::http::HeaderValue::from_static("application/json"),
+      );
+      response
+    }
+    Err(error) => text_response(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to encode JSON response: {error}"),
+    ),
+  }
 }
 
 async fn serve_until_shutdown(
@@ -1468,6 +1995,38 @@ mod tests {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
   const ADMIN_TOKEN_ENV: &str = "PATH";
+
+  #[test]
+  fn admin_rbac_role_checks_match_endpoint_scopes() {
+    let viewer = AdminActor {
+      name: "viewer".to_string(),
+      roles: vec![AdminRole::Viewer],
+    };
+    let upstream_operator = AdminActor {
+      name: "upstream".to_string(),
+      roles: vec![AdminRole::UpstreamOperator],
+    };
+    let admin = AdminActor {
+      name: "admin".to_string(),
+      roles: vec![AdminRole::Admin],
+    };
+
+    assert!(admin_actor_has_any_role(
+      &viewer,
+      &[
+        AdminRole::Viewer,
+        AdminRole::UpstreamOperator,
+        AdminRole::Admin
+      ]
+    ));
+    assert!(!admin_actor_has_role(&viewer, AdminRole::UpstreamOperator));
+    assert!(admin_actor_has_role(
+      &upstream_operator,
+      AdminRole::UpstreamOperator
+    ));
+    assert!(admin_actor_has_role(&admin, AdminRole::CacheOperator));
+    assert!(admin_actor_has_role(&admin, AdminRole::UpstreamOperator));
+  }
 
   #[tokio::test]
   async fn admin_listener_disabled_config_does_not_serve_stale_requests() {

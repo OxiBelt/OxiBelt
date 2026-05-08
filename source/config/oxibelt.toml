@@ -182,6 +182,11 @@ transport = "auto" # auto | tls | plaintext_allowlist | plaintext
 allow_insecure_plaintext = false
 plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
 
+#[[admin.rbac.tokens]]
+# name = "upstream-ops"
+# bearer_token_env = "OXIBELT_UPSTREAM_TOKEN"
+# roles = ["viewer", "upstream_operator"] # viewer | cache_operator | upstream_operator | admin
+
 [admin.tls]
 enabled = false
 min_version = "tls1.3"
@@ -296,6 +301,32 @@ proxy_protocol_egress = "off"
 
 [upstreams.tls.ech]
 mode = "disabled"
+
+#[[upstream_pools]]
+# name = "app-pool"
+# algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash
+#
+#[[upstream_pools.servers]]
+# id = "app-1"
+# origin = "https://app-1.internal.example"
+# weight = 1
+# max_conns = 1024
+# backup = false
+# state = "ready" # ready | drain | down | maintenance
+#
+#[[upstream_pools.discovery]]
+# provider = "file"
+# file = "discovery/app-pool.json"
+# refresh_interval_ms = 5000
+#
+#[[upstream_pools.discovery]]
+# provider = "dns"
+# name = "app.internal.example"
+# record_type = "a_aaaa" # a | aaaa | a_aaaa | srv
+# scheme = "http"
+# port = 8080
+# refresh_interval_ms = 30000
+# min_ttl_ms = 1000
 
 [[routes]]
 name = "app-root"

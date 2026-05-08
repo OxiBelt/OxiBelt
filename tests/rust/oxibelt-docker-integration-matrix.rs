@@ -1142,6 +1142,103 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "upstream-discovery",
+            "file-provider",
+            "file discovery adds and removes upstream pool servers without full reload",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second third
+  sleep 1
+  first="$(client_request "example.test" "/app/file-discovery-a" 200)"
+  second="$(client_request "example.test" "/app/file-discovery-b" 200)"
+  assert_body_jq "${first}" '.upstream == "http-upstream"'
+  assert_body_jq "${second}" '.upstream == "alt-upstream"'
+
+  cat >"${case_dir}/config/discovery/app-pool.json" <<'JSON'
+{
+  "servers": []
+}
+JSON
+  docker cp "${case_dir}/config/discovery/app-pool.json" "${proxy_container}:/etc/oxibelt/config/discovery/app-pool.json"
+  sleep 1
+
+  third="$(client_request "example.test" "/app/file-discovery-after-remove" 200)"
+  assert_body_jq "${third}" '.upstream == "http-upstream"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-discovery",
+            "admin-runtime-control",
+            "admin API can drain/down pool servers and update runtime weights",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response first second third
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/primary" 200 "PATCH" '{"state":"down"}' "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${response}" '.body | fromjson | .ok == true'
+
+  first="$(client_request "example.test" "/app/admin-down-a" 200)"
+  second="$(client_request "example.test" "/app/admin-down-b" 200)"
+  assert_body_jq "${first}" '.upstream == "alt-upstream"'
+  assert_body_jq "${second}" '.upstream == "alt-upstream"'
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/primary" 200 "PATCH" '{"state":"ready","weight":2}' "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${response}" '.body | fromjson | .ok == true'
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/alt" 200 "PATCH" '{"weight":1}' "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${response}" '.body | fromjson | .ok == true'
+
+  first="$(client_request "example.test" "/app/admin-weight-a" 200)"
+  second="$(client_request "example.test" "/app/admin-weight-b" 200)"
+  third="$(client_request "example.test" "/app/admin-weight-c" 200)"
+  assert_body_jq "${first}" '.upstream == "http-upstream"'
+  assert_body_jq "${second}" '.upstream == "http-upstream"'
+  assert_body_jq "${third}" '.upstream == "alt-upstream"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-discovery",
+            "admin-rbac",
+            "admin RBAC allows pool reads while protecting mutations",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools" 200 "GET" "" "Authorization: Bearer matrix-viewer-token")"
+  assert_response_jq "${response}" '.body | fromjson | length == 1'
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/primary" 403 "PATCH" '{"state":"down"}' "Authorization: Bearer matrix-viewer-token")"
+  assert_response_jq "${response}" '.body == "forbidden"'
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/primary" 200 "PATCH" '{"state":"down"}' "Authorization: Bearer matrix-upstream-token")"
+  assert_response_jq "${response}" '.body | fromjson | .ok == true'
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools" 401 "GET" "" "Authorization: Bearer wrong-token")"
+  assert_response_jq "${response}" '.body == "unauthorized"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "cache",
             "tmpfs-route-cache",
             "tmpfs cache serves a route response after the upstream disappears",
