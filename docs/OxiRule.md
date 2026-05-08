@@ -234,7 +234,7 @@ success_tag = "PersonProof"
 status = 403
 ```
 
-`rate_limit` is request-phase only. Supported keys are `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, and `access_token_path`; `client-ip` style aliases are accepted. Access-token limits read `Authorization: Bearer <token>` first and then optional `token_header`. Token values are hashed before storage, and requests without a token fall back to the client IP bucket. Monitor-mode rules count matches without consuming rate-limit tokens.
+`rate_limit` is request-phase only. Supported keys are `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, and `access_token_path`; `client-ip` style aliases are accepted. Access-token limits read `Authorization: Bearer <token>` first and then optional `token_header`. Token values are hashed before storage, and requests without a token fall back to the client IP bucket. When shared state maps rate limits to a backend, WAF `rate_limit` actions use the same Redis-compatible or PostgreSQL token-bucket storage as route rate limits. Monitor-mode rules count matches without consuming rate-limit tokens.
 
 Response-phase terminal actions:
 

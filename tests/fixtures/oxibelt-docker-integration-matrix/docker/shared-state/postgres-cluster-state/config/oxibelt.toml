@@ -98,9 +98,33 @@ cookie = "__matrix_person_proof"
 token_bindings = ["route"]
 single_use = true
 
+[[waf.rules]]
+name = "shared-waf-token-rate"
+phase = "request"
+priority = 20
+when = "Request.Http.Path.endsWith('/waf-token-rate')"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "shared-waf-token-route"
+key = "access_token_route"
+token_header = "X-Api-Token"
+rate = "1r/h"
+burst = 1
+status = 429
+body = "postgres waf rate limit exceeded"
+
 [[rate_limits]]
 name = "shared-rate"
 key = "client_ip"
+rate = "1r/h"
+burst = 1
+status = 429
+
+[[rate_limits]]
+name = "shared-token-route"
+key = "access_token_route"
+routes = ["app-route"]
 rate = "1r/h"
 burst = 1
 status = 429
