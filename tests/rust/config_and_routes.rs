@@ -6,9 +6,10 @@ use std::path::Path;
 use base64::Engine;
 use oxibelt::config::{
     AdminRole, AdminTransportMode, CacheStore, CompressionConfig, Config,
-    ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, ForwardedHeaderMode,
-    HotReloadMode, OcspMode, ProxyProtocolEgressMode, QuicZeroRttMode, RateLimitKey,
-    RuntimeOverrides, SharedStateBackendKind, UpstreamDiscoveryProvider, UpstreamEchMode,
+    ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, EarlyHintsMode,
+    ForwardedHeaderMode, HotReloadMode, OcspMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
+    QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
+    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -51,6 +52,355 @@ fn protocol_operations_defaults_are_disabled() {
         ProxyProtocolEgressMode::Off
     );
     assert!(config.stream_listeners.is_empty());
+}
+
+#[test]
+fn proxy_retry_defaults_and_custom_values_are_parsed() {
+    let temp_dir = common::TempDir::new("proxy-retry");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "proxy-retry");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let default_config: Config = toml::from_str(&base).expect("config should parse");
+    default_config.validate().expect("config should validate");
+    assert!(!default_config.proxy.retry.enabled);
+    assert_eq!(default_config.proxy.retry.tries, 2);
+    assert_eq!(default_config.proxy.retry.timeout_ms, 5_000);
+    assert_eq!(
+        default_config.proxy.retry.on,
+        vec![
+            RetryCondition::ConnectError,
+            RetryCondition::ReadTimeout,
+            RetryCondition::Status502,
+            RetryCondition::Status503,
+            RetryCondition::Status504,
+        ]
+    );
+    assert!(!default_config.proxy.retry.retry_non_idempotent);
+
+    let raw = format!(
+        r#"
+{base}
+
+[proxy.retry]
+enabled = true
+tries = 4
+timeout_ms = 750
+on = ["connect_error", "read_timeout", "502", "503", "504"]
+retry_non_idempotent = true
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert!(config.proxy.retry.enabled);
+    assert_eq!(config.proxy.retry.tries, 4);
+    assert_eq!(config.proxy.retry.timeout_ms, 750);
+    assert_eq!(
+        config.proxy.retry.on,
+        vec![
+            RetryCondition::ConnectError,
+            RetryCondition::ReadTimeout,
+            RetryCondition::Status502,
+            RetryCondition::Status503,
+            RetryCondition::Status504,
+        ]
+    );
+    assert!(config.proxy.retry.retry_non_idempotent);
+}
+
+#[test]
+fn proxy_retry_rejects_zero_numeric_values() {
+    let temp_dir = common::TempDir::new("proxy-retry-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-retry-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (setting, expected) in [
+        ("tries = 0", "proxy.retry.tries must be greater than 0"),
+        (
+            "timeout_ms = 0",
+            "proxy.retry.timeout_ms must be greater than 0",
+        ),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[proxy.retry]
+{setting}
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn proxy_http_modes_parse_and_reject_reserved_early_hints_pass() {
+    let temp_dir = common::TempDir::new("proxy-http");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "proxy-http");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let raw = format!(
+        r#"
+{base}
+
+[proxy.http]
+trailers = "drop"
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.proxy.http.early_hints, EarlyHintsMode::Drop);
+    assert_eq!(config.proxy.http.trailers, TrailerMode::Drop);
+
+    let raw = format!(
+        r#"
+{base}
+
+[proxy.http]
+early_hints = "pass"
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("reserved early hints pass mode should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("proxy.http.early_hints = \"pass\" is reserved"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn security_headers_parse_hsts_and_optional_headers() {
+    let temp_dir = common::TempDir::new("security-headers");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "security-headers");
+    let raw = format!(
+        r#"
+{}
+
+[security.headers]
+hsts = true
+hsts_max_age_seconds = 31536000
+hsts_include_subdomains = false
+hsts_preload = true
+x_content_type_options = "nosniff"
+referrer_policy = "strict-origin-when-cross-origin"
+permissions_policy = "geolocation=()"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert!(config.security.headers.hsts);
+    assert_eq!(config.security.headers.hsts_max_age_seconds, 31_536_000);
+    assert!(!config.security.headers.hsts_include_subdomains);
+    assert!(config.security.headers.hsts_preload);
+    assert_eq!(
+        config.security.headers.x_content_type_options.as_deref(),
+        Some("nosniff")
+    );
+    assert_eq!(
+        config.security.headers.referrer_policy.as_deref(),
+        Some("strict-origin-when-cross-origin")
+    );
+    assert_eq!(
+        config.security.headers.permissions_policy.as_deref(),
+        Some("geolocation=()")
+    );
+}
+
+#[test]
+fn security_headers_reject_invalid_header_values() {
+    let temp_dir = common::TempDir::new("security-headers-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "security-headers-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (setting, expected_field) in [
+        (
+            r#"x_content_type_options = "nosniff\nbad""#,
+            "security.headers.x_content_type_options",
+        ),
+        (
+            r#"referrer_policy = "strict-origin\rbad""#,
+            "security.headers.referrer_policy",
+        ),
+        (
+            r#"permissions_policy = "geolocation=()\nbad""#,
+            "security.headers.permissions_policy",
+        ),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[security.headers]
+{setting}
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid header value should fail");
+        let error = error.to_string();
+        assert!(
+            error.contains(expected_field) && error.contains("not a valid header value"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn tls_versions_and_session_ticket_rotation_are_validated() {
+    let temp_dir = common::TempDir::new("tls-validation");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "tls-validation");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let raw = base.replace(
+        "[tls.ocsp]",
+        r#"min_version = "tls1.2"
+max_version = "tls1.3"
+session_tickets = false
+session_ticket_rotation_seconds = 120
+
+[tls.ocsp]"#,
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.tls.min_version, TlsVersion::Tls12);
+    assert_eq!(config.tls.max_version, TlsVersion::Tls13);
+    assert!(!config.tls.session_tickets);
+    assert_eq!(config.tls.session_ticket_rotation_seconds, 120);
+
+    let raw = base.replace(
+        "[tls.ocsp]",
+        r#"min_version = "tls1.3"
+max_version = "tls1.2"
+
+[tls.ocsp]"#,
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid TLS version range should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("tls.min_version must be less than or equal to tls.max_version"),
+        "unexpected error: {error}"
+    );
+
+    let raw = base.replace(
+        "[tls.ocsp]",
+        r#"session_ticket_rotation_seconds = 0
+
+[tls.ocsp]"#,
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("zero ticket rotation should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("tls.session_ticket_rotation_seconds must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn admin_tls_validation_rejects_invalid_versions_and_missing_client_auth_roots() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+    }
+    let temp_dir = common::TempDir::new("admin-tls-validation");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "admin-tls-validation");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let raw = format!(
+        r#"
+{base}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[admin.tls]
+min_version = "tls1.3"
+max_version = "tls1.2"
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid admin TLS version range should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.tls.min_version must be less than or equal to admin.tls.max_version"),
+        "unexpected error: {error}"
+    );
+
+    let raw = format!(
+        r#"
+{base}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[admin.tls.client_auth]
+mode = "require"
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("admin TLS client auth without roots should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.tls.client_auth.ca_certs is required"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn proxy_protocol_listener_versions_parse() {
+    let temp_dir = common::TempDir::new("proxy-protocol-versions");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-protocol-versions");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (raw_version, expected) in [
+        ("v1", ProxyProtocolVersion::V1),
+        ("v2", ProxyProtocolVersion::V2),
+        ("any", ProxyProtocolVersion::Any),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[listeners.proxy_protocol]
+enabled = true
+version = "{raw_version}"
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        config.validate().expect("config should validate");
+        assert_eq!(config.listeners.proxy_protocol.version, expected);
+    }
 }
 
 #[test]

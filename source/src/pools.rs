@@ -561,6 +561,108 @@ mod tests {
   }
 
   #[test]
+  fn random_selection_excludes_busy_capacity_limited_servers() {
+    let mut pool = test_pool(LoadBalancingAlgorithm::Random);
+    pool.servers[0].max_conns = 1;
+    pool.servers[1].max_conns = 1;
+    let state = PoolState::new(&[pool], None);
+
+    let first = state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .unwrap();
+    let second = state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .unwrap();
+    assert_ne!(first.upstream_name, second.upstream_name);
+
+    let error = match state.select("app-pool", "203.0.113.10".parse().unwrap(), "/", None) {
+      Ok(selection) => panic!(
+        "all capacity-limited servers should be busy, got {}",
+        selection.upstream_name
+      ),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("no available servers"));
+  }
+
+  #[test]
+  fn hash_selection_is_stable_for_same_hash_key() {
+    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::Hash)], None);
+
+    let first = state
+      .select(
+        "app-pool",
+        "203.0.113.10".parse().unwrap(),
+        "stable-key",
+        None,
+      )
+      .unwrap();
+    let expected = first.upstream_name.clone();
+    drop(first);
+
+    for _ in 0..5 {
+      let selection = state
+        .select(
+          "app-pool",
+          "203.0.113.10".parse().unwrap(),
+          "stable-key",
+          None,
+        )
+        .unwrap();
+      assert_eq!(selection.upstream_name, expected);
+    }
+  }
+
+  #[test]
+  fn ip_hash_selection_is_stable_for_same_client_ip() {
+    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::IpHash)], None);
+
+    let first = state
+      .select(
+        "app-pool",
+        "203.0.113.44".parse().unwrap(),
+        "first-request-path",
+        None,
+      )
+      .unwrap();
+    let expected = first.upstream_name.clone();
+    drop(first);
+
+    for hash_key in ["other-path", "unrelated-key", "/"] {
+      let selection = state
+        .select("app-pool", "203.0.113.44".parse().unwrap(), hash_key, None)
+        .unwrap();
+      assert_eq!(selection.upstream_name, expected);
+    }
+  }
+
+  #[test]
+  fn policy_override_strings_take_precedence_over_pool_algorithm() {
+    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::StickyCookie)], None);
+
+    let error = match state.select("app-pool", "203.0.113.10".parse().unwrap(), "/", None) {
+      Ok(selection) => panic!(
+        "sticky_cookie pool should not select without an override, got {}",
+        selection.upstream_name
+      ),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("no available servers"));
+
+    for policy in ["least_connections", "random", "hash", "ip_hash"] {
+      let selection = state
+        .select(
+          "app-pool",
+          "203.0.113.10".parse().unwrap(),
+          "override-key",
+          Some(policy),
+        )
+        .unwrap();
+      assert!(selection.upstream_name.starts_with("pool:app-pool:"));
+    }
+  }
+
+  #[test]
   fn shared_state_coordinates_pool_active_counts_and_health() {
     let shared = SharedState::test_memory("pool-test");
     let mut pool = test_pool(LoadBalancingAlgorithm::LeastConn);
