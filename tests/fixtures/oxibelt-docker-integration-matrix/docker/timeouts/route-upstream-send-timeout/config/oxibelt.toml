@@ -1,0 +1,61 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = false
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "h1-stall-upstream"
+origin = "http://mock-stall-h1:18083"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 5000
+first_byte_timeout_ms = 4000
+read_timeout_ms = 5000
+send_timeout_ms = 100
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "send-timeout"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "h1-stall-upstream"
+
+[routes.timeouts]
+client_body_timeout_ms = 5000
+upstream_first_byte_timeout_ms = 4000
+upstream_send_timeout_ms = 100

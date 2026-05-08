@@ -6,7 +6,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
 use bytes::{Buf, Bytes, BytesMut};
@@ -16,12 +16,14 @@ use h3_quinn::quinn::{
 };
 use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::{Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -60,6 +62,12 @@ struct H2cUpstreamArgs {
     name: String,
 }
 
+struct H1StallUpstreamArgs {
+    listen: SocketAddr,
+    name: String,
+    read_delay_ms: u64,
+}
+
 struct H3UpstreamArgs {
     listen: SocketAddr,
     cert: String,
@@ -76,9 +84,18 @@ struct DownstreamArgs {
     path: String,
     method: Method,
     body: String,
+    body_bytes: Option<usize>,
+    body_chunk_size: usize,
+    omit_content_length: bool,
     headers: HeaderMap,
     ca_cert: String,
     expect_status: Option<u16>,
+}
+
+impl DownstreamArgs {
+    fn body_len(&self) -> usize {
+        self.body_bytes.unwrap_or(self.body.len())
+    }
 }
 
 #[tokio::main]
@@ -92,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
     match command.as_str() {
         "h2-upstream" => serve_h2_upstream(parse_h2_upstream_args(args)?).await,
         "h2c-upstream" => serve_h2c_upstream(parse_h2c_upstream_args(args)?).await,
+        "h1-stall-upstream" => serve_h1_stall_upstream(parse_h1_stall_upstream_args(args)?).await,
         "h3-upstream" => serve_h3_upstream(parse_h3_upstream_args(args)?).await,
         "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
         _ => {
@@ -103,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-status <status>]"
+    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]"
   );
 }
 
@@ -159,6 +177,34 @@ fn parse_h2c_upstream_args(
     })
 }
 
+fn parse_h1_stall_upstream_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<H1StallUpstreamArgs> {
+    let mut listen = None;
+    let mut name = None;
+    let mut read_delay_ms = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--listen" => listen = Some(value.parse().context("invalid --listen value")?),
+            "--name" => name = Some(value),
+            "--read-delay-ms" => {
+                read_delay_ms = Some(value.parse().context("invalid --read-delay-ms value")?);
+            }
+            _ => bail!("unknown h1-stall-upstream flag: {flag}"),
+        }
+    }
+
+    Ok(H1StallUpstreamArgs {
+        listen: listen.ok_or_else(|| anyhow!("--listen is required"))?,
+        name: name.ok_or_else(|| anyhow!("--name is required"))?,
+        read_delay_ms: read_delay_ms.ok_or_else(|| anyhow!("--read-delay-ms is required"))?,
+    })
+}
+
 fn parse_h3_upstream_args(args: impl Iterator<Item = String>) -> anyhow::Result<H3UpstreamArgs> {
     let parsed = parse_h2_upstream_args(args)?;
     Ok(H3UpstreamArgs {
@@ -178,11 +224,18 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     let mut path = None;
     let mut method = Method::GET;
     let mut body = String::new();
+    let mut body_bytes = None;
+    let mut body_chunk_size = 16 * 1024;
+    let mut omit_content_length = false;
     let mut headers = HeaderMap::new();
     let mut ca_cert = None;
     let mut expect_status = None;
 
     while let Some(flag) = args.next() {
+        if flag.as_str() == "--omit-content-length" {
+            omit_content_length = true;
+            continue;
+        }
         let value = args
             .next()
             .ok_or_else(|| anyhow!("missing value for {flag}"))?;
@@ -195,6 +248,16 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
             "--path" => path = Some(validate_origin_form_path(&value)?),
             "--method" => method = value.parse().context("invalid --method value")?,
             "--body" => body = value,
+            "--body-bytes" => {
+                let bytes = value.parse().context("invalid --body-bytes value")?;
+                body_bytes = Some(bytes);
+            }
+            "--body-chunk-size" => {
+                body_chunk_size = value.parse().context("invalid --body-chunk-size value")?;
+                if body_chunk_size == 0 {
+                    bail!("--body-chunk-size must be greater than zero");
+                }
+            }
             "--header" => {
                 let (name, value) = value
                     .split_once(':')
@@ -222,6 +285,9 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         path: path.ok_or_else(|| anyhow!("--path is required"))?,
         method,
         body,
+        body_bytes,
+        body_chunk_size,
+        omit_content_length,
         headers,
         ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
         expect_status,
@@ -346,6 +412,136 @@ async fn handle_h2c_upstream_connection(
         .await
         .context("failed to serve upstream cleartext HTTP/2 connection")?;
     Ok(())
+}
+
+async fn serve_h1_stall_upstream(args: H1StallUpstreamArgs) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("failed to bind h1 stall upstream to {}", args.listen))?;
+    let upstream_name = Arc::<str>::from(args.name);
+    let read_delay = Duration::from_millis(args.read_delay_ms);
+
+    loop {
+        let (stream, peer_addr) = listener.accept().await.context("failed to accept TCP")?;
+        let upstream_name = upstream_name.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                handle_h1_stall_upstream_connection(stream, upstream_name, read_delay).await
+            {
+                eprintln!("h1 stall upstream connection from {peer_addr} failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn handle_h1_stall_upstream_connection(
+    mut stream: TcpStream,
+    upstream_name: Arc<str>,
+    read_delay: Duration,
+) -> anyhow::Result<()> {
+    let request_head = read_http1_request_head(&mut stream).await?;
+    tokio::time::sleep(read_delay).await;
+
+    let (body_bytes, clean_chunk_end) = read_chunked_body_observation(&mut stream).await?;
+    let status = if clean_chunk_end {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    let payload = serde_json::json!({
+      "upstream": upstream_name.as_ref(),
+      "request_head": request_head,
+      "body_bytes": body_bytes,
+      "clean_chunk_end": clean_chunk_end,
+    });
+    write_http1_json_response(
+        &mut stream,
+        status,
+        payload.to_string(),
+        Some(upstream_name.as_ref()),
+    )
+    .await
+}
+
+async fn read_http1_request_head(stream: &mut TcpStream) -> anyhow::Result<String> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while head.len() < 64 * 1024 {
+        let read = stream
+            .read(&mut byte)
+            .await
+            .context("failed to read request head")?;
+        if read == 0 {
+            bail!("connection closed before HTTP/1 request head completed");
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            return Ok(String::from_utf8_lossy(&head).into_owned());
+        }
+    }
+    bail!("HTTP/1 request head exceeded 64KiB")
+}
+
+async fn read_chunked_body_observation(stream: &mut TcpStream) -> anyhow::Result<(usize, bool)> {
+    let started = tokio::time::Instant::now();
+    let mut body_bytes = 0usize;
+    let mut tail = Vec::new();
+
+    loop {
+        if started.elapsed() > Duration::from_secs(10) {
+            return Ok((body_bytes, false));
+        }
+
+        let mut chunk = [0u8; 8192];
+        let read =
+            match tokio::time::timeout(Duration::from_millis(250), stream.read(&mut chunk)).await {
+                Ok(Ok(read)) => read,
+                Ok(Err(error)) => return Err(error).context("failed to read request body"),
+                Err(_) => continue,
+            };
+        if read == 0 {
+            return Ok((body_bytes, false));
+        }
+
+        body_bytes += read;
+        tail.extend_from_slice(&chunk[..read]);
+        if tail.len() > 64 {
+            tail.drain(..tail.len() - 64);
+        }
+        if tail
+            .windows(b"\r\n0\r\n\r\n".len())
+            .any(|window| window == b"\r\n0\r\n\r\n")
+            || tail
+                .windows(b"0\r\n\r\n".len())
+                .any(|window| window == b"0\r\n\r\n")
+        {
+            return Ok((body_bytes, true));
+        }
+    }
+}
+
+async fn write_http1_json_response(
+    stream: &mut TcpStream,
+    status: StatusCode,
+    body: String,
+    upstream_marker: Option<&str>,
+) -> anyhow::Result<()> {
+    let reason = status.canonical_reason().unwrap_or("Unknown");
+    let marker = upstream_marker
+        .map(|value| format!("x-upstream-marker: {value}\r\n"))
+        .unwrap_or_default();
+    let response = format!(
+        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{}connection: close\r\n\r\n{}",
+        status.as_u16(),
+        reason,
+        body.len(),
+        marker,
+        body,
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .context("failed to write HTTP/1 response")
 }
 
 async fn serve_h3_upstream(args: H3UpstreamArgs) -> anyhow::Result<()> {
@@ -522,6 +718,9 @@ async fn echo_upstream_request(
         return grpc_health_response();
     }
     let status = status_from_path(parts.uri.path()).unwrap_or(StatusCode::OK);
+    if let Some(delay_ms) = query_u64(&parts.uri, "request_body_delay_ms") {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
     let body_bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(error) => {
@@ -547,6 +746,17 @@ async fn echo_upstream_request(
       "body": body_text,
     });
     json_response(status, payload.to_string(), Some(upstream_name.as_ref()))
+}
+
+fn query_u64(uri: &Uri, key: &str) -> Option<u64> {
+    uri.query()?.split('&').find_map(|part| {
+        let (name, value) = part.split_once('=').unwrap_or((part, ""));
+        if name == key {
+            value.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn grpc_health_response() -> Response<Full<Bytes>> {
@@ -627,11 +837,7 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
         }
     });
 
-    let request = downstream_request(
-        args,
-        Version::HTTP_2,
-        Full::new(Bytes::from(args.body.clone())),
-    )?;
+    let request = downstream_request(args, Version::HTTP_2, downstream_h2_body(args))?;
     let response = sender
         .send_request(request)
         .await
@@ -683,7 +889,17 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
         .send_request(request)
         .await
         .context("failed to send downstream HTTP/3 request")?;
-    if !args.body.is_empty() {
+    if let Some(total) = args.body_bytes {
+        let mut sent = 0usize;
+        while sent < total {
+            let len = (total - sent).min(args.body_chunk_size);
+            stream
+                .send_data(Bytes::from(vec![b'x'; len]))
+                .await
+                .context("failed to send downstream HTTP/3 request body")?;
+            sent += len;
+        }
+    } else if !args.body.is_empty() {
         stream
             .send_data(Bytes::from(args.body.clone()))
             .await
@@ -720,6 +936,26 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     ))
 }
 
+fn downstream_h2_body(args: &DownstreamArgs) -> BoxBody<Bytes, Infallible> {
+    if let Some(total) = args.body_bytes {
+        let chunk_size = args.body_chunk_size;
+        return StreamBody::new(futures_util::stream::unfold(
+            0usize,
+            move |sent| async move {
+                if sent >= total {
+                    None
+                } else {
+                    let len = (total - sent).min(chunk_size);
+                    Some((Ok(Frame::data(Bytes::from(vec![b'x'; len]))), sent + len))
+                }
+            },
+        ))
+        .boxed();
+    }
+
+    Full::new(Bytes::from(args.body.clone())).boxed()
+}
+
 fn downstream_client_config(path: &Path, alpn: &[u8]) -> anyhow::Result<ClientConfig> {
     let mut config = ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
@@ -743,8 +979,10 @@ fn downstream_request<B>(
     let mut request = Request::builder()
         .method(args.method.clone())
         .uri(uri)
-        .version(version)
-        .header(CONTENT_LENGTH, args.body.len().to_string());
+        .version(version);
+    if !args.omit_content_length {
+        request = request.header(CONTENT_LENGTH, args.body_len().to_string());
+    }
     for (name, value) in &args.headers {
         request = request.header(name, value);
     }

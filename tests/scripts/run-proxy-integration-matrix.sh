@@ -34,6 +34,7 @@ https_container="oxibelt-https-${run_id}"
 alt_container="oxibelt-alt-${run_id}"
 h2_container="oxibelt-h2-${run_id}"
 h2c_container="oxibelt-h2c-${run_id}"
+h1_stall_container="oxibelt-h1-stall-${run_id}"
 h3_container="oxibelt-h3-${run_id}"
 postgres_container="oxibelt-postgres-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
@@ -71,6 +72,7 @@ collect_diagnostics() {
   docker logs "${alt_container}" >"${logs_dir}/mock-alt.log" 2>&1 || true
   docker logs "${h2_container}" >"${logs_dir}/mock-h2.log" 2>&1 || true
   docker logs "${h2c_container}" >"${logs_dir}/mock-h2c.log" 2>&1 || true
+  docker logs "${h1_stall_container}" >"${logs_dir}/mock-h1-stall.log" 2>&1 || true
   docker logs "${h3_container}" >"${logs_dir}/mock-h3.log" 2>&1 || true
   docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
 
@@ -523,6 +525,55 @@ protocol_probe_client_with_headers() {
   fail_with_diagnostics "protocol probe did not reach expected status ${expect_status}"
 }
 
+protocol_probe_generated_body_request() {
+  local protocol="$1"
+  local authority="$2"
+  local path="$3"
+  local method="$4"
+  local body_bytes="$5"
+  local body_chunk_size="$6"
+  shift 6
+  local extra_args=("$@")
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-protocol-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      downstream \
+      --protocol "${protocol}" \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --method "${method}" \
+      --body-bytes "${body_bytes}" \
+      --body-chunk-size "${body_chunk_size}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      "${extra_args[@]}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "protocol probe generated-body client failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "protocol probe generated-body request failed"
+}
+
 postgres_query() {
   local sql="$1"
   docker exec \
@@ -744,7 +795,7 @@ if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
     "${repo_root}/tests/docker/pq_probe" >/dev/null
 fi
 
-if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then
+if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then
   docker build \
     -t "${protocol_probe_image}" \
     -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
@@ -833,6 +884,19 @@ if [[ "${CASE_NEED_H2C_UPSTREAM}" == "1" ]]; then
     h2c-upstream \
     --listen 0.0.0.0:18082 \
     --name h2c-upstream >/dev/null
+fi
+
+if [[ "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" ]]; then
+  docker run -d \
+    --name "${h1_stall_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-stall-h1 \
+    "${protocol_probe_image}" \
+    h1-stall-upstream \
+    --listen 0.0.0.0:18083 \
+    --name h1-stall-upstream \
+    --read-delay-ms 1500 >/dev/null
 fi
 
 if [[ "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then

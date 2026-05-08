@@ -33,6 +33,7 @@ struct Needs {
     alt_upstream: bool,
     h2_upstream: bool,
     h2c_upstream: bool,
+    h1_stall_upstream: bool,
     h3_upstream: bool,
     protocol_probe: bool,
     pq_probe: bool,
@@ -187,6 +188,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     manifest.push_str(&format!(
         "CASE_NEED_H2C_UPSTREAM={}\n",
         bool_env(case.needs.h2c_upstream)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_H1_STALL_UPSTREAM={}\n",
+        bool_env(case.needs.h1_stall_upstream)
     ));
     manifest.push_str(&format!(
         "CASE_NEED_H3_UPSTREAM={}\n",
@@ -731,6 +736,30 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/stalled-body?body_delay_ms=1200" 504)"
   assert_response_jq "${response}" '.body == "upstream response body timed out"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "timeouts",
+            "route-upstream-send-timeout",
+            "route-level upstream send timeout aborts a backpressured request body",
+            ExpectStart::Success,
+            Needs {
+                h1_stall_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_generated_body_request "h2" "example.test" "/upload" "POST" 67108864 16384 --omit-content-length)"
+  if jq -e '.status == 200' <<<"${response}" >/dev/null; then
+    echo "${response}" >&2
+    fail_with_diagnostics "upstream send timeout cleanly truncated the request body"
+  fi
+  assert_response_jq "${response}" '(.status == 400 or .status == 502 or .status == 504)
+    and (.body | contains("upstream request failed") or contains("failed to read upstream request body"))'
 }
 "#,
             None,
