@@ -117,6 +117,26 @@ assert_body_jq() {
   fi
 }
 
+response_status_matches() {
+  local response="$1"
+  local expected_statuses="$2"
+  local actual_status=""
+  actual_status="$(jq -r '.status // empty' <<<"${response}" 2>/dev/null || true)"
+  if [[ -z "${actual_status}" ]]; then
+    return 1
+  fi
+
+  local expected=""
+  local -a expected_status_values=()
+  IFS=',' read -ra expected_status_values <<<"${expected_statuses}"
+  for expected in "${expected_status_values[@]}"; do
+    if [[ "${actual_status}" == "${expected}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 client_request() {
   client_request_on_port 8443 "$1" "$2" "$3" "GET" ""
 }
@@ -150,6 +170,10 @@ client_request_with_headers_to_target() {
   for header in "$@"; do
     header_args+=(--header "${header}")
   done
+  local expect_args=()
+  if [[ "${expect_status}" != *,* ]]; then
+    expect_args+=(--expect-status "${expect_status}")
+  fi
 
   local output=""
   local status=0
@@ -172,17 +196,30 @@ client_request_with_headers_to_target() {
       --body "${body}" \
       --ca-file /tmp/proxy-ca.pem \
       --dump-response-json \
-      --expect-status "${expect_status}" \
+      "${expect_args[@]}" \
       "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
     if output="$(docker start -a "${client_container}" 2>&1)"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
-      printf '%s' "${output}"
-      return 0
+      if [[ "${expect_status}" == *,* ]]; then
+        if response_status_matches "${output}" "${expect_status}"; then
+          printf '%s' "${output}"
+          return 0
+        fi
+      else
+        printf '%s' "${output}"
+        return 0
+      fi
+      sleep 1
+      continue
     fi
     status=$?
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    if [[ "${expect_status}" == *,* ]] && response_status_matches "${output}" "${expect_status}"; then
+      printf '%s' "${output}"
+      return 0
+    fi
     sleep 1
   done
 

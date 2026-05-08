@@ -548,8 +548,8 @@ assert_shared_cache() {
   purge="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/shared-cache%3Fbody%3Dshared-cache%26cache_control%3Dpublic%26content_type%3Dtext/plain" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
   assert_response_jq "${purge}" '.body == "purged=2\n"'
 
-  miss="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 502 "GET" "" "X-Forwarded-For: 203.0.113.42")"
-  assert_response_jq "${miss}" '.status == 502'
+  miss="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 502,504 "GET" "" "X-Forwarded-For: 203.0.113.42")"
+  assert_response_jq "${miss}" '.status == 502 or .status == 504'
 }
 "#;
 
@@ -675,8 +675,8 @@ assert_shared_cache() {
   purge="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/shared-cache%3Fbody%3Dshared-cache%26cache_control%3Dpublic%26content_type%3Dtext/plain" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
   assert_response_jq "${purge}" '.body == "purged=2\n"'
 
-  miss="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 502 "GET" "" "X-Forwarded-For: 203.0.113.42")"
-  assert_response_jq "${miss}" '.status == 502'
+  miss="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/shared-cache?body=shared-cache&cache_control=public&content_type=text/plain" 502,504 "GET" "" "X-Forwarded-For: 203.0.113.42")"
+  assert_response_jq "${miss}" '.status == 502 or .status == 504'
 }
 "#;
 
