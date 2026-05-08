@@ -98,6 +98,120 @@ body = "blocked"
 }
 
 #[test]
+fn route_level_rate_limit_action_blocks_second_matching_request() {
+    let temp_dir = common::TempDir::new("waf-rate-limit-action");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rate-limit-action");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[routes.waf.rules]]
+name = "route-rate-limit"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.startsWith('/login')"
+
+[[routes.waf.rules.actions]]
+type = "rate_limit"
+name = "login-token-limit"
+key = "access_token_route"
+token_header = "X-Api-Token"
+rate = "1r/h"
+burst = 1
+status = 429
+body = "slow down"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", HeaderValue::from_static("Bearer token-a"));
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/login".parse().expect("URI should parse");
+
+    let first = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let second = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert!(first.terminal.is_none());
+    assert_eq!(
+        second.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    assert_eq!(
+        second
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("slow down")
+    );
+}
+
+#[test]
+fn rate_limit_action_monitor_mode_does_not_consume_tokens() {
+    let temp_dir = common::TempDir::new("waf-rate-limit-monitor");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rate-limit-monitor");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "monitor-rate-limit"
+mode = "monitor"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/monitored'"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "monitor-limit"
+key = "client_ip_route"
+rate = "1r/h"
+burst = 1
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    assert!(
+        evaluate_simple_request(&engine, "/monitored")
+            .terminal
+            .is_none()
+    );
+    assert!(
+        evaluate_simple_request(&engine, "/monitored")
+            .terminal
+            .is_none()
+    );
+}
+
+#[test]
 fn rule_without_mode_inherits_global_mode() {
     let temp_dir = common::TempDir::new("waf-rule-inherit-mode");
     let (cert_path, key_path) =
@@ -2747,6 +2861,43 @@ type = "emit_access_log"
         error
             .to_string()
             .contains("action emit_access_log is not valid in Request phase"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn validation_rejects_rate_limit_action_in_response_phase() {
+    let temp_dir = common::TempDir::new("waf-rate-limit-response-phase");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rate-limit-response-phase");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "response-rate-limit"
+phase = "response"
+priority = 10
+when = "Response.Http.Status == 200"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "bad-response-limit"
+rate = "1r/s"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("WAF should reject invalid action phase");
+    assert!(
+        error
+            .to_string()
+            .contains("action rate_limit is not valid in Response phase"),
         "unexpected error: {error}"
     );
 }

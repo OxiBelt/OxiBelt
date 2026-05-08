@@ -177,10 +177,11 @@ impl AppSnapshot {
     } else {
       None
     };
-    let waf = WafEngine::new_with_previous(
+    let waf = WafEngine::new_with_previous_and_limits(
       &config,
       previous.map(|snapshot| &snapshot.waf),
       shared_state.clone(),
+      Some(limits.clone()),
     )
     .context("failed to build WAF engine")?;
     let access_logs = AccessLogSinks::new(&config.database.access_log)

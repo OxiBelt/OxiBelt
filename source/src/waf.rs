@@ -15,7 +15,10 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::config::{Config, resolve_existing_local_config_file_path_with_logical};
+use crate::config::{
+  Config, LimitMode, RateLimitKey, resolve_existing_local_config_file_path_with_logical,
+};
+use crate::limits::{LimitState, RateLimitCheck, RateLimitContext};
 use crate::routes::normalize_host;
 use crate::shared_state::SharedState;
 
@@ -238,6 +241,20 @@ pub enum WafActionConfig {
   SetTag {
     key: String,
     value: String,
+  },
+  RateLimit {
+    name: String,
+    #[serde(default)]
+    key: RateLimitKey,
+    #[serde(default)]
+    token_header: Option<String>,
+    rate: String,
+    #[serde(default)]
+    burst: u32,
+    #[serde(default = "default_waf_rate_limit_status")]
+    status: u16,
+    #[serde(default)]
+    body: Option<String>,
   },
   RequirePersonProof {
     #[serde(default)]
@@ -696,6 +713,32 @@ fn validate_actions(
         }
         mutations += 1;
       }
+      WafActionConfig::RateLimit {
+        name,
+        key,
+        token_header,
+        rate,
+        status,
+        ..
+      } => {
+        require_phase(rule, WafPhase::Request, "rate_limit")?;
+        if name.trim().is_empty() {
+          bail!("WAF rule {} rate_limit name must not be empty", rule.name);
+        }
+        crate::limits::parse_rate(rate)
+          .with_context(|| format!("invalid WAF rule {} rate_limit rate", rule.name))?;
+        validate_status(*status, &rule.name)?;
+        if let Some(token_header) = token_header {
+          if !key.uses_access_token() {
+            bail!(
+              "WAF rule {} rate_limit token_header requires an access_token key",
+              rule.name
+            );
+          }
+          validate_header_name(token_header)?;
+        }
+        mutations += 1;
+      }
       WafActionConfig::RequirePersonProof { status, .. } => {
         require_phase(rule, WafPhase::Request, "require_person_proof")?;
         validate_status(*status, &rule.name)?;
@@ -873,6 +916,7 @@ pub struct WafEngine {
   pattern_sets: HashMap<String, CompiledPatternSet>,
   global_rules: Vec<CompiledRule>,
   route_rules: HashMap<String, Vec<CompiledRule>>,
+  rate_limits: Arc<LimitState>,
   person_proof: PersonProofEngine,
   person_proof_tcp_max_hop: Option<u8>,
 }
@@ -887,11 +931,21 @@ impl WafEngine {
     previous: Option<&Self>,
     shared_state: Option<std::sync::Arc<SharedState>>,
   ) -> anyhow::Result<Self> {
+    Self::new_with_previous_and_limits(config, previous, shared_state, None)
+  }
+
+  pub fn new_with_previous_and_limits(
+    config: &Config,
+    previous: Option<&Self>,
+    shared_state: Option<std::sync::Arc<SharedState>>,
+    rate_limits: Option<Arc<LimitState>>,
+  ) -> anyhow::Result<Self> {
     validate_config(config)?;
 
     let previous_counters = previous
       .map(WafEngine::active_hit_counters)
       .unwrap_or_default();
+    let rate_limits = rate_limits.unwrap_or_else(|| LimitState::new(shared_state.clone()));
     let pattern_sets = compile_pattern_sets(&config.waf.pattern_sets, &config.waf.limits)?;
     let global_rules = compile_rules(
       &config.waf.rules,
@@ -937,6 +991,7 @@ impl WafEngine {
       pattern_sets,
       global_rules,
       route_rules,
+      rate_limits,
       person_proof,
       person_proof_tcp_max_hop,
     })
@@ -1145,7 +1200,14 @@ impl WafEngine {
           tags: &active_tags,
           ..input
         };
-        apply_request_actions(rule, request, &self.person_proof, &mut decision, &mut tx)?;
+        apply_request_actions(
+          rule,
+          request,
+          &self.person_proof,
+          &self.rate_limits,
+          &mut decision,
+          &mut tx,
+        )?;
       }
       for (key, value) in &decision.tags[previous_tag_count..] {
         active_tags.insert(key.clone(), value.clone());
@@ -1757,6 +1819,7 @@ fn apply_request_actions(
   rule: &CompiledRule,
   input: WafRequestInput<'_>,
   person_proof: &PersonProofEngine,
+  rate_limits: &LimitState,
   decision: &mut RequestWafDecision,
   tx: &mut TransactionBudget,
 ) -> anyhow::Result<()> {
@@ -1794,6 +1857,40 @@ fn apply_request_actions(
       }
       CompiledAction::Config(WafActionConfig::SetLoadBalancingPolicy { policy }) => {
         decision.load_balancing_policy = Some(policy.clone());
+      }
+      CompiledAction::Config(WafActionConfig::RateLimit {
+        name,
+        key,
+        token_header,
+        rate,
+        burst,
+        status,
+        body,
+      }) => {
+        let context = RateLimitContext::route(
+          input.peer_addr.ip(),
+          input.route_name,
+          input.uri.path(),
+          input.headers,
+        );
+        let check = RateLimitCheck {
+          name,
+          key: *key,
+          token_header: token_header.as_deref(),
+          rate,
+          burst: *burst,
+          mode: LimitMode::Enforcing,
+          status: *status,
+        };
+        if let Some(status) = rate_limits.check_rate_limit(context, check) {
+          decision.terminal = Some(WafTerminalResponse::new(
+            status,
+            body
+              .clone()
+              .unwrap_or_else(|| "rate limit exceeded".to_string()),
+          ));
+          return Ok(());
+        }
       }
       CompiledAction::RequirePersonProof(policy) => {
         decision.terminal = Some(person_proof.issue_challenge(input, policy.clone())?);
@@ -1870,6 +1967,7 @@ fn apply_response_actions(
       | CompiledAction::Config(WafActionConfig::SetRequestHeader { .. })
       | CompiledAction::Config(WafActionConfig::RemoveRequestHeader { .. })
       | CompiledAction::Config(WafActionConfig::SetTag { .. })
+      | CompiledAction::Config(WafActionConfig::RateLimit { .. })
       | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
       | CompiledAction::RequirePersonProof(_)
       | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. }) => {
@@ -4548,6 +4646,10 @@ fn default_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
     value: value.to_string(),
   })
   .collect()
+}
+
+fn default_waf_rate_limit_status() -> u16 {
+  429
 }
 
 fn default_max_rule_runtime_ms() -> u64 {

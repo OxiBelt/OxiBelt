@@ -124,7 +124,7 @@ OxiRule is a CEL-like, declarative WAF model. It separates:
 
 Rules can be attached globally under `[[waf.rules]]` or under `[[routes.waf.rules]]`. They may be inline TOML rules or external `.oxirule.toml` files loaded from the OxiRule directory.
 
-Request-phase rules can reject, mutate request headers, set transaction tags, require Person proof, or choose an upstream/pool before forwarding. Response-phase rules can continue, replace, or reject responses, mutate response headers, and emit structured access logs.
+Request-phase rules can reject, rate-limit, mutate request headers, set transaction tags, require Person proof, or choose an upstream/pool before forwarding. Response-phase rules can continue, replace, or reject responses, mutate response headers, and emit structured access logs.
 
 The rule engine is intentionally bounded:
 
@@ -138,7 +138,7 @@ See [OxiRule.md](OxiRule.md) for the full rule reference.
 
 Runtime state is process-local unless `[shared_state].enabled = true`. With shared state disabled, cache indexes and locks, upstream health state, rate and connection limits, and Person proof single-use token state stay inside one process.
 
-When shared state is enabled, each feature maps to one configured Redis/Valkey-compatible or PostgreSQL backend. Rate limits use distributed token buckets; connection limits use TTL-backed leases; Person proof can share its HMAC secret and single-use replay store; upstream pool health and active counts can be shared for selection; cache keeps local storage as L1 and uses the shared backend as L2 for cacheable objects, metadata, fill locks, and purges; reload writes per-instance heartbeat records with config generation metadata. Security-sensitive backend failures fail closed. Shared cache backend failures fall back to local/no shared cache for that request.
+When shared state is enabled, each feature maps to one configured Redis/Valkey-compatible or PostgreSQL backend. Rate limits use distributed token buckets keyed by client IP, route, path, or hashed access token according to configuration; connection limits use TTL-backed leases; Person proof can share its HMAC secret and single-use replay store; upstream pool health and active counts can be shared for selection; cache keeps local storage as L1 and uses the shared backend as L2 for cacheable objects, metadata, fill locks, and purges; reload writes per-instance heartbeat records with config generation metadata. Security-sensitive backend failures fail closed. Shared cache backend failures fall back to local/no shared cache for that request.
 
 Hot reload modes:
 

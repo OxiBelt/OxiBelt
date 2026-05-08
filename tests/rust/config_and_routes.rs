@@ -7,8 +7,8 @@ use base64::Engine;
 use oxibelt::config::{
     AdminRole, AdminTransportMode, CacheStore, CompressionConfig, Config,
     ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, ForwardedHeaderMode,
-    HotReloadMode, OcspMode, ProxyProtocolEgressMode, QuicZeroRttMode, RuntimeOverrides,
-    SharedStateBackendKind, UpstreamDiscoveryProvider, UpstreamEchMode,
+    HotReloadMode, OcspMode, ProxyProtocolEgressMode, QuicZeroRttMode, RateLimitKey,
+    RuntimeOverrides, SharedStateBackendKind, UpstreamDiscoveryProvider, UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -298,6 +298,67 @@ max_connections = 2
     assert_eq!(
         config.shared_state.person_proof_backend.as_deref(),
         Some("postgres-main")
+    );
+}
+
+#[test]
+fn rate_limit_config_parses_route_and_token_keys() {
+    let temp_dir = common::TempDir::new("rate-limit-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "rate-limit-config");
+    let raw = format!(
+        r#"
+{}
+
+[[rate_limits]]
+name = "route-token"
+key = "access-token-route"
+routes = ["app-root"]
+token_header = "X-Api-Token"
+rate = "10r/m"
+burst = 10
+status = 429
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.rate_limits[0].key, RateLimitKey::AccessTokenRoute);
+    assert_eq!(config.rate_limits[0].routes, ["app-root"]);
+    assert_eq!(
+        config.rate_limits[0].token_header.as_deref(),
+        Some("X-Api-Token")
+    );
+}
+
+#[test]
+fn rate_limit_config_rejects_unknown_route_filter() {
+    let temp_dir = common::TempDir::new("rate-limit-unknown-route");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "rate-limit-unknown-route");
+    let raw = format!(
+        r#"
+{}
+
+[[rate_limits]]
+name = "unknown-route"
+key = "client_ip_route"
+routes = ["missing-route"]
+rate = "10r/m"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("unknown route filter should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("rate limit unknown-route references unknown route missing-route"),
+        "unexpected error: {error}"
     );
 }
 

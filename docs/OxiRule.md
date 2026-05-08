@@ -209,6 +209,18 @@ body = "Forbidden"
 
 ```toml
 [[waf.rules.actions]]
+type = "rate_limit"
+name = "login-token-limit"
+key = "access_token_route"
+token_header = "X-Api-Token"
+rate = "10r/m"
+burst = 10
+status = 429
+body = "rate limit exceeded"
+```
+
+```toml
+[[waf.rules.actions]]
 type = "require_person_proof"
 algorithm = "pow_sha256_v1"
 difficulty = 18
@@ -221,6 +233,8 @@ single_use = false
 success_tag = "PersonProof"
 status = 403
 ```
+
+`rate_limit` is request-phase only. Supported keys are `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, and `access_token_path`; `client-ip` style aliases are accepted. Access-token limits read `Authorization: Bearer <token>` first and then optional `token_header`. Token values are hashed before storage, and requests without a token fall back to the client IP bucket. Monitor-mode rules count matches without consuming rate-limit tokens.
 
 Response-phase terminal actions:
 

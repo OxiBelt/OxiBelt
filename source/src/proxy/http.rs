@@ -15,7 +15,7 @@ use crate::config::{
   Config, ConnectionLimitIdentityMode, HttpVersion, ProxyProtocolEgressMode, RouteConfig,
   UpstreamConfig,
 };
-use crate::limits::{ConnectionLimitContext, ConnectionPermit};
+use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::pools::PoolSelection;
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
 use crate::waf::{
@@ -441,7 +441,7 @@ where
 
   if let Some(status) = state
     .limits
-    .check_rate_limits(client_addr.ip(), &state.config.rate_limits)
+    .check_pre_route_rate_limits(client_addr.ip(), &state.config.rate_limits)
   {
     return text_response(status, "rate limit exceeded");
   }
@@ -450,6 +450,19 @@ where
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.route_name = resolved.route.name.clone();
+
+  let rate_limit_context = RateLimitContext::route(
+    client_addr.ip(),
+    &resolved.route.name,
+    request_uri.path(),
+    &request_headers,
+  );
+  if let Some(status) = state
+    .limits
+    .check_route_rate_limits(rate_limit_context, &state.config.rate_limits)
+  {
+    return text_response(status, "rate limit exceeded");
+  }
 
   let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
   let request = request.map(|body| {

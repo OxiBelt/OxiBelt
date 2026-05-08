@@ -757,6 +757,11 @@ impl Config {
     {
       bail!("limits values must be greater than 0");
     }
+    let route_names = self
+      .routes
+      .iter()
+      .map(|route| route.name.as_str())
+      .collect::<HashSet<_>>();
     let mut names = HashSet::new();
     for rate_limit in &self.rate_limits {
       if rate_limit.name.trim().is_empty() {
@@ -769,6 +774,33 @@ impl Config {
         .with_context(|| format!("invalid rate_limits {} rate", rate_limit.name))?;
       http::StatusCode::from_u16(rate_limit.status)
         .with_context(|| format!("rate limit {} has invalid status", rate_limit.name))?;
+      if let Some(token_header) = &rate_limit.token_header {
+        if !rate_limit.key.uses_access_token() {
+          bail!(
+            "rate limit {} token_header requires an access_token key",
+            rate_limit.name
+          );
+        }
+        http::header::HeaderName::from_bytes(token_header.as_bytes())
+          .with_context(|| format!("rate limit {} has invalid token_header", rate_limit.name))?;
+      }
+      let mut route_filter_names = HashSet::new();
+      for route in &rate_limit.routes {
+        if !route_filter_names.insert(route.as_str()) {
+          bail!(
+            "rate limit {} contains duplicate route {}",
+            rate_limit.name,
+            route
+          );
+        }
+        if !route_names.contains(route.as_str()) {
+          bail!(
+            "rate limit {} references unknown route {}",
+            rate_limit.name,
+            route
+          );
+        }
+      }
     }
     names.clear();
     for connection_limit in &self.connection_limits {
@@ -1796,7 +1828,16 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "proxy_protocol_egress",
       "target",
     ][..],
-    "rate_limits" => &["burst", "key", "mode", "name", "rate", "status"][..],
+    "rate_limits" => &[
+      "burst",
+      "key",
+      "mode",
+      "name",
+      "rate",
+      "routes",
+      "status",
+      "token_header",
+    ][..],
     "connection_limits" => &["key", "limit", "name", "status"][..],
     _ => return None,
   };
@@ -3081,7 +3122,11 @@ pub enum ConnectionLimitIdentityMode {
 pub struct RateLimitConfig {
   pub name: String,
   #[serde(default)]
-  pub key: LimitKey,
+  pub key: RateLimitKey,
+  #[serde(default)]
+  pub routes: Vec<String>,
+  #[serde(default)]
+  pub token_header: Option<String>,
   pub rate: String,
   #[serde(default)]
   pub burst: u32,
@@ -3089,6 +3134,33 @@ pub struct RateLimitConfig {
   pub mode: LimitMode,
   #[serde(default = "default_rate_limit_status")]
   pub status: u16,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitKey {
+  #[default]
+  #[serde(alias = "client-ip")]
+  ClientIp,
+  #[serde(alias = "client-ip-route")]
+  ClientIpRoute,
+  #[serde(alias = "client-ip-path")]
+  ClientIpPath,
+  #[serde(alias = "access-token")]
+  AccessToken,
+  #[serde(alias = "access-token-route")]
+  AccessTokenRoute,
+  #[serde(alias = "access-token-path")]
+  AccessTokenPath,
+}
+
+impl RateLimitKey {
+  pub fn uses_access_token(self) -> bool {
+    matches!(
+      self,
+      Self::AccessToken | Self::AccessTokenRoute | Self::AccessTokenPath
+    )
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

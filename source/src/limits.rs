@@ -4,9 +4,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, bail};
-use http::StatusCode;
+use http::header::{AUTHORIZATION, HeaderName};
+use http::{HeaderMap, StatusCode};
+use ring::digest;
 
-use crate::config::{ConnectionLimitConfig, LimitKey, LimitMode, LimitsConfig, RateLimitConfig};
+use crate::config::{
+  ConnectionLimitConfig, LimitMode, LimitsConfig, RateLimitConfig, RateLimitKey,
+};
 use crate::shared_state::{ConnectionScope, SharedState};
 
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +42,59 @@ pub fn parse_rate(raw: &str) -> anyhow::Result<ParsedRate> {
 impl ParsedRate {
   pub fn per_second(self) -> f64 {
     self.per_second
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitContext<'a> {
+  pub ip: IpAddr,
+  pub route_name: Option<&'a str>,
+  pub path: Option<&'a str>,
+  pub headers: Option<&'a HeaderMap>,
+}
+
+impl<'a> RateLimitContext<'a> {
+  pub fn pre_route(ip: IpAddr) -> Self {
+    Self {
+      ip,
+      route_name: None,
+      path: None,
+      headers: None,
+    }
+  }
+
+  pub fn route(ip: IpAddr, route_name: &'a str, path: &'a str, headers: &'a HeaderMap) -> Self {
+    Self {
+      ip,
+      route_name: Some(route_name),
+      path: Some(path),
+      headers: Some(headers),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitCheck<'a> {
+  pub name: &'a str,
+  pub key: RateLimitKey,
+  pub token_header: Option<&'a str>,
+  pub rate: &'a str,
+  pub burst: u32,
+  pub mode: LimitMode,
+  pub status: u16,
+}
+
+impl<'a> From<&'a RateLimitConfig> for RateLimitCheck<'a> {
+  fn from(limit: &'a RateLimitConfig) -> Self {
+    Self {
+      name: &limit.name,
+      key: limit.key,
+      token_header: limit.token_header.as_deref(),
+      rate: &limit.rate,
+      burst: limit.burst,
+      mode: limit.mode,
+      status: limit.status,
+    }
   }
 }
 
@@ -248,53 +305,86 @@ impl LimitState {
     ip: IpAddr,
     rate_limits: &[RateLimitConfig],
   ) -> Option<StatusCode> {
+    self.check_pre_route_rate_limits(ip, rate_limits)
+  }
+
+  pub fn check_pre_route_rate_limits(
+    &self,
+    ip: IpAddr,
+    rate_limits: &[RateLimitConfig],
+  ) -> Option<StatusCode> {
+    let context = RateLimitContext::pre_route(ip);
+    for limit in rate_limits
+      .iter()
+      .filter(|limit| rate_limit_applies_before_route(limit))
+    {
+      if let Some(status) = self.check_rate_limit(context, RateLimitCheck::from(limit)) {
+        return Some(status);
+      }
+    }
+    None
+  }
+
+  pub fn check_route_rate_limits(
+    &self,
+    context: RateLimitContext<'_>,
+    rate_limits: &[RateLimitConfig],
+  ) -> Option<StatusCode> {
+    for limit in rate_limits
+      .iter()
+      .filter(|limit| rate_limit_applies_after_route(limit, context.route_name.unwrap_or_default()))
+    {
+      if let Some(status) = self.check_rate_limit(context, RateLimitCheck::from(limit)) {
+        return Some(status);
+      }
+    }
+    None
+  }
+
+  pub fn check_rate_limit(
+    &self,
+    context: RateLimitContext<'_>,
+    limit: RateLimitCheck<'_>,
+  ) -> Option<StatusCode> {
+    let Ok(rate) = parse_rate(limit.rate) else {
+      return Some(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    let key = rate_limit_key(context, limit.key, limit.token_header);
     if let Some(shared) = &self.shared_state
       && shared.has_rate_limits()
     {
-      for limit in rate_limits {
-        let Ok(rate) = parse_rate(&limit.rate) else {
-          return Some(StatusCode::INTERNAL_SERVER_ERROR);
-        };
-        let key = match limit.key {
-          LimitKey::ClientIp => ip.to_string(),
-        };
-        match shared.take_rate_token(&limit.name, &key, rate, limit.burst) {
-          Ok(true) => {}
-          Ok(false) => {
-            if limit.mode == LimitMode::Enforcing {
-              return Some(
-                StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
-              );
-            }
+      match shared.take_rate_token(limit.name, &key, rate, limit.burst) {
+        Ok(true) => {}
+        Ok(false) => {
+          if limit.mode == LimitMode::Enforcing {
+            return Some(
+              StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
+            );
           }
-          Err(error) => {
-            tracing::warn!(error = %error, "shared rate limit backend failed closed");
-            return Some(StatusCode::SERVICE_UNAVAILABLE);
-          }
+        }
+        Err(error) => {
+          tracing::warn!(error = %error, "shared rate limit backend failed closed");
+          return Some(StatusCode::SERVICE_UNAVAILABLE);
         }
       }
       return None;
     }
     let now = Instant::now();
     let mut buckets = self.rates.lock().expect("rate limit lock poisoned");
-    for limit in rate_limits {
-      let Ok(rate) = parse_rate(&limit.rate) else {
-        return Some(StatusCode::INTERNAL_SERVER_ERROR);
-      };
-      let burst = f64::from(limit.burst.max(1));
-      let key = (limit.name.clone(), ip.to_string());
-      let bucket = buckets.entry(key).or_insert(TokenBucket {
+    let burst = f64::from(limit.burst.max(1));
+    let bucket = buckets
+      .entry((limit.name.to_string(), key))
+      .or_insert(TokenBucket {
         tokens: burst,
         last: now,
       });
-      let elapsed = now.duration_since(bucket.last).as_secs_f64();
-      bucket.tokens = (bucket.tokens + elapsed * rate.per_second).min(burst);
-      bucket.last = now;
-      if bucket.tokens < 1.0 && limit.mode == LimitMode::Enforcing {
-        return Some(StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS));
-      }
-      bucket.tokens -= 1.0;
+    let elapsed = now.duration_since(bucket.last).as_secs_f64();
+    bucket.tokens = (bucket.tokens + elapsed * rate.per_second).min(burst);
+    bucket.last = now;
+    if bucket.tokens < 1.0 && limit.mode == LimitMode::Enforcing {
+      return Some(StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS));
     }
+    bucket.tokens -= 1.0;
     None
   }
 
@@ -359,6 +449,90 @@ impl ConnectionLimitContext {
   }
 }
 
+fn rate_limit_applies_before_route(limit: &RateLimitConfig) -> bool {
+  limit.key == RateLimitKey::ClientIp && limit.routes.is_empty()
+}
+
+fn rate_limit_applies_after_route(limit: &RateLimitConfig, route_name: &str) -> bool {
+  if rate_limit_applies_before_route(limit) {
+    return false;
+  }
+  limit.routes.is_empty() || limit.routes.iter().any(|route| route == route_name)
+}
+
+fn rate_limit_key(
+  context: RateLimitContext<'_>,
+  key: RateLimitKey,
+  token_header: Option<&str>,
+) -> String {
+  let route = context.route_name.unwrap_or_default();
+  let path = context.path.unwrap_or_default();
+  match key {
+    RateLimitKey::ClientIp => format!("client_ip:{}", context.ip),
+    RateLimitKey::ClientIpRoute => format!("client_ip_route:{}:{route}", context.ip),
+    RateLimitKey::ClientIpPath => format!("client_ip_path:{}:{path}", context.ip),
+    RateLimitKey::AccessToken => {
+      format!(
+        "access_token:{}",
+        access_token_bucket_identity(context, token_header)
+      )
+    }
+    RateLimitKey::AccessTokenRoute => format!(
+      "access_token_route:{}:{route}",
+      access_token_bucket_identity(context, token_header)
+    ),
+    RateLimitKey::AccessTokenPath => format!(
+      "access_token_path:{}:{path}",
+      access_token_bucket_identity(context, token_header)
+    ),
+  }
+}
+
+fn access_token_bucket_identity(
+  context: RateLimitContext<'_>,
+  token_header: Option<&str>,
+) -> String {
+  context
+    .headers
+    .and_then(|headers| access_token(headers, token_header))
+    .map(|token| format!("token:{}", sha256_hex(token.as_bytes())))
+    .unwrap_or_else(|| format!("fallback_ip:{}", context.ip))
+}
+
+fn access_token(headers: &HeaderMap, token_header: Option<&str>) -> Option<String> {
+  bearer_token(headers).or_else(|| token_header.and_then(|name| named_header_token(headers, name)))
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+  let raw = headers.get(AUTHORIZATION)?.to_str().ok()?.trim();
+  let mut parts = raw.splitn(2, char::is_whitespace);
+  let scheme = parts.next()?;
+  let token = parts.next()?.trim();
+  if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+    return None;
+  }
+  Some(token.to_string())
+}
+
+fn named_header_token(headers: &HeaderMap, name: &str) -> Option<String> {
+  let name = HeaderName::from_bytes(name.as_bytes()).ok()?;
+  let value = headers.get(name)?.to_str().ok()?.trim();
+  if value.is_empty() {
+    return None;
+  }
+  Some(value.to_string())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+  let digest = digest::digest(&digest::SHA256, bytes);
+  let mut output = String::with_capacity(digest.as_ref().len() * 2);
+  for byte in digest.as_ref() {
+    use std::fmt::Write as _;
+    let _ = write!(&mut output, "{byte:02x}");
+  }
+  output
+}
+
 fn decrement_or_remove<K>(map: &mut HashMap<K, usize>, key: &K)
 where
   K: Eq + std::hash::Hash,
@@ -374,6 +548,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config::LimitKey;
 
   #[test]
   fn parses_rates() {
@@ -442,7 +617,9 @@ mod tests {
     let ip = "203.0.113.10".parse().unwrap();
     let rate_limits = [RateLimitConfig {
       name: "per-ip".to_string(),
-      key: LimitKey::ClientIp,
+      key: RateLimitKey::ClientIp,
+      routes: Vec::new(),
+      token_header: None,
       rate: "1r/h".to_string(),
       burst: 1,
       mode: LimitMode::Enforcing,
@@ -474,5 +651,133 @@ mod tests {
     );
     drop(ip_permit);
     assert!(second.acquire_global_connection(&limits).is_ok());
+  }
+
+  #[test]
+  fn route_and_path_rate_limit_keys_are_isolated() {
+    let state = LimitState::new(None);
+    let ip = "203.0.113.10".parse().unwrap();
+    let headers = HeaderMap::new();
+    let route_limit = [RateLimitConfig {
+      name: "per-route".to_string(),
+      key: RateLimitKey::ClientIpRoute,
+      routes: Vec::new(),
+      token_header: None,
+      rate: "1r/h".to_string(),
+      burst: 1,
+      mode: LimitMode::Enforcing,
+      status: 429,
+    }];
+    let app = RateLimitContext::route(ip, "app", "/same", &headers);
+    let admin = RateLimitContext::route(ip, "admin", "/same", &headers);
+
+    assert_eq!(state.check_route_rate_limits(app, &route_limit), None);
+    assert_eq!(
+      state.check_route_rate_limits(app, &route_limit),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    assert_eq!(state.check_route_rate_limits(admin, &route_limit), None);
+
+    let path_limit = [RateLimitConfig {
+      name: "per-path".to_string(),
+      key: RateLimitKey::ClientIpPath,
+      routes: Vec::new(),
+      token_header: None,
+      rate: "1r/h".to_string(),
+      burst: 1,
+      mode: LimitMode::Enforcing,
+      status: 429,
+    }];
+    let first_path = RateLimitContext::route(ip, "app", "/first", &headers);
+    let second_path = RateLimitContext::route(ip, "app", "/second", &headers);
+
+    assert_eq!(state.check_route_rate_limits(first_path, &path_limit), None);
+    assert_eq!(
+      state.check_route_rate_limits(first_path, &path_limit),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    assert_eq!(
+      state.check_route_rate_limits(second_path, &path_limit),
+      None
+    );
+  }
+
+  #[test]
+  fn access_token_keys_hash_tokens_and_fallback_to_ip() {
+    let ip = "203.0.113.10".parse().unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, "Bearer bearer-secret".parse().unwrap());
+    headers.insert("x-api-token", "header-secret".parse().unwrap());
+    let context = RateLimitContext::route(ip, "app", "/tokens", &headers);
+
+    let bearer_key = rate_limit_key(context, RateLimitKey::AccessToken, Some("X-Api-Token"));
+    assert!(bearer_key.starts_with("access_token:token:"));
+    assert!(!bearer_key.contains("bearer-secret"));
+    assert!(!bearer_key.contains("header-secret"));
+
+    let mut header_only = HeaderMap::new();
+    header_only.insert("x-api-token", "header-secret".parse().unwrap());
+    let header_context = RateLimitContext::route(ip, "app", "/tokens", &header_only);
+    let header_key = rate_limit_key(
+      header_context,
+      RateLimitKey::AccessTokenRoute,
+      Some("X-Api-Token"),
+    );
+    assert!(header_key.starts_with("access_token_route:token:"));
+    assert!(header_key.ends_with(":app"));
+    assert!(!header_key.contains("header-secret"));
+    assert_ne!(bearer_key, header_key);
+
+    let empty_headers = HeaderMap::new();
+    let fallback_context = RateLimitContext::route(ip, "app", "/tokens", &empty_headers);
+    assert_eq!(
+      rate_limit_key(
+        fallback_context,
+        RateLimitKey::AccessTokenPath,
+        Some("X-Api-Token"),
+      ),
+      "access_token_path:fallback_ip:203.0.113.10:/tokens"
+    );
+  }
+
+  #[test]
+  fn access_token_rate_limits_are_isolated_by_token_and_fallback_ip() {
+    let state = LimitState::new(None);
+    let ip = "203.0.113.10".parse().unwrap();
+    let limit = [RateLimitConfig {
+      name: "per-token".to_string(),
+      key: RateLimitKey::AccessToken,
+      routes: Vec::new(),
+      token_header: None,
+      rate: "1r/h".to_string(),
+      burst: 1,
+      mode: LimitMode::Enforcing,
+      status: 429,
+    }];
+    let mut token_a = HeaderMap::new();
+    token_a.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
+    let mut token_b = HeaderMap::new();
+    token_b.insert(AUTHORIZATION, "Bearer token-b".parse().unwrap());
+    let token_a_context = RateLimitContext::route(ip, "app", "/tokens", &token_a);
+    let token_b_context = RateLimitContext::route(ip, "app", "/tokens", &token_b);
+
+    assert_eq!(state.check_route_rate_limits(token_a_context, &limit), None);
+    assert_eq!(
+      state.check_route_rate_limits(token_a_context, &limit),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    assert_eq!(state.check_route_rate_limits(token_b_context, &limit), None);
+
+    let fallback_state = LimitState::new(None);
+    let empty_headers = HeaderMap::new();
+    let fallback_context = RateLimitContext::route(ip, "app", "/tokens", &empty_headers);
+    assert_eq!(
+      fallback_state.check_route_rate_limits(fallback_context, &limit),
+      None
+    );
+    assert_eq!(
+      fallback_state.check_route_rate_limits(fallback_context, &limit),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
   }
 }

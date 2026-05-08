@@ -97,8 +97,13 @@ impl ReloadManager {
       return Ok(false);
     }
 
-    let waf = WafEngine::new_with_previous(&config, Some(&active.waf), active.shared_state.clone())
-      .context("failed to rebuild WAF engine")?;
+    let waf = WafEngine::new_with_previous_and_limits(
+      &config,
+      Some(&active.waf),
+      active.shared_state.clone(),
+      Some(active.limits.clone()),
+    )
+    .context("failed to rebuild WAF engine")?;
     let snapshot = AppSnapshot {
       route_table: RouteTable::new(config.routes.clone()),
       upstreams: active.upstreams.clone(),
