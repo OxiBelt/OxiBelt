@@ -22,6 +22,8 @@ use crate::config::{
 };
 use crate::shared_state::{SharedCacheEntry, SharedCacheLock, SharedState, SharedVaryMatcher};
 
+const TMPFS_CACHE_ROOT: &str = "/dev/shm";
+
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
   pub status: StatusCode,
@@ -168,6 +170,25 @@ enum StoredBody {
   Disk(PathBuf),
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CacheFileKind {
+  Body,
+  BodyTmp,
+  Meta,
+  MetaTmp,
+}
+
+impl CacheFileKind {
+  fn suffix(self) -> &'static str {
+    match self {
+      Self::Body => "body",
+      Self::BodyTmp => "body.tmp",
+      Self::Meta => "meta",
+      Self::MetaTmp => "meta.tmp",
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 struct VaryMatcher {
   name: String,
@@ -244,18 +265,16 @@ impl ResponseCache {
         .tmpfs_dir
         .clone()
         .unwrap_or_else(default_cache_tmpfs_dir);
-      validate_tmpfs_dir(&dir)?;
-      Some(dir)
+      Some(validated_tmpfs_dir(&dir)?)
     } else {
       None
     };
-    let disk_dir = if config.enabled && config.store.uses_disk() {
+    let disk_dir = if config.enabled && cache_needs_disk_dir(config) {
       let dir = config
         .disk_dir
-        .clone()
+        .as_ref()
         .ok_or_else(|| anyhow!("cache.disk_dir is required when cache.store uses disk"))?;
-      validate_disk_dir(&dir)?;
-      Some(dir)
+      Some(validated_disk_dir(dir)?)
     } else {
       config.disk_dir.clone()
     };
@@ -878,8 +897,10 @@ impl ResponseCache {
       return Ok(());
     };
     let meta = encode_metadata(entry)?;
-    let path = dir.join(format!("{}.meta", cache_file_name(&entry.variant_key)));
-    let tmp = path.with_extension("meta.tmp");
+    let path = cache_file_path(dir, &entry.variant_key, CacheFileKind::Meta)
+      .ok_or_else(|| anyhow!("invalid cache metadata file name"))?;
+    let tmp = cache_file_path(dir, &entry.variant_key, CacheFileKind::MetaTmp)
+      .ok_or_else(|| anyhow!("invalid temporary cache metadata file name"))?;
     std::fs::write(&tmp, meta)
       .with_context(|| format!("failed to write cache metadata {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
@@ -914,7 +935,7 @@ impl ResponseCache {
       if path.extension().and_then(|value| value.to_str()) != Some("meta") {
         continue;
       }
-      match decode_metadata(&path) {
+      match decode_metadata(&path, dir) {
         Ok(stored) => {
           let now = SystemTime::now();
           if stored
@@ -982,29 +1003,11 @@ impl Drop for ResponseCache {
 }
 
 pub fn validate_tmpfs_dir(path: &Path) -> anyhow::Result<()> {
-  let metadata = path
-    .metadata()
-    .with_context(|| format!("failed to inspect cache tmpfs_dir {}", path.display()))?;
-  if !metadata.is_dir() {
-    bail!("cache tmpfs_dir {} must be a directory", path.display());
-  }
-  let canonical = path
-    .canonicalize()
-    .with_context(|| format!("failed to resolve cache tmpfs_dir {}", path.display()))?;
-  if !canonical.starts_with("/dev/shm") {
-    bail!("cache tmpfs_dir {} must be under /dev/shm", path.display());
-  }
-  validate_writable_dir("cache tmpfs_dir", path)
+  validated_tmpfs_dir(path).map(|_| ())
 }
 
 pub fn validate_disk_dir(path: &Path) -> anyhow::Result<()> {
-  let metadata = path
-    .metadata()
-    .with_context(|| format!("failed to inspect cache disk_dir {}", path.display()))?;
-  if !metadata.is_dir() {
-    bail!("cache disk_dir {} must be a directory", path.display());
-  }
-  validate_writable_dir("cache disk_dir", path)
+  validated_disk_dir(path).map(|_| ())
 }
 
 pub fn range_entry(entry: CacheEntry, method: &Method, request_headers: &HeaderMap) -> CacheEntry {
@@ -1582,6 +1585,14 @@ fn admission_runtime(
   }
 }
 
+fn cache_needs_disk_dir(config: &CacheConfig) -> bool {
+  config.store.uses_disk()
+    || config.policies.iter().any(|policy| {
+      policy.store.is_some_and(CacheStore::uses_disk)
+        || policy.rules.iter().any(|rule| rule.store.uses_disk())
+    })
+}
+
 fn auto_memory_cache_limit(config: &CacheConfig) -> usize {
   let limit = detect_memory_limit_bytes().unwrap_or(config.max_size_bytes as u64);
   ((limit as f64) * config.memory_auto_fraction)
@@ -1619,8 +1630,38 @@ pub fn detect_memory_limit_bytes() -> Option<u64> {
     })
 }
 
+fn validated_tmpfs_dir(path: &Path) -> anyhow::Result<PathBuf> {
+  let canonical = canonical_cache_dir("cache tmpfs_dir", path)?;
+  if !canonical.starts_with(Path::new(TMPFS_CACHE_ROOT)) {
+    bail!("cache tmpfs_dir {} must be under /dev/shm", path.display());
+  }
+  validate_writable_dir("cache tmpfs_dir", &canonical)?;
+  Ok(canonical)
+}
+
+fn validated_disk_dir(path: &Path) -> anyhow::Result<PathBuf> {
+  let canonical = canonical_cache_dir("cache disk_dir", path)?;
+  validate_writable_dir("cache disk_dir", &canonical)?;
+  Ok(canonical)
+}
+
+fn canonical_cache_dir(field_name: &str, path: &Path) -> anyhow::Result<PathBuf> {
+  let canonical = path
+    .canonicalize()
+    .with_context(|| format!("failed to resolve {field_name} {}", path.display()))?;
+  let metadata = canonical
+    .metadata()
+    .with_context(|| format!("failed to inspect {field_name} {}", path.display()))?;
+  if !metadata.is_dir() {
+    bail!("{field_name} {} must be a directory", path.display());
+  }
+  Ok(canonical)
+}
+
 fn validate_writable_dir(field_name: &str, path: &Path) -> anyhow::Result<()> {
-  let probe = path.join(format!(".oxibelt-write-test-{}", std::process::id()));
+  let probe_name = format!(".oxibelt-write-test-{}", std::process::id());
+  let probe = safe_child_path(path, &probe_name)
+    .ok_or_else(|| anyhow!("{field_name} write probe file name is invalid"))?;
   std::fs::write(&probe, b"ok")
     .with_context(|| format!("{field_name} {} must be writable", path.display()))?;
   let _ = std::fs::remove_file(probe);
@@ -1702,8 +1743,8 @@ impl StoredEntry {
 }
 
 fn write_body_file(dir: &Path, key: &str, body: &Bytes) -> Option<PathBuf> {
-  let path = dir.join(format!("{}.body", cache_file_name(key)));
-  let tmp = path.with_extension("body.tmp");
+  let path = cache_file_path(dir, key, CacheFileKind::Body)?;
+  let tmp = cache_file_path(dir, key, CacheFileKind::BodyTmp)?;
   if std::fs::write(&tmp, body).is_err() {
     return None;
   }
@@ -1744,6 +1785,34 @@ fn cache_file_name(key: &str) -> String {
   name
 }
 
+fn cache_file_path(dir: &Path, key: &str, kind: CacheFileKind) -> Option<PathBuf> {
+  let stem = cache_file_name(key);
+  cache_file_path_from_stem(dir, &stem, kind)
+}
+
+fn cache_file_path_from_stem(dir: &Path, stem: &str, kind: CacheFileKind) -> Option<PathBuf> {
+  if !is_cache_file_stem(stem) {
+    return None;
+  }
+  safe_child_path(dir, &format!("{}.{}", stem, kind.suffix()))
+}
+
+fn safe_child_path(dir: &Path, file_name: &str) -> Option<PathBuf> {
+  if file_name.is_empty()
+    || file_name.contains("..")
+    || file_name.contains('/')
+    || file_name.contains('\\')
+  {
+    return None;
+  }
+  let path = dir.join(file_name);
+  (path.parent() == Some(dir)).then_some(path)
+}
+
+fn is_cache_file_stem(stem: &str) -> bool {
+  stem.len() == digest::SHA256_OUTPUT_LEN * 2 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn header_size(headers: &HeaderMap) -> usize {
   headers
     .iter()
@@ -1755,6 +1824,10 @@ fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
   let StoredBody::Disk(body_path) = &entry.body else {
     return Ok(String::new());
   };
+  let body_file = body_path
+    .file_name()
+    .and_then(|value| value.to_str())
+    .ok_or_else(|| anyhow!("invalid cache body path"))?;
   let mut lines = Vec::new();
   lines.push("version=1".to_string());
   for (key, value) in [
@@ -1764,7 +1837,7 @@ fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
     ("scheme", entry.scheme.as_str()),
     ("host", entry.host.as_str()),
     ("uri", entry.uri.as_str()),
-    ("body_path", body_path.to_string_lossy().as_ref()),
+    ("body_file", body_file),
   ] {
     lines.push(format!("{key}={}", b64(value.as_bytes())));
   }
@@ -1803,7 +1876,20 @@ fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
   Ok(lines.join("\n"))
 }
 
-fn decode_metadata(path: &Path) -> anyhow::Result<StoredEntry> {
+fn decode_metadata(path: &Path, disk_dir: &Path) -> anyhow::Result<StoredEntry> {
+  let metadata_file_name = path
+    .file_name()
+    .and_then(|value| value.to_str())
+    .ok_or_else(|| anyhow!("invalid cache metadata file name"))?;
+  let Some(metadata_stem) = metadata_file_name.strip_suffix(".meta") else {
+    bail!("invalid cache metadata file extension");
+  };
+  let expected_metadata_path =
+    cache_file_path_from_stem(disk_dir, metadata_stem, CacheFileKind::Meta)
+      .ok_or_else(|| anyhow!("invalid cache metadata file name"))?;
+  if path != expected_metadata_path {
+    bail!("cache metadata path must stay under cache disk_dir");
+  }
   let raw = std::fs::read_to_string(path)
     .with_context(|| format!("failed to read cache metadata {}", path.display()))?;
   let mut values: HashMap<&str, Vec<String>> = HashMap::new();
@@ -1826,7 +1912,12 @@ fn decode_metadata(path: &Path) -> anyhow::Result<StoredEntry> {
   let scheme = get("scheme")?;
   let host = get("host")?;
   let uri = get("uri")?;
-  let body_path = PathBuf::from(get("body_path")?);
+  let expected_metadata_stem = cache_file_name(&variant_key);
+  if metadata_stem != expected_metadata_stem {
+    bail!("cache metadata file name does not match variant key");
+  }
+  let body_path = cache_file_path(disk_dir, &variant_key, CacheFileKind::Body)
+    .ok_or_else(|| anyhow!("invalid cache body file name"))?;
   let status = values
     .get("status")
     .and_then(|items| items.first())
@@ -1890,9 +1981,10 @@ fn decode_metadata(path: &Path) -> anyhow::Result<StoredEntry> {
 }
 
 fn remove_metadata(entry: &StoredEntry) {
-  if let StoredBody::Disk(path) = &entry.body {
-    let _ = std::fs::remove_file(path.with_extension("meta"));
-    let meta = path.with_file_name(format!("{}.meta", cache_file_name(&entry.variant_key)));
+  if let StoredBody::Disk(path) = &entry.body
+    && let Some(dir) = path.parent()
+    && let Some(meta) = cache_file_path(dir, &entry.variant_key, CacheFileKind::Meta)
+  {
     let _ = std::fs::remove_file(meta);
   }
 }
@@ -2237,7 +2329,7 @@ mod tests {
 
   #[test]
   fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
-    let temp_dir = TestTempDir::new("cache-recovery");
+    let temp_dir = TestTempDir::new();
     let config = CacheConfig {
       enabled: true,
       store: CacheStore::Disk,
@@ -2276,6 +2368,51 @@ mod tests {
     assert!(stats.disk_recovery_removed_files_total >= 2);
     assert!(!temp_dir.path.join("orphan.body").exists());
     assert!(!temp_dir.path.join("stale.body.tmp").exists());
+  }
+
+  #[test]
+  fn disk_cache_recovery_does_not_trust_metadata_body_path() {
+    let temp_dir = TestTempDir::new();
+    let cache_dir = temp_dir.path.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let outside_path = temp_dir.path.join("outside.txt");
+    std::fs::write(&outside_path, b"keep").unwrap();
+
+    let variant_key = "https:example.test:/asset/poison.css";
+    let meta_path = cache_file_path(&cache_dir, variant_key, CacheFileKind::Meta).unwrap();
+    let stored = StoredEntry {
+      policy: "default".to_string(),
+      base_key: "https:example.test:/asset/poison.css".to_string(),
+      variant_key: variant_key.to_string(),
+      scheme: "https".to_string(),
+      host: "example.test".to_string(),
+      uri: "/asset/poison.css".to_string(),
+      status: StatusCode::OK,
+      headers: HeaderMap::new(),
+      body: StoredBody::Disk(outside_path.clone()),
+      expires_at: UNIX_EPOCH + Duration::from_secs(1),
+      stale_if_error_until: None,
+      stale_while_revalidate_until: None,
+      must_revalidate: false,
+      vary: Vec::new(),
+      tags: Vec::new(),
+      size: 4,
+    };
+    std::fs::write(&meta_path, encode_metadata(&stored).unwrap()).unwrap();
+
+    let config = CacheConfig {
+      enabled: true,
+      store: CacheStore::Disk,
+      disk_dir: Some(cache_dir),
+      disk_max_size_bytes: Some(1024 * 1024),
+      ..CacheConfig::default()
+    };
+    let cache = ResponseCache::new(&config, None).unwrap();
+    let stats = cache.stats();
+
+    assert_eq!(stats.disk_recovered_entries_total, 0);
+    assert!(stats.disk_recovery_removed_files_total >= 1);
+    assert!(outside_path.exists());
   }
 
   fn cache_config_with_disabled_named_background_refresh() -> CacheConfig {
@@ -2418,9 +2555,9 @@ mod tests {
   }
 
   impl TestTempDir {
-    fn new(name: &str) -> Self {
-      let path = std::env::temp_dir().join(format!(
-        "oxibelt-{name}-{}-{}",
+    fn new() -> Self {
+      let path = Path::new("/tmp").join(format!(
+        "oxibelt-cache-test-{}-{}",
         std::process::id(),
         SystemTime::now()
           .duration_since(UNIX_EPOCH)
