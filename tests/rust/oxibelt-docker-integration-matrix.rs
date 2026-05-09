@@ -966,6 +966,13 @@ run_case_checks() {
       mkdir -p /tmp/oxibelt-root
       /bin/sh /tmp/kernel-extension/install.sh --apply --root /tmp/oxibelt-root --kernel-release 7.0.3
       /bin/sh /tmp/kernel-extension/verify.sh --root /tmp/oxibelt-root --kernel-release 7.0.3
+      limits_file=/tmp/oxibelt-root/etc/security/limits.d/90-oxibelt-edge.conf
+      if awk '"'"'$1 == "*" && $3 == "nofile" { found = 1 } END { exit found ? 0 : 1 }'"'"' "${limits_file}"; then
+        echo "${limits_file} grants nofile limits to wildcard principal *" >&2
+        exit 45
+      fi
+      grep -Fx "oxibelt soft nofile 1048576" "${limits_file}" >/dev/null
+      grep -Fx "oxibelt hard nofile 1048576" "${limits_file}" >/dev/null
       if /bin/sh /tmp/kernel-extension/install.sh --dry-run --root /tmp/old-root --kernel-release 6.19.14 >/tmp/old-kernel.log 2>&1; then
         cat /tmp/old-kernel.log >&2
         exit 44

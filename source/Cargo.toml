@@ -72,3 +72,7 @@ path = "../tests/rust/pq_negotiation_support.rs"
 [[test]]
 name = "waf"
 path = "../tests/rust/waf.rs"
+
+[[test]]
+name = "kernel_extension_security"
+path = "../tests/rust/kernel_extension_security.rs"

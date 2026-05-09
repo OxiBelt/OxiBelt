@@ -32,7 +32,7 @@ kernel-extension/verify.sh --root /tmp/oxibelt-root --kernel-release 7.0.3
 - `/etc/security/limits.d/90-oxibelt-edge.conf`
 - `/etc/systemd/system/oxibelt.service.d/10-limits.conf`
 
-The sysctl template raises listen backlog, network backlog, UDP socket buffer ceilings, ephemeral port range, and system-wide file capacity. The limits and systemd templates raise `nofile` for OxiBelt service deployments.
+The sysctl template raises listen backlog, network backlog, UDP socket buffer ceilings, ephemeral port range, and system-wide file capacity. The limits template raises `nofile` only for the `oxibelt` service account, and the systemd template raises `nofile` for OxiBelt service deployments.
 
 ## Rollback
 
