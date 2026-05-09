@@ -2621,9 +2621,9 @@ run_case_checks() {
             Some("Response is unavailable in request-phase rules"),
         ),
         docker_case(
-            "waf-validation",
-            "reserved-response-body-scan-fail-closed",
-            "reserved response body scans fail closed at runtime",
+            "waf-helpers",
+            "response-body-scan",
+            "bounded response body scan can reject matching upstream bodies",
             ExpectStart::Success,
             Needs {
                 http_upstream: true,
@@ -2632,8 +2632,8 @@ run_case_checks() {
             r#"
 run_case_checks() {
   local response
-  response="$(client_request "example.test" "/app/scan" 403)"
-  assert_response_jq "${response}" '.body == "WAF evaluation failed"'
+  response="$(client_request "example.test" "/app/scan" 451)"
+  assert_response_jq "${response}" '.body == "response body scan matched"'
 }
 "#,
             None,

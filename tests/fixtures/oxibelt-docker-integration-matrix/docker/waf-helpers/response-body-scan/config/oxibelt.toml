@@ -41,18 +41,18 @@ fail_policy = "closed"
 [[waf.pattern_sets]]
 name = "body-patterns"
 kind = "contains"
-patterns = ["anything"]
+patterns = ["/origin/app/scan"]
 
 [[waf.rules]]
-name = "reserved-response-body-scan"
+name = "response-body-scan"
 phase = "response"
 priority = 10
 when = "Response.Body.containsAny('body-patterns')"
 
 [[waf.rules.actions]]
-type = "replace_response"
-status = 200
-body = "unreachable"
+type = "reject_response"
+status = 451
+body = "response body scan matched"
 
 [[upstreams]]
 name = "http-upstream"
@@ -73,4 +73,3 @@ name = "main-route"
 hosts = ["example.test"]
 path_prefix = "/"
 upstream = "http-upstream"
-
