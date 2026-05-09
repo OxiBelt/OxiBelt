@@ -34,7 +34,8 @@ pub(crate) mod uri;
 pub(crate) mod version;
 
 use self::body::{
-  BodyTimeoutKind, CapturedBody, ProxyBody, boxed_error, capture_prefix, error_is_timeout,
+  BodyTimeoutKind, CapturedBody, ProxyBody, boxed_error, capture_body_prefix, capture_prefix,
+  error_is_timeout,
 };
 use self::headers::{
   add_forwarded_headers, extract_host, is_upgrade_request, strip_hop_by_hop_headers,
@@ -146,6 +147,7 @@ impl SystemAccessLogContext {
       version: response.version(),
       status: response.status(),
       headers: response.headers(),
+      body: None,
       upstream_name: &self.upstream_name,
       upstream_pool: self.upstream_pool.as_deref(),
       upstream_scheme: &self.upstream_scheme,
@@ -1077,6 +1079,42 @@ where
   apply_security_headers(&mut parts.headers, &state.config.security.headers);
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
+  let (body, captured_response_body) = if state
+    .waf
+    .requires_response_body_inspection(&resolved.route.name)
+  {
+    let content_length = parts
+      .headers
+      .get(http::header::CONTENT_LENGTH)
+      .and_then(|value| value.to_str().ok())
+      .and_then(|value| value.parse::<u64>().ok());
+    match capture_body_prefix(
+      body,
+      state.config.waf.limits.max_body_inspection_bytes,
+      content_length,
+    )
+    .await
+    {
+      Ok((body, captured)) => (body, Some(captured)),
+      Err(error) => {
+        if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) {
+          return text_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream response body timed out",
+          );
+        }
+        warn!(error = %error, "failed to read upstream response body for WAF inspection");
+        return text_response(
+          StatusCode::BAD_GATEWAY,
+          "failed to read upstream response body",
+        );
+      }
+    }
+  } else {
+    (body, None)
+  };
+  let response_body = captured_response_body.as_ref().map(waf_body_input);
+
   if state.waf.has_response_rules(&resolved.route.name) {
     access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
     let request_input = WafRequestInput {
@@ -1105,6 +1143,7 @@ where
       version: parts.version,
       status: parts.status,
       headers: &parts.headers,
+      body: response_body,
       upstream_name: &upstream.name,
       upstream_pool: access_log.upstream_pool.as_deref(),
       upstream_scheme: upstream.origin.scheme(),

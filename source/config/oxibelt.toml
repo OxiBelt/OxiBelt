@@ -313,6 +313,16 @@ max_helper_pattern_count = 32
 max_helper_result_bytes = 8192
 max_person_proof_reuse_tokens = 4096
 
+[waf.crs]
+enabled = false
+mode = "monitor" # monitor | enforcing
+setup_file = "crs/crs-setup.conf"
+rule_files = ["crs/rules/*.conf"]
+paranoia_level = 1
+inbound_anomaly_score_threshold = 5
+outbound_anomaly_score_threshold = 4
+unsupported_directive_policy = "fail_closed"
+
 #[[waf.rules]]
 # name = "shadow-admin-block"
 # id = "shadow-admin-block"

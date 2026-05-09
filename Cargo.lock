@@ -1399,6 +1399,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "url",
  "web-transport-quinn",
  "webpki-roots 1.0.7",

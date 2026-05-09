@@ -725,6 +725,437 @@ body = "blocked binary format"
 }
 
 #[test]
+fn normalized_request_view_decodes_path_query_headers_and_cookies() {
+    let temp_dir = common::TempDir::new("waf-normalized-view");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-normalized-view");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "normalized-view"
+phase = "request"
+priority = 10
+when = "Request.Http.Path != Request.Normalized.Http.Path && Request.Normalized.Http.Path == '/admin/secret' && Request.Normalized.Http.Query.contains('role=admin') && Request.Normalized.Headers.get('x-user') == 'alice root' && Request.Normalized.QueryParams.get('role') == 'admin' && Request.Normalized.Cookies.get('theme') == 'dark mode'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "normalized"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let mut headers = HeaderMap::new();
+    headers.insert("x-user", HeaderValue::from_static("  ALICE%20ROOT  "));
+    headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_static("session=One; theme=Dark%20Mode"),
+    );
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/safe/%2e%2e/Admin/%53ecret?role=%41DMIN&bad=%ZZ"
+        .parse()
+        .expect("URI should parse");
+
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn request_and_response_body_text_scan_helpers_match_bounded_bodies() {
+    let temp_dir = common::TempDir::new("waf-body-scan-helpers");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-body-scan-helpers");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.pattern_sets]]
+name = "request-secrets"
+kind = "regex"
+patterns = ["boundary.secret"]
+
+[[waf.pattern_sets]]
+name = "response-secrets"
+kind = "contains"
+patterns = ["token"]
+
+[[waf.rules]]
+name = "request-body-text"
+mode = "monitor"
+phase = "request"
+priority = 10
+when = "Request.Body.Text.contains('hello')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 422
+body = "request body"
+
+[[waf.rules]]
+name = "request-body-contains"
+mode = "monitor"
+phase = "request"
+priority = 11
+when = "Request.Body.contains('boundary secret')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 422
+body = "request body"
+
+[[waf.rules]]
+name = "request-body-matches"
+mode = "monitor"
+phase = "request"
+priority = 12
+when = "Request.Body.matches('boundary.secret')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 422
+body = "request body"
+
+[[waf.rules]]
+name = "request-body-pattern-set"
+mode = "monitor"
+phase = "request"
+priority = 13
+when = "Request.Body.matchesAny('request-secrets')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 422
+body = "request body"
+
+[[waf.rules]]
+name = "request-body-scan-result"
+mode = "monitor"
+phase = "request"
+priority = 14
+when = "Request.Body.scan('request-secrets').Matched && Request.Body.scan('request-secrets').Match == 'boundary secret' && Request.Body.scan('request-secrets').IsTruncated"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 422
+body = "request body"
+
+[[waf.rules]]
+name = "response-body-text"
+mode = "monitor"
+phase = "response"
+priority = 10
+when = "Response.Body.Text.contains('leak')"
+
+[[waf.rules.actions]]
+type = "continue_response"
+
+[[waf.rules]]
+name = "response-body-pattern-set"
+mode = "monitor"
+phase = "response"
+priority = 11
+when = "Response.Body.containsAny('response-secrets')"
+
+[[waf.rules.actions]]
+type = "continue_response"
+
+[[waf.rules]]
+name = "response-body-scan-result"
+phase = "response"
+priority = 12
+when = "Response.Body.scan('response-secrets').Matched && Response.Body.scan('response-secrets').Offset == 5 && !Response.Body.scan('response-secrets').IsTruncated"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 451
+body = "response body"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert!(engine.requires_request_body_inspection("app-root"));
+    assert!(engine.requires_response_body_inspection("app-root"));
+
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let rejected = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        b"hello boundary secret trailer",
+        true,
+    ));
+    assert!(rejected.terminal.is_none());
+    for name in [
+        "request-body-text",
+        "request-body-contains",
+        "request-body-matches",
+        "request-body-pattern-set",
+        "request-body-scan-result",
+    ] {
+        let hit = engine
+            .rule_hit_snapshots()
+            .into_iter()
+            .find(|hit| hit.name == name)
+            .unwrap_or_else(|| panic!("missing hit snapshot for {name}"));
+        assert_eq!(hit.hits, 1, "expected {name} to match once");
+    }
+
+    let response_headers = HeaderMap::new();
+    let response = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: Some(WafBodyInput {
+            bytes: b"leak token here",
+            is_truncated: false,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert_eq!(
+        response.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+    for name in [
+        "response-body-text",
+        "response-body-pattern-set",
+        "response-body-scan-result",
+    ] {
+        let hit = engine
+            .rule_hit_snapshots()
+            .into_iter()
+            .find(|hit| hit.name == name)
+            .unwrap_or_else(|| panic!("missing hit snapshot for {name}"));
+        assert_eq!(hit.hits, 1, "expected {name} to match once");
+    }
+}
+
+#[test]
+fn crs_monitor_mode_scores_and_counts_without_blocking() {
+    let (_temp_dir, config) = load_crs_fixture_config("waf-crs-monitor", "monitor");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert!(engine.requires_request_body_inspection("app-root"));
+    assert!(engine.requires_response_body_inspection("app-root"));
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::POST;
+    let uri: Uri = "/search?q=UNION%20SELECT"
+        .parse()
+        .expect("URI should parse");
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let request_decision = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        b"normal request body",
+        false,
+    ));
+    assert!(request_decision.terminal.is_none());
+
+    let inbound_hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.id.as_deref() == Some("942100"))
+        .expect("CRS inbound rule should have a snapshot");
+    assert_eq!(inbound_hit.scope, "crs");
+    assert_eq!(inbound_hit.effective_mode, "monitor");
+    assert_eq!(inbound_hit.hits, 1);
+    assert_eq!(inbound_hit.latest_inbound_anomaly_score, Some(5));
+
+    let response_headers = HeaderMap::new();
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: Some(WafBodyInput {
+            bytes: b"public body with secret-leak marker",
+            is_truncated: false,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert!(response_decision.terminal.is_none());
+
+    let outbound_hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.id.as_deref() == Some("951100"))
+        .expect("CRS outbound rule should have a snapshot");
+    assert_eq!(outbound_hit.hits, 1);
+    assert_eq!(outbound_hit.latest_outbound_anomaly_score, Some(4));
+}
+
+#[test]
+fn crs_enforcing_blocks_request_and_response_body_by_anomaly_threshold() {
+    let (_temp_dir, config) = load_crs_fixture_config("waf-crs-enforcing", "enforcing");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::POST;
+    let uri: Uri = "/search?q=union%20select"
+        .parse()
+        .expect("URI should parse");
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let request_decision = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        b"normal request body",
+        false,
+    ));
+    assert_eq!(
+        request_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let ok_uri: Uri = "/ok".parse().expect("URI should parse");
+    let response_headers = HeaderMap::new();
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &ok_uri, &headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: Some(WafBodyInput {
+            bytes: b"public body with secret-leak marker",
+            is_truncated: false,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert_eq!(
+        response_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::BAD_GATEWAY)
+    );
+}
+
+#[test]
+fn config_rejects_crs_path_escaping() {
+    let temp_dir = common::TempDir::new("waf-crs-path-escape");
+    let layout = temp_dir.path();
+    std::fs::create_dir_all(layout.join("config")).expect("config dir should be created");
+    std::fs::create_dir_all(layout.join("cert")).expect("cert dir should be created");
+    std::fs::create_dir_all(layout.join("oxirule/crs/rules"))
+        .expect("oxirule dir should be created");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&layout.join("cert"), "waf-crs-path-escape");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml_with_paths(
+            cert_path.file_name().unwrap().to_str().unwrap(),
+            key_path.file_name().unwrap().to_str().unwrap(),
+        ),
+        r#"
+[waf]
+enabled = true
+
+[waf.crs]
+enabled = true
+setup_file = "crs/crs-setup.conf"
+rule_files = ["../escape.conf"]
+"#
+    );
+    let config_path = layout.join("config/oxibelt.toml");
+    std::fs::write(&config_path, raw).expect("config should be written");
+    std::fs::write(layout.join("oxirule/crs/crs-setup.conf"), "")
+        .expect("setup file should be written");
+
+    let error = Config::load(&config_path).expect_err("path escaping should fail");
+    assert!(
+        error.to_string().contains("waf.crs.rule_files"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn crs_unsupported_syntax_fails_closed_during_compile() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule(
+        "waf-crs-unsupported",
+        "monitor",
+        r#"
+SecRule REQUEST_URI "@unknownOperator test" "id:999001,phase:1,msg:'unsupported'"
+"#,
+    );
+
+    let error = match WafEngine::new(&config) {
+        Ok(_) => panic!("unsupported CRS syntax should fail closed"),
+        Err(error) => error,
+    };
+    let error_chain = format!("{error:#}");
+    assert!(
+        error_chain.contains("unsupported CRS operator"),
+        "unexpected error: {error_chain}"
+    );
+}
+
+#[test]
 fn request_rule_can_match_tcp_max_hop_metadata() {
     let temp_dir = common::TempDir::new("waf-tcp-hop-metadata");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-tcp-hop");
@@ -1080,6 +1511,7 @@ value = "no-store"
         version: http::Version::HTTP_11,
         status: StatusCode::INTERNAL_SERVER_ERROR,
         headers: &response_headers,
+        body: None,
         upstream_name: "app",
         upstream_pool: None,
         upstream_scheme: "http",
@@ -1173,6 +1605,7 @@ value = "Context.RuleName"
         version: http::Version::HTTP_11,
         status: StatusCode::CREATED,
         headers: &response_headers,
+        body: None,
         upstream_name: "app",
         upstream_pool: None,
         upstream_scheme: "http",
@@ -1240,6 +1673,7 @@ fn system_access_log_default_fields_preserve_duplicate_user_agents() {
                 version: http::Version::HTTP_11,
                 status: StatusCode::CREATED,
                 headers: &response_headers,
+                body: None,
                 upstream_name: "app",
                 upstream_pool: None,
                 upstream_scheme: "http",
@@ -1314,6 +1748,7 @@ type = "emit_access_log"
         version: http::Version::HTTP_11,
         status: StatusCode::CREATED,
         headers: &response_headers,
+        body: None,
         upstream_name: "app",
         upstream_pool: None,
         upstream_scheme: "http",
@@ -1420,6 +1855,7 @@ value = "Response.Upstream.FirstByteTimeMs"
         version: http::Version::HTTP_11,
         status: StatusCode::OK,
         headers: &response_headers,
+        body: None,
         upstream_name: "app",
         upstream_pool: Some("main-pool"),
         upstream_scheme: "http",
@@ -3004,6 +3440,69 @@ token_bindings = ["tcp_max_hop"]
         error.to_string().contains("requires tcp_max_hop"),
         "unexpected error: {error}"
     );
+}
+
+fn load_crs_fixture_config(prefix: &str, mode: &str) -> (common::TempDir, Config) {
+    load_crs_fixture_config_with_rule(
+        prefix,
+        mode,
+        r#"
+SecRule REQUEST_URI "@contains union select" "id:942100,phase:2,t:urlDecodeUni,t:lowercase,msg:'SQLi',tag:'paranoia-level/1',severity:'CRITICAL',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+SecRule REQUEST_BODY "@contains body-threat" "id:942101,phase:2,t:lowercase,msg:'Request body threat',tag:'paranoia-level/1',severity:'CRITICAL',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+SecRule RESPONSE_BODY "@contains secret-leak" "id:951100,phase:4,t:lowercase,msg:'Leak',tag:'paranoia-level/1',severity:'ERROR',setvar:'tx.outbound_anomaly_score=+%{tx.error_anomaly_score}'"
+"#,
+    )
+}
+
+fn load_crs_fixture_config_with_rule(
+    prefix: &str,
+    mode: &str,
+    rule_file: &str,
+) -> (common::TempDir, Config) {
+    let temp_dir = common::TempDir::new(prefix);
+    let layout = temp_dir.path();
+    let config_dir = layout.join("config");
+    let cert_dir = layout.join("cert");
+    let oxirule_rules_dir = layout.join("oxirule/crs/rules");
+    std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+    std::fs::create_dir_all(&cert_dir).expect("cert dir should be created");
+    std::fs::create_dir_all(&oxirule_rules_dir).expect("CRS rules dir should be created");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, prefix);
+    std::fs::write(layout.join("oxirule/crs/crs-setup.conf"), "")
+        .expect("CRS setup file should be written");
+    std::fs::write(oxirule_rules_dir.join("REQUEST-942.conf"), rule_file)
+        .expect("CRS rule file should be written");
+    let base = common::minimal_config_toml_with_paths(
+        cert_path.file_name().unwrap().to_str().unwrap(),
+        key_path.file_name().unwrap().to_str().unwrap(),
+    );
+    let raw = format!(
+        r#"{base}
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[waf.limits]
+max_body_inspection_bytes = 128
+
+[waf.crs]
+enabled = true
+mode = "{mode}"
+setup_file = "crs/crs-setup.conf"
+rule_files = ["crs/rules/*.conf"]
+paranoia_level = 1
+inbound_anomaly_score_threshold = 5
+outbound_anomaly_score_threshold = 4
+unsupported_directive_policy = "fail_closed"
+"#
+    );
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(&config_path, raw).expect("config should be written");
+    let config = Config::load(&config_path).expect("config should load");
+    config.validate().expect("config should validate");
+    (temp_dir, config)
 }
 
 fn evaluate_simple_request(engine: &WafEngine, path: &str) -> oxibelt::waf::RequestWafDecision {

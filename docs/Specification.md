@@ -30,11 +30,11 @@ At a high level, each HTTP transaction follows this order:
 3. Terminate downstream TLS and collect transport metadata, including SNI, ALPN, client certificate presence, and QUIC metadata where available.
 4. Parse the HTTP request and normalize the client IP used for Real-IP connection-limit modes, rate limits, and WAF evaluation.
 5. Match a route by host and path prefix.
-6. Evaluate request-phase OxiRule rules when WAF is enabled.
+6. Evaluate request-phase OxiRule rules and enabled CRS phase 1/2 rules when WAF is enabled.
 7. Select the configured upstream or upstream pool, optionally using request-phase routing actions.
 8. Apply the effective request buffering policy, normalize forwarded headers, and forward the request upstream.
 9. Build a response context from the upstream response or from a synthetic upstream-error response.
-10. Evaluate response-phase OxiRule rules when WAF is enabled.
+10. Evaluate response-phase OxiRule rules and enabled CRS phase 3/4 rules when WAF is enabled.
 11. Apply response mutations, the effective response buffering policy, cache behavior, structured access-log actions, and response forwarding back to the downstream client.
 
 If a validation, runtime, or WAF policy failure occurs, the configured fail policy determines whether OxiBelt rejects the transaction or allows it to continue.
@@ -131,11 +131,13 @@ Rules can be attached globally under `[[waf.rules]]` or under `[[routes.waf.rule
 
 Request-phase rules can reject, rate-limit, mutate request headers, set transaction tags, require Person proof, or choose an upstream/pool before forwarding. Response-phase rules can continue, replace, or reject responses, mutate response headers, and emit structured access logs.
 
+The optional CRS compatibility layer loads ModSecurity-style CRS setup/rule files from the OxiRule directory. It supports request/response phases 1 through 4, bounded request/response body prefix inspection with replay, normalized CRS transforms, `tx` variables, chained rules, macro expansion, `setvar`, paranoia-level tags, and anomaly scoring. CRS defaults to `monitor`; `enforcing` mode blocks at configured inbound/outbound anomaly thresholds. Unsupported CRS syntax fails closed during configuration load/compile.
+
 The rule engine is intentionally bounded:
 
 - No loops, callbacks, user-defined functions, imports, external I/O, or general-purpose scripting.
 - Runtime, step, memory, regex, body-inspection, helper, and mutation budgets.
-- Bounded helper APIs for headers, query parameters, cookies, tags, body byte inspection, and pattern sets.
+- Bounded helper APIs for raw and normalized headers, query parameters, cookies, tags, body byte/text inspection, response body prefix inspection, body pattern scanning, and pattern sets.
 
 See [OxiRule.md](OxiRule.md) for the full rule reference.
 
@@ -198,8 +200,6 @@ The current implementation intentionally leaves these as future work:
 - WebRTC media forwarding.
 - TCP stream proxying, generic HTTP upgrade, CONNECT tunneling, gRPC health checks, gRPC-Web translation, and PROXY protocol egress for TCP upstreams.
 - Passing `103 Early Hints`.
-- Streaming-safe WAF text scanning helpers such as `Body.contains`, `Body.matches`, and `Body.scan`.
-- Response body byte inspection.
 - WAF frame-level or datagram-level WebTransport inspection.
 - Downstream ECH configuration.
 - General-purpose scripting, user-defined OxiRule functions, imports, loops, callbacks, and unbounded comprehensions.

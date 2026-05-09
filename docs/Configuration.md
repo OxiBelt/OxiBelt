@@ -662,6 +662,16 @@ max_person_proof_reuse_tokens = 4096
 name = "sql-injection-keywords"
 kind = "contains" # contains | regex
 patterns = ["UNION SELECT", "DROP TABLE", "information_schema"]
+
+[waf.crs]
+enabled = false
+mode = "monitor" # monitor | enforcing
+setup_file = "crs/crs-setup.conf"
+rule_files = ["crs/rules/*.conf"]
+paranoia_level = 1
+inbound_anomaly_score_threshold = 5
+outbound_anomaly_score_threshold = 4
+unsupported_directive_policy = "fail_closed"
 ```
 
 Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. External rule entries use `path` and resolve under the oxirule directory. A rule entry must specify exactly one of `when` or `path`.
@@ -683,6 +693,8 @@ body = "Forbidden"
 ```
 
 `[waf].mode` sets the default mode for all rules. A rule-level `mode` overrides that default in both directions: `monitor` counts matches without applying actions, while `enforcing` applies actions normally.
+
+`[waf.crs]` enables the CRS-compatible execution layer. It loads `setup_file` and each `rule_files` glob from the OxiRule directory, using the same normalized relative path restrictions as external OxiRule files. CRS starts in `monitor` mode by default so hits and anomaly scores are recorded without blocking; set `mode = "enforcing"` to apply inbound and outbound anomaly thresholds. Unsupported CRS directives, operators, transforms, or actions fail closed at configuration load/compile time and report the file and line that must be changed.
 
 Rule syntax, actions, helpers, and Person proof settings are documented in [OxiRule.md](OxiRule.md).
 

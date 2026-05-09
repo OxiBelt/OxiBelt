@@ -2346,6 +2346,84 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "waf-crs",
+            "request-response-full",
+            "CRS-compatible rules enforce request and response phases 1 through 4",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request_with_headers "example.test" "/app/phase1" 403 "GET" "" "User-Agent: phase1-probe")"
+  assert_response_jq "${response}" '.body == "Blocked by CRS"'
+
+  response="$(split_body_client_request "example.test" "/app/phase2" 403 "POST" "prefix body-threat suffix" 10 100 "Content-Type: text/plain")"
+  assert_response_jq "${response}" '.body == "Blocked by CRS"'
+
+  response="$(client_request "example.test" "/app/phase3?content_type=text/crs-phase3&body=safe" 502)"
+  assert_response_jq "${response}" '.body == "Blocked by CRS"'
+
+  response="$(client_request "example.test" "/app/phase4?content_type=text/plain&body=prefix-secret-leak-suffix" 502)"
+  assert_response_jq "${response}" '.body == "Blocked by CRS"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "waf-crs",
+            "monitor-first",
+            "default CRS monitor mode allows traffic while recording hits and anomaly scores",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response admin metrics
+  response="$(client_request "example.test" "/app/monitor?q=UNION%20SELECT" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/monitor?q=UNION%20SELECT"'
+
+  response="$(client_request "example.test" "/app/leak?content_type=text/plain&body=secret-leak" 200)"
+  assert_response_jq "${response}" '.body == "secret-leak"'
+
+  admin="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/waf/rule-hits" 200 "GET" "" "Authorization: Bearer matrix-viewer-token")"
+  assert_body_jq "${admin}" '([.rules[] | select(.scope == "crs" and .phase == "request" and .id == "942100" and .effective_mode == "monitor" and .hits == 1 and .latest_inbound_anomaly_score == 5)] | length) == 1'
+  assert_body_jq "${admin}" '([.rules[] | select(.scope == "crs" and .phase == "response" and .id == "951100" and .effective_mode == "monitor" and .hits == 1 and .latest_outbound_anomaly_score == 4)] | length) == 1'
+
+  metrics="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
+  assert_response_jq "${metrics}" '.body | contains("oxibelt_waf_rule_hits_total") | not'
+  assert_response_jq "${metrics}" '.body | contains("942100") | not'
+  assert_response_jq "${metrics}" '.body | contains("951100") | not'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "waf-request",
+            "normalized-crs-request",
+            "CRS transforms detect encoded traversal and SQLi request payloads",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/download?file=%2e%2e%2fetc%2fpasswd" 403)"
+  assert_response_jq "${response}" '.body == "Blocked by CRS"'
+
+  response="$(client_request "example.test" "/app/search?q=UNION%20SELECT" 403)"
+  assert_response_jq "${response}" '.body == "Blocked by CRS"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "waf-request",
             "route-to-upstream",
             "request rule can override the selected upstream",
@@ -2601,6 +2679,24 @@ run_case_checks() {
   local response
   response="$(client_request_with_headers "example.test" "/app/upload" 415 "POST" "plain text body" "Content-Type: application/octet-stream")"
   assert_response_jq "${response}" '.body == "not png"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "waf-helpers",
+            "body-streaming-scan",
+            "bounded request body scan detects a pattern split across body frames",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(split_body_client_request "example.test" "/app/stream" 403 "POST" "prefix split-secret suffix" 11 100 "Content-Type: text/plain")"
+  assert_response_jq "${response}" '.body == "streaming scan matched"'
 }
 "#,
             None,

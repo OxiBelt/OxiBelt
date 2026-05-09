@@ -22,8 +22,16 @@ use crate::limits::{LimitState, RateLimitCheck, RateLimitContext};
 use crate::routes::normalize_host;
 use crate::shared_state::SharedState;
 
+mod body_scan;
+mod crs;
+mod normalization;
 mod person_proof;
 
+use crs::{CrsDecision, CrsEngine, WafCrsConfig};
+use normalization::{
+  normalize_cookie_pairs, normalize_header_pairs, normalize_query_pairs, normalized_http_path,
+  normalized_http_query, normalized_http_uri,
+};
 use person_proof::{
   PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
 };
@@ -41,6 +49,8 @@ pub struct WafConfig {
   #[serde(default)]
   pub limits: WafLimits,
   #[serde(default)]
+  pub crs: WafCrsConfig,
+  #[serde(default)]
   pub rules: Vec<WafRuleConfig>,
   #[serde(default)]
   pub pattern_sets: Vec<WafPatternSetConfig>,
@@ -54,6 +64,7 @@ impl Default for WafConfig {
       fail_policy: WafFailPolicy::Closed,
       duplicate_metadata_policy: WafDuplicateMetadataPolicy::FailClosed,
       limits: WafLimits::default(),
+      crs: WafCrsConfig::default(),
       rules: Vec::new(),
       pattern_sets: Vec::new(),
     }
@@ -357,6 +368,7 @@ struct ExternalRuleFile {
 
 impl WafConfig {
   pub fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
+    self.crs.resolve_relative_paths(base_dir)?;
     for rule in &mut self.rules {
       resolve_rule_path(rule, base_dir)?;
     }
@@ -371,7 +383,7 @@ impl WafConfig {
   }
 
   pub fn loaded_rule_paths(&self) -> Vec<PathBuf> {
-    self
+    let mut paths = self
       .rules
       .iter()
       .filter_map(|rule| {
@@ -380,7 +392,9 @@ impl WafConfig {
           .clone()
           .or_else(|| rule.loaded_from_path.clone())
       })
-      .collect()
+      .collect::<Vec<_>>();
+    paths.extend(self.crs.loaded_paths());
+    paths
   }
 }
 
@@ -453,6 +467,20 @@ fn load_external_rule(rule: &mut WafRuleConfig) -> anyhow::Result<()> {
 pub fn validate_config(config: &Config) -> anyhow::Result<()> {
   if config.waf.limits.max_person_proof_reuse_tokens == 0 {
     bail!("waf.limits.max_person_proof_reuse_tokens must be greater than 0");
+  }
+  if config.waf.crs.enabled {
+    if !(1..=4).contains(&config.waf.crs.paranoia_level) {
+      bail!("waf.crs.paranoia_level must be between 1 and 4");
+    }
+    if config.waf.crs.inbound_anomaly_score_threshold <= 0 {
+      bail!("waf.crs.inbound_anomaly_score_threshold must be greater than 0");
+    }
+    if config.waf.crs.outbound_anomaly_score_threshold <= 0 {
+      bail!("waf.crs.outbound_anomaly_score_threshold must be greater than 0");
+    }
+    if config.waf.crs.rule_files.is_empty() {
+      bail!("waf.crs.rule_files must include at least one entry when CRS is enabled");
+    }
   }
 
   let upstream_names = config
@@ -925,6 +953,7 @@ pub struct WafEngine {
   pattern_sets: HashMap<String, CompiledPatternSet>,
   global_rules: Vec<CompiledRule>,
   route_rules: HashMap<String, Vec<CompiledRule>>,
+  crs: CrsEngine,
   rate_limits: Arc<LimitState>,
   person_proof: PersonProofEngine,
   person_proof_tcp_max_hop: Option<u8>,
@@ -954,8 +983,12 @@ impl WafEngine {
     let previous_counters = previous
       .map(WafEngine::active_hit_counters)
       .unwrap_or_default();
+    let previous_crs_counters = previous
+      .map(|engine| engine.crs.active_hit_counters())
+      .unwrap_or_default();
     let rate_limits = rate_limits.unwrap_or_else(|| LimitState::new(shared_state.clone()));
     let pattern_sets = compile_pattern_sets(&config.waf.pattern_sets, &config.waf.limits)?;
+    let crs = CrsEngine::compile(&config.waf.crs, &previous_crs_counters)?;
     let global_rules = compile_rules(
       &config.waf.rules,
       WafRuleScope::global(),
@@ -1000,6 +1033,7 @@ impl WafEngine {
       pattern_sets,
       global_rules,
       route_rules,
+      crs,
       rate_limits,
       person_proof,
       person_proof_tcp_max_hop,
@@ -1021,6 +1055,7 @@ impl WafEngine {
       .chain(self.route_rules.values().flat_map(|rules| rules.iter()))
       .map(CompiledRule::hit_snapshot)
       .collect::<Vec<_>>();
+    snapshots.extend(self.crs.rule_hit_snapshots());
     snapshots.sort_by(|left, right| {
       left
         .scope
@@ -1036,10 +1071,11 @@ impl WafEngine {
 
   pub fn has_response_rules(&self, route_name: &str) -> bool {
     self.enabled
-      && (self
-        .global_rules
-        .iter()
-        .any(|rule| rule.phase == WafPhase::Response)
+      && (self.crs.enabled()
+        || self
+          .global_rules
+          .iter()
+          .any(|rule| rule.phase == WafPhase::Response)
         || self
           .route_rules
           .get(route_name)
@@ -1049,10 +1085,20 @@ impl WafEngine {
 
   pub fn requires_request_body_inspection(&self, route_name: &str) -> bool {
     self.enabled
-      && self
-        .rules_for(route_name, WafPhase::Request)
-        .iter()
-        .any(|rule| rule.requires_request_body_inspection)
+      && (self.crs.requires_request_body_inspection()
+        || self
+          .rules_for(route_name, WafPhase::Request)
+          .iter()
+          .any(|rule| rule.requires_request_body_inspection))
+  }
+
+  pub fn requires_response_body_inspection(&self, route_name: &str) -> bool {
+    self.enabled
+      && (self.crs.requires_response_body_inspection()
+        || self
+          .rules_for(route_name, WafPhase::Response)
+          .iter()
+          .any(|rule| rule.requires_response_body_inspection()))
   }
 
   pub fn evaluate_request(&self, input: WafRequestInput<'_>) -> RequestWafDecision {
@@ -1226,6 +1272,15 @@ impl WafEngine {
       }
     }
 
+    let request = WafRequestInput {
+      tags: &active_tags,
+      ..input
+    };
+    apply_crs_request_decision(self.crs.evaluate_request(request)?, &mut decision);
+    if decision.terminal.is_some() {
+      return Ok(decision);
+    }
+
     Ok(decision)
   }
 
@@ -1272,6 +1327,11 @@ impl WafEngine {
       if decision.terminal.is_some() {
         return Ok(decision);
       }
+    }
+
+    apply_crs_response_decision(self.crs.evaluate_response(input)?, &mut decision);
+    if decision.terminal.is_some() {
+      return Ok(decision);
     }
 
     Ok(decision)
@@ -1602,6 +1662,10 @@ pub struct WafRuleHitSnapshot {
   pub id: Option<String>,
   pub effective_mode: String,
   pub hits: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub latest_inbound_anomaly_score: Option<i64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub latest_outbound_anomaly_score: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -1637,7 +1701,13 @@ impl CompiledRule {
       id: self.id.clone(),
       effective_mode: self.mode.as_str().to_string(),
       hits: self.hit_counter.load(Ordering::Relaxed),
+      latest_inbound_anomaly_score: None,
+      latest_outbound_anomaly_score: None,
     }
+  }
+
+  fn requires_response_body_inspection(&self) -> bool {
+    self.phase == WafPhase::Response && self.expression.requires_response_body_inspection()
   }
 }
 
@@ -1740,6 +1810,7 @@ pub struct WafResponseInput<'a> {
   pub version: Version,
   pub status: StatusCode,
   pub headers: &'a HeaderMap,
+  pub body: Option<WafBodyInput<'a>>,
   pub upstream_name: &'a str,
   pub upstream_pool: Option<&'a str>,
   pub upstream_scheme: &'a str,
@@ -1789,6 +1860,18 @@ fn person_proof_rate_limited_decision() -> RequestWafDecision {
       "person proof token capacity exhausted".to_string(),
     )),
     ..RequestWafDecision::default()
+  }
+}
+
+fn apply_crs_request_decision(crs: CrsDecision, decision: &mut RequestWafDecision) {
+  if decision.terminal.is_none() {
+    decision.terminal = crs.terminal;
+  }
+}
+
+fn apply_crs_response_decision(crs: CrsDecision, decision: &mut ResponseWafDecision) {
+  if decision.terminal.is_none() {
+    decision.terminal = crs.terminal;
   }
 }
 
@@ -2092,6 +2175,25 @@ impl AccessLogJsonValue {
         ctx.limits.max_helper_result_bytes,
       ))),
       Value::StringList(list) => Ok(Self::bounded_string_list(list, ctx.limits)),
+      Value::BodyScanResult(result) => Ok(Self::Object(vec![
+        ("matched".to_string(), Self::Bool(result.matched)),
+        (
+          "pattern".to_string(),
+          result.pattern.map(Self::String).unwrap_or(Self::Null),
+        ),
+        (
+          "offset".to_string(),
+          result
+            .offset
+            .map(|offset| Self::Int(offset as i64))
+            .unwrap_or(Self::Null),
+        ),
+        (
+          "match".to_string(),
+          result.matched_text.map(Self::String).unwrap_or(Self::Null),
+        ),
+        ("is_truncated".to_string(), Self::Bool(result.is_truncated)),
+      ])),
       Value::Object(object) => Self::from_object(object, ctx),
       Value::Null => Ok(Self::Null),
       Value::Bytes(_) => bail!("emit_access_log fields cannot write raw Bytes"),
@@ -2145,6 +2247,24 @@ impl AccessLogJsonValue {
         ],
         ctx,
       ),
+      ObjectRef::RequestNormalized => {
+        object_members_json(object, &["Http", "Headers", "QueryParams", "Cookies"], ctx)
+      }
+      ObjectRef::RequestNormalizedHttp => {
+        object_members_json(object, &["Path", "Query", "Uri"], ctx)
+      }
+      ObjectRef::RequestNormalizedHeaders => Ok(pair_map_json(
+        normalize_header_pairs(ctx.request.headers),
+        ctx.limits,
+      )),
+      ObjectRef::RequestNormalizedQueryParams => Ok(pair_map_json(
+        normalize_query_pairs(ctx.request.uri),
+        ctx.limits,
+      )),
+      ObjectRef::RequestNormalizedCookies => Ok(pair_map_json(
+        normalize_cookie_pairs(ctx.request.headers),
+        ctx.limits,
+      )),
       ObjectRef::RequestClient => object_members_json(
         object,
         &[
@@ -2623,7 +2743,8 @@ impl Expr {
     match self {
       Self::Member(receiver, field) => {
         receiver.requires_request_body_inspection()
-          || (matches!(field.as_str(), "Bytes" | "IsTruncated") && receiver.is_request_body_expr())
+          || (matches!(field.as_str(), "Bytes" | "Text" | "IsTruncated")
+            && receiver.is_request_body_expr())
       }
       Self::Call(receiver, method, args) => {
         receiver.requires_request_body_inspection()
@@ -2634,6 +2755,27 @@ impl Expr {
       Self::UnaryNot(expr) => expr.requires_request_body_inspection(),
       Self::Binary(left, _, right) => {
         left.requires_request_body_inspection() || right.requires_request_body_inspection()
+      }
+      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
+    }
+  }
+
+  fn requires_response_body_inspection(&self) -> bool {
+    match self {
+      Self::Member(receiver, field) => {
+        receiver.requires_response_body_inspection()
+          || (matches!(field.as_str(), "Bytes" | "Text" | "IsTruncated")
+            && receiver.is_response_body_expr())
+      }
+      Self::Call(receiver, method, args) => {
+        receiver.requires_response_body_inspection()
+          || args.iter().any(Self::requires_response_body_inspection)
+          || (receiver.is_response_body_expr() && body_content_method(method))
+          || (receiver.is_response_body_bytes_expr() && bytes_content_method(method))
+      }
+      Self::UnaryNot(expr) => expr.requires_response_body_inspection(),
+      Self::Binary(left, _, right) => {
+        left.requires_response_body_inspection() || right.requires_response_body_inspection()
       }
       Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
     }
@@ -2652,12 +2794,33 @@ impl Expr {
     matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_request_body_expr())
   }
 
+  fn is_response_body_expr(&self) -> bool {
+    match self {
+      Self::Member(receiver, field) if field == "Body" => {
+        receiver.is_response_expr() || receiver.is_response_http_expr()
+      }
+      _ => false,
+    }
+  }
+
+  fn is_response_body_bytes_expr(&self) -> bool {
+    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_response_body_expr())
+  }
+
   fn is_request_expr(&self) -> bool {
     matches!(self, Self::Ident(name) if name == "Request")
   }
 
+  fn is_response_expr(&self) -> bool {
+    matches!(self, Self::Ident(name) if name == "Response")
+  }
+
   fn is_request_http_expr(&self) -> bool {
     matches!(self, Self::Member(receiver, field) if field == "Http" && receiver.is_request_expr())
+  }
+
+  fn is_response_http_expr(&self) -> bool {
+    matches!(self, Self::Member(receiver, field) if field == "Http" && receiver.is_response_expr())
   }
 
   fn eval(&self, ctx: &EvalContext<'_>, tx: &mut TransactionBudget) -> anyhow::Result<Value> {
@@ -2693,6 +2856,7 @@ enum Value {
   String(String),
   Bytes(Vec<u8>),
   StringList(BoundedStringList),
+  BodyScanResult(body_scan::BodyScanResult),
   Null,
   Object(ObjectRef),
 }
@@ -2728,6 +2892,11 @@ enum ObjectRef {
   Context,
   ContextRuleTags,
   Request,
+  RequestNormalized,
+  RequestNormalizedHttp,
+  RequestNormalizedHeaders,
+  RequestNormalizedQueryParams,
+  RequestNormalizedCookies,
   RequestClient,
   RequestClientPersonProof,
   RequestClientAgent,
@@ -2769,6 +2938,9 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
   if let Value::StringList(list) = value {
     return eval_string_list_member(list, field);
   }
+  if let Value::BodyScanResult(result) = value {
+    return eval_body_scan_result_member(result, field);
+  }
 
   let object = match value {
     Value::Object(object) => object,
@@ -2805,6 +2977,7 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::Request, "Client") => Ok(Value::Object(ObjectRef::RequestClient)),
     (ObjectRef::Request, "Transport") => Ok(Value::Object(ObjectRef::RequestTransport)),
     (ObjectRef::Request, "Http") => Ok(Value::Object(ObjectRef::RequestHttp)),
+    (ObjectRef::Request, "Normalized") => Ok(Value::Object(ObjectRef::RequestNormalized)),
     (ObjectRef::Request, "Headers") => Ok(Value::Object(ObjectRef::RequestHeaders)),
     (ObjectRef::Request, "QueryParams") => Ok(Value::Object(ObjectRef::RequestQueryParams)),
     (ObjectRef::Request, "Cookies") => Ok(Value::Object(ObjectRef::RequestCookies)),
@@ -2930,6 +3103,25 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     | (ObjectRef::RequestTransportUdp, "FlowId")
     | (ObjectRef::RequestTransportUdp, "ConnectionId") => Ok(Value::Null),
     (ObjectRef::RequestTransportUdp, "QuicDetected") => Ok(Value::Bool(true)),
+    (ObjectRef::RequestNormalized, "Http") => Ok(Value::Object(ObjectRef::RequestNormalizedHttp)),
+    (ObjectRef::RequestNormalized, "Headers") => {
+      Ok(Value::Object(ObjectRef::RequestNormalizedHeaders))
+    }
+    (ObjectRef::RequestNormalized, "QueryParams") => {
+      Ok(Value::Object(ObjectRef::RequestNormalizedQueryParams))
+    }
+    (ObjectRef::RequestNormalized, "Cookies") => {
+      Ok(Value::Object(ObjectRef::RequestNormalizedCookies))
+    }
+    (ObjectRef::RequestNormalizedHttp, "Path") => {
+      Ok(Value::String(normalized_http_path(ctx.request.uri)))
+    }
+    (ObjectRef::RequestNormalizedHttp, "Query") => {
+      Ok(Value::String(normalized_http_query(ctx.request.uri)))
+    }
+    (ObjectRef::RequestNormalizedHttp, "Uri") => {
+      Ok(Value::String(normalized_http_uri(ctx.request.uri)))
+    }
     (ObjectRef::RequestHttp, "Version") => Ok(Value::String(version_string(ctx.request.version))),
     (ObjectRef::RequestHttp, "Method") => {
       Ok(Value::String(ctx.request.method.as_str().to_string()))
@@ -2961,7 +3153,13 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         .map(|body| Value::Bytes(body.bytes.to_vec()))
         .unwrap_or(Value::Null),
     ),
-    (ObjectRef::RequestBody, "Text") => Ok(Value::Null),
+    (ObjectRef::RequestBody, "Text") => Ok(
+      ctx
+        .request
+        .body
+        .map(|body| Value::String(body_scan::body_text(body.bytes)))
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::RequestTls, "Enabled") => Ok(Value::Bool(ctx.request.tls.enabled)),
     (ObjectRef::RequestTls, "Version") => Ok(
       ctx
@@ -3091,11 +3289,36 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         .unwrap_or(Value::Null),
     ),
     (ObjectRef::ResponseHttp, "Body") => Ok(Value::Object(ObjectRef::ResponseBody)),
-    (ObjectRef::ResponseBody, "Size") => Ok(Value::Int(content_length(
-      ctx.response.context("missing response context")?.headers,
-    ))),
-    (ObjectRef::ResponseBody, "IsTruncated") => Ok(Value::Bool(false)),
-    (ObjectRef::ResponseBody, "Text") | (ObjectRef::ResponseBody, "Bytes") => Ok(Value::Null),
+    (ObjectRef::ResponseBody, "Size") => {
+      let response = ctx.response.context("missing response context")?;
+      Ok(Value::Int(
+        response
+          .body
+          .map(|body| body.bytes.len() as i64)
+          .unwrap_or_else(|| content_length(response.headers)),
+      ))
+    }
+    (ObjectRef::ResponseBody, "IsTruncated") => Ok(Value::Bool(
+      ctx
+        .response
+        .and_then(|response| response.body)
+        .map(|body| body.is_truncated)
+        .unwrap_or(false),
+    )),
+    (ObjectRef::ResponseBody, "Text") => Ok(
+      ctx
+        .response
+        .and_then(|response| response.body)
+        .map(|body| Value::String(body_scan::body_text(body.bytes)))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::ResponseBody, "Bytes") => Ok(
+      ctx
+        .response
+        .and_then(|response| response.body)
+        .map(|body| Value::Bytes(body.bytes.to_vec()))
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::ResponseUpstream, "Name") => {
       let upstream_name = ctx
         .response
@@ -3206,6 +3429,12 @@ fn eval_call(
     Value::Object(ObjectRef::RequestHeaders) => {
       eval_header_call(ctx.request.headers, method, args, ctx)
     }
+    Value::Object(ObjectRef::RequestNormalizedHeaders) => eval_pair_map_call(
+      &normalize_header_pairs(ctx.request.headers),
+      method,
+      args,
+      ctx,
+    ),
     Value::Object(ObjectRef::ResponseHeaders) => eval_header_call(
       ctx.response.context("missing response context")?.headers,
       method,
@@ -3213,11 +3442,25 @@ fn eval_call(
       ctx,
     ),
     Value::Object(ObjectRef::RequestQueryParams) => eval_query_call(ctx, method, args),
+    Value::Object(ObjectRef::RequestNormalizedQueryParams) => {
+      eval_pair_map_call(&normalize_query_pairs(ctx.request.uri), method, args, ctx)
+    }
     Value::Object(ObjectRef::RequestCookies) => eval_cookie_call(ctx, method, args),
+    Value::Object(ObjectRef::RequestNormalizedCookies) => eval_pair_map_call(
+      &normalize_cookie_pairs(ctx.request.headers),
+      method,
+      args,
+      ctx,
+    ),
     Value::Object(ObjectRef::RequestTags) => eval_tag_call(ctx.request.tags, method, args, ctx),
     Value::Object(ObjectRef::RequestTokenBindings) => eval_token_binding_call(ctx, method, args),
-    Value::Object(ObjectRef::RequestBody) => eval_body_call(ctx.request.body, method, args),
-    Value::Object(ObjectRef::ResponseBody) => eval_body_call(None, method, args),
+    Value::Object(ObjectRef::RequestBody) => eval_body_call(ctx.request.body, method, args, ctx),
+    Value::Object(ObjectRef::ResponseBody) => eval_body_call(
+      ctx.response.and_then(|response| response.body),
+      method,
+      args,
+      ctx,
+    ),
     _ => bail!("method {method} is not available on {:?}", value),
   }
 }
@@ -3441,6 +3684,30 @@ fn eval_string_list_member(list: BoundedStringList, field: &str) -> anyhow::Resu
   }
 }
 
+fn eval_body_scan_result_member(
+  result: body_scan::BodyScanResult,
+  field: &str,
+) -> anyhow::Result<Value> {
+  match field {
+    "Matched" => Ok(Value::Bool(result.matched)),
+    "Pattern" => Ok(result.pattern.map(Value::String).unwrap_or(Value::Null)),
+    "Offset" => Ok(
+      result
+        .offset
+        .map(|offset| Value::Int(offset as i64))
+        .unwrap_or(Value::Null),
+    ),
+    "Match" => Ok(
+      result
+        .matched_text
+        .map(Value::String)
+        .unwrap_or(Value::Null),
+    ),
+    "IsTruncated" => Ok(Value::Bool(result.is_truncated)),
+    _ => bail!("unknown BodyScanResult property {field}"),
+  }
+}
+
 fn eval_string_list_call(
   list: &BoundedStringList,
   method: &str,
@@ -3592,6 +3859,7 @@ fn eval_body_call(
   body: Option<WafBodyInput<'_>>,
   method: &str,
   args: &[Value],
+  ctx: &EvalContext<'_>,
 ) -> anyhow::Result<Value> {
   match method {
     "isFormat" | "isBinaryFormat" | "matchesFormat" => {
@@ -3602,15 +3870,63 @@ fn eval_body_call(
           .unwrap_or(false),
       ))
     }
-    "contains" | "matches" | "containsAny" | "matchesAny" | "scan" => bail!(
-      "body content inspection is reserved for a streaming-safe WAF body buffer implementation"
-    ),
+    "contains" => Ok(Value::Bool(if let Some(body) = body {
+      body_scan::contains(body.bytes, expect_string_arg(args, 0)?)
+    } else {
+      false
+    })),
+    "matches" => Ok(Value::Bool(
+      body
+        .map(|body| body_scan::matches(body.bytes, expect_string_arg(args, 0)?))
+        .transpose()?
+        .unwrap_or(false),
+    )),
+    "containsAny" | "matchesAny" => {
+      let pattern_set_name = expect_string_arg(args, 0)?;
+      let Some(body) = body else {
+        return Ok(Value::Bool(false));
+      };
+      let pattern_set = ctx
+        .pattern_sets
+        .get(pattern_set_name)
+        .ok_or_else(|| anyhow!("unknown WAF pattern set {pattern_set_name}"))?;
+      Ok(Value::Bool(
+        body_scan::scan_pattern_set(body.bytes, body.is_truncated, pattern_set).matched,
+      ))
+    }
+    "scan" => {
+      let pattern_set_name = expect_string_arg(args, 0)?;
+      let Some(body) = body else {
+        return Ok(Value::BodyScanResult(body_scan::BodyScanResult::no_match(
+          false,
+        )));
+      };
+      let pattern_set = ctx
+        .pattern_sets
+        .get(pattern_set_name)
+        .ok_or_else(|| anyhow!("unknown WAF pattern set {pattern_set_name}"))?;
+      Ok(Value::BodyScanResult(body_scan::scan_pattern_set(
+        body.bytes,
+        body.is_truncated,
+        pattern_set,
+      )))
+    }
     _ => bail!("unknown BodyView method {method}"),
   }
 }
 
 fn body_content_method(method: &str) -> bool {
-  matches!(method, "isFormat" | "isBinaryFormat" | "matchesFormat")
+  matches!(
+    method,
+    "isFormat"
+      | "isBinaryFormat"
+      | "matchesFormat"
+      | "contains"
+      | "matches"
+      | "containsAny"
+      | "matchesAny"
+      | "scan"
+  )
 }
 
 fn bytes_content_method(method: &str) -> bool {

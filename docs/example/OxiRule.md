@@ -202,6 +202,26 @@ status = 400
 body = "Session cookies require downstream TLS"
 ```
 
+### Match Encoded Input Through the Normalized View
+
+```toml
+[[waf.rules]]
+name = "normalized-admin-and-sqli"
+tags = ["normalization", "attack-signature"]
+phase = "request"
+priority = 195
+when = """
+Request.Normalized.Http.Path == '/admin/secret' ||
+Request.Normalized.Http.Query.contains('union select') ||
+Request.Normalized.Headers.anyValueContains('sqlmap')
+"""
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "Blocked"
+```
+
 ## Request Body and Upload Guards
 
 ### Reject Oversized POST Requests
@@ -284,6 +304,37 @@ when = "Request.Body.IsTruncated"
 type = "set_tag"
 key = "BodyInspectionTruncated"
 value = "true"
+```
+
+### Scan Request and Response Body Prefixes
+
+```toml
+[[waf.pattern_sets]]
+name = "leak-markers"
+kind = "contains"
+patterns = ["BEGIN PRIVATE KEY", "secret-leak"]
+
+[[waf.rules]]
+name = "block-secret-request-body"
+phase = "request"
+priority = 240
+when = "Request.Body.scan('leak-markers').Matched"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "Request body blocked"
+
+[[waf.rules]]
+name = "block-secret-response-body"
+phase = "response"
+priority = 241
+when = "Response.Body.scan('leak-markers').Matched"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 502
+body = "Response body blocked"
 ```
 
 ## Header Mutation and Response Policy
@@ -737,3 +788,21 @@ type = "reject"
 status = 403
 body = "Blocked by WAF"
 ```
+
+## CRS Compatibility Example
+
+Operators can place OWASP CRS v4.x setup and rule files under the configured OxiRule directory and enable the CRS-compatible layer separately from OxiRule rules:
+
+```toml
+[waf.crs]
+enabled = true
+mode = "monitor"
+setup_file = "crs/crs-setup.conf"
+rule_files = ["crs/rules/*.conf"]
+paranoia_level = 1
+inbound_anomaly_score_threshold = 5
+outbound_anomaly_score_threshold = 4
+unsupported_directive_policy = "fail_closed"
+```
+
+Switch `mode` to `enforcing` after reviewing `/admin/v1/waf/rule-hits` for rule hits and latest anomaly scores.

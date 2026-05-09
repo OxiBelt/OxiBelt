@@ -94,6 +94,7 @@ pub(super) fn upstream_error_response(
     version: http::Version::HTTP_11,
     status,
     headers: response.headers(),
+    body: None,
     upstream_name,
     upstream_pool,
     upstream_scheme,

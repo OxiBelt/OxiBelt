@@ -93,11 +93,33 @@ patterns = ["(?i)<script", "(?i)javascript:"]
 
 Supported pattern set kinds are `contains` and `regex`.
 
+## CRS Compatibility
+
+OxiBelt can run a CRS-compatible WAF layer alongside OxiRule rules:
+
+```toml
+[waf.crs]
+enabled = true
+mode = "monitor" # monitor | enforcing
+setup_file = "crs/crs-setup.conf"
+rule_files = ["crs/rules/*.conf"]
+paranoia_level = 1
+inbound_anomaly_score_threshold = 5
+outbound_anomaly_score_threshold = 4
+unsupported_directive_policy = "fail_closed"
+```
+
+CRS files resolve under the OxiRule directory and must use normalized relative paths or globs. The CRS layer supports request/response phases 1, 2, 3, and 4, CRS-style `tx` variables, macro expansion, `setvar`, chained rules, paranoia-level tags, transforms used by the supported CRS v4.x surface, and anomaly scoring. Unsupported CRS syntax fails closed during configuration load/compile and includes file/line context.
+
+CRS `monitor` mode records rule hits and latest inbound/outbound anomaly summaries through `/admin/v1/waf/rule-hits` without blocking. CRS `enforcing` mode blocks requests with `403` when the inbound threshold is met and suppresses blocked upstream response bodies with a `502` response when the outbound threshold is met. Prometheus metrics intentionally do not expose CRS rule IDs, names, or tags as labels.
+
 ## Execution Phases
 
 Request rules run after OxiBelt parses the request and matches a route, but before upstream forwarding. They can reject the request, mutate request headers, set transaction tags, require Person proof, or override the upstream/pool selection.
 
 Response rules run after OxiBelt receives an upstream response or creates a synthetic upstream-error response, but before returning data to the downstream client. They can continue, replace, or reject the response, mutate response headers, and emit access logs.
+
+Rules that read request or response body content trigger bounded prefix inspection before forwarding that side of the transaction. OxiBelt scans up to `waf.limits.max_body_inspection_bytes`, replays the captured prefix, and forwards data beyond the inspection window unchanged with `Body.IsTruncated = true`.
 
 Rules run by ascending `priority`, with rule name as a tie-breaker. Tags created by request rules are visible to later request rules and to response rules for the same transaction.
 
@@ -409,6 +431,7 @@ Request.Http: HttpRequestMetadata
 Request.Headers: HeaderMap
 Request.QueryParams: QueryParamMap
 Request.Cookies: CookieMap
+Request.Normalized: NormalizedRequestView
 Request.Body: BodyView
 Request.Tls: TlsMetadata | Null
 Request.Tags: TagMap
@@ -502,6 +525,19 @@ HttpRequestMetadata.Query: String
 HttpRequestMetadata.Uri: String
 HttpRequestMetadata.Body: BodyMetadata
 ```
+
+```text
+NormalizedRequestView.Http: NormalizedHttpRequestMetadata
+NormalizedRequestView.Headers: HeaderMap
+NormalizedRequestView.QueryParams: QueryParamMap
+NormalizedRequestView.Cookies: CookieMap
+
+NormalizedHttpRequestMetadata.Path: String
+NormalizedHttpRequestMetadata.Query: String
+NormalizedHttpRequestMetadata.Uri: String
+```
+
+`Request.Normalized` is a WAF-only view. It does not replace raw `Request.Http.*`, `Request.Headers`, `Request.QueryParams`, or `Request.Cookies`. The view applies URL/Unicode decoding, Unicode NFC normalization, null removal, whitespace compression, lower-case text transforms, path segment normalization, and duplicate metadata policy handling through the same bounded map helpers.
 
 ```text
 HttpResponseMetadata.Version: '1.0' | '1.1' | '2' | '3'
@@ -628,7 +664,17 @@ Request.Body.matchesAny(PatternSetName): Bool
 Request.Body.scan(PatternSetName): BodyScanResult
 ```
 
-The same shape is reserved for `Response.Body` in response-phase rules. Current implementation supports bounded request body byte inspection and binary format signature checks. Streaming text scanning helpers, response body byte inspection, and unbounded body processing remain reserved.
+The same shape is supported for `Response.Body` in response-phase rules. Body content helpers are bounded by `waf.limits.max_body_inspection_bytes`; bytes beyond that prefix are replayed but not inspected.
+
+`Body.scan(PatternSetName)` returns:
+
+```text
+BodyScanResult.Matched: Bool
+BodyScanResult.Pattern: String | Null
+BodyScanResult.Offset: Int | Null
+BodyScanResult.Match: String | Null
+BodyScanResult.IsTruncated: Bool
+```
 
 Bytes helpers:
 

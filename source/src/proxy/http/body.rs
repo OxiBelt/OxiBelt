@@ -209,6 +209,31 @@ where
     .get(http::header::CONTENT_LENGTH)
     .and_then(|value| value.to_str().ok())
     .and_then(|value| value.parse::<u64>().ok());
+  let (body, captured) = capture_body_prefix_with_length(body, limit, content_length).await?;
+  Ok((Request::from_parts(parts, body), captured))
+}
+
+pub(crate) async fn capture_body_prefix<B>(
+  body: B,
+  limit: usize,
+  content_length: Option<u64>,
+) -> Result<(ProxyBody, CapturedBody), BoxError>
+where
+  B: Body<Data = Bytes> + Send + Sync + 'static,
+  B::Error: Into<BoxError> + Send + Sync + 'static,
+{
+  capture_body_prefix_with_length(body, limit, content_length).await
+}
+
+async fn capture_body_prefix_with_length<B>(
+  body: B,
+  limit: usize,
+  content_length: Option<u64>,
+) -> Result<(ProxyBody, CapturedBody), BoxError>
+where
+  B: Body<Data = Bytes> + Send + Sync + 'static,
+  B::Error: Into<BoxError> + Send + Sync + 'static,
+{
   let hinted_upper = body.size_hint().upper();
   let known_body_len = content_length.or(hinted_upper);
   let mut body = Box::pin(body);
@@ -258,7 +283,7 @@ where
   }
   .boxed();
   Ok((
-    Request::from_parts(parts, body),
+    body,
     CapturedBody {
       bytes: captured.freeze(),
       is_truncated,

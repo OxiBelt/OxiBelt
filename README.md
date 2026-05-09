@@ -13,7 +13,7 @@ The current implementation is a production-oriented foundation: configuration is
 - Host and path-prefix routing, prefix replacement, upstream pools, local load-balancing state, and passive or active health marking.
 - WebSocket tunneling for HTTP/1.1 upgrade routes and WebTransport forwarding over HTTP/3.
 - Forwarded-header normalization, trusted real-IP handling, PROXY protocol intake, rate limits, connection limits, request limits, and bounded response cache support.
-- OxiRule request and response WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, and structured access logs.
+- OxiRule request and response WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, structured access logs, bounded body scanning, and optional CRS-compatible anomaly scoring.
 - Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload.
 
 See [docs/Specification.md](docs/Specification.md) for the compact behavior spec and current non-goals.
@@ -147,4 +147,4 @@ tests/scripts/run-proxy-integration.sh
 
 ## Current Non-Goals
 
-The current implementation intentionally leaves ACME HTTP-01 handling, live OCSP fetch/refresh, request-wide structured access logging outside OxiRule, sticky-cookie upstream sessions, WebRTC media forwarding, streaming-safe WAF text scanning, and passing `103 Early Hints` as future work. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
+The current implementation intentionally leaves ACME HTTP-01 handling, live OCSP fetch/refresh, request-wide structured access logging outside OxiRule, sticky-cookie upstream sessions, WebRTC media forwarding, and passing `103 Early Hints` as future work. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
