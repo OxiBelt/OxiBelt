@@ -41,6 +41,8 @@ If a validation, runtime, or WAF policy failure occurs, the configured fail poli
 
 HTTP request and response buffering is opt-in and defaults to streaming. `memory` buffers bounded bodies in memory, `spool` spills bytes beyond the memory threshold to explicit temp files and removes partial files if buffering fails, and route-level buffering overrides inherit omitted values from `[proxy.buffering]`. CONNECT tunnels, HTTP Upgrade, and WebTransport sessions remain streaming.
 
+HTTP semantics controls preserve compatibility across common edge cases. OxiBelt accepts `Expect: 100-continue` in automatic mode, rejects unsupported `Expect` values with `417`, can strip or pass RFC 9218 `Priority` headers, and can drop ordinary HTTP trailer frames while preserving native gRPC trailers. `text/event-stream` responses remain streaming by default even when route response buffering is enabled. Native gRPC requests preserve `grpc-status` and `grpc-message` trailers, can honor `grpc-timeout`, and receive gRPC status trailers for proxy-generated upstream failures.
+
 Data-plane TCP listeners can run one or more accept workers inside a single OxiBelt process. The default is one listener socket per logical HTTPS, plain HTTP, or TCP stream listener. When `runtime.accept.workers > 1`, `runtime.accept.reuse_port = true` is required and OxiBelt creates a `SO_REUSEPORT` socket per worker so the kernel can distribute accepts. Downstream HTTP/3 can similarly create multiple UDP endpoints with `quic.socket.workers > 1` and `quic.socket.reuse_port = true`. Kernel sysctl and file-limit changes are not applied by the OxiBelt binary; the optional `kernel-extension/` installer stages those Linux 7.0.x+ host tunings separately, with PAM `nofile` limits scoped to the `oxibelt` service account.
 
 ## Protocol Behavior
@@ -199,7 +201,6 @@ The current implementation intentionally leaves these as future work:
 - Sticky-cookie upstream sessions.
 - WebRTC media forwarding.
 - TCP stream proxying, generic HTTP upgrade, CONNECT tunneling, gRPC health checks, gRPC-Web translation, and PROXY protocol egress for TCP upstreams.
-- Passing `103 Early Hints`.
 - WAF frame-level or datagram-level WebTransport inspection.
 - Downstream ECH configuration.
 - General-purpose scripting, user-defined OxiRule functions, imports, loops, callbacks, and unbounded comprehensions.

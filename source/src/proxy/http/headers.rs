@@ -133,9 +133,20 @@ pub(crate) fn is_upgrade_request<B>(request: &Request<B>) -> bool {
 
 #[cfg(test)]
 mod tests {
-  use http::HeaderMap;
+  use http::{HeaderMap, Request};
 
   use super::*;
+
+  #[test]
+  fn extract_host_prefers_absolute_form_authority_over_host_header() {
+    let request = Request::builder()
+      .uri("http://absolute.example:8080/path?query=1")
+      .header(HOST, "header.example")
+      .body(())
+      .expect("request should build");
+
+    assert_eq!(extract_host(&request).as_deref(), Some("absolute.example"));
+  }
 
   #[test]
   fn forwarded_headers_overwrite_spoofed_inbound_values() {

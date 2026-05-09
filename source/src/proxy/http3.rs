@@ -461,12 +461,25 @@ async fn send_h3_request(
     .context("upstream HTTP/3 request finish timed out")?
     .context("failed to finish upstream HTTP/3 request")?;
 
-  let response = tokio::time::timeout(timeouts.upstream_first_byte, stream.recv_response())
-    .await
-    .context("upstream HTTP/3 first byte timed out")?
-    .context("failed to receive upstream HTTP/3 response")?;
-
-  let (parts, _) = response.into_parts();
+  let mut interim = crate::proxy::http::semantics::InterimResponses::default();
+  let parts = loop {
+    let response = tokio::time::timeout(timeouts.upstream_first_byte, stream.recv_response())
+      .await
+      .context("upstream HTTP/3 first byte timed out")?
+      .context("failed to receive upstream HTTP/3 response")?;
+    if let Some(response) = crate::proxy::http::semantics::sanitize_interim_response(
+      response.status(),
+      response.headers(),
+    ) {
+      interim.responses.push(response);
+      continue;
+    }
+    let (mut parts, _) = response.into_parts();
+    if !interim.responses.is_empty() {
+      parts.extensions.insert(interim);
+    }
+    break parts;
+  };
   let (body_sender, body) = channel_body(H3_BODY_CHANNEL_CAPACITY);
   tokio::spawn(async move {
     loop {
@@ -588,6 +601,24 @@ async fn respond_to_h3_request(
 ) -> anyhow::Result<()> {
   let response_send_timeout = http_proxy::downstream_response_send_timeout(&response);
   let (parts, mut body) = response.into_parts();
+  let mut parts = parts;
+  if let Some(interim) = parts
+    .extensions
+    .remove::<crate::proxy::http::semantics::InterimResponses>()
+  {
+    for response in interim.responses {
+      let head = Response::builder()
+        .status(response.status)
+        .body(())
+        .context("failed to build downstream HTTP/3 interim response")?;
+      let (mut interim_parts, _) = head.into_parts();
+      interim_parts.headers = response.headers;
+      stream
+        .send_response(Response::from_parts(interim_parts, ()))
+        .await
+        .context("failed to send downstream HTTP/3 interim response")?;
+    }
+  }
   let head = Response::from_parts(parts, ());
   stream
     .send_response(head)

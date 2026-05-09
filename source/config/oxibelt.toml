@@ -127,6 +127,17 @@ max_temp_file_bytes = 0
 [proxy.http]
 early_hints = "drop"
 trailers = "pass"
+expect_continue = "auto"
+priority = "pass"
+sse_auto_streaming = true
+
+[proxy.http.grpc]
+enabled = true
+respect_grpc_timeout = true
+retry = "off"
+
+[proxy.http.errors]
+mode = "legacy_plain"
 
 [limits]
 max_connections = 65536

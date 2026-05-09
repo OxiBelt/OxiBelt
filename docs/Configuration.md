@@ -371,6 +371,17 @@ max_temp_file_bytes = 0
 [proxy.http]
 early_hints = "drop" # drop | pass
 trailers = "pass"    # pass | drop
+expect_continue = "auto" # auto | reject
+priority = "pass"    # pass | ignore
+sse_auto_streaming = true
+
+[proxy.http.grpc]
+enabled = true
+respect_grpc_timeout = true
+retry = "off"        # off | safe_unary
+
+[proxy.http.errors]
+mode = "legacy_plain" # legacy_plain | plain | json
 ```
 
 `trusted_ca_certs` adds upstream TLS trust roots from the cert directory. `forwarded_headers.mode = "overwrite"` replaces inbound forwarding metadata; `append` preserves and extends the inbound `X-Forwarded-For` chain. `real_ip` affects the client IP used by rate limiting and WAF evaluation only when the direct peer is trusted, and can also drive connection limits when `limits.connection_limit_identity` selects a Real-IP mode.
@@ -378,6 +389,12 @@ trailers = "pass"    # pass | drop
 `generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
 
 `proxy.buffering` controls ordinary HTTP request and response body buffering. `streaming` keeps the previous streaming behavior. `memory` reads the full body into memory up to `max_memory_body_bytes`. `spool` keeps up to `max_memory_body_bytes` in memory and spills the remainder to `temp_dir`, capped by `max_temp_file_bytes` per body. `reject_if_too_large` is memory-only and rejects bodies that exceed `max_memory_body_bytes`. `spool` requires `max_temp_file_bytes > 0` and a writable `temp_dir`; OxiBelt removes `oxibelt-buffer-*` temp files when the buffered body is dropped, when spooled buffering fails before ownership is transferred, and when cleaning stale matching files on initial startup.
+
+`proxy.http` controls HTTP compatibility details. `early_hints = "pass"` relays upstream `103 Early Hints` where the downstream transport supports interim responses; `drop` keeps the legacy behavior. `trailers = "drop"` removes body trailer frames for ordinary HTTP traffic while preserving native gRPC trailers. `expect_continue = "auto"` accepts `Expect: 100-continue` and rejects unsupported `Expect` values with `417`; `reject` rejects all `Expect` values. `priority = "ignore"` strips RFC 9218 `Priority` headers instead of forwarding them. `sse_auto_streaming = true` keeps `text/event-stream` responses streaming even when response buffering is enabled.
+
+`proxy.http.grpc` enables native gRPC HTTP semantics. When enabled, OxiBelt preserves gRPC trailers, honors `grpc-timeout` by capping upstream first-byte and read timeouts, maps generated upstream failures to gRPC status trailers, and only retries gRPC requests when `retry = "safe_unary"`.
+
+`proxy.http.errors.mode = "json"` changes proxy-generated error bodies to JSON with stable `error`, `status`, `code`, and `request_id` fields. `legacy_plain` preserves the historical body text without setting a content type; `plain` emits the same text with `text/plain`.
 
 Reserved or constrained values:
 
@@ -894,7 +911,7 @@ Configuration validation rejects:
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
 - TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, or reserved live OCSP mode.
-- Reserved early-hints or sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
+- Reserved sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.
 
 ## Minimal Example

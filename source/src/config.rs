@@ -833,9 +833,6 @@ impl Config {
   }
 
   fn validate_proxy(&self) -> anyhow::Result<()> {
-    if self.proxy.http.early_hints == EarlyHintsMode::Pass {
-      bail!("proxy.http.early_hints = \"pass\" is reserved but not implemented yet");
-    }
     if self.proxy.retry.tries == 0 {
       bail!("proxy.retry.tries must be greater than 0");
     }
@@ -1679,7 +1676,17 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "response",
       "temp_dir",
     ][..],
-    "proxy.http" => &["early_hints", "trailers"][..],
+    "proxy.http" => &[
+      "early_hints",
+      "trailers",
+      "expect_continue",
+      "priority",
+      "sse_auto_streaming",
+      "grpc",
+      "errors",
+    ][..],
+    "proxy.http.grpc" => &["enabled", "respect_grpc_timeout", "retry"][..],
+    "proxy.http.errors" => &["mode"][..],
     "limits" => &[
       "client_body_timeout_ms",
       "client_header_timeout_ms",
@@ -3099,12 +3106,36 @@ pub enum BufferingMode {
   RejectIfTooLarge,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ProxyHttpConfig {
   #[serde(default)]
   pub early_hints: EarlyHintsMode,
   #[serde(default)]
   pub trailers: TrailerMode,
+  #[serde(default)]
+  pub expect_continue: ExpectContinueMode,
+  #[serde(default)]
+  pub priority: PriorityMode,
+  #[serde(default = "default_true")]
+  pub sse_auto_streaming: bool,
+  #[serde(default)]
+  pub grpc: ProxyHttpGrpcConfig,
+  #[serde(default)]
+  pub errors: ProxyHttpErrorsConfig,
+}
+
+impl Default for ProxyHttpConfig {
+  fn default() -> Self {
+    Self {
+      early_hints: EarlyHintsMode::Drop,
+      trailers: TrailerMode::Pass,
+      expect_continue: ExpectContinueMode::Auto,
+      priority: PriorityMode::Pass,
+      sse_auto_streaming: true,
+      grpc: ProxyHttpGrpcConfig::default(),
+      errors: ProxyHttpErrorsConfig::default(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -3121,6 +3152,65 @@ pub enum TrailerMode {
   #[default]
   Pass,
   Drop,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectContinueMode {
+  #[default]
+  Auto,
+  Reject,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PriorityMode {
+  #[default]
+  Pass,
+  Ignore,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProxyHttpGrpcConfig {
+  #[serde(default = "default_true")]
+  pub enabled: bool,
+  #[serde(default = "default_true")]
+  pub respect_grpc_timeout: bool,
+  #[serde(default)]
+  pub retry: GrpcRetryMode,
+}
+
+impl Default for ProxyHttpGrpcConfig {
+  fn default() -> Self {
+    Self {
+      enabled: true,
+      respect_grpc_timeout: true,
+      retry: GrpcRetryMode::Off,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcRetryMode {
+  #[default]
+  Off,
+  SafeUnary,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct ProxyHttpErrorsConfig {
+  #[serde(default)]
+  pub mode: ErrorResponseMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorResponseMode {
+  #[default]
+  LegacyPlain,
+  Plain,
+  Json,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

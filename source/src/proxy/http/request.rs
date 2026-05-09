@@ -55,3 +55,87 @@ where
 
   Request::from_parts(parts, body.map_err(Into::into).boxed())
 }
+
+#[cfg(test)]
+mod tests {
+  use bytes::Bytes;
+  use http_body_util::Full;
+  use pretty_assertions::assert_eq;
+
+  use super::*;
+
+  fn empty_proxy_body() -> ProxyBody {
+    Full::new(Bytes::new())
+      .map_err(|never| -> BoxError { match never {} })
+      .boxed()
+  }
+
+  fn rebuild_options<'a>(
+    target_uri: Uri,
+    compression: &'a CompressionConfig,
+    downstream_host: &'a str,
+    preserve_host: bool,
+  ) -> RebuildRequestOptions<'a> {
+    RebuildRequestOptions {
+      target_uri,
+      compression,
+      peer_addr: "203.0.113.10:5443".parse().unwrap(),
+      downstream_host,
+      downstream_scheme: "https",
+      forwarded_header_mode: ForwardedHeaderMode::Overwrite,
+      preserve_host,
+      upstream_version: HttpVersion::H1,
+      waf_mutations: &[],
+    }
+  }
+
+  #[test]
+  fn rebuild_request_does_not_forward_absolute_form_authority_as_host_by_default() {
+    let request = Request::builder()
+      .uri("http://absolute.example/app?q=1")
+      .header(HOST, "header.example")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let compression = CompressionConfig::default();
+
+    let rebuilt = rebuild_request(
+      request,
+      rebuild_options(
+        "http://upstream.internal/base/app?q=1".parse().unwrap(),
+        &compression,
+        "absolute.example",
+        false,
+      ),
+    );
+
+    assert_eq!(
+      rebuilt.uri().to_string(),
+      "http://upstream.internal/base/app?q=1"
+    );
+    assert!(!rebuilt.headers().contains_key(HOST));
+    assert_eq!(rebuilt.headers()["x-forwarded-host"], "absolute.example");
+  }
+
+  #[test]
+  fn rebuild_request_preserves_host_only_when_configured() {
+    let request = Request::builder()
+      .uri("http://absolute.example/app?q=1")
+      .header(HOST, "header.example")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let compression = CompressionConfig::default();
+
+    let rebuilt = rebuild_request(
+      request,
+      rebuild_options(
+        "http://upstream.internal/base/app?q=1".parse().unwrap(),
+        &compression,
+        "absolute.example",
+        true,
+      ),
+    );
+
+    assert_eq!(rebuilt.headers()[HOST], "header.example");
+    assert_eq!(rebuilt.headers()["x-forwarded-host"], "absolute.example");
+  }
+}

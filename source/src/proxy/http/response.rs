@@ -11,6 +11,7 @@ use crate::waf::{
 
 use super::SystemAccessLogContext;
 use super::body::{BoxError, ProxyBody};
+use super::semantics::{configured_error_response, grpc_upstream_error_response};
 
 pub(crate) fn text_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
   let body = Full::new(Bytes::copy_from_slice(message.as_bytes()))
@@ -62,7 +63,21 @@ pub(super) fn upstream_error_response(
   } else {
     StatusCode::BAD_GATEWAY
   };
-  let mut response = text_response(status, "upstream request failed");
+  let mut response = grpc_upstream_error_response(
+    &state.config,
+    request_headers,
+    upstream_error_code,
+    error_message,
+  )
+  .unwrap_or_else(|| {
+    configured_error_response(
+      &state.config,
+      &access_log.request_id,
+      status,
+      "upstream request failed",
+      upstream_error_code,
+    )
+  });
   apply_header_mutations(response.headers_mut(), request_response_mutations);
   if !state.waf.has_response_rules(route_name) {
     return response;

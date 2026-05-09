@@ -7,9 +7,10 @@ use base64::Engine;
 use oxibelt::config::{
     AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
     ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, EarlyHintsMode,
-    ForwardedHeaderMode, HotReloadMode, OcspMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
-    QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    ErrorResponseMode, ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode,
+    OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
+    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind, TlsVersion,
+    TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -255,7 +256,7 @@ fn proxy_retry_rejects_zero_numeric_values() {
 }
 
 #[test]
-fn proxy_http_modes_parse_and_reject_reserved_early_hints_pass() {
+fn proxy_http_semantics_modes_parse() {
     let temp_dir = common::TempDir::new("proxy-http");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "proxy-http");
     let base = common::minimal_config_toml(&cert_path, &key_path);
@@ -266,31 +267,34 @@ fn proxy_http_modes_parse_and_reject_reserved_early_hints_pass() {
 
 [proxy.http]
 trailers = "drop"
+early_hints = "pass"
+expect_continue = "reject"
+priority = "ignore"
+sse_auto_streaming = false
+
+[proxy.http.grpc]
+enabled = true
+respect_grpc_timeout = false
+retry = "safe_unary"
+
+[proxy.http.errors]
+mode = "json"
 "#
     );
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
-    assert_eq!(config.proxy.http.early_hints, EarlyHintsMode::Drop);
+    assert_eq!(config.proxy.http.early_hints, EarlyHintsMode::Pass);
     assert_eq!(config.proxy.http.trailers, TrailerMode::Drop);
-
-    let raw = format!(
-        r#"
-{base}
-
-[proxy.http]
-early_hints = "pass"
-"#
+    assert_eq!(
+        config.proxy.http.expect_continue,
+        ExpectContinueMode::Reject
     );
-    let config: Config = toml::from_str(&raw).expect("config should parse");
-    let error = config
-        .validate()
-        .expect_err("reserved early hints pass mode should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("proxy.http.early_hints = \"pass\" is reserved"),
-        "unexpected error: {error}"
-    );
+    assert_eq!(config.proxy.http.priority, PriorityMode::Ignore);
+    assert!(!config.proxy.http.sse_auto_streaming);
+    assert!(config.proxy.http.grpc.enabled);
+    assert!(!config.proxy.http.grpc.respect_grpc_timeout);
+    assert_eq!(config.proxy.http.grpc.retry, GrpcRetryMode::SafeUnary);
+    assert_eq!(config.proxy.http.errors.mode, ErrorResponseMode::Json);
 }
 
 #[test]

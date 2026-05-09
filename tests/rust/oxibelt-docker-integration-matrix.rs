@@ -870,6 +870,72 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "http-semantics",
+            "early-hints-pass",
+            "HTTP semantics accepts early hints pass mode and forwards final responses",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/early?early_hints=1&early_link=</app.css>; rel=preload; as=style" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/early?early_hints=1&early_link=%3C/app.css%3E;%20rel=preload;%20as=style"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "http-semantics",
+            "expect-priority",
+            "HTTP semantics validates Expect and can strip Priority headers",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request_with_headers "example.test" "/app/expect" 200 "POST" "hello" "Expect: 100-continue")"
+  assert_body_jq "${response}" '.body == "hello" and .headers.expect == null'
+
+  response="$(client_request_with_headers "example.test" "/app/bad-expect" 417 "GET" "" "Expect: custom-token")"
+  assert_response_jq "${response}" '.status == 417'
+
+  response="$(client_request_with_headers "example.test" "/app/priority" 200 "GET" "" "Priority: u=1")"
+  assert_body_jq "${response}" '.headers.priority == null'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "http-semantics",
+            "sse-grpc-errors",
+            "HTTP semantics keeps SSE streaming and maps proxy errors for gRPC and JSON clients",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/events/stream?body=data:%20hello%0A%0A&content_type=text/event-stream" 200)"
+  assert_response_jq "${response}" '.headers["content-type"] == "text/event-stream" and .body == "data: hello\n\n"'
+
+  response="$(client_request_with_headers_to_target "proxy" 8443 "missing.example.test" "/app/error" 502,504 "GET" "")"
+  assert_response_jq "${response}" '(.status == 502 or .status == 504) and (.body | fromjson | (.code == "connect_error" or .code == "read_timeout"))'
+
+  response="$(client_request_with_headers "grpc.example.test" "/grpc.Matrix/Unary" 200 "POST" "" "Content-Type: application/grpc" "Grpc-Timeout: 1S")"
+  assert_response_jq "${response}" '.headers["grpc-status"] == "4"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "config-invalid",
             "strict-unknown-field",
             "strict configuration rejects unknown merged fields by default",

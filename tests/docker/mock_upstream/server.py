@@ -83,6 +83,10 @@ class EchoHandler(BaseHTTPRequestHandler):
     encoded = query.get("body", [""])[0].encode("utf-8") or json.dumps(payload, sort_keys=True).encode("utf-8")
     if header_delay_ms > 0:
       time.sleep(header_delay_ms / 1000.0)
+    if query.get("early_hints"):
+      self.send_response_only(103, "Early Hints")
+      self.send_header("link", query.get("early_link", ["</style.css>; rel=preload; as=style"])[0])
+      self.end_headers()
     self.send_response(status)
     self.send_header("content-type", query.get("content_type", ["application/json"])[0])
     self.send_header("x-upstream-marker", UPSTREAM_MARKER)

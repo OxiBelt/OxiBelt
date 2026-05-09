@@ -30,6 +30,7 @@ pub(crate) mod grpc_web;
 pub(crate) mod headers;
 pub(crate) mod request;
 pub(crate) mod response;
+pub(crate) mod semantics;
 pub(crate) mod uri;
 pub(crate) mod version;
 
@@ -42,6 +43,7 @@ use self::headers::{
 };
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::response::{text_response, upstream_error_response, waf_terminal_response};
+use self::semantics::{configured_error_response, filter_trailers};
 use self::uri::{rewrite_uri, validate_downstream_path};
 use self::version::select_upstream_http_version;
 
@@ -176,6 +178,16 @@ fn emit_system_access_log(
   }
   let input = context.response_input(response);
   state.system_access_log.emit(&state.waf, input);
+}
+
+fn proxy_error_response(
+  state: &AppSnapshot,
+  access_log: &SystemAccessLogContext,
+  status: StatusCode,
+  message: &str,
+  code: &str,
+) -> Response<ProxyBody> {
+  configured_error_response(&state.config, &access_log.request_id, status, message, code)
 }
 
 fn elapsed_ms(started_at: Instant) -> u64 {
@@ -377,6 +389,18 @@ where
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
   state.metrics.record_request();
+
+  if let Err(rejection) =
+    semantics::validate_expect(request.headers(), state.config.proxy.http.expect_continue)
+  {
+    return proxy_error_response(
+      &state,
+      access_log,
+      StatusCode::EXPECTATION_FAILED,
+      rejection.message(),
+      "expect_rejected",
+    );
+  }
 
   let host = extract_host(&request).unwrap_or_default();
   access_log.downstream_host = host.clone();
@@ -612,7 +636,11 @@ where
   };
   access_log.upstream_name = upstream.name.clone();
   access_log.upstream_scheme = upstream.origin.scheme().to_string();
-  let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
+  let native_grpc_request = semantics::is_native_grpc_request(&request_headers, &state.config);
+  let mut timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
+  if native_grpc_request {
+    timeouts = semantics::cap_timeouts_for_grpc(timeouts, &request_headers, &state.config);
+  }
 
   let mut upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
     select_upstream_http_version(
@@ -681,6 +709,8 @@ where
     waf_mutations: &request_waf.request_header_mutations,
   };
   let mut outbound = rebuild_request(request, rebuild);
+  semantics::strip_accepted_expect(outbound.headers_mut());
+  semantics::apply_priority_policy(outbound.headers_mut(), state.config.proxy.http.priority);
   if let Some(mode) = grpc_web_mode {
     grpc_web::rewrite_request_headers(outbound.headers_mut(), mode);
     let (parts, body) = outbound.into_parts();
@@ -693,6 +723,8 @@ where
     };
     outbound = Request::from_parts(parts, body);
   }
+  let outbound = outbound
+    .map(|body| filter_trailers(body, state.config.proxy.http.trailers, native_grpc_request));
   let mut outbound = outbound.map(|body| {
     body::with_send_timeout(
       body,
@@ -946,14 +978,26 @@ where
         );
         return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
       };
+      let early_hints_capture =
+        semantics::attach_early_hints_capture(&mut outbound, state.config.proxy.http.early_hints);
       send_with_retry(
         client,
         outbound,
         timeouts,
         &state,
-        state.config.proxy.retry.enabled && is_idempotent(&request_method),
+        if native_grpc_request {
+          semantics::should_retry_grpc(&state.config)
+        } else {
+          state.config.proxy.retry.enabled && is_idempotent(&request_method)
+        },
       )
       .await
+      .map(|mut response| {
+        if let Some(capture) = early_hints_capture {
+          semantics::attach_interim_responses(&mut response, capture.take());
+        }
+        response
+      })
     } else {
       send_one_shot_with_proxy_protocol(
         outbound,
@@ -1073,9 +1117,10 @@ where
     BodyTimeoutKind::UpstreamResponseRead,
   );
   strip_hop_by_hop_headers(&mut parts.headers);
-  if state.config.proxy.http.trailers == crate::config::TrailerMode::Drop {
+  if state.config.proxy.http.trailers == crate::config::TrailerMode::Drop && !native_grpc_request {
     parts.headers.remove(http::header::TRAILER);
   }
+  semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
   apply_security_headers(&mut parts.headers, &state.config.security.headers);
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
@@ -1168,9 +1213,14 @@ where
     downstream_scheme,
     request_version,
   );
+  let mut response_buffering = effective_buffering.response;
+  if state.config.proxy.http.sse_auto_streaming && semantics::is_sse(&parts.headers) {
+    response_buffering.mode = crate::config::BufferingMode::Streaming;
+  }
+  let body = filter_trailers(body, state.config.proxy.http.trailers, native_grpc_request);
   let body = match buffering::buffer_body(
     body,
-    effective_buffering.response,
+    response_buffering,
     effective_buffering.temp_dir.as_deref(),
   )
   .await
