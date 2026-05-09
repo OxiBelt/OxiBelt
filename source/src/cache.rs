@@ -356,7 +356,7 @@ impl ResponseCache {
       .map(|(key, _)| key.clone());
     let Some(key) = key else {
       drop(inner);
-      return self.lookup_shared(&policy.name, &base_key, ctx);
+      return self.lookup_shared(&policy.name, policy.background_refresh, &base_key, ctx);
     };
 
     let expired = inner
@@ -420,6 +420,7 @@ impl ResponseCache {
   fn lookup_shared(
     &self,
     policy: &str,
+    background_refresh: bool,
     base_key: &str,
     ctx: CacheLookupContext<'_>,
   ) -> Option<CacheLookup> {
@@ -437,9 +438,12 @@ impl ResponseCache {
       ctx.method,
       ctx.request_headers,
       request_no_cache(ctx.request_headers),
+      background_refresh,
     ) {
       Ok(Some(lookup)) => {
-        self.promote_shared_lookup(ctx, &lookup);
+        if matches!(lookup, CacheLookup::Fresh(_)) {
+          self.promote_shared_lookup(ctx, &lookup);
+        }
         Some(lookup)
       }
       Ok(None) => None,
@@ -736,6 +740,9 @@ impl ResponseCache {
     &self,
     policy_name: Option<&str>,
   ) -> Option<OwnedSemaphorePermit> {
+    if !self.background_refresh_enabled(policy_name) {
+      return None;
+    }
     let name = policy_name.unwrap_or("default");
     self
       .refresh_limiters
@@ -2167,6 +2174,68 @@ mod tests {
   }
 
   #[test]
+  fn stale_shared_hits_respect_named_policy_disabled_background_refresh() {
+    let config = cache_config_with_disabled_named_background_refresh();
+    let local = ResponseCache::new(&config, None).unwrap();
+    let shared = crate::shared_state::SharedState::test_memory("cache-bg-refresh-disabled");
+    let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+    let second = ResponseCache::new(&config, Some(shared)).unwrap();
+    let request_headers = HeaderMap::new();
+    let mut no_cache_headers = HeaderMap::new();
+    no_cache_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let local_uri = "/asset/local.css".parse::<Uri>().unwrap();
+    let shared_validator_uri = "/asset/shared-validator.css".parse::<Uri>().unwrap();
+    let shared_no_validator_uri = "/asset/shared-no-validator.css".parse::<Uri>().unwrap();
+
+    insert_stale_revalidate_entry(
+      &local,
+      &local_uri,
+      &request_headers,
+      Bytes::from_static(b"local"),
+      true,
+    );
+    insert_stale_revalidate_entry(
+      &first,
+      &shared_validator_uri,
+      &request_headers,
+      Bytes::from_static(b"shared-validator"),
+      true,
+    );
+    insert_stale_revalidate_entry(
+      &first,
+      &shared_no_validator_uri,
+      &request_headers,
+      Bytes::from_static(b"shared-no-validator"),
+      false,
+    );
+
+    std::thread::sleep(Duration::from_millis(1200));
+
+    assert_stale_background_refresh_disabled(&local, &local_uri, &request_headers);
+    assert_stale_background_refresh_disabled(&second, &shared_validator_uri, &request_headers);
+    // A repeated lookup catches stale L2 entries being promoted as newly fresh L1 entries.
+    assert_stale_background_refresh_disabled(&second, &shared_validator_uri, &request_headers);
+    assert_stale_background_refresh_disabled(&second, &shared_no_validator_uri, &no_cache_headers);
+  }
+
+  #[test]
+  fn background_refresh_permit_respects_disabled_named_policy() {
+    let config = cache_config_with_disabled_named_background_refresh();
+    let cache = ResponseCache::new(&config, None).unwrap();
+
+    assert!(
+      cache
+        .try_background_refresh_permit(Some("no-background-refresh"))
+        .is_none()
+    );
+    assert!(
+      cache
+        .try_background_refresh_permit(Some("default"))
+        .is_some()
+    );
+  }
+
+  #[test]
   fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
     let temp_dir = TestTempDir::new("cache-recovery");
     let config = CacheConfig {
@@ -2207,6 +2276,87 @@ mod tests {
     assert!(stats.disk_recovery_removed_files_total >= 2);
     assert!(!temp_dir.path.join("orphan.body").exists());
     assert!(!temp_dir.path.join("stale.body.tmp").exists());
+  }
+
+  fn cache_config_with_disabled_named_background_refresh() -> CacheConfig {
+    CacheConfig {
+      enabled: true,
+      policies: vec![crate::config::CachePolicyConfig {
+        name: "no-background-refresh".to_string(),
+        store: None,
+        cache_key: None,
+        default_ttl_seconds: None,
+        memory_max_size_bytes: None,
+        disk_max_size_bytes: None,
+        tag_headers: None,
+        max_tags_per_entry: None,
+        max_tag_bytes: None,
+        background_refresh: Some(false),
+        background_refresh_max_concurrent: None,
+        lock_wait_timeout_ms: None,
+        admission: None,
+        stale_if_error: None,
+        rules: Vec::new(),
+      }],
+      ..CacheConfig::default()
+    }
+  }
+
+  fn insert_stale_revalidate_entry(
+    cache: &ResponseCache,
+    uri: &Uri,
+    request_headers: &HeaderMap,
+    body: Bytes,
+    include_validator: bool,
+  ) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      CACHE_CONTROL,
+      HeaderValue::from_static("public, max-age=1, stale-while-revalidate=60, stale-if-error=60"),
+    );
+    if include_validator {
+      headers.insert(ETAG, HeaderValue::from_static("\"v1\""));
+    }
+
+    assert_eq!(
+      cache.insert(
+        CacheInsertContext {
+          policy_name: Some("no-background-refresh"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri,
+          request_headers,
+        },
+        CacheEntry {
+          status: StatusCode::OK,
+          headers,
+          body,
+        },
+      ),
+      CacheInsertOutcome::Stored
+    );
+  }
+
+  fn assert_stale_background_refresh_disabled(
+    cache: &ResponseCache,
+    uri: &Uri,
+    request_headers: &HeaderMap,
+  ) {
+    match cache.lookup(CacheLookupContext {
+      policy_name: Some("no-background-refresh"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri,
+      request_headers,
+    }) {
+      Some(CacheLookup::Stale(stale)) => assert!(
+        !stale.background_refresh,
+        "stale hit ignored disabled background_refresh policy"
+      ),
+      other => panic!("expected stale cache hit, got {other:?}"),
+    }
   }
 
   #[test]

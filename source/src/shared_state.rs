@@ -351,6 +351,7 @@ impl SharedState {
     method: &Method,
     request_headers: &HeaderMap,
     request_no_cache: bool,
+    background_refresh: bool,
   ) -> anyhow::Result<Option<CacheLookup>> {
     let Some(backend) = &self.cache else {
       return Ok(None);
@@ -394,7 +395,7 @@ impl SharedState {
             serve_stale_on_error: entry
               .stale_if_error_until_ms
               .is_some_and(|until| until > now),
-            background_refresh: true,
+            background_refresh,
           })));
         }
         if validators.is_empty() {
@@ -408,9 +409,7 @@ impl SharedState {
               serve_stale_on_error: entry
                 .stale_if_error_until_ms
                 .is_some_and(|until| until > now),
-              background_refresh: entry
-                .stale_while_revalidate_until_ms
-                .is_some_and(|until| until > now),
+              background_refresh,
             })));
           }
           if entry
