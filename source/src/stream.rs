@@ -10,37 +10,52 @@ use tracing::{info, warn};
 
 use crate::config::{StreamListenerConfig, parse_stream_target};
 use crate::limits::ConnectionPermit;
+use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::proxy_protocol_egress;
 use crate::state::AppHandle;
 
 pub(crate) struct StreamListenerTask {
   pub(crate) name: String,
   pub(crate) bind: SocketAddr,
+  pub(crate) options: TcpListenOptions,
   shutdown: watch::Sender<bool>,
-  task: JoinHandle<()>,
+  tasks: Vec<JoinHandle<()>>,
 }
 
 pub(crate) struct BoundStreamListener {
   pub(crate) config: StreamListenerConfig,
-  listener: TcpListener,
+  options: TcpListenOptions,
+  accept_error_backoff: Duration,
+  listeners: Vec<TcpListener>,
 }
 
 impl StreamListenerTask {
   pub(crate) fn shutdown(self) {
     let _ = self.shutdown.send(true);
-    self.task.abort();
+    for task in self.tasks {
+      task.abort();
+    }
   }
 }
 
 impl BoundStreamListener {
-  pub(crate) async fn bind(config: StreamListenerConfig) -> anyhow::Result<Self> {
-    let listener = TcpListener::bind(config.bind).await.with_context(|| {
+  pub(crate) fn bind(
+    config: StreamListenerConfig,
+    options: TcpListenOptions,
+    accept_error_backoff: Duration,
+  ) -> anyhow::Result<Self> {
+    let listeners = bind_tcp_listeners(config.bind, options, "stream").with_context(|| {
       format!(
         "failed to bind stream listener {} to {}",
         config.name, config.bind
       )
     })?;
-    Ok(Self { config, listener })
+    Ok(Self {
+      config,
+      options,
+      accept_error_backoff,
+      listeners,
+    })
   }
 
   pub(crate) fn start(
@@ -51,19 +66,43 @@ impl BoundStreamListener {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let name = self.config.name.clone();
     let bind = self.config.bind;
+    let options = self.options;
+    let config = self.config;
+    let listeners = self.listeners;
     let task_name = name.clone();
-    let task = tokio::spawn(async move {
-      if let Err(error) =
-        serve_stream_listener(self.listener, self.config, state, shutdown_rx).await
-      {
-        let _ = error_tx.send(error.context(format!("stream listener {task_name} failed")));
-      }
-    });
+    let accept_error_backoff = self.accept_error_backoff;
+    let tasks = listeners
+      .into_iter()
+      .enumerate()
+      .map(|(worker_index, listener)| {
+        let worker_shutdown = shutdown_rx.clone();
+        let worker_config = config.clone();
+        let worker_state = state.clone();
+        let worker_error_tx = error_tx.clone();
+        let worker_task_name = task_name.clone();
+        tokio::spawn(async move {
+          if let Err(error) = serve_stream_listener(
+            listener,
+            worker_config,
+            worker_state,
+            worker_shutdown,
+            worker_index,
+            accept_error_backoff,
+          )
+          .await
+          {
+            let _ = worker_error_tx
+              .send(error.context(format!("stream listener {worker_task_name} failed")));
+          }
+        })
+      })
+      .collect();
     StreamListenerTask {
       name,
       bind,
+      options,
       shutdown,
-      task,
+      tasks,
     }
   }
 }
@@ -73,18 +112,20 @@ async fn serve_stream_listener(
   config: StreamListenerConfig,
   state: AppHandle,
   mut shutdown: watch::Receiver<bool>,
+  worker_index: usize,
+  accept_error_backoff: Duration,
 ) -> anyhow::Result<()> {
   let bind = listener
     .local_addr()
     .context("failed to read stream listener address")?;
-  info!(name = %config.name, bind = %bind, target = %config.target, "stream listener started");
+  info!(name = %config.name, bind = %bind, target = %config.target, worker = worker_index, "stream listener started");
 
   loop {
     tokio::select! {
       biased;
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
-          info!(name = %config.name, bind = %bind, "stream listener stopped");
+          info!(name = %config.name, bind = %bind, worker = worker_index, "stream listener stopped");
         }
         return Ok(());
       }
@@ -92,7 +133,8 @@ async fn serve_stream_listener(
         let (downstream, peer_addr) = match accepted {
           Ok(value) => value,
           Err(error) => {
-            warn!(name = %config.name, error = %error, "failed to accept stream connection");
+            warn!(name = %config.name, error = %error, worker = worker_index, "failed to accept stream connection");
+            tokio::time::sleep(accept_error_backoff).await;
             continue;
           }
         };

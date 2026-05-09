@@ -17,6 +17,7 @@ The implementation is optimized for:
 - Bounded process-local state.
 - Safe hot reload of selected runtime inputs.
 - Docker-based local and CI testing.
+- Optional in-process multi-worker accept using Linux `SO_REUSEPORT`.
 
 OxiBelt currently targets Rust 1.95 and uses `rustls` with the `aws-lc-rs` crypto provider. The default rustls key exchange group order enables and prefers `X25519MLKEM768`.
 
@@ -39,6 +40,8 @@ At a high level, each HTTP transaction follows this order:
 If a validation, runtime, or WAF policy failure occurs, the configured fail policy determines whether OxiBelt rejects the transaction or allows it to continue.
 
 HTTP request and response buffering is opt-in and defaults to streaming. `memory` buffers bounded bodies in memory, `spool` spills bytes beyond the memory threshold to explicit temp files, and route-level buffering overrides inherit omitted values from `[proxy.buffering]`. CONNECT tunnels, HTTP Upgrade, and WebTransport sessions remain streaming.
+
+Data-plane TCP listeners can run one or more accept workers inside a single OxiBelt process. The default is one listener socket per logical HTTPS, plain HTTP, or TCP stream listener. When `runtime.accept.workers > 1`, `runtime.accept.reuse_port = true` is required and OxiBelt creates a `SO_REUSEPORT` socket per worker so the kernel can distribute accepts. Downstream HTTP/3 can similarly create multiple UDP endpoints with `quic.socket.workers > 1` and `quic.socket.reuse_port = true`. Kernel sysctl and file-limit changes are not applied by the OxiBelt binary; the optional `kernel-extension/` installer stages those Linux 7.0.x+ host tunings separately.
 
 ## Protocol Behavior
 

@@ -414,7 +414,7 @@ impl Config {
       }
     }
 
-    self.runtime.hot_reload.validate()?;
+    self.runtime.validate()?;
     self.validate_limits()?;
     self.validate_proxy()?;
     self.validate_compression()?;
@@ -1580,11 +1580,19 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "logging.access_log.database.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "runtime" => &[
+      "accept",
       "hot_reload",
       "linux_only",
       "memory_only_state",
       "read_only_rootfs_compatible",
       "unprivileged_mode",
+      "worker_threads",
+    ][..],
+    "runtime.accept" => &[
+      "accept_error_backoff_ms",
+      "backlog",
+      "reuse_port",
+      "workers",
     ][..],
     "runtime.hot_reload" => &["mode", "poll_interval_ms"][..],
     "listeners" => &[
@@ -1628,7 +1636,12 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_concurrent_uni_streams",
       "max_udp_payload_size",
     ][..],
-    "quic.socket" => &["receive_buffer_bytes", "send_buffer_bytes"][..],
+    "quic.socket" => &[
+      "receive_buffer_bytes",
+      "reuse_port",
+      "send_buffer_bytes",
+      "workers",
+    ][..],
     "quic.upstream_pool" => &["enabled", "max_connections_per_upstream", "max_lifetime_ms"][..],
     "proxy" => &[
       "auto_upgrade",
@@ -2449,6 +2462,10 @@ pub struct RuntimeConfig {
   #[serde(default = "default_true")]
   pub unprivileged_mode: bool,
   #[serde(default)]
+  pub worker_threads: Option<usize>,
+  #[serde(default)]
+  pub accept: RuntimeAcceptConfig,
+  #[serde(default)]
   pub hot_reload: HotReloadConfig,
 }
 
@@ -2459,8 +2476,61 @@ impl Default for RuntimeConfig {
       read_only_rootfs_compatible: true,
       memory_only_state: true,
       unprivileged_mode: true,
+      worker_threads: None,
+      accept: RuntimeAcceptConfig::default(),
       hot_reload: HotReloadConfig::default(),
     }
+  }
+}
+
+impl RuntimeConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.worker_threads == Some(0) {
+      bail!("runtime.worker_threads must be greater than 0");
+    }
+    self.accept.validate()?;
+    self.hot_reload.validate()
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RuntimeAcceptConfig {
+  #[serde(default = "default_one_usize")]
+  pub workers: usize,
+  #[serde(default)]
+  pub reuse_port: bool,
+  #[serde(default = "default_runtime_accept_backlog")]
+  pub backlog: u32,
+  #[serde(default = "default_accept_error_backoff_ms")]
+  pub accept_error_backoff_ms: u64,
+}
+
+impl Default for RuntimeAcceptConfig {
+  fn default() -> Self {
+    Self {
+      workers: default_one_usize(),
+      reuse_port: false,
+      backlog: default_runtime_accept_backlog(),
+      accept_error_backoff_ms: default_accept_error_backoff_ms(),
+    }
+  }
+}
+
+impl RuntimeAcceptConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.workers == 0 {
+      bail!("runtime.accept.workers must be greater than 0");
+    }
+    if self.workers > 1 && !self.reuse_port {
+      bail!("runtime.accept.reuse_port must be true when runtime.accept.workers is greater than 1");
+    }
+    if self.backlog == 0 {
+      bail!("runtime.accept.backlog must be greater than 0");
+    }
+    if self.accept_error_backoff_ms == 0 {
+      bail!("runtime.accept.accept_error_backoff_ms must be greater than 0");
+    }
+    Ok(())
   }
 }
 
@@ -2725,6 +2795,7 @@ impl QuicConfig {
     if self.upstream_pool.max_lifetime_ms == 0 {
       bail!("quic.upstream_pool.max_lifetime_ms must be greater than 0");
     }
+    self.socket.validate()?;
     Ok(())
   }
 }
@@ -2789,12 +2860,39 @@ impl Default for QuicTransportConfig {
   }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct QuicSocketConfig {
   #[serde(default)]
   pub receive_buffer_bytes: usize,
   #[serde(default)]
   pub send_buffer_bytes: usize,
+  #[serde(default = "default_one_usize")]
+  pub workers: usize,
+  #[serde(default)]
+  pub reuse_port: bool,
+}
+
+impl Default for QuicSocketConfig {
+  fn default() -> Self {
+    Self {
+      receive_buffer_bytes: 0,
+      send_buffer_bytes: 0,
+      workers: default_one_usize(),
+      reuse_port: false,
+    }
+  }
+}
+
+impl QuicSocketConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.workers == 0 {
+      bail!("quic.socket.workers must be greater than 0");
+    }
+    if self.workers > 1 && !self.reuse_port {
+      bail!("quic.socket.reuse_port must be true when quic.socket.workers is greater than 1");
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -4651,6 +4749,18 @@ fn default_system_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
 
 fn default_hot_reload_poll_interval_ms() -> u64 {
   2_000
+}
+
+fn default_one_usize() -> usize {
+  1
+}
+
+fn default_runtime_accept_backlog() -> u32 {
+  1_024
+}
+
+fn default_accept_error_backoff_ms() -> u64 {
+  50
 }
 
 fn default_hosts() -> Vec<String> {

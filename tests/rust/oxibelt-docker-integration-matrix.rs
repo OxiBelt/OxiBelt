@@ -942,6 +942,54 @@ run_case_checks() {
         ),
         docker_case(
             "ops",
+            "kernel-extension-installer",
+            "kernel extension installer stages and verifies Linux 7.0.x host tuning files",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response output kernel_container
+  response="$(client_request "example.test" "/app/kernel-extension" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/kernel-extension"'
+
+  kernel_container="oxibelt-kernel-extension-${run_id}-${RANDOM}"
+  docker create \
+    --name "${kernel_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint /bin/sh \
+    "${proxy_image}" \
+    -ceu '
+      mkdir -p /tmp/oxibelt-root
+      /bin/sh /tmp/kernel-extension/install.sh --apply --root /tmp/oxibelt-root --kernel-release 7.0.3
+      /bin/sh /tmp/kernel-extension/verify.sh --root /tmp/oxibelt-root --kernel-release 7.0.3
+      if /bin/sh /tmp/kernel-extension/install.sh --dry-run --root /tmp/old-root --kernel-release 6.19.14 >/tmp/old-kernel.log 2>&1; then
+        cat /tmp/old-kernel.log >&2
+        exit 44
+      fi
+      grep -F "targets Linux 7.0.x" /tmp/old-kernel.log >/dev/null
+    ' >/dev/null
+  docker cp "${repo_root}/kernel-extension" "${kernel_container}:/tmp/kernel-extension"
+
+  if ! output="$(docker start -a "${kernel_container}" 2>&1)"; then
+    echo "${output}" >&2
+    docker rm -f "${kernel_container}" >/dev/null 2>&1 || true
+    fail_with_diagnostics "kernel extension installer container failed"
+  fi
+  docker rm -f "${kernel_container}" >/dev/null 2>&1 || true
+  if ! grep -F "verified /tmp/oxibelt-root/etc/sysctl.d/90-oxibelt-edge.conf" <<<"${output}" >/dev/null; then
+    echo "${output}" >&2
+    fail_with_diagnostics "kernel extension verifier did not report sysctl template"
+  fi
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "ops",
             "system-access-log-stdout",
             "system-wide access log emits structured stdout records without WAF rules",
             ExpectStart::Success,
@@ -1993,6 +2041,15 @@ assert_old_admin_port_closed() {
         ),
         docker_case(
             "config-invalid",
+            "accept-workers-without-reuseport",
+            "multi-worker TCP accept requires SO_REUSEPORT",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some("runtime.accept.reuse_port must be true"),
+        ),
+        docker_case(
+            "config-invalid",
             "static-ocsp-missing-response",
             "static OCSP mode requires a response file",
             ExpectStart::Failure,
@@ -2586,6 +2643,24 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/h3-enabled" 200)"
   assert_body_jq "${response}" '.path == "/origin/app/h3-enabled"'
+}
+      "#,
+            None,
+        ),
+        docker_case(
+            "protocol-startup",
+            "listener-reuseport-workers",
+            "in-process SO_REUSEPORT accept workers start and forward",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/reuseport-workers" 200)"
+  assert_body_jq "${response}" '.path == "/origin/app/reuseport-workers"'
 }
       "#,
             None,

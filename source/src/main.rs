@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use oxibelt::config::{Config, HotReloadMode, RuntimeOverrides};
+use tokio::runtime::{Builder, Runtime};
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt")]
@@ -24,8 +25,7 @@ struct Cli {
   dump_effective_config: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
   let runtime_overrides = RuntimeOverrides {
     hot_reload_mode: cli.hot_reload_mode,
@@ -49,27 +49,40 @@ async fn main() -> anyhow::Result<()> {
     return Ok(());
   }
 
-  let state = oxibelt::state::AppHandle::new(
-    oxibelt::state::AppSnapshot::new(config)
-      .await
-      .context("failed to initialize application state")?,
-  );
-  if cli.check {
-    return Ok(());
-  }
-  oxibelt::server::serve(
-    state,
-    Some(cli.config),
-    RuntimeOverrides {
-      hot_reload_mode: runtime_overrides.hot_reload_mode,
-      hot_reload_poll_interval_ms: runtime_overrides.hot_reload_poll_interval_ms,
-    },
-  )
-  .await
+  let worker_threads = config.runtime.worker_threads;
+  let runtime = build_runtime(worker_threads)?;
+  runtime.block_on(async move {
+    let state = oxibelt::state::AppHandle::new(
+      oxibelt::state::AppSnapshot::new(config)
+        .await
+        .context("failed to initialize application state")?,
+    );
+    if cli.check {
+      return Ok(());
+    }
+    oxibelt::server::serve(
+      state,
+      Some(cli.config),
+      RuntimeOverrides {
+        hot_reload_mode: runtime_overrides.hot_reload_mode,
+        hot_reload_poll_interval_ms: runtime_overrides.hot_reload_poll_interval_ms,
+      },
+    )
+    .await
+  })
 }
 
 fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
   value
     .parse()
     .map_err(|error: anyhow::Error| error.to_string())
+}
+
+fn build_runtime(worker_threads: Option<usize>) -> anyhow::Result<Runtime> {
+  let mut builder = Builder::new_multi_thread();
+  builder.enable_all();
+  if let Some(worker_threads) = worker_threads {
+    builder.worker_threads(worker_threads);
+  }
+  builder.build().context("failed to build Tokio runtime")
 }

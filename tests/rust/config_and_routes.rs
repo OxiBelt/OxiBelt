@@ -55,6 +55,121 @@ fn protocol_operations_defaults_are_disabled() {
 }
 
 #[test]
+fn accept_scaling_defaults_are_single_worker() {
+    let temp_dir = common::TempDir::new("accept-defaults");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "accept-defaults");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(config.runtime.worker_threads, None);
+    assert_eq!(config.runtime.accept.workers, 1);
+    assert!(!config.runtime.accept.reuse_port);
+    assert_eq!(config.runtime.accept.backlog, 1024);
+    assert_eq!(config.runtime.accept.accept_error_backoff_ms, 50);
+    assert_eq!(config.quic.socket.workers, 1);
+    assert!(!config.quic.socket.reuse_port);
+}
+
+#[test]
+fn accept_scaling_custom_values_parse() {
+    let temp_dir = common::TempDir::new("accept-custom");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "accept-custom");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "unprivileged_mode = true",
+        r#"unprivileged_mode = true
+worker_threads = 2
+
+[runtime.accept]
+workers = 2
+reuse_port = true
+backlog = 2048
+accept_error_backoff_ms = 75"#,
+    ) + r#"
+
+[quic.socket]
+receive_buffer_bytes = 1048576
+send_buffer_bytes = 1048576
+workers = 2
+reuse_port = true
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(config.runtime.worker_threads, Some(2));
+    assert_eq!(config.runtime.accept.workers, 2);
+    assert!(config.runtime.accept.reuse_port);
+    assert_eq!(config.runtime.accept.backlog, 2048);
+    assert_eq!(config.runtime.accept.accept_error_backoff_ms, 75);
+    assert_eq!(config.quic.socket.workers, 2);
+    assert!(config.quic.socket.reuse_port);
+}
+
+#[test]
+fn accept_scaling_rejects_invalid_values() {
+    let temp_dir = common::TempDir::new("accept-invalid");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "accept-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let cases = [
+        (
+            base.replace(
+                "unprivileged_mode = true",
+                "unprivileged_mode = true\nworker_threads = 0",
+            ),
+            "runtime.worker_threads must be greater than 0",
+        ),
+        (
+            base.replace(
+                "unprivileged_mode = true",
+                "unprivileged_mode = true\n\n[runtime.accept]\nworkers = 0",
+            ),
+            "runtime.accept.workers must be greater than 0",
+        ),
+        (
+            base.replace(
+                "unprivileged_mode = true",
+                "unprivileged_mode = true\n\n[runtime.accept]\nworkers = 2",
+            ),
+            "runtime.accept.reuse_port must be true",
+        ),
+        (
+            base.replace(
+                "unprivileged_mode = true",
+                "unprivileged_mode = true\n\n[runtime.accept]\nbacklog = 0",
+            ),
+            "runtime.accept.backlog must be greater than 0",
+        ),
+        (
+            base.replace(
+                "unprivileged_mode = true",
+                "unprivileged_mode = true\n\n[runtime.accept]\naccept_error_backoff_ms = 0",
+            ),
+            "runtime.accept.accept_error_backoff_ms must be greater than 0",
+        ),
+        (
+            format!("{base}\n\n[quic.socket]\nworkers = 0\n"),
+            "quic.socket.workers must be greater than 0",
+        ),
+        (
+            format!("{base}\n\n[quic.socket]\nworkers = 2\n"),
+            "quic.socket.reuse_port must be true",
+        ),
+    ];
+
+    for (raw, expected) in cases {
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn proxy_retry_defaults_and_custom_values_are_parsed() {
     let temp_dir = common::TempDir::new("proxy-retry");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "proxy-retry");

@@ -84,6 +84,35 @@ pub fn bind_server_endpoint(
   .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))
 }
 
+pub fn bind_server_endpoints(
+  bind: SocketAddr,
+  server_config: ServerConfig,
+  config: &QuicConfig,
+  host_key_base_dir: Option<&Path>,
+) -> anyhow::Result<Vec<Endpoint>> {
+  let mut endpoints = Vec::with_capacity(config.socket.workers);
+  let first = bind_server_endpoint(bind, server_config.clone(), config, host_key_base_dir)?;
+  let assigned = first
+    .local_addr()
+    .context("failed to read downstream HTTP/3 listener address")?;
+  endpoints.push(first);
+
+  if config.socket.workers == 1 {
+    return Ok(endpoints);
+  }
+
+  let worker_bind = SocketAddr::new(bind.ip(), assigned.port());
+  for _ in 1..config.socket.workers {
+    endpoints.push(bind_server_endpoint(
+      worker_bind,
+      server_config.clone(),
+      config,
+      host_key_base_dir,
+    )?);
+  }
+  Ok(endpoints)
+}
+
 pub fn bind_client_endpoint(
   remote_addr: SocketAddr,
   config: &QuicConfig,
@@ -152,6 +181,11 @@ fn bind_udp_socket(bind: SocketAddr, config: &QuicSocketConfig) -> anyhow::Resul
     socket
       .set_send_buffer_size(config.send_buffer_bytes)
       .context("failed to set QUIC UDP send buffer size")?;
+  }
+  if config.reuse_port {
+    socket
+      .set_reuse_port(true)
+      .context("failed to set QUIC UDP SO_REUSEPORT")?;
   }
   socket
     .bind(&SockAddr::from(bind))

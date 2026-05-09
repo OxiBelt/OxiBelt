@@ -14,6 +14,13 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+# worker_threads = 8
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 1024
+accept_error_backoff_ms = 50
 
 [runtime.hot_reload]
 mode = "off"
@@ -70,6 +77,8 @@ gso = true
 [quic.socket]
 receive_buffer_bytes = 0
 send_buffer_bytes = 0
+workers = 1
+reuse_port = false
 
 [quic.upstream_pool]
 enabled = true

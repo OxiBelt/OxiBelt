@@ -61,6 +61,7 @@ include = ["conf.d/*.toml"]
 [logging.access_log.database]
 [logging.access_log.database.tls]
 [runtime]
+[runtime.accept]
 [runtime.hot_reload]
 [listeners]
 [listeners.proxy_protocol]
@@ -217,13 +218,20 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+# worker_threads = 8
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 1024
+accept_error_backoff_ms = 50
 
 [runtime.hot_reload]
 mode = "off" # off | oxirule | downstream_tls | full
 poll_interval_ms = 2000
 ```
 
-`unprivileged_mode = true` rejects listener ports below `1024`. `poll_interval_ms` must be greater than zero. CLI flags `--hot-reload-mode` and `--hot-reload-poll-interval-ms` override TOML values and emit warnings when they differ.
+`unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` is optional; when omitted, Tokio chooses its default multi-thread worker count. `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers = 1` keeps the compatibility path. Set `workers > 1` only with `reuse_port = true`, which creates one `SO_REUSEPORT` listener socket per worker. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors. `poll_interval_ms` must be greater than zero. CLI flags `--hot-reload-mode` and `--hot-reload-poll-interval-ms` override TOML values and emit warnings when they differ.
 
 Reload modes:
 
@@ -299,6 +307,8 @@ gso = true
 [quic.socket]
 receive_buffer_bytes = 0
 send_buffer_bytes = 0
+workers = 1
+reuse_port = false
 
 [quic.upstream_pool]
 enabled = true
@@ -312,7 +322,7 @@ max_lifetime_ms = 600000
 
 When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/1.1 and HTTP/2 responses advertise `Alt-Svc: h3=":<https port>"; ma=<max_age_seconds>`. `persist = true` appends `; persist=1`. OxiBelt does not add `Alt-Svc` to downstream HTTP/3 responses, plain HTTP responses, or `101 Switching Protocols`.
 
-`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to the UDP socket. Other QUIC transport and pool numeric values must be greater than zero; `max_udp_payload_size` must be in the QUIC-valid range `1200..=65527`.
+`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets. `quic.socket.workers = 1` keeps a single downstream HTTP/3 endpoint. Set `workers > 1` only with `reuse_port = true`, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. Other QUIC transport, socket, and pool numeric values must be greater than zero; `max_udp_payload_size` must be in the QUIC-valid range `1200..=65527`.
 
 The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
 
@@ -865,7 +875,7 @@ Configuration validation rejects:
 - No enabled downstream HTTP versions.
 - Privileged listener ports when `runtime.unprivileged_mode = true`.
 - Non-Linux runtime when `runtime.linux_only = true`.
-- Invalid hot reload mode or zero `poll_interval_ms`.
+- Invalid hot reload mode, zero `worker_threads`, zero `poll_interval_ms`, zero accept worker/backlog/backoff values, or accept/QUIC worker counts greater than one without `reuse_port = true`.
 - No upstreams/pools, no routes, duplicate names, empty route hosts, or unknown route targets.
 - Routes that set both `upstream` and `upstream_pool`, or neither.
 - Unsafe route paths.
