@@ -792,6 +792,106 @@ cache = "assets"
 }
 
 #[test]
+fn cache_advanced_policy_config_parse() {
+    let temp_dir = common::TempDir::new("cache-advanced-policy");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "cache-advanced-policy");
+    let raw = format!(
+        r#"
+{}
+
+[cache]
+enabled = true
+tag_headers = ["Surrogate-Key", "Cache-Tag"]
+max_tags_per_entry = 16
+max_tag_bytes = 64
+background_refresh = true
+background_refresh_max_concurrent = 4
+lock_wait_timeout_ms = 250
+stale_if_error_seconds = 30
+stale_while_revalidate_seconds = 30
+
+[cache.admission]
+statuses = [200, 203, 204]
+content_types = ["text/*", "application/json"]
+max_body_bytes = 4096
+min_hits = 2
+max_tracked_keys = 128
+
+[cache.stale_if_error]
+connect_error = true
+read_timeout = false
+statuses = [500, 502]
+
+[[cache.policies]]
+name = "assets"
+cache_key = "{{scheme}}:{{host}}:{{path}}"
+tag_headers = ["Surrogate-Key"]
+background_refresh = false
+lock_wait_timeout_ms = 100
+
+[cache.policies.admission]
+statuses = [200]
+content_types = ["text/css"]
+min_hits = 1
+max_tracked_keys = 64
+
+[cache.policies.stale_if_error]
+connect_error = false
+read_timeout = true
+statuses = [503]
+
+[[routes]]
+name = "cached-assets"
+hosts = ["assets.example.com"]
+path_prefix = "/assets"
+upstream = "app"
+cache = "assets"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.cache.max_tags_per_entry, 16);
+    assert_eq!(config.cache.admission.min_hits, 2);
+    assert_eq!(config.cache.stale_if_error.statuses, vec![500, 502]);
+    assert_eq!(
+        config.cache.policies[0].tag_headers.as_deref().unwrap(),
+        ["Surrogate-Key"]
+    );
+    assert_eq!(config.cache.policies[0].lock_wait_timeout_ms, Some(100));
+    assert_eq!(config.routes[1].cache.as_deref(), Some("assets"));
+}
+
+#[test]
+fn cache_advanced_policy_rejects_invalid_values() {
+    let temp_dir = common::TempDir::new("cache-advanced-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "cache-advanced-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[cache]
+enabled = true
+max_tags_per_entry = 0
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("config should reject invalid cache tag limit");
+    assert!(
+        error
+            .to_string()
+            .contains("cache.max_tags_per_entry must be greater than 0")
+    );
+}
+
+#[test]
 fn cache_disk_store_requires_explicit_disk_dir() {
     let temp_dir = common::TempDir::new("cache-disk-invalid");
     let (cert_path, key_path) =

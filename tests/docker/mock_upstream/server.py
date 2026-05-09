@@ -2,6 +2,7 @@ import json
 import os
 import re
 import ssl
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -14,6 +15,8 @@ UPSTREAM_NAME = os.environ.get("UPSTREAM_NAME", "mock-upstream")
 UPSTREAM_MARKER = "mock-upstream"
 ACCEPT_PROXY_PROTOCOL = os.environ.get("ACCEPT_PROXY_PROTOCOL", "0") == "1"
 HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+REQUEST_COUNTS = {}
+REQUEST_COUNTS_LOCK = threading.Lock()
 
 
 class EchoHandler(BaseHTTPRequestHandler):
@@ -49,6 +52,7 @@ class EchoHandler(BaseHTTPRequestHandler):
     body = self.rfile.read(body_length).decode("utf-8", "replace") if body_length else ""
     parsed = urlsplit(self.path)
     query = parse_qs(parsed.query)
+    sequence_index = _sequence_index(parsed.path, query)
     header_delay_ms = _query_int(query, "header_delay_ms", 0)
     body_delay_ms = _query_int(query, "body_delay_ms", 0)
     body_split_at = _query_int(query, "body_split_at", -1)
@@ -61,6 +65,11 @@ class EchoHandler(BaseHTTPRequestHandler):
         status = 500
     if "status" in query:
       status = _query_int(query, "status", status)
+    status = _sequence_value(query, "status_sequence", sequence_index, str(status))
+    try:
+      status = int(status)
+    except (TypeError, ValueError):
+      status = 500
     etag = query.get("etag", [""])[0]
     last_modified = query.get("last_modified", [""])[0]
     if etag and self.headers.get("if-none-match") == etag:
@@ -80,7 +89,8 @@ class EchoHandler(BaseHTTPRequestHandler):
       "body": body,
       "proxy_protocol_line": self.proxy_protocol_line,
     }
-    encoded = query.get("body", [""])[0].encode("utf-8") or json.dumps(payload, sort_keys=True).encode("utf-8")
+    body_value = _sequence_value(query, "body_sequence", sequence_index, query.get("body", [""])[0])
+    encoded = body_value.encode("utf-8") or json.dumps(payload, sort_keys=True).encode("utf-8")
     if header_delay_ms > 0:
       time.sleep(header_delay_ms / 1000.0)
     if query.get("early_hints"):
@@ -90,6 +100,8 @@ class EchoHandler(BaseHTTPRequestHandler):
     self.send_response(status)
     self.send_header("content-type", query.get("content_type", ["application/json"])[0])
     self.send_header("x-upstream-marker", UPSTREAM_MARKER)
+    if any(key in query for key in ("sequence_key", "body_sequence", "status_sequence")):
+      self.send_header("x-sequence-index", str(sequence_index))
     if query.get("set_cookie"):
       self.send_header("set-cookie", "upstream_session=present; Path=/")
     cache_control = {
@@ -97,9 +109,17 @@ class EchoHandler(BaseHTTPRequestHandler):
       "no-store": "no-store",
       "private-no-store": "private, no-store",
       "public": "public, max-age=60",
+      "public-max-age-1": "public, max-age=1",
+      "public-stale-revalidate": "public, max-age=1, stale-while-revalidate=30",
+      "public-stale-error": "public, max-age=1, stale-if-error=30",
     }.get(query.get("cache_control", [""])[0])
+    cache_control = query.get("cache_control_value", [cache_control])[0]
     if cache_control:
       self.send_header("cache-control", cache_control)
+    if query.get("surrogate_key"):
+      self.send_header("surrogate-key", query.get("surrogate_key", [""])[0])
+    if query.get("cache_tag"):
+      self.send_header("cache-tag", query.get("cache_tag", [""])[0])
     if etag:
       self.send_header("etag", etag)
     if last_modified:
@@ -147,6 +167,24 @@ def _query_int(query, key, default):
     return int(query.get(key, [str(default)])[0])
   except (TypeError, ValueError):
     return default
+
+
+def _sequence_index(path, query):
+  if not any(key in query for key in ("sequence_key", "body_sequence", "status_sequence")):
+    return 0
+  key = query.get("sequence_key", [path])[0]
+  with REQUEST_COUNTS_LOCK:
+    index = REQUEST_COUNTS.get(key, 0)
+    REQUEST_COUNTS[key] = index + 1
+    return index
+
+
+def _sequence_value(query, key, index, default):
+  raw = query.get(key, [""])[0]
+  if not raw:
+    return default
+  values = raw.split("|")
+  return values[min(index, len(values) - 1)]
 
 
 def main():

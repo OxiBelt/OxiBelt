@@ -414,7 +414,7 @@ async fn admin_response(
     .collect::<std::collections::HashMap<_, _>>();
   let path = uri.path().to_string();
 
-  if path == "/cache/purge" || path == "/cache/purge-prefix" {
+  if path == "/cache/purge" || path == "/cache/purge-prefix" || path == "/cache/purge-tag" {
     if !admin_actor_has_role(&actor, AdminRole::CacheOperator) {
       return text_response(StatusCode::FORBIDDEN, "forbidden");
     }
@@ -563,20 +563,21 @@ fn admin_cache_purge_response(
     .map(String::as_str)
     .unwrap_or("default");
   let purge_scheme = params.get("scheme").map(String::as_str).unwrap_or(scheme);
-  let Some(host) = params.get("host").map(String::as_str) else {
-    admin_audit(
-      peer_addr,
-      actor,
-      "cache_purge",
-      None,
-      None,
-      AdminAuditOutcome::Rejected,
-      Some("missing host"),
-    );
-    return text_response(StatusCode::BAD_REQUEST, "missing host");
-  };
+  let host = params.get("host").map(String::as_str);
   let purged = match path {
     "/cache/purge" => {
+      let Some(host) = host else {
+        admin_audit(
+          peer_addr,
+          actor,
+          "cache_purge",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing host"),
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing host");
+      };
       let Some(uri) = params.get("uri").map(String::as_str) else {
         admin_audit(
           peer_addr,
@@ -592,6 +593,18 @@ fn admin_cache_purge_response(
       snapshot.cache.purge_exact(policy, purge_scheme, host, uri)
     }
     "/cache/purge-prefix" => {
+      let Some(host) = host else {
+        admin_audit(
+          peer_addr,
+          actor,
+          "cache_purge_prefix",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing host"),
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing host");
+      };
       let Some(path_prefix) = params.get("path_prefix").map(String::as_str) else {
         admin_audit(
           peer_addr,
@@ -608,16 +621,38 @@ fn admin_cache_purge_response(
         .cache
         .purge_prefix(policy, purge_scheme, host, path_prefix)
     }
+    "/cache/purge-tag" => {
+      let Some(tag) = params.get("tag").map(String::as_str) else {
+        admin_audit(
+          peer_addr,
+          actor,
+          "cache_purge_tag",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing tag"),
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing tag");
+      };
+      snapshot
+        .cache
+        .purge_tag(policy, tag, params.get("scheme").map(String::as_str), host)
+    }
     _ => unreachable!("admin cache purge path checked before dispatch"),
   };
-  snapshot.metrics.record_cache_purge();
+  if path == "/cache/purge-tag" {
+    snapshot.metrics.record_cache_tag_purge();
+  } else {
+    snapshot.metrics.record_cache_purge();
+  }
   admin_audit(
     peer_addr,
     actor,
-    if path == "/cache/purge" {
-      "cache_purge"
-    } else {
-      "cache_purge_prefix"
+    match path {
+      "/cache/purge" => "cache_purge",
+      "/cache/purge-prefix" => "cache_purge_prefix",
+      "/cache/purge-tag" => "cache_purge_tag",
+      _ => unreachable!("admin cache purge path checked before dispatch"),
     },
     None,
     None,

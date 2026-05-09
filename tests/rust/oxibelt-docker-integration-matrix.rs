@@ -1916,6 +1916,121 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "cache",
+            "tag-purge",
+            "admin API purges cache entries by Surrogate-Key tag",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second purge first_after second_after
+  first="$(client_request "example.test" "/app/tag-a?body=tag-a&cache_control=public&content_type=text/plain&surrogate_key=release-1%20assets" 200)"
+  second="$(client_request "example.test" "/app/tag-b?body=tag-b&cache_control=public&content_type=text/plain&surrogate_key=release-2%20assets" 200)"
+  assert_response_jq "${first}" '.body == "tag-a"'
+  assert_response_jq "${second}" '.body == "tag-b"'
+
+  purge="$(plain_client_request_with_headers_on_port 9092 "proxy" "/cache/purge-tag?policy=default&tag=release-1" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${purge}" '.body == "purged=1\n"'
+
+  docker rm -f "${http_container}" >/dev/null
+  first_after="$(client_request "example.test" "/app/tag-a?body=tag-a&cache_control=public&content_type=text/plain&surrogate_key=release-1%20assets" 502)"
+  second_after="$(client_request "example.test" "/app/tag-b?body=tag-b&cache_control=public&content_type=text/plain&surrogate_key=release-2%20assets" 200)"
+  assert_response_jq "${first_after}" '.status == 502'
+  assert_response_jq "${second_after}" '.body == "tag-b"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "background-refresh",
+            "stale-while-revalidate serves stale while refreshing in the background",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first stale second_stale refreshed
+  first="$(client_request "example.test" "/app/bg?sequence_key=bg-refresh&body_sequence=old%7Cold%7Cnew&cache_control=public-stale-revalidate&content_type=text/plain" 200)"
+  assert_response_jq "${first}" '.body == "old"'
+  sleep 2
+  stale="$(client_request "example.test" "/app/bg?sequence_key=bg-refresh&body_sequence=old%7Cold%7Cnew&cache_control=public-stale-revalidate&content_type=text/plain" 200)"
+  assert_response_jq "${stale}" '.body == "old"'
+  sleep 2
+  second_stale="$(client_request "example.test" "/app/bg?sequence_key=bg-refresh&body_sequence=old%7Cold%7Cnew&cache_control=public-stale-revalidate&content_type=text/plain" 200)"
+  assert_response_jq "${second_stale}" '.body == "old" or .body == "new"'
+  sleep 1
+  refreshed="$(client_request "example.test" "/app/bg?sequence_key=bg-refresh&body_sequence=old%7Cold%7Cnew&cache_control=public-stale-revalidate&content_type=text/plain" 200)"
+  assert_response_jq "${refreshed}" '.body == "new"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "admission-stale-errors",
+            "cache admission policy and stale-if-error status handling work together",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second third stale rejected
+  first="$(client_request "example.test" "/app/admit?sequence_key=admit&body_sequence=admitted%7Cadmitted%7Cshould-not-serve&status_sequence=200%7C200%7C500&cache_control=public-stale-error&content_type=text/plain" 200)"
+  second="$(client_request "example.test" "/app/admit?sequence_key=admit&body_sequence=admitted%7Cadmitted%7Cshould-not-serve&status_sequence=200%7C200%7C500&cache_control=public-stale-error&content_type=text/plain" 200)"
+  assert_response_jq "${first}" '.body == "admitted"'
+  assert_response_jq "${second}" '.body == "admitted"'
+  sleep 2
+  stale="$(client_request "example.test" "/app/admit?sequence_key=admit&body_sequence=admitted%7Cadmitted%7Cshould-not-serve&status_sequence=200%7C200%7C500&cache_control=public-stale-error&content_type=text/plain" 200)"
+  assert_response_jq "${stale}" '.body == "admitted"'
+
+  rejected="$(client_request "example.test" "/app/reject-content-type?body=json&cache_control=public&content_type=application/json" 200)"
+  assert_response_jq "${rejected}" '.body == "json"'
+  docker rm -f "${http_container}" >/dev/null
+  third="$(client_request "example.test" "/app/reject-content-type?body=json&cache_control=public&content_type=application/json" 502)"
+  assert_response_jq "${third}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "collapsed-forwarding-metrics",
+            "collapsed forwarding exposes waiter metrics for concurrent cache fills",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first_file second_file first second metrics
+  first_file="${work_dir}/first-cache-fill.json"
+  second_file="${work_dir}/second-cache-fill.json"
+  client_request "example.test" "/app/collapse?body=collapsed&cache_control=public&content_type=text/plain&header_delay_ms=800" 200 >"${first_file}" &
+  sleep 0.1
+  client_request "example.test" "/app/collapse?body=collapsed&cache_control=public&content_type=text/plain&header_delay_ms=800" 200 >"${second_file}" &
+  wait
+  first="$(cat "${first_file}")"
+  second="$(cat "${second_file}")"
+  assert_response_jq "${first}" '.body == "collapsed"'
+  assert_response_jq "${second}" '.body == "collapsed"'
+
+  metrics="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
+  assert_response_jq "${metrics}" '.body | contains("oxibelt_cache_fill_waiters_total 1")'
+  assert_response_jq "${metrics}" '.body | contains("oxibelt_cache_fill_lock_timeouts_total 0")'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "database-access-log",
             "postgres-mtls",
             "OxiRule access logs are written to PostgreSQL over verified mTLS",

@@ -217,8 +217,26 @@ respect_cache_control = true
 stale_if_error_seconds = 30
 stale_while_revalidate_seconds = 30
 lock = true
+lock_wait_timeout_ms = 10000
+tag_headers = ["Surrogate-Key", "Cache-Tag"]
+max_tags_per_entry = 32
+max_tag_bytes = 128
+background_refresh = true
+background_refresh_max_concurrent = 16
 negative_statuses = []
 negative_ttl_seconds = 0
+
+[cache.admission]
+statuses = [200, 203, 204, 301, 308]
+content_types = []
+max_body_bytes = 0
+min_hits = 1
+max_tracked_keys = 16384
+
+[cache.stale_if_error]
+connect_error = true
+read_timeout = true
+statuses = []
 
 [admin]
 enabled = false

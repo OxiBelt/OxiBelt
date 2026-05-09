@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,10 +13,13 @@ use http::header::{
 };
 use http::{HeaderMap, Method, StatusCode, Uri};
 use ring::digest;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
 
-use crate::config::{CacheConfig, CachePolicyConfig, CacheStore, default_cache_tmpfs_dir};
+use crate::config::{
+  CacheAdmissionConfig, CacheConfig, CachePolicyConfig, CacheStaleIfErrorConfig, CacheStore,
+  default_cache_tmpfs_dir,
+};
 use crate::shared_state::{SharedCacheEntry, SharedCacheLock, SharedState, SharedVaryMatcher};
 
 #[derive(Debug, Clone)]
@@ -34,9 +37,17 @@ pub struct Revalidation {
 }
 
 #[derive(Debug, Clone)]
+pub struct StaleEntry {
+  pub entry: CacheEntry,
+  pub request_headers: HeaderMap,
+  pub serve_stale_on_error: bool,
+  pub background_refresh: bool,
+}
+
+#[derive(Debug, Clone)]
 pub enum CacheLookup {
   Fresh(CacheEntry),
-  Stale(CacheEntry),
+  Stale(StaleEntry),
   Revalidate(Revalidation),
 }
 
@@ -44,6 +55,7 @@ pub enum CacheLookup {
 pub enum CacheFillPermit {
   Leader(CacheFillGuard),
   Follower(CacheFillWaiter),
+  SharedConflict,
 }
 
 #[derive(Debug)]
@@ -62,6 +74,12 @@ pub struct CacheFillWaiter {
 impl CacheFillWaiter {
   pub async fn wait(self) {
     self.notify.notified().await;
+  }
+
+  pub async fn wait_timeout(self, timeout: Duration) -> bool {
+    tokio::time::timeout(timeout, self.notify.notified())
+      .await
+      .is_ok()
   }
 }
 
@@ -90,6 +108,17 @@ pub struct CacheStats {
   pub memory_bytes: usize,
   pub disk_bytes: usize,
   pub tmpfs_bytes: usize,
+  pub disk_recovered_entries_total: u64,
+  pub disk_recovery_errors_total: u64,
+  pub disk_recovery_removed_files_total: u64,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CacheInsertOutcome {
+  Stored,
+  NotCacheable,
+  Rejected,
+  StoreFailed,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +157,7 @@ struct StoredEntry {
   stale_while_revalidate_until: Option<SystemTime>,
   must_revalidate: bool,
   vary: Vec<VaryMatcher>,
+  tags: Vec<String>,
   size: usize,
 }
 
@@ -152,6 +182,11 @@ struct CacheInner {
   memory_size: usize,
   disk_size: usize,
   tmpfs_size: usize,
+  admission_counts: HashMap<String, u32>,
+  admission_order: VecDeque<String>,
+  disk_recovered_entries_total: u64,
+  disk_recovery_errors_total: u64,
+  disk_recovery_removed_files_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +197,24 @@ struct CachePolicyRuntime {
   default_ttl_seconds: u64,
   memory_max_size_bytes: usize,
   disk_max_size_bytes: Option<usize>,
+  tag_headers: Vec<HeaderName>,
+  max_tags_per_entry: usize,
+  max_tag_bytes: usize,
+  background_refresh: bool,
+  background_refresh_max_concurrent: usize,
+  lock_wait_timeout: Duration,
+  admission: CacheAdmissionRuntime,
+  stale_if_error: CacheStaleIfErrorConfig,
   rules: Vec<CachePolicyRuleRuntime>,
+}
+
+#[derive(Debug, Clone)]
+struct CacheAdmissionRuntime {
+  statuses: Vec<StatusCode>,
+  content_types: Vec<String>,
+  max_body_bytes: usize,
+  min_hits: usize,
+  max_tracked_keys: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +227,7 @@ struct CachePolicyRuleRuntime {
 pub struct ResponseCache {
   config: CacheConfig,
   policies: HashMap<String, CachePolicyRuntime>,
+  refresh_limiters: HashMap<String, Arc<Semaphore>>,
   tmpfs_dir: Option<PathBuf>,
   disk_dir: Option<PathBuf>,
   inner: Mutex<CacheInner>,
@@ -217,6 +270,14 @@ impl ResponseCache {
       default_ttl_seconds: config.default_ttl_seconds,
       memory_max_size_bytes: default_memory_limit,
       disk_max_size_bytes: config.disk_max_size_bytes,
+      tag_headers: cache_tag_headers(&config.tag_headers),
+      max_tags_per_entry: config.max_tags_per_entry,
+      max_tag_bytes: config.max_tag_bytes,
+      background_refresh: config.background_refresh,
+      background_refresh_max_concurrent: config.background_refresh_max_concurrent,
+      lock_wait_timeout: Duration::from_millis(config.lock_wait_timeout_ms),
+      admission: admission_runtime(&config.admission, &config.negative_statuses),
+      stale_if_error: config.stale_if_error.clone(),
       rules: Vec::new(),
     };
     let mut policies = HashMap::new();
@@ -225,10 +286,20 @@ impl ResponseCache {
       let runtime = policy_runtime(config, policy, default_memory_limit);
       policies.insert(runtime.name.clone(), runtime);
     }
+    let refresh_limiters = policies
+      .iter()
+      .map(|(name, policy)| {
+        (
+          name.clone(),
+          Arc::new(Semaphore::new(policy.background_refresh_max_concurrent)),
+        )
+      })
+      .collect();
 
     let cache = Arc::new(Self {
       config: config.clone(),
       policies,
+      refresh_limiters,
       tmpfs_dir,
       disk_dir,
       inner: Mutex::new(CacheInner::default()),
@@ -300,13 +371,40 @@ impl ResponseCache {
     let cache_entry = entry.to_cache_entry()?;
     if request_no_cache(ctx.request_headers) || entry.must_revalidate || entry.expires_at <= now {
       let validators = validator_headers(&entry.headers);
+      if !request_no_cache(ctx.request_headers)
+        && !entry.must_revalidate
+        && entry
+          .stale_while_revalidate_until
+          .is_some_and(|until| until > now)
+      {
+        return Some(CacheLookup::Stale(StaleEntry {
+          entry: cache_entry,
+          request_headers: validators,
+          serve_stale_on_error: entry.stale_if_error_until.is_some_and(|until| until > now),
+          background_refresh: policy.background_refresh,
+        }));
+      }
       if validators.is_empty() {
         if entry
           .stale_while_revalidate_until
           .is_some_and(|until| until > now)
-          || entry.stale_if_error_until.is_some_and(|until| until > now)
         {
-          return Some(CacheLookup::Stale(cache_entry));
+          return Some(CacheLookup::Stale(StaleEntry {
+            entry: cache_entry,
+            request_headers: HeaderMap::new(),
+            serve_stale_on_error: entry.stale_if_error_until.is_some_and(|until| until > now),
+            background_refresh: entry
+              .stale_while_revalidate_until
+              .is_some_and(|until| until > now)
+              && policy.background_refresh,
+          }));
+        }
+        if entry.stale_if_error_until.is_some_and(|until| until > now) {
+          return Some(CacheLookup::Revalidate(Revalidation {
+            entry: cache_entry,
+            request_headers: HeaderMap::new(),
+            serve_stale_on_error: true,
+          }));
         }
         return None;
       }
@@ -354,7 +452,8 @@ impl ResponseCache {
 
   fn promote_shared_lookup(&self, ctx: CacheLookupContext<'_>, lookup: &CacheLookup) {
     let entry = match lookup {
-      CacheLookup::Fresh(entry) | CacheLookup::Stale(entry) => entry.clone(),
+      CacheLookup::Fresh(entry) => entry.clone(),
+      CacheLookup::Stale(stale) => stale.entry.clone(),
       CacheLookup::Revalidate(revalidation) => revalidation.entry.clone(),
     };
     self.insert(
@@ -392,7 +491,7 @@ impl ResponseCache {
       .is_some_and(|shared| shared.has_cache())
       && shared_lock.is_none()
     {
-      return None;
+      return Some(CacheFillPermit::SharedConflict);
     }
     let mut inner = self.inner.lock().expect("cache lock poisoned");
     if let Some(notify) = inner.inflight.get(&key) {
@@ -410,18 +509,18 @@ impl ResponseCache {
     }))
   }
 
-  pub fn insert(&self, ctx: CacheInsertContext<'_>, entry: CacheEntry) {
+  pub fn insert(&self, ctx: CacheInsertContext<'_>, entry: CacheEntry) -> CacheInsertOutcome {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
-      return;
+      return CacheInsertOutcome::NotCacheable;
     }
     if request_no_store(ctx.request_headers) {
-      return;
+      return CacheInsertOutcome::NotCacheable;
     }
     let Some(policy) = self.policy(ctx.policy_name).cloned() else {
-      return;
+      return CacheInsertOutcome::NotCacheable;
     };
     let Some(metadata) = cache_metadata(&self.config, &policy, ctx.request_headers, &entry) else {
-      return;
+      return CacheInsertOutcome::NotCacheable;
     };
     let base_key = expanded_cache_key(
       &policy.cache_key,
@@ -433,10 +532,13 @@ impl ResponseCache {
     let variant_key = variant_key(&base_key, &metadata.vary);
     let size = entry.body.len() + header_size(&entry.headers);
     if size > self.config.max_size_bytes {
-      return;
+      return CacheInsertOutcome::Rejected;
     }
 
     let mut inner = self.inner.lock().expect("cache lock poisoned");
+    if !admit_entry(&mut inner, &policy, &variant_key, &entry) {
+      return CacheInsertOutcome::Rejected;
+    }
     remove_entry(&mut inner, &variant_key);
     let selected_store = select_store(&policy, &entry.headers);
     let Some(body) = self.store_body(
@@ -447,8 +549,9 @@ impl ResponseCache {
       &entry.body,
       size,
     ) else {
-      return;
+      return CacheInsertOutcome::StoreFailed;
     };
+    let tags = extract_tags(&entry.headers, &policy);
     let stored = StoredEntry {
       policy: policy.name.clone(),
       base_key,
@@ -464,13 +567,14 @@ impl ResponseCache {
       stale_while_revalidate_until: metadata.stale_while_revalidate_until,
       must_revalidate: metadata.must_revalidate,
       vary: metadata.vary,
+      tags,
       size,
     };
     if let Err(error) = self.persist_metadata(&stored) {
       warn!(error = %error, "failed to persist cache metadata");
       if matches!(stored.body, StoredBody::Disk(_)) {
         stored.remove_body();
-        return;
+        return CacheInsertOutcome::StoreFailed;
       }
     }
     if let Some(shared) = &self.shared_state
@@ -483,6 +587,7 @@ impl ResponseCache {
     inner.order.push_back(variant_key.clone());
     inner.entries.insert(variant_key, stored);
     self.evict_if_needed(&mut inner, &policy);
+    CacheInsertOutcome::Stored
   }
 
   pub fn update_from_not_modified(
@@ -563,12 +668,47 @@ impl ResponseCache {
         .unwrap_or(0)
   }
 
+  pub fn purge_tag(
+    &self,
+    policy: &str,
+    tag: &str,
+    scheme: Option<&str>,
+    host: Option<&str>,
+  ) -> usize {
+    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let keys = inner
+      .entries
+      .iter()
+      .filter(|(_, entry)| {
+        entry.policy == policy
+          && scheme.is_none_or(|scheme| entry.scheme == scheme)
+          && host.is_none_or(|host| entry.host == host)
+          && entry.tags.iter().any(|candidate| candidate == tag)
+      })
+      .map(|(key, _)| key.clone())
+      .collect::<Vec<_>>();
+    let count = keys.len();
+    for key in keys {
+      remove_entry(&mut inner, &key);
+    }
+    count
+      + self
+        .shared_state
+        .as_ref()
+        .filter(|shared| shared.has_cache())
+        .map(|shared| shared.cache_purge_tag(policy, tag, scheme, host))
+        .unwrap_or(0)
+  }
+
   pub fn stats(&self) -> CacheStats {
     let inner = self.inner.lock().expect("cache lock poisoned");
     let mut stats = CacheStats {
       memory_bytes: inner.memory_size,
       disk_bytes: inner.disk_size,
       tmpfs_bytes: inner.tmpfs_size,
+      disk_recovered_entries_total: inner.disk_recovered_entries_total,
+      disk_recovery_errors_total: inner.disk_recovery_errors_total,
+      disk_recovery_removed_files_total: inner.disk_recovery_removed_files_total,
       ..CacheStats::default()
     };
     for entry in inner.entries.values() {
@@ -584,6 +724,58 @@ impl ResponseCache {
   fn policy(&self, policy_name: Option<&str>) -> Option<&CachePolicyRuntime> {
     let name = policy_name.unwrap_or("default");
     self.policies.get(name)
+  }
+
+  pub fn background_refresh_enabled(&self, policy_name: Option<&str>) -> bool {
+    self
+      .policy(policy_name)
+      .is_some_and(|policy| policy.background_refresh)
+  }
+
+  pub fn try_background_refresh_permit(
+    &self,
+    policy_name: Option<&str>,
+  ) -> Option<OwnedSemaphorePermit> {
+    let name = policy_name.unwrap_or("default");
+    self
+      .refresh_limiters
+      .get(name)?
+      .clone()
+      .try_acquire_owned()
+      .ok()
+  }
+
+  pub fn lock_wait_timeout(&self, policy_name: Option<&str>) -> Duration {
+    self
+      .policy(policy_name)
+      .map(|policy| policy.lock_wait_timeout)
+      .unwrap_or_else(|| Duration::from_millis(self.config.lock_wait_timeout_ms))
+  }
+
+  pub fn stale_if_error_allows_connect(&self, policy_name: Option<&str>) -> bool {
+    self
+      .policy(policy_name)
+      .is_some_and(|policy| policy.stale_if_error.connect_error)
+  }
+
+  pub fn stale_if_error_allows_read_timeout(&self, policy_name: Option<&str>) -> bool {
+    self
+      .policy(policy_name)
+      .is_some_and(|policy| policy.stale_if_error.read_timeout)
+  }
+
+  pub fn stale_if_error_allows_status(
+    &self,
+    policy_name: Option<&str>,
+    status: StatusCode,
+  ) -> bool {
+    self.policy(policy_name).is_some_and(|policy| {
+      policy
+        .stale_if_error
+        .statuses
+        .iter()
+        .any(|candidate| StatusCode::from_u16(*candidate).ok() == Some(status))
+    })
   }
 
   fn fill_key(&self, ctx: CacheLookupContext<'_>) -> Option<String> {
@@ -699,8 +891,19 @@ impl ResponseCache {
       return;
     };
     let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut referenced_bodies = HashSet::new();
     for entry in entries.flatten() {
       let path = entry.path();
+      if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.ends_with("tmp"))
+      {
+        if std::fs::remove_file(&path).is_ok() {
+          inner.disk_recovery_removed_files_total += 1;
+        }
+        continue;
+      }
       if path.extension().and_then(|value| value.to_str()) != Some("meta") {
         continue;
       }
@@ -715,15 +918,41 @@ impl ResponseCache {
           {
             remove_metadata(&stored);
             stored.remove_body();
+            inner.disk_recovery_removed_files_total += 2;
             continue;
           }
+          let StoredBody::Disk(body_path) = &stored.body else {
+            continue;
+          };
+          if !body_path.is_file() {
+            remove_metadata(&stored);
+            inner.disk_recovery_errors_total += 1;
+            inner.disk_recovery_removed_files_total += 1;
+            continue;
+          }
+          referenced_bodies.insert(body_path.clone());
           add_size(&mut inner, &stored);
           inner.order.push_back(stored.variant_key.clone());
           inner.entries.insert(stored.variant_key.clone(), stored);
+          inner.disk_recovered_entries_total += 1;
         }
         Err(error) => {
           warn!(error = %error, path = %path.display(), "failed to load disk cache metadata");
-          let _ = std::fs::remove_file(path);
+          inner.disk_recovery_errors_total += 1;
+          if std::fs::remove_file(path).is_ok() {
+            inner.disk_recovery_removed_files_total += 1;
+          }
+        }
+      }
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+      for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("body")
+          && !referenced_bodies.contains(&path)
+          && std::fs::remove_file(&path).is_ok()
+        {
+          inner.disk_recovery_removed_files_total += 1;
         }
       }
     }
@@ -1123,18 +1352,7 @@ fn variant_key(base_key: &str, vary: &[VaryMatcher]) -> String {
 }
 
 fn select_store(policy: &CachePolicyRuntime, headers: &HeaderMap) -> CacheStore {
-  let content_type = headers
-    .get(CONTENT_TYPE)
-    .and_then(|value| value.to_str().ok())
-    .map(|value| {
-      value
-        .split(';')
-        .next()
-        .unwrap_or(value)
-        .trim()
-        .to_ascii_lowercase()
-    })
-    .unwrap_or_default();
+  let content_type = normalized_content_type(headers);
   for rule in &policy.rules {
     if rule
       .mime_types
@@ -1162,6 +1380,96 @@ fn mime_matches(pattern: &str, mime: &str) -> bool {
     return mime.ends_with(&format!("+{suffix}"));
   }
   pattern == mime
+}
+
+fn extract_tags(headers: &HeaderMap, policy: &CachePolicyRuntime) -> Vec<String> {
+  let mut tags = Vec::new();
+  for header in &policy.tag_headers {
+    for value in headers.get_all(header) {
+      let Ok(value) = value.to_str() else {
+        continue;
+      };
+      for tag in value
+        .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+      {
+        if tag.len() > policy.max_tag_bytes
+          || tag.bytes().any(|byte| byte.is_ascii_control())
+          || tags.iter().any(|existing| existing == tag)
+        {
+          continue;
+        }
+        tags.push(tag.to_string());
+        if tags.len() >= policy.max_tags_per_entry {
+          return tags;
+        }
+      }
+    }
+  }
+  tags
+}
+
+fn admit_entry(
+  inner: &mut CacheInner,
+  policy: &CachePolicyRuntime,
+  variant_key: &str,
+  entry: &CacheEntry,
+) -> bool {
+  if !policy.admission.statuses.contains(&entry.status) {
+    return false;
+  }
+  if policy.admission.max_body_bytes > 0 && entry.body.len() > policy.admission.max_body_bytes {
+    return false;
+  }
+  if !policy.admission.content_types.is_empty() {
+    let content_type = normalized_content_type(&entry.headers);
+    if !policy
+      .admission
+      .content_types
+      .iter()
+      .any(|pattern| mime_matches(pattern, &content_type))
+    {
+      return false;
+    }
+  }
+  if policy.admission.min_hits <= 1 {
+    return true;
+  }
+  let key = format!("{}\n{variant_key}", policy.name);
+  let count = {
+    let count = inner
+      .admission_counts
+      .entry(key.clone())
+      .and_modify(|count| *count = count.saturating_add(1))
+      .or_insert(1);
+    *count
+  };
+  if count == 1 {
+    inner.admission_order.push_back(key.clone());
+  }
+  while inner.admission_counts.len() > policy.admission.max_tracked_keys {
+    let Some(oldest) = inner.admission_order.pop_front() else {
+      break;
+    };
+    inner.admission_counts.remove(&oldest);
+  }
+  count >= policy.admission.min_hits as u32
+}
+
+fn normalized_content_type(headers: &HeaderMap) -> String {
+  headers
+    .get(CONTENT_TYPE)
+    .and_then(|value| value.to_str().ok())
+    .map(|value| {
+      value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase()
+    })
+    .unwrap_or_default()
 }
 
 fn parse_byte_range(range: &str, len: usize) -> Option<(usize, usize)> {
@@ -1204,6 +1512,30 @@ fn policy_runtime(
       .unwrap_or(config.default_ttl_seconds),
     memory_max_size_bytes: policy.memory_max_size_bytes.unwrap_or(default_memory_limit),
     disk_max_size_bytes: policy.disk_max_size_bytes.or(config.disk_max_size_bytes),
+    tag_headers: cache_tag_headers(policy.tag_headers.as_ref().unwrap_or(&config.tag_headers)),
+    max_tags_per_entry: policy
+      .max_tags_per_entry
+      .unwrap_or(config.max_tags_per_entry),
+    max_tag_bytes: policy.max_tag_bytes.unwrap_or(config.max_tag_bytes),
+    background_refresh: policy
+      .background_refresh
+      .unwrap_or(config.background_refresh),
+    background_refresh_max_concurrent: policy
+      .background_refresh_max_concurrent
+      .unwrap_or(config.background_refresh_max_concurrent),
+    lock_wait_timeout: Duration::from_millis(
+      policy
+        .lock_wait_timeout_ms
+        .unwrap_or(config.lock_wait_timeout_ms),
+    ),
+    admission: admission_runtime(
+      policy.admission.as_ref().unwrap_or(&config.admission),
+      &config.negative_statuses,
+    ),
+    stale_if_error: policy
+      .stale_if_error
+      .clone()
+      .unwrap_or_else(|| config.stale_if_error.clone()),
     rules: policy
       .rules
       .iter()
@@ -1212,6 +1544,34 @@ fn policy_runtime(
         store: rule.store,
       })
       .collect(),
+  }
+}
+
+fn cache_tag_headers(headers: &[String]) -> Vec<HeaderName> {
+  headers
+    .iter()
+    .filter_map(|header| HeaderName::from_bytes(header.as_bytes()).ok())
+    .collect()
+}
+
+fn admission_runtime(
+  admission: &CacheAdmissionConfig,
+  negative_statuses: &[u16],
+) -> CacheAdmissionRuntime {
+  let mut statuses = admission
+    .statuses
+    .iter()
+    .chain(negative_statuses)
+    .filter_map(|status| StatusCode::from_u16(*status).ok())
+    .collect::<Vec<_>>();
+  statuses.sort();
+  statuses.dedup();
+  CacheAdmissionRuntime {
+    statuses,
+    content_types: admission.content_types.clone(),
+    max_body_bytes: admission.max_body_bytes,
+    min_hits: admission.min_hits,
+    max_tracked_keys: admission.max_tracked_keys,
   }
 }
 
@@ -1299,6 +1659,7 @@ fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
         value: item.value.clone(),
       })
       .collect(),
+    tags: entry.tags.clone(),
   })
 }
 
@@ -1422,6 +1783,9 @@ fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
       b64(matcher.value.as_bytes())
     ));
   }
+  for tag in &entry.tags {
+    lines.push(format!("tag={}", b64(tag.as_bytes())));
+  }
   for (name, value) in &entry.headers {
     lines.push(format!(
       "header={}:{}",
@@ -1492,6 +1856,12 @@ fn decode_metadata(path: &Path) -> anyhow::Result<StoredEntry> {
       headers.append(name, value);
     }
   }
+  let tags = values
+    .get("tag")
+    .into_iter()
+    .flatten()
+    .filter_map(|tag| unb64(tag).ok())
+    .collect();
   Ok(StoredEntry {
     policy,
     base_key,
@@ -1507,6 +1877,7 @@ fn decode_metadata(path: &Path) -> anyhow::Result<StoredEntry> {
     stale_while_revalidate_until,
     must_revalidate,
     vary,
+    tags,
     size,
   })
 }
@@ -1620,11 +1991,15 @@ mod tests {
     };
     let guard = match cache.begin_fill(ctx.clone()).unwrap() {
       CacheFillPermit::Leader(guard) => guard,
-      CacheFillPermit::Follower(_) => panic!("first fill should lead"),
+      CacheFillPermit::Follower(_) | CacheFillPermit::SharedConflict => {
+        panic!("first fill should lead")
+      }
     };
     let waiter = match cache.begin_fill(ctx.clone()).unwrap() {
-      CacheFillPermit::Leader(_) => panic!("second fill should wait"),
       CacheFillPermit::Follower(waiter) => waiter,
+      CacheFillPermit::Leader(_) | CacheFillPermit::SharedConflict => {
+        panic!("second fill should wait")
+      }
     };
     let wait_task = tokio::spawn(waiter.wait());
     tokio::task::yield_now().await;
@@ -1636,8 +2011,281 @@ mod tests {
       .unwrap();
     assert!(matches!(
       cache.begin_fill(ctx).unwrap(),
-      CacheFillPermit::Leader(_)
+      CacheFillPermit::Leader(_) | CacheFillPermit::SharedConflict
     ));
+  }
+
+  #[tokio::test]
+  async fn fill_waiter_times_out_without_leader_drop() {
+    let config = CacheConfig {
+      enabled: true,
+      ..CacheConfig::default()
+    };
+    let cache = ResponseCache::new(&config, None).unwrap();
+    let uri = "/asset/app.css?v=1".parse::<Uri>().unwrap();
+    let headers = HeaderMap::new();
+    let ctx = CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &headers,
+    };
+    let _guard = match cache.begin_fill(ctx.clone()).unwrap() {
+      CacheFillPermit::Leader(guard) => guard,
+      CacheFillPermit::Follower(_) | CacheFillPermit::SharedConflict => {
+        panic!("first fill should lead")
+      }
+    };
+    let waiter = match cache.begin_fill(ctx).unwrap() {
+      CacheFillPermit::Follower(waiter) => waiter,
+      CacheFillPermit::Leader(_) | CacheFillPermit::SharedConflict => {
+        panic!("second fill should wait")
+      }
+    };
+    assert!(!waiter.wait_timeout(Duration::from_millis(5)).await);
+  }
+
+  #[test]
+  fn cache_tag_purge_removes_matching_entries_only() {
+    let config = CacheConfig {
+      enabled: true,
+      ..CacheConfig::default()
+    };
+    let cache = ResponseCache::new(&config, None).unwrap();
+    let headers = HeaderMap::new();
+    let first_uri = "/asset/a.css".parse::<Uri>().unwrap();
+    let second_uri = "/asset/b.css".parse::<Uri>().unwrap();
+    let mut first_response_headers = HeaderMap::new();
+    first_response_headers.insert("surrogate-key", HeaderValue::from_static("assets css"));
+    let mut second_response_headers = HeaderMap::new();
+    second_response_headers.insert("surrogate-key", HeaderValue::from_static("assets js"));
+
+    for (uri, response_headers, body) in [
+      (&first_uri, first_response_headers, Bytes::from_static(b"a")),
+      (
+        &second_uri,
+        second_response_headers,
+        Bytes::from_static(b"b"),
+      ),
+    ] {
+      assert_eq!(
+        cache.insert(
+          CacheInsertContext {
+            policy_name: Some("default"),
+            scheme: "https",
+            host: "example.test",
+            method: &Method::GET,
+            uri,
+            request_headers: &headers,
+          },
+          CacheEntry {
+            status: StatusCode::OK,
+            headers: response_headers,
+            body,
+          },
+        ),
+        CacheInsertOutcome::Stored
+      );
+    }
+
+    assert_eq!(cache.purge_tag("default", "css", None, None), 1);
+    let first = CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &first_uri,
+      request_headers: &headers,
+    };
+    let second = CacheLookupContext {
+      uri: &second_uri,
+      ..first.clone()
+    };
+    assert!(cache.lookup(first).is_none());
+    assert!(matches!(cache.lookup(second), Some(CacheLookup::Fresh(_))));
+  }
+
+  #[test]
+  fn admission_min_hits_rejects_until_threshold() {
+    let config = CacheConfig {
+      enabled: true,
+      admission: CacheAdmissionConfig {
+        min_hits: 2,
+        ..CacheAdmissionConfig::default()
+      },
+      ..CacheConfig::default()
+    };
+    let cache = ResponseCache::new(&config, None).unwrap();
+    let uri = "/asset/app.css".parse::<Uri>().unwrap();
+    let headers = HeaderMap::new();
+    let ctx = CacheInsertContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &headers,
+    };
+    let entry = CacheEntry {
+      status: StatusCode::OK,
+      headers: HeaderMap::new(),
+      body: Bytes::from_static(b"body"),
+    };
+    assert_eq!(
+      cache.insert(ctx.clone(), entry.clone()),
+      CacheInsertOutcome::Rejected
+    );
+    assert!(
+      cache
+        .lookup(CacheLookupContext {
+          policy_name: Some("default"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri: &uri,
+          request_headers: &headers,
+        })
+        .is_none()
+    );
+    assert_eq!(cache.insert(ctx, entry), CacheInsertOutcome::Stored);
+  }
+
+  #[test]
+  fn stale_if_error_status_policy_matches_configured_status() {
+    let config = CacheConfig {
+      stale_if_error: CacheStaleIfErrorConfig {
+        statuses: vec![500, 502],
+        ..CacheStaleIfErrorConfig::default()
+      },
+      ..CacheConfig::default()
+    };
+    let cache = ResponseCache::new(&config, None).unwrap();
+    assert!(cache.stale_if_error_allows_status(Some("default"), StatusCode::BAD_GATEWAY));
+    assert!(!cache.stale_if_error_allows_status(Some("default"), StatusCode::SERVICE_UNAVAILABLE));
+  }
+
+  #[test]
+  fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
+    let temp_dir = TestTempDir::new("cache-recovery");
+    let config = CacheConfig {
+      enabled: true,
+      store: CacheStore::Disk,
+      disk_dir: Some(temp_dir.path.clone()),
+      disk_max_size_bytes: Some(1024 * 1024),
+      ..CacheConfig::default()
+    };
+    {
+      let cache = ResponseCache::new(&config, None).unwrap();
+      let uri = "/asset/app.css".parse::<Uri>().unwrap();
+      assert_eq!(
+        cache.insert(
+          CacheInsertContext {
+            policy_name: Some("default"),
+            scheme: "https",
+            host: "example.test",
+            method: &Method::GET,
+            uri: &uri,
+            request_headers: &HeaderMap::new(),
+          },
+          CacheEntry {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"disk-body"),
+          },
+        ),
+        CacheInsertOutcome::Stored
+      );
+    }
+    std::fs::write(temp_dir.path.join("orphan.body"), b"orphan").unwrap();
+    std::fs::write(temp_dir.path.join("stale.body.tmp"), b"tmp").unwrap();
+
+    let cache = ResponseCache::new(&config, None).unwrap();
+    let stats = cache.stats();
+    assert_eq!(stats.disk_recovered_entries_total, 1);
+    assert!(stats.disk_recovery_removed_files_total >= 2);
+    assert!(!temp_dir.path.join("orphan.body").exists());
+    assert!(!temp_dir.path.join("stale.body.tmp").exists());
+  }
+
+  #[test]
+  fn shared_cache_tag_purge_removes_l2_entry() {
+    let shared = crate::shared_state::SharedState::test_memory("cache-tag-test");
+    let config = CacheConfig {
+      enabled: true,
+      ..CacheConfig::default()
+    };
+    let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+    let second = ResponseCache::new(&config, Some(shared)).unwrap();
+    let uri = "/asset/app.css".parse::<Uri>().unwrap();
+    let request_headers = HeaderMap::new();
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert("cache-tag", HeaderValue::from_static("release-1"));
+    first.insert(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &request_headers,
+      },
+      CacheEntry {
+        status: StatusCode::OK,
+        headers: response_headers,
+        body: Bytes::from_static(b"tagged"),
+      },
+    );
+    assert!(matches!(
+      second.lookup(CacheLookupContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &request_headers,
+      }),
+      Some(CacheLookup::Fresh(_))
+    ));
+    assert_eq!(second.purge_tag("default", "release-1", None, None), 2);
+    assert!(
+      second
+        .lookup(CacheLookupContext {
+          policy_name: Some("default"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri: &uri,
+          request_headers: &request_headers,
+        })
+        .is_none()
+    );
+  }
+
+  struct TestTempDir {
+    path: PathBuf,
+  }
+
+  impl TestTempDir {
+    fn new(name: &str) -> Self {
+      let path = std::env::temp_dir().join(format!(
+        "oxibelt-{name}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+          .duration_since(UNIX_EPOCH)
+          .unwrap()
+          .as_nanos()
+      ));
+      std::fs::create_dir_all(&path).unwrap();
+      Self { path }
+    }
+  }
+
+  impl Drop for TestTempDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.path);
+    }
   }
 
   #[test]

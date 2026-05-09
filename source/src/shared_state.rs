@@ -18,7 +18,7 @@ use tokio::runtime::Handle;
 use tracing::warn;
 use url::Url;
 
-use crate::cache::{CacheEntry, CacheLookup, Revalidation};
+use crate::cache::{CacheEntry, CacheLookup, Revalidation, StaleEntry};
 use crate::config::{Config, DatabaseTlsMode, SharedStateBackendConfig, SharedStateBackendKind};
 use crate::limits::ParsedRate;
 
@@ -101,6 +101,8 @@ pub struct SharedCacheEntry {
   pub stale_while_revalidate_until_ms: Option<i64>,
   pub must_revalidate: bool,
   pub vary: Vec<SharedVaryMatcher>,
+  #[serde(default)]
+  pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,15 +382,46 @@ impl SharedState {
       }
       if request_no_cache || entry.must_revalidate || entry.expires_at_ms <= now {
         let validators = validator_headers(&cache_entry.headers);
+        if !request_no_cache
+          && !entry.must_revalidate
+          && entry
+            .stale_while_revalidate_until_ms
+            .is_some_and(|until| until > now)
+        {
+          return Ok(Some(CacheLookup::Stale(StaleEntry {
+            entry: cache_entry,
+            request_headers: validators,
+            serve_stale_on_error: entry
+              .stale_if_error_until_ms
+              .is_some_and(|until| until > now),
+            background_refresh: true,
+          })));
+        }
         if validators.is_empty() {
           if entry
             .stale_while_revalidate_until_ms
             .is_some_and(|until| until > now)
-            || entry
-              .stale_if_error_until_ms
-              .is_some_and(|until| until > now)
           {
-            return Ok(Some(CacheLookup::Stale(cache_entry)));
+            return Ok(Some(CacheLookup::Stale(StaleEntry {
+              entry: cache_entry,
+              request_headers: HeaderMap::new(),
+              serve_stale_on_error: entry
+                .stale_if_error_until_ms
+                .is_some_and(|until| until > now),
+              background_refresh: entry
+                .stale_while_revalidate_until_ms
+                .is_some_and(|until| until > now),
+            })));
+          }
+          if entry
+            .stale_if_error_until_ms
+            .is_some_and(|until| until > now)
+          {
+            return Ok(Some(CacheLookup::Revalidate(Revalidation {
+              entry: cache_entry,
+              request_headers: HeaderMap::new(),
+              serve_stale_on_error: true,
+            })));
           }
           return Ok(None);
         }
@@ -465,6 +498,21 @@ impl SharedState {
           .parse::<Uri>()
           .ok()
           .is_some_and(|uri| uri.path().starts_with(path_prefix))
+    })
+  }
+
+  pub fn cache_purge_tag(
+    &self,
+    policy: &str,
+    tag: &str,
+    scheme: Option<&str>,
+    host: Option<&str>,
+  ) -> usize {
+    self.cache_purge(|entry| {
+      entry.policy == policy
+        && scheme.is_none_or(|scheme| entry.scheme == scheme)
+        && host.is_none_or(|host| entry.host == host)
+        && entry.tags.iter().any(|candidate| candidate == tag)
     })
   }
 

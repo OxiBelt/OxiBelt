@@ -1003,6 +1003,21 @@ impl Config {
     if !self.cache.negative_statuses.is_empty() && self.cache.negative_ttl_seconds == 0 {
       bail!("cache.negative_ttl_seconds must be greater than 0 when negative_statuses is set");
     }
+    validate_cache_tag_headers("cache.tag_headers", &self.cache.tag_headers)?;
+    if self.cache.max_tags_per_entry == 0 {
+      bail!("cache.max_tags_per_entry must be greater than 0");
+    }
+    if self.cache.max_tag_bytes == 0 {
+      bail!("cache.max_tag_bytes must be greater than 0");
+    }
+    if self.cache.background_refresh_max_concurrent == 0 {
+      bail!("cache.background_refresh_max_concurrent must be greater than 0");
+    }
+    if self.cache.lock_wait_timeout_ms == 0 {
+      bail!("cache.lock_wait_timeout_ms must be greater than 0");
+    }
+    validate_cache_admission("cache.admission", &self.cache.admission, &self.cache)?;
+    validate_cache_stale_if_error("cache.stale_if_error", &self.cache.stale_if_error)?;
 
     let mut names = HashSet::new();
     for policy in &self.cache.policies {
@@ -1038,6 +1053,49 @@ impl Config {
           "cache policy {} disk_max_size_bytes must be greater than 0",
           policy.name
         );
+      }
+      if let Some(tag_headers) = &policy.tag_headers {
+        validate_cache_tag_headers(
+          &format!("cache policy {} tag_headers", policy.name),
+          tag_headers,
+        )?;
+      }
+      if policy.max_tags_per_entry == Some(0) {
+        bail!(
+          "cache policy {} max_tags_per_entry must be greater than 0",
+          policy.name
+        );
+      }
+      if policy.max_tag_bytes == Some(0) {
+        bail!(
+          "cache policy {} max_tag_bytes must be greater than 0",
+          policy.name
+        );
+      }
+      if policy.background_refresh_max_concurrent == Some(0) {
+        bail!(
+          "cache policy {} background_refresh_max_concurrent must be greater than 0",
+          policy.name
+        );
+      }
+      if policy.lock_wait_timeout_ms == Some(0) {
+        bail!(
+          "cache policy {} lock_wait_timeout_ms must be greater than 0",
+          policy.name
+        );
+      }
+      if let Some(admission) = &policy.admission {
+        validate_cache_admission(
+          &format!("cache policy {} admission", policy.name),
+          admission,
+          &self.cache,
+        )?;
+      }
+      if let Some(stale_if_error) = &policy.stale_if_error {
+        validate_cache_stale_if_error(
+          &format!("cache policy {} stale_if_error", policy.name),
+          stale_if_error,
+        )?;
       }
       if policy.store == Some(CacheStore::Tmpfs) && self.cache.enabled {
         let dir = self
@@ -1323,6 +1381,58 @@ fn validate_compression_mime_type(field_name: &str, mime_type: &str) -> anyhow::
   }
   if subtype_part.contains('*') && subtype_part != "*" && !subtype_part.starts_with("*+") {
     bail!("{field_name} MIME pattern {mime_type} has invalid wildcard subtype");
+  }
+  Ok(())
+}
+
+fn validate_cache_tag_headers(field_name: &str, headers: &[String]) -> anyhow::Result<()> {
+  if headers.is_empty() {
+    bail!("{field_name} must include at least one header name");
+  }
+  for header in headers {
+    if header.trim() != header || header.is_empty() {
+      bail!("{field_name} contains an empty or padded header name");
+    }
+    http::header::HeaderName::from_bytes(header.as_bytes())
+      .with_context(|| format!("{field_name} contains invalid header name {header}"))?;
+  }
+  Ok(())
+}
+
+fn validate_cache_admission(
+  field_name: &str,
+  admission: &CacheAdmissionConfig,
+  cache: &CacheConfig,
+) -> anyhow::Result<()> {
+  if admission.statuses.is_empty() && cache.negative_statuses.is_empty() {
+    bail!("{field_name}.statuses must include at least one status");
+  }
+  for status in &admission.statuses {
+    http::StatusCode::from_u16(*status)
+      .with_context(|| format!("{field_name}.statuses contains invalid status {status}"))?;
+  }
+  if !admission.content_types.is_empty() {
+    validate_compression_mime_types(
+      &format!("{field_name}.content_types"),
+      &admission.content_types,
+    )?;
+  }
+  if admission.min_hits == 0 {
+    bail!("{field_name}.min_hits must be greater than 0");
+  }
+  if admission.max_tracked_keys == 0 {
+    bail!("{field_name}.max_tracked_keys must be greater than 0");
+  }
+  Ok(())
+}
+
+fn validate_cache_stale_if_error(
+  field_name: &str,
+  stale_if_error: &CacheStaleIfErrorConfig,
+) -> anyhow::Result<()> {
+  for status in &stale_if_error.statuses {
+    http::StatusCode::from_u16(*status)
+      .with_context(|| format!("{field_name}.statuses contains invalid status {status}"))?;
   }
   Ok(())
 }
@@ -1736,6 +1846,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "zstd",
     ][..],
     "cache" => &[
+      "admission",
+      "background_refresh",
+      "background_refresh_max_concurrent",
       "cache_key",
       "cache_methods",
       "default_ttl_seconds",
@@ -1743,6 +1856,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "disk_max_size_bytes",
       "enabled",
       "lock",
+      "lock_wait_timeout_ms",
+      "max_tag_bytes",
+      "max_tags_per_entry",
       "max_size_bytes",
       "memory_auto_fraction",
       "memory_max_size_bytes",
@@ -1750,20 +1866,46 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "negative_ttl_seconds",
       "policies",
       "respect_cache_control",
+      "stale_if_error",
       "stale_if_error_seconds",
       "stale_while_revalidate_seconds",
       "store",
+      "tag_headers",
       "tmpfs_dir",
     ][..],
+    "cache.admission" => &[
+      "content_types",
+      "max_body_bytes",
+      "max_tracked_keys",
+      "min_hits",
+      "statuses",
+    ][..],
+    "cache.stale_if_error" => &["connect_error", "read_timeout", "statuses"][..],
     "cache.policies" => &[
+      "admission",
+      "background_refresh",
+      "background_refresh_max_concurrent",
       "cache_key",
       "default_ttl_seconds",
       "disk_max_size_bytes",
+      "lock_wait_timeout_ms",
+      "max_tag_bytes",
+      "max_tags_per_entry",
       "memory_max_size_bytes",
       "name",
       "rules",
+      "stale_if_error",
       "store",
+      "tag_headers",
     ][..],
+    "cache.policies.admission" => &[
+      "content_types",
+      "max_body_bytes",
+      "max_tracked_keys",
+      "min_hits",
+      "statuses",
+    ][..],
+    "cache.policies.stale_if_error" => &["connect_error", "read_timeout", "statuses"][..],
     "cache.policies.rules" => &["mime_types", "store"][..],
     "admin" => &[
       "allow_insecure_plaintext",
@@ -3541,6 +3683,22 @@ pub struct CacheConfig {
   pub negative_statuses: Vec<u16>,
   #[serde(default)]
   pub negative_ttl_seconds: u64,
+  #[serde(default = "default_cache_tag_headers")]
+  pub tag_headers: Vec<String>,
+  #[serde(default = "default_cache_max_tags_per_entry")]
+  pub max_tags_per_entry: usize,
+  #[serde(default = "default_cache_max_tag_bytes")]
+  pub max_tag_bytes: usize,
+  #[serde(default = "default_true")]
+  pub background_refresh: bool,
+  #[serde(default = "default_cache_background_refresh_max_concurrent")]
+  pub background_refresh_max_concurrent: usize,
+  #[serde(default = "default_cache_lock_wait_timeout_ms")]
+  pub lock_wait_timeout_ms: u64,
+  #[serde(default)]
+  pub admission: CacheAdmissionConfig,
+  #[serde(default)]
+  pub stale_if_error: CacheStaleIfErrorConfig,
   #[serde(default)]
   pub policies: Vec<CachePolicyConfig>,
 }
@@ -3565,6 +3723,14 @@ impl Default for CacheConfig {
       stale_while_revalidate_seconds: 0,
       negative_statuses: Vec::new(),
       negative_ttl_seconds: 0,
+      tag_headers: default_cache_tag_headers(),
+      max_tags_per_entry: default_cache_max_tags_per_entry(),
+      max_tag_bytes: default_cache_max_tag_bytes(),
+      background_refresh: true,
+      background_refresh_max_concurrent: default_cache_background_refresh_max_concurrent(),
+      lock_wait_timeout_ms: default_cache_lock_wait_timeout_ms(),
+      admission: CacheAdmissionConfig::default(),
+      stale_if_error: CacheStaleIfErrorConfig::default(),
       policies: Vec::new(),
     }
   }
@@ -3600,7 +3766,69 @@ pub struct CachePolicyConfig {
   #[serde(default)]
   pub disk_max_size_bytes: Option<usize>,
   #[serde(default)]
+  pub tag_headers: Option<Vec<String>>,
+  #[serde(default)]
+  pub max_tags_per_entry: Option<usize>,
+  #[serde(default)]
+  pub max_tag_bytes: Option<usize>,
+  #[serde(default)]
+  pub background_refresh: Option<bool>,
+  #[serde(default)]
+  pub background_refresh_max_concurrent: Option<usize>,
+  #[serde(default)]
+  pub lock_wait_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub admission: Option<CacheAdmissionConfig>,
+  #[serde(default)]
+  pub stale_if_error: Option<CacheStaleIfErrorConfig>,
+  #[serde(default)]
   pub rules: Vec<CachePolicyRuleConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CacheAdmissionConfig {
+  #[serde(default = "default_cache_admission_statuses")]
+  pub statuses: Vec<u16>,
+  #[serde(default)]
+  pub content_types: Vec<String>,
+  #[serde(default)]
+  pub max_body_bytes: usize,
+  #[serde(default = "default_cache_admission_min_hits")]
+  pub min_hits: usize,
+  #[serde(default = "default_cache_admission_max_tracked_keys")]
+  pub max_tracked_keys: usize,
+}
+
+impl Default for CacheAdmissionConfig {
+  fn default() -> Self {
+    Self {
+      statuses: default_cache_admission_statuses(),
+      content_types: Vec::new(),
+      max_body_bytes: 0,
+      min_hits: default_cache_admission_min_hits(),
+      max_tracked_keys: default_cache_admission_max_tracked_keys(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CacheStaleIfErrorConfig {
+  #[serde(default = "default_true")]
+  pub connect_error: bool,
+  #[serde(default = "default_true")]
+  pub read_timeout: bool,
+  #[serde(default)]
+  pub statuses: Vec<u16>,
+}
+
+impl Default for CacheStaleIfErrorConfig {
+  fn default() -> Self {
+    Self {
+      connect_error: true,
+      read_timeout: true,
+      statuses: Vec::new(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -5094,6 +5322,38 @@ fn default_cache_methods() -> Vec<String> {
 
 fn default_cache_key() -> String {
   "{scheme}:{host}:{uri}".to_string()
+}
+
+fn default_cache_tag_headers() -> Vec<String> {
+  vec!["Surrogate-Key".to_string(), "Cache-Tag".to_string()]
+}
+
+fn default_cache_max_tags_per_entry() -> usize {
+  32
+}
+
+fn default_cache_max_tag_bytes() -> usize {
+  128
+}
+
+fn default_cache_background_refresh_max_concurrent() -> usize {
+  16
+}
+
+fn default_cache_lock_wait_timeout_ms() -> u64 {
+  10_000
+}
+
+fn default_cache_admission_statuses() -> Vec<u16> {
+  vec![200, 203, 204, 301, 308]
+}
+
+fn default_cache_admission_min_hits() -> usize {
+  1
+}
+
+fn default_cache_admission_max_tracked_keys() -> usize {
+  16_384
 }
 
 pub(crate) fn default_cache_tmpfs_dir() -> PathBuf {

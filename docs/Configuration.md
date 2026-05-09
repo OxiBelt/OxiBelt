@@ -513,8 +513,26 @@ respect_cache_control = true
 stale_if_error_seconds = 30
 stale_while_revalidate_seconds = 30
 lock = true
+lock_wait_timeout_ms = 10000
+tag_headers = ["Surrogate-Key", "Cache-Tag"]
+max_tags_per_entry = 32
+max_tag_bytes = 128
+background_refresh = true
+background_refresh_max_concurrent = 16
 negative_statuses = []
 negative_ttl_seconds = 0
+
+[cache.admission]
+statuses = [200, 203, 204, 301, 308]
+content_types = []
+max_body_bytes = 0
+min_hits = 1
+max_tracked_keys = 16384
+
+[cache.stale_if_error]
+connect_error = true
+read_timeout = true
+statuses = []
 
 [[cache.policies]]
 name = "assets"
@@ -599,7 +617,13 @@ Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate
 
 `cache.store = "tmpfs"` validates `tmpfs_dir` under `/dev/shm` when cache is enabled. `disk` and `memory_then_disk` require an explicit writable `disk_dir` and `disk_max_size_bytes`; OxiBelt does not choose a disk path implicitly. If `memory_then_disk` omits `memory_max_size_bytes`, OxiBelt uses `memory_auto_fraction` of the detected cgroup/container memory limit, falling back to system memory. `cache_key` supports `{scheme}`, `{host}`, `{uri}`, `{path}`, `{query}`, `{query:name}`, `{header:Name}`, and `{cookie:name}`. Named cache policies are selected by `routes.cache`; `default` refers to the top-level `[cache]` policy. Policy rules select storage after the upstream response MIME type is known. When `cache_backend` maps to a shared backend, the configured local cache remains L1 and the shared backend stores full cacheable objects, metadata, fill locks, and purge-visible L2 entries.
 
-The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on upstream error, serve cached byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`.
+The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on configured upstream errors, serve cached byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`. `stale-if-error` serving is controlled separately for connect errors, read timeouts, and configured HTTP statuses.
+
+`tag_headers` extracts whitespace- or comma-separated cache tags from response headers such as `Surrogate-Key` and `Cache-Tag`; admin tag purge can remove all entries carrying a tag. `background_refresh` serves a stale response immediately during `stale-while-revalidate` and refreshes eligible GET/HEAD responses in the background. OxiBelt skips background refresh for response-WAF inspected routes, HTTP/3 upstreams, and PROXY protocol egress routes, which continue to use foreground revalidation. `lock_wait_timeout_ms` bounds collapsed-forwarding followers so a stuck fill cannot block indefinitely.
+
+`[cache.admission]` filters what is admitted into cache after HTTP cacheability checks. `statuses` limits response status codes, `content_types` optionally limits MIME patterns, `max_body_bytes = 0` means unlimited, `min_hits` requires repeated fills before storing, and `max_tracked_keys` bounds frequency tracking memory. Named `[[cache.policies]]` may override tag headers, tag limits, background refresh settings, lock wait timeout, admission, and stale-if-error behavior.
+
+Cache poisoning defenses should be explicit in production configs. Keep `Authorization` and `Cookie` requests out of cache unless the cache key intentionally varies by a safe credential-derived token; include the effective `Host` in `cache_key`; rely on upstream `Vary` for negotiated headers; and prefer `{query:name}` allowlist-style keys over broad `{query}` when only selected query parameters affect the response.
 
 `[admin]` exposes operations APIs such as cache purge and upstream-pool runtime control. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>`, even when mTLS is enabled.
 
@@ -634,6 +658,7 @@ Admin purge endpoints:
 ```sh
 POST /cache/purge?policy=default&scheme=https&host=example.test&uri=/path
 POST /cache/purge-prefix?policy=default&scheme=https&host=example.test&path_prefix=/assets/
+POST /cache/purge-tag?policy=default&tag=release-2026-05-09
 ```
 
 Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics omit detailed WAF rule names, IDs, modes, routes, and per-rule hit counters because the metrics listener is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoint for that rule-level data.
@@ -880,7 +905,7 @@ Fields:
 - `path_prefix`: path prefix match; defaults to `/`.
 - `replace_prefix_with`: optional upstream path prefix replacement.
 - `upstream` or `upstream_pool`: exactly one target.
-- `cache`: optional cache reference; currently only `default` is accepted.
+- `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
