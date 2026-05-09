@@ -17,6 +17,7 @@ use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
 use crate::pools::PoolState;
+use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
@@ -147,6 +148,11 @@ impl AppSnapshot {
     let shared_state = SharedState::new(&config)
       .await
       .context("failed to build shared state")?;
+    if previous.is_none()
+      && let Some(temp_dir) = config.proxy.buffering.temp_dir.as_deref()
+    {
+      buffering::cleanup_stale_temp_files(temp_dir);
+    }
     let limits = LimitState::new(shared_state.clone());
     let pools = PoolState::new(&config.upstream_pools, shared_state.clone());
     let cache = ResponseCache::new(&config.cache, shared_state.clone())

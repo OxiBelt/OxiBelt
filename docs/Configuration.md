@@ -352,10 +352,11 @@ on = ["connect_error", "read_timeout", "502", "503", "504"]
 retry_non_idempotent = false
 
 [proxy.buffering]
-request = "streaming" # streaming | memory | reject_if_too_large
-response = "streaming"
+request = "streaming"  # streaming | memory | spool | reject_if_too_large
+response = "streaming" # streaming | memory | spool | reject_if_too_large
 max_memory_body_bytes = 1048576
 max_temp_file_bytes = 0
+# temp_dir = "/var/cache/oxibelt"
 
 [proxy.http]
 early_hints = "drop" # drop | pass
@@ -366,10 +367,11 @@ trailers = "pass"    # pass | drop
 
 `generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
 
+`proxy.buffering` controls ordinary HTTP request and response body buffering. `streaming` keeps the previous streaming behavior. `memory` reads the full body into memory up to `max_memory_body_bytes`. `spool` keeps up to `max_memory_body_bytes` in memory and spills the remainder to `temp_dir`, capped by `max_temp_file_bytes` per body. `reject_if_too_large` is memory-only and rejects bodies that exceed `max_memory_body_bytes`. `spool` requires `max_temp_file_bytes > 0` and a writable `temp_dir`; OxiBelt removes `oxibelt-buffer-*` temp files when the buffered body is dropped and cleans stale matching files on initial startup.
+
 Reserved or constrained values:
 
 - `proxy.http.early_hints = "pass"` is rejected.
-- Disk buffering is not implemented; `max_temp_file_bytes` must be `0`.
 
 ## Limits, Cache, and Ops
 
@@ -798,11 +800,19 @@ upstream = "app"
 # upstream_first_byte_timeout_ms = 2000
 # upstream_read_timeout_ms = 10000
 # upstream_send_timeout_ms = 10000
+
+[routes.buffering]
+# request = "streaming"
+# response = "streaming"
+# max_memory_body_bytes = 1048576
+# max_temp_file_bytes = 0
 ```
 
 `upstream_http_version` is a route-level backend protocol override and must not exceed the selected upstream capability. HTTP/3 overrides are rejected for upstream-pool routes and for upstreams with PROXY protocol egress enabled.
 
 Route timeout overrides are optional. Omitted values inherit from `[limits]` for downstream behavior and from the selected `[[upstreams]]` entry for upstream behavior. TLS handshake and downstream header read timeouts are not route-level because route matching has not happened yet.
+
+Route buffering overrides are optional. Omitted values inherit from `[proxy.buffering]`; `temp_dir` is always global. CONNECT tunnels, HTTP Upgrade, and WebTransport forwarding remain streaming even when buffering is enabled.
 
 Fields:
 
@@ -862,7 +872,7 @@ Configuration validation rejects:
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
 - TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, or reserved live OCSP mode.
-- Reserved early-hints, disk-buffering, or sticky-cookie settings.
+- Reserved early-hints or sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.
 
 ## Minimal Example

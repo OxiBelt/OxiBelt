@@ -842,12 +842,62 @@ impl Config {
     if self.proxy.retry.timeout_ms == 0 {
       bail!("proxy.retry.timeout_ms must be greater than 0");
     }
-    if self.proxy.buffering.max_temp_file_bytes != 0 {
-      bail!("proxy.buffering.max_temp_file_bytes must be 0; disk buffering is not implemented");
-    }
+    self.validate_buffering()?;
     for cidr in &self.proxy.real_ip.trusted_proxies {
       crate::identity::Cidr::parse(cidr)
         .with_context(|| format!("invalid proxy.real_ip.trusted_proxies entry {cidr}"))?;
+    }
+    Ok(())
+  }
+
+  fn validate_buffering(&self) -> anyhow::Result<()> {
+    let mut requires_temp_dir = false;
+    validate_effective_buffering(
+      "proxy.buffering",
+      self.proxy.buffering.request,
+      self.proxy.buffering.max_temp_file_bytes,
+      &mut requires_temp_dir,
+    )?;
+    validate_effective_buffering(
+      "proxy.buffering",
+      self.proxy.buffering.response,
+      self.proxy.buffering.max_temp_file_bytes,
+      &mut requires_temp_dir,
+    )?;
+
+    for route in &self.routes {
+      let request = route
+        .buffering
+        .request
+        .unwrap_or(self.proxy.buffering.request);
+      let response = route
+        .buffering
+        .response
+        .unwrap_or(self.proxy.buffering.response);
+      let max_temp_file_bytes = route
+        .buffering
+        .max_temp_file_bytes
+        .unwrap_or(self.proxy.buffering.max_temp_file_bytes);
+      validate_effective_buffering(
+        &format!("route {} buffering", route.name),
+        request,
+        max_temp_file_bytes,
+        &mut requires_temp_dir,
+      )?;
+      validate_effective_buffering(
+        &format!("route {} buffering", route.name),
+        response,
+        max_temp_file_bytes,
+        &mut requires_temp_dir,
+      )?;
+    }
+
+    if requires_temp_dir {
+      let dir =
+        self.proxy.buffering.temp_dir.as_ref().ok_or_else(|| {
+          anyhow!("proxy.buffering.temp_dir is required when buffering uses spool")
+        })?;
+      crate::cache::validate_disk_dir(dir)?;
     }
     Ok(())
   }
@@ -1386,7 +1436,23 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.grpc_web == right.grpc_web
         && left.cache == right.cache
         && left.compression == right.compression
+        && left.buffering == right.buffering
     })
+}
+
+fn validate_effective_buffering(
+  field_name: &str,
+  mode: BufferingMode,
+  max_temp_file_bytes: usize,
+  requires_temp_dir: &mut bool,
+) -> anyhow::Result<()> {
+  if mode == BufferingMode::Spool {
+    if max_temp_file_bytes == 0 {
+      bail!("{field_name}.max_temp_file_bytes must be greater than 0 when buffering uses spool");
+    }
+    *requires_temp_dir = true;
+  }
+  Ok(())
 }
 
 fn route_waf_configs_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]) -> bool {
@@ -1598,6 +1664,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_temp_file_bytes",
       "request",
       "response",
+      "temp_dir",
     ][..],
     "proxy.http" => &["early_hints", "trailers"][..],
     "limits" => &[
@@ -1800,6 +1867,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "upstream_pools.servers" => &["backup", "id", "max_conns", "origin", "state", "weight"][..],
     "routes" => &[
+      "buffering",
       "cache",
       "compression",
       "hosts",
@@ -1814,6 +1882,12 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "upstream_pool",
       "timeouts",
       "waf",
+    ][..],
+    "routes.buffering" => &[
+      "max_memory_body_bytes",
+      "max_temp_file_bytes",
+      "request",
+      "response",
     ][..],
     "routes.timeouts" => &[
       "client_body_timeout_ms",
@@ -2901,6 +2975,8 @@ pub struct ProxyBufferingConfig {
   pub max_memory_body_bytes: usize,
   #[serde(default)]
   pub max_temp_file_bytes: usize,
+  #[serde(default)]
+  pub temp_dir: Option<PathBuf>,
 }
 
 impl Default for ProxyBufferingConfig {
@@ -2910,6 +2986,7 @@ impl Default for ProxyBufferingConfig {
       response: BufferingMode::Streaming,
       max_memory_body_bytes: default_buffering_max_memory_body_bytes(),
       max_temp_file_bytes: 0,
+      temp_dir: None,
     }
   }
 }
@@ -2920,6 +2997,7 @@ pub enum BufferingMode {
   #[default]
   Streaming,
   Memory,
+  Spool,
   RejectIfTooLarge,
 }
 
@@ -4413,9 +4491,23 @@ pub struct RouteConfig {
   #[serde(default)]
   pub compression: Option<String>,
   #[serde(default)]
+  pub buffering: RouteBufferingConfig,
+  #[serde(default)]
   pub timeouts: RouteTimeoutConfig,
   #[serde(default)]
   pub waf: RouteWafConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteBufferingConfig {
+  #[serde(default)]
+  pub request: Option<BufferingMode>,
+  #[serde(default)]
+  pub response: Option<BufferingMode>,
+  #[serde(default)]
+  pub max_memory_body_bytes: Option<usize>,
+  #[serde(default)]
+  pub max_temp_file_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

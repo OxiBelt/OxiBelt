@@ -1012,6 +1012,55 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "buffering",
+            "request-spool",
+            "request body spooling preserves oversized-over-memory uploads and cleans temp files",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response temp_count
+  response="$(client_request_with_headers "example.test" "/app/upload" 200 "POST" "spooled-request-body" "Content-Type: text/plain")"
+  assert_body_jq "${response}" '.body == "spooled-request-body"'
+
+  temp_count="$(docker exec "${proxy_container}" sh -c 'find /var/cache/oxibelt -maxdepth 1 -type f -name "oxibelt-buffer-*" | wc -l' | tr -d "[:space:]")"
+  if [[ "${temp_count}" != "0" ]]; then
+    docker exec "${proxy_container}" sh -c 'ls -la /var/cache/oxibelt' >&2 || true
+    fail_with_diagnostics "expected request buffering temp files to be removed"
+  fi
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "buffering",
+            "response-spool",
+            "response body spooling protects upstream while a slow client delays body reads",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local temp_count response
+  start_holding_client_request_with_headers "proxy" 8443 "https" "" "example.test" "/app/download?body=spooled-response-body-0123456789" 200 3000
+  wait_holding_client
+  response="$(cat "${HOLDING_CLIENT_LOG}")"
+  assert_response_jq "${response}" '.body == "spooled-response-body-0123456789"'
+  temp_count="$(docker exec "${proxy_container}" sh -c 'find /var/cache/oxibelt -maxdepth 1 -type f -name "oxibelt-buffer-*" | wc -l' | tr -d "[:space:]")"
+  if [[ "${temp_count}" != "0" ]]; then
+    docker exec "${proxy_container}" sh -c 'ls -la /var/cache/oxibelt' >&2 || true
+    fail_with_diagnostics "expected response buffering temp files to be removed"
+  fi
+}
+"#,
+            None,
+        ),
+        docker_case(
             "timeouts",
             "route-first-byte-timeout",
             "route-level upstream first-byte timeout can fail one route while another succeeds",

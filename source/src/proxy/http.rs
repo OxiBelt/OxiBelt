@@ -24,6 +24,7 @@ use crate::waf::{
 };
 
 pub(crate) mod body;
+pub(crate) mod buffering;
 pub(crate) mod compression;
 pub(crate) mod grpc_web;
 pub(crate) mod headers;
@@ -450,6 +451,7 @@ where
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.route_name = resolved.route.name.clone();
+  let effective_buffering = buffering::EffectiveBuffering::new(&state.config, resolved.route);
 
   let rate_limit_context = RateLimitContext::route(
     client_addr.ip(),
@@ -646,6 +648,11 @@ where
       "PROXY protocol egress is not supported for HTTP/3 upstream",
     );
   }
+
+  let request = match buffer_request_body(request, &effective_buffering).await {
+    Ok(request) => request,
+    Err(error) => return request_buffering_error_response(error),
+  };
 
   let target_uri = match rewrite_uri(
     &upstream.origin,
@@ -1122,6 +1129,16 @@ where
     downstream_scheme,
     request_version,
   );
+  let body = match buffering::buffer_body(
+    body,
+    effective_buffering.response,
+    effective_buffering.temp_dir.as_deref(),
+  )
+  .await
+  {
+    Ok(body) => body,
+    Err(error) => return response_buffering_error_response(error),
+  };
 
   let response = maybe_cache_response(
     Response::from_parts(parts, body),
@@ -1199,6 +1216,105 @@ fn with_downstream_response_timeout(
     .insert(DownstreamResponseSendTimeout(timeout));
   let body = body::with_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
   Response::from_parts(parts, body)
+}
+
+async fn buffer_request_body(
+  request: Request<ProxyBody>,
+  effective: &buffering::EffectiveBuffering,
+) -> Result<Request<ProxyBody>, buffering::BufferingError> {
+  if effective.request.is_streaming() {
+    return Ok(request);
+  }
+  let (parts, body) = request.into_parts();
+  let body = buffering::buffer_body(body, effective.request, effective.temp_dir.as_deref()).await?;
+  Ok(Request::from_parts(parts, body))
+}
+
+fn request_buffering_error_response(error: buffering::BufferingError) -> Response<ProxyBody> {
+  match error {
+    buffering::BufferingError::TooLarge => {
+      text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+    }
+    buffering::BufferingError::Body(error)
+      if error_is_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) =>
+    {
+      text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out")
+    }
+    buffering::BufferingError::Body(error) if error_is_body_length_limit(&error) => {
+      text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+    }
+    buffering::BufferingError::Body(error) => {
+      warn!(error = %error, "failed to buffer downstream request body");
+      text_response(StatusCode::BAD_REQUEST, "failed to read request body")
+    }
+    buffering::BufferingError::Io(error) => {
+      warn!(error = %error, "failed to spool downstream request body");
+      text_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "failed to buffer request body",
+      )
+    }
+    buffering::BufferingError::MissingTempDir => {
+      warn!("request buffering spool mode is missing temp_dir");
+      text_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "failed to buffer request body",
+      )
+    }
+  }
+}
+
+fn response_buffering_error_response(error: buffering::BufferingError) -> Response<ProxyBody> {
+  match error {
+    buffering::BufferingError::TooLarge => text_response(
+      StatusCode::BAD_GATEWAY,
+      "upstream response body is too large",
+    ),
+    buffering::BufferingError::Body(error)
+      if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) =>
+    {
+      text_response(
+        StatusCode::GATEWAY_TIMEOUT,
+        "upstream response body timed out",
+      )
+    }
+    buffering::BufferingError::Body(error) => {
+      warn!(error = %error, "failed to buffer upstream response body");
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "failed to read upstream response body",
+      )
+    }
+    buffering::BufferingError::Io(error) => {
+      warn!(error = %error, "failed to spool upstream response body");
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "failed to buffer upstream response body",
+      )
+    }
+    buffering::BufferingError::MissingTempDir => {
+      warn!("response buffering spool mode is missing temp_dir");
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "failed to buffer upstream response body",
+      )
+    }
+  }
+}
+
+fn error_is_body_length_limit(error: &body::BoxError) -> bool {
+  let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error.as_ref());
+  while let Some(error) = current {
+    let message = error.to_string();
+    if message.contains("length limit")
+      || message.contains("body length")
+      || message.contains("body is too large")
+    {
+      return true;
+    }
+    current = error.source();
+  }
+  false
 }
 
 fn with_connection_permit(

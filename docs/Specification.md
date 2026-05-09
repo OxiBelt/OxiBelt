@@ -31,12 +31,14 @@ At a high level, each HTTP transaction follows this order:
 5. Match a route by host and path prefix.
 6. Evaluate request-phase OxiRule rules when WAF is enabled.
 7. Select the configured upstream or upstream pool, optionally using request-phase routing actions.
-8. Normalize forwarded headers and forward the request upstream.
+8. Apply the effective request buffering policy, normalize forwarded headers, and forward the request upstream.
 9. Build a response context from the upstream response or from a synthetic upstream-error response.
 10. Evaluate response-phase OxiRule rules when WAF is enabled.
-11. Apply response mutations, cache behavior, structured access-log actions, and response forwarding back to the downstream client.
+11. Apply response mutations, the effective response buffering policy, cache behavior, structured access-log actions, and response forwarding back to the downstream client.
 
 If a validation, runtime, or WAF policy failure occurs, the configured fail policy determines whether OxiBelt rejects the transaction or allows it to continue.
+
+HTTP request and response buffering is opt-in and defaults to streaming. `memory` buffers bounded bodies in memory, `spool` spills bytes beyond the memory threshold to explicit temp files, and route-level buffering overrides inherit omitted values from `[proxy.buffering]`. CONNECT tunnels, HTTP Upgrade, and WebTransport sessions remain streaming.
 
 ## Protocol Behavior
 

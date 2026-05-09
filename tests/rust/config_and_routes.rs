@@ -5,7 +5,7 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-    AdminRole, AdminTransportMode, CacheStore, CompressionConfig, Config,
+    AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
     ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, EarlyHintsMode,
     ForwardedHeaderMode, HotReloadMode, OcspMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
     QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
@@ -174,6 +174,108 @@ early_hints = "pass"
         error
             .to_string()
             .contains("proxy.http.early_hints = \"pass\" is reserved"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn proxy_buffering_parses_spool_and_route_overrides() {
+    let temp_dir = common::TempDir::new("proxy-buffering");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "proxy-buffering");
+    let buffering_dir = temp_dir.path().join("buffering");
+    std::fs::create_dir_all(&buffering_dir).expect("failed to create buffering temp dir");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let raw = format!(
+        r#"
+{base}
+
+[proxy.buffering]
+request = "spool"
+response = "memory"
+max_memory_body_bytes = 4
+max_temp_file_bytes = 16
+temp_dir = "{}"
+
+[routes.buffering]
+request = "streaming"
+response = "spool"
+max_memory_body_bytes = 2
+max_temp_file_bytes = 8
+"#,
+        buffering_dir.display()
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.proxy.buffering.request, BufferingMode::Spool);
+    assert_eq!(config.proxy.buffering.response, BufferingMode::Memory);
+    assert_eq!(
+        config.proxy.buffering.temp_dir.as_deref(),
+        Some(buffering_dir.as_path())
+    );
+    let route = &config.routes[0].buffering;
+    assert_eq!(route.request, Some(BufferingMode::Streaming));
+    assert_eq!(route.response, Some(BufferingMode::Spool));
+    assert_eq!(route.max_memory_body_bytes, Some(2));
+    assert_eq!(route.max_temp_file_bytes, Some(8));
+}
+
+#[test]
+fn proxy_buffering_rejects_spool_without_temp_dir() {
+    let temp_dir = common::TempDir::new("proxy-buffering-no-temp");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-buffering-no-temp");
+    let raw = format!(
+        r#"
+{}
+
+[proxy.buffering]
+request = "spool"
+max_temp_file_bytes = 16
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("spool without temp_dir should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("proxy.buffering.temp_dir is required"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn proxy_buffering_rejects_spool_with_zero_temp_quota() {
+    let temp_dir = common::TempDir::new("proxy-buffering-zero-temp");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-buffering-zero-temp");
+    let buffering_dir = temp_dir.path().join("buffering");
+    std::fs::create_dir_all(&buffering_dir).expect("failed to create buffering temp dir");
+    let raw = format!(
+        r#"
+{}
+
+[proxy.buffering]
+request = "spool"
+max_temp_file_bytes = 0
+temp_dir = "{}"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path),
+        buffering_dir.display()
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("spool with zero temp quota should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("max_temp_file_bytes must be greater than 0"),
         "unexpected error: {error}"
     );
 }

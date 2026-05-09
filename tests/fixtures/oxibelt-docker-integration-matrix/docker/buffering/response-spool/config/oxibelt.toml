@@ -1,0 +1,62 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.buffering]
+request = "streaming"
+response = "memory"
+max_memory_body_bytes = 4
+max_temp_file_bytes = 128
+temp_dir = "/var/cache/oxibelt"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 5000
+first_byte_timeout_ms = 5000
+read_timeout_ms = 5000
+send_timeout_ms = 5000
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "response-spool"
+hosts = ["example.test"]
+path_prefix = "/app"
+upstream = "http-upstream"
+
+[routes.buffering]
+response = "spool"

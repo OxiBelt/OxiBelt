@@ -109,10 +109,11 @@ on = ["connect_error", "read_timeout", "502", "503", "504"]
 retry_non_idempotent = false
 
 [proxy.buffering]
-request = "streaming"
-response = "streaming"
+request = "streaming"  # streaming | memory | spool | reject_if_too_large
+response = "streaming" # streaming | memory | spool | reject_if_too_large
 max_memory_body_bytes = 1048576
 max_temp_file_bytes = 0
+# temp_dir = "/var/cache/oxibelt"
 
 [proxy.http]
 early_hints = "drop"
