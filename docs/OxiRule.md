@@ -109,7 +109,7 @@ outbound_anomaly_score_threshold = 4
 unsupported_directive_policy = "fail_closed"
 ```
 
-CRS files resolve under the OxiRule directory and must use normalized relative paths or globs. The CRS layer supports request/response phases 1, 2, 3, and 4, CRS-style `tx` variables, macro expansion, `setvar`, chained rules, paranoia-level tags, transforms used by the supported CRS v4.x surface, and anomaly scoring. Unsupported CRS syntax fails closed during configuration load/compile and includes file/line context.
+CRS files resolve under the OxiRule directory and must use normalized relative paths or globs. The CRS layer supports request/response phases 1, 2, 3, and 4, CRS-style `tx` variables, macro expansion, `setvar`, chained rules, paranoia-level tags, transforms used by the supported CRS v4.x surface, and anomaly scoring. CRS validation operators such as `@validateUrlEncoding` and `@validateUtf8Encoding` follow CRS detection semantics by matching malformed encodings. Unsupported CRS syntax fails closed during configuration load/compile and includes file/line context.
 
 CRS `monitor` mode records rule hits and latest inbound/outbound anomaly summaries through `/admin/v1/waf/rule-hits` without blocking. CRS `enforcing` mode blocks requests with `403` when the inbound threshold is met and suppresses blocked upstream response bodies with a `502` response when the outbound threshold is met. Prometheus metrics intentionally do not expose CRS rule IDs, names, or tags as labels.
 

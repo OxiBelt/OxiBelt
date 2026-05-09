@@ -4,7 +4,7 @@ use regex::Regex;
 use super::actions::expand_macros;
 use super::model::CrsTransaction;
 use super::syntax::split_phrases;
-use super::utils::invalid_url_encoding;
+use super::utils::{invalid_url_encoding, invalid_utf8_encoding};
 
 #[derive(Clone)]
 pub(super) enum CrsOperator {
@@ -91,8 +91,8 @@ impl CrsOperator {
         Regex::new("(?i)(<\\s*script|javascript:|onerror\\s*=|onload\\s*=)")?.is_match(value)
       }
       Self::UnconditionalMatch => true,
-      Self::ValidateUrlEncoding => !invalid_url_encoding(value),
-      Self::ValidateUtf8Encoding => std::str::from_utf8(value.as_bytes()).is_ok(),
+      Self::ValidateUrlEncoding => invalid_url_encoding(value),
+      Self::ValidateUtf8Encoding => invalid_utf8_encoding(value),
       Self::Negated(inner) => !inner.matches(value, tx)?,
     };
     Ok(result)

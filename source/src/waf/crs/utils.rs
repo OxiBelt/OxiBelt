@@ -116,11 +116,59 @@ pub(super) fn invalid_url_encoding(value: &str) -> bool {
   false
 }
 
+pub(super) fn invalid_utf8_encoding(value: &str) -> bool {
+  if value.contains('\u{FFFD}') {
+    return true;
+  }
+
+  let bytes = value.as_bytes();
+  let mut decoded = Vec::with_capacity(bytes.len());
+  let mut saw_percent_encoding = false;
+  let mut index = 0;
+  while index < bytes.len() {
+    if bytes[index] == b'%'
+      && index + 2 < bytes.len()
+      && let (Some(high), Some(low)) = (hex_nibble(bytes[index + 1]), hex_nibble(bytes[index + 2]))
+    {
+      decoded.push((high << 4) | low);
+      saw_percent_encoding = true;
+      index += 3;
+      continue;
+    }
+    decoded.push(bytes[index]);
+    index += 1;
+  }
+
+  saw_percent_encoding && std::str::from_utf8(&decoded).is_err()
+}
+
 fn hex_nibble(byte: u8) -> Option<u8> {
   match byte {
     b'0'..=b'9' => Some(byte - b'0'),
     b'a'..=b'f' => Some(byte - b'a' + 10),
     b'A'..=b'F' => Some(byte - b'A' + 10),
     _ => None,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{invalid_url_encoding, invalid_utf8_encoding};
+
+  #[test]
+  fn invalid_url_encoding_detects_malformed_percent_sequences() {
+    assert!(!invalid_url_encoding("/app/search?q=safe%20value"));
+    assert!(!invalid_url_encoding("/app/search?q=%2f"));
+    assert!(invalid_url_encoding("/app/search?q=%ZZ"));
+    assert!(invalid_url_encoding("/app/search?q=trailing%"));
+  }
+
+  #[test]
+  fn invalid_utf8_encoding_detects_bad_percent_encoded_bytes() {
+    assert!(!invalid_utf8_encoding("/app/search?q=plain"));
+    assert!(!invalid_utf8_encoding("/app/search?q=%E2%9C%93"));
+    assert!(!invalid_utf8_encoding("/app/search?q=%ZZ"));
+    assert!(invalid_utf8_encoding("/app/search?q=%C0%AF"));
+    assert!(invalid_utf8_encoding("\u{FFFD}\u{FFFD}"));
   }
 }

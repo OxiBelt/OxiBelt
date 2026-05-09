@@ -1097,6 +1097,62 @@ fn crs_enforcing_blocks_request_and_response_body_by_anomaly_threshold() {
 }
 
 #[test]
+fn crs_validate_url_encoding_matches_malformed_percent_sequences_only() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule(
+        "waf-crs-url-encoding",
+        "enforcing",
+        r#"
+SecRule REQUEST_URI_RAW "@validateUrlEncoding" "id:920100,phase:1,msg:'Malformed URL encoding',tag:'paranoia-level/1',severity:'CRITICAL',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+"#,
+    );
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let safe = evaluate_simple_request(&engine, "/app/search?q=safe%20value");
+    assert!(safe.terminal.is_none());
+
+    let rejected = evaluate_simple_request(&engine, "/app/search?q=%ZZ");
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.id.as_deref() == Some("920100"))
+        .expect("CRS URL encoding rule should have a snapshot");
+    assert_eq!(hit.hits, 1);
+}
+
+#[test]
+fn crs_validate_utf8_encoding_matches_invalid_decoded_args_only() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule(
+        "waf-crs-utf8-encoding",
+        "enforcing",
+        r#"
+SecRule ARGS "@validateUtf8Encoding" "id:920200,phase:2,msg:'Invalid UTF-8 encoding',tag:'paranoia-level/1',severity:'CRITICAL',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+"#,
+    );
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let safe = evaluate_simple_request(&engine, "/app/search?q=%E2%9C%93");
+    assert!(safe.terminal.is_none());
+
+    let rejected = evaluate_simple_request(&engine, "/app/search?q=%C0%AF");
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.id.as_deref() == Some("920200"))
+        .expect("CRS UTF-8 encoding rule should have a snapshot");
+    assert_eq!(hit.hits, 1);
+}
+
+#[test]
 fn config_rejects_crs_path_escaping() {
     let temp_dir = common::TempDir::new("waf-crs-path-escape");
     let layout = temp_dir.path();
