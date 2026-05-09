@@ -14,6 +14,7 @@ use std::time::Duration;
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::cache::ResponseCache;
 use crate::config::{Config, HttpVersion, UpstreamConfig};
+use crate::lifecycle::LifecycleState;
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
 use crate::pools::PoolState;
@@ -120,6 +121,7 @@ pub struct AppSnapshot {
   pub cache: Arc<ResponseCache>,
   pub(crate) compression: Arc<CompressionState>,
   pub metrics: Arc<Metrics>,
+  pub lifecycle: Arc<LifecycleState>,
   pub shared_state: Option<Arc<SharedState>>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
@@ -160,6 +162,9 @@ impl AppSnapshot {
     let compression = CompressionState::new(&config.compression);
     let metrics = previous
       .map(|snapshot| snapshot.metrics.clone())
+      .unwrap_or_default();
+    let lifecycle = previous
+      .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
     let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
       .context("failed to build downstream TLS config")?;
@@ -208,6 +213,7 @@ impl AppSnapshot {
       cache,
       compression,
       metrics,
+      lifecycle,
       shared_state,
       tls_server_config,
       admin_tls_server_config,
@@ -242,6 +248,7 @@ impl AppSnapshot {
       cache: previous.cache.clone(),
       compression: previous.compression.clone(),
       metrics: previous.metrics.clone(),
+      lifecycle: previous.lifecycle.clone(),
       shared_state: previous.shared_state.clone(),
       tls_server_config: previous.tls_server_config.clone(),
       admin_tls_server_config: previous.admin_tls_server_config.clone(),

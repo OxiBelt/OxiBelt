@@ -17,6 +17,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, warn};
 
 use crate::config::{Config, ConnectionLimitIdentityMode, HttpVersion, UpstreamConfig};
+use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
@@ -253,6 +254,8 @@ async fn connect_h3_upstream(
 pub(crate) async fn handle_downstream_connection(
   connection: h3_quinn::quinn::Connection,
   state: AppHandle,
+  mut shutdown: tokio::sync::watch::Receiver<bool>,
+  drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let peer_addr = connection.remote_address();
   let snapshot = state.snapshot();
@@ -292,11 +295,22 @@ pub(crate) async fn handle_downstream_connection(
     .context("failed to establish downstream HTTP/3 connection")?;
 
   loop {
-    let Some(resolver) = h3_connection
-      .accept()
-      .await
-      .context("failed to accept downstream HTTP/3 request")?
-    else {
+    if *shutdown.borrow() {
+      return Ok(());
+    }
+    let resolver = tokio::select! {
+      biased;
+      changed = shutdown.changed() => {
+        if changed.is_ok() && *shutdown.borrow() {
+          return Ok(());
+        }
+        continue;
+      }
+      accepted = h3_connection.accept() => {
+        accepted.context("failed to accept downstream HTTP/3 request")?
+      }
+    };
+    let Some(resolver) = resolver else {
       return Ok(());
     };
 
@@ -362,6 +376,7 @@ pub(crate) async fn handle_downstream_connection(
         connection_limit_context.clone(),
         state,
         prepared.timeouts,
+        drain.clone(),
         prepared.connection_limit_permit.take(),
       )
       .await?;
@@ -375,6 +390,7 @@ pub(crate) async fn handle_downstream_connection(
       tls_metadata.clone(),
       connection_limit_context.clone(),
       state.clone(),
+      drain.clone(),
     )
     .await?;
     debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
@@ -540,6 +556,7 @@ async fn handle_h3_request(
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
+  drain: ConnectionDrain,
 ) -> anyhow::Result<StatusCode> {
   let (request, stream_receiver) = stream_h3_request_body(request, stream);
   let response = http_proxy::handle_http3(
@@ -548,6 +565,7 @@ async fn handle_h3_request(
     tls_metadata,
     connection_limit_context,
     state,
+    drain,
   )
   .await;
   let status = response.status();
@@ -721,6 +739,7 @@ async fn bridge_webtransport(
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
   timeouts: EffectiveTimeouts,
+  mut drain: ConnectionDrain,
   _connection_limit_permit: Option<ConnectionPermit>,
 ) -> anyhow::Result<()> {
   let downstream = Arc::new(downstream);
@@ -735,6 +754,7 @@ async fn bridge_webtransport(
     connection_limit_context,
     state,
     activity_tx.clone(),
+    drain.clone(),
   ));
   tasks.spawn(bridge_upstream_bidi(
     downstream.clone(),
@@ -765,6 +785,8 @@ async fn bridge_webtransport(
 
   let idle = tokio::time::sleep(timeouts.webtransport_idle);
   tokio::pin!(idle);
+  let drain_close = drain.close_delay_elapsed();
+  tokio::pin!(drain_close);
 
   loop {
     tokio::select! {
@@ -785,10 +807,15 @@ async fn bridge_webtransport(
         tasks.abort_all();
         return Err(anyhow::anyhow!("WebTransport bridge idle timeout elapsed"));
       }
+      _ = &mut drain_close => {
+        tasks.abort_all();
+        return Ok(());
+      }
     }
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bridge_downstream_bidi(
   downstream: Arc<H3WebTransportSession>,
   upstream: Arc<web_transport_quinn::Session>,
@@ -797,6 +824,7 @@ async fn bridge_downstream_bidi(
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
   activity: mpsc::Sender<()>,
+  drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   loop {
     match downstream.accept_bi().await? {
@@ -828,6 +856,7 @@ async fn bridge_downstream_bidi(
             tls_metadata.clone(),
             connection_limit_context.clone(),
             state.clone(),
+            drain.clone(),
           )
           .await?;
         }

@@ -27,6 +27,7 @@ use crate::config::{
   RuntimeOverrides, UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
 };
 use crate::identity::Cidr;
+use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::pool_health;
@@ -73,7 +74,7 @@ pub async fn serve(
   if let Some(reload) = reload {
     serve_with_reload(state, &mut listeners, &mut error_rx, reload).await
   } else {
-    serve_until_shutdown(&mut error_rx).await
+    serve_until_shutdown(state, &mut listeners, &mut error_rx).await
   }
 }
 
@@ -216,7 +217,11 @@ fn ops_response(
       let snapshot = state.snapshot();
       let path = request.uri().path();
       if path == snapshot.config.health.ready_path {
-        text_response(StatusCode::OK, "ready")
+        if snapshot.lifecycle.is_draining() {
+          text_response(StatusCode::SERVICE_UNAVAILABLE, "draining")
+        } else {
+          text_response(StatusCode::OK, "ready")
+        }
       } else if path == snapshot.config.health.live_path {
         text_response(StatusCode::OK, "live")
       } else {
@@ -424,6 +429,10 @@ async fn admin_response(
     return response;
   }
 
+  if let Some(response) = admin_lifecycle_response(snapshot.as_ref(), &actor, &method, &path) {
+    return response;
+  }
+
   if let Some(response) = admin_upstream_pools_response(
     request,
     state,
@@ -463,6 +472,61 @@ fn admin_waf_response(
     StatusCode::OK,
     &json!({ "rules": snapshot.waf.rule_hit_snapshots() }),
   ))
+}
+
+fn admin_lifecycle_response(
+  snapshot: &AppSnapshot,
+  actor: &AdminActor,
+  method: &::http::Method,
+  path: &str,
+) -> Option<Response<ProxyBody>> {
+  match path {
+    "/admin/v1/lifecycle" => {
+      if !admin_actor_has_role(actor, AdminRole::Viewer) {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      if *method != ::http::Method::GET {
+        return Some(text_response(
+          StatusCode::METHOD_NOT_ALLOWED,
+          "method not allowed",
+        ));
+      }
+      Some(json_response(
+        StatusCode::OK,
+        &json!({
+          "draining": snapshot.lifecycle.is_draining(),
+          "reason": snapshot.lifecycle.reason(),
+        }),
+      ))
+    }
+    "/admin/v1/lifecycle/drain" => {
+      if !admin_actor_has_role(actor, AdminRole::Admin) {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      if *method != ::http::Method::POST {
+        return Some(text_response(
+          StatusCode::METHOD_NOT_ALLOWED,
+          "method not allowed",
+        ));
+      }
+      snapshot.lifecycle.set_admin_draining();
+      Some(json_response(StatusCode::OK, &json!({ "ok": true })))
+    }
+    "/admin/v1/lifecycle/undrain" => {
+      if !admin_actor_has_role(actor, AdminRole::Admin) {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      if *method != ::http::Method::POST {
+        return Some(text_response(
+          StatusCode::METHOD_NOT_ALLOWED,
+          "method not allowed",
+        ));
+      }
+      snapshot.lifecycle.clear_admin_draining();
+      Some(json_response(StatusCode::OK, &json!({ "ok": true })))
+    }
+    _ => None,
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -1001,13 +1065,14 @@ fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<ProxyB
 }
 
 async fn serve_until_shutdown(
+  state: AppHandle,
+  listeners: &mut ListenerSupervisor,
   error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
 ) -> anyhow::Result<()> {
   tokio::select! {
-      result = tokio::signal::ctrl_c() => {
-          result.context("failed to wait for ctrl_c signal")?;
-          info!("shutdown signal received");
-          Ok(())
+      result = shutdown_signal() => {
+          result?;
+          graceful_process_shutdown(&state, listeners).await
       }
       Some(error) = error_rx.recv() => Err(error),
   }
@@ -1027,10 +1092,9 @@ async fn serve_with_reload(
     let poll_sleep = tokio::time::sleep(reload.poll_interval());
     tokio::pin!(poll_sleep);
     tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            result.context("failed to wait for ctrl_c signal")?;
-            info!("shutdown signal received");
-            return Ok(());
+        result = shutdown_signal() => {
+            result?;
+            return graceful_process_shutdown(&state, listeners).await;
         }
         Some(error) = error_rx.recv() => return Err(error),
         _ = &mut poll_sleep => {
@@ -1041,6 +1105,42 @@ async fn serve_with_reload(
         }
     }
   }
+}
+
+async fn shutdown_signal() -> anyhow::Result<()> {
+  #[cfg(unix)]
+  {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+      .context("failed to install SIGTERM listener")?;
+    tokio::select! {
+      result = tokio::signal::ctrl_c() => {
+        result.context("failed to wait for ctrl_c signal")?;
+      }
+      _ = term.recv() => {}
+    }
+  }
+  #[cfg(not(unix))]
+  {
+    tokio::signal::ctrl_c()
+      .await
+      .context("failed to wait for ctrl_c signal")?;
+  }
+  info!("shutdown signal received");
+  Ok(())
+}
+
+async fn graceful_process_shutdown(
+  state: &AppHandle,
+  listeners: &mut ListenerSupervisor,
+) -> anyhow::Result<()> {
+  let snapshot = state.snapshot();
+  snapshot.lifecycle.start_shutdown();
+  let shutdown_delay = Duration::from_millis(snapshot.config.runtime.drain.shutdown_delay_ms);
+  if !shutdown_delay.is_zero() {
+    tokio::time::sleep(shutdown_delay).await;
+  }
+  listeners.shutdown(snapshot.as_ref()).await;
+  Ok(())
 }
 
 pub(crate) struct ListenerSupervisor {
@@ -1056,6 +1156,8 @@ struct TcpListenerTask {
   bind: SocketAddr,
   options: TcpListenOptions,
   shutdown: watch::Sender<bool>,
+  connections: TaskRegistry,
+  drain_timeouts: DrainTimeouts,
   tasks: Vec<JoinHandle<()>>,
 }
 
@@ -1078,6 +1180,8 @@ struct Http3ListenerTask {
   socket: crate::config::QuicSocketConfig,
   endpoints: Vec<h3_quinn::quinn::Endpoint>,
   shutdown: watch::Sender<bool>,
+  connections: TaskRegistry,
+  drain_timeouts: DrainTimeouts,
   tasks: Vec<JoinHandle<()>>,
 }
 
@@ -1090,6 +1194,7 @@ struct BoundHttp3Listener {
 struct AdminListenerTask {
   bind: SocketAddr,
   shutdown: watch::Sender<bool>,
+  drain_timeouts: DrainTimeouts,
   task: JoinHandle<()>,
 }
 
@@ -1105,6 +1210,23 @@ pub(crate) struct PendingListenerUpdate {
   admin: Option<Option<BoundAdminListener>>,
   streams: Option<Vec<BoundStreamListener>>,
   refresh_http3_config: bool,
+}
+
+#[derive(Clone, Copy)]
+struct DrainTimeouts {
+  graceful: Duration,
+  long_connection_close_delay: Duration,
+}
+
+impl DrainTimeouts {
+  fn from_snapshot(snapshot: &AppSnapshot) -> Self {
+    Self {
+      graceful: Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms),
+      long_connection_close_delay: Duration::from_millis(
+        snapshot.config.runtime.drain.long_connection_close_delay_ms,
+      ),
+    }
+  }
 }
 
 impl ListenerSupervisor {
@@ -1254,44 +1376,45 @@ impl ListenerSupervisor {
     snapshot: &AppSnapshot,
     state: AppHandle,
   ) {
+    let drain_timeouts = DrainTimeouts::from_snapshot(snapshot);
     match pending.tcp {
       Some(Some(tcp)) => {
-        let tcp = tcp.start(state.clone(), self.error_tx.clone());
+        let tcp = tcp.start(state.clone(), self.error_tx.clone(), drain_timeouts);
         if let Some(old) = self.tcp.replace(tcp) {
-          old.shutdown();
+          old.drain_background();
         }
       }
       Some(None) => {
         if let Some(old) = self.tcp.take() {
-          old.shutdown();
+          old.drain_background();
         }
       }
       None => {}
     }
     match pending.http {
       Some(Some(http)) => {
-        let http = http.start(state.clone(), self.error_tx.clone());
+        let http = http.start(state.clone(), self.error_tx.clone(), drain_timeouts);
         if let Some(old) = self.http.replace(http) {
-          old.shutdown();
+          old.drain_background();
         }
       }
       Some(None) => {
         if let Some(old) = self.http.take() {
-          old.shutdown();
+          old.drain_background();
         }
       }
       None => {}
     }
     match pending.http3 {
       Some(Some(http3)) => {
-        let http3 = http3.start(state.clone(), self.error_tx.clone());
+        let http3 = http3.start(state.clone(), self.error_tx.clone(), drain_timeouts);
         if let Some(old) = self.http3.replace(http3) {
-          old.shutdown();
+          old.drain_background();
         }
       }
       Some(None) => {
         if let Some(old) = self.http3.take() {
-          old.shutdown();
+          old.drain_background();
         }
       }
       None if pending.refresh_http3_config => {
@@ -1306,14 +1429,14 @@ impl ListenerSupervisor {
     }
     match pending.admin {
       Some(Some(admin)) => {
-        let admin = admin.start(state.clone(), self.error_tx.clone());
+        let admin = admin.start(state.clone(), self.error_tx.clone(), drain_timeouts);
         if let Some(old) = self.admin.replace(admin) {
-          old.shutdown();
+          old.drain_background();
         }
       }
       Some(None) => {
         if let Some(old) = self.admin.take() {
-          old.shutdown();
+          old.drain_background();
         }
       }
       None => {}
@@ -1321,7 +1444,7 @@ impl ListenerSupervisor {
     if let Some(streams) = pending.streams {
       let old = std::mem::take(&mut self.streams);
       for task in old {
-        task.shutdown();
+        task.drain_background();
       }
       self.streams = streams
         .into_iter()
@@ -1329,34 +1452,82 @@ impl ListenerSupervisor {
         .collect();
     }
   }
+
+  async fn shutdown(&mut self, snapshot: &AppSnapshot) {
+    let drain_timeouts = DrainTimeouts::from_snapshot(snapshot);
+    let mut tasks = Vec::new();
+    if let Some(task) = self.tcp.take() {
+      tasks.push(task.drain());
+    }
+    if let Some(task) = self.http.take() {
+      tasks.push(task.drain());
+    }
+    if let Some(task) = self.http3.take() {
+      tasks.push(task.drain());
+    }
+    if let Some(task) = self.admin.take() {
+      tasks.push(task.drain());
+    }
+    for task in std::mem::take(&mut self.streams) {
+      tasks.push(task.drain());
+    }
+    if tasks.is_empty() {
+      tokio::time::sleep(drain_timeouts.graceful.min(Duration::from_millis(1))).await;
+      return;
+    }
+    let _ = futures_util::future::join_all(tasks).await;
+  }
 }
 
 impl Drop for ListenerSupervisor {
   fn drop(&mut self) {
     if let Some(task) = self.tcp.take() {
-      task.shutdown();
+      task.drain_background();
     }
     if let Some(task) = self.http.take() {
-      task.shutdown();
+      task.drain_background();
     }
     if let Some(task) = self.http3.take() {
-      task.shutdown();
+      task.drain_background();
     }
     if let Some(task) = self.admin.take() {
-      task.shutdown();
+      task.drain_background();
     }
     for task in std::mem::take(&mut self.streams) {
-      task.shutdown();
+      task.drain_background();
     }
   }
 }
 
 impl TcpListenerTask {
-  fn shutdown(self) {
-    let _ = self.shutdown.send(true);
-    for task in self.tasks {
-      task.abort();
-    }
+  fn drain_background(self) {
+    drop(self.drain());
+  }
+
+  fn drain(self) -> JoinHandle<()> {
+    tokio::spawn(async move {
+      let TcpListenerTask {
+        shutdown,
+        connections,
+        drain_timeouts,
+        tasks,
+        ..
+      } = self;
+      let _ = shutdown.send(true);
+      let wait_connections = connections.clone();
+      let wait = async {
+        for task in tasks {
+          let _ = task.await;
+        }
+        wait_connections.wait_idle().await;
+      };
+      if tokio::time::timeout(drain_timeouts.graceful, wait)
+        .await
+        .is_err()
+      {
+        connections.abort_all();
+      }
+    })
   }
 }
 
@@ -1365,12 +1536,14 @@ impl BoundTcpListener {
     self,
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
+    drain_timeouts: DrainTimeouts,
   ) -> TcpListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
     let options = self.options;
     let kind = self.kind;
     let accept_error_backoff = self.accept_error_backoff;
+    let connections = TaskRegistry::default();
     let tasks = self
       .listeners
       .into_iter()
@@ -1379,6 +1552,7 @@ impl BoundTcpListener {
         let worker_shutdown = shutdown_rx.clone();
         let worker_state = state.clone();
         let worker_error_tx = error_tx.clone();
+        let worker_connections = connections.clone();
         tokio::spawn(async move {
           if let Err(error) = serve_tcp(
             listener,
@@ -1387,6 +1561,8 @@ impl BoundTcpListener {
             worker_shutdown,
             worker_index,
             accept_error_backoff,
+            worker_connections,
+            drain_timeouts.long_connection_close_delay,
           )
           .await
           {
@@ -1399,20 +1575,50 @@ impl BoundTcpListener {
       bind,
       options,
       shutdown,
+      connections,
+      drain_timeouts,
       tasks,
     }
   }
 }
 
 impl Http3ListenerTask {
-  fn shutdown(self) {
-    let _ = self.shutdown.send(true);
-    for endpoint in self.endpoints {
-      endpoint.close(0u32.into(), b"listener reload");
-    }
-    for task in self.tasks {
-      task.abort();
-    }
+  fn drain_background(self) {
+    drop(self.drain());
+  }
+
+  fn drain(self) -> JoinHandle<()> {
+    tokio::spawn(async move {
+      let Http3ListenerTask {
+        endpoints,
+        shutdown,
+        connections,
+        drain_timeouts,
+        tasks,
+        ..
+      } = self;
+      let _ = shutdown.send(true);
+      let wait_endpoints = endpoints.clone();
+      let wait_connections = connections.clone();
+      let wait = async {
+        for task in tasks {
+          let _ = task.await;
+        }
+        wait_connections.wait_idle().await;
+        for endpoint in wait_endpoints {
+          endpoint.wait_idle().await;
+        }
+      };
+      if tokio::time::timeout(drain_timeouts.graceful, wait)
+        .await
+        .is_err()
+      {
+        for endpoint in endpoints {
+          endpoint.close(0u32.into(), b"listener drain timeout");
+        }
+        connections.abort_all();
+      }
+    })
   }
 }
 
@@ -1421,10 +1627,12 @@ impl BoundHttp3Listener {
     self,
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
+    drain_timeouts: DrainTimeouts,
   ) -> Http3ListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
     let socket = self.socket;
+    let connections = TaskRegistry::default();
     let tasks = self
       .endpoints
       .iter()
@@ -1434,9 +1642,17 @@ impl BoundHttp3Listener {
         let worker_shutdown = shutdown_rx.clone();
         let worker_state = state.clone();
         let worker_error_tx = error_tx.clone();
+        let worker_connections = connections.clone();
         tokio::spawn(async move {
-          if let Err(error) =
-            serve_http3(endpoint, worker_state, worker_shutdown, worker_index).await
+          if let Err(error) = serve_http3(
+            endpoint,
+            worker_state,
+            worker_shutdown,
+            worker_index,
+            worker_connections,
+            drain_timeouts.long_connection_close_delay,
+          )
+          .await
           {
             let _ = worker_error_tx.send(error.context("downstream HTTP/3 listener failed"));
           }
@@ -1448,15 +1664,34 @@ impl BoundHttp3Listener {
       socket,
       endpoints: self.endpoints,
       shutdown,
+      connections,
+      drain_timeouts,
       tasks,
     }
   }
 }
 
 impl AdminListenerTask {
-  fn shutdown(self) {
-    let _ = self.shutdown.send(true);
-    self.task.abort();
+  fn drain_background(self) {
+    drop(self.drain());
+  }
+
+  fn drain(self) -> JoinHandle<()> {
+    tokio::spawn(async move {
+      let AdminListenerTask {
+        shutdown,
+        drain_timeouts,
+        mut task,
+        ..
+      } = self;
+      let _ = shutdown.send(true);
+      tokio::select! {
+        _ = &mut task => {}
+        _ = tokio::time::sleep(drain_timeouts.graceful) => {
+          task.abort();
+        }
+      }
+    })
   }
 }
 
@@ -1465,6 +1700,7 @@ impl BoundAdminListener {
     self,
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
+    drain_timeouts: DrainTimeouts,
   ) -> AdminListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
@@ -1476,6 +1712,7 @@ impl BoundAdminListener {
     AdminListenerTask {
       bind,
       shutdown,
+      drain_timeouts,
       task,
     }
   }
@@ -1505,6 +1742,7 @@ async fn bind_admin_listener(bind: SocketAddr) -> anyhow::Result<BoundAdminListe
   Ok(BoundAdminListener { bind, listener })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_tcp(
   listener: TcpListener,
   kind: TcpListenerKind,
@@ -1512,6 +1750,8 @@ async fn serve_tcp(
   mut shutdown: watch::Receiver<bool>,
   worker_index: usize,
   accept_error_backoff: Duration,
+  connections: TaskRegistry,
+  long_connection_close_delay: Duration,
 ) -> anyhow::Result<()> {
   let bind = listener
     .local_addr()
@@ -1538,10 +1778,28 @@ async fn serve_tcp(
             };
 
             let connection_state = state.clone();
-            tokio::spawn(async move {
+            let connection_shutdown = shutdown.clone();
+            let connection_drain = ConnectionDrain::new(
+              connection_shutdown.clone(),
+              connection_state.snapshot().lifecycle.subscribe(),
+              long_connection_close_delay,
+            );
+            connections.spawn(async move {
                 let result = match kind {
-                  TcpListenerKind::Https => handle_connection(stream, peer_addr, connection_state).await,
-                  TcpListenerKind::PlainHttp => handle_plain_http_connection(stream, peer_addr, connection_state).await,
+                  TcpListenerKind::Https => handle_connection(
+                    stream,
+                    peer_addr,
+                    connection_state,
+                    connection_shutdown,
+                    connection_drain,
+                  ).await,
+                  TcpListenerKind::PlainHttp => handle_plain_http_connection(
+                    stream,
+                    peer_addr,
+                    connection_state,
+                    connection_shutdown,
+                    connection_drain,
+                  ).await,
                 };
                 if let Err(error) = result {
                     warn!(peer = %peer_addr, error = %error, "downstream connection closed with error");
@@ -1578,6 +1836,8 @@ async fn serve_http3(
   state: AppHandle,
   mut shutdown: watch::Receiver<bool>,
   worker_index: usize,
+  connections: TaskRegistry,
+  long_connection_close_delay: Duration,
 ) -> anyhow::Result<()> {
   let bind = endpoint
     .local_addr()
@@ -1604,10 +1864,21 @@ async fn serve_http3(
                 continue;
             }
             let connection_state = state.clone();
-            tokio::spawn(async move {
+            let connection_shutdown = shutdown.clone();
+            let connection_drain = ConnectionDrain::new(
+              connection_shutdown.clone(),
+              connection_state.snapshot().lifecycle.subscribe(),
+              long_connection_close_delay,
+            );
+            connections.spawn(async move {
                 match connecting.await {
                     Ok(connection) => {
-                        if let Err(error) = http3::handle_downstream_connection(connection, connection_state).await {
+                        if let Err(error) = http3::handle_downstream_connection(
+                          connection,
+                          connection_state,
+                          connection_shutdown,
+                          connection_drain,
+                        ).await {
                             warn!(error = %error, "HTTP/3 downstream connection closed with error");
                         }
                     }
@@ -1668,6 +1939,8 @@ async fn handle_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
   state: AppHandle,
+  mut shutdown: watch::Receiver<bool>,
+  drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let handshake_state = state.snapshot();
   let _global_permit = acquire_global_connection_permit(&handshake_state)?;
@@ -1725,6 +1998,7 @@ async fn handle_connection(
     let tls_metadata = tls_metadata.clone();
     let request_count = request_count.clone();
     let connection_limit_context = connection_limit_context.clone();
+    let drain = drain.clone();
     async move {
       Ok::<_, Infallible>(
         if request_count.fetch_add(1, Ordering::Relaxed)
@@ -1743,6 +2017,7 @@ async fn handle_connection(
             connection_limit_context.clone(),
             state,
             "https",
+            drain,
           )
           .await
         },
@@ -1757,13 +2032,24 @@ async fn handle_connection(
     builder.keep_alive_timeout(Duration::from_millis(
       handshake_state.config.limits.client_idle_timeout_ms,
     ));
-    builder
-      .serve_connection(TokioIo::new(tls_stream), service)
-      .await
-      .map_err(|error| {
-        error!(peer = %peer_addr, error = %error, "HTTP/2 downstream connection failed");
-        anyhow::anyhow!(error)
-      })?;
+    let connection = builder.serve_connection(TokioIo::new(tls_stream), service);
+    tokio::pin!(connection);
+    if *shutdown.borrow() {
+      connection.as_mut().graceful_shutdown();
+    }
+    let result = tokio::select! {
+      result = &mut connection => result,
+      changed = shutdown.changed() => {
+        if changed.is_ok() && *shutdown.borrow() {
+          connection.as_mut().graceful_shutdown();
+        }
+        (&mut connection).await
+      }
+    };
+    result.map_err(|error| {
+      error!(peer = %peer_addr, error = %error, "HTTP/2 downstream connection failed");
+      anyhow::anyhow!(error)
+    })?;
   } else {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
@@ -1780,14 +2066,26 @@ async fn handle_connection(
           .max(8192),
       )
       .keep_alive(true);
-    builder
+    let connection = builder
       .serve_connection(TokioIo::new(tls_stream), service)
-      .with_upgrades()
-      .await
-      .map_err(|error| {
-        error!(peer = %peer_addr, error = %error, "HTTP/1.1 downstream connection failed");
-        anyhow::anyhow!(error)
-      })?;
+      .with_upgrades();
+    tokio::pin!(connection);
+    if *shutdown.borrow() {
+      connection.as_mut().graceful_shutdown();
+    }
+    let result = tokio::select! {
+      result = &mut connection => result,
+      changed = shutdown.changed() => {
+        if changed.is_ok() && *shutdown.borrow() {
+          connection.as_mut().graceful_shutdown();
+        }
+        (&mut connection).await
+      }
+    };
+    result.map_err(|error| {
+      error!(peer = %peer_addr, error = %error, "HTTP/1.1 downstream connection failed");
+      anyhow::anyhow!(error)
+    })?;
   }
 
   Ok(())
@@ -1797,6 +2095,8 @@ async fn handle_plain_http_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
   state: AppHandle,
+  mut shutdown: watch::Receiver<bool>,
+  drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
   let _global_permit = acquire_global_connection_permit(&snapshot)?;
@@ -1816,6 +2116,7 @@ async fn handle_plain_http_connection(
     let state = state.clone();
     let request_count = request_count.clone();
     let connection_limit_context = connection_limit_context.clone();
+    let drain = drain.clone();
     async move {
       let response = match state.snapshot().config.listeners.http_mode {
         crate::config::HttpListenerMode::RedirectToHttps => redirect_to_https(&request),
@@ -1836,6 +2137,7 @@ async fn handle_plain_http_connection(
               connection_limit_context.clone(),
               state,
               "http",
+              drain,
             )
             .await
           }
@@ -1856,14 +2158,26 @@ async fn handle_plain_http_connection(
     .max_headers(snapshot.config.limits.max_headers)
     .max_buf_size(snapshot.config.limits.max_total_header_bytes.max(8192))
     .keep_alive(true);
-  builder
+  let connection = builder
     .serve_connection(TokioIo::new(stream), service)
-    .with_upgrades()
-    .await
-    .map_err(|error| {
-      error!(peer = %peer_addr, error = %error, "plain HTTP downstream connection failed");
-      anyhow::anyhow!(error)
-    })?;
+    .with_upgrades();
+  tokio::pin!(connection);
+  if *shutdown.borrow() {
+    connection.as_mut().graceful_shutdown();
+  }
+  let result = tokio::select! {
+    result = &mut connection => result,
+    changed = shutdown.changed() => {
+      if changed.is_ok() && *shutdown.borrow() {
+        connection.as_mut().graceful_shutdown();
+      }
+      (&mut connection).await
+    }
+  };
+  result.map_err(|error| {
+    error!(peer = %peer_addr, error = %error, "plain HTTP downstream connection failed");
+    anyhow::anyhow!(error)
+  })?;
   Ok(())
 }
 
@@ -2178,6 +2492,65 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn admin_lifecycle_endpoints_enforce_rbac_and_toggle_drain() {
+    let temp_dir = common::TempDir::new("admin-lifecycle");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-lifecycle");
+    let config = admin_listener_config(&cert_path, &key_path, true, None);
+    let snapshot = AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize");
+    let viewer = AdminActor {
+      name: "viewer".to_string(),
+      roles: vec![AdminRole::Viewer],
+    };
+    let admin = AdminActor {
+      name: "admin".to_string(),
+      roles: vec![AdminRole::Admin],
+    };
+
+    let response = admin_lifecycle_response(
+      &snapshot,
+      &viewer,
+      &::http::Method::GET,
+      "/admin/v1/lifecycle",
+    )
+    .expect("lifecycle GET should be handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!snapshot.lifecycle.is_draining());
+
+    let response = admin_lifecycle_response(
+      &snapshot,
+      &viewer,
+      &::http::Method::POST,
+      "/admin/v1/lifecycle/drain",
+    )
+    .expect("lifecycle drain should be handled");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!snapshot.lifecycle.is_draining());
+
+    let response = admin_lifecycle_response(
+      &snapshot,
+      &admin,
+      &::http::Method::POST,
+      "/admin/v1/lifecycle/drain",
+    )
+    .expect("lifecycle drain should be handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(snapshot.lifecycle.is_draining());
+    assert_eq!(snapshot.lifecycle.reason(), "admin");
+
+    let response = admin_lifecycle_response(
+      &snapshot,
+      &admin,
+      &::http::Method::POST,
+      "/admin/v1/lifecycle/undrain",
+    )
+    .expect("lifecycle undrain should be handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!snapshot.lifecycle.is_draining());
+  }
+
+  #[tokio::test]
   async fn admin_listener_disabled_config_does_not_serve_stale_requests() {
     let temp_dir = common::TempDir::new("admin-listener-disabled");
     let (cert_path, key_path) =
@@ -2320,6 +2693,73 @@ mod tests {
     assert_tcp_connect_fails(admin_addr).await;
   }
 
+  #[tokio::test]
+  async fn listener_supervisor_rebind_drains_delayed_plain_http_request() {
+    let temp_dir = common::TempDir::new("plain-http-drain-rebind");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-http-drain-rebind");
+    let (old_http, new_http) = unused_loopback_ports().await;
+    let https_bind = unused_loopback_port().await;
+    let (upstream_addr, upstream_task, first_upstream_request) =
+      start_delayed_http_upstream(Duration::from_millis(200), 2).await;
+    let initial_config =
+      plain_http_listener_config(&cert_path, &key_path, https_bind, old_http, upstream_addr);
+    let state = AppHandle::new(
+      AppSnapshot::new(initial_config)
+        .await
+        .expect("initial snapshot should initialize"),
+    );
+    let (error_tx, _error_rx) = mpsc::unbounded_channel();
+    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx)
+      .await
+      .expect("listener supervisor should start");
+
+    let held_request = tokio::spawn(raw_http_response(old_http, "/slow"));
+    tokio::time::timeout(Duration::from_secs(2), first_upstream_request)
+      .await
+      .expect("upstream should receive held request before reload")
+      .expect("upstream signal should be sent");
+
+    let active = state.snapshot();
+    let reloaded_config =
+      plain_http_listener_config(&cert_path, &key_path, https_bind, new_http, upstream_addr);
+    let reloaded = AppSnapshot::new_with_previous(reloaded_config, Some(active.as_ref()))
+      .await
+      .expect("reloaded snapshot should initialize");
+    let pending = supervisor
+      .prepare(&reloaded)
+      .await
+      .expect("plain HTTP rebind should prepare");
+    state.replace(reloaded);
+    let active = state.snapshot();
+    supervisor.commit(pending, active.as_ref(), state.clone());
+
+    let held_response = held_request
+      .await
+      .expect("held request task should not panic")
+      .expect("held request should finish across listener drain");
+    assert!(
+      held_response.starts_with("HTTP/1.1 200 OK") && held_response.contains("delayed-0"),
+      "held request should complete on old listener generation: {}",
+      log_safe_test_text(&held_response)
+    );
+    assert_tcp_connect_fails(old_http).await;
+
+    let new_response = raw_http_response(new_http, "/after")
+      .await
+      .expect("new listener should serve after reload");
+    assert!(
+      new_response.starts_with("HTTP/1.1 200 OK") && new_response.contains("delayed-1"),
+      "new listener generation should serve after reload: {}",
+      log_safe_test_text(&new_response)
+    );
+
+    supervisor.shutdown(state.snapshot().as_ref()).await;
+    upstream_task
+      .await
+      .expect("delayed upstream task should not panic");
+  }
+
   fn admin_listener_config(
     cert_path: &Path,
     key_path: &Path,
@@ -2345,6 +2785,123 @@ transport = "plaintext_allowlist"
       raw.push_str(&format!("bind = \"{admin_bind}\"\n"));
     }
     parse_test_config(&raw)
+  }
+
+  fn plain_http_listener_config(
+    cert_path: &Path,
+    key_path: &Path,
+    https_bind: SocketAddr,
+    http_bind: SocketAddr,
+    upstream_addr: SocketAddr,
+  ) -> Config {
+    let mut raw = common::minimal_config_toml(cert_path, key_path)
+      .replace("unprivileged_mode = true", "unprivileged_mode = false")
+      .replace(
+        "https_bind = \"127.0.0.1:8443\"",
+        &format!(
+          "https_bind = \"{https_bind}\"\nhttp_bind = \"{http_bind}\"\nhttp_mode = \"proxy\""
+        ),
+      )
+      .replace(
+        "origin = \"https://app.internal.example\"",
+        &format!("origin = \"http://{upstream_addr}/origin\""),
+      )
+      .replace("max_http_version = \"h2\"", "max_http_version = \"h1\"");
+    raw.push_str(
+      r#"
+
+[runtime.drain]
+graceful_timeout_ms = 1000
+long_connection_close_delay_ms = 1000
+shutdown_delay_ms = 0
+"#,
+    );
+    parse_test_config(&raw)
+  }
+
+  async fn start_delayed_http_upstream(
+    response_delay: Duration,
+    request_count: usize,
+  ) -> (
+    SocketAddr,
+    JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+  ) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("delayed upstream should bind");
+    let addr = listener
+      .local_addr()
+      .expect("delayed upstream address should be available");
+    let (first_request_tx, first_request_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+      let mut first_request_tx = Some(first_request_tx);
+      for index in 0..request_count {
+        let (mut stream, _) = listener
+          .accept()
+          .await
+          .expect("delayed upstream should accept connection");
+        read_http_request_headers(&mut stream)
+          .await
+          .expect("delayed upstream should read request headers");
+        if let Some(tx) = first_request_tx.take() {
+          let _ = tx.send(());
+        }
+        tokio::time::sleep(response_delay).await;
+        let body = format!("delayed-{index}");
+        let response = format!(
+          "HTTP/1.1 200 OK\r\n\
+           Content-Type: text/plain\r\n\
+           Content-Length: {}\r\n\
+           Connection: close\r\n\
+           \r\n\
+           {body}",
+          body.len()
+        );
+        stream
+          .write_all(response.as_bytes())
+          .await
+          .expect("delayed upstream should write response");
+      }
+    });
+    (addr, task, first_request_rx)
+  }
+
+  async fn read_http_request_headers(stream: &mut TcpStream) -> std::io::Result<()> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 256];
+    loop {
+      let read = stream.read(&mut chunk).await?;
+      if read == 0 {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::UnexpectedEof,
+          "connection closed before request headers completed",
+        ));
+      }
+      buffer.extend_from_slice(&chunk[..read]);
+      if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+        return Ok(());
+      }
+    }
+  }
+
+  async fn raw_http_response(addr: SocketAddr, path: &str) -> std::io::Result<String> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let request = format!(
+      "GET {path} HTTP/1.1\r\n\
+       Host: example.com\r\n\
+       Content-Length: 0\r\n\
+       Connection: close\r\n\
+       \r\n"
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+      .await
+      .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP response timed out")
+      })??;
+    Ok(String::from_utf8_lossy(&response).into_owned())
   }
 
   fn parse_test_config(raw: &str) -> Config {

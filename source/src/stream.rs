@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::{StreamListenerConfig, parse_stream_target};
+use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::ConnectionPermit;
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::proxy_protocol_egress;
@@ -19,6 +20,8 @@ pub(crate) struct StreamListenerTask {
   pub(crate) bind: SocketAddr,
   pub(crate) options: TcpListenOptions,
   shutdown: watch::Sender<bool>,
+  connections: TaskRegistry,
+  graceful_timeout: Duration,
   tasks: Vec<JoinHandle<()>>,
 }
 
@@ -30,11 +33,31 @@ pub(crate) struct BoundStreamListener {
 }
 
 impl StreamListenerTask {
-  pub(crate) fn shutdown(self) {
-    let _ = self.shutdown.send(true);
-    for task in self.tasks {
-      task.abort();
-    }
+  pub(crate) fn drain_background(self) {
+    drop(self.drain());
+  }
+
+  pub(crate) fn drain(self) -> JoinHandle<()> {
+    tokio::spawn(async move {
+      let StreamListenerTask {
+        shutdown,
+        connections,
+        graceful_timeout,
+        tasks,
+        ..
+      } = self;
+      let _ = shutdown.send(true);
+      let wait_connections = connections.clone();
+      let wait = async {
+        for task in tasks {
+          let _ = task.await;
+        }
+        wait_connections.wait_idle().await;
+      };
+      if tokio::time::timeout(graceful_timeout, wait).await.is_err() {
+        connections.abort_all();
+      }
+    })
   }
 }
 
@@ -71,6 +94,12 @@ impl BoundStreamListener {
     let listeners = self.listeners;
     let task_name = name.clone();
     let accept_error_backoff = self.accept_error_backoff;
+    let snapshot = state.snapshot();
+    let graceful_timeout = Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
+    let long_connection_close_delay =
+      Duration::from_millis(snapshot.config.runtime.drain.long_connection_close_delay_ms);
+    drop(snapshot);
+    let connections = TaskRegistry::default();
     let tasks = listeners
       .into_iter()
       .enumerate()
@@ -80,6 +109,7 @@ impl BoundStreamListener {
         let worker_state = state.clone();
         let worker_error_tx = error_tx.clone();
         let worker_task_name = task_name.clone();
+        let worker_connections = connections.clone();
         tokio::spawn(async move {
           if let Err(error) = serve_stream_listener(
             listener,
@@ -88,6 +118,8 @@ impl BoundStreamListener {
             worker_shutdown,
             worker_index,
             accept_error_backoff,
+            worker_connections,
+            long_connection_close_delay,
           )
           .await
           {
@@ -102,11 +134,14 @@ impl BoundStreamListener {
       bind,
       options,
       shutdown,
+      connections,
+      graceful_timeout,
       tasks,
     }
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_stream_listener(
   listener: TcpListener,
   config: StreamListenerConfig,
@@ -114,6 +149,8 @@ async fn serve_stream_listener(
   mut shutdown: watch::Receiver<bool>,
   worker_index: usize,
   accept_error_backoff: Duration,
+  connections: TaskRegistry,
+  long_connection_close_delay: Duration,
 ) -> anyhow::Result<()> {
   let bind = listener
     .local_addr()
@@ -146,8 +183,20 @@ async fn serve_stream_listener(
             continue;
           }
         };
-        tokio::spawn(async move {
-          let result = proxy_stream_connection(downstream, peer_addr, connection_config, permit).await;
+        let connection_shutdown = shutdown.clone();
+        let connection_drain = ConnectionDrain::new(
+          connection_shutdown,
+          state.snapshot().lifecycle.subscribe(),
+          long_connection_close_delay,
+        );
+        connections.spawn(async move {
+          let result = proxy_stream_connection(
+            downstream,
+            peer_addr,
+            connection_config,
+            permit,
+            connection_drain,
+          ).await;
           if let Err(error) = result {
             warn!(peer = %peer_addr, error = %error, "stream proxy connection failed");
           }
@@ -162,6 +211,7 @@ async fn proxy_stream_connection(
   peer_addr: SocketAddr,
   config: StreamListenerConfig,
   _permit: ConnectionPermit,
+  drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let (host, port) = parse_stream_target(&config.target)?;
   let remote_addr = resolve_target_addr(&host, port).await?;
@@ -186,6 +236,7 @@ async fn proxy_stream_connection(
     downstream,
     upstream,
     Duration::from_millis(config.idle_timeout_ms),
+    drain,
   )
   .await
 }
@@ -217,6 +268,7 @@ async fn copy_bidirectional_with_idle(
   downstream: TcpStream,
   upstream: TcpStream,
   idle_timeout: Duration,
+  mut drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let (downstream_read, downstream_write) = downstream.into_split();
   let (upstream_read, upstream_write) = upstream.into_split();
@@ -233,6 +285,8 @@ async fn copy_bidirectional_with_idle(
   ));
   let idle = tokio::time::sleep(idle_timeout);
   tokio::pin!(idle);
+  let drain_close = drain.close_delay_elapsed();
+  tokio::pin!(drain_close);
 
   loop {
     tokio::select! {
@@ -254,6 +308,11 @@ async fn copy_bidirectional_with_idle(
         downstream_to_upstream.abort();
         upstream_to_downstream.abort();
         return Err(anyhow::anyhow!("stream proxy idle timeout elapsed"));
+      }
+      _ = &mut drain_close => {
+        downstream_to_upstream.abort();
+        upstream_to_downstream.abort();
+        return Ok(());
       }
     }
   }

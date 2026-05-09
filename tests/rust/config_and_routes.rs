@@ -2611,6 +2611,73 @@ fn hot_reload_config_defaults_to_off() {
 }
 
 #[test]
+fn runtime_drain_config_defaults_are_safe_for_graceful_reload() {
+    let temp_dir = common::TempDir::new("drain-default");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "drain-default");
+    let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+        .expect("config should parse");
+
+    assert_eq!(config.runtime.drain.graceful_timeout_ms, 30_000);
+    assert_eq!(config.runtime.drain.long_connection_close_delay_ms, 300_000);
+    assert_eq!(config.runtime.drain.shutdown_delay_ms, 0);
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn runtime_drain_config_parses_custom_values() {
+    let temp_dir = common::TempDir::new("drain-custom");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "drain-custom");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "unprivileged_mode = true",
+        r#"unprivileged_mode = true
+
+[runtime.drain]
+graceful_timeout_ms = 750
+long_connection_close_delay_ms = 1250
+shutdown_delay_ms = 250"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert_eq!(config.runtime.drain.graceful_timeout_ms, 750);
+    assert_eq!(config.runtime.drain.long_connection_close_delay_ms, 1250);
+    assert_eq!(config.runtime.drain.shutdown_delay_ms, 250);
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn runtime_drain_config_rejects_zero_enforcement_timeouts() {
+    let temp_dir = common::TempDir::new("drain-invalid");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "drain-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let cases = [
+        (
+            base.replace(
+                "unprivileged_mode = true",
+                "unprivileged_mode = true\n\n[runtime.drain]\ngraceful_timeout_ms = 0",
+            ),
+            "runtime.drain.graceful_timeout_ms must be greater than 0",
+        ),
+        (
+            base.replace(
+                "unprivileged_mode = true",
+                "unprivileged_mode = true\n\n[runtime.drain]\nlong_connection_close_delay_ms = 0",
+            ),
+            "runtime.drain.long_connection_close_delay_ms must be greater than 0",
+        ),
+    ];
+
+    for (raw, expected) in cases {
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn hot_reload_config_parses_modes_and_poll_interval() {
     let temp_dir = common::TempDir::new("hot-reload-parse");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");

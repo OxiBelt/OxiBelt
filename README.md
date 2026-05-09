@@ -14,7 +14,7 @@ The current implementation is a production-oriented foundation: configuration is
 - WebSocket tunneling for HTTP/1.1 upgrade routes and WebTransport forwarding over HTTP/3.
 - Forwarded-header normalization, trusted real-IP handling, PROXY protocol intake, rate limits, connection limits, request limits, and bounded response cache support.
 - OxiRule request and response WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, structured access logs, bounded body scanning, and optional CRS-compatible anomaly scoring.
-- Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload.
+- Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload, with graceful listener drain for in-flight requests and long-lived tunnels.
 
 See [docs/Specification.md](docs/Specification.md) for the compact behavior spec and current non-goals.
 
@@ -59,6 +59,16 @@ cargo run --manifest-path source/Cargo.toml -- \
 ```
 
 Send `SIGHUP` to trigger an immediate reload check when hot reload is enabled.
+
+Full reloads activate replacement listeners before old listener generations drain. OxiBelt also handles Ctrl-C and `SIGTERM` by marking the instance draining, keeping `/live` healthy, returning `503` from `/ready`, optionally waiting `runtime.drain.shutdown_delay_ms`, and then draining listeners up to `runtime.drain.graceful_timeout_ms`. Long-lived WebSocket, generic Upgrade, CONNECT, WebTransport, and TCP stream bridges get `runtime.drain.long_connection_close_delay_ms` before forced close.
+
+The admin listener exposes lifecycle control when enabled:
+
+```text
+GET  /admin/v1/lifecycle
+POST /admin/v1/lifecycle/drain
+POST /admin/v1/lifecycle/undrain
+```
 
 ## Documentation
 

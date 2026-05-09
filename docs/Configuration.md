@@ -62,6 +62,7 @@ include = ["conf.d/*.toml"]
 [logging.access_log.database.tls]
 [runtime]
 [runtime.accept]
+[runtime.drain]
 [runtime.hot_reload]
 [listeners]
 [listeners.proxy_protocol]
@@ -226,12 +227,21 @@ reuse_port = false
 backlog = 1024
 accept_error_backoff_ms = 50
 
+[runtime.drain]
+graceful_timeout_ms = 30000
+long_connection_close_delay_ms = 300000
+shutdown_delay_ms = 0
+
 [runtime.hot_reload]
 mode = "off" # off | oxirule | downstream_tls | full
 poll_interval_ms = 2000
 ```
 
-`unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` is optional; when omitted, Tokio chooses its default multi-thread worker count. `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers = 1` keeps the compatibility path. Set `workers > 1` only with `reuse_port = true`, which creates one `SO_REUSEPORT` listener socket per worker. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors. `poll_interval_ms` must be greater than zero. CLI flags `--hot-reload-mode` and `--hot-reload-poll-interval-ms` override TOML values and emit warnings when they differ.
+`unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` is optional; when omitted, Tokio chooses its default multi-thread worker count. `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers = 1` keeps the compatibility path. Set `workers > 1` only with `reuse_port = true`, which creates one `SO_REUSEPORT` listener socket per worker. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
+
+`[runtime.drain]` controls reload and shutdown draining. `graceful_timeout_ms` is the maximum time a stopped listener generation waits for active HTTP/1.1 and HTTP/2 requests to finish before force-closing remaining connection tasks. `long_connection_close_delay_ms` protects upgraded WebSocket/generic Upgrade, CONNECT, WebTransport, and TCP stream bridges after a drain signal before they are closed. `shutdown_delay_ms` marks the instance draining and waits before listener drain begins; `0` is allowed. `graceful_timeout_ms` and `long_connection_close_delay_ms` must be greater than zero.
+
+`poll_interval_ms` must be greater than zero. CLI flags `--hot-reload-mode` and `--hot-reload-poll-interval-ms` override TOML values and emit warnings when they differ.
 
 Reload modes:
 
@@ -241,6 +251,8 @@ Reload modes:
 - `full`: reload OxiRule policy, TOML configuration, upstream clients, access-log sinks, downstream TLS material, downstream listener bind/protocol settings, and admin listener enable/bind settings.
 
 Reload failures keep the previous active state.
+
+Successful full reloads start replacement listeners before draining old listener generations. Local readiness stays OK for a successful reload because the active replacement snapshot is serving; existing requests on the old generation finish within `graceful_timeout_ms`, and long-lived upgraded or stream connections keep their drain grace from `long_connection_close_delay_ms`.
 
 ## Listeners and TLS
 
@@ -593,6 +605,14 @@ The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag
 
 `admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and roles. Roles are `viewer`, `cache_operator`, `upstream_operator`, and `admin`; `admin` implies all scopes. Cache purge requires `cache_operator`; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
 
+Admin lifecycle endpoints:
+
+- `GET /admin/v1/lifecycle`
+- `POST /admin/v1/lifecycle/drain`
+- `POST /admin/v1/lifecycle/undrain`
+
+Lifecycle read requires `viewer` or `admin` and returns `{"draining": bool, "reason": string}`. Drain and undrain require `admin`. Admin drain makes `/ready` return `503 draining`, keeps `/live` at `200 live`, and rejects new data-plane requests with `503 draining` and `Connection: close`; in-flight requests continue. Undrain clears only admin-initiated drain state.
+
 Admin WAF telemetry endpoint:
 
 - `GET /admin/v1/waf/rule-hits`
@@ -616,7 +636,7 @@ POST /cache/purge?policy=default&scheme=https&host=example.test&uri=/path
 POST /cache/purge-prefix?policy=default&scheme=https&host=example.test&path_prefix=/assets/
 ```
 
-Health paths must start with `/`. Prometheus metrics omit detailed WAF rule names, IDs, modes, routes, and per-rule hit counters because the metrics listener is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoint for that rule-level data.
+Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics omit detailed WAF rule names, IDs, modes, routes, and per-rule hit counters because the metrics listener is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoint for that rule-level data.
 
 ## Database Access Log Sink
 
@@ -910,6 +930,7 @@ Configuration validation rejects:
 - Unsafe route paths.
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
+- `runtime.drain.graceful_timeout_ms = 0` or `runtime.drain.long_connection_close_delay_ms = 0`.
 - TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, or reserved live OCSP mode.
 - Reserved sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.

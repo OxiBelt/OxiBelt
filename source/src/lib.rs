@@ -14,6 +14,7 @@ pub mod access_log;
 pub mod cache;
 pub mod config;
 pub mod identity;
+pub mod lifecycle;
 pub mod limits;
 mod listener_socket;
 pub mod metrics;

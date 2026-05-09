@@ -15,6 +15,7 @@ use crate::config::{
   Config, ConnectionLimitIdentityMode, HttpVersion, ProxyProtocolEgressMode, RouteConfig,
   UpstreamConfig,
 };
+use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::pools::PoolSelection;
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
@@ -270,7 +271,8 @@ pub(crate) fn downstream_response_send_timeout(response: &Response<ProxyBody>) -
     .map(|timeout| timeout.0)
 }
 
-pub async fn handle(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle(
   request: Request<Incoming>,
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
@@ -278,6 +280,7 @@ pub async fn handle(
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
   downstream_scheme: &'static str,
+  drain: ConnectionDrain,
 ) -> Response<ProxyBody> {
   let protocol = request_protocol(request.headers());
   handle_inner(
@@ -291,6 +294,7 @@ pub async fn handle(
     WafTransportNetwork::Tcp,
     true,
     downstream_scheme,
+    drain,
   )
   .await
 }
@@ -301,6 +305,7 @@ pub(crate) async fn handle_http3(
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
+  drain: ConnectionDrain,
 ) -> Response<ProxyBody> {
   handle_inner(
     request,
@@ -313,6 +318,7 @@ pub(crate) async fn handle_http3(
     WafTransportNetwork::Udp,
     false,
     "https",
+    drain,
   )
   .await
 }
@@ -329,6 +335,7 @@ async fn handle_inner<B>(
   transport_network: WafTransportNetwork,
   _reject_connect: bool,
   downstream_scheme: &'static str,
+  drain: ConnectionDrain,
 ) -> Response<ProxyBody>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
@@ -356,6 +363,7 @@ where
     transport_network,
     _reject_connect,
     downstream_scheme,
+    drain,
     &mut access_log,
     &mut request_connection_permit,
   )
@@ -381,6 +389,7 @@ async fn handle_inner_impl<B>(
   transport_network: WafTransportNetwork,
   _reject_connect: bool,
   downstream_scheme: &'static str,
+  drain: ConnectionDrain,
   access_log: &mut SystemAccessLogContext,
   request_connection_permit: &mut Option<ConnectionPermit>,
 ) -> Response<ProxyBody>
@@ -389,6 +398,10 @@ where
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
   state.metrics.record_request();
+
+  if state.lifecycle.is_draining() {
+    return draining_response();
+  }
 
   if let Err(rejection) =
     semantics::validate_expect(request.headers(), state.config.proxy.http.expect_continue)
@@ -564,6 +577,7 @@ where
       request_version,
       connection_limit_context.as_ref(),
       request_connection_permit,
+      drain,
       access_log,
     )
     .await;
@@ -580,6 +594,7 @@ where
       &request_waf,
       connection_limit_context.as_ref(),
       request_connection_permit,
+      drain,
       access_log,
     )
     .await
@@ -1253,6 +1268,15 @@ where
   response
 }
 
+fn draining_response() -> Response<ProxyBody> {
+  let mut response = text_response(StatusCode::SERVICE_UNAVAILABLE, "draining");
+  response.headers_mut().insert(
+    http::header::CONNECTION,
+    http::HeaderValue::from_static("close"),
+  );
+  response
+}
+
 fn apply_alt_svc_header(
   headers: &mut HeaderMap,
   status: StatusCode,
@@ -1518,6 +1542,7 @@ async fn handle_connect_request(
   request_version: http::Version,
   connection_limit_context: Option<&ConnectionLimitContext>,
   request_connection_permit: &mut Option<ConnectionPermit>,
+  drain: ConnectionDrain,
   access_log: &mut SystemAccessLogContext,
 ) -> Response<ProxyBody> {
   if !state.config.proxy.upgrades.connect_tunneling || !resolved.route.connect_tunneling {
@@ -1559,7 +1584,8 @@ async fn handle_connect_request(
         let downstream = downstream_upgrade.await?;
         let downstream = TokioIo::new(downstream);
         let upstream_stream = dial_tunnel_upstream(&upstream, client_addr, timeouts).await?;
-        copy_bidirectional_with_idle(downstream, upstream_stream, timeouts.websocket_idle).await?;
+        copy_bidirectional_with_idle(downstream, upstream_stream, timeouts.websocket_idle, drain)
+          .await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
       }
       .await;
@@ -1578,7 +1604,7 @@ async fn handle_connect_request(
 
   match dial_tunnel_upstream(&upstream, client_addr, timeouts).await {
     Ok(upstream_stream) => {
-      let body = bridge_connect_body(request.into_body(), upstream_stream, timeouts);
+      let body = bridge_connect_body(request.into_body(), upstream_stream, timeouts, drain);
       drop(pool_selection);
       Response::builder()
         .status(StatusCode::OK)
@@ -1601,11 +1627,12 @@ fn bridge_connect_body(
   mut downstream_body: ProxyBody,
   upstream: TcpStream,
   timeouts: EffectiveTimeouts,
+  mut drain: ConnectionDrain,
 ) -> ProxyBody {
   let (body_sender, body) = body::channel_body(16);
   let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
 
-  tokio::spawn(async move {
+  let mut downstream_to_upstream = tokio::spawn(async move {
     while let Some(frame) = downstream_body.frame().await {
       let frame = match frame {
         Ok(frame) => frame,
@@ -1622,7 +1649,7 @@ fn bridge_connect_body(
     let _ = upstream_writer.shutdown().await;
   });
 
-  tokio::spawn(async move {
+  let mut upstream_to_downstream = tokio::spawn(async move {
     let mut buffer = vec![0u8; 16 * 1024];
     loop {
       match tokio::time::timeout(timeouts.upstream_read, upstream_reader.read(&mut buffer)).await {
@@ -1658,6 +1685,39 @@ fn bridge_connect_body(
     }
   });
 
+  tokio::spawn(async move {
+    let drain_close = drain.close_delay_elapsed();
+    tokio::pin!(drain_close);
+    let mut downstream_done = false;
+    let mut upstream_done = false;
+
+    loop {
+      tokio::select! {
+        _ = &mut drain_close => {
+          if !downstream_done {
+            downstream_to_upstream.abort();
+          }
+          if !upstream_done {
+            upstream_to_downstream.abort();
+          }
+          return;
+        }
+        _ = &mut downstream_to_upstream, if !downstream_done => {
+          downstream_done = true;
+          if upstream_done {
+            return;
+          }
+        }
+        _ = &mut upstream_to_downstream, if !upstream_done => {
+          upstream_done = true;
+          if downstream_done {
+            return;
+          }
+        }
+      }
+    }
+  });
+
   body
 }
 
@@ -1665,6 +1725,7 @@ async fn copy_bidirectional_with_idle<D, U>(
   downstream: D,
   upstream: U,
   idle_timeout: Duration,
+  mut drain: ConnectionDrain,
 ) -> anyhow::Result<()>
 where
   D: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1685,6 +1746,8 @@ where
   ));
   let idle = tokio::time::sleep(idle_timeout);
   tokio::pin!(idle);
+  let drain_close = drain.close_delay_elapsed();
+  tokio::pin!(drain_close);
 
   loop {
     tokio::select! {
@@ -1706,6 +1769,11 @@ where
         downstream_to_upstream.abort();
         upstream_to_downstream.abort();
         return Err(anyhow::anyhow!("upgrade tunnel idle timeout elapsed"));
+      }
+      _ = &mut drain_close => {
+        downstream_to_upstream.abort();
+        upstream_to_downstream.abort();
+        return Ok(());
       }
     }
   }
@@ -1763,6 +1831,7 @@ async fn handle_upgrade_request(
   request_waf: &crate::waf::RequestWafDecision,
   connection_limit_context: Option<&ConnectionLimitContext>,
   request_connection_permit: &mut Option<ConnectionPermit>,
+  drain: ConnectionDrain,
   access_log: &mut SystemAccessLogContext,
 ) -> Option<Response<ProxyBody>> {
   if request.version() != http::Version::HTTP_11 {
@@ -1931,6 +2000,7 @@ async fn handle_upgrade_request(
         TokioIo::new(downstream),
         TokioIo::new(upstream),
         timeouts.websocket_idle,
+        drain,
       )
       .await?;
       Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())

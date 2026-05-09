@@ -1578,6 +1578,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "logging.access_log.database.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "runtime" => &[
       "accept",
+      "drain",
       "hot_reload",
       "linux_only",
       "memory_only_state",
@@ -1590,6 +1591,11 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "backlog",
       "reuse_port",
       "workers",
+    ][..],
+    "runtime.drain" => &[
+      "graceful_timeout_ms",
+      "long_connection_close_delay_ms",
+      "shutdown_delay_ms",
     ][..],
     "runtime.hot_reload" => &["mode", "poll_interval_ms"][..],
     "listeners" => &[
@@ -2473,6 +2479,8 @@ pub struct RuntimeConfig {
   #[serde(default)]
   pub accept: RuntimeAcceptConfig,
   #[serde(default)]
+  pub drain: RuntimeDrainConfig,
+  #[serde(default)]
   pub hot_reload: HotReloadConfig,
 }
 
@@ -2485,6 +2493,7 @@ impl Default for RuntimeConfig {
       unprivileged_mode: true,
       worker_threads: None,
       accept: RuntimeAcceptConfig::default(),
+      drain: RuntimeDrainConfig::default(),
       hot_reload: HotReloadConfig::default(),
     }
   }
@@ -2496,6 +2505,7 @@ impl RuntimeConfig {
       bail!("runtime.worker_threads must be greater than 0");
     }
     self.accept.validate()?;
+    self.drain.validate()?;
     self.hot_reload.validate()
   }
 }
@@ -2536,6 +2546,38 @@ impl RuntimeAcceptConfig {
     }
     if self.accept_error_backoff_ms == 0 {
       bail!("runtime.accept.accept_error_backoff_ms must be greater than 0");
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RuntimeDrainConfig {
+  #[serde(default = "default_drain_graceful_timeout_ms")]
+  pub graceful_timeout_ms: u64,
+  #[serde(default = "default_drain_long_connection_close_delay_ms")]
+  pub long_connection_close_delay_ms: u64,
+  #[serde(default)]
+  pub shutdown_delay_ms: u64,
+}
+
+impl Default for RuntimeDrainConfig {
+  fn default() -> Self {
+    Self {
+      graceful_timeout_ms: default_drain_graceful_timeout_ms(),
+      long_connection_close_delay_ms: default_drain_long_connection_close_delay_ms(),
+      shutdown_delay_ms: 0,
+    }
+  }
+}
+
+impl RuntimeDrainConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.graceful_timeout_ms == 0 {
+      bail!("runtime.drain.graceful_timeout_ms must be greater than 0");
+    }
+    if self.long_connection_close_delay_ms == 0 {
+      bail!("runtime.drain.long_connection_close_delay_ms must be greater than 0");
     }
     Ok(())
   }
@@ -4839,6 +4881,14 @@ fn default_system_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
 
 fn default_hot_reload_poll_interval_ms() -> u64 {
   2_000
+}
+
+fn default_drain_graceful_timeout_ms() -> u64 {
+  30_000
+}
+
+fn default_drain_long_connection_close_delay_ms() -> u64 {
+  300_000
 }
 
 fn default_one_usize() -> usize {

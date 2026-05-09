@@ -2118,6 +2118,171 @@ assert_old_admin_port_closed() {
             None,
         ),
         docker_case(
+            "hot-reload",
+            "graceful-http-drain",
+            "full hot reload drains old HTTP/1 and HTTP/2 listener generations",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response h1_output h2_output
+
+  start_holding_client_request_with_headers \
+    "proxy" \
+    8443 \
+    "https" \
+    "" \
+    "example.test" \
+    "/app/h1-drain?body=slow-h1&body_delay_ms=4500" \
+    200 \
+    0
+  start_holding_h2_probe "/app/h2-drain?body=slow-h2&body_delay_ms=4500"
+
+  docker cp "${case_dir}/config/reloaded-oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
+  reload_proxy
+
+  response="$(client_request_on_port 9443 "example.test" "/app/after-reload" 200)"
+  assert_body_jq "${response}" '.upstream == "alt-upstream" and .path == "/alt/app/after-reload"'
+
+  wait_holding_h2_probe
+  h2_output="$(cat "${H2_HOLD_LOG}")"
+  assert_response_jq "${h2_output}" '.negotiated_protocol == "h2" and .status == 200 and .body == "slow-h2"'
+
+  wait_holding_client
+  h1_output="$(cat "${HOLDING_CLIENT_LOG}")"
+  assert_response_jq "${h1_output}" '.status == 200 and .body == "slow-h1"'
+}
+
+start_holding_h2_probe() {
+  local path="$1"
+  H2_HOLD_CONTAINER="oxibelt-holding-h2-client-${run_id}-${RANDOM}"
+  H2_HOLD_LOG="${logs_dir}/${H2_HOLD_CONTAINER}.log"
+  docker create \
+    --name "${H2_HOLD_CONTAINER}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    "${protocol_probe_image}" \
+    downstream \
+    --protocol h2 \
+    --host proxy \
+    --port 8443 \
+    --server-name proxy \
+    --authority example.test \
+    --path "${path}" \
+    --ca-cert /tmp/proxy-ca.pem \
+    --expect-status 200 >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${H2_HOLD_CONTAINER}:/tmp/proxy-ca.pem"
+  docker start -a "${H2_HOLD_CONTAINER}" >"${H2_HOLD_LOG}" 2>&1 &
+  H2_HOLD_PID=$!
+  sleep 1
+}
+
+wait_holding_h2_probe() {
+  if ! wait "${H2_HOLD_PID}"; then
+    cat "${H2_HOLD_LOG}" >&2 || true
+    fail_with_diagnostics "holding HTTP/2 protocol probe failed"
+  fi
+  docker rm -f "${H2_HOLD_CONTAINER}" >/dev/null 2>&1 || true
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "hot-reload",
+            "graceful-upgrade-drain",
+            "full hot reload protects upgraded connections during old listener drain",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response upgrade_output
+
+  start_holding_upgrade_client_request_with_headers \
+    "example.test" \
+    "/app/upgrade-drain" \
+    "matrixproto" \
+    "drain-body" \
+    101 \
+    1500
+
+  docker cp "${case_dir}/config/reloaded-oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
+  reload_proxy
+
+  response="$(client_request_on_port 9443 "example.test" "/app/after-upgrade-reload" 200)"
+  assert_body_jq "${response}" '.upstream == "alt-upstream" and .path == "/alt/app/after-upgrade-reload"'
+
+  wait_holding_client
+  upgrade_output="$(cat "${HOLDING_CLIENT_LOG}")"
+  assert_response_jq "${upgrade_output}" '.status == 101 and .body == "upgraded:drain-body"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "lifecycle",
+            "admin-drain-readiness",
+            "admin lifecycle drain flips readiness, rejects new requests, and preserves in-flight work",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response held_output
+
+  response="$(plain_client_request_with_headers_on_port 9091 "proxy" "/ready" 200 "GET" "")"
+  assert_response_jq "${response}" '.body == "ready"'
+  response="$(plain_client_request_with_headers_on_port 9091 "proxy" "/live" 200 "GET" "")"
+  assert_response_jq "${response}" '.body == "live"'
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/lifecycle" 200 "GET" "" "Authorization: Bearer matrix-viewer-token")"
+  assert_body_jq "${response}" '.draining == false and .reason == "ready"'
+
+  start_holding_client_request_with_headers \
+    "proxy" \
+    8443 \
+    "https" \
+    "" \
+    "example.test" \
+    "/app/held?body=held-ok&body_delay_ms=3500" \
+    200 \
+    0
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/lifecycle/drain" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_body_jq "${response}" '.ok == true'
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/lifecycle" 200 "GET" "" "Authorization: Bearer matrix-viewer-token")"
+  assert_body_jq "${response}" '.draining == true and .reason == "admin"'
+  response="$(plain_client_request_with_headers_on_port 9091 "proxy" "/ready" 503 "GET" "")"
+  assert_response_jq "${response}" '.body == "draining"'
+  response="$(plain_client_request_with_headers_on_port 9091 "proxy" "/live" 200 "GET" "")"
+  assert_response_jq "${response}" '.body == "live"'
+  response="$(client_request_with_headers "example.test" "/app/rejected" 503 "GET" "")"
+  assert_response_jq "${response}" '.body == "draining" and (.headers.connection | ascii_downcase) == "close"'
+
+  wait_holding_client
+  held_output="$(cat "${HOLDING_CLIENT_LOG}")"
+  assert_response_jq "${held_output}" '.status == 200 and .body == "held-ok"'
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/lifecycle/undrain" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_body_jq "${response}" '.ok == true'
+  response="$(plain_client_request_with_headers_on_port 9091 "proxy" "/ready" 200 "GET" "")"
+  assert_response_jq "${response}" '.body == "ready"'
+  response="$(client_request_with_headers "example.test" "/app/restored?body=restored" 200 "GET" "")"
+  assert_response_jq "${response}" '.body == "restored"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "config-invalid",
             "no-http-versions",
             "listener validation rejects all downstream HTTP versions disabled",
