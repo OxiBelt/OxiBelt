@@ -653,8 +653,13 @@ where
   access_log.upstream_scheme = upstream.origin.scheme().to_string();
   let native_grpc_request = semantics::is_native_grpc_request(&request_headers, &state.config);
   let mut timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
+  let mut grpc_timeout_caps = semantics::GrpcTimeoutCaps::default();
   if native_grpc_request {
-    timeouts = semantics::cap_timeouts_for_grpc(timeouts, &request_headers, &state.config);
+    (timeouts, grpc_timeout_caps) = semantics::cap_timeouts_for_grpc(
+      timeouts,
+      &request_headers,
+      state.config.proxy.http.grpc.respect_grpc_timeout,
+    );
   }
 
   let mut upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
@@ -902,7 +907,9 @@ where
     .await
     {
       Err(_) => {
-        state.pools.report_failure(&upstream.name);
+        if should_report_upstream_request_failure(true, grpc_timeout_caps) {
+          state.pools.report_failure(&upstream.name);
+        }
         warn!(upstream = %upstream.name, "upstream HTTP/3 request timed out");
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("read_timeout", "upstream request timed out");
@@ -1033,7 +1040,10 @@ where
         if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
           return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
         }
-        state.pools.report_failure(&upstream.name);
+        let upstream_first_byte_timeout = error_is_upstream_first_byte_timeout(&error);
+        if should_report_upstream_request_failure(upstream_first_byte_timeout, grpc_timeout_caps) {
+          state.pools.report_failure(&upstream.name);
+        }
         warn!(
             error = %error,
             error_debug = ?error,
@@ -1042,7 +1052,7 @@ where
         );
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         let error_message = error.to_string();
-        let error_code = if error_message.contains("timed out") {
+        let error_code = if upstream_first_byte_timeout || error_message.contains("timed out") {
           "read_timeout"
         } else {
           "connect_error"
@@ -2059,10 +2069,7 @@ async fn send_with_retry(
         Ok(Ok(response)) => return Ok(response),
         Ok(Err(error)) => last_error = Some(error.into()),
         Err(_) => {
-          last_error = Some(anyhow::anyhow!(
-            "upstream request timed out after {}ms",
-            timeouts.upstream_first_byte.as_millis()
-          ));
+          last_error = Some(UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte).into());
         }
       }
     }
@@ -2070,10 +2077,7 @@ async fn send_with_retry(
   }
   match tokio::time::timeout(timeouts.upstream_first_byte, client.request(request)).await {
     Ok(result) => Ok(result?),
-    Err(_) => anyhow::bail!(
-      "upstream request timed out after {}ms",
-      timeouts.upstream_first_byte.as_millis()
-    ),
+    Err(_) => Err(UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte).into()),
   }
 }
 
@@ -2127,15 +2131,49 @@ async fn send_one_shot_with_proxy_protocol(
       send_one_shot_over_io(tls, request, upstream_version),
     )
     .await
-    .context("one-shot upstream request timed out")?
+    .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
   } else {
     tokio::time::timeout(
       timeouts.upstream_first_byte,
       send_one_shot_over_io(stream, request, upstream_version),
     )
     .await
-    .context("one-shot upstream request timed out")?
+    .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
   }
+}
+
+#[derive(Debug)]
+struct UpstreamFirstByteTimeout {
+  timeout: Duration,
+}
+
+impl UpstreamFirstByteTimeout {
+  fn new(timeout: Duration) -> Self {
+    Self { timeout }
+  }
+}
+
+impl std::fmt::Display for UpstreamFirstByteTimeout {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      formatter,
+      "upstream request timed out after {}ms",
+      self.timeout.as_millis()
+    )
+  }
+}
+
+impl std::error::Error for UpstreamFirstByteTimeout {}
+
+fn error_is_upstream_first_byte_timeout(error: &anyhow::Error) -> bool {
+  error.downcast_ref::<UpstreamFirstByteTimeout>().is_some()
+}
+
+fn should_report_upstream_request_failure(
+  upstream_first_byte_timeout: bool,
+  grpc_timeout_caps: semantics::GrpcTimeoutCaps,
+) -> bool {
+  !(upstream_first_byte_timeout && grpc_timeout_caps.upstream_first_byte)
 }
 
 async fn send_one_shot_over_io<I>(
@@ -2815,6 +2853,32 @@ upstream_first_byte_timeout_ms = 5000
     let timeouts = EffectiveTimeouts::new(&config, &config.routes[0], &config.upstreams[0]);
 
     assert_eq!(timeouts.upstream_first_byte, Duration::from_millis(1_000));
+  }
+
+  #[test]
+  fn client_grpc_deadline_first_byte_timeout_is_not_pool_health_failure() {
+    let caps = semantics::GrpcTimeoutCaps {
+      upstream_first_byte: true,
+    };
+
+    assert!(!should_report_upstream_request_failure(true, caps));
+  }
+
+  #[test]
+  fn configured_first_byte_timeout_still_reports_pool_health_failure() {
+    assert!(should_report_upstream_request_failure(
+      true,
+      semantics::GrpcTimeoutCaps::default()
+    ));
+  }
+
+  #[test]
+  fn non_timeout_upstream_error_still_reports_pool_health_failure() {
+    let caps = semantics::GrpcTimeoutCaps {
+      upstream_first_byte: true,
+    };
+
+    assert!(should_report_upstream_request_failure(false, caps));
   }
 
   #[tokio::test]

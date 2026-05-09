@@ -1,0 +1,61 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[proxy.http.grpc]
+enabled = true
+respect_grpc_timeout = true
+retry = "off"
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstream_pools]]
+name = "grpc-timeout-victims"
+algorithm = "round_robin"
+
+[[upstream_pools.servers]]
+origin = "http://mock-http:18080/origin"
+
+[[upstream_pools.servers]]
+origin = "http://mock-alt:18081/alt"
+
+[upstream_pools.health_check]
+enabled = true
+mode = "passive"
+protocol = "http"
+healthy_threshold = 1
+unhealthy_threshold = 1
+
+[[routes]]
+name = "grpc-timeout-pool"
+hosts = ["grpc-pool.example.test"]
+path_prefix = "/"
+upstream_pool = "grpc-timeout-victims"

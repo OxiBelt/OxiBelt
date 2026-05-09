@@ -163,20 +163,28 @@ pub(super) fn should_retry_grpc(config: &Config) -> bool {
   config.proxy.http.grpc.retry == GrpcRetryMode::SafeUnary
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct GrpcTimeoutCaps {
+  pub(super) upstream_first_byte: bool,
+}
+
 pub(super) fn cap_timeouts_for_grpc(
   mut timeouts: EffectiveTimeouts,
   headers: &HeaderMap,
-  config: &Config,
-) -> EffectiveTimeouts {
-  if !config.proxy.http.grpc.respect_grpc_timeout {
-    return timeouts;
+  respect_grpc_timeout: bool,
+) -> (EffectiveTimeouts, GrpcTimeoutCaps) {
+  if !respect_grpc_timeout {
+    return (timeouts, GrpcTimeoutCaps::default());
   }
   let Some(deadline) = parse_grpc_timeout(headers) else {
-    return timeouts;
+    return (timeouts, GrpcTimeoutCaps::default());
+  };
+  let caps = GrpcTimeoutCaps {
+    upstream_first_byte: deadline < timeouts.upstream_first_byte,
   };
   timeouts.upstream_first_byte = timeouts.upstream_first_byte.min(deadline);
   timeouts.upstream_read = timeouts.upstream_read.min(deadline);
-  timeouts
+  (timeouts, caps)
 }
 
 pub(super) fn parse_grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
@@ -381,6 +389,32 @@ mod tests {
     assert_eq!(parse_grpc_timeout(&headers), Some(Duration::from_secs(2)));
     headers.insert(GRPC_TIMEOUT, HeaderValue::from_static("3u"));
     assert_eq!(parse_grpc_timeout(&headers), Some(Duration::from_micros(3)));
+  }
+
+  #[test]
+  fn grpc_timeout_cap_records_client_limited_first_byte() {
+    let mut headers = HeaderMap::new();
+    headers.insert(GRPC_TIMEOUT, HeaderValue::from_static("0n"));
+    let timeouts = EffectiveTimeouts {
+      response_send: Duration::from_secs(30),
+      websocket_idle: Duration::from_secs(30),
+      webtransport_idle: Duration::from_secs(30),
+      upstream_connect: Duration::from_secs(3),
+      upstream_first_byte: Duration::from_secs(30),
+      upstream_read: Duration::from_secs(30),
+      upstream_send: Duration::from_secs(30),
+    };
+
+    let (timeouts, caps) = cap_timeouts_for_grpc(timeouts, &headers, true);
+
+    assert_eq!(timeouts.upstream_first_byte, Duration::ZERO);
+    assert_eq!(timeouts.upstream_read, Duration::ZERO);
+    assert_eq!(
+      caps,
+      GrpcTimeoutCaps {
+        upstream_first_byte: true
+      }
+    );
   }
 
   #[test]

@@ -404,7 +404,7 @@ mode = "legacy_plain" # legacy_plain | plain | json
 
 `proxy.http` controls HTTP compatibility details. `early_hints = "pass"` relays upstream `103 Early Hints` where the downstream transport supports interim responses; `drop` keeps the legacy behavior. `trailers = "drop"` removes body trailer frames for ordinary HTTP traffic while preserving native gRPC trailers. `expect_continue = "auto"` accepts `Expect: 100-continue` and rejects unsupported `Expect` values with `417`; `reject` rejects all `Expect` values. `priority = "ignore"` strips RFC 9218 `Priority` headers instead of forwarding them. `sse_auto_streaming = true` keeps `text/event-stream` responses streaming even when response buffering is enabled.
 
-`proxy.http.grpc` enables native gRPC HTTP semantics. When enabled, OxiBelt preserves gRPC trailers, honors `grpc-timeout` by capping upstream first-byte and read timeouts, maps generated upstream failures to gRPC status trailers, and only retries gRPC requests when `retry = "safe_unary"`.
+`proxy.http.grpc` enables native gRPC HTTP semantics. When enabled, OxiBelt preserves gRPC trailers, honors `grpc-timeout` by capping upstream first-byte and read timeouts, maps generated upstream failures to gRPC status trailers, and only retries gRPC requests when `retry = "safe_unary"`. If a client `grpc-timeout` deadline is the reason an upstream first-byte wait expires, OxiBelt returns the gRPC deadline response without counting that event as a passive upstream-pool health failure.
 
 `proxy.http.errors.mode = "json"` changes proxy-generated error bodies to JSON with stable `error`, `status`, `code`, and `request_id` fields. `legacy_plain` preserves the historical body text without setting a content type; `plain` emits the same text with `text/plain`.
 
