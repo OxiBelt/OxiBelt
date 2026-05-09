@@ -127,12 +127,13 @@ impl TaskRegistry {
   where
     F: std::future::Future<Output = ()> + Send + 'static,
   {
+    self.reap_finished();
     self.inner.active.fetch_add(1, Ordering::Relaxed);
     let inner = self.inner.clone();
+    let completion = TaskCompletion { inner };
     let task = tokio::spawn(async move {
+      let _completion = completion;
       future.await;
-      inner.active.fetch_sub(1, Ordering::Relaxed);
-      inner.notify.notify_waiters();
     });
     self
       .inner
@@ -143,21 +144,62 @@ impl TaskRegistry {
   }
 
   pub(crate) async fn wait_idle(&self) {
-    while self.inner.active.load(Ordering::Relaxed) > 0 {
-      self.inner.notify.notified().await;
+    loop {
+      let notified = self.inner.notify.notified();
+      if self.inner.active.load(Ordering::Relaxed) == 0 {
+        break;
+      }
+      notified.await;
     }
+
+    self.reap_finished();
   }
 
   pub(crate) fn abort_all(&self) {
-    for task in self
+    let mut tasks = self
+      .inner
+      .tasks
+      .lock()
+      .expect("task registry lock poisoned");
+    tasks.retain(|task| !task.is_finished());
+    for task in tasks.iter() {
+      task.abort();
+    }
+  }
+
+  fn reap_finished(&self) {
+    self
       .inner
       .tasks
       .lock()
       .expect("task registry lock poisoned")
-      .iter()
-    {
-      task.abort();
-    }
+      .retain(|task| !task.is_finished());
+  }
+
+  #[cfg(test)]
+  fn active_count(&self) -> usize {
+    self.inner.active.load(Ordering::Relaxed)
+  }
+
+  #[cfg(test)]
+  fn tracked_task_count(&self) -> usize {
+    self
+      .inner
+      .tasks
+      .lock()
+      .expect("task registry lock poisoned")
+      .len()
+  }
+}
+
+struct TaskCompletion {
+  inner: Arc<TaskRegistryInner>,
+}
+
+impl Drop for TaskCompletion {
+  fn drop(&mut self) {
+    self.inner.active.fetch_sub(1, Ordering::Relaxed);
+    self.inner.notify.notify_waiters();
   }
 }
 
@@ -204,5 +246,61 @@ mod tests {
     let _ = listener_tx.send(true);
     task.await.expect("drain task should finish");
     assert!(started.elapsed() >= Duration::from_millis(25));
+  }
+
+  #[tokio::test]
+  async fn task_registry_reaps_completed_tasks_during_long_lived_generation() {
+    let registry = TaskRegistry::default();
+
+    for _ in 0..128 {
+      registry.spawn(async {});
+      wait_for_active_tasks(&registry, 0).await;
+      assert!(
+        registry.tracked_task_count() <= 1,
+        "completed connection tasks should not accumulate across spawns"
+      );
+    }
+
+    registry.wait_idle().await;
+    assert_eq!(registry.tracked_task_count(), 0);
+  }
+
+  #[tokio::test]
+  async fn task_registry_wait_idle_reaps_last_completed_task() {
+    let registry = TaskRegistry::default();
+
+    registry.spawn(async {});
+    wait_for_active_tasks(&registry, 0).await;
+    assert_eq!(registry.tracked_task_count(), 1);
+
+    registry.wait_idle().await;
+    assert_eq!(registry.tracked_task_count(), 0);
+  }
+
+  #[tokio::test]
+  async fn task_registry_abort_all_decrements_active_tasks() {
+    let registry = TaskRegistry::default();
+    let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    registry.spawn(async move {
+      let _ = rx.await;
+    });
+    wait_for_active_tasks(&registry, 1).await;
+
+    registry.abort_all();
+    wait_for_active_tasks(&registry, 0).await;
+  }
+
+  async fn wait_for_active_tasks(registry: &TaskRegistry, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+      loop {
+        if registry.active_count() == expected {
+          break;
+        }
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("task registry active count should settle");
   }
 }
