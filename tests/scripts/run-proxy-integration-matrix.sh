@@ -373,6 +373,59 @@ slow_body_client_request() {
   fail_with_diagnostics "slow body request did not reach expected status ${expect_status}"
 }
 
+split_body_client_request() {
+  local host="$1"
+  local path="$2"
+  local expect_status="$3"
+  local method="$4"
+  local body="$5"
+  local split_at="$6"
+  local split_delay_ms="$7"
+  shift 7
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  local output=""
+  local status=0
+  local client_container=""
+
+  client_container="oxibelt-split-body-client-${run_id}-${RANDOM}"
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
+    /opt/mock_upstream/client.py \
+    --path "${path}" \
+    --host "${host}" \
+    --port 8443 \
+    --method "${method}" \
+    --body "${body}" \
+    --body-split-at "${split_at}" \
+    --body-split-delay-ms "${split_delay_ms}" \
+    --ca-file /tmp/proxy-ca.pem \
+    --dump-response-json \
+    --expect-status "${expect_status}" \
+    --timeout 10 \
+    "${header_args[@]}" >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+  if output="$(docker start -a "${client_container}" 2>&1)"; then
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    printf '%s' "${output}"
+    return 0
+  fi
+  status=$?
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  echo "split body client request failed with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "split body request did not reach expected status ${expect_status}"
+}
+
 plain_client_request() {
   plain_client_request_on_port 8080 "$1" "$2" "$3" "GET" ""
 }

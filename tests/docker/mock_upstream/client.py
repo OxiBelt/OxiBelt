@@ -126,6 +126,8 @@ def send_http_request(
   connection,
   slow_body_delay_ms=0,
   hold_after_headers_ms=0,
+  body_split_at=None,
+  body_split_delay_ms=0,
 ):
   request_lines = [
     f"{method} {target_path} HTTP/1.1",
@@ -145,7 +147,14 @@ def send_http_request(
   sock.sendall(head)
   if slow_body_delay_ms > 0 and body:
     time.sleep(slow_body_delay_ms / 1000.0)
-  sock.sendall(body)
+  if body_split_at is None:
+    sock.sendall(body)
+  else:
+    split_at = max(0, min(body_split_at, len(body)))
+    sock.sendall(body[:split_at])
+    if body_split_delay_ms > 0:
+      time.sleep(body_split_delay_ms / 1000.0)
+    sock.sendall(body[split_at:])
   return read_http_response(sock, hold_after_headers_ms)
 
 
@@ -162,6 +171,8 @@ def request_direct(args, target_path, host_header, headers, body):
       args.connection,
       args.slow_body_delay_ms,
       args.hold_after_headers_ms,
+      args.body_split_at,
+      args.body_split_delay_ms,
     )
   finally:
     sock.close()
@@ -180,6 +191,8 @@ def request_with_proxy_protocol(args, target_path, host_header, headers, body):
       args.connection,
       args.slow_body_delay_ms,
       args.hold_after_headers_ms,
+      args.body_split_at,
+      args.body_split_delay_ms,
     )
   finally:
     sock.close()
@@ -276,6 +289,8 @@ def main() -> int:
   parser.add_argument("--connection", choices=("close", "keep-alive"), default="close")
   parser.add_argument("--slow-body-delay-ms", type=int, default=0)
   parser.add_argument("--hold-after-headers-ms", type=int, default=0)
+  parser.add_argument("--body-split-at", type=int)
+  parser.add_argument("--body-split-delay-ms", type=int, default=0)
   args = parser.parse_args()
 
   try:

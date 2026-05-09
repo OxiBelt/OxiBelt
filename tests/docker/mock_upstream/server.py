@@ -51,6 +51,8 @@ class EchoHandler(BaseHTTPRequestHandler):
     query = parse_qs(parsed.query)
     header_delay_ms = _query_int(query, "header_delay_ms", 0)
     body_delay_ms = _query_int(query, "body_delay_ms", 0)
+    body_split_at = _query_int(query, "body_split_at", -1)
+    body_split_delay_ms = _query_int(query, "body_split_delay_ms", 0)
     status = 200
     if parsed.path.startswith("/status/"):
       try:
@@ -108,7 +110,14 @@ class EchoHandler(BaseHTTPRequestHandler):
     self.end_headers()
     if body_delay_ms > 0:
       time.sleep(body_delay_ms / 1000.0)
-    self.wfile.write(encoded)
+    if 0 <= body_split_at < len(encoded):
+      self.wfile.write(encoded[:body_split_at])
+      self.wfile.flush()
+      if body_split_delay_ms > 0:
+        time.sleep(body_split_delay_ms / 1000.0)
+      self.wfile.write(encoded[body_split_at:])
+    else:
+      self.wfile.write(encoded)
 
   def _handle_upgrade(self):
     upgrade = self.headers.get("upgrade")

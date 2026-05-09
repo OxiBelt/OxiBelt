@@ -21,6 +21,30 @@ const SPOOL_FILE_PREFIX: &str = "oxibelt-buffer-";
 const SPOOL_READ_CHUNK_BYTES: usize = 16 * 1024;
 static NEXT_SPOOL_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Default)]
+struct TempFileCleanupGuard {
+  path: Option<PathBuf>,
+}
+
+impl TempFileCleanupGuard {
+  fn arm(&mut self, path: PathBuf) {
+    debug_assert!(self.path.is_none());
+    self.path = Some(path);
+  }
+
+  fn disarm(&mut self) {
+    self.path = None;
+  }
+}
+
+impl Drop for TempFileCleanupGuard {
+  fn drop(&mut self) {
+    if let Some(path) = self.path.take() {
+      let _ = std::fs::remove_file(path);
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EffectiveBuffering {
   pub(crate) request: BodyBufferingPolicy,
@@ -156,6 +180,7 @@ async fn buffer_spooled(
     .max_memory_body_bytes
     .saturating_add(policy.max_temp_file_bytes);
   let mut memory = BytesMut::new();
+  let mut temp_file_cleanup = TempFileCleanupGuard::default();
   let mut temp_file = None;
   let mut temp_path = None;
   let mut total = 0usize;
@@ -182,6 +207,7 @@ async fn buffer_spooled(
           Some(file) => file,
           None => {
             let (path, file) = create_spool_file(temp_dir).await?;
+            temp_file_cleanup.arm(path.clone());
             temp_path = Some(path);
             temp_file.insert(file)
           }
@@ -204,12 +230,14 @@ async fn buffer_spooled(
   } else {
     None
   };
-  buffered_body(
+  let body = buffered_body(
     vec![memory.freeze()],
     file.map(|file| (file, temp_path)),
     trailers,
   )
-  .await
+  .await?;
+  temp_file_cleanup.disarm();
+  Ok(body)
 }
 
 async fn buffered_body(
@@ -374,6 +402,27 @@ mod tests {
     path
   }
 
+  fn spool_files(dir: &Path) -> Vec<PathBuf> {
+    fs::read_dir(dir)
+      .expect("temp dir should be readable")
+      .map(|entry| entry.expect("temp dir entry should be readable").path())
+      .filter(|path| {
+        path
+          .file_name()
+          .and_then(|name| name.to_str())
+          .is_some_and(|name| name.starts_with(SPOOL_FILE_PREFIX))
+      })
+      .collect()
+  }
+
+  fn assert_no_spool_files(dir: &Path) {
+    let files = spool_files(dir);
+    assert!(
+      files.is_empty(),
+      "spooled buffering should remove temp files: {files:?}"
+    );
+  }
+
   #[tokio::test]
   async fn memory_buffering_preserves_full_body() {
     let body = buffer_body(
@@ -478,6 +527,40 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn oversized_spooled_body_removes_temp_file_on_error() {
+    let dir = temp_dir("spool-oversized-cleanup");
+    let (sender, body) = channel_body(2);
+    sender
+      .send(Ok(Frame::data(Bytes::from_static(b"abcd"))))
+      .await
+      .expect("body channel should accept first frame");
+    sender
+      .send(Ok(Frame::data(Bytes::from_static(b"ef"))))
+      .await
+      .expect("body channel should accept second frame");
+    drop(sender);
+
+    let error = match buffer_body(
+      body,
+      BodyBufferingPolicy {
+        mode: BufferingMode::Spool,
+        max_memory_body_bytes: 3,
+        max_temp_file_bytes: 2,
+      },
+      Some(&dir),
+    )
+    .await
+    {
+      Ok(_) => panic!("oversized spooled body should fail"),
+      Err(error) => error,
+    };
+
+    assert!(matches!(error, BufferingError::TooLarge));
+    assert_no_spool_files(&dir);
+    let _ = fs::remove_dir_all(dir);
+  }
+
+  #[tokio::test]
   async fn body_errors_are_classified_as_body_errors() {
     let (sender, body) = channel_body(1);
     sender
@@ -500,6 +583,40 @@ mod tests {
       Err(error) => error,
     };
     assert!(matches!(error, BufferingError::Body(_)));
+  }
+
+  #[tokio::test]
+  async fn erroring_spooled_body_removes_temp_file_on_error() {
+    let dir = temp_dir("spool-body-error-cleanup");
+    let (sender, body) = channel_body(2);
+    sender
+      .send(Ok(Frame::data(Bytes::from_static(b"abcd"))))
+      .await
+      .expect("body channel should accept first frame");
+    sender
+      .send(Err(boxed_error(std::io::Error::other("boom"))))
+      .await
+      .expect("body channel should accept error");
+    drop(sender);
+
+    let error = match buffer_body(
+      body,
+      BodyBufferingPolicy {
+        mode: BufferingMode::Spool,
+        max_memory_body_bytes: 3,
+        max_temp_file_bytes: 16,
+      },
+      Some(&dir),
+    )
+    .await
+    {
+      Ok(_) => panic!("erroring spooled body should fail"),
+      Err(error) => error,
+    };
+
+    assert!(matches!(error, BufferingError::Body(_)));
+    assert_no_spool_files(&dir);
+    let _ = fs::remove_dir_all(dir);
   }
 
   #[test]
