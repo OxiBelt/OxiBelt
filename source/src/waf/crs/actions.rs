@@ -11,22 +11,36 @@ pub(super) enum CrsAction {
 }
 
 impl CrsAction {
-  pub(super) fn apply(&self, tx: &mut CrsTransaction<'_>) -> anyhow::Result<()> {
+  pub(super) fn apply(
+    &self,
+    tx: &mut CrsTransaction<'_>,
+    contribute_to_blocking_score: bool,
+  ) -> anyhow::Result<()> {
     match self {
       Self::SetVar { name, operation } => {
         let current = tx.get_i64(name);
+        let blocking_current = tx.get_blocking_i64(name);
         match operation {
           SetVarOperation::Assign(raw) => {
             let expanded = expand_macros(raw, tx);
-            tx.set_value(name, expanded);
+            tx.set_value(name, expanded.clone());
+            if contribute_to_blocking_score {
+              tx.set_blocking_value(name, expanded);
+            }
           }
           SetVarOperation::Add(raw) => {
             let value = expand_macros(raw, tx).parse::<i64>().unwrap_or(0);
             tx.set_value(name, current.saturating_add(value).to_string());
+            if contribute_to_blocking_score {
+              tx.set_blocking_value(name, blocking_current.saturating_add(value).to_string());
+            }
           }
           SetVarOperation::Subtract(raw) => {
             let value = expand_macros(raw, tx).parse::<i64>().unwrap_or(0);
             tx.set_value(name, current.saturating_sub(value).to_string());
+            if contribute_to_blocking_score {
+              tx.set_blocking_value(name, blocking_current.saturating_sub(value).to_string());
+            }
           }
         }
       }

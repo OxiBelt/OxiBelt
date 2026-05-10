@@ -2,6 +2,7 @@ use anyhow::bail;
 use regex::Regex;
 
 use super::actions::expand_macros;
+use super::compatibility::SUPPORTED_OPERATORS;
 use super::model::CrsTransaction;
 use super::syntax::split_phrases;
 use super::utils::{invalid_url_encoding, invalid_utf8_encoding};
@@ -39,6 +40,9 @@ impl CrsOperator {
         .split_once(char::is_whitespace)
         .map(|(name, arg)| (name, arg.trim()))
         .unwrap_or((rest, ""));
+      if !SUPPORTED_OPERATORS.contains(&name) {
+        bail!("unsupported CRS operator @{name}");
+      }
       return match name {
         "rx" => Ok(Self::Regex(Regex::new(arg)?)),
         "contains" => Ok(Self::Contains(arg.to_string())),
@@ -57,7 +61,7 @@ impl CrsOperator {
         "unconditionalMatch" => Ok(Self::UnconditionalMatch),
         "validateUrlEncoding" => Ok(Self::ValidateUrlEncoding),
         "validateUtf8Encoding" => Ok(Self::ValidateUtf8Encoding),
-        _ => bail!("unsupported CRS operator @{name}"),
+        _ => bail!("CRS compatibility matrix lists unimplemented operator @{name}"),
       };
     }
     Ok(Self::Regex(Regex::new(raw)?))

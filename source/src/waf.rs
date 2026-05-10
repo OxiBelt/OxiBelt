@@ -28,7 +28,8 @@ mod crs;
 pub(crate) mod normalization;
 mod person_proof;
 
-use crs::{CrsDecision, CrsEngine, WafCrsConfig};
+pub use crs::{CrsCompatibilityMatrix, compatibility_matrix as crs_compatibility_matrix};
+use crs::{CrsDecision, CrsEngine, WafCrsConfig, validate_crs_config};
 use normalization::{
   normalize_cookie_pairs, normalize_header_pairs, normalize_query_pairs, normalized_http_path,
   normalized_http_query, normalized_http_uri,
@@ -470,18 +471,7 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
     bail!("waf.limits.max_person_proof_reuse_tokens must be greater than 0");
   }
   if config.waf.crs.enabled {
-    if !(1..=4).contains(&config.waf.crs.paranoia_level) {
-      bail!("waf.crs.paranoia_level must be between 1 and 4");
-    }
-    if config.waf.crs.inbound_anomaly_score_threshold <= 0 {
-      bail!("waf.crs.inbound_anomaly_score_threshold must be greater than 0");
-    }
-    if config.waf.crs.outbound_anomaly_score_threshold <= 0 {
-      bail!("waf.crs.outbound_anomaly_score_threshold must be greater than 0");
-    }
-    if config.waf.crs.rule_files.is_empty() {
-      bail!("waf.crs.rule_files must include at least one entry when CRS is enabled");
-    }
+    validate_crs_config(&config.waf.crs)?;
   }
 
   let upstream_names = config
@@ -1661,12 +1651,20 @@ pub struct WafRuleHitSnapshot {
   pub phase: String,
   pub name: String,
   pub id: Option<String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub tags: Vec<String>,
   pub effective_mode: String,
   pub hits: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub tuned_hits: Option<u64>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub latest_inbound_anomaly_score: Option<i64>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub latest_outbound_anomaly_score: Option<i64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub latest_inbound_blocking_score: Option<i64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub latest_outbound_blocking_score: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -1700,10 +1698,14 @@ impl CompiledRule {
       phase: self.phase.as_str().to_string(),
       name: self.name.clone(),
       id: self.id.clone(),
+      tags: self.tags.clone(),
       effective_mode: self.mode.as_str().to_string(),
       hits: self.hit_counter.load(Ordering::Relaxed),
+      tuned_hits: None,
       latest_inbound_anomaly_score: None,
       latest_outbound_anomaly_score: None,
+      latest_inbound_blocking_score: None,
+      latest_outbound_blocking_score: None,
     }
   }
 

@@ -468,7 +468,7 @@ fn admin_waf_response(
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
-  if path != "/admin/v1/waf/rule-hits" {
+  if path != "/admin/v1/waf/rule-hits" && path != "/admin/v1/waf/crs/compatibility" {
     return None;
   }
   if !admin_actor_has_role(actor, AdminRole::Viewer) {
@@ -480,10 +480,17 @@ fn admin_waf_response(
       "method not allowed",
     ));
   }
-  Some(json_response(
-    StatusCode::OK,
-    &json!({ "rules": snapshot.waf.rule_hit_snapshots() }),
-  ))
+  match path {
+    "/admin/v1/waf/rule-hits" => Some(json_response(
+      StatusCode::OK,
+      &json!({ "rules": snapshot.waf.rule_hit_snapshots() }),
+    )),
+    "/admin/v1/waf/crs/compatibility" => Some(json_response(
+      StatusCode::OK,
+      &crate::waf::crs_compatibility_matrix(),
+    )),
+    _ => None,
+  }
 }
 
 fn admin_lifecycle_response(

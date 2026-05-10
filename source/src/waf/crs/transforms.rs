@@ -1,6 +1,7 @@
 use anyhow::bail;
 
 use super::super::normalization::{normalize_path, normalize_text};
+use super::compatibility::SUPPORTED_TRANSFORMS;
 
 #[derive(Clone)]
 pub(super) enum CrsTransform {
@@ -16,6 +17,9 @@ pub(super) enum CrsTransform {
 
 impl CrsTransform {
   pub(super) fn parse(raw: &str) -> anyhow::Result<Option<Self>> {
+    if !SUPPORTED_TRANSFORMS.contains(&raw) {
+      bail!("unsupported CRS transform t:{raw}");
+    }
     match raw {
       "none" => Ok(None),
       "lowercase" => Ok(Some(Self::Lowercase)),
@@ -28,7 +32,7 @@ impl CrsTransform {
       "htmlEntityDecode" | "jsDecode" | "cssDecode" | "cmdLine" | "utf8toUnicode" => {
         Ok(Some(Self::HtmlEntityDecode))
       }
-      _ => bail!("unsupported CRS transform t:{raw}"),
+      _ => bail!("CRS compatibility matrix lists unimplemented transform t:{raw}"),
     }
   }
 }

@@ -3,6 +3,10 @@ use std::path::Path;
 use anyhow::{Context, anyhow, bail};
 
 use super::actions::parse_setvar;
+use super::compatibility::{
+  is_accepted_ignored_action_key, is_accepted_ignored_bare_action, is_accepted_ignored_directive,
+  is_supported_action_key,
+};
 use super::model::{CrsEntry, CrsRule};
 use super::operators::CrsOperator;
 use super::syntax::{logical_lines, parse_quoted_sections, split_actions, strip_comment, unquote};
@@ -83,11 +87,7 @@ impl CrsParser {
       self.entries.push(CrsEntry::Rule(Box::new(rule)));
       return Ok(());
     }
-    if raw.starts_with("SecRuleUpdate")
-      || raw.starts_with("SecRuleRemove")
-      || raw.starts_with("SecDefaultAction")
-      || raw.starts_with("SecComponentSignature")
-    {
+    if is_accepted_ignored_directive(raw) {
       return Ok(());
     }
     bail!("unsupported CRS directive {raw}");
@@ -130,17 +130,18 @@ impl CrsRule {
               transforms.push(transform);
             }
           }
-          "severity" | "ver" | "rev" | "status" | "logdata" | "accuracy" | "maturity" | "ctl"
-          | "expirevar" | "initcol" | "setuid" | "sanitiseArg" => {}
+          _ if is_supported_action_key(key) => {
+            unreachable!("supported action {key} was not parsed")
+          }
+          _ if is_accepted_ignored_action_key(key) => {}
           _ => bail!("unsupported CRS action {key}"),
         }
       } else {
-        match token.as_str() {
-          "chain" => chain = true,
-          "pass" | "deny" | "block" | "log" | "nolog" | "auditlog" | "noauditlog" | "capture"
-          | "multiMatch" | "append" | "prepend" => {}
-          "" => {}
-          _ => bail!("unsupported CRS action {token}"),
+        if token == "chain" {
+          chain = true;
+        } else if token.is_empty() || is_accepted_ignored_bare_action(token.as_str()) {
+        } else {
+          bail!("unsupported CRS action {token}");
         }
       }
     }

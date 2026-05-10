@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
+use http::HeaderName;
 use serde::Deserialize;
 
 use crate::config::{
@@ -28,6 +30,10 @@ pub struct WafCrsConfig {
   pub outbound_anomaly_score_threshold: i64,
   #[serde(default)]
   pub unsupported_directive_policy: WafCrsUnsupportedDirectivePolicy,
+  #[serde(default)]
+  pub rule_overrides: Vec<WafCrsRuleOverrideConfig>,
+  #[serde(default)]
+  pub allowlists: Vec<WafCrsAllowlistConfig>,
   #[serde(skip)]
   pub(super) setup_file_resolved: Option<PathBuf>,
   #[serde(skip)]
@@ -49,6 +55,8 @@ impl Default for WafCrsConfig {
       inbound_anomaly_score_threshold: default_inbound_threshold(),
       outbound_anomaly_score_threshold: default_outbound_threshold(),
       unsupported_directive_policy: WafCrsUnsupportedDirectivePolicy::FailClosed,
+      rule_overrides: Vec::new(),
+      allowlists: Vec::new(),
       setup_file_resolved: None,
       setup_file_logical: None,
       rule_files_resolved: Vec::new(),
@@ -140,7 +148,77 @@ pub enum WafCrsUnsupportedDirectivePolicy {
   FailClosed,
 }
 
-pub(super) fn validate_config(config: &WafCrsConfig) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WafCrsRuleOverrideMode {
+  Enforcing,
+  Monitor,
+  Disabled,
+}
+
+impl WafCrsRuleOverrideMode {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::Enforcing => "enforcing",
+      Self::Monitor => "monitor",
+      Self::Disabled => "disabled",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct WafCrsRuleSelectorConfig {
+  #[serde(default)]
+  pub rule_ids: Vec<String>,
+  #[serde(default)]
+  pub tags: Vec<String>,
+  #[serde(default)]
+  pub msg_contains: Vec<String>,
+}
+
+impl WafCrsRuleSelectorConfig {
+  pub(crate) fn has_selector(&self) -> bool {
+    !self.rule_ids.is_empty() || !self.tags.is_empty() || !self.msg_contains.is_empty()
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WafCrsRuleOverrideConfig {
+  pub name: String,
+  #[serde(flatten)]
+  pub selector: WafCrsRuleSelectorConfig,
+  pub mode: WafCrsRuleOverrideMode,
+  #[serde(default)]
+  pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WafCrsAllowlistConfig {
+  pub name: String,
+  #[serde(flatten)]
+  pub selector: WafCrsRuleSelectorConfig,
+  #[serde(default)]
+  pub methods: Vec<String>,
+  #[serde(default)]
+  pub routes: Vec<String>,
+  #[serde(default)]
+  pub path_prefixes: Vec<String>,
+  #[serde(default)]
+  pub header_equals: BTreeMap<String, String>,
+  #[serde(default)]
+  pub reason: Option<String>,
+}
+
+impl WafCrsAllowlistConfig {
+  pub(crate) fn has_traffic_selector(&self) -> bool {
+    !self.methods.is_empty()
+      || !self.routes.is_empty()
+      || !self.path_prefixes.is_empty()
+      || !self.header_equals.is_empty()
+  }
+}
+
+pub(crate) fn validate_config(config: &WafCrsConfig) -> anyhow::Result<()> {
   if !(1..=4).contains(&config.paranoia_level) {
     bail!("waf.crs.paranoia_level must be between 1 and 4");
   }
@@ -152,6 +230,82 @@ pub(super) fn validate_config(config: &WafCrsConfig) -> anyhow::Result<()> {
   }
   if config.rule_files.is_empty() {
     bail!("waf.crs.rule_files must include at least one entry when CRS is enabled");
+  }
+  for override_config in &config.rule_overrides {
+    validate_name("waf.crs.rule_overrides.name", &override_config.name)?;
+    validate_rule_selector(
+      &format!("waf.crs.rule_overrides.{}", override_config.name),
+      &override_config.selector,
+    )?;
+  }
+  for allowlist in &config.allowlists {
+    validate_name("waf.crs.allowlists.name", &allowlist.name)?;
+    validate_rule_selector(
+      &format!("waf.crs.allowlists.{}", allowlist.name),
+      &allowlist.selector,
+    )?;
+    if !allowlist.has_traffic_selector() {
+      bail!(
+        "waf.crs.allowlists.{} must include at least one traffic selector",
+        allowlist.name
+      );
+    }
+    for method in &allowlist.methods {
+      if method.parse::<http::Method>().is_err() {
+        bail!(
+          "waf.crs.allowlists.{} has invalid HTTP method {}",
+          allowlist.name,
+          method
+        );
+      }
+    }
+    for route in &allowlist.routes {
+      validate_name(
+        &format!("waf.crs.allowlists.{}.routes", allowlist.name),
+        route,
+      )?;
+    }
+    for prefix in &allowlist.path_prefixes {
+      if !prefix.starts_with('/') {
+        bail!(
+          "waf.crs.allowlists.{} path_prefixes entries must start with /",
+          allowlist.name
+        );
+      }
+    }
+    for name in allowlist.header_equals.keys() {
+      HeaderName::try_from(name.as_str()).with_context(|| {
+        format!(
+          "waf.crs.allowlists.{} header_equals contains invalid header name {}",
+          allowlist.name, name
+        )
+      })?;
+    }
+  }
+  Ok(())
+}
+
+fn validate_rule_selector(label: &str, selector: &WafCrsRuleSelectorConfig) -> anyhow::Result<()> {
+  if !selector.has_selector() {
+    bail!("{label} must include at least one of rule_ids, tags, or msg_contains");
+  }
+  for rule_id in &selector.rule_ids {
+    validate_name(&format!("{label}.rule_ids"), rule_id)?;
+  }
+  for tag in &selector.tags {
+    validate_name(&format!("{label}.tags"), tag)?;
+  }
+  for message in &selector.msg_contains {
+    if message.is_empty() {
+      bail!("{label}.msg_contains entries must not be empty");
+    }
+  }
+  Ok(())
+}
+
+fn validate_name(label: &str, value: &str) -> anyhow::Result<()> {
+  if value.trim().is_empty() {
+    bail!("{label} must not be empty");
   }
   Ok(())
 }

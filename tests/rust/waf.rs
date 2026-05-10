@@ -10,7 +10,7 @@ use oxibelt::config::Config;
 use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
     HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput, WafResponseInput,
-    WafTlsMetadata, WafTransportNetwork, compile_access_log_fields,
+    WafTlsMetadata, WafTransportNetwork, compile_access_log_fields, crs_compatibility_matrix,
 };
 use ring::digest;
 
@@ -1160,6 +1160,280 @@ fn crs_enforcing_blocks_request_and_response_body_by_anomaly_threshold() {
             .map(|terminal| terminal.status),
         Some(StatusCode::BAD_GATEWAY)
     );
+}
+
+#[test]
+fn crs_compatibility_matrix_lists_supported_and_ignored_syntax() {
+    let matrix = crs_compatibility_matrix();
+
+    assert_eq!(matrix.compatibility_as_of, "2026-05-10");
+    assert!(
+        matrix
+            .release_lines
+            .iter()
+            .any(|line| line.name == "current" && line.version == "v4.25.0")
+    );
+    assert!(matrix.supported.directives.contains(&"SecRule"));
+    assert!(matrix.supported.operators.contains(&"validateUtf8Encoding"));
+    assert!(matrix.supported.transforms.contains(&"urlDecodeUni"));
+    assert!(matrix.supported.variables.contains(&"REQUEST_HEADERS"));
+    assert!(
+        matrix
+            .accepted_but_ignored
+            .directives
+            .contains(&"SecRuleRemoveById")
+    );
+    assert!(
+        matrix
+            .known_unsupported
+            .iter()
+            .any(|entry| entry.contains("WebTransport"))
+    );
+}
+
+#[test]
+fn crs_paranoia_levels_only_activate_configured_level_and_below() {
+    for paranoia_level in 1..=4 {
+        let (_temp_dir, config) = load_crs_fixture_config_with_rule_and_crs_extra(
+            &format!("waf-crs-pl-{paranoia_level}"),
+            "monitor",
+            r#"
+SecRule REQUEST_URI "@contains paranoia-probe" "id:910001,phase:2,msg:'PL1',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+SecRule REQUEST_URI "@contains paranoia-probe" "id:910002,phase:2,msg:'PL2',tag:'paranoia-level/2',setvar:'tx.anomaly_score_pl2=+%{tx.critical_anomaly_score}'"
+SecRule REQUEST_URI "@contains paranoia-probe" "id:910003,phase:2,msg:'PL3',tag:'paranoia-level/3',setvar:'tx.anomaly_score_pl3=+%{tx.critical_anomaly_score}'"
+SecRule REQUEST_URI "@contains paranoia-probe" "id:910004,phase:2,msg:'PL4',tag:'paranoia-level/4',setvar:'tx.anomaly_score_pl4=+%{tx.critical_anomaly_score}'"
+"#,
+            &format!("paranoia_level = {paranoia_level}"),
+        );
+        let engine = WafEngine::new(&config).expect("WAF should compile");
+
+        let decision = evaluate_simple_request(&engine, "/app/paranoia-probe");
+
+        assert!(decision.terminal.is_none());
+        let snapshots = engine.rule_hit_snapshots();
+        for level in 1..=4 {
+            let id = format!("91000{level}");
+            let hit = snapshots
+                .iter()
+                .find(|hit| hit.id.as_deref() == Some(id.as_str()))
+                .unwrap_or_else(|| panic!("missing CRS snapshot for {id}"));
+            let expected_hits = if level <= paranoia_level { 1 } else { 0 };
+            assert_eq!(
+                hit.hits, expected_hits,
+                "unexpected hit count for PL{level} when configured PL is {paranoia_level}"
+            );
+        }
+    }
+}
+
+#[test]
+fn crs_rule_override_monitor_records_without_blocking_global_enforcing() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule_and_crs_extra(
+        "waf-crs-override-monitor",
+        "enforcing",
+        r#"
+SecRule REQUEST_URI "@contains union select" "id:942100,phase:2,t:urlDecodeUni,t:lowercase,msg:'SQLi',tag:'paranoia-level/1',tag:'attack-sqli',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+"#,
+        r#"
+[[waf.crs.rule_overrides]]
+name = "monitor-sqli-rule"
+rule_ids = ["942100"]
+mode = "monitor"
+reason = "known application false positive"
+"#,
+    );
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let decision = evaluate_simple_request(&engine, "/search?q=union%20select");
+
+    assert!(decision.terminal.is_none());
+    let hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.id.as_deref() == Some("942100"))
+        .expect("CRS override hit should be present");
+    assert_eq!(hit.effective_mode, "monitor");
+    assert_eq!(hit.hits, 1);
+    assert_eq!(hit.tuned_hits, Some(1));
+    assert_eq!(hit.latest_inbound_anomaly_score, Some(5));
+    assert_eq!(hit.latest_inbound_blocking_score, Some(0));
+    assert!(hit.tags.contains(&"attack-sqli".to_string()));
+}
+
+#[test]
+fn crs_rule_override_enforcing_blocks_global_monitor() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule_and_crs_extra(
+        "waf-crs-override-enforcing",
+        "monitor",
+        r#"
+SecRule REQUEST_URI "@contains union select" "id:942100,phase:2,t:urlDecodeUni,t:lowercase,msg:'SQLi',tag:'paranoia-level/1',tag:'attack-sqli',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+"#,
+        r#"
+[[waf.crs.rule_overrides]]
+name = "enforce-sqli-rule"
+tags = ["attack-sqli"]
+mode = "enforcing"
+"#,
+    );
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let decision = evaluate_simple_request(&engine, "/search?q=union%20select");
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    let hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.id.as_deref() == Some("942100"))
+        .expect("CRS override hit should be present");
+    assert_eq!(hit.effective_mode, "enforcing");
+    assert_eq!(hit.tuned_hits, Some(1));
+    assert_eq!(hit.latest_inbound_blocking_score, Some(5));
+}
+
+#[test]
+fn crs_allowlist_suppresses_scoped_false_positive_only() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule_and_crs_extra(
+        "waf-crs-allowlist",
+        "enforcing",
+        r#"
+SecRule REQUEST_URI "@contains safe-html" "id:941320,phase:2,msg:'Possible XSS',tag:'paranoia-level/1',tag:'attack-xss',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+"#,
+        r#"
+[[waf.crs.allowlists]]
+name = "allow-editor-html"
+rule_ids = ["941320"]
+methods = ["GET"]
+routes = ["app-root"]
+path_prefixes = ["/editor/"]
+header_equals = { "x-app-context" = "trusted-editor" }
+reason = "editor intentionally submits HTML"
+"#,
+    );
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let mut headers = HeaderMap::new();
+    headers.insert("x-app-context", HeaderValue::from_static("trusted-editor"));
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let editor_uri: Uri = "/editor/post?content=safe-html"
+        .parse()
+        .expect("URI should parse");
+    let editor_decision = engine.evaluate_request(request_input(
+        &method,
+        &editor_uri,
+        &headers,
+        &tags,
+        peer_addr,
+    ));
+    assert!(editor_decision.terminal.is_none());
+
+    let public_uri: Uri = "/public/post?content=safe-html"
+        .parse()
+        .expect("URI should parse");
+    let public_decision = engine.evaluate_request(request_input(
+        &method,
+        &public_uri,
+        &headers,
+        &tags,
+        peer_addr,
+    ));
+    assert_eq!(
+        public_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.id.as_deref() == Some("941320"))
+        .expect("CRS allowlist hit should be present");
+    assert_eq!(hit.hits, 2);
+    assert_eq!(hit.tuned_hits, Some(1));
+    assert_eq!(hit.latest_inbound_blocking_score, Some(5));
+}
+
+#[test]
+fn crs_tuning_config_rejects_invalid_selectors_and_traffic_scopes() {
+    for (name, extra, expected) in [
+        (
+            "missing-rule-selector",
+            r#"
+[[waf.crs.rule_overrides]]
+name = "missing-selector"
+mode = "monitor"
+"#,
+            "must include at least one of rule_ids, tags, or msg_contains",
+        ),
+        (
+            "missing-traffic-selector",
+            r#"
+[[waf.crs.allowlists]]
+name = "missing-traffic"
+rule_ids = ["942100"]
+"#,
+            "must include at least one traffic selector",
+        ),
+        (
+            "invalid-method",
+            r#"
+[[waf.crs.allowlists]]
+name = "invalid-method"
+rule_ids = ["942100"]
+methods = ["GET BAD"]
+"#,
+            "invalid HTTP method",
+        ),
+        (
+            "invalid-path-prefix",
+            r#"
+[[waf.crs.allowlists]]
+name = "invalid-prefix"
+rule_ids = ["942100"]
+path_prefixes = ["editor/"]
+"#,
+            "path_prefixes entries must start with /",
+        ),
+        (
+            "invalid-header",
+            r#"
+[[waf.crs.allowlists]]
+name = "invalid-header"
+rule_ids = ["942100"]
+header_equals = { "bad header" = "value" }
+"#,
+            "invalid header name",
+        ),
+    ] {
+        let temp_dir = common::TempDir::new(&format!("waf-crs-tuning-{name}"));
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let raw = format!(
+            "{}\n{}\n{}",
+            common::minimal_config_toml(&cert_path, &key_path),
+            r#"
+[waf]
+enabled = true
+
+[waf.crs]
+enabled = true
+"#,
+            extra
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid CRS tuning should fail validation");
+        assert!(
+            error.to_string().contains(expected),
+            "expected error containing {expected:?}, got {error:#}"
+        );
+    }
 }
 
 #[test]
@@ -3581,6 +3855,15 @@ fn load_crs_fixture_config_with_rule(
     mode: &str,
     rule_file: &str,
 ) -> (common::TempDir, Config) {
+    load_crs_fixture_config_with_rule_and_crs_extra(prefix, mode, rule_file, "")
+}
+
+fn load_crs_fixture_config_with_rule_and_crs_extra(
+    prefix: &str,
+    mode: &str,
+    rule_file: &str,
+    crs_extra: &str,
+) -> (common::TempDir, Config) {
     let temp_dir = common::TempDir::new(prefix);
     let layout = temp_dir.path();
     let config_dir = layout.join("config");
@@ -3598,6 +3881,11 @@ fn load_crs_fixture_config_with_rule(
         cert_path.file_name().unwrap().to_str().unwrap(),
         key_path.file_name().unwrap().to_str().unwrap(),
     );
+    let paranoia_level = if crs_extra.contains("paranoia_level") {
+        ""
+    } else {
+        "paranoia_level = 1"
+    };
     let raw = format!(
         r#"{base}
 
@@ -3614,10 +3902,11 @@ enabled = true
 mode = "{mode}"
 setup_file = "crs/crs-setup.conf"
 rule_files = ["crs/rules/*.conf"]
-paranoia_level = 1
+{paranoia_level}
 inbound_anomaly_score_threshold = 5
 outbound_anomaly_score_threshold = 4
 unsupported_directive_policy = "fail_closed"
+{crs_extra}
 "#
     );
     let config_path = config_dir.join("oxibelt.toml");

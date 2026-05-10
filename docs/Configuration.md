@@ -778,8 +778,9 @@ Lifecycle read requires `viewer` or `admin` and returns `{"draining": bool, "rea
 Admin WAF telemetry endpoint:
 
 - `GET /admin/v1/waf/rule-hits`
+- `GET /admin/v1/waf/crs/compatibility`
 
-This endpoint requires `viewer` or `admin` and returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`.
+These endpoints require `viewer` or `admin`. Rule hits returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`. CRS rule hit entries also include `tags`, `tuned_hits`, latest observed anomaly scores, and latest blocking scores when available. The CRS compatibility endpoint returns the OxiBelt-supported CRS release lines, supported directives/operators/transforms/variables/actions, accepted-but-ignored syntax, fail-closed policy, and known unsupported surfaces.
 
 Admin upstream-pool endpoints:
 
@@ -884,6 +885,22 @@ paranoia_level = 1
 inbound_anomaly_score_threshold = 5
 outbound_anomaly_score_threshold = 4
 unsupported_directive_policy = "fail_closed"
+
+[[waf.crs.rule_overrides]]
+name = "monitor-sqli-rule"
+rule_ids = ["942100"]
+tags = ["attack-sqli"]
+mode = "monitor" # enforcing | monitor | disabled
+reason = "known application false positive"
+
+[[waf.crs.allowlists]]
+name = "allow-editor-html"
+rule_ids = ["941320"]
+methods = ["POST"]
+routes = ["app-root"]
+path_prefixes = ["/editor/"]
+header_equals = { "x-app-context" = "trusted-editor" }
+reason = "editor intentionally submits HTML"
 ```
 
 Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. External rule entries use `path` and resolve under the oxirule directory. A rule entry must specify exactly one of `when` or `path`.
@@ -906,7 +923,15 @@ body = "Forbidden"
 
 `[waf].mode` sets the default mode for all rules. A rule-level `mode` overrides that default in both directions: `monitor` counts matches without applying actions, while `enforcing` applies actions normally.
 
-`[waf.crs]` enables the CRS-compatible execution layer. It loads `setup_file` and each `rule_files` glob from the OxiRule directory, using the same normalized relative path restrictions as external OxiRule files. CRS starts in `monitor` mode by default so hits and anomaly scores are recorded without blocking; set `mode = "enforcing"` to apply inbound and outbound anomaly thresholds. Unsupported CRS directives, operators, transforms, or actions fail closed at configuration load/compile time and report the file and line that must be changed.
+`[waf.crs]` enables the CRS-compatible execution layer. It loads `setup_file` and each `rule_files` glob from the OxiRule directory, using the same normalized relative path restrictions as external OxiRule files. CRS starts in `monitor` mode by default so hits and anomaly scores are recorded without blocking; set `mode = "enforcing"` to apply inbound and outbound anomaly thresholds. Unsupported CRS directives, operators, transforms, variables, or actions fail closed at configuration load/compile time and report the file and line that must be changed.
+
+`[[waf.crs.rule_overrides]]` applies the first matching static rule override. Select rules with `rule_ids`, `tags`, or `msg_contains`; at least one selector is required. `mode = "monitor"` records observed hits and anomaly score without contributing to blocking score, `mode = "enforcing"` can enforce even when global CRS mode is monitor, and `mode = "disabled"` records hits without scoring/actions.
+
+`[[waf.crs.allowlists]]` is for scoped false-positive tuning. It uses the same rule selectors and also requires at least one traffic selector: `methods`, `routes`, `path_prefixes`, or `header_equals`. Traffic selector categories are ANDed together, while values within a category are ORed. A matching allowlist suppresses CRS scoring/actions for that transaction and increments `tuned_hits`; broad rule disables should use `rule_overrides` instead.
+
+Recommended CRS rollout is monitor first, inspect `/admin/v1/waf/rule-hits`, add scoped allowlists or per-rule overrides for confirmed false positives, then switch `[waf.crs].mode` to `enforcing`. The compatibility matrix is available from `/admin/v1/waf/crs/compatibility`; OxiBelt targets the CRS current release and `v4.25.x` LTS line as of 2026-05-10. Official CRS references: [v4.25.0 LTS announcement](https://coreruleset.org/20260321/announcing-crs-v4-25-lts/), [false positives and tuning](https://coreruleset.org/docs/2-how-crs-works/2-3-false-positives-and-tuning/), and [installation](https://coreruleset.org/docs/1-getting-started/1-1-crs-installation/).
+
+Response body CRS inspection uses the same bounded prefix behavior as OxiRule response body inspection and can affect cache/background refresh behavior. Treat response inspection as a targeted control for leakage detection, not a substitute for upstream output encoding. WebTransport frame/datagram payload inspection is not supported by the CRS layer.
 
 Rule syntax, actions, helpers, and Person proof settings are documented in [OxiRule.md](OxiRule.md).
 

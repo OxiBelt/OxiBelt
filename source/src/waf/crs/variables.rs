@@ -2,6 +2,7 @@ use anyhow::bail;
 use regex::Regex;
 
 use super::super::{WafResponseInput, body_scan};
+use super::compatibility::SUPPORTED_VARIABLES;
 use super::model::CrsTransaction;
 use super::syntax::unquote_selector;
 use super::utils::{
@@ -39,6 +40,9 @@ impl CrsVariable {
       .map(|(name, selector)| (name.trim(), Some(selector.trim())))
       .unwrap_or((raw.trim(), None));
     let upper = name.to_ascii_uppercase();
+    if !SUPPORTED_VARIABLES.contains(&upper.as_str()) {
+      bail!("unsupported CRS variable {raw}");
+    }
     match upper.as_str() {
       "REQUEST_URI" => Ok(Self::RequestUri),
       "REQUEST_URI_RAW" => Ok(Self::RequestUriRaw),
@@ -68,7 +72,7 @@ impl CrsVariable {
           Ok(Self::Tx(unquote_selector(selector).to_ascii_lowercase()))
         }
       }
-      _ => bail!("unsupported CRS variable {raw}"),
+      _ => bail!("CRS compatibility matrix lists unimplemented variable {raw}"),
     }
   }
 

@@ -111,7 +111,35 @@ unsupported_directive_policy = "fail_closed"
 
 CRS files resolve under the OxiRule directory and must use normalized relative paths or globs. The CRS layer supports request/response phases 1, 2, 3, and 4, CRS-style `tx` variables, macro expansion, `setvar`, chained rules, paranoia-level tags, transforms used by the supported CRS v4.x surface, and anomaly scoring. CRS validation operators such as `@validateUrlEncoding` and `@validateUtf8Encoding` follow CRS detection semantics by matching malformed encodings. Unsupported CRS syntax fails closed during configuration load/compile and includes file/line context.
 
-CRS `monitor` mode records rule hits and latest inbound/outbound anomaly summaries through `/admin/v1/waf/rule-hits` without blocking. CRS `enforcing` mode blocks requests with `403` when the inbound threshold is met and suppresses blocked upstream response bodies with a `502` response when the outbound threshold is met. Prometheus metrics intentionally do not expose CRS rule IDs, names, or tags as labels.
+CRS `monitor` mode records rule hits and latest inbound/outbound anomaly summaries through `/admin/v1/waf/rule-hits` without blocking. CRS `enforcing` mode blocks requests with `403` when the inbound blocking threshold is met and suppresses blocked upstream response bodies with a `502` response when the outbound blocking threshold is met. Prometheus metrics intentionally do not expose CRS rule IDs, names, or tags as labels.
+
+The CRS compatibility matrix is available at `GET /admin/v1/waf/crs/compatibility` for `viewer` or `admin` users. It returns the targeted CRS release lines, currently including CRS `v4.25.0` and the `v4.25.x` LTS line as of 2026-05-10, plus supported directives, operators, transforms, variables, action syntax, accepted-but-ignored syntax, and known unsupported surfaces.
+
+OxiBelt-native CRS tuning is configured under `[waf.crs]`:
+
+```toml
+[[waf.crs.rule_overrides]]
+name = "monitor-sqli-rule"
+rule_ids = ["942100"]
+tags = ["attack-sqli"]
+mode = "monitor" # enforcing | monitor | disabled
+reason = "known application false positive"
+
+[[waf.crs.allowlists]]
+name = "allow-editor-html"
+rule_ids = ["941320"]
+methods = ["POST"]
+routes = ["app-root"]
+path_prefixes = ["/editor/"]
+header_equals = { "x-app-context" = "trusted-editor" }
+reason = "editor intentionally submits HTML"
+```
+
+Rule selectors match by `rule_ids`, `tags`, or `msg_contains`; at least one selector is required. Allowlists also require a traffic selector. Traffic selector categories are ANDed together, and values within one category are ORed. A matching allowlist suppresses CRS scoring/actions for that transaction, increments `tuned_hits`, and leaves the original hit visible for review. `rule_overrides` are for broader per-rule policy changes: `monitor` observes without contributing to blocking score, `enforcing` can enforce under global monitor mode, and `disabled` records hits without scoring/actions.
+
+Recommended rollout is monitor first, review `/admin/v1/waf/rule-hits`, add scoped allowlists or per-rule overrides for confirmed false positives, then switch CRS mode to `enforcing`. This mirrors the CRS tuning model while keeping OxiBelt's supported tuning surface in TOML rather than implementing the full ModSecurity exclusion language. See the official CRS [v4.25.0 LTS announcement](https://coreruleset.org/20260321/announcing-crs-v4-25-lts/), [false positives and tuning](https://coreruleset.org/docs/2-how-crs-works/2-3-false-positives-and-tuning/), and [installation](https://coreruleset.org/docs/1-getting-started/1-1-crs-installation/) references.
+
+Response body inspection is bounded by `waf.limits.max_body_inspection_bytes`, records whether the inspected prefix was truncated, and should be enabled only where the deployment needs response leak detection. WebTransport frame and datagram payload inspection is not supported by CRS compatibility mode.
 
 ## Execution Phases
 

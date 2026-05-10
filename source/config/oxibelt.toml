@@ -381,6 +381,22 @@ inbound_anomaly_score_threshold = 5
 outbound_anomaly_score_threshold = 4
 unsupported_directive_policy = "fail_closed"
 
+#[[waf.crs.rule_overrides]]
+#name = "monitor-sqli-rule"
+#rule_ids = ["942100"]
+#tags = ["attack-sqli"]
+#mode = "monitor" # enforcing | monitor | disabled
+#reason = "known application false positive"
+
+#[[waf.crs.allowlists]]
+#name = "allow-editor-html"
+#rule_ids = ["941320"]
+#methods = ["POST"]
+#routes = ["app-root"]
+#path_prefixes = ["/editor/"]
+#header_equals = { "x-app-context" = "trusted-editor" }
+#reason = "editor intentionally submits HTML"
+
 #[[waf.rules]]
 # name = "shadow-admin-block"
 # id = "shadow-admin-block"

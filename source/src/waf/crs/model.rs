@@ -77,13 +77,17 @@ impl CrsRule {
     Ok(false)
   }
 
-  pub(super) fn apply_actions(&self, tx: &mut CrsTransaction<'_>) -> anyhow::Result<()> {
+  pub(super) fn apply_actions(
+    &self,
+    tx: &mut CrsTransaction<'_>,
+    contribute_to_blocking_score: bool,
+  ) -> anyhow::Result<()> {
     for action in &self.actions {
-      action.apply(tx)?;
+      action.apply(tx, contribute_to_blocking_score)?;
     }
     for chained in &self.chain {
       for action in &chained.actions {
-        action.apply(tx)?;
+        action.apply(tx, contribute_to_blocking_score)?;
       }
     }
     Ok(())
@@ -106,7 +110,9 @@ pub(super) struct CrsTransaction<'a> {
   pub(super) request: WafRequestInput<'a>,
   pub(super) response: Option<CrsResponseView<'a>>,
   pub(super) tx: HashMap<String, String>,
+  pub(super) blocking_tx: HashMap<String, String>,
   pub(super) matched_var: Option<String>,
+  pub(super) last_blocking_match: Option<CrsAuditRuleMatch>,
 }
 
 impl<'a> CrsTransaction<'a> {
@@ -147,12 +153,15 @@ impl<'a> CrsTransaction<'a> {
     ] {
       tx.insert(key.to_string(), "0".to_string());
     }
+    let blocking_tx = tx.clone();
     Self {
       engine,
       request,
       response: None,
       tx,
+      blocking_tx,
       matched_var: None,
+      last_blocking_match: None,
     }
   }
 
@@ -168,6 +177,18 @@ impl<'a> CrsTransaction<'a> {
     self.tx.insert(key.to_ascii_lowercase(), value);
   }
 
+  pub(super) fn get_blocking_i64(&self, key: &str) -> i64 {
+    self
+      .blocking_tx
+      .get(&key.to_ascii_lowercase())
+      .and_then(|value| value.parse::<i64>().ok())
+      .unwrap_or(0)
+  }
+
+  pub(super) fn set_blocking_value(&mut self, key: &str, value: String) {
+    self.blocking_tx.insert(key.to_ascii_lowercase(), value);
+  }
+
   pub(super) fn inbound_score(&self) -> i64 {
     let explicit = self.get_i64("inbound_anomaly_score");
     if explicit > 0 {
@@ -175,6 +196,16 @@ impl<'a> CrsTransaction<'a> {
     }
     (1..=self.engine.paranoia_level)
       .map(|level| self.get_i64(&format!("anomaly_score_pl{level}")))
+      .sum()
+  }
+
+  pub(super) fn inbound_blocking_score(&self) -> i64 {
+    let explicit = self.get_blocking_i64("inbound_anomaly_score");
+    if explicit > 0 {
+      return explicit;
+    }
+    (1..=self.engine.paranoia_level)
+      .map(|level| self.get_blocking_i64(&format!("anomaly_score_pl{level}")))
       .sum()
   }
 
@@ -187,6 +218,24 @@ impl<'a> CrsTransaction<'a> {
       .map(|level| self.get_i64(&format!("anomaly_score_pl{level}")))
       .sum()
   }
+
+  pub(super) fn outbound_blocking_score(&self) -> i64 {
+    let explicit = self.get_blocking_i64("outbound_anomaly_score");
+    if explicit > 0 {
+      return explicit;
+    }
+    (1..=self.engine.paranoia_level)
+      .map(|level| self.get_blocking_i64(&format!("anomaly_score_pl{level}")))
+      .sum()
+  }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CrsAuditRuleMatch {
+  pub(super) id: String,
+  pub(super) msg: Option<String>,
+  pub(super) mode: String,
+  pub(super) tuning_name: Option<String>,
 }
 
 pub(super) struct CrsResponseView<'a> {
