@@ -724,6 +724,7 @@ run_case_checks() {
   assert_expired_policy_passes
   assert_route_mismatch_passes
   assert_dynamic_rate_limit
+  assert_noncanonical_ipv6_dynamic_policies
   assert_refresh_failure_keeps_last_good
   assert_dynamic_policies_use_dedicated_table
 }
@@ -774,6 +775,26 @@ assert_dynamic_rate_limit() {
   assert_body_jq "${first}" '.path == "/origin/app/identity/login"'
   second="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 203.0.113.52")"
   assert_response_jq "${second}" '.body == "dynamic rate limited"'
+}
+
+assert_noncanonical_ipv6_dynamic_policies() {
+  local path_response route_response first second
+  postgres_query "INSERT INTO oxibelt_dynamic_policies (namespace, priority, name, action, subject_type, subject, path_prefix, status, body) VALUES ('matrix-dynamic', 41, 'ipv6-path-block', 'reject', 'client_ip_path', '2001:0DB8:0000:0000:0000:0000:0000:0001|/app/identity', '/app/identity', 429, 'ipv6 path block');" >/dev/null
+  postgres_query "INSERT INTO oxibelt_dynamic_policies (namespace, priority, name, action, subject_type, subject, route_name, status, body) VALUES ('matrix-dynamic', 42, 'ipv6-route-block', 'reject', 'client_ip_route', '2001:0DB8:0000:0000:0000:0000:0000:0002|app-route', 'app-route', 429, 'ipv6 route block');" >/dev/null
+  postgres_query "INSERT INTO oxibelt_dynamic_policies (namespace, priority, name, action, subject_type, subject, rate, burst, status, body) VALUES ('matrix-dynamic', 43, 'ipv6-client-rate', 'rate_limit', 'client_ip', '2001:0DB8:0000:0000:0000:0000:0000:0003', '1r/h', 1, 429, 'ipv6 rate limited');" >/dev/null
+  bump_dynamic_policy_generation
+  wait_for_dynamic_policy_refresh
+
+  path_response="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 2001:db8::1")"
+  assert_response_jq "${path_response}" '.body == "ipv6 path block"'
+
+  route_response="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 2001:db8::2")"
+  assert_response_jq "${route_response}" '.body == "ipv6 route block"'
+
+  first="$(client_request_with_headers "example.test" "/app/identity/login" 200 "GET" "" "X-Forwarded-For: 2001:db8::3")"
+  assert_body_jq "${first}" '.path == "/origin/app/identity/login"'
+  second="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 2001:db8::3")"
+  assert_response_jq "${second}" '.body == "ipv6 rate limited"'
 }
 
 assert_refresh_failure_keeps_last_good() {
