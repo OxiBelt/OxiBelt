@@ -1384,6 +1384,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "libc",
+ "md-5",
  "pretty_assertions",
  "regex",
  "ring",

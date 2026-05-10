@@ -470,6 +470,51 @@ mode = "disabled"
 # refresh_interval_ms = 30000
 # min_ttl_ms = 1000
 
+#[[turn_upstream_pools]]
+# name = "turn-udp"
+# algorithm = "round_robin"
+#
+#[[turn_upstream_pools.servers]]
+# id = "turn-udp-1"
+# origin = "turn://turn.internal.example:3478"
+# weight = 1
+# max_conns = 1024
+# backup = false
+# state = "ready"
+#
+#[[turn_upstream_pools]]
+# name = "turn-tcp"
+# algorithm = "round_robin"
+#
+#[[turn_upstream_pools.servers]]
+# id = "turn-tcp-1"
+# origin = "turn+tcp://turn.internal.example:3478"
+# weight = 1
+#
+#[[turn_upstream_pools]]
+# name = "turn-tls"
+# algorithm = "round_robin"
+#
+#[[turn_upstream_pools.servers]]
+# id = "turn-tls-1"
+# origin = "turns://turn.internal.example:5349"
+# weight = 1
+#
+#[[webrtc_turn_listeners]]
+# name = "turn-edge"
+# mode = "proxy_pool" # proxy_pool | edge_relay
+# bind_udp = "0.0.0.0:3478"
+# bind_tcp = "0.0.0.0:3478"
+# bind_tls = "0.0.0.0:5349"
+# realm = "example.com"
+# udp_pool = "turn-udp"
+# tcp_pool = "turn-tcp"
+# tls_pool = "turn-tls"
+#
+#[webrtc_turn_listeners.auth]
+# mode = "validate" # pass_through | validate | enforce
+# rest_shared_secret_env = "OXIBELT_TURN_REST_SECRET"
+
 [[routes]]
 name = "app-root"
 hosts = ["example.com", "www.example.com"]

@@ -1126,6 +1126,81 @@ proxy_protocol_egress = "off" # off | v1 | v2
 
 Stream listeners proxy raw TCP from a dedicated bind address to a single `host:port` target. They do not perform HTTP routing, TLS termination, SNI routing, HTTP rate limiting, or WAF inspection, but their downstream connections are counted by the global connection limits.
 
+## WebRTC TURN Listeners
+
+```toml
+[[turn_upstream_pools]]
+name = "turn-udp"
+algorithm = "round_robin"
+
+[[turn_upstream_pools.servers]]
+id = "turn-a"
+origin = "turn://turn-a.internal.example:3478"
+weight = 1
+
+[[turn_upstream_pools]]
+name = "turn-tcp"
+algorithm = "round_robin"
+
+[[turn_upstream_pools.servers]]
+id = "turn-tcp-a"
+origin = "turn+tcp://turn-a.internal.example:3478"
+weight = 1
+
+[[turn_upstream_pools]]
+name = "turn-tls"
+algorithm = "round_robin"
+
+[[turn_upstream_pools.servers]]
+id = "turn-tls-a"
+origin = "turns://turn-a.internal.example:5349"
+weight = 1
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "proxy_pool" # proxy_pool | edge_relay
+bind_udp = "0.0.0.0:3478"
+bind_tcp = "0.0.0.0:3478"
+bind_tls = "0.0.0.0:5349"
+realm = "example.test"
+udp_pool = "turn-udp"
+tcp_pool = "turn-tcp"
+tls_pool = "turn-tls"
+idle_timeout_ms = 75000
+
+[webrtc_turn_listeners.auth]
+mode = "validate" # pass_through | validate | enforce
+rest_shared_secret_env = "OXIBELT_TURN_REST_SECRET"
+```
+
+`mode = "proxy_pool"` forwards TURN UDP, TCP, and TLS traffic to `[[turn_upstream_pools]]`. Upstream servers use `turn://`, `turn+tcp://`, or `turns://` origins and advertise their own relay addresses. Listener pool fields are transport-specific: `udp_pool` must reference `turn://` servers, `tcp_pool` must reference `turn+tcp://` servers, and `tls_pool` must reference `turns://` servers. `auth.mode = "validate"` checks authenticated TURN messages when credentials are present, but lets the upstream TURN server issue nonce challenges and remain authoritative.
+
+```toml
+[[webrtc_turn_listeners]]
+name = "edge-relay"
+mode = "edge_relay"
+bind_udp = "0.0.0.0:3478"
+bind_tcp = "0.0.0.0:3478"
+bind_tls = "0.0.0.0:5349"
+realm = "example.test"
+public_ip = "203.0.113.10"
+relay_bind_ip = "0.0.0.0"
+idle_timeout_ms = 75000
+
+[webrtc_turn_listeners.relay_port_range]
+start = 49152
+end = 49200
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+
+[[webrtc_turn_listeners.auth.static_credentials]]
+username = "media-user"
+password_env = "OXIBELT_TURN_MEDIA_PASSWORD"
+```
+
+`mode = "edge_relay"` makes OxiBelt allocate UDP relay sockets and advertise `public_ip` with a port from `relay_port_range`. It requires enforced TURN authentication and rejects open relay configurations. TURN over TLS reuses `[tls]` certificate material by default; set `[webrtc_turn_listeners.tls] cert_chain` and `private_key` to override it for a listener. TURN payloads are protocol-forwarded only; OxiRule/WAF inspection applies to signaling HTTP, not SRTP/media payloads.
+
 Route-level WAF example:
 
 ```toml
@@ -1160,6 +1235,7 @@ Configuration validation rejects:
 - `runtime.drain.graceful_timeout_ms = 0` or `runtime.drain.long_connection_close_delay_ms = 0`.
 - TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, or reserved live OCSP mode.
 - Reserved sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
+- Invalid WebRTC TURN listener binds, missing proxy pools, open `edge_relay` auth, invalid TURN upstream schemes, or invalid relay port ranges.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.
 
 ## Minimal Example

@@ -733,7 +733,7 @@ Supported binary format checks include common image, audio, video, document, arc
 
 - HTTP rules may inspect and mutate headers, URI metadata, methods, status, and bounded body metadata.
 - WebSocket rules apply to the HTTP upgrade request; frame-level inspection is not implemented.
-- WebRTC signaling HTTP requests can be inspected when they pass through OxiBelt; WebRTC media forwarding is not implemented.
+- WebRTC signaling HTTP requests can be inspected when they pass through OxiBelt; TURN media payloads are forwarded by WebRTC TURN listeners outside OxiRule/WAF inspection.
 - WebTransport over HTTP/3 exposes the CONNECT request as `Request.Protocol == 'webtransport'` with UDP/QUIC transport metadata. Frame-level and datagram payload inspection is not implemented.
 
 ## Validation Summary

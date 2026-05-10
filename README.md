@@ -161,4 +161,4 @@ tests/scripts/run-proxy-integration.sh
 
 ## Current Non-Goals
 
-The current implementation intentionally leaves ACME HTTP-01 handling, live OCSP fetch/refresh, sticky-cookie upstream sessions, WebRTC media forwarding, and advanced UDP/L4 proxying such as UDP stream proxying and TLS passthrough SNI routing as future work. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
+The current implementation intentionally leaves ACME HTTP-01 handling, live OCSP fetch/refresh, sticky-cookie upstream sessions, and advanced UDP/L4 proxying such as general UDP stream proxying and TLS passthrough SNI routing as future work. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.

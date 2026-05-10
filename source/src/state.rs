@@ -25,6 +25,7 @@ use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
 use crate::shared_state::SharedState;
 use crate::tls;
+use crate::turn::TurnPoolState;
 use crate::waf::WafEngine;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -119,6 +120,7 @@ pub struct AppSnapshot {
   pub(crate) h3_clients: UpstreamH3Pools,
   pub limits: Arc<LimitState>,
   pub pools: Arc<PoolState>,
+  pub turn_pools: Arc<TurnPoolState>,
   pub cache: Arc<ResponseCache>,
   pub(crate) compression: Arc<CompressionState>,
   pub metrics: Arc<Metrics>,
@@ -159,6 +161,7 @@ impl AppSnapshot {
     }
     let limits = LimitState::new(shared_state.clone());
     let pools = PoolState::new(&config.upstream_pools, shared_state.clone());
+    let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let cache = ResponseCache::new(&config.cache, shared_state.clone())
       .context("failed to build response cache")?;
     let metrics = previous
@@ -215,6 +218,7 @@ impl AppSnapshot {
       h3_clients,
       limits,
       pools,
+      turn_pools,
       cache,
       compression,
       metrics,
@@ -242,6 +246,7 @@ impl AppSnapshot {
     let h3_clients =
       UpstreamH3Pools::new(&upstreams, &config).context("failed to build upstream HTTP/3 pools")?;
     let pools = PoolState::new(&config.upstream_pools, previous.shared_state.clone());
+    let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
 
     Ok(Self {
       config,
@@ -251,6 +256,7 @@ impl AppSnapshot {
       h3_clients,
       limits: previous.limits.clone(),
       pools,
+      turn_pools,
       cache: previous.cache.clone(),
       compression: previous.compression.clone(),
       metrics: previous.metrics.clone(),

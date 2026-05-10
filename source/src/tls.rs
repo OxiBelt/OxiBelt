@@ -11,8 +11,8 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 
 use crate::config::{
   AdminTlsConfig, ListenerConfig, OcspMode, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
-  TlsClientAuthMode, TlsConfig, TlsVersion, UpstreamEchConfig, UpstreamEchMode,
-  canonicalize_existing_file,
+  TlsClientAuthMode, TlsConfig, TlsVersion, TurnListenerTlsConfig, UpstreamEchConfig,
+  UpstreamEchMode, canonicalize_existing_file,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
@@ -135,6 +135,35 @@ pub fn build_admin_server_config(tls: &AdminTlsConfig) -> anyhow::Result<Arc<Ser
     server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
   }
   server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+  Ok(Arc::new(server_config))
+}
+
+pub fn build_turn_server_config(
+  listener_tls: &TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let cert_chain = listener_tls
+    .cert_chain
+    .as_ref()
+    .unwrap_or(&default_tls.cert_chain);
+  let private_key = listener_tls
+    .private_key
+    .as_ref()
+    .unwrap_or(&default_tls.private_key);
+  let certs = load_certs(cert_chain)?;
+  let key = load_private_key(private_key)?;
+  let certified_key = CertifiedKey::from_der(certs, key, &provider)
+    .context("failed to create TURN rustls certified key")?;
+  let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
+  let versions = tls_protocol_versions(default_tls.min_version, default_tls.max_version);
+  let builder = ServerConfig::builder_with_provider(provider)
+    .with_protocol_versions(&versions)
+    .context("failed to configure TURN TLS versions")?;
+  let mut server_config = builder
+    .with_no_client_auth()
+    .with_cert_resolver(Arc::new(cert_resolver));
+  server_config.alpn_protocols = Vec::new();
   Ok(Arc::new(server_config))
 }
 
@@ -326,7 +355,7 @@ fn read_existing_file(field_name: &str, path: &std::path::Path) -> anyhow::Resul
   fs::read(&canonical_path).with_context(|| format!("failed to read {}", canonical_path.display()))
 }
 
-fn load_upstream_root_store(
+pub(crate) fn load_upstream_root_store(
   extra_root_certificates: &[std::path::PathBuf],
 ) -> anyhow::Result<RootCertStore> {
   let mut roots = RootCertStore::empty();

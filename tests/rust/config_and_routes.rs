@@ -2176,6 +2176,201 @@ target = "db.internal.example"
 }
 
 #[test]
+fn webrtc_turn_proxy_pool_listener_validates() {
+    let temp_dir = common::TempDir::new("turn-proxy-valid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-proxy-valid");
+    let raw = format!(
+        r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-udp"
+algorithm = "round_robin"
+
+[[turn_upstream_pools.servers]]
+id = "turn-a"
+origin = "turn://turn.internal.example:3478"
+weight = 1
+
+[[turn_upstream_pools]]
+name = "turn-tcp"
+algorithm = "round_robin"
+
+[[turn_upstream_pools.servers]]
+id = "turn-tcp-a"
+origin = "turn+tcp://turn.internal.example:3478"
+weight = 1
+
+[[turn_upstream_pools]]
+name = "turn-tls"
+algorithm = "round_robin"
+
+[[turn_upstream_pools.servers]]
+id = "turn-tls-a"
+origin = "turns://turn.internal.example:5349"
+weight = 1
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "proxy_pool"
+bind_udp = "127.0.0.1:0"
+bind_tcp = "127.0.0.1:0"
+bind_tls = "127.0.0.1:0"
+realm = "example.test"
+udp_pool = "turn-udp"
+tcp_pool = "turn-tcp"
+tls_pool = "turn-tls"
+
+[webrtc_turn_listeners.auth]
+mode = "validate"
+rest_shared_secret = "turn-secret"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("TURN proxy listener should validate");
+}
+
+#[test]
+fn webrtc_turn_proxy_pool_requires_configured_pool() {
+    let temp_dir = common::TempDir::new("turn-missing-pool");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-missing-pool");
+    let raw = format!(
+        r#"
+{}
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "proxy_pool"
+bind_udp = "127.0.0.1:0"
+realm = "example.test"
+udp_pool = "missing-pool"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("missing TURN pool should fail");
+    assert!(
+        error.to_string().contains("unknown TURN upstream pool"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn webrtc_turn_proxy_pool_rejects_transport_incompatible_pool() {
+    let temp_dir = common::TempDir::new("turn-incompatible-pool");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-incompatible-pool");
+    let raw = format!(
+        r#"
+{}
+
+[[turn_upstream_pools]]
+name = "plain-turn"
+
+[[turn_upstream_pools.servers]]
+origin = "turn://turn.internal.example:3478"
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "proxy_pool"
+bind_tls = "127.0.0.1:0"
+tls_pool = "plain-turn"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("transport-incompatible TURN pool should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("requires TURN upstream pool plain-turn to use turns:// servers only"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn webrtc_turn_edge_relay_requires_enforced_auth() {
+    let temp_dir = common::TempDir::new("turn-edge-auth");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "turn-edge-auth");
+    let raw = format!(
+        r#"
+{}
+
+[[webrtc_turn_listeners]]
+name = "edge-relay"
+mode = "edge_relay"
+bind_udp = "127.0.0.1:0"
+realm = "example.test"
+public_ip = "127.0.0.1"
+relay_bind_ip = "127.0.0.1"
+
+[webrtc_turn_listeners.relay_port_range]
+start = 49152
+end = 49160
+
+[webrtc_turn_listeners.auth]
+mode = "pass_through"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("open edge relay should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("edge_relay requires auth.mode = \"enforce\""),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn turn_upstream_pool_rejects_invalid_scheme() {
+    let temp_dir = common::TempDir::new("turn-invalid-scheme");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-invalid-scheme");
+    let raw = format!(
+        r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-pool"
+
+[[turn_upstream_pools.servers]]
+origin = "http://turn.internal.example:3478"
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "proxy_pool"
+bind_udp = "127.0.0.1:0"
+udp_pool = "turn-pool"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid TURN upstream scheme should fail");
+    assert!(
+        error.to_string().contains("must use turn://"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn config_load_resolves_relative_paths_against_config_directory() {
     let temp_dir = common::TempDir::new("relative-config");
     let config_dir = temp_dir.path().join("config");

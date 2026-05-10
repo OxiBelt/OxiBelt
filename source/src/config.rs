@@ -11,7 +11,11 @@ use url::Url;
 use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 
 mod dynamic_policy;
+mod stream;
+mod turn;
 pub use dynamic_policy::*;
+pub use stream::*;
+pub use turn::*;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Config {
@@ -56,7 +60,11 @@ pub struct Config {
   #[serde(default)]
   pub upstream_pools: Vec<UpstreamPoolConfig>,
   #[serde(default)]
+  pub turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
+  #[serde(default)]
   pub stream_listeners: Vec<StreamListenerConfig>,
+  #[serde(default)]
+  pub webrtc_turn_listeners: Vec<WebRtcTurnListenerConfig>,
   #[serde(default)]
   pub routes: Vec<RouteConfig>,
   #[serde(default)]
@@ -217,7 +225,9 @@ impl Config {
       && self.dynamic_policy == other.dynamic_policy
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools
+      && self.turn_upstream_pools == other.turn_upstream_pools
       && self.stream_listeners == other.stream_listeners
+      && self.webrtc_turn_listeners == other.webrtc_turn_listeners
       && routes_without_waf_are_equivalent(&self.routes, &other.routes)
   }
 
@@ -357,6 +367,12 @@ impl Config {
         self.source_paths.remember_discovery_file(path);
       }
     }
+    for listener in &mut self.webrtc_turn_listeners {
+      for path in listener.tls.resolve_relative_paths(&path_roots.cert_dir)? {
+        self.source_paths.remember_runtime_file(path.clone());
+        self.source_paths.remember_downstream_tls_file(path);
+      }
+    }
     for path in self
       .admin
       .tls
@@ -441,8 +457,11 @@ impl Config {
       bail!("at least one upstream or upstream pool must be configured");
     }
 
-    if self.routes.is_empty() && self.stream_listeners.is_empty() {
-      bail!("at least one route must be configured");
+    if self.routes.is_empty()
+      && self.stream_listeners.is_empty()
+      && self.webrtc_turn_listeners.is_empty()
+    {
+      bail!("at least one route, stream listener, or WebRTC TURN listener must be configured");
     }
 
     self.database.validate()?;
@@ -593,6 +612,8 @@ impl Config {
       }
     }
 
+    let turn_pool_names = self.validate_turn_forwarding()?;
+
     let compression_policy_names = self
       .compression
       .policies
@@ -725,6 +746,7 @@ impl Config {
 
     self.validate_dynamic_policy(&route_names)?;
     self.validate_stream_listeners()?;
+    self.validate_webrtc_turn_listeners(&turn_pool_names)?;
 
     match self.tls.ocsp.mode {
       OcspMode::Disabled => {}
@@ -960,34 +982,6 @@ impl Config {
           anyhow!("proxy.buffering.temp_dir is required when buffering uses spool")
         })?;
       crate::cache::validate_disk_dir(dir)?;
-    }
-    Ok(())
-  }
-
-  fn validate_stream_listeners(&self) -> anyhow::Result<()> {
-    let mut names = HashSet::new();
-    let mut binds = HashSet::new();
-    for listener in &self.stream_listeners {
-      if listener.name.trim().is_empty() {
-        bail!("stream listener name must not be empty");
-      }
-      if !names.insert(listener.name.clone()) {
-        bail!("duplicate stream listener name: {}", listener.name);
-      }
-      if !binds.insert(listener.bind) {
-        bail!(
-          "duplicate stream listener bind {} on listener {}",
-          listener.bind,
-          listener.name
-        );
-      }
-      if listener.connect_timeout_ms == 0 || listener.idle_timeout_ms == 0 {
-        bail!(
-          "stream listener {} timeout values must be greater than 0",
-          listener.name
-        );
-      }
-      validate_stream_target(&listener.name, &listener.target)?;
     }
     Ok(())
   }
@@ -1420,45 +1414,6 @@ fn validate_route_path_value(
   Ok(())
 }
 
-fn validate_stream_target(listener_name: &str, target: &str) -> anyhow::Result<()> {
-  let (host, port) = parse_stream_target(target)
-    .with_context(|| format!("stream listener {listener_name} target must be in host:port form"))?;
-  if host.trim().is_empty() {
-    bail!("stream listener {listener_name} target host must not be empty");
-  }
-  if port == 0 {
-    bail!("stream listener {listener_name} target port must be greater than 0");
-  }
-  Ok(())
-}
-
-pub fn parse_stream_target(target: &str) -> anyhow::Result<(String, u16)> {
-  if let Some(stripped) = target.strip_prefix('[') {
-    let Some(end) = stripped.find(']') else {
-      bail!("missing closing ']' in IPv6 stream target");
-    };
-    let host = stripped[..end].to_string();
-    let port = stripped
-      .get(end + 1..)
-      .and_then(|rest| rest.strip_prefix(':'))
-      .ok_or_else(|| anyhow!("missing port in stream target"))?
-      .parse::<u16>()
-      .context("invalid stream target port")?;
-    return Ok((host, port));
-  }
-
-  let (host, port) = target
-    .rsplit_once(':')
-    .ok_or_else(|| anyhow!("missing port in stream target"))?;
-  if host.contains(':') {
-    bail!("IPv6 stream targets must use [addr]:port form");
-  }
-  Ok((
-    host.to_string(),
-    port.parse::<u16>().context("invalid stream target port")?,
-  ))
-}
-
 fn validate_compression_statuses(field_name: &str, statuses: &[u16]) -> anyhow::Result<()> {
   if statuses.is_empty() {
     bail!("{field_name} must include at least one status");
@@ -1672,6 +1627,13 @@ pub(crate) fn upstream_pool_server_id(index: usize, server: &UpstreamPoolServerC
   server.id.clone().unwrap_or_else(|| index.to_string())
 }
 
+pub(crate) fn turn_upstream_pool_server_id(
+  index: usize,
+  server: &TurnUpstreamPoolServerConfig,
+) -> String {
+  server.id.clone().unwrap_or_else(|| index.to_string())
+}
+
 pub(crate) fn validate_runtime_identifier(field_name: &str, value: &str) -> anyhow::Result<()> {
   if value.trim() != value || value.is_empty() {
     bail!("{field_name} must not be empty or padded");
@@ -1825,9 +1787,11 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "shared_state",
       "stream_listeners",
       "tls",
+      "turn_upstream_pools",
       "upstream_pools",
       "upstreams",
       "waf",
+      "webrtc_turn_listeners",
     ][..],
     "config" => &["strict_unknown_fields", "warn_on_deprecated_fields"][..],
     "logging" => &["access_log", "level"][..],
@@ -2285,6 +2249,46 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "proxy_protocol_egress",
       "target",
     ][..],
+    "turn_upstream_pools" => &["algorithm", "hash_key", "health_check", "name", "servers"][..],
+    "turn_upstream_pools.health_check" => &[
+      "enabled",
+      "healthy_threshold",
+      "interval_ms",
+      "timeout_ms",
+      "unhealthy_threshold",
+    ][..],
+    "turn_upstream_pools.servers" => {
+      &["backup", "id", "max_conns", "origin", "state", "weight"][..]
+    }
+    "webrtc_turn_listeners" => &[
+      "auth",
+      "bind_tcp",
+      "bind_tls",
+      "bind_udp",
+      "idle_timeout_ms",
+      "mode",
+      "name",
+      "public_ip",
+      "realm",
+      "relay_bind_ip",
+      "relay_port_range",
+      "tcp_pool",
+      "tls",
+      "tls_pool",
+      "udp_pool",
+    ][..],
+    "webrtc_turn_listeners.auth" => &[
+      "mode",
+      "nonce_ttl_seconds",
+      "rest_shared_secret",
+      "rest_shared_secret_env",
+      "static_credentials",
+    ][..],
+    "webrtc_turn_listeners.auth.static_credentials" => {
+      &["password", "password_env", "username"][..]
+    }
+    "webrtc_turn_listeners.relay_port_range" => &["end", "start"][..],
+    "webrtc_turn_listeners.tls" => &["cert_chain", "private_key"][..],
     "rate_limits" => &[
       "burst",
       "key",
@@ -5316,19 +5320,6 @@ impl RouteTimeoutConfig {
     }
     Ok(())
   }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct StreamListenerConfig {
-  pub name: String,
-  pub bind: SocketAddr,
-  pub target: String,
-  #[serde(default = "default_connect_timeout_ms")]
-  pub connect_timeout_ms: u64,
-  #[serde(default = "default_client_idle_timeout_ms")]
-  pub idle_timeout_ms: u64,
-  #[serde(default)]
-  pub proxy_protocol_egress: ProxyProtocolEgressMode,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]

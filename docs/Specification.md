@@ -78,7 +78,7 @@ Upgrade and extended protocol behavior:
 - CONNECT tunneling targets the selected route upstream origin, not the downstream request target.
 - WebTransport forwarding is supported for downstream HTTP/3 extended CONNECT requests when the selected upstream also uses HTTP/3 and has `webtransport = true`.
 - WebTransport stream and datagram payload inspection is outside the current WAF implementation.
-- WebRTC media forwarding is not implemented; signaling HTTP requests can still be routed and inspected as ordinary HTTP traffic.
+- WebRTC media forwarding is supported through TURN listeners. Signaling HTTP requests can still be routed and inspected as ordinary HTTP traffic, while TURN media payloads are forwarded outside WAF inspection.
 
 ## TLS and Identity
 
@@ -215,7 +215,6 @@ The current implementation intentionally leaves these as future work:
 - ACME HTTP-01 challenge handling.
 - Live OCSP fetch and refresh workers.
 - Sticky-cookie upstream sessions.
-- WebRTC media forwarding.
 - WAF frame-level or datagram-level WebTransport inspection.
 - Downstream ECH configuration.
 - Advanced UDP/L4 proxying such as UDP stream proxying and TLS passthrough SNI routing.

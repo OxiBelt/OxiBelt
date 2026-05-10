@@ -38,6 +38,7 @@ use crate::reload::{ReloadManager, ReloadTrigger};
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::{BoundStreamListener, StreamListenerTask};
 use crate::tcp_hop;
+use crate::turn::{BoundTurnListener, TurnListenerTask};
 use crate::upstream_control;
 use crate::waf::WafTlsMetadata;
 
@@ -1099,6 +1100,7 @@ pub(crate) struct ListenerSupervisor {
   http3: Option<Http3ListenerTask>,
   admin: Option<AdminListenerTask>,
   streams: Vec<StreamListenerTask>,
+  turns: Vec<TurnListenerTask>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
 }
 
@@ -1159,6 +1161,7 @@ pub(crate) struct PendingListenerUpdate {
   http3: Option<Option<BoundHttp3Listener>>,
   admin: Option<Option<BoundAdminListener>>,
   streams: Option<Vec<BoundStreamListener>>,
+  turns: Option<Vec<BoundTurnListener>>,
   refresh_http3_config: bool,
 }
 
@@ -1191,6 +1194,7 @@ impl ListenerSupervisor {
       http3: None,
       admin: None,
       streams: Vec::new(),
+      turns: Vec::new(),
       error_tx,
     };
     let pending = supervisor.prepare(&snapshot).await?;
@@ -1310,12 +1314,56 @@ impl ListenerSupervisor {
       None
     };
 
+    let desired_turns = snapshot
+      .config
+      .webrtc_turn_listeners
+      .iter()
+      .map(|listener| {
+        (
+          listener.name.clone(),
+          listener.bind_udp,
+          listener.bind_tcp,
+          listener.bind_tls,
+          tcp_options,
+        )
+      })
+      .collect::<Vec<_>>();
+    let current_turns = self
+      .turns
+      .iter()
+      .map(|listener| {
+        let key = listener.listener_key();
+        (
+          key.name.clone(),
+          key.bind_udp,
+          key.bind_tcp,
+          key.bind_tls,
+          key.tcp_options,
+        )
+      })
+      .collect::<Vec<_>>();
+    let turns = if desired_turns != current_turns {
+      let mut bound = Vec::with_capacity(snapshot.config.webrtc_turn_listeners.len());
+      for listener in &snapshot.config.webrtc_turn_listeners {
+        bound.push(BoundTurnListener::bind(
+          listener.clone(),
+          tcp_options,
+          Duration::from_millis(snapshot.config.runtime.accept.accept_error_backoff_ms),
+          &snapshot.config.tls,
+        )?);
+      }
+      Some(bound)
+    } else {
+      None
+    };
+
     Ok(PendingListenerUpdate {
       tcp,
       http,
       http3,
       admin,
       streams,
+      turns,
       refresh_http3_config,
     })
   }
@@ -1401,6 +1449,16 @@ impl ListenerSupervisor {
         .map(|stream| stream.start(state.clone(), self.error_tx.clone()))
         .collect();
     }
+    if let Some(turns) = pending.turns {
+      let old = std::mem::take(&mut self.turns);
+      for task in old {
+        task.drain_background();
+      }
+      self.turns = turns
+        .into_iter()
+        .map(|turn| turn.start(state.clone(), self.error_tx.clone()))
+        .collect();
+    }
   }
 
   async fn shutdown(&mut self, snapshot: &AppSnapshot) {
@@ -1419,6 +1477,9 @@ impl ListenerSupervisor {
       tasks.push(task.drain());
     }
     for task in std::mem::take(&mut self.streams) {
+      tasks.push(task.drain());
+    }
+    for task in std::mem::take(&mut self.turns) {
       tasks.push(task.drain());
     }
     if tasks.is_empty() {
