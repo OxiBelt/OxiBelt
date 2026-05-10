@@ -1,0 +1,108 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "plaintext_allowlist"
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+[[admin.rbac.tokens]]
+name = "security-operator"
+bearer_token_env = "OXIBELT_SECURITY_TOKEN"
+roles = ["security_operator"]
+
+[shared_state]
+enabled = true
+namespace = "matrix-dynamic-api"
+default_backend = "cluster"
+dynamic_policy_backend = "cluster"
+rate_limits_backend = "cluster"
+operation_timeout_ms = 5000
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+max_connections = 4
+connect_timeout_ms = 5000
+
+[shared_state.backends.tls]
+mode = "off"
+
+[dynamic_policy]
+enabled = true
+backend = "cluster"
+refresh_interval_ms = 1000
+max_policies = 100
+fail_policy = "use_last_good"
+default_status = 429
+default_body = "Blocked by dynamic policy"
+
+[dynamic_policy.automation_api]
+enabled = true
+require_ttl = true
+signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
+default_source_quota = 10
+
+[[dynamic_policy.automation_api.source_quotas]]
+source = "vaultwarden"
+max_active_policies = 5
+
+[dynamic_policy.matching]
+trust_route_name = true
+normalize_path = true
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["0.0.0.0/0", "::/0"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = false
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+first_byte_timeout_ms = 2000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[routes]]
+name = "app-route"
+hosts = ["example.test"]
+path_prefix = "/app"
+upstream = "http-upstream"
+
+[[routes]]
+name = "admin-route"
+hosts = ["example.test"]
+path_prefix = "/admin"
+upstream = "http-upstream"

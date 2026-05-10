@@ -503,6 +503,16 @@ fail_policy = "use_last_good" # use_last_good | fail_closed_on_startup | disable
 default_status = 429
 default_body = "Blocked by dynamic policy"
 
+[dynamic_policy.automation_api]
+enabled = false
+require_ttl = true
+signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
+# default_source_quota = 1000
+
+[[dynamic_policy.automation_api.source_quotas]]
+source = "vaultwarden"
+max_active_policies = 100
+
 [dynamic_policy.matching]
 trust_route_name = true
 normalize_path = true
@@ -520,9 +530,13 @@ max_connections = 4
 connect_timeout_ms = 3000
 ```
 
-Dynamic policy is an opt-in PostgreSQL-backed policy snapshot for external security automation. The selected backend comes from `dynamic_policy.backend`, then `shared_state.dynamic_policy_backend`, then `shared_state.default_backend`, and must be a PostgreSQL shared-state backend. PostgreSQL is only the policy source: OxiBelt creates dedicated `oxibelt_dynamic_policies` and `oxibelt_dynamic_policy_generation` tables, periodically loads active rows into an immutable in-memory snapshot, and never runs PostgreSQL queries from the request hot path. External translators, such as a Vaultwarden stdout sidecar, write this supported policy API table; they should not write `oxibelt_shared_state` or `oxibelt_shared_counters`.
+Dynamic policy is an opt-in PostgreSQL-backed policy snapshot for external security automation. The selected backend comes from `dynamic_policy.backend`, then `shared_state.dynamic_policy_backend`, then `shared_state.default_backend`, and must be a PostgreSQL shared-state backend. PostgreSQL is only the policy source: OxiBelt creates dedicated `oxibelt_dynamic_policies`, `oxibelt_dynamic_policy_generation`, and `oxibelt_dynamic_policy_audit` tables, periodically loads active rows into an immutable in-memory snapshot, and never runs PostgreSQL queries from the request hot path. Legacy external translators, such as a Vaultwarden stdout sidecar, may write this supported policy API table while `dynamic_policy.automation_api.enabled = false`; they should not write `oxibelt_shared_state` or `oxibelt_shared_counters`.
 
-Active rows must match `shared_state.namespace`, have `enabled = true`, and be unexpired. Lower `priority` values apply first. `action` is `reject` or `rate_limit`; `subject_type` is `client_ip`, `client_ip_route`, or `client_ip_path`. Composite subjects use a pipe separator: `client_ip` stores `203.0.113.10`, `client_ip_route` stores `203.0.113.10|app-route`, and `client_ip_path` stores `203.0.113.10|/identity`. IP portions are parsed and canonicalized when snapshots load, including equivalent IPv6 spellings such as expanded uppercase addresses. `client_ip_route` rows require `route_name`; `client_ip_path` rows require `path_prefix`. Optional `method`, `route_name`, and `path_prefix` further narrow the match. Policy values are untrusted input and are strictly validated before a snapshot is accepted.
+When `[dynamic_policy.automation_api]` is enabled, `[admin]` must also be enabled and `signature_key_env` must point to base64 for exactly 32 random bytes. The Admin API signs rows with HMAC-SHA256 and the snapshot loader rejects active rows whose `signature_version` or `row_signature` does not verify. `require_ttl = true` requires `expires_at` or `ttl_seconds` for Admin-created/imported active policies and for active signed rows loaded into a snapshot. `default_source_quota` and `source_quotas` bound active policies by writer/source.
+
+Active rows must match `shared_state.namespace`, have `enabled = true`, and be unexpired. `action` is `allow`, `reject`, or `rate_limit`; `subject_type` is `client_ip`, `client_ip_cidr`, `client_ip_route`, or `client_ip_path`. Composite subjects use a pipe separator: `client_ip` stores `203.0.113.10`, `client_ip_cidr` stores `203.0.113.0/24`, `client_ip_route` stores `203.0.113.10|app-route`, and `client_ip_path` stores `203.0.113.10|/identity`. IP portions are parsed and canonicalized when snapshots load, including equivalent IPv6 spellings such as expanded uppercase addresses. `client_ip_route` rows require `route_name`; `client_ip_path` rows require `path_prefix`. Optional `method`, `route_name`, and `path_prefix` further narrow the match. `mode = "dry_run"` records a match without applying an `allow`, `reject`, or `rate_limit`; `mode = "enforce"` applies the selected policy.
+
+When multiple policies match, OxiBelt chooses the most specific match before applying the action: rows with `route_name` beat route-agnostic rows, longer `path_prefix` beats shorter prefixes, exact IP subjects beat CIDR subjects, longer CIDR prefixes beat shorter prefixes, then lower `priority`, then lower `id`. The first enforcing `allow` permits the request; the first enforcing `reject` or `rate_limit` applies as usual. If only dry-run policies match, `DynamicPolicy.*` context is populated and the request continues.
 
 OxiBelt initializes the policy API schema:
 
@@ -545,6 +559,11 @@ CREATE TABLE IF NOT EXISTS oxibelt_dynamic_policies (
   status integer NULL,
   body text NULL,
   reason text NULL,
+  code text NULL,
+  mode text NOT NULL DEFAULT 'enforce',
+  writer_identity text NULL,
+  signature_version text NULL,
+  row_signature text NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NULL
@@ -556,10 +575,26 @@ ON oxibelt_dynamic_policies (namespace, enabled, expires_at, priority);
 CREATE INDEX IF NOT EXISTS oxibelt_dynamic_policies_subject_idx
 ON oxibelt_dynamic_policies (namespace, subject_type, subject);
 
+CREATE INDEX IF NOT EXISTS oxibelt_dynamic_policies_source_name_idx
+ON oxibelt_dynamic_policies (namespace, source, name);
+
 CREATE TABLE IF NOT EXISTS oxibelt_dynamic_policy_generation (
   namespace text PRIMARY KEY,
   generation bigint NOT NULL DEFAULT 0,
   updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS oxibelt_dynamic_policy_audit (
+  id bigserial PRIMARY KEY,
+  namespace text NOT NULL,
+  policy_id bigint NULL,
+  actor text NOT NULL,
+  operation text NOT NULL,
+  source text NULL,
+  name text NULL,
+  outcome text NOT NULL,
+  error text NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
 );
 ```
 
@@ -730,7 +765,7 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 
 `[admin]` exposes operations APIs such as cache purge and upstream-pool runtime control. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>`, even when mTLS is enabled.
 
-`admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and roles. Roles are `viewer`, `cache_operator`, `upstream_operator`, and `admin`; `admin` implies all scopes. Cache purge requires `cache_operator`; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
+`admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and roles. Roles are `viewer`, `cache_operator`, `upstream_operator`, `security_operator`, and `admin`; `admin` implies all scopes. Cache purge requires `cache_operator`; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`; dynamic policy automation APIs require `security_operator`. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
 
 Admin lifecycle endpoints:
 
@@ -755,6 +790,18 @@ Admin upstream-pool endpoints:
 - `DELETE /admin/v1/upstream-pools/{pool}/servers/{server_id}`
 
 Runtime server mutation accepts JSON fields `id`, `origin`, `state`, `weight`, `backup`, and `max_conns` where applicable. `DELETE` is limited to servers created by the admin API. Every admin mutation emits a structured audit log with actor, peer, operation, target, outcome, and validation error when rejected.
+
+Dynamic policy automation endpoints:
+
+- `GET /admin/v1/dynamic-policies`
+- `GET /admin/v1/dynamic-policies/{id}`
+- `POST /admin/v1/dynamic-policies`
+- `PATCH /admin/v1/dynamic-policies/{id}`
+- `DELETE /admin/v1/dynamic-policies/{id}`
+- `GET /admin/v1/dynamic-policies/export`
+- `POST /admin/v1/dynamic-policies/import`
+
+Create/import JSON accepts `source`, `name`, `action`, `subject_type`, `subject`, optional `route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`, `reason`, `code`, `mode`, and either `expires_at` or `ttl_seconds` when TTL is required. Import payloads use `{ "policies": [...] }` and upsert by `namespace + source + name`; duplicate rows beyond the lowest `id` are disabled. `DELETE` disables the row instead of physically removing it.
 
 Admin purge endpoints:
 

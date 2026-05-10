@@ -1497,6 +1497,8 @@ docker create \
   -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
   -e OXIBELT_VIEWER_TOKEN=matrix-viewer-token \
   -e OXIBELT_UPSTREAM_TOKEN=matrix-upstream-token \
+  -e OXIBELT_SECURITY_TOKEN=matrix-security-token \
+  -e OXIBELT_DYNAMIC_POLICY_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
   -e OXIBELT_INSTANCE_ID=proxy-a \
   "${proxy_dns_args[@]}" \
   "${proxy_image}" >/dev/null
@@ -1515,6 +1517,8 @@ if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then
     -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
     -e OXIBELT_VIEWER_TOKEN=matrix-viewer-token \
     -e OXIBELT_UPSTREAM_TOKEN=matrix-upstream-token \
+    -e OXIBELT_SECURITY_TOKEN=matrix-security-token \
+    -e OXIBELT_DYNAMIC_POLICY_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
     -e OXIBELT_INSTANCE_ID=proxy-b \
     "${proxy_dns_args[@]}" \
     "${proxy_image}" >/dev/null

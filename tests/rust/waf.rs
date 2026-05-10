@@ -401,6 +401,7 @@ value = "hit"
         action: Some("rate_limit".to_string()),
         name: Some("login-rate".to_string()),
         reason: Some("failed login".to_string()),
+        ..DynamicPolicyContext::default()
     };
     let input = WafRequestInput {
         dynamic_policy: &dynamic_policy,

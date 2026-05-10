@@ -2975,33 +2975,24 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     }
     (ObjectRef::Context, "Mode") => Ok(Value::String(ctx.mode.as_str().to_string())),
     (ObjectRef::DynamicPolicy, "Matched") => Ok(Value::Bool(ctx.request.dynamic_policy.matched)),
-    (ObjectRef::DynamicPolicy, "Action") => Ok(
-      ctx
-        .request
-        .dynamic_policy
-        .action
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
-    (ObjectRef::DynamicPolicy, "Name") => Ok(
-      ctx
-        .request
-        .dynamic_policy
-        .name
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
-    (ObjectRef::DynamicPolicy, "Reason") => Ok(
-      ctx
-        .request
-        .dynamic_policy
-        .reason
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
+    (ObjectRef::DynamicPolicy, "Action") => {
+      Ok(optional_string_value(&ctx.request.dynamic_policy.action))
+    }
+    (ObjectRef::DynamicPolicy, "Name") => {
+      Ok(optional_string_value(&ctx.request.dynamic_policy.name))
+    }
+    (ObjectRef::DynamicPolicy, "Reason") => {
+      Ok(optional_string_value(&ctx.request.dynamic_policy.reason))
+    }
+    (ObjectRef::DynamicPolicy, "Code") => {
+      Ok(optional_string_value(&ctx.request.dynamic_policy.code))
+    }
+    (ObjectRef::DynamicPolicy, "Mode") => {
+      Ok(optional_string_value(&ctx.request.dynamic_policy.mode))
+    }
+    (ObjectRef::DynamicPolicy, "Source") => {
+      Ok(optional_string_value(&ctx.request.dynamic_policy.source))
+    }
     (ObjectRef::Request, "Id") => Ok(Value::String(ctx.request.request_id.to_string())),
     (ObjectRef::Request, "ReceivedAtUnixMs") => Ok(Value::Int(
       i64::try_from(ctx.request.received_at_unix_ms).unwrap_or(i64::MAX),
@@ -3447,6 +3438,13 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::ResponseTags, _) => Ok(Value::Null),
     _ => bail!("unknown WAF object property {:?}.{field}", object),
   }
+}
+
+fn optional_string_value(value: &Option<String>) -> Value {
+  value
+    .as_ref()
+    .map(|value| Value::String(value.clone()))
+    .unwrap_or(Value::Null)
 }
 
 fn eval_call(

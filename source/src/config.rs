@@ -9,6 +9,9 @@ use url::Url;
 
 use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 
+mod dynamic_policy;
+pub use dynamic_policy::*;
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Config {
   #[serde(default)]
@@ -838,21 +841,17 @@ impl Config {
 
   fn validate_dynamic_policy(&self, route_names: &HashSet<String>) -> anyhow::Result<()> {
     let policy = &self.dynamic_policy;
-    if policy.refresh_interval_ms == 0 {
-      bail!("dynamic_policy.refresh_interval_ms must be greater than 0");
-    }
-    if policy.max_policies == 0 {
-      bail!("dynamic_policy.max_policies must be greater than 0");
-    }
-    http::StatusCode::from_u16(policy.default_status)
-      .context("dynamic_policy.default_status is not a valid HTTP status")?;
-    if policy.default_body.len() > crate::dynamic_policy::MAX_DYNAMIC_POLICY_BODY_BYTES {
-      bail!(
-        "dynamic_policy.default_body must be at most {} bytes",
-        crate::dynamic_policy::MAX_DYNAMIC_POLICY_BODY_BYTES
-      );
-    }
+    policy.validate_basic()?;
     validate_optional_non_empty("dynamic_policy.backend", policy.backend.as_deref())?;
+    if policy.automation_api.enabled {
+      if !policy.enabled {
+        bail!("dynamic_policy.automation_api.enabled requires dynamic_policy.enabled = true");
+      }
+      if !self.admin.enabled {
+        bail!("dynamic_policy.automation_api.enabled requires admin.enabled = true");
+      }
+      policy.automation_api.validate_signature_key_env()?;
+    }
     if !policy.enabled {
       return Ok(());
     }
@@ -2022,6 +2021,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "database.access_log.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "dynamic_policy" => &[
+      "automation_api",
       "backend",
       "default_body",
       "default_status",
@@ -2031,6 +2031,14 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_policies",
       "refresh_interval_ms",
     ][..],
+    "dynamic_policy.automation_api" => &[
+      "default_source_quota",
+      "enabled",
+      "require_ttl",
+      "signature_key_env",
+      "source_quotas",
+    ][..],
+    "dynamic_policy.automation_api.source_quotas" => &["max_active_policies", "source"][..],
     "dynamic_policy.matching" => &["normalize_path", "trust_route_name"][..],
     "shared_state" => &[
       "backends",
@@ -3970,6 +3978,7 @@ pub enum AdminRole {
   Viewer,
   CacheOperator,
   UpstreamOperator,
+  SecurityOperator,
   Admin,
 }
 
@@ -3979,6 +3988,7 @@ impl AdminRole {
       Self::Viewer => "viewer",
       Self::CacheOperator => "cache_operator",
       Self::UpstreamOperator => "upstream_operator",
+      Self::SecurityOperator => "security_operator",
       Self::Admin => "admin",
     }
   }
@@ -4213,67 +4223,6 @@ pub struct DatabaseConfig {
 impl DatabaseConfig {
   fn validate(&self) -> anyhow::Result<()> {
     self.access_log.validate()
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct DynamicPolicyConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default)]
-  pub backend: Option<String>,
-  #[serde(default = "default_dynamic_policy_refresh_interval_ms")]
-  pub refresh_interval_ms: u64,
-  #[serde(default = "default_dynamic_policy_max_policies")]
-  pub max_policies: usize,
-  #[serde(default)]
-  pub fail_policy: DynamicPolicyFailPolicy,
-  #[serde(default = "default_dynamic_policy_status")]
-  pub default_status: u16,
-  #[serde(default = "default_dynamic_policy_body")]
-  pub default_body: String,
-  #[serde(default)]
-  pub matching: DynamicPolicyMatchingConfig,
-}
-
-impl Default for DynamicPolicyConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      backend: None,
-      refresh_interval_ms: default_dynamic_policy_refresh_interval_ms(),
-      max_policies: default_dynamic_policy_max_policies(),
-      fail_policy: DynamicPolicyFailPolicy::default(),
-      default_status: default_dynamic_policy_status(),
-      default_body: default_dynamic_policy_body(),
-      matching: DynamicPolicyMatchingConfig::default(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum DynamicPolicyFailPolicy {
-  #[default]
-  UseLastGood,
-  FailClosedOnStartup,
-  DisabledOnError,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct DynamicPolicyMatchingConfig {
-  #[serde(default = "default_true")]
-  pub trust_route_name: bool,
-  #[serde(default = "default_true")]
-  pub normalize_path: bool,
-}
-
-impl Default for DynamicPolicyMatchingConfig {
-  fn default() -> Self {
-    Self {
-      trust_route_name: true,
-      normalize_path: true,
-    }
   }
 }
 
@@ -5598,22 +5547,6 @@ fn default_database_access_log_connect_timeout_ms() -> u64 {
 
 fn default_database_access_log_queue_capacity() -> usize {
   1024
-}
-
-fn default_dynamic_policy_refresh_interval_ms() -> u64 {
-  2_000
-}
-
-fn default_dynamic_policy_max_policies() -> usize {
-  10_000
-}
-
-fn default_dynamic_policy_status() -> u16 {
-  429
-}
-
-fn default_dynamic_policy_body() -> String {
-  "Blocked by dynamic policy".to_string()
 }
 
 fn default_shared_state_namespace() -> String {

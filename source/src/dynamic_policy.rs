@@ -7,15 +7,18 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use http::{Method, StatusCode};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
-use sqlx::{Pool, Postgres};
+use sqlx::{Pool, Postgres, Row};
 use tracing::{info, warn};
 
-use crate::config::{
-  Config, DatabaseTlsMode, DynamicPolicyConfig, DynamicPolicyFailPolicy, SharedStateBackendConfig,
-};
+use crate::config::{Config, DynamicPolicyConfig, DynamicPolicyFailPolicy};
+use crate::identity::Cidr;
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
+
+pub mod admin;
+pub mod signature;
+pub mod store;
+pub use admin::*;
 
 pub const MAX_DYNAMIC_POLICY_NAME_BYTES: usize = 128;
 pub const MAX_DYNAMIC_POLICY_SUBJECT_BYTES: usize = 512;
@@ -37,6 +40,7 @@ struct DynamicPolicyInner {
   pool: Pool<Postgres>,
   snapshot: RwLock<Arc<DynamicPolicySnapshot>>,
   metrics: Arc<Metrics>,
+  signature_key: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,10 +53,13 @@ pub struct DynamicPolicySnapshot {
 #[derive(Debug, Clone)]
 struct DynamicPolicy {
   id: i64,
+  priority: i32,
   name: String,
+  source: String,
   action: DynamicPolicyAction,
   subject_type: DynamicPolicySubjectType,
   subject: String,
+  cidr: Option<Cidr>,
   route_name: Option<String>,
   method: Option<Method>,
   path_prefix: Option<String>,
@@ -61,10 +68,13 @@ struct DynamicPolicy {
   status: StatusCode,
   body: String,
   reason: Option<String>,
+  code: Option<String>,
+  mode: DynamicPolicyMode,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum DynamicPolicyAction {
+  Allow,
   Reject,
   RateLimit,
 }
@@ -72,6 +82,7 @@ enum DynamicPolicyAction {
 impl DynamicPolicyAction {
   fn as_str(self) -> &'static str {
     match self {
+      Self::Allow => "allow",
       Self::Reject => "reject",
       Self::RateLimit => "rate_limit",
     }
@@ -81,6 +92,7 @@ impl DynamicPolicyAction {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum DynamicPolicySubjectType {
   Ip,
+  IpCidr,
   IpRoute,
   IpPath,
 }
@@ -89,8 +101,24 @@ impl DynamicPolicySubjectType {
   fn as_str(self) -> &'static str {
     match self {
       Self::Ip => "client_ip",
+      Self::IpCidr => "client_ip_cidr",
       Self::IpRoute => "client_ip_route",
       Self::IpPath => "client_ip_path",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DynamicPolicyMode {
+  Enforce,
+  DryRun,
+}
+
+impl DynamicPolicyMode {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Enforce => "enforce",
+      Self::DryRun => "dry_run",
     }
   }
 }
@@ -101,6 +129,9 @@ pub struct DynamicPolicyContext {
   pub action: Option<String>,
   pub name: Option<String>,
   pub reason: Option<String>,
+  pub code: Option<String>,
+  pub mode: Option<String>,
+  pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,24 +153,31 @@ pub struct DynamicPolicyRequest<'a> {
   pub path: &'a str,
 }
 
-type PolicyRow = (
-  i64,
-  i32,
-  String,
-  String,
-  String,
-  String,
-  String,
-  Option<String>,
-  Option<String>,
-  Option<String>,
-  Option<String>,
-  Option<i32>,
-  Option<i32>,
-  Option<String>,
-  Option<String>,
-  String,
-);
+#[derive(Debug, Clone)]
+struct PolicyRow {
+  id: i64,
+  enabled: bool,
+  priority: i32,
+  name: String,
+  source: String,
+  action: String,
+  subject_type: String,
+  subject: String,
+  route_name: Option<String>,
+  method: Option<String>,
+  path_prefix: Option<String>,
+  rate: Option<String>,
+  burst: Option<i32>,
+  status: Option<i32>,
+  body: Option<String>,
+  reason: Option<String>,
+  code: Option<String>,
+  mode: String,
+  writer_identity: Option<String>,
+  signature_version: Option<String>,
+  row_signature: Option<String>,
+  expires_at: Option<String>,
+}
 
 impl DynamicPolicyRuntime {
   pub async fn new(config: &Config, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
@@ -157,6 +195,13 @@ impl DynamicPolicyRuntime {
       .find(|backend| backend.name == backend_name)
       .ok_or_else(|| anyhow!("dynamic_policy backend {backend_name} was not found"))?;
     let namespace = Arc::from(config.shared_state.namespace.as_str());
+    let signature_key = if config.dynamic_policy.automation_api.enabled {
+      Some(signature::load_key(
+        &config.dynamic_policy.automation_api.signature_key_env,
+      )?)
+    } else {
+      None
+    };
     let route_names = Arc::new(
       config
         .routes
@@ -165,7 +210,7 @@ impl DynamicPolicyRuntime {
         .collect::<HashSet<_>>(),
     );
 
-    let pool = match connect_postgres_pool(backend).await {
+    let pool = match store::connect_postgres_pool(backend).await {
       Ok(pool) => pool,
       Err(error)
         if config.dynamic_policy.fail_policy == DynamicPolicyFailPolicy::DisabledOnError =>
@@ -179,22 +224,29 @@ impl DynamicPolicyRuntime {
         return Err(error).context("failed to connect dynamic policy PostgreSQL backend");
       }
     };
-    init_postgres(&pool)
+    store::init_postgres(&pool)
       .await
       .context("failed to initialize dynamic policy PostgreSQL tables")?;
 
-    let snapshot =
-      match load_snapshot(&pool, &config.dynamic_policy, &namespace, &route_names).await {
-        Ok(snapshot) => snapshot,
-        Err(error)
-          if config.dynamic_policy.fail_policy == DynamicPolicyFailPolicy::DisabledOnError =>
-        {
-          warn!(error = %error, "dynamic policy startup load failed; starting with empty snapshot");
-          metrics.record_dynamic_policy_refresh_error();
-          DynamicPolicySnapshot::empty()
-        }
-        Err(error) => return Err(error).context("failed to load initial dynamic policy snapshot"),
-      };
+    let snapshot = match load_snapshot(
+      &pool,
+      &config.dynamic_policy,
+      &namespace,
+      &route_names,
+      signature_key.as_ref(),
+    )
+    .await
+    {
+      Ok(snapshot) => snapshot,
+      Err(error)
+        if config.dynamic_policy.fail_policy == DynamicPolicyFailPolicy::DisabledOnError =>
+      {
+        warn!(error = %error, "dynamic policy startup load failed; starting with empty snapshot");
+        metrics.record_dynamic_policy_refresh_error();
+        DynamicPolicySnapshot::empty()
+      }
+      Err(error) => return Err(error).context("failed to load initial dynamic policy snapshot"),
+    };
     metrics.set_dynamic_policy_active_policies(snapshot.policies.len() as u64);
 
     let inner = Arc::new(DynamicPolicyInner {
@@ -204,6 +256,7 @@ impl DynamicPolicyRuntime {
       pool,
       snapshot: RwLock::new(Arc::new(snapshot)),
       metrics,
+      signature_key,
     });
     spawn_refresh_task(&inner);
     Ok(Self { inner: Some(inner) })
@@ -249,71 +302,104 @@ fn evaluate_snapshot(
     request.path.to_string()
   };
 
+  let mut dry_run_context = None;
+  let mut selected = None;
   for policy in snapshot.policies.iter() {
     if !policy.matches(config, &request, &request_path) {
       continue;
     }
-    let context = DynamicPolicyContext {
-      matched: true,
-      action: Some(policy.action.as_str().to_string()),
-      name: Some(policy.name.clone()),
-      reason: policy.reason.clone(),
-    };
     metrics.record_dynamic_policy_match();
-    match policy.action {
-      DynamicPolicyAction::Reject => {
-        metrics.record_dynamic_policy_reject();
+    if policy.mode == DynamicPolicyMode::DryRun {
+      info!(
+        policy_id = policy.id,
+        policy_name = %policy.name,
+        action = policy.action.as_str(),
+        route = request.route_name,
+        client_ip = %request.client_ip,
+        "dynamic policy dry-run matched request"
+      );
+      dry_run_context.get_or_insert_with(|| policy.context());
+      continue;
+    }
+    if selected.is_none_or(|current| policy.precedes(current)) {
+      selected = Some(policy);
+    }
+  }
+
+  let Some(policy) = selected else {
+    return dry_run_context
+      .map(|context| DynamicPolicyOutcome {
+        context,
+        terminal: None,
+      })
+      .unwrap_or_default();
+  };
+  let context = policy.context();
+  match policy.action {
+    DynamicPolicyAction::Allow => {
+      info!(
+        policy_id = policy.id,
+        policy_name = %policy.name,
+        action = "allow",
+        route = request.route_name,
+        client_ip = %request.client_ip,
+        "dynamic policy allowed request"
+      );
+      DynamicPolicyOutcome {
+        context,
+        terminal: None,
+      }
+    }
+    DynamicPolicyAction::Reject => {
+      metrics.record_dynamic_policy_reject();
+      info!(
+        policy_id = policy.id,
+        policy_name = %policy.name,
+        action = "reject",
+        route = request.route_name,
+        client_ip = %request.client_ip,
+        "dynamic policy rejected request"
+      );
+      DynamicPolicyOutcome {
+        context,
+        terminal: Some(DynamicPolicyTerminal {
+          status: policy.status,
+          body: policy.body.clone(),
+        }),
+      }
+    }
+    DynamicPolicyAction::RateLimit => {
+      let bucket = policy.bucket_name(request.route_name);
+      let status = limits.check_direct_rate_limit(
+        &bucket,
+        policy.rate.as_deref().unwrap_or("1r/s"),
+        policy.burst.unwrap_or(1),
+        policy.status.as_u16(),
+      );
+      if let Some(status) = status {
+        metrics.record_dynamic_policy_rate_limit_denied();
         info!(
           policy_id = policy.id,
           policy_name = %policy.name,
-          action = "reject",
+          action = "rate_limit",
           route = request.route_name,
           client_ip = %request.client_ip,
-          "dynamic policy rejected request"
+          "dynamic policy rate limit denied request"
         );
         return DynamicPolicyOutcome {
           context,
           terminal: Some(DynamicPolicyTerminal {
-            status: policy.status,
+            status,
             body: policy.body.clone(),
           }),
         };
       }
-      DynamicPolicyAction::RateLimit => {
-        let bucket = policy.bucket_name(request.route_name);
-        let status = limits.check_direct_rate_limit(
-          &bucket,
-          policy.rate.as_deref().unwrap_or("1r/s"),
-          policy.burst.unwrap_or(1),
-          policy.status.as_u16(),
-        );
-        if let Some(status) = status {
-          metrics.record_dynamic_policy_rate_limit_denied();
-          info!(
-            policy_id = policy.id,
-            policy_name = %policy.name,
-            action = "rate_limit",
-            route = request.route_name,
-            client_ip = %request.client_ip,
-            "dynamic policy rate limit denied request"
-          );
-          return DynamicPolicyOutcome {
-            context,
-            terminal: Some(DynamicPolicyTerminal {
-              status,
-              body: policy.body.clone(),
-            }),
-          };
-        }
-        return DynamicPolicyOutcome {
-          context,
-          terminal: None,
-        };
+      DynamicPolicyOutcome {
+        context,
+        terminal: None,
       }
     }
   }
-
-  DynamicPolicyOutcome::default()
 }
 
 impl DynamicPolicyInner {
@@ -372,6 +458,10 @@ impl DynamicPolicy {
 
     match self.subject_type {
       DynamicPolicySubjectType::Ip => self.subject == request.client_ip.to_string(),
+      DynamicPolicySubjectType::IpCidr => self
+        .cidr
+        .as_ref()
+        .is_some_and(|cidr| cidr.contains(request.client_ip)),
       DynamicPolicySubjectType::IpRoute => {
         self.subject == format!("{}|{}", request.client_ip, request.route_name)
       }
@@ -394,6 +484,45 @@ impl DynamicPolicy {
       path
     )
   }
+
+  fn context(&self) -> DynamicPolicyContext {
+    DynamicPolicyContext {
+      matched: true,
+      action: Some(self.action.as_str().to_string()),
+      name: Some(self.name.clone()),
+      reason: self.reason.clone(),
+      code: self.code.clone(),
+      mode: Some(self.mode.as_str().to_string()),
+      source: Some(self.source.clone()),
+    }
+  }
+
+  fn precedes(&self, other: &Self) -> bool {
+    self.precedence_key() < other.precedence_key()
+  }
+
+  fn precedence_key(&self) -> (u8, usize, u16, i32, i64) {
+    (
+      if self.route_name.is_some() { 0 } else { 1 },
+      usize::MAX - self.path_prefix.as_deref().map(str::len).unwrap_or(0),
+      u16::MAX - self.ip_specificity(),
+      self.priority,
+      self.id,
+    )
+  }
+
+  fn ip_specificity(&self) -> u16 {
+    match self.subject_type {
+      DynamicPolicySubjectType::Ip
+      | DynamicPolicySubjectType::IpRoute
+      | DynamicPolicySubjectType::IpPath => 1_000,
+      DynamicPolicySubjectType::IpCidr => self
+        .cidr
+        .as_ref()
+        .map(|cidr| u16::from(cidr.prefix()))
+        .unwrap_or(0),
+    }
+  }
 }
 
 fn spawn_refresh_task(inner: &Arc<DynamicPolicyInner>) {
@@ -415,6 +544,7 @@ async fn refresh_loop(inner: Weak<DynamicPolicyInner>, interval: Duration) {
       &inner.config,
       &inner.namespace,
       &inner.route_names,
+      inner.signature_key.as_ref(),
     )
     .await
     {
@@ -443,13 +573,15 @@ async fn load_snapshot(
   config: &DynamicPolicyConfig,
   namespace: &str,
   route_names: &HashSet<String>,
+  signature_key: Option<&[u8; 32]>,
 ) -> anyhow::Result<DynamicPolicySnapshot> {
   let generation = load_generation(pool, namespace).await?;
   let limit = i64::try_from(config.max_policies.saturating_add(1))
     .context("dynamic_policy.max_policies does not fit in i64")?;
-  let rows: Vec<PolicyRow> = sqlx::query_as(
-    "SELECT id, priority, name, source, action, subject_type, subject, route_name, method,
-            path_prefix, rate, burst, status, body, reason, updated_at::text
+  let rows = sqlx::query(
+    "SELECT id, enabled, priority, name, source, action, subject_type, subject, route_name, method,
+            path_prefix, rate, burst, status, body, reason, code, mode, writer_identity,
+            signature_version, row_signature, expires_at::text AS expires_at
        FROM oxibelt_dynamic_policies
       WHERE namespace = $1
         AND enabled = true
@@ -472,8 +604,15 @@ async fn load_snapshot(
   generation.hash(&mut hasher);
   let mut policies = Vec::with_capacity(rows.len());
   for row in rows {
+    let row = policy_row_from_pg(&row)?;
     hash_policy_row(&row, &mut hasher);
-    policies.push(validate_policy_row(row, config, route_names)?);
+    policies.push(validate_policy_row(
+      row,
+      config,
+      namespace,
+      route_names,
+      signature_key,
+    )?);
   }
 
   Ok(DynamicPolicySnapshot {
@@ -484,22 +623,55 @@ async fn load_snapshot(
 }
 
 fn hash_policy_row(row: &PolicyRow, hasher: &mut impl Hasher) {
-  row.0.hash(hasher);
-  row.1.hash(hasher);
-  row.2.hash(hasher);
-  row.3.hash(hasher);
-  row.4.hash(hasher);
-  row.5.hash(hasher);
-  row.6.hash(hasher);
-  row.7.hash(hasher);
-  row.8.hash(hasher);
-  row.9.hash(hasher);
-  row.10.hash(hasher);
-  row.11.hash(hasher);
-  row.12.hash(hasher);
-  row.13.hash(hasher);
-  row.14.hash(hasher);
-  row.15.hash(hasher);
+  row.id.hash(hasher);
+  row.enabled.hash(hasher);
+  row.priority.hash(hasher);
+  row.name.hash(hasher);
+  row.source.hash(hasher);
+  row.action.hash(hasher);
+  row.subject_type.hash(hasher);
+  row.subject.hash(hasher);
+  row.route_name.hash(hasher);
+  row.method.hash(hasher);
+  row.path_prefix.hash(hasher);
+  row.rate.hash(hasher);
+  row.burst.hash(hasher);
+  row.status.hash(hasher);
+  row.body.hash(hasher);
+  row.reason.hash(hasher);
+  row.code.hash(hasher);
+  row.mode.hash(hasher);
+  row.writer_identity.hash(hasher);
+  row.signature_version.hash(hasher);
+  row.row_signature.hash(hasher);
+  row.expires_at.hash(hasher);
+}
+
+fn policy_row_from_pg(row: &sqlx::postgres::PgRow) -> anyhow::Result<PolicyRow> {
+  Ok(PolicyRow {
+    id: row.try_get("id")?,
+    enabled: row.try_get("enabled")?,
+    priority: row.try_get("priority")?,
+    name: row.try_get("name")?,
+    source: row.try_get("source")?,
+    action: row.try_get("action")?,
+    subject_type: row.try_get("subject_type")?,
+    subject: row.try_get("subject")?,
+    route_name: row.try_get("route_name")?,
+    method: row.try_get("method")?,
+    path_prefix: row.try_get("path_prefix")?,
+    rate: row.try_get("rate")?,
+    burst: row.try_get("burst")?,
+    status: row.try_get("status")?,
+    body: row.try_get("body")?,
+    reason: row.try_get("reason")?,
+    code: row.try_get("code")?,
+    mode: row.try_get("mode")?,
+    writer_identity: row.try_get("writer_identity")?,
+    signature_version: row.try_get("signature_version")?,
+    row_signature: row.try_get("row_signature")?,
+    expires_at: row.try_get("expires_at")?,
+  })
 }
 
 async fn load_generation(pool: &Pool<Postgres>, namespace: &str) -> anyhow::Result<i64> {
@@ -515,11 +687,14 @@ async fn load_generation(pool: &Pool<Postgres>, namespace: &str) -> anyhow::Resu
 fn validate_policy_row(
   row: PolicyRow,
   config: &DynamicPolicyConfig,
+  namespace: &str,
   route_names: &HashSet<String>,
+  signature_key: Option<&[u8; 32]>,
 ) -> anyhow::Result<DynamicPolicy> {
-  let (
+  let PolicyRow {
     id,
-    _priority,
+    enabled,
+    priority,
     name,
     source,
     action,
@@ -533,8 +708,55 @@ fn validate_policy_row(
     status,
     body,
     reason,
-    _updated_at,
-  ) = row;
+    code,
+    mode,
+    writer_identity,
+    signature_version,
+    row_signature,
+    expires_at,
+  } = row;
+
+  if config.automation_api.enabled {
+    if config.automation_api.require_ttl && expires_at.is_none() {
+      bail!("dynamic policy {id} requires expires_at when automation API require_ttl is enabled");
+    }
+    let Some(signature_key) = signature_key else {
+      bail!("dynamic policy automation API requires a signature key");
+    };
+    if signature_version.as_deref() != Some(signature::SIGNATURE_VERSION) {
+      bail!("dynamic policy {id} has missing or unsupported signature_version");
+    }
+    let Some(row_signature) = row_signature.as_deref() else {
+      bail!("dynamic policy {id} is missing row_signature");
+    };
+    signature::verify(
+      signature_key,
+      &signature::DynamicPolicySignatureFields {
+        namespace,
+        enabled,
+        priority,
+        name: &name,
+        source: &source,
+        action: &action,
+        subject_type: &subject_type,
+        subject: &subject,
+        route_name: route_name.as_deref(),
+        method: method.as_deref(),
+        path_prefix: path_prefix.as_deref(),
+        rate: rate.as_deref(),
+        burst,
+        status,
+        body: body.as_deref(),
+        reason: reason.as_deref(),
+        code: code.as_deref(),
+        mode: &mode,
+        writer_identity: writer_identity.as_deref(),
+        expires_at: expires_at.as_deref(),
+      },
+      row_signature,
+    )
+    .with_context(|| format!("dynamic policy {id} signature verification failed"))?;
+  }
 
   validate_string_len("dynamic policy name", &name, MAX_DYNAMIC_POLICY_NAME_BYTES)?;
   validate_string_len(
@@ -552,15 +774,22 @@ fn validate_policy_row(
   }
 
   let action = match action.as_str() {
+    "allow" => DynamicPolicyAction::Allow,
     "reject" => DynamicPolicyAction::Reject,
     "rate_limit" => DynamicPolicyAction::RateLimit,
     _ => bail!("dynamic policy {id} has unsupported action {action}"),
   };
   let subject_type = match subject_type.as_str() {
     "client_ip" => DynamicPolicySubjectType::Ip,
+    "client_ip_cidr" => DynamicPolicySubjectType::IpCidr,
     "client_ip_route" => DynamicPolicySubjectType::IpRoute,
     "client_ip_path" => DynamicPolicySubjectType::IpPath,
     _ => bail!("dynamic policy {id} has unsupported subject_type {subject_type}"),
+  };
+  let mode = match mode.as_str() {
+    "enforce" => DynamicPolicyMode::Enforce,
+    "dry_run" => DynamicPolicyMode::DryRun,
+    _ => bail!("dynamic policy {id} has unsupported mode {mode}"),
   };
 
   let route_name = route_name
@@ -582,6 +811,18 @@ fn validate_policy_row(
       Ok::<_, anyhow::Error>(reason)
     })
     .transpose()?;
+  let code = code
+    .map(|code| {
+      validate_string_len("dynamic policy code", &code, MAX_DYNAMIC_POLICY_NAME_BYTES)?;
+      if code
+        .bytes()
+        .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')))
+      {
+        bail!("dynamic policy {id} code contains invalid characters");
+      }
+      Ok::<_, anyhow::Error>(code)
+    })
+    .transpose()?;
   let status = status
     .map(validate_status)
     .transpose()
@@ -590,7 +831,7 @@ fn validate_policy_row(
   let body = body.unwrap_or_else(|| config.default_body.clone());
   validate_string_len("dynamic policy body", &body, MAX_DYNAMIC_POLICY_BODY_BYTES)?;
 
-  let subject = validate_subject(
+  let (subject, cidr) = validate_subject(
     id,
     subject_type,
     &subject,
@@ -620,10 +861,13 @@ fn validate_policy_row(
 
   Ok(DynamicPolicy {
     id,
+    priority,
     name,
+    source,
     action,
     subject_type,
     subject,
+    cidr,
     route_name,
     method,
     path_prefix,
@@ -632,6 +876,8 @@ fn validate_policy_row(
     status,
     body,
     reason,
+    code,
+    mode,
   })
 }
 
@@ -704,12 +950,17 @@ fn validate_subject(
   subject: &str,
   route_name: Option<&str>,
   path_prefix: Option<&str>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Option<Cidr>)> {
   let subject = match subject_type {
     DynamicPolicySubjectType::Ip => {
       let ip = IpAddr::from_str(subject)
         .with_context(|| format!("dynamic policy {id} subject must be a valid IP address"))?;
-      ip.to_string()
+      (ip.to_string(), None)
+    }
+    DynamicPolicySubjectType::IpCidr => {
+      let cidr = Cidr::parse(subject)
+        .with_context(|| format!("dynamic policy {id} subject must be a valid CIDR"))?;
+      (cidr.canonical(), Some(cidr))
     }
     DynamicPolicySubjectType::IpRoute => {
       let (ip, route) = split_composite_subject(id, subject, "client_ip_route")?;
@@ -722,7 +973,7 @@ fn validate_subject(
       if route != route_name {
         bail!("dynamic policy {id} client_ip_route subject route does not match route_name");
       }
-      format!("{ip}|{route_name}")
+      (format!("{ip}|{route_name}"), None)
     }
     DynamicPolicySubjectType::IpPath => {
       let (ip, path) = split_composite_subject(id, subject, "client_ip_path")?;
@@ -735,7 +986,7 @@ fn validate_subject(
       if path != path_prefix {
         bail!("dynamic policy {id} client_ip_path subject path does not match path_prefix");
       }
-      format!("{ip}|{path_prefix}")
+      (format!("{ip}|{path_prefix}"), None)
     }
   };
   Ok(subject)
@@ -753,84 +1004,6 @@ fn split_composite_subject<'a>(
     bail!("dynamic policy {id} {subject_type} subject must not contain empty parts");
   }
   Ok((ip, value))
-}
-
-async fn connect_postgres_pool(
-  config: &SharedStateBackendConfig,
-) -> anyhow::Result<Pool<Postgres>> {
-  let connection_url =
-    config.connection_url_with_prefix(&format!("shared_state.backends.{}", config.name))?;
-  let mut options = PgConnectOptions::from_str(&connection_url)?
-    .application_name("oxibelt-dynamic-policy")
-    .ssl_mode(match config.tls.mode {
-      DatabaseTlsMode::Off => PgSslMode::Disable,
-      DatabaseTlsMode::VerifyFull => PgSslMode::VerifyFull,
-    });
-  if let Some(ca_cert) = &config.tls.ca_cert {
-    options = options.ssl_root_cert(ca_cert);
-  }
-  if let (Some(client_cert), Some(client_key)) = (&config.tls.client_cert, &config.tls.client_key) {
-    options = options
-      .ssl_client_cert(client_cert)
-      .ssl_client_key(client_key);
-  }
-  PgPoolOptions::new()
-    .max_connections(config.max_connections)
-    .acquire_timeout(Duration::from_millis(config.connect_timeout_ms))
-    .connect_with(options)
-    .await
-    .map_err(Into::into)
-}
-
-async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
-  sqlx::query(
-    "CREATE TABLE IF NOT EXISTS oxibelt_dynamic_policies (
-       id bigserial PRIMARY KEY,
-       namespace text NOT NULL,
-       enabled boolean NOT NULL DEFAULT true,
-       priority integer NOT NULL DEFAULT 100,
-       name text NOT NULL,
-       source text NOT NULL DEFAULT 'external',
-       action text NOT NULL,
-       subject_type text NOT NULL,
-       subject text NOT NULL,
-       route_name text NULL,
-       method text NULL,
-       path_prefix text NULL,
-       rate text NULL,
-       burst integer NULL,
-       status integer NULL,
-       body text NULL,
-       reason text NULL,
-       created_at timestamptz NOT NULL DEFAULT now(),
-       updated_at timestamptz NOT NULL DEFAULT now(),
-       expires_at timestamptz NULL
-     )",
-  )
-  .execute(pool)
-  .await?;
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS oxibelt_dynamic_policies_active_idx
-       ON oxibelt_dynamic_policies (namespace, enabled, expires_at, priority)",
-  )
-  .execute(pool)
-  .await?;
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS oxibelt_dynamic_policies_subject_idx
-       ON oxibelt_dynamic_policies (namespace, subject_type, subject)",
-  )
-  .execute(pool)
-  .await?;
-  sqlx::query(
-    "CREATE TABLE IF NOT EXISTS oxibelt_dynamic_policy_generation (
-       namespace text PRIMARY KEY,
-       generation bigint NOT NULL DEFAULT 0,
-       updated_at timestamptz NOT NULL DEFAULT now()
-     )",
-  )
-  .execute(pool)
-  .await?;
-  Ok(())
 }
 
 #[cfg(test)]

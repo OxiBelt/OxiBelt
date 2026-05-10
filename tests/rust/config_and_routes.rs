@@ -1027,6 +1027,74 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 }
 
 #[test]
+fn dynamic_policy_automation_api_config_validates_signature_key_and_quotas() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+        std::env::set_var(
+            "OXIBELT_DYNAMIC_POLICY_HMAC_KEY_TEST",
+            base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+        );
+    }
+    let temp_dir = common::TempDir::new("dynamic-policy-automation");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "dynamic-policy-automation");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[dynamic_policy]
+enabled = true
+backend = "postgres-main"
+max_policies = 256
+
+[dynamic_policy.automation_api]
+enabled = true
+require_ttl = true
+signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY_TEST"
+default_source_quota = 16
+
+[[dynamic_policy.automation_api.source_quotas]]
+source = "vaultwarden"
+max_active_policies = 8
+
+[shared_state]
+enabled = true
+namespace = "matrix"
+dynamic_policy_backend = "postgres-main"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(config.dynamic_policy.automation_api.enabled);
+    assert_eq!(
+        config
+            .dynamic_policy
+            .automation_api
+            .quota_for_source("vaultwarden", config.dynamic_policy.max_policies),
+        8
+    );
+    assert_eq!(
+        config
+            .dynamic_policy
+            .automation_api
+            .quota_for_source("other", config.dynamic_policy.max_policies),
+        16
+    );
+}
+
+#[test]
 fn dynamic_policy_rejects_non_postgres_backend() {
     let temp_dir = common::TempDir::new("dynamic-policy-redis");
     let (cert_path, key_path) =
@@ -1358,6 +1426,7 @@ fn admin_rbac_tokens_parse_and_validate_roles() {
         std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
         std::env::set_var("OXIBELT_VIEWER_TOKEN_TEST", "viewer-secret");
         std::env::set_var("OXIBELT_UPSTREAM_TOKEN_TEST", "upstream-secret");
+        std::env::set_var("OXIBELT_SECURITY_TOKEN_TEST", "security-secret");
     }
     let temp_dir = common::TempDir::new("admin-rbac");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-rbac");
@@ -1375,10 +1444,15 @@ bearer_token_env = "OXIBELT_VIEWER_TOKEN_TEST"
 roles = ["viewer"]
 
 [[admin.rbac.tokens]]
-name = "upstream-ops"
-bearer_token_env = "OXIBELT_UPSTREAM_TOKEN_TEST"
-roles = ["upstream_operator", "cache_operator"]
-"#,
+	name = "upstream-ops"
+	bearer_token_env = "OXIBELT_UPSTREAM_TOKEN_TEST"
+	roles = ["upstream_operator", "cache_operator"]
+
+[[admin.rbac.tokens]]
+name = "security-ops"
+bearer_token_env = "OXIBELT_SECURITY_TOKEN_TEST"
+roles = ["security_operator"]
+	"#,
         common::minimal_config_toml(&cert_path, &key_path)
     );
 
@@ -1388,6 +1462,10 @@ roles = ["upstream_operator", "cache_operator"]
     assert_eq!(
         config.admin.rbac.tokens[1].roles,
         vec![AdminRole::UpstreamOperator, AdminRole::CacheOperator]
+    );
+    assert_eq!(
+        config.admin.rbac.tokens[2].roles,
+        vec![AdminRole::SecurityOperator]
     );
 }
 

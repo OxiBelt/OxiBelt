@@ -56,6 +56,14 @@ impl Cidr {
       _ => false,
     }
   }
+
+  pub fn canonical(&self) -> String {
+    format!("{}/{}", self.network, self.prefix)
+  }
+
+  pub fn prefix(&self) -> u8 {
+    self.prefix
+  }
 }
 
 #[derive(Debug, Clone)]

@@ -335,6 +335,16 @@ fail_policy = "use_last_good" # use_last_good | fail_closed_on_startup | disable
 default_status = 429
 default_body = "Blocked by dynamic policy"
 
+[dynamic_policy.automation_api]
+enabled = false
+require_ttl = true
+signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
+# default_source_quota = 1000
+
+# [[dynamic_policy.automation_api.source_quotas]]
+# source = "vaultwarden"
+# max_active_policies = 100
+
 [dynamic_policy.matching]
 trust_route_name = true
 normalize_path = true

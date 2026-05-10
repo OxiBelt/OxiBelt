@@ -13,7 +13,6 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use ring::digest;
 use serde::Deserialize;
-use serde::Serialize;
 use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
@@ -41,6 +40,9 @@ use crate::stream::{BoundStreamListener, StreamListenerTask};
 use crate::tcp_hop;
 use crate::upstream_control;
 use crate::waf::WafTlsMetadata;
+
+mod admin;
+use admin::json_response;
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
 const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
@@ -431,6 +433,16 @@ async fn admin_response(
 
   if let Some(response) = admin_lifecycle_response(snapshot.as_ref(), &actor, &method, &path) {
     return response;
+  }
+
+  if path == "/admin/v1/dynamic-policies"
+    || path == "/admin/v1/dynamic-policies/export"
+    || path == "/admin/v1/dynamic-policies/import"
+    || path.starts_with("/admin/v1/dynamic-policies/")
+  {
+    return admin::dynamic_policy_response(request, state.clone(), &actor, &method, &path)
+      .await
+      .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
 
   if let Some(response) = admin_upstream_pools_response(
@@ -1076,27 +1088,6 @@ fn admin_audit(
     error,
     "admin operation audit"
   );
-}
-
-fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<ProxyBody> {
-  match serde_json::to_vec(value) {
-    Ok(bytes) => {
-      let body = http_body_util::Full::new(bytes::Bytes::from(bytes))
-        .map_err(|never| -> crate::proxy::http::body::BoxError { match never {} })
-        .boxed();
-      let mut response = Response::new(body);
-      *response.status_mut() = status;
-      response.headers_mut().insert(
-        ::http::header::CONTENT_TYPE,
-        ::http::HeaderValue::from_static("application/json"),
-      );
-      response
-    }
-    Err(error) => text_response(
-      StatusCode::INTERNAL_SERVER_ERROR,
-      &format!("failed to encode JSON response: {error}"),
-    ),
-  }
 }
 
 async fn serve_until_shutdown(
