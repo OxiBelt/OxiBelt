@@ -105,6 +105,8 @@ Build the release image from the repository root:
 docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
+The Docker build rebuilds `ui/person-proof` and embeds the generated challenge page in the release binary.
+
 The Alpine image runs as UID/GID `10001:10001`, exposes `8443/tcp`, and expects its default entry configuration at:
 
 ```text

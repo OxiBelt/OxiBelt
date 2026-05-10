@@ -1,9 +1,23 @@
 ARG RUST_BUILDER_IMAGE=rust:1.95.0-alpine3.23
+ARG OXIBELT_NODE_IMAGE=node:24-alpine3.23
 ARG OXIBELT_RUNTIME_IMAGE=alpine:3.23
 ARG OXIBELT_VERSION=dev
 ARG OXIBELT_REVISION=unknown
 ARG OXIBELT_CREATED=1970-01-01T00:00:00Z
 ARG OXIBELT_SOURCE=https://github.com/OxiBelt/OxiBelt
+
+FROM --platform=$BUILDPLATFORM ${OXIBELT_NODE_IMAGE} AS person-proof-ui
+
+WORKDIR /repo
+COPY tsconfig.json ./
+COPY ui/person-proof ./ui/person-proof
+RUN npm install --prefix /repo --ignore-scripts --no-audit --no-fund \
+      @types/node@24.10.2 \
+      tsx@4.21.0 \
+      typescript@6.0.3 && \
+    ./node_modules/.bin/tsc -p ui/person-proof/tsconfig.json && \
+    ./node_modules/.bin/tsx ui/person-proof/source/build.ts
+
 FROM ${RUST_BUILDER_IMAGE} AS builder
 
 ARG OXIBELT_RUST_TARGET=
@@ -27,6 +41,7 @@ RUN if command -v apk >/dev/null 2>&1; then \
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
 COPY source ./source
+COPY --from=person-proof-ui /repo/source/assets/person-proof-challenge.html ./source/assets/person-proof-challenge.html
 RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
       rustup target add "${OXIBELT_RUST_TARGET}" && \
       if [ "${OXIBELT_RUST_TARGET}" = "riscv64gc-unknown-linux-musl" ]; then \
