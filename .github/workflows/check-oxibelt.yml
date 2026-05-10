@@ -11,6 +11,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Keep this job independent. If test jobs need it, a PR can intentionally
+  # fail structure checks and cause branch-protected test jobs to be skipped.
   source-structure:
     name: Source structure checks
     runs-on: ubuntu-latest
@@ -66,8 +68,6 @@ jobs:
   test:
     name: Test (${{ matrix.runner }} with rust-${{ matrix.rust_version }})
     runs-on: ${{ matrix.runner }}
-    needs:
-      - source-structure
     permissions:
       contents: read
     strategy:
@@ -101,8 +101,6 @@ jobs:
   test-riscv64-qemu:
     name: Test (riscv64 via QEMU, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
     runs-on: ubuntu-latest
-    needs:
-      - source-structure
     permissions:
       contents: read
     strategy:
