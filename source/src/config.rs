@@ -46,6 +46,8 @@ pub struct Config {
   #[serde(default)]
   pub shared_state: SharedStateConfig,
   #[serde(default)]
+  pub dynamic_policy: DynamicPolicyConfig,
+  #[serde(default)]
   pub upstreams: Vec<UpstreamConfig>,
   #[serde(default)]
   pub upstream_pools: Vec<UpstreamPoolConfig>,
@@ -208,6 +210,7 @@ impl Config {
       && self.security == other.security
       && self.database == other.database
       && self.shared_state == other.shared_state
+      && self.dynamic_policy == other.dynamic_policy
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools
       && self.stream_listeners == other.stream_listeners
@@ -716,6 +719,7 @@ impl Config {
       route.timeouts.validate(&route.name)?;
     }
 
+    self.validate_dynamic_policy(&route_names)?;
     self.validate_stream_listeners()?;
 
     match self.tls.ocsp.mode {
@@ -830,6 +834,67 @@ impl Config {
       })?;
     }
     Ok(())
+  }
+
+  fn validate_dynamic_policy(&self, route_names: &HashSet<String>) -> anyhow::Result<()> {
+    let policy = &self.dynamic_policy;
+    if policy.refresh_interval_ms == 0 {
+      bail!("dynamic_policy.refresh_interval_ms must be greater than 0");
+    }
+    if policy.max_policies == 0 {
+      bail!("dynamic_policy.max_policies must be greater than 0");
+    }
+    http::StatusCode::from_u16(policy.default_status)
+      .context("dynamic_policy.default_status is not a valid HTTP status")?;
+    if policy.default_body.len() > crate::dynamic_policy::MAX_DYNAMIC_POLICY_BODY_BYTES {
+      bail!(
+        "dynamic_policy.default_body must be at most {} bytes",
+        crate::dynamic_policy::MAX_DYNAMIC_POLICY_BODY_BYTES
+      );
+    }
+    validate_optional_non_empty("dynamic_policy.backend", policy.backend.as_deref())?;
+    if !policy.enabled {
+      return Ok(());
+    }
+    if !self.shared_state.enabled {
+      bail!("dynamic_policy.enabled requires shared_state.enabled = true");
+    }
+    let Some(backend_name) = self.dynamic_policy_backend_name() else {
+      bail!(
+        "dynamic_policy.enabled requires dynamic_policy.backend, shared_state.dynamic_policy_backend, shared_state.default_backend, or at least one shared_state backend"
+      );
+    };
+    let Some(backend) = self
+      .shared_state
+      .backends
+      .iter()
+      .find(|backend| backend.name == backend_name)
+    else {
+      bail!("dynamic_policy backend references unknown shared_state backend {backend_name}");
+    };
+    if backend.kind != SharedStateBackendKind::Postgres {
+      bail!("dynamic_policy backend {backend_name} must use kind = \"postgres\"");
+    }
+    if route_names.is_empty() {
+      bail!("dynamic_policy requires at least one named route");
+    }
+    Ok(())
+  }
+
+  pub(crate) fn dynamic_policy_backend_name(&self) -> Option<&str> {
+    self
+      .dynamic_policy
+      .backend
+      .as_deref()
+      .or(self.shared_state.dynamic_policy_backend.as_deref())
+      .or(self.shared_state.default_backend.as_deref())
+      .or_else(|| {
+        self
+          .shared_state
+          .backends
+          .first()
+          .map(|backend| backend.name.as_str())
+      })
   }
 
   fn validate_proxy(&self) -> anyhow::Result<()> {
@@ -1653,6 +1718,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "config",
       "connection_limits",
       "database",
+      "dynamic_policy",
       "health",
       "limits",
       "listeners",
@@ -1955,6 +2021,17 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "tls",
     ][..],
     "database.access_log.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
+    "dynamic_policy" => &[
+      "backend",
+      "default_body",
+      "default_status",
+      "enabled",
+      "fail_policy",
+      "matching",
+      "max_policies",
+      "refresh_interval_ms",
+    ][..],
+    "dynamic_policy.matching" => &["normalize_path", "trust_route_name"][..],
     "shared_state" => &[
       "backends",
       "cache_backend",
@@ -1962,6 +2039,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "connection_lease_ms",
       "connection_limits_backend",
       "default_backend",
+      "dynamic_policy_backend",
       "enabled",
       "instance_id_env",
       "namespace",
@@ -4139,6 +4217,67 @@ impl DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DynamicPolicyConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub backend: Option<String>,
+  #[serde(default = "default_dynamic_policy_refresh_interval_ms")]
+  pub refresh_interval_ms: u64,
+  #[serde(default = "default_dynamic_policy_max_policies")]
+  pub max_policies: usize,
+  #[serde(default)]
+  pub fail_policy: DynamicPolicyFailPolicy,
+  #[serde(default = "default_dynamic_policy_status")]
+  pub default_status: u16,
+  #[serde(default = "default_dynamic_policy_body")]
+  pub default_body: String,
+  #[serde(default)]
+  pub matching: DynamicPolicyMatchingConfig,
+}
+
+impl Default for DynamicPolicyConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      backend: None,
+      refresh_interval_ms: default_dynamic_policy_refresh_interval_ms(),
+      max_policies: default_dynamic_policy_max_policies(),
+      fail_policy: DynamicPolicyFailPolicy::default(),
+      default_status: default_dynamic_policy_status(),
+      default_body: default_dynamic_policy_body(),
+      matching: DynamicPolicyMatchingConfig::default(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DynamicPolicyFailPolicy {
+  #[default]
+  UseLastGood,
+  FailClosedOnStartup,
+  DisabledOnError,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DynamicPolicyMatchingConfig {
+  #[serde(default = "default_true")]
+  pub trust_route_name: bool,
+  #[serde(default = "default_true")]
+  pub normalize_path: bool,
+}
+
+impl Default for DynamicPolicyMatchingConfig {
+  fn default() -> Self {
+    Self {
+      trust_route_name: true,
+      normalize_path: true,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SharedStateConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -4167,6 +4306,8 @@ pub struct SharedStateConfig {
   #[serde(default)]
   pub reload_backend: Option<String>,
   #[serde(default)]
+  pub dynamic_policy_backend: Option<String>,
+  #[serde(default)]
   pub backends: Vec<SharedStateBackendConfig>,
 }
 
@@ -4186,6 +4327,7 @@ impl Default for SharedStateConfig {
       upstream_health_backend: None,
       cache_backend: None,
       reload_backend: None,
+      dynamic_policy_backend: None,
       backends: Vec::new(),
     }
   }
@@ -4236,6 +4378,10 @@ impl SharedStateConfig {
       (
         "shared_state.reload_backend",
         self.reload_backend.as_deref(),
+      ),
+      (
+        "shared_state.dynamic_policy_backend",
+        self.dynamic_policy_backend.as_deref(),
       ),
     ] {
       if let Some(name) = name
@@ -5452,6 +5598,22 @@ fn default_database_access_log_connect_timeout_ms() -> u64 {
 
 fn default_database_access_log_queue_capacity() -> usize {
   1024
+}
+
+fn default_dynamic_policy_refresh_interval_ms() -> u64 {
+  2_000
+}
+
+fn default_dynamic_policy_max_policies() -> usize {
+  10_000
+}
+
+fn default_dynamic_policy_status() -> u16 {
+  429
+}
+
+fn default_dynamic_policy_body() -> String {
+  "Blocked by dynamic policy".to_string()
 }
 
 fn default_shared_state_namespace() -> String {

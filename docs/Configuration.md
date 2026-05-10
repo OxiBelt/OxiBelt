@@ -477,6 +477,7 @@ person_proof_backend = "cluster"
 upstream_health_backend = "cluster"
 cache_backend = "cluster"
 reload_backend = "cluster"
+dynamic_policy_backend = "cluster"
 
 [[shared_state.backends]]
 name = "cluster"
@@ -495,6 +496,112 @@ mode = "off" # off | verify_full, PostgreSQL only
 Shared state is opt-in. If it is disabled, features keep their local in-process behavior. When it is enabled, an omitted feature mapping uses `default_backend`, or the first configured backend when `default_backend` is not set. Backends are named, and each feature maps to one backend; OxiBelt does not mirror writes or fall back through backend chains. Exactly one of `connection_url` or `connection_url_env` is required per backend. Effective config dumps redact shared-state `connection_url` values.
 
 Redis backends target Redis-protocol compatible Redis, Valkey, and KeyDB single-endpoint deployments. PostgreSQL backends create OxiBelt-managed shared-state tables at startup. Security-sensitive operations such as rate limits, connection leases, and Person proof fail closed when the configured shared backend errors. Shared cache operations fall back to the local/no-shared-cache path for the current request.
+
+```toml
+[dynamic_policy]
+enabled = false
+backend = "cluster"
+refresh_interval_ms = 2000
+max_policies = 10000
+fail_policy = "use_last_good" # use_last_good | fail_closed_on_startup | disabled_on_error
+default_status = 429
+default_body = "Blocked by dynamic policy"
+
+[dynamic_policy.matching]
+trust_route_name = true
+normalize_path = true
+
+[shared_state]
+enabled = true
+namespace = "oxibelt"
+dynamic_policy_backend = "cluster"
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "postgres"
+connection_url_env = "OXIBELT_SHARED_STATE_URL"
+max_connections = 4
+connect_timeout_ms = 3000
+```
+
+Dynamic policy is an opt-in PostgreSQL-backed policy snapshot for external security automation. The selected backend comes from `dynamic_policy.backend`, then `shared_state.dynamic_policy_backend`, then `shared_state.default_backend`, and must be a PostgreSQL shared-state backend. PostgreSQL is only the policy source: OxiBelt creates dedicated `oxibelt_dynamic_policies` and `oxibelt_dynamic_policy_generation` tables, periodically loads active rows into an immutable in-memory snapshot, and never runs PostgreSQL queries from the request hot path. External translators, such as a Vaultwarden stdout sidecar, write this supported policy API table; they should not write `oxibelt_shared_state` or `oxibelt_shared_counters`.
+
+Active rows must match `shared_state.namespace`, have `enabled = true`, and be unexpired. Lower `priority` values apply first. `action` is `reject` or `rate_limit`; `subject_type` is `client_ip`, `client_ip_route`, or `client_ip_path`. Composite subjects use a pipe separator: `client_ip` stores `203.0.113.10`, `client_ip_route` stores `203.0.113.10|app-route`, and `client_ip_path` stores `203.0.113.10|/identity`. `client_ip_route` rows require `route_name`; `client_ip_path` rows require `path_prefix`. Optional `method`, `route_name`, and `path_prefix` further narrow the match. Policy values are untrusted input and are strictly validated before a snapshot is accepted.
+
+OxiBelt initializes the policy API schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS oxibelt_dynamic_policies (
+  id bigserial PRIMARY KEY,
+  namespace text NOT NULL,
+  enabled boolean NOT NULL DEFAULT true,
+  priority integer NOT NULL DEFAULT 100,
+  name text NOT NULL,
+  source text NOT NULL DEFAULT 'external',
+  action text NOT NULL,
+  subject_type text NOT NULL,
+  subject text NOT NULL,
+  route_name text NULL,
+  method text NULL,
+  path_prefix text NULL,
+  rate text NULL,
+  burst integer NULL,
+  status integer NULL,
+  body text NULL,
+  reason text NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NULL
+);
+
+CREATE INDEX IF NOT EXISTS oxibelt_dynamic_policies_active_idx
+ON oxibelt_dynamic_policies (namespace, enabled, expires_at, priority);
+
+CREATE INDEX IF NOT EXISTS oxibelt_dynamic_policies_subject_idx
+ON oxibelt_dynamic_policies (namespace, subject_type, subject);
+
+CREATE TABLE IF NOT EXISTS oxibelt_dynamic_policy_generation (
+  namespace text PRIMARY KEY,
+  generation bigint NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+Example Vaultwarden translator output for a TTL block:
+
+```sql
+INSERT INTO oxibelt_dynamic_policies
+  (namespace, priority, name, source, action, subject_type, subject, path_prefix, status, body, reason, expires_at)
+VALUES
+  ('oxibelt', 10, 'vaultwarden-login-block', 'vaultwarden-stdout', 'reject',
+   'client_ip_path', '203.0.113.10|/identity', '/identity', 429,
+   'Blocked by dynamic policy', 'repeated Vaultwarden login failures',
+   now() + interval '15 minutes');
+
+INSERT INTO oxibelt_dynamic_policy_generation (namespace, generation, updated_at)
+VALUES ('oxibelt', 1, now())
+ON CONFLICT (namespace)
+DO UPDATE SET generation = oxibelt_dynamic_policy_generation.generation + 1,
+              updated_at = now();
+```
+
+For layered login protection, keep a static route/path rate limit and let the translator add short-lived dynamic blocks when Vaultwarden logs repeated failures:
+
+```toml
+[[rate_limits]]
+name = "vaultwarden-identity-path"
+key = "client_ip_path"
+routes = ["vaultwarden"]
+rate = "30r/m"
+burst = 30
+status = 429
+
+[[routes]]
+name = "vaultwarden"
+hosts = ["vault.example.com"]
+path_prefix = "/identity"
+upstream = "vaultwarden"
+```
 
 ```toml
 [cache]

@@ -14,6 +14,7 @@ use std::time::Duration;
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::cache::ResponseCache;
 use crate::config::{Config, HttpVersion, UpstreamConfig};
+use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::lifecycle::LifecycleState;
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
@@ -121,6 +122,7 @@ pub struct AppSnapshot {
   pub cache: Arc<ResponseCache>,
   pub(crate) compression: Arc<CompressionState>,
   pub metrics: Arc<Metrics>,
+  pub dynamic_policy: DynamicPolicyRuntime,
   pub lifecycle: Arc<LifecycleState>,
   pub shared_state: Option<Arc<SharedState>>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
@@ -159,10 +161,13 @@ impl AppSnapshot {
     let pools = PoolState::new(&config.upstream_pools, shared_state.clone());
     let cache = ResponseCache::new(&config.cache, shared_state.clone())
       .context("failed to build response cache")?;
-    let compression = CompressionState::new(&config.compression);
     let metrics = previous
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
+    let compression = CompressionState::new(&config.compression);
+    let dynamic_policy = DynamicPolicyRuntime::new(&config, metrics.clone())
+      .await
+      .context("failed to build dynamic policy runtime")?;
     let lifecycle = previous
       .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
@@ -213,6 +218,7 @@ impl AppSnapshot {
       cache,
       compression,
       metrics,
+      dynamic_policy,
       lifecycle,
       shared_state,
       tls_server_config,
@@ -248,6 +254,7 @@ impl AppSnapshot {
       cache: previous.cache.clone(),
       compression: previous.compression.clone(),
       metrics: previous.metrics.clone(),
+      dynamic_policy: previous.dynamic_policy.clone(),
       lifecycle: previous.lifecycle.clone(),
       shared_state: previous.shared_state.clone(),
       tls_server_config: previous.tls_server_config.clone(),

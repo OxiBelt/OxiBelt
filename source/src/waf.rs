@@ -18,13 +18,14 @@ use tracing::{debug, warn};
 use crate::config::{
   Config, LimitMode, RateLimitKey, resolve_existing_local_config_file_path_with_logical,
 };
+use crate::dynamic_policy::DynamicPolicyContext;
 use crate::limits::{LimitState, RateLimitCheck, RateLimitContext};
 use crate::routes::normalize_host;
 use crate::shared_state::SharedState;
 
 mod body_scan;
 mod crs;
-mod normalization;
+pub(crate) mod normalization;
 mod person_proof;
 
 use crs::{CrsDecision, CrsEngine, WafCrsConfig};
@@ -1749,6 +1750,7 @@ pub struct WafRequestInput<'a> {
   pub protocol: WafProtocol,
   pub transport_network: WafTransportNetwork,
   pub tags: &'a HashMap<String, String>,
+  pub dynamic_policy: &'a DynamicPolicyContext,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2360,6 +2362,9 @@ impl AccessLogJsonValue {
         ],
         ctx,
       ),
+      ObjectRef::DynamicPolicy => {
+        object_members_json(object, &["Matched", "Action", "Name", "Reason"], ctx)
+      }
       ObjectRef::Context | ObjectRef::Request | ObjectRef::Response => {
         bail!("top-level OxiRule objects cannot be written as access-log fields")
       }
@@ -2912,6 +2917,7 @@ enum ObjectRef {
   RequestTags,
   RequestTls,
   RequestTokenBindings,
+  DynamicPolicy,
   Response,
   ResponseHttp,
   ResponseHeaders,
@@ -2928,6 +2934,7 @@ fn eval_ident(name: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
   match name {
     "Context" => Ok(Value::Object(ObjectRef::Context)),
     "Request" => Ok(Value::Object(ObjectRef::Request)),
+    "DynamicPolicy" => Ok(Value::Object(ObjectRef::DynamicPolicy)),
     "Response" if ctx.phase == WafPhase::Response => Ok(Value::Object(ObjectRef::Response)),
     "Response" => bail!("Response is unavailable in request phase"),
     _ => bail!("unknown identifier {name}"),
@@ -2967,6 +2974,34 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
       Ok(Value::String(ctx.request.transaction_id.to_string()))
     }
     (ObjectRef::Context, "Mode") => Ok(Value::String(ctx.mode.as_str().to_string())),
+    (ObjectRef::DynamicPolicy, "Matched") => Ok(Value::Bool(ctx.request.dynamic_policy.matched)),
+    (ObjectRef::DynamicPolicy, "Action") => Ok(
+      ctx
+        .request
+        .dynamic_policy
+        .action
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::DynamicPolicy, "Name") => Ok(
+      ctx
+        .request
+        .dynamic_policy
+        .name
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::DynamicPolicy, "Reason") => Ok(
+      ctx
+        .request
+        .dynamic_policy
+        .reason
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::Request, "Id") => Ok(Value::String(ctx.request.request_id.to_string())),
     (ObjectRef::Request, "ReceivedAtUnixMs") => Ok(Value::Int(
       i64::try_from(ctx.request.received_at_unix_ms).unwrap_or(i64::MAX),

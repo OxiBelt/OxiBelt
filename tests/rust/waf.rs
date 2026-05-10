@@ -3,14 +3,22 @@ mod common;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
+use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
     HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput, WafResponseInput,
     WafTlsMetadata, WafTransportNetwork, compile_access_log_fields,
 };
 use ring::digest;
+
+static TEST_DYNAMIC_POLICY: OnceLock<DynamicPolicyContext> = OnceLock::new();
+
+fn test_dynamic_policy() -> &'static DynamicPolicyContext {
+    TEST_DYNAMIC_POLICY.get_or_init(DynamicPolicyContext::default)
+}
 
 #[test]
 fn rule_monitor_mode_overrides_global_enforcing_and_counts_hit() {
@@ -351,6 +359,63 @@ body = "Forbidden"
         decision.terminal.as_ref().map(|terminal| terminal.status),
         Some(StatusCode::FORBIDDEN)
     );
+}
+
+#[test]
+fn request_rule_can_read_dynamic_policy_snapshot_context() {
+    let temp_dir = common::TempDir::new("waf-dynamic-policy-context");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-dynamic-policy-context");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "dynamic-rate-tag"
+phase = "request"
+priority = 100
+when = "DynamicPolicy.Matched && DynamicPolicy.Action == 'rate_limit' && DynamicPolicy.Name == 'login-rate'"
+
+[[waf.rules.actions]]
+type = "set_tag"
+key = "dp"
+value = "hit"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/app/login".parse().expect("URI should parse");
+    let dynamic_policy = DynamicPolicyContext {
+        matched: true,
+        action: Some("rate_limit".to_string()),
+        name: Some("login-rate".to_string()),
+        reason: Some("failed login".to_string()),
+    };
+    let input = WafRequestInput {
+        dynamic_policy: &dynamic_policy,
+        ..request_input(
+            &method,
+            &uri,
+            &headers,
+            &tags,
+            "203.0.113.10:49152".parse().unwrap(),
+        )
+    };
+    let decision = engine.evaluate_request(input);
+
+    assert!(decision.terminal.is_none());
+    assert_eq!(decision.tags, vec![("dp".to_string(), "hit".to_string())]);
 }
 
 #[test]
@@ -3685,6 +3750,7 @@ fn request_input_with_transport<'a>(
         protocol: WafProtocol::Http,
         transport_network: WafTransportNetwork::Tcp,
         tags,
+        dynamic_policy: test_dynamic_policy(),
     }
 }
 
@@ -3717,6 +3783,7 @@ fn request_input_with_protocol_and_network<'a>(
         protocol,
         transport_network,
         tags,
+        dynamic_policy: test_dynamic_policy(),
     }
 }
 

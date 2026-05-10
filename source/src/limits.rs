@@ -91,6 +91,16 @@ pub struct RateLimitCheck<'a> {
   pub status: u16,
 }
 
+struct RateLimitBucketSpec<'a> {
+  name: &'a str,
+  key: &'a str,
+  rate: ParsedRate,
+  burst: u32,
+  max_buckets: usize,
+  mode: LimitMode,
+  status: u16,
+}
+
 impl<'a> From<&'a RateLimitConfig> for RateLimitCheck<'a> {
   fn from(limit: &'a RateLimitConfig) -> Self {
     Self {
@@ -358,15 +368,53 @@ impl LimitState {
       return Some(StatusCode::INTERNAL_SERVER_ERROR);
     };
     let key = rate_limit_key(context, limit.key, limit.token_header);
+    self.check_rate_limit_bucket(RateLimitBucketSpec {
+      name: limit.name,
+      key: &key,
+      rate,
+      burst: limit.burst,
+      max_buckets: limit.max_buckets,
+      mode: limit.mode,
+      status: limit.status,
+    })
+  }
+
+  pub fn check_direct_rate_limit(
+    &self,
+    bucket: &str,
+    rate: &str,
+    burst: u32,
+    status: u16,
+  ) -> Option<StatusCode> {
+    let Ok(rate) = parse_rate(rate) else {
+      return Some(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    self.check_rate_limit_bucket(RateLimitBucketSpec {
+      name: bucket,
+      key: "",
+      rate,
+      burst,
+      max_buckets: 1,
+      mode: LimitMode::Enforcing,
+      status,
+    })
+  }
+
+  fn check_rate_limit_bucket(&self, spec: RateLimitBucketSpec<'_>) -> Option<StatusCode> {
     if let Some(shared) = &self.shared_state
       && shared.has_rate_limits()
     {
-      match shared.take_rate_token(limit.name, &key, rate, limit.burst) {
+      let result = if spec.key.is_empty() {
+        shared.take_rate_token_bucket(spec.name, spec.rate, spec.burst)
+      } else {
+        shared.take_rate_token(spec.name, spec.key, spec.rate, spec.burst)
+      };
+      match result {
         Ok(true) => {}
         Ok(false) => {
-          if limit.mode == LimitMode::Enforcing {
+          if spec.mode == LimitMode::Enforcing {
             return Some(
-              StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
+              StatusCode::from_u16(spec.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
             );
           }
         }
@@ -377,18 +425,18 @@ impl LimitState {
       }
       return None;
     }
-    let burst = f64::from(limit.burst.max(1));
+    let burst = f64::from(spec.burst.max(1));
     let now = Instant::now();
     let mut buckets = self.rates.lock().expect("rate limit lock poisoned");
-    let bucket_key = (limit.name.to_string(), key);
+    let bucket_key = (spec.name.to_string(), spec.key.to_string());
     if let Some(bucket) = buckets.get_mut(&bucket_key) {
-      return take_local_rate_token(bucket, now, rate, burst, limit.mode, limit.status);
+      return take_local_rate_token(bucket, now, spec.rate, burst, spec.mode, spec.status);
     }
 
-    prune_refilled_rate_buckets(&mut buckets, limit.name, now, rate.per_second, burst);
-    if rate_limit_bucket_count(&buckets, limit.name) >= limit.max_buckets.max(1) {
-      if limit.mode == LimitMode::Enforcing {
-        return Some(rate_limit_status(limit.status));
+    prune_refilled_rate_buckets(&mut buckets, spec.name, now, spec.rate.per_second, burst);
+    if rate_limit_bucket_count(&buckets, spec.name) >= spec.max_buckets.max(1) {
+      if spec.mode == LimitMode::Enforcing {
+        return Some(rate_limit_status(spec.status));
       }
       return None;
     }
@@ -397,7 +445,7 @@ impl LimitState {
       tokens: burst,
       last: now,
     });
-    take_local_rate_token(bucket, now, rate, burst, limit.mode, limit.status)
+    take_local_rate_token(bucket, now, spec.rate, burst, spec.mode, spec.status)
   }
 
   fn release_connection(&self, release: &LocalConnectionRelease) {

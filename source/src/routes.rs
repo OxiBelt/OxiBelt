@@ -93,7 +93,7 @@ fn match_host_pattern(pattern: &str, host: &str) -> Option<usize> {
   None
 }
 
-fn path_prefix_matches(prefix: &str, path: &str) -> bool {
+pub fn path_prefix_matches(prefix: &str, path: &str) -> bool {
   if prefix == "/" {
     return true;
   }

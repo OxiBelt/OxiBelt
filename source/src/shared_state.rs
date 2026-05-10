@@ -234,6 +234,24 @@ impl SharedState {
     )
   }
 
+  pub fn take_rate_token_bucket(
+    &self,
+    bucket: &str,
+    rate: ParsedRate,
+    burst: u32,
+  ) -> anyhow::Result<bool> {
+    let Some(backend) = &self.rate_limits else {
+      return Ok(true);
+    };
+    let key = self.key(&format!("rate:{bucket}"));
+    backend.rate_take(
+      &key,
+      rate.per_second(),
+      burst.max(1),
+      self.operation_timeout,
+    )
+  }
+
   pub fn acquire_connections(
     &self,
     scopes: &[ConnectionScope<'_>],

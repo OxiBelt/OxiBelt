@@ -311,6 +311,7 @@ cache_lock_ms = 10000
 # upstream_health_backend = "cluster"
 # cache_backend = "cluster"
 # reload_backend = "cluster"
+# dynamic_policy_backend = "cluster"
 
 # [[shared_state.backends]]
 # name = "cluster"
@@ -324,6 +325,19 @@ cache_lock_ms = 10000
 # ca_cert = "postgres-ca.pem"
 # client_cert = "postgres-client.pem"
 # client_key = "postgres-client.key"
+
+[dynamic_policy]
+enabled = false
+# backend = "cluster" # PostgreSQL shared_state backend used as the policy source
+refresh_interval_ms = 2000
+max_policies = 10000
+fail_policy = "use_last_good" # use_last_good | fail_closed_on_startup | disabled_on_error
+default_status = 429
+default_body = "Blocked by dynamic policy"
+
+[dynamic_policy.matching]
+trust_route_name = true
+normalize_path = true
 
 [waf]
 enabled = false

@@ -6,11 +6,11 @@ use std::path::Path;
 use base64::Engine;
 use oxibelt::config::{
     AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
-    ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, EarlyHintsMode,
-    ErrorResponseMode, ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode,
-    OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind, TlsVersion,
-    TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy,
+    EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode,
+    HotReloadMode, OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
+    QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
+    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -936,6 +936,7 @@ person_proof_backend = "postgres-main"
 upstream_health_backend = "redis-main"
 cache_backend = "postgres-main"
 reload_backend = "postgres-main"
+dynamic_policy_backend = "postgres-main"
 operation_timeout_ms = 250
 connection_lease_ms = 30000
 cache_lock_ms = 5000
@@ -970,6 +971,134 @@ max_connections = 2
         config.shared_state.person_proof_backend.as_deref(),
         Some("postgres-main")
     );
+    assert_eq!(
+        config.shared_state.dynamic_policy_backend.as_deref(),
+        Some("postgres-main")
+    );
+}
+
+#[test]
+fn dynamic_policy_config_parses_postgres_backend_mapping() {
+    let temp_dir = common::TempDir::new("dynamic-policy-config");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "dynamic-policy");
+    let raw = format!(
+        r#"
+{}
+
+[dynamic_policy]
+enabled = true
+backend = "postgres-main"
+refresh_interval_ms = 250
+max_policies = 256
+fail_policy = "disabled_on_error"
+default_status = 403
+default_body = "blocked"
+
+[dynamic_policy.matching]
+trust_route_name = true
+normalize_path = true
+
+[shared_state]
+enabled = true
+namespace = "matrix"
+dynamic_policy_backend = "postgres-main"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(config.dynamic_policy.enabled);
+    assert_eq!(
+        config.dynamic_policy.backend.as_deref(),
+        Some("postgres-main")
+    );
+    assert_eq!(
+        config.dynamic_policy.fail_policy,
+        DynamicPolicyFailPolicy::DisabledOnError
+    );
+    assert_eq!(config.dynamic_policy.default_status, 403);
+}
+
+#[test]
+fn dynamic_policy_rejects_non_postgres_backend() {
+    let temp_dir = common::TempDir::new("dynamic-policy-redis");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "dynamic-policy-redis");
+    let raw = format!(
+        r#"
+{}
+
+[dynamic_policy]
+enabled = true
+backend = "redis-main"
+
+[shared_state]
+enabled = true
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("dynamic policy should require postgres");
+
+    assert!(
+        error
+            .to_string()
+            .contains("dynamic_policy backend redis-main must use kind = \"postgres\""),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn dynamic_policy_rejects_invalid_values() {
+    let temp_dir = common::TempDir::new("dynamic-policy-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "dynamic-policy-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (setting, expected) in [
+        (
+            "refresh_interval_ms = 0",
+            "dynamic_policy.refresh_interval_ms must be greater than 0",
+        ),
+        (
+            "max_policies = 0",
+            "dynamic_policy.max_policies must be greater than 0",
+        ),
+        (
+            "default_status = 99",
+            "dynamic_policy.default_status is not a valid HTTP status",
+        ),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[dynamic_policy]
+{setting}
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error for {setting}: {error}"
+        );
+    }
 }
 
 #[test]

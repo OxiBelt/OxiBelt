@@ -101,6 +101,7 @@ pub(super) fn upstream_error_response(
     protocol,
     transport_network,
     tags,
+    dynamic_policy: &access_log.dynamic_policy,
   };
   let response_waf = state.waf.evaluate_response(WafResponseInput {
     request,

@@ -209,6 +209,8 @@ Forbidden constructs:
 - `await`, promises, external I/O, file access, environment access, network access, clock access, random access, or process execution.
 - Unbounded loops, comprehensions, and map construction in v1.
 
+Dynamic policy integration does not change this sandbox: OxiRule can only read `DynamicPolicy.*` values already computed from the current in-memory snapshot.
+
 Nullable values must be checked before nested access:
 
 ```cel
@@ -420,6 +422,15 @@ Context.RouteName: String | Null
 Context.TransactionId: String
 Context.Mode: 'enforcing' | 'monitor' # effective mode for the current rule, or global mode outside a rule
 ```
+
+```text
+DynamicPolicy.Matched: Bool
+DynamicPolicy.Action: 'reject' | 'rate_limit' | Null
+DynamicPolicy.Name: String | Null
+DynamicPolicy.Reason: String | Null
+```
+
+`DynamicPolicy.*` is read-only request context from OxiBelt's in-memory dynamic policy snapshot. It does not perform SQL or any other external I/O while evaluating an OxiRule expression. Terminal dynamic policy rejects happen before request-phase OxiRule evaluation, so these fields are mainly useful for requests that matched an allowed dynamic `rate_limit` policy or for response/access-log expressions.
 
 ```text
 Request.Id: String

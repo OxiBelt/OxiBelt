@@ -24,6 +24,12 @@ pub struct Metrics {
   cache_background_refresh_success_total: AtomicU64,
   cache_background_refresh_errors_total: AtomicU64,
   cache_background_refresh_skips_total: AtomicU64,
+  dynamic_policy_matches_total: AtomicU64,
+  dynamic_policy_rejects_total: AtomicU64,
+  dynamic_policy_rate_limit_denied_total: AtomicU64,
+  dynamic_policy_refresh_success_total: AtomicU64,
+  dynamic_policy_refresh_errors_total: AtomicU64,
+  dynamic_policy_active_policies: AtomicU64,
 }
 
 impl Metrics {
@@ -116,9 +122,45 @@ impl Metrics {
       .fetch_add(1, Ordering::Relaxed);
   }
 
+  pub fn record_dynamic_policy_match(&self) {
+    self
+      .dynamic_policy_matches_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_dynamic_policy_reject(&self) {
+    self
+      .dynamic_policy_rejects_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_dynamic_policy_rate_limit_denied(&self) {
+    self
+      .dynamic_policy_rate_limit_denied_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_dynamic_policy_refresh_success(&self) {
+    self
+      .dynamic_policy_refresh_success_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_dynamic_policy_refresh_error(&self) {
+    self
+      .dynamic_policy_refresh_errors_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn set_dynamic_policy_active_policies(&self, count: u64) {
+    self
+      .dynamic_policy_active_policies
+      .store(count, Ordering::Relaxed);
+  }
+
   pub fn prometheus(&self, cache: CacheStats) -> String {
     format!(
-      "# TYPE oxibelt_requests_total counter\noxibelt_requests_total {}\n# TYPE oxibelt_responses_total counter\noxibelt_responses_total {}\n# TYPE oxibelt_upstream_errors_total counter\noxibelt_upstream_errors_total {}\n# TYPE oxibelt_cache_hits_total counter\noxibelt_cache_hits_total {}\n# TYPE oxibelt_cache_misses_total counter\noxibelt_cache_misses_total {}\n# TYPE oxibelt_cache_revalidations_total counter\noxibelt_cache_revalidations_total {}\n# TYPE oxibelt_cache_stale_served_total counter\noxibelt_cache_stale_served_total {}\n# TYPE oxibelt_cache_purges_total counter\noxibelt_cache_purges_total {}\n# TYPE oxibelt_cache_tag_purges_total counter\noxibelt_cache_tag_purges_total {}\n# TYPE oxibelt_cache_admission_rejections_total counter\noxibelt_cache_admission_rejections_total {}\n# TYPE oxibelt_cache_fill_waiters_total counter\noxibelt_cache_fill_waiters_total {}\n# TYPE oxibelt_cache_fill_lock_conflicts_total counter\noxibelt_cache_fill_lock_conflicts_total {}\n# TYPE oxibelt_cache_fill_lock_timeouts_total counter\noxibelt_cache_fill_lock_timeouts_total {}\n# TYPE oxibelt_cache_fill_errors_total counter\noxibelt_cache_fill_errors_total {}\n# TYPE oxibelt_cache_background_refresh_success_total counter\noxibelt_cache_background_refresh_success_total {}\n# TYPE oxibelt_cache_background_refresh_errors_total counter\noxibelt_cache_background_refresh_errors_total {}\n# TYPE oxibelt_cache_background_refresh_skips_total counter\noxibelt_cache_background_refresh_skips_total {}\n# TYPE oxibelt_cache_disk_recovered_entries_total counter\noxibelt_cache_disk_recovered_entries_total {}\n# TYPE oxibelt_cache_disk_recovery_errors_total counter\noxibelt_cache_disk_recovery_errors_total {}\n# TYPE oxibelt_cache_disk_recovery_removed_files_total counter\noxibelt_cache_disk_recovery_removed_files_total {}\n# TYPE oxibelt_cache_memory_entries gauge\noxibelt_cache_memory_entries {}\n# TYPE oxibelt_cache_disk_entries gauge\noxibelt_cache_disk_entries {}\n# TYPE oxibelt_cache_tmpfs_entries gauge\noxibelt_cache_tmpfs_entries {}\n# TYPE oxibelt_cache_memory_bytes gauge\noxibelt_cache_memory_bytes {}\n# TYPE oxibelt_cache_disk_bytes gauge\noxibelt_cache_disk_bytes {}\n# TYPE oxibelt_cache_tmpfs_bytes gauge\noxibelt_cache_tmpfs_bytes {}\n",
+      "# TYPE oxibelt_requests_total counter\noxibelt_requests_total {}\n# TYPE oxibelt_responses_total counter\noxibelt_responses_total {}\n# TYPE oxibelt_upstream_errors_total counter\noxibelt_upstream_errors_total {}\n# TYPE oxibelt_cache_hits_total counter\noxibelt_cache_hits_total {}\n# TYPE oxibelt_cache_misses_total counter\noxibelt_cache_misses_total {}\n# TYPE oxibelt_cache_revalidations_total counter\noxibelt_cache_revalidations_total {}\n# TYPE oxibelt_cache_stale_served_total counter\noxibelt_cache_stale_served_total {}\n# TYPE oxibelt_cache_purges_total counter\noxibelt_cache_purges_total {}\n# TYPE oxibelt_cache_tag_purges_total counter\noxibelt_cache_tag_purges_total {}\n# TYPE oxibelt_cache_admission_rejections_total counter\noxibelt_cache_admission_rejections_total {}\n# TYPE oxibelt_cache_fill_waiters_total counter\noxibelt_cache_fill_waiters_total {}\n# TYPE oxibelt_cache_fill_lock_conflicts_total counter\noxibelt_cache_fill_lock_conflicts_total {}\n# TYPE oxibelt_cache_fill_lock_timeouts_total counter\noxibelt_cache_fill_lock_timeouts_total {}\n# TYPE oxibelt_cache_fill_errors_total counter\noxibelt_cache_fill_errors_total {}\n# TYPE oxibelt_cache_background_refresh_success_total counter\noxibelt_cache_background_refresh_success_total {}\n# TYPE oxibelt_cache_background_refresh_errors_total counter\noxibelt_cache_background_refresh_errors_total {}\n# TYPE oxibelt_cache_background_refresh_skips_total counter\noxibelt_cache_background_refresh_skips_total {}\n# TYPE oxibelt_dynamic_policy_matches_total counter\noxibelt_dynamic_policy_matches_total {}\n# TYPE oxibelt_dynamic_policy_rejects_total counter\noxibelt_dynamic_policy_rejects_total {}\n# TYPE oxibelt_dynamic_policy_rate_limit_denied_total counter\noxibelt_dynamic_policy_rate_limit_denied_total {}\n# TYPE oxibelt_dynamic_policy_refresh_success_total counter\noxibelt_dynamic_policy_refresh_success_total {}\n# TYPE oxibelt_dynamic_policy_refresh_errors_total counter\noxibelt_dynamic_policy_refresh_errors_total {}\n# TYPE oxibelt_dynamic_policy_active_policies gauge\noxibelt_dynamic_policy_active_policies {}\n# TYPE oxibelt_cache_disk_recovered_entries_total counter\noxibelt_cache_disk_recovered_entries_total {}\n# TYPE oxibelt_cache_disk_recovery_errors_total counter\noxibelt_cache_disk_recovery_errors_total {}\n# TYPE oxibelt_cache_disk_recovery_removed_files_total counter\noxibelt_cache_disk_recovery_removed_files_total {}\n# TYPE oxibelt_cache_memory_entries gauge\noxibelt_cache_memory_entries {}\n# TYPE oxibelt_cache_disk_entries gauge\noxibelt_cache_disk_entries {}\n# TYPE oxibelt_cache_tmpfs_entries gauge\noxibelt_cache_tmpfs_entries {}\n# TYPE oxibelt_cache_memory_bytes gauge\noxibelt_cache_memory_bytes {}\n# TYPE oxibelt_cache_disk_bytes gauge\noxibelt_cache_disk_bytes {}\n# TYPE oxibelt_cache_tmpfs_bytes gauge\noxibelt_cache_tmpfs_bytes {}\n",
       self.requests_total.load(Ordering::Relaxed),
       self.responses_total.load(Ordering::Relaxed),
       self.upstream_errors_total.load(Ordering::Relaxed),
@@ -144,6 +186,18 @@ impl Metrics {
       self
         .cache_background_refresh_skips_total
         .load(Ordering::Relaxed),
+      self.dynamic_policy_matches_total.load(Ordering::Relaxed),
+      self.dynamic_policy_rejects_total.load(Ordering::Relaxed),
+      self
+        .dynamic_policy_rate_limit_denied_total
+        .load(Ordering::Relaxed),
+      self
+        .dynamic_policy_refresh_success_total
+        .load(Ordering::Relaxed),
+      self
+        .dynamic_policy_refresh_errors_total
+        .load(Ordering::Relaxed),
+      self.dynamic_policy_active_policies.load(Ordering::Relaxed),
       cache.disk_recovered_entries_total,
       cache.disk_recovery_errors_total,
       cache.disk_recovery_removed_files_total,

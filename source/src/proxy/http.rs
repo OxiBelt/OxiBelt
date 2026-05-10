@@ -15,6 +15,7 @@ use crate::config::{
   Config, ConnectionLimitIdentityMode, HttpVersion, ProxyProtocolEgressMode, RouteConfig,
   UpstreamConfig,
 };
+use crate::dynamic_policy::{DynamicPolicyContext, DynamicPolicyRequest};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::pools::PoolSelection;
@@ -67,6 +68,7 @@ struct SystemAccessLogContext {
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
   tags: std::collections::HashMap<String, String>,
+  dynamic_policy: DynamicPolicyContext,
   upstream_name: String,
   upstream_pool: Option<String>,
   upstream_scheme: String,
@@ -105,6 +107,7 @@ impl SystemAccessLogContext {
       protocol,
       transport_network,
       tags: std::collections::HashMap::new(),
+      dynamic_policy: DynamicPolicyContext::default(),
       upstream_name: String::new(),
       upstream_pool: None,
       upstream_scheme: String::new(),
@@ -134,6 +137,7 @@ impl SystemAccessLogContext {
       protocol: self.protocol,
       transport_network: self.transport_network,
       tags: &self.tags,
+      dynamic_policy: &self.dynamic_policy,
     }
   }
 
@@ -505,6 +509,20 @@ where
     return text_response(status, "rate limit exceeded");
   }
 
+  let dynamic_policy = state.dynamic_policy.evaluate(
+    DynamicPolicyRequest {
+      client_ip: client_addr.ip(),
+      route_name: &resolved.route.name,
+      method: &request_method,
+      path: request_uri.path(),
+    },
+    &state.limits,
+  );
+  access_log.dynamic_policy = dynamic_policy.context;
+  if let Some(terminal) = dynamic_policy.terminal {
+    return text_response(terminal.status, &terminal.body);
+  }
+
   let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
   let request = request.map(|body| {
     body::with_read_timeout(
@@ -555,6 +573,7 @@ where
     protocol,
     transport_network,
     tags: &tags,
+    dynamic_policy: &access_log.dynamic_policy,
   });
 
   for (key, value) in &request_waf.tags {
@@ -1422,6 +1441,7 @@ where
       protocol,
       transport_network,
       tags: &tags,
+      dynamic_policy: &access_log.dynamic_policy,
     };
     let response_waf = state.waf.evaluate_response(WafResponseInput {
       request: request_input,
@@ -2944,6 +2964,20 @@ pub(crate) fn prepare_webtransport(
     )));
   };
 
+  let dynamic_policy = state.dynamic_policy.evaluate(
+    DynamicPolicyRequest {
+      client_ip: client_addr.ip(),
+      route_name: &resolved.route.name,
+      method: &request_method,
+      path: request_uri.path(),
+    },
+    &state.limits,
+  );
+  if let Some(terminal) = dynamic_policy.terminal {
+    return Err(Box::new(text_response(terminal.status, &terminal.body)));
+  }
+  let dynamic_policy_context = dynamic_policy.context;
+
   let request_waf = state.waf.evaluate_request(WafRequestInput {
     request_id: "",
     transaction_id: "",
@@ -2962,6 +2996,7 @@ pub(crate) fn prepare_webtransport(
     protocol: WafProtocol::Webtransport,
     transport_network: WafTransportNetwork::Udp,
     tags: &tags,
+    dynamic_policy: &dynamic_policy_context,
   });
 
   for (key, value) in request_waf.tags {
