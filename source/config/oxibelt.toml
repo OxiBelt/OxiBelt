@@ -339,7 +339,7 @@ default_body = "Blocked by dynamic policy"
 enabled = false
 require_ttl = true
 signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
-# default_source_quota = 1000
+# default_source_quota = 1000 # shared by all sources without an explicit source_quotas entry
 
 # [[dynamic_policy.automation_api.source_quotas]]
 # source = "vaultwarden"

@@ -1,11 +1,11 @@
 use anyhow::Context;
-use sqlx::{Pool, Postgres, Row};
+use sqlx::{Pool, Postgres, Row, Transaction};
 
 use super::DynamicPolicyAdminRecord;
 use crate::dynamic_policy::{PolicyRow, policy_row_from_pg};
 
-pub(super) async fn select_policy_row(
-  pool: &Pool<Postgres>,
+pub(super) async fn select_policy_row_tx(
+  tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   id: i64,
 ) -> anyhow::Result<Option<PolicyRow>> {
@@ -18,7 +18,7 @@ pub(super) async fn select_policy_row(
   )
   .bind(namespace)
   .bind(id)
-  .fetch_optional(pool)
+  .fetch_optional(&mut **tx)
   .await?;
   row.as_ref().map(policy_row_from_pg).transpose()
 }
@@ -62,6 +62,26 @@ pub(super) async fn select_admin_record(
   row.as_ref().map(admin_record_from_row).transpose()
 }
 
+pub(super) async fn select_admin_record_tx(
+  tx: &mut Transaction<'_, Postgres>,
+  namespace: &str,
+  id: i64,
+) -> anyhow::Result<Option<DynamicPolicyAdminRecord>> {
+  let row = sqlx::query(
+    "SELECT id, namespace, enabled, priority, name, source, action, subject_type, subject,
+            route_name, method, path_prefix, rate, burst, status, body, reason, code, mode,
+            writer_identity, signature_version, row_signature, expires_at::text AS expires_at,
+            created_at::text AS created_at, updated_at::text AS updated_at
+       FROM oxibelt_dynamic_policies
+      WHERE namespace = $1 AND id = $2",
+  )
+  .bind(namespace)
+  .bind(id)
+  .fetch_optional(&mut **tx)
+  .await?;
+  row.as_ref().map(admin_record_from_row).transpose()
+}
+
 fn admin_record_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<DynamicPolicyAdminRecord> {
   Ok(DynamicPolicyAdminRecord {
     id: row.try_get("id")?,
@@ -92,8 +112,8 @@ fn admin_record_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<DynamicP
   })
 }
 
-pub(super) async fn policy_ids_by_source_name(
-  pool: &Pool<Postgres>,
+pub(super) async fn policy_ids_by_source_name_tx(
+  tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   source: &str,
   name: &str,
@@ -106,7 +126,7 @@ pub(super) async fn policy_ids_by_source_name(
   .bind(namespace)
   .bind(source)
   .bind(name)
-  .fetch_all(pool)
+  .fetch_all(&mut **tx)
   .await?;
   Ok(ids)
 }
@@ -121,6 +141,23 @@ pub(super) async fn bump_generation(pool: &Pool<Postgres>, namespace: &str) -> a
   )
   .bind(namespace)
   .execute(pool)
+  .await?;
+  Ok(())
+}
+
+pub(super) async fn bump_generation_tx(
+  tx: &mut Transaction<'_, Postgres>,
+  namespace: &str,
+) -> anyhow::Result<()> {
+  sqlx::query(
+    "INSERT INTO oxibelt_dynamic_policy_generation (namespace, generation, updated_at)
+     VALUES ($1, 1, now())
+     ON CONFLICT (namespace)
+     DO UPDATE SET generation = oxibelt_dynamic_policy_generation.generation + 1,
+                   updated_at = now()",
+  )
+  .bind(namespace)
+  .execute(&mut **tx)
   .await?;
   Ok(())
 }
@@ -151,6 +188,37 @@ pub(super) async fn audit(
   .bind(outcome)
   .bind(error)
   .execute(pool)
+  .await
+  .context("failed to write dynamic policy audit row")?;
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn audit_tx(
+  tx: &mut Transaction<'_, Postgres>,
+  namespace: &str,
+  policy_id: Option<i64>,
+  actor: &str,
+  operation: &str,
+  source: &str,
+  name: &str,
+  outcome: &str,
+  error: Option<&str>,
+) -> anyhow::Result<()> {
+  sqlx::query(
+    "INSERT INTO oxibelt_dynamic_policy_audit
+       (namespace, policy_id, actor, operation, source, name, outcome, error)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+  )
+  .bind(namespace)
+  .bind(policy_id)
+  .bind(actor)
+  .bind(operation)
+  .bind(source)
+  .bind(name)
+  .bind(outcome)
+  .bind(error)
+  .execute(&mut **tx)
   .await
   .context("failed to write dynamic policy audit row")?;
   Ok(())

@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
-use sqlx::{Pool, Postgres};
+use sqlx::{Postgres, Transaction};
 
 use super::{DynamicPolicyRuntime, PolicyRow, signature};
 
+mod quota;
 mod store;
 mod validation;
+use quota::enforce_policy_quotas;
 use store::*;
 use validation::*;
 
@@ -142,12 +144,20 @@ impl DynamicPolicyRuntime {
   ) -> anyhow::Result<DynamicPolicyAdminRecord> {
     let inner = self.admin_inner()?;
     validate_create(&inner, &input)?;
-    enforce_source_quota(&inner, &input.source, None, input.enabled.unwrap_or(true)).await?;
-    let id = insert_policy(&inner.pool, &inner.namespace, actor, &input).await?;
-    sign_policy(&inner, id).await?;
-    bump_generation(&inner.pool, &inner.namespace).await?;
-    audit(
-      &inner.pool,
+    let mut tx = begin_admin_write(&inner).await?;
+    enforce_policy_quotas(
+      &mut tx,
+      &inner,
+      &input.source,
+      None,
+      input.enabled.unwrap_or(true),
+    )
+    .await?;
+    let id = insert_policy(&mut tx, &inner.namespace, actor, &input).await?;
+    sign_policy(&mut tx, &inner, id).await?;
+    bump_generation_tx(&mut tx, &inner.namespace).await?;
+    audit_tx(
+      &mut tx,
       &inner.namespace,
       Some(id),
       actor,
@@ -158,6 +168,7 @@ impl DynamicPolicyRuntime {
       None,
     )
     .await?;
+    tx.commit().await?;
     select_admin_record(&inner.pool, &inner.namespace, id)
       .await?
       .context("created dynamic policy disappeared")
@@ -170,19 +181,20 @@ impl DynamicPolicyRuntime {
     input: DynamicPolicyAdminPatch,
   ) -> anyhow::Result<Option<DynamicPolicyAdminRecord>> {
     let inner = self.admin_inner()?;
-    let Some(existing) = select_admin_record(&inner.pool, &inner.namespace, id).await? else {
+    let mut tx = begin_admin_write(&inner).await?;
+    let Some(existing) = select_admin_record_tx(&mut tx, &inner.namespace, id).await? else {
       return Ok(None);
     };
     validate_patch(&inner, &input)?;
     validate_patch_merged(&inner, &existing, &input)?;
     let source = input.source.as_deref().unwrap_or(&existing.source);
     let enabled = input.enabled.unwrap_or(existing.enabled);
-    enforce_source_quota(&inner, source, Some(id), enabled).await?;
-    update_policy(&inner.pool, &inner.namespace, actor, id, &input).await?;
-    sign_policy(&inner, id).await?;
-    bump_generation(&inner.pool, &inner.namespace).await?;
-    audit(
-      &inner.pool,
+    enforce_policy_quotas(&mut tx, &inner, source, Some(id), enabled).await?;
+    update_policy(&mut tx, &inner.namespace, actor, id, &input).await?;
+    sign_policy(&mut tx, &inner, id).await?;
+    bump_generation_tx(&mut tx, &inner.namespace).await?;
+    audit_tx(
+      &mut tx,
       &inner.namespace,
       Some(id),
       actor,
@@ -193,6 +205,7 @@ impl DynamicPolicyRuntime {
       None,
     )
     .await?;
+    tx.commit().await?;
     select_admin_record(&inner.pool, &inner.namespace, id).await
   }
 
@@ -238,42 +251,47 @@ impl DynamicPolicyRuntime {
     input: DynamicPolicyAdminImport,
   ) -> anyhow::Result<Vec<DynamicPolicyAdminRecord>> {
     let inner = self.admin_inner()?;
-    let mut records = Vec::with_capacity(input.policies.len());
+    let mut tx = begin_admin_write(&inner).await?;
+    let mut ids = Vec::with_capacity(input.policies.len());
     for policy in input.policies {
       validate_create(&inner, &policy)?;
       let existing =
-        policy_ids_by_source_name(&inner.pool, &inner.namespace, &policy.source, &policy.name)
+        policy_ids_by_source_name_tx(&mut tx, &inner.namespace, &policy.source, &policy.name)
           .await?;
       let id = if let Some((&id, duplicates)) = existing.split_first() {
-        enforce_source_quota(
+        enforce_policy_quotas(
+          &mut tx,
           &inner,
           &policy.source,
           Some(id),
           policy.enabled.unwrap_or(true),
         )
         .await?;
-        replace_policy(&inner.pool, &inner.namespace, actor, id, &policy).await?;
+        replace_policy(&mut tx, &inner.namespace, actor, id, &policy).await?;
         if !duplicates.is_empty() {
           sqlx::query("UPDATE oxibelt_dynamic_policies SET enabled = false, updated_at = now(), writer_identity = $3, signature_version = NULL, row_signature = NULL WHERE namespace = $1 AND id = ANY($2)")
             .bind(inner.namespace.as_ref())
             .bind(duplicates)
             .bind(actor)
-            .execute(&inner.pool)
+            .execute(&mut *tx)
             .await?;
         }
         id
       } else {
-        enforce_source_quota(&inner, &policy.source, None, policy.enabled.unwrap_or(true)).await?;
-        insert_policy(&inner.pool, &inner.namespace, actor, &policy).await?
+        enforce_policy_quotas(
+          &mut tx,
+          &inner,
+          &policy.source,
+          None,
+          policy.enabled.unwrap_or(true),
+        )
+        .await?;
+        insert_policy(&mut tx, &inner.namespace, actor, &policy).await?
       };
-      sign_policy(&inner, id).await?;
-      records.push(
-        select_admin_record(&inner.pool, &inner.namespace, id)
-          .await?
-          .context("imported dynamic policy disappeared")?,
-      );
-      audit(
-        &inner.pool,
+      sign_policy(&mut tx, &inner, id).await?;
+      ids.push(id);
+      audit_tx(
+        &mut tx,
         &inner.namespace,
         Some(id),
         actor,
@@ -285,7 +303,16 @@ impl DynamicPolicyRuntime {
       )
       .await?;
     }
-    bump_generation(&inner.pool, &inner.namespace).await?;
+    bump_generation_tx(&mut tx, &inner.namespace).await?;
+    tx.commit().await?;
+    let mut records = Vec::with_capacity(ids.len());
+    for id in ids {
+      records.push(
+        select_admin_record(&inner.pool, &inner.namespace, id)
+          .await?
+          .context("imported dynamic policy disappeared")?,
+      );
+    }
     Ok(records)
   }
 
@@ -300,8 +327,18 @@ impl DynamicPolicyRuntime {
   }
 }
 
+async fn begin_admin_write(
+  inner: &super::DynamicPolicyInner,
+) -> anyhow::Result<Transaction<'static, Postgres>> {
+  let mut tx = inner.pool.begin().await?;
+  sqlx::query("LOCK TABLE oxibelt_dynamic_policies IN SHARE ROW EXCLUSIVE MODE")
+    .execute(&mut *tx)
+    .await?;
+  Ok(tx)
+}
+
 async fn insert_policy(
-  pool: &Pool<Postgres>,
+  tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   actor: &str,
   input: &DynamicPolicyAdminCreate,
@@ -342,13 +379,13 @@ async fn insert_policy(
   .bind(actor)
   .bind(input.ttl_seconds)
   .bind(&input.expires_at)
-  .fetch_one(pool)
+  .fetch_one(&mut **tx)
   .await?;
   Ok(id)
 }
 
 async fn replace_policy(
-  pool: &Pool<Postgres>,
+  tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   actor: &str,
   id: i64,
@@ -390,13 +427,13 @@ async fn replace_policy(
   .bind(actor)
   .bind(input.ttl_seconds)
   .bind(&input.expires_at)
-  .execute(pool)
+  .execute(&mut **tx)
   .await?;
   Ok(())
 }
 
 async fn update_policy(
-  pool: &Pool<Postgres>,
+  tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   actor: &str,
   id: i64,
@@ -443,17 +480,21 @@ async fn update_policy(
   .bind(actor)
   .bind(input.ttl_seconds)
   .bind(&input.expires_at)
-  .execute(pool)
+  .execute(&mut **tx)
   .await?;
   Ok(())
 }
 
-async fn sign_policy(inner: &super::DynamicPolicyInner, id: i64) -> anyhow::Result<()> {
+async fn sign_policy(
+  tx: &mut Transaction<'_, Postgres>,
+  inner: &super::DynamicPolicyInner,
+  id: i64,
+) -> anyhow::Result<()> {
   let key = inner
     .signature_key
     .as_ref()
     .context("dynamic policy automation API signature key is unavailable")?;
-  let row = select_policy_row(&inner.pool, &inner.namespace, id)
+  let row = select_policy_row_tx(tx, &inner.namespace, id)
     .await?
     .context("dynamic policy row not found for signing")?;
   if row.enabled {
@@ -487,7 +528,7 @@ async fn sign_policy(inner: &super::DynamicPolicyInner, id: i64) -> anyhow::Resu
   .bind(id)
   .bind(signature::SIGNATURE_VERSION)
   .bind(signature)
-  .execute(&inner.pool)
+  .execute(&mut **tx)
   .await?;
   Ok(())
 }
@@ -518,34 +559,4 @@ fn signature_fields<'a>(
     writer_identity: row.writer_identity.as_deref(),
     expires_at: row.expires_at.as_deref(),
   }
-}
-
-async fn enforce_source_quota(
-  inner: &super::DynamicPolicyInner,
-  source: &str,
-  exclude_id: Option<i64>,
-  enabled: bool,
-) -> anyhow::Result<()> {
-  if !enabled {
-    return Ok(());
-  }
-  let quota = inner
-    .config
-    .automation_api
-    .quota_for_source(source, inner.config.max_policies);
-  let count: i64 = sqlx::query_scalar(
-    "SELECT count(*) FROM oxibelt_dynamic_policies
-      WHERE namespace = $1 AND source = $2 AND enabled = true
-        AND (expires_at IS NULL OR expires_at > now())
-        AND ($3::bigint IS NULL OR id <> $3)",
-  )
-  .bind(inner.namespace.as_ref())
-  .bind(source)
-  .bind(exclude_id)
-  .fetch_one(&inner.pool)
-  .await?;
-  if count >= i64::try_from(quota).unwrap_or(i64::MAX) {
-    bail!("dynamic policy source {source} exceeds active policy quota {quota}");
-  }
-  Ok(())
 }

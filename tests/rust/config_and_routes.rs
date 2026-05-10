@@ -1095,6 +1095,60 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 }
 
 #[test]
+fn dynamic_policy_automation_api_rejects_default_quota_above_global_cap() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+        std::env::set_var(
+            "OXIBELT_DYNAMIC_POLICY_HMAC_KEY_TEST",
+            base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+        );
+    }
+    let temp_dir = common::TempDir::new("dynamic-policy-default-quota");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "dynamic-policy-default-quota");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[dynamic_policy]
+enabled = true
+backend = "postgres-main"
+max_policies = 8
+
+[dynamic_policy.automation_api]
+enabled = true
+signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY_TEST"
+default_source_quota = 9
+
+[shared_state]
+enabled = true
+namespace = "matrix"
+dynamic_policy_backend = "postgres-main"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("default quota above max_policies should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("default_source_quota must be less than or equal")
+    );
+}
+
+#[test]
 fn dynamic_policy_rejects_non_postgres_backend() {
     let temp_dir = common::TempDir::new("dynamic-policy-redis");
     let (cert_path, key_path) =

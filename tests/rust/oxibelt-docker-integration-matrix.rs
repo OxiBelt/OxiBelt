@@ -826,6 +826,10 @@ run_case_checks() {
   import_upserts_existing_policy
   delete_disables_policy
   tampered_signature_keeps_last_good_snapshot
+  default_source_quota_blocks_spoofed_source_rotation
+  import_rejects_spoofed_default_source_over_quota
+  patch_rejects_enabling_policy_over_default_quota
+  global_active_policy_cap_blocks_cross_source_growth
 }
 
 wait_for_dynamic_policy_refresh() {
@@ -908,6 +912,60 @@ tampered_signature_keeps_last_good_snapshot() {
 
   request="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 203.0.113.62")"
   assert_response_jq "${request}" '.body == "signed block"'
+}
+
+default_source_quota_blocks_spoofed_source_rotation() {
+  local index response body default_bucket_count
+  for index in $(seq 1 9); do
+    body="{\"source\":\"spoof-${index}\",\"name\":\"spoof-${index}\",\"action\":\"reject\",\"subject_type\":\"client_ip\",\"subject\":\"203.0.113.$((70 + index))\",\"status\":429,\"body\":\"spoof block\",\"reason\":\"spoofed source\",\"code\":\"spoof.${index}\",\"ttl_seconds\":3600}"
+    response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies" 201 "POST" "${body}" "Authorization: Bearer matrix-security-token")"
+    assert_response_jq "${response}" ".body | fromjson | .source == \"spoof-${index}\""
+  done
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies" 400 "POST" '{"source":"spoof-overflow","name":"spoof-overflow","action":"reject","subject_type":"client_ip","subject":"203.0.113.80","status":429,"body":"spoof overflow","reason":"spoofed source","code":"spoof.overflow","ttl_seconds":3600}' "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${response}" '.body | contains("default source quota")'
+
+  default_bucket_count="$(postgres_query "SELECT count(*) FROM oxibelt_dynamic_policies WHERE namespace = 'matrix-dynamic-api' AND enabled = true AND (expires_at IS NULL OR expires_at > now()) AND source <> 'vaultwarden';")"
+  if [[ "${default_bucket_count}" != "10" ]]; then
+    fail_with_diagnostics "default source quota should cap all unconfigured sources together, got ${default_bucket_count}"
+  fi
+}
+
+import_rejects_spoofed_default_source_over_quota() {
+  local response
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/import" 400 "POST" '{"policies":[{"source":"spoof-import","name":"spoof-import","action":"reject","subject_type":"client_ip","subject":"203.0.113.81","status":429,"body":"spoof import","reason":"spoofed import","code":"spoof.import","ttl_seconds":3600}]}' "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${response}" '.body | contains("default source quota")'
+}
+
+patch_rejects_enabling_policy_over_default_quota() {
+  local response disabled_policy_id enabled
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies" 201 "POST" '{"enabled":false,"source":"spoof-disabled","name":"spoof-disabled","action":"reject","subject_type":"client_ip","subject":"203.0.113.82","status":429,"body":"spoof disabled","reason":"disabled spoof","code":"spoof.disabled","ttl_seconds":3600}' "Authorization: Bearer matrix-security-token")"
+  disabled_policy_id="$(policy_json_field "${response}" '.id')"
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/${disabled_policy_id}" 400 "PATCH" '{"enabled":true}' "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${response}" '.body | contains("default source quota")'
+
+  enabled="$(postgres_query "SELECT enabled FROM oxibelt_dynamic_policies WHERE namespace = 'matrix-dynamic-api' AND id = ${disabled_policy_id};")"
+  if [[ "${enabled}" != "f" ]]; then
+    fail_with_diagnostics "patch over default source quota must leave the policy disabled"
+  fi
+}
+
+global_active_policy_cap_blocks_cross_source_growth() {
+  local index response body active_total
+  for index in $(seq 1 2); do
+    body="{\"source\":\"vaultwarden\",\"name\":\"global-cap-${index}\",\"action\":\"reject\",\"subject_type\":\"client_ip\",\"subject\":\"203.0.113.$((90 + index))\",\"status\":429,\"body\":\"global cap\",\"reason\":\"global cap\",\"code\":\"global.cap.${index}\",\"ttl_seconds\":3600}"
+    response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies" 201 "POST" "${body}" "Authorization: Bearer matrix-security-token")"
+    assert_response_jq "${response}" ".body | fromjson | .source == \"vaultwarden\" and .name == \"global-cap-${index}\""
+  done
+
+  active_total="$(postgres_query "SELECT count(*) FROM oxibelt_dynamic_policies WHERE namespace = 'matrix-dynamic-api' AND enabled = true AND (expires_at IS NULL OR expires_at > now());")"
+  if [[ "${active_total}" != "12" ]]; then
+    fail_with_diagnostics "expected active policy count to reach max_policies before overflow, got ${active_total}"
+  fi
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies" 400 "POST" '{"source":"vaultwarden","name":"global-cap-overflow","action":"reject","subject_type":"client_ip","subject":"203.0.113.93","status":429,"body":"global cap overflow","reason":"global cap","code":"global.cap.overflow","ttl_seconds":3600}' "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${response}" '.body | contains("max_policies")'
 }
 "#;
 

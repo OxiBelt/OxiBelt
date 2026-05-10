@@ -507,7 +507,7 @@ default_body = "Blocked by dynamic policy"
 enabled = false
 require_ttl = true
 signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
-# default_source_quota = 1000
+# default_source_quota = 1000 # shared by all sources without an explicit source_quotas entry
 
 [[dynamic_policy.automation_api.source_quotas]]
 source = "vaultwarden"
@@ -532,7 +532,7 @@ connect_timeout_ms = 3000
 
 Dynamic policy is an opt-in PostgreSQL-backed policy snapshot for external security automation. The selected backend comes from `dynamic_policy.backend`, then `shared_state.dynamic_policy_backend`, then `shared_state.default_backend`, and must be a PostgreSQL shared-state backend. PostgreSQL is only the policy source: OxiBelt creates dedicated `oxibelt_dynamic_policies`, `oxibelt_dynamic_policy_generation`, and `oxibelt_dynamic_policy_audit` tables, periodically loads active rows into an immutable in-memory snapshot, and never runs PostgreSQL queries from the request hot path. Legacy external translators, such as a Vaultwarden stdout sidecar, may write this supported policy API table while `dynamic_policy.automation_api.enabled = false`; they should not write `oxibelt_shared_state` or `oxibelt_shared_counters`.
 
-When `[dynamic_policy.automation_api]` is enabled, `[admin]` must also be enabled and `signature_key_env` must point to base64 for exactly 32 random bytes. The Admin API signs rows with HMAC-SHA256 and the snapshot loader rejects active rows whose `signature_version` or `row_signature` does not verify. `require_ttl = true` requires `expires_at` or `ttl_seconds` for Admin-created/imported active policies and for active signed rows loaded into a snapshot. `default_source_quota` and `source_quotas` bound active policies by writer/source.
+When `[dynamic_policy.automation_api]` is enabled, `[admin]` must also be enabled and `signature_key_env` must point to base64 for exactly 32 random bytes. The Admin API signs rows with HMAC-SHA256 and the snapshot loader rejects active rows whose `signature_version` or `row_signature` does not verify. `require_ttl = true` requires `expires_at` or `ttl_seconds` for Admin-created/imported active policies and for active signed rows loaded into a snapshot. Admin create, import, and patch writes enforce `dynamic_policy.max_policies` before they can add another active row, so the automation API cannot create a snapshot that would exceed the loader cap. Explicit `source_quotas` bound active policies for the matching source. `default_source_quota` bounds the shared bucket for all sources that do not have an explicit `source_quotas` entry, preventing clients from rotating arbitrary source names to gain fresh quota.
 
 Active rows must match `shared_state.namespace`, have `enabled = true`, and be unexpired. `action` is `allow`, `reject`, or `rate_limit`; `subject_type` is `client_ip`, `client_ip_cidr`, `client_ip_route`, or `client_ip_path`. Composite subjects use a pipe separator: `client_ip` stores `203.0.113.10`, `client_ip_cidr` stores `203.0.113.0/24`, `client_ip_route` stores `203.0.113.10|app-route`, and `client_ip_path` stores `203.0.113.10|/identity`. IP portions are parsed and canonicalized when snapshots load, including equivalent IPv6 spellings such as expanded uppercase addresses. `client_ip_route` rows require `route_name`; `client_ip_path` rows require `path_prefix`. Optional `method`, `route_name`, and `path_prefix` further narrow the match. `mode = "dry_run"` records a match without applying an `allow`, `reject`, or `rate_limit`; `mode = "enforce"` applies the selected policy.
 
@@ -802,7 +802,7 @@ Dynamic policy automation endpoints:
 - `GET /admin/v1/dynamic-policies/export`
 - `POST /admin/v1/dynamic-policies/import`
 
-Create/import JSON accepts `source`, `name`, `action`, `subject_type`, `subject`, optional `route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`, `reason`, `code`, `mode`, and either `expires_at` or `ttl_seconds` when TTL is required. Import payloads use `{ "policies": [...] }` and upsert by `namespace + source + name`; duplicate rows beyond the lowest `id` are disabled. `DELETE` disables the row instead of physically removing it.
+Create/import JSON accepts `source`, `name`, `action`, `subject_type`, `subject`, optional `route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`, `reason`, `code`, `mode`, and either `expires_at` or `ttl_seconds` when TTL is required. Create, import, and patch reject changes that would exceed either the global active policy cap or the matching source quota bucket. Import payloads use `{ "policies": [...] }` and upsert by `namespace + source + name`; duplicate rows beyond the lowest `id` are disabled. `DELETE` disables the row instead of physically removing it.
 
 Admin purge endpoints:
 

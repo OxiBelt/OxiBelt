@@ -124,6 +124,13 @@ impl DynamicPolicyAutomationApiConfig {
     {
       bail!("dynamic_policy.automation_api.default_source_quota must be greater than 0");
     }
+    if let Some(quota) = self.default_source_quota
+      && quota > max_policies
+    {
+      bail!(
+        "dynamic_policy.automation_api.default_source_quota must be less than or equal to dynamic_policy.max_policies"
+      );
+    }
     let mut sources = std::collections::HashSet::new();
     for quota in &self.source_quotas {
       if quota.source.trim().is_empty() {
