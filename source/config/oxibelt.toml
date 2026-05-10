@@ -394,7 +394,6 @@ unsupported_directive_policy = "fail_closed"
 #methods = ["POST"]
 #routes = ["app-root"]
 #path_prefixes = ["/editor/"]
-#header_equals = { "x-app-context" = "trusted-editor" }
 #reason = "editor intentionally submits HTML"
 
 #[[waf.rules]]

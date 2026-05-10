@@ -211,10 +211,7 @@ pub struct WafCrsAllowlistConfig {
 
 impl WafCrsAllowlistConfig {
   pub(crate) fn has_traffic_selector(&self) -> bool {
-    !self.methods.is_empty()
-      || !self.routes.is_empty()
-      || !self.path_prefixes.is_empty()
-      || !self.header_equals.is_empty()
+    !self.methods.is_empty() || !self.routes.is_empty() || !self.path_prefixes.is_empty()
   }
 }
 
@@ -244,12 +241,6 @@ pub(crate) fn validate_config(config: &WafCrsConfig) -> anyhow::Result<()> {
       &format!("waf.crs.allowlists.{}", allowlist.name),
       &allowlist.selector,
     )?;
-    if !allowlist.has_traffic_selector() {
-      bail!(
-        "waf.crs.allowlists.{} must include at least one traffic selector",
-        allowlist.name
-      );
-    }
     for method in &allowlist.methods {
       if method.parse::<http::Method>().is_err() {
         bail!(
@@ -280,6 +271,18 @@ pub(crate) fn validate_config(config: &WafCrsConfig) -> anyhow::Result<()> {
           allowlist.name, name
         )
       })?;
+    }
+    if !allowlist.header_equals.is_empty() {
+      bail!(
+        "waf.crs.allowlists.{} header_equals is not supported because request headers are client-controlled; use methods, routes, or path_prefixes to scope CRS allowlists",
+        allowlist.name
+      );
+    }
+    if !allowlist.has_traffic_selector() {
+      bail!(
+        "waf.crs.allowlists.{} must include at least one traffic selector",
+        allowlist.name
+      );
     }
   }
   Ok(())

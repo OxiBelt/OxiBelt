@@ -899,7 +899,6 @@ rule_ids = ["941320"]
 methods = ["POST"]
 routes = ["app-root"]
 path_prefixes = ["/editor/"]
-header_equals = { "x-app-context" = "trusted-editor" }
 reason = "editor intentionally submits HTML"
 ```
 
@@ -927,7 +926,7 @@ body = "Forbidden"
 
 `[[waf.crs.rule_overrides]]` applies the first matching static rule override. Select rules with `rule_ids`, `tags`, or `msg_contains`; at least one selector is required. `mode = "monitor"` records observed hits and anomaly score without contributing to blocking score, `mode = "enforcing"` can enforce even when global CRS mode is monitor, and `mode = "disabled"` records hits without scoring/actions.
 
-`[[waf.crs.allowlists]]` is for scoped false-positive tuning. It uses the same rule selectors and also requires at least one traffic selector: `methods`, `routes`, `path_prefixes`, or `header_equals`. Traffic selector categories are ANDed together, while values within a category are ORed. A matching allowlist suppresses CRS scoring/actions for that transaction and increments `tuned_hits`; broad rule disables should use `rule_overrides` instead.
+`[[waf.crs.allowlists]]` is for scoped false-positive tuning. It uses the same rule selectors and also requires at least one traffic selector: `methods`, `routes`, or `path_prefixes`. Traffic selector categories are ANDed together, while values within a category are ORed. A matching allowlist suppresses CRS scoring/actions for that transaction and increments `tuned_hits`; broad rule disables should use `rule_overrides` instead. `header_equals` is rejected for CRS allowlists because inbound request headers are client-controlled before proxy forwarding.
 
 Recommended CRS rollout is monitor first, inspect `/admin/v1/waf/rule-hits`, add scoped allowlists or per-rule overrides for confirmed false positives, then switch `[waf.crs].mode` to `enforcing`. The compatibility matrix is available from `/admin/v1/waf/crs/compatibility`; OxiBelt targets the CRS current release and `v4.25.x` LTS line as of 2026-05-10. Official CRS references: [v4.25.0 LTS announcement](https://coreruleset.org/20260321/announcing-crs-v4-25-lts/), [false positives and tuning](https://coreruleset.org/docs/2-how-crs-works/2-3-false-positives-and-tuning/), and [installation](https://coreruleset.org/docs/1-getting-started/1-1-crs-installation/).
 

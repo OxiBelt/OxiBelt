@@ -1308,13 +1308,11 @@ rule_ids = ["941320"]
 methods = ["GET"]
 routes = ["app-root"]
 path_prefixes = ["/editor/"]
-header_equals = { "x-app-context" = "trusted-editor" }
 reason = "editor intentionally submits HTML"
 "#,
     );
     let engine = WafEngine::new(&config).expect("WAF should compile");
-    let mut headers = HeaderMap::new();
-    headers.insert("x-app-context", HeaderValue::from_static("trusted-editor"));
+    let headers = HeaderMap::new();
     let tags = HashMap::new();
     let method = Method::GET;
     let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
@@ -1379,6 +1377,27 @@ name = "missing-traffic"
 rule_ids = ["942100"]
 "#,
             "must include at least one traffic selector",
+        ),
+        (
+            "spoofable-header-selector",
+            r#"
+[[waf.crs.allowlists]]
+name = "spoofable-header-selector"
+rule_ids = ["942100"]
+header_equals = { "x-app-context" = "trusted-editor" }
+"#,
+            "header_equals is not supported because request headers are client-controlled",
+        ),
+        (
+            "spoofable-header-plus-path",
+            r#"
+[[waf.crs.allowlists]]
+name = "spoofable-header-plus-path"
+rule_ids = ["942100"]
+path_prefixes = ["/editor/"]
+header_equals = { "x-app-context" = "trusted-editor" }
+"#,
+            "header_equals is not supported because request headers are client-controlled",
         ),
         (
             "invalid-method",

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use http::{HeaderName, StatusCode};
+use http::StatusCode;
 use tracing::info;
 
 use super::super::{
@@ -458,20 +458,6 @@ fn traffic_matches(allowlist: &WafCrsAllowlistConfig, request: WafRequestInput<'
       .any(|prefix| request.uri.path().starts_with(prefix))
   {
     return false;
-  }
-  for (name, expected) in &allowlist.header_equals {
-    let Ok(header_name) = HeaderName::try_from(name.as_str()) else {
-      return false;
-    };
-    let matched = request
-      .headers
-      .get_all(header_name)
-      .iter()
-      .filter_map(|value| value.to_str().ok())
-      .any(|value| value == expected);
-    if !matched {
-      return false;
-    }
   }
   true
 }

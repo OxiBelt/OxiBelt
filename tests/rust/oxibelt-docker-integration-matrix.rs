@@ -2894,6 +2894,15 @@ run_case_checks() {
             Some("must not contain dot segments"),
         ),
         docker_case(
+            "config-invalid",
+            "crs-allowlist-header-selector",
+            "CRS allowlists reject client-spoofable request header selectors",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some("header_equals is not supported because request headers are client-controlled"),
+        ),
+        docker_case(
             "proxy-routing",
             "exact-host-beats-wildcard",
             "exact host routes beat wildcard routes",
