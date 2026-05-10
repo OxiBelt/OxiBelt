@@ -7,5 +7,22 @@
     "build": "tsc -p tsconfig.json && tsx source/build.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint source/**/*.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.2",
+    "tsx": "4.21.0",
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "get-tsconfig": {
+      "resolve-pkg-maps": "1.0.0"
+    },
+    "tsx": {
+      "esbuild": "0.27.7",
+      "get-tsconfig": "4.14.0"
+    },
+    "@types/node": {
+      "undici-types": "7.16.0"
+    }
   }
 }

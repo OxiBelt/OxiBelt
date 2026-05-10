@@ -3,6 +3,7 @@ node_modules
 **/node_modules
 **/dist
 *.tsbuildinfo
+**/*.tsbuildinfo
 source/target
 target
 tests/.tmp

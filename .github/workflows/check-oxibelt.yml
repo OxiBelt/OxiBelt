@@ -24,6 +24,45 @@ jobs:
       - name: Rust module size
         run: tests/scripts/check-rust-module-size.sh
 
+      - name: Person proof UI asset uses pinned npm dependencies
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+
+          const exactVersion = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+          const checkedFields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'overrides'];
+          const invalid = [];
+
+          const checkValue = (file, path, value) => {
+            if (typeof value === 'string') {
+              if (!exactVersion.test(value)) {
+                invalid.push(`${file}:${path}=${value}`);
+              }
+              return;
+            }
+
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+              for (const [key, nested] of Object.entries(value)) {
+                checkValue(file, `${path}.${key}`, nested);
+              }
+            }
+          };
+
+          const file = 'ui/person-proof/package.json';
+          const manifest = JSON.parse(readFileSync(file, 'utf8'));
+          for (const field of checkedFields) {
+            checkValue(file, field, manifest[field]);
+          }
+
+          if (invalid.length > 0) {
+            console.error(`npm dependencies must use exact versions:\n${invalid.join('\n')}`);
+            process.exit(1);
+          }
+          NODE
+          npm install --prefix ui/person-proof --ignore-scripts --no-audit --no-fund --package-lock=false
+          npm run --prefix ui/person-proof build
+          git diff --exit-code source/assets/person-proof-challenge.html
+
   test:
     name: Test (${{ matrix.runner }} with rust-${{ matrix.rust_version }})
     runs-on: ${{ matrix.runner }}

@@ -9,16 +9,11 @@ ARG OXIBELT_SOURCE=https://github.com/OxiBelt/OxiBelt
 FROM --platform=$BUILDPLATFORM ${OXIBELT_NODE_IMAGE} AS person-proof-ui
 
 WORKDIR /repo
-COPY package*.json ./
-COPY ui/person-proof/package.json ./ui/person-proof/package.json
-RUN if [ -f package-lock.json ]; then \
-      npm ci --ignore-scripts --no-audit --no-fund; \
-    else \
-      npm install --ignore-scripts --no-audit --no-fund; \
-    fi
 COPY tsconfig.json ./
+COPY ui/person-proof/package.json ./ui/person-proof/package.json
+RUN npm install --prefix ui/person-proof --ignore-scripts --no-audit --no-fund --package-lock=false
 COPY ui/person-proof ./ui/person-proof
-RUN npm run person-proof-ui:build
+RUN npm run --prefix ui/person-proof build
 
 FROM ${RUST_BUILDER_IMAGE} AS builder
 
