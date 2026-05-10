@@ -2453,6 +2453,29 @@ run_case_checks() {
         ),
         docker_case(
             "cache",
+            "large-object-over-memory-not-cached",
+            "cache streams responses larger than the proxy memory body limit without storing them",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path first miss
+  path="/app/large-over-memory?body_repeat=131072&body_repeat_char=M&cache_control=public&content_type=text/plain"
+  first="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${first}" '(.body | length) == 131072'
+
+  docker rm -f "${http_container}" >/dev/null
+  miss="$(client_request "example.test" "${path}" 502)"
+  assert_response_jq "${miss}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
             "background-refresh",
             "stale-while-revalidate serves stale while refreshing in the background",
             ExpectStart::Success,

@@ -2810,11 +2810,7 @@ async fn maybe_cache_response(
     return response;
   }
   let (mut parts, body) = response.into_parts();
-  let collect_limit = if state.config.cache.stream_large_objects {
-    state.config.cache.max_size_bytes
-  } else {
-    state.config.proxy.buffering.max_memory_body_bytes
-  };
+  let collect_limit = cache_response_collect_limit(&state.config);
   if body
     .size_hint()
     .upper()
@@ -2825,9 +2821,8 @@ async fn maybe_cache_response(
     }
     return Response::from_parts(parts, body);
   }
-  match body.collect().await {
-    Ok(collected) => {
-      let bytes = collected.to_bytes();
+  match collect_cache_response_body(body, collect_limit).await {
+    Ok(bytes) => {
       let cache_headers = parts.headers.clone();
       if state.cache.strip_surrogate_control(route_cache) {
         parts.headers.remove("surrogate-control");
@@ -2873,6 +2868,42 @@ async fn maybe_cache_response(
       )
     }
   }
+}
+
+fn cache_response_collect_limit(config: &Config) -> usize {
+  config
+    .cache
+    .max_size_bytes
+    .min(config.proxy.buffering.max_memory_body_bytes)
+}
+
+async fn collect_cache_response_body(
+  mut body: ProxyBody,
+  limit: usize,
+) -> Result<bytes::Bytes, self::body::BoxError> {
+  let mut chunks = Vec::new();
+  let mut total = 0usize;
+  while let Some(frame) = body.frame().await {
+    let frame = frame?;
+    let Ok(data) = frame.into_data() else {
+      continue;
+    };
+    total = total
+      .checked_add(data.len())
+      .ok_or_else(|| boxed_error(std::io::Error::other("cache fill body length overflow")))?;
+    if total > limit {
+      return Err(boxed_error(std::io::Error::other(
+        "cache fill body exceeds memory limit",
+      )));
+    }
+    chunks.push(data);
+  }
+
+  let mut bytes = bytes::BytesMut::with_capacity(total);
+  for chunk in chunks {
+    bytes.extend_from_slice(&chunk);
+  }
+  Ok(bytes.freeze())
 }
 
 fn merge_not_modified_headers(headers: &mut HeaderMap, not_modified: &HeaderMap) {
@@ -3169,6 +3200,12 @@ fn waf_body_input(body: &CapturedBody) -> WafBodyInput<'_> {
 }
 
 #[cfg(test)]
+mod cache_tests;
+
+#[cfg(test)]
+mod webtransport_tests;
+
+#[cfg(test)]
 mod tests {
   mod common {
     include!(concat!(
@@ -3177,7 +3214,6 @@ mod tests {
     ));
   }
 
-  use http::header::HOST;
   use pretty_assertions::assert_eq;
 
   use super::*;
@@ -3187,17 +3223,6 @@ mod tests {
     let config: Config = toml::from_str(raw).expect("config should parse");
     config.validate().expect("config should validate");
     config
-  }
-
-  fn webtransport_request() -> Request<()> {
-    Request::builder()
-      .method(Method::CONNECT)
-      .version(http::Version::HTTP_3)
-      .uri("https://example.com/session?token=1")
-      .header(HOST, "example.com")
-      .header("wt-available-protocols", "\"chat\", data")
-      .body(())
-      .expect("request should build")
   }
 
   #[test]
@@ -3401,119 +3426,5 @@ upstream_first_byte_timeout_ms = 5000
       "https",
       http::Version::HTTP_11
     ));
-  }
-
-  #[tokio::test]
-  async fn prepare_webtransport_selects_direct_upstream() {
-    let temp_dir = common::TempDir::new("direct-webtransport");
-    let (cert_path, key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "direct-webtransport");
-    let raw = format!(
-      r#"
-[listeners]
-https_bind = "127.0.0.1:8443"
-http1 = true
-http2 = true
-http3 = true
-
-[tls]
-cert_chain = "{cert}"
-private_key = "{key}"
-
-[tls.ocsp]
-mode = "disabled"
-
-[proxy.auto_upgrade]
-enabled = true
-max_http_version = "h3"
-
-[[upstreams]]
-name = "app"
-origin = "https://app.example/origin"
-max_http_version = "h3"
-webtransport = true
-
-[[routes]]
-name = "direct-route"
-hosts = ["example.com"]
-path_prefix = "/"
-upstream = "app"
-"#,
-      cert = cert_path.display(),
-      key = key_path.display(),
-    );
-    let state = AppSnapshot::new(parse_config(&raw))
-      .await
-      .expect("snapshot should initialize");
-
-    let prepared = prepare_webtransport(
-      &webtransport_request(),
-      "203.0.113.10:45678".parse().unwrap(),
-      &WafTlsMetadata::default(),
-      None,
-      &state,
-    )
-    .expect("direct WebTransport route should prepare");
-
-    assert_eq!(prepared.upstream.name, "app");
-    assert_eq!(
-      prepared.target_url.as_str(),
-      "https://app.example/origin/session?token=1"
-    );
-    assert_eq!(prepared.protocols, vec!["chat", "data"]);
-  }
-
-  #[tokio::test]
-  async fn prepare_webtransport_pool_route_returns_bad_gateway_without_panicking() {
-    let temp_dir = common::TempDir::new("pool-webtransport");
-    let (cert_path, key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "pool-webtransport");
-    let raw = format!(
-      r#"
-[listeners]
-https_bind = "127.0.0.1:8443"
-http1 = true
-http2 = true
-http3 = true
-
-[tls]
-cert_chain = "{cert}"
-private_key = "{key}"
-
-[tls.ocsp]
-mode = "disabled"
-
-[[upstream_pools]]
-name = "app-pool"
-algorithm = "round_robin"
-
-[[upstream_pools.servers]]
-origin = "https://app-a.example/origin"
-
-[[routes]]
-name = "pool-route"
-hosts = ["example.com"]
-path_prefix = "/"
-upstream_pool = "app-pool"
-"#,
-      cert = cert_path.display(),
-      key = key_path.display(),
-    );
-    let state = AppSnapshot::new(parse_config(&raw))
-      .await
-      .expect("snapshot should initialize");
-
-    let response = match prepare_webtransport(
-      &webtransport_request(),
-      "203.0.113.10:45678".parse().unwrap(),
-      &WafTlsMetadata::default(),
-      None,
-      &state,
-    ) {
-      Ok(_) => panic!("pool route should be rejected with a response, not panic"),
-      Err(response) => response,
-    };
-
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
   }
 }
