@@ -2,7 +2,7 @@
 
 OxiBelt is a Rust reverse proxy for Linux edge deployments. It terminates downstream TLS, routes HTTP traffic by host and path, forwards to HTTP/1.1, HTTP/2, or HTTP/3 upstreams, and can apply OxiRule WAF policy on the request and response path.
 
-The current implementation is a production-oriented foundation: configuration is TOML, state is process-local, Docker is the canonical release environment, and the default runtime assumptions fit non-root containers with read-only root filesystems.
+The current implementation is a production-oriented foundation: configuration is TOML, state is process-local by default with optional shared-state backends, Docker is the canonical release environment, and the default runtime assumptions fit non-root containers with read-only root filesystems.
 
 ## Capabilities
 
@@ -11,9 +11,11 @@ The current implementation is a production-oriented foundation: configuration is
 - TLS termination with `rustls`, `aws-lc-rs`, TLS 1.3 defaults, client certificate authentication, static OCSP stapling, and preferred post-quantum key exchange support.
 - Upstream TLS 1.3 ECH in GREASE or configured `ECHConfigList` mode.
 - Host and path-prefix routing, prefix replacement, upstream pools, local load-balancing state, and passive or active health marking.
-- WebSocket tunneling for HTTP/1.1 upgrade routes and WebTransport forwarding over HTTP/3.
-- Forwarded-header normalization, trusted real-IP handling, PROXY protocol intake, rate limits, connection limits, request limits, and bounded response cache support.
+- WebSocket tunneling, opt-in generic HTTP/1.1 Upgrade and CONNECT tunneling, gRPC-Web translation, and WebTransport forwarding over HTTP/3.
+- Forwarded-header normalization, trusted real-IP handling, PROXY protocol intake, TCP upstream/stream-target PROXY protocol egress, rate limits, connection limits, request limits, and bounded response cache support.
+- Opt-in TCP stream listeners for raw TCP forwarding to fixed targets.
 - OxiRule request and response WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, structured access logs, bounded body scanning, and optional CRS-compatible anomaly scoring.
+- Request-wide structured system access logs with stdout and PostgreSQL sinks.
 - Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload, with graceful listener drain for in-flight requests and long-lived tunnels.
 
 See [docs/Specification.md](docs/Specification.md) for the compact behavior spec and current non-goals.
@@ -159,4 +161,4 @@ tests/scripts/run-proxy-integration.sh
 
 ## Current Non-Goals
 
-The current implementation intentionally leaves ACME HTTP-01 handling, live OCSP fetch/refresh, request-wide structured access logging outside OxiRule, sticky-cookie upstream sessions, WebRTC media forwarding, and passing `103 Early Hints` as future work. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
+The current implementation intentionally leaves ACME HTTP-01 handling, live OCSP fetch/refresh, sticky-cookie upstream sessions, WebRTC media forwarding, and advanced UDP/L4 proxying such as UDP stream proxying and TLS passthrough SNI routing as future work. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.

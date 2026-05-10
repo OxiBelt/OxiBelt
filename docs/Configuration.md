@@ -408,10 +408,6 @@ mode = "legacy_plain" # legacy_plain | plain | json
 
 `proxy.http.errors.mode = "json"` changes proxy-generated error bodies to JSON with stable `error`, `status`, `code`, and `request_id` fields. `legacy_plain` preserves the historical body text without setting a content type; `plain` emits the same text with `text/plain`.
 
-Reserved or constrained values:
-
-- `proxy.http.early_hints = "pass"` is rejected.
-
 ## Limits, Cache, and Ops
 
 ```toml

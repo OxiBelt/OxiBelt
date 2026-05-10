@@ -216,7 +216,7 @@ The current implementation intentionally leaves these as future work:
 - Live OCSP fetch and refresh workers.
 - Sticky-cookie upstream sessions.
 - WebRTC media forwarding.
-- TCP stream proxying, generic HTTP upgrade, CONNECT tunneling, gRPC health checks, gRPC-Web translation, and PROXY protocol egress for TCP upstreams.
 - WAF frame-level or datagram-level WebTransport inspection.
 - Downstream ECH configuration.
+- Advanced UDP/L4 proxying such as UDP stream proxying and TLS passthrough SNI routing.
 - General-purpose scripting, user-defined OxiRule functions, imports, loops, callbacks, and unbounded comprehensions.
