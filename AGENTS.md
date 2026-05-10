@@ -78,6 +78,7 @@ Recommended checks:
 
 ```sh
 cargo fmt --check
+tests/scripts/check-rust-module-size.sh
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
@@ -90,6 +91,8 @@ If a command must be run from `source/`, document that clearly.
 Do not force unrelated functionality into an existing Rust source file just because the file already exists.
 
 If new code belongs to a different responsibility or feature category, add a new Rust module or source file under the most appropriate directory and wire it through `mod.rs`, `lib.rs`, or `main.rs` as needed.
+
+Treat 750 lines as the review threshold for Rust source files under `source/src/`. Files above that threshold should be split into smaller responsibility-focused modules unless there is a documented reason to keep the implementation together. Existing oversized files are tracked by `tests/scripts/check-rust-module-size.sh` and should shrink over time rather than grow.
 
 Examples:
 
@@ -328,6 +331,7 @@ GitHub Actions should run at least:
 
 ```sh
 cargo fmt --check
+tests/scripts/check-rust-module-size.sh
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
