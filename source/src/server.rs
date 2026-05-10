@@ -405,9 +405,6 @@ async fn admin_response(
   if !admin_listener_current(&snapshot, listener_bind) {
     return text_response(StatusCode::NOT_FOUND, "not found");
   }
-  let Some(actor) = admin_actor(&request, &snapshot.config.admin) else {
-    return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
-  };
   let method = request.method().clone();
   let uri = request.uri().clone();
   let query = uri.query().unwrap_or_default();
@@ -415,16 +412,49 @@ async fn admin_response(
     .into_owned()
     .collect::<std::collections::HashMap<_, _>>();
   let path = uri.path().to_string();
+  let actor = admin_actor(&request, &snapshot.config.admin);
 
   if path == "/cache/purge" || path == "/cache/purge-prefix" || path == "/cache/purge-tag" {
-    if !admin_actor_has_role(&actor, AdminRole::CacheOperator) {
-      return text_response(StatusCode::FORBIDDEN, "forbidden");
-    }
     if method != ::http::Method::POST {
       return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
     }
-    let response = admin_cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &actor);
+    let signed_actor = if actor
+      .as_ref()
+      .is_some_and(|actor| admin_actor_has_role(actor, AdminRole::CacheOperator))
+    {
+      None
+    } else {
+      match admin::signed_cache_purge_actor(&request, snapshot.as_ref(), &method) {
+        Ok(actor) => Some(actor),
+        Err(error) => {
+          if actor.is_none() {
+            warn!(error = %error, "rejected unsigned admin cache purge request");
+            return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+          }
+          None
+        }
+      }
+    };
+    let actor = match actor.or(signed_actor) {
+      Some(actor) if admin_actor_has_role(&actor, AdminRole::CacheOperator) => actor,
+      Some(_) => return text_response(StatusCode::FORBIDDEN, "forbidden"),
+      None => return text_response(StatusCode::UNAUTHORIZED, "unauthorized"),
+    };
+    let response =
+      admin::cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &actor);
     return response;
+  }
+
+  let Some(actor) = actor else {
+    return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+  };
+
+  if path == "/admin/v1/cache/key-explain" {
+    return admin::cache_key_explain_response(request, snapshot.as_ref(), &actor, &method).await;
+  }
+
+  if path == "/admin/v1/cache/warm" {
+    return admin::cache_warm_response(request, state.clone(), &actor, &method, peer_addr).await;
   }
 
   if let Some(response) = admin_waf_response(snapshot.as_ref(), &actor, &method, &path) {
@@ -567,119 +597,6 @@ impl AdminAuditOutcome {
       Self::Rejected => "rejected",
     }
   }
-}
-
-fn admin_cache_purge_response(
-  snapshot: &AppSnapshot,
-  params: &std::collections::HashMap<String, String>,
-  path: &str,
-  scheme: &'static str,
-  peer_addr: SocketAddr,
-  actor: &AdminActor,
-) -> Response<ProxyBody> {
-  let policy = params
-    .get("policy")
-    .map(String::as_str)
-    .unwrap_or("default");
-  let purge_scheme = params.get("scheme").map(String::as_str).unwrap_or(scheme);
-  let host = params.get("host").map(String::as_str);
-  let purged = match path {
-    "/cache/purge" => {
-      let Some(host) = host else {
-        admin_audit(
-          peer_addr,
-          actor,
-          "cache_purge",
-          None,
-          None,
-          AdminAuditOutcome::Rejected,
-          Some("missing host"),
-        );
-        return text_response(StatusCode::BAD_REQUEST, "missing host");
-      };
-      let Some(uri) = params.get("uri").map(String::as_str) else {
-        admin_audit(
-          peer_addr,
-          actor,
-          "cache_purge",
-          None,
-          None,
-          AdminAuditOutcome::Rejected,
-          Some("missing uri"),
-        );
-        return text_response(StatusCode::BAD_REQUEST, "missing uri");
-      };
-      snapshot.cache.purge_exact(policy, purge_scheme, host, uri)
-    }
-    "/cache/purge-prefix" => {
-      let Some(host) = host else {
-        admin_audit(
-          peer_addr,
-          actor,
-          "cache_purge_prefix",
-          None,
-          None,
-          AdminAuditOutcome::Rejected,
-          Some("missing host"),
-        );
-        return text_response(StatusCode::BAD_REQUEST, "missing host");
-      };
-      let Some(path_prefix) = params.get("path_prefix").map(String::as_str) else {
-        admin_audit(
-          peer_addr,
-          actor,
-          "cache_purge_prefix",
-          None,
-          None,
-          AdminAuditOutcome::Rejected,
-          Some("missing path_prefix"),
-        );
-        return text_response(StatusCode::BAD_REQUEST, "missing path_prefix");
-      };
-      snapshot
-        .cache
-        .purge_prefix(policy, purge_scheme, host, path_prefix)
-    }
-    "/cache/purge-tag" => {
-      let Some(tag) = params.get("tag").map(String::as_str) else {
-        admin_audit(
-          peer_addr,
-          actor,
-          "cache_purge_tag",
-          None,
-          None,
-          AdminAuditOutcome::Rejected,
-          Some("missing tag"),
-        );
-        return text_response(StatusCode::BAD_REQUEST, "missing tag");
-      };
-      snapshot
-        .cache
-        .purge_tag(policy, tag, params.get("scheme").map(String::as_str), host)
-    }
-    _ => unreachable!("admin cache purge path checked before dispatch"),
-  };
-  if path == "/cache/purge-tag" {
-    snapshot.metrics.record_cache_tag_purge();
-  } else {
-    snapshot.metrics.record_cache_purge();
-  }
-  admin_audit(
-    peer_addr,
-    actor,
-    match path {
-      "/cache/purge" => "cache_purge",
-      "/cache/purge-prefix" => "cache_purge_prefix",
-      "/cache/purge-tag" => "cache_purge_tag",
-      _ => unreachable!("admin cache purge path checked before dispatch"),
-    },
-    None,
-    None,
-    AdminAuditOutcome::Applied,
-    None,
-  );
-  info!(peer = %peer_addr, actor = %actor.name, policy, purged, "admin cache purge completed");
-  text_response(StatusCode::OK, &format!("purged={purged}\n"))
 }
 
 async fn admin_upstream_pools_response(

@@ -213,7 +213,10 @@ memory_auto_fraction = 0.5
 default_ttl_seconds = 60
 cache_methods = ["GET", "HEAD"]
 cache_key = "{scheme}:{host}:{uri}"
+partition_key = ""
 respect_cache_control = true
+stream_large_objects = true
+stream_chunk_bytes = 1048576
 stale_if_error_seconds = 30
 stale_while_revalidate_seconds = 30
 lock = true
@@ -221,10 +224,17 @@ lock_wait_timeout_ms = 10000
 tag_headers = ["Surrogate-Key", "Cache-Tag"]
 max_tags_per_entry = 32
 max_tag_bytes = 128
+max_vary_fields = 8
+max_vary_variants_per_key = 64
+bypass_request_headers = ["Authorization", "Cookie", "Proxy-Authorization"]
 background_refresh = true
 background_refresh_max_concurrent = 16
 negative_statuses = []
 negative_ttl_seconds = 0
+
+[cache.surrogate]
+enabled = true
+strip_response_header = true
 
 [cache.admission]
 statuses = [200, 203, 204, 301, 308]
@@ -237,6 +247,7 @@ max_tracked_keys = 16384
 connect_error = true
 read_timeout = true
 statuses = []
+max_upstream_stale_seconds = 0
 
 [admin]
 enabled = false
@@ -245,6 +256,12 @@ bearer_token_env = "OXIBELT_ADMIN_TOKEN"
 transport = "auto" # auto | tls | plaintext_allowlist | plaintext
 allow_insecure_plaintext = false
 plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
+
+[admin.cache_purge_signing]
+enabled = false
+key_env = "OXIBELT_CACHE_PURGE_HMAC_KEY"
+max_skew_seconds = 300
+nonce_ttl_seconds = 600
 
 #[[admin.rbac.tokens]]
 # name = "upstream-ops"

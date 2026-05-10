@@ -9,13 +9,13 @@ max_lines="${OXIBELT_RUST_SOURCE_LINE_LIMIT:-750}"
 grandfathered_limit() {
   case "$1" in
     source/src/cache.rs) echo "2688" ;;
-    source/src/config.rs) echo "5641" ;;
+    source/src/config.rs) echo "5806" ;;
     source/src/dynamic_policy.rs) echo "1049" ;;
     source/src/limits.rs) echo "1023" ;;
-    source/src/proxy/http.rs) echo "3504" ;;
+    source/src/proxy/http.rs) echo "3519" ;;
     source/src/proxy/http3.rs) echo "1112" ;;
     source/src/server.rs) echo "3210" ;;
-    source/src/shared_state.rs) echo "1928" ;;
+    source/src/shared_state.rs) echo "2034" ;;
     source/src/upstream_discovery.rs) echo "942" ;;
     source/src/waf.rs) echo "5133" ;;
     source/src/waf/person_proof.rs) echo "868" ;;

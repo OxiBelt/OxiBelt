@@ -90,6 +90,10 @@ class EchoHandler(BaseHTTPRequestHandler):
       "proxy_protocol_line": self.proxy_protocol_line,
     }
     body_value = _sequence_value(query, "body_sequence", sequence_index, query.get("body", [""])[0])
+    if query.get("body_repeat"):
+      repeat_count = int(query.get("body_repeat", ["0"])[0])
+      repeat_char = query.get("body_repeat_char", ["x"])[0][:1] or "x"
+      body_value = repeat_char * repeat_count
     encoded = body_value.encode("utf-8") or json.dumps(payload, sort_keys=True).encode("utf-8")
     if header_delay_ms > 0:
       time.sleep(header_delay_ms / 1000.0)
@@ -116,6 +120,8 @@ class EchoHandler(BaseHTTPRequestHandler):
     cache_control = query.get("cache_control_value", [cache_control])[0]
     if cache_control:
       self.send_header("cache-control", cache_control)
+    if query.get("surrogate_control"):
+      self.send_header("surrogate-control", query.get("surrogate_control", [""])[0])
     if query.get("surrogate_key"):
       self.send_header("surrogate-key", query.get("surrogate_key", [""])[0])
     if query.get("cache_tag"):

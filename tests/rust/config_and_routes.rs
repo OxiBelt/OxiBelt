@@ -802,14 +802,24 @@ fn cache_advanced_policy_config_parse() {
 
 [cache]
 enabled = true
+partition_key = "{{header:X-Tenant-ID}}"
 tag_headers = ["Surrogate-Key", "Cache-Tag"]
 max_tags_per_entry = 16
 max_tag_bytes = 64
+max_vary_fields = 4
+max_vary_variants_per_key = 8
+bypass_request_headers = ["Authorization", "Cookie"]
+stream_large_objects = true
+stream_chunk_bytes = 262144
 background_refresh = true
 background_refresh_max_concurrent = 4
 lock_wait_timeout_ms = 250
 stale_if_error_seconds = 30
 stale_while_revalidate_seconds = 30
+
+[cache.surrogate]
+enabled = true
+strip_response_header = true
 
 [cache.admission]
 statuses = [200, 203, 204]
@@ -822,11 +832,17 @@ max_tracked_keys = 128
 connect_error = true
 read_timeout = false
 statuses = [500, 502]
+max_upstream_stale_seconds = 120
 
 [[cache.policies]]
 name = "assets"
 cache_key = "{{scheme}}:{{host}}:{{path}}"
+partition_key = "{{header:X-Tenant-ID}}"
+negative_statuses = [404]
+negative_ttl_seconds = 15
 tag_headers = ["Surrogate-Key"]
+max_vary_fields = 2
+max_vary_variants_per_key = 4
 background_refresh = false
 lock_wait_timeout_ms = 100
 
@@ -840,6 +856,7 @@ max_tracked_keys = 64
 connect_error = false
 read_timeout = true
 statuses = [503]
+max_upstream_stale_seconds = 30
 
 [[routes]]
 name = "cached-assets"
@@ -854,12 +871,31 @@ cache = "assets"
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
     assert_eq!(config.cache.max_tags_per_entry, 16);
+    assert_eq!(config.cache.partition_key, "{header:X-Tenant-ID}");
+    assert_eq!(config.cache.max_vary_fields, 4);
+    assert_eq!(config.cache.max_vary_variants_per_key, 8);
+    assert_eq!(
+        config.cache.bypass_request_headers,
+        ["Authorization", "Cookie"]
+    );
+    assert_eq!(config.cache.stream_chunk_bytes, 262144);
     assert_eq!(config.cache.admission.min_hits, 2);
     assert_eq!(config.cache.stale_if_error.statuses, vec![500, 502]);
+    assert_eq!(config.cache.stale_if_error.max_upstream_stale_seconds, 120);
     assert_eq!(
         config.cache.policies[0].tag_headers.as_deref().unwrap(),
         ["Surrogate-Key"]
     );
+    assert_eq!(
+        config.cache.policies[0].partition_key.as_deref(),
+        Some("{header:X-Tenant-ID}")
+    );
+    assert_eq!(
+        config.cache.policies[0].negative_statuses.as_deref(),
+        Some(&[404][..])
+    );
+    assert_eq!(config.cache.policies[0].negative_ttl_seconds, Some(15));
+    assert_eq!(config.cache.policies[0].max_vary_fields, Some(2));
     assert_eq!(config.cache.policies[0].lock_wait_timeout_ms, Some(100));
     assert_eq!(config.routes[1].cache.as_deref(), Some("assets"));
 }

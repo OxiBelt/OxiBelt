@@ -7,12 +7,12 @@ use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use bytes::Bytes;
 use http::header::{
-  ACCEPT_RANGES, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
-  EXPIRES, HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, PRAGMA, RANGE,
-  VARY,
+  ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, EXPIRES,
+  HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, PRAGMA, RANGE, VARY,
 };
 use http::{HeaderMap, Method, StatusCode, Uri};
 use ring::digest;
+use serde::Serialize;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
 
@@ -22,7 +22,11 @@ use crate::config::{
 };
 use crate::shared_state::{SharedCacheEntry, SharedCacheLock, SharedState, SharedVaryMatcher};
 
+pub mod signing;
+
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
+const SURROGATE_CONTROL_HEADER: &str = "surrogate-control";
+const MAX_VARY_VALUE_BYTES: usize = 8_192;
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
@@ -143,9 +147,23 @@ pub struct CacheLookupContext<'a> {
   pub request_headers: &'a HeaderMap,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CacheKeyExplain {
+  pub policy: String,
+  pub enabled: bool,
+  pub cacheable_method: bool,
+  pub bypassed: bool,
+  pub partition: String,
+  pub base_key: String,
+  pub variant_key: Option<String>,
+  pub vary_fields: Vec<String>,
+  pub reasons: Vec<String>,
+}
+
 #[derive(Debug)]
 struct StoredEntry {
   policy: String,
+  partition: String,
   base_key: String,
   variant_key: String,
   scheme: String,
@@ -200,6 +218,8 @@ struct CacheInner {
   entries: HashMap<String, StoredEntry>,
   inflight: HashMap<String, Arc<Notify>>,
   order: VecDeque<String>,
+  purge_nonces: HashMap<String, SystemTime>,
+  purge_nonce_order: VecDeque<String>,
   memory_size: usize,
   disk_size: usize,
   tmpfs_size: usize,
@@ -215,12 +235,17 @@ struct CachePolicyRuntime {
   name: String,
   store: CacheStore,
   cache_key: String,
+  partition_key: String,
   default_ttl_seconds: u64,
+  negative_statuses: Vec<StatusCode>,
+  negative_ttl_seconds: u64,
   memory_max_size_bytes: usize,
   disk_max_size_bytes: Option<usize>,
   tag_headers: Vec<HeaderName>,
   max_tags_per_entry: usize,
   max_tag_bytes: usize,
+  max_vary_fields: usize,
+  max_vary_variants_per_key: usize,
   background_refresh: bool,
   background_refresh_max_concurrent: usize,
   lock_wait_timeout: Duration,
@@ -248,6 +273,7 @@ struct CachePolicyRuleRuntime {
 pub struct ResponseCache {
   config: CacheConfig,
   policies: HashMap<String, CachePolicyRuntime>,
+  bypass_request_headers: Vec<HeaderName>,
   refresh_limiters: HashMap<String, Arc<Semaphore>>,
   tmpfs_dir: Option<PathBuf>,
   disk_dir: Option<PathBuf>,
@@ -286,12 +312,17 @@ impl ResponseCache {
       name: "default".to_string(),
       store: config.store,
       cache_key: config.cache_key.clone(),
+      partition_key: config.partition_key.clone(),
       default_ttl_seconds: config.default_ttl_seconds,
+      negative_statuses: cache_status_codes(&config.negative_statuses),
+      negative_ttl_seconds: config.negative_ttl_seconds,
       memory_max_size_bytes: default_memory_limit,
       disk_max_size_bytes: config.disk_max_size_bytes,
       tag_headers: cache_tag_headers(&config.tag_headers),
       max_tags_per_entry: config.max_tags_per_entry,
       max_tag_bytes: config.max_tag_bytes,
+      max_vary_fields: config.max_vary_fields,
+      max_vary_variants_per_key: config.max_vary_variants_per_key,
       background_refresh: config.background_refresh,
       background_refresh_max_concurrent: config.background_refresh_max_concurrent,
       lock_wait_timeout: Duration::from_millis(config.lock_wait_timeout_ms),
@@ -318,6 +349,7 @@ impl ResponseCache {
     let cache = Arc::new(Self {
       config: config.clone(),
       policies,
+      bypass_request_headers: cache_tag_headers(&config.bypass_request_headers),
       refresh_limiters,
       tmpfs_dir,
       disk_dir,
@@ -348,12 +380,19 @@ impl ResponseCache {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
       return None;
     }
-    if request_no_store(ctx.request_headers) {
+    let policy = self.policy(ctx.policy_name)?;
+    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
       return None;
     }
-    let policy = self.policy(ctx.policy_name)?;
     let base_key = expanded_cache_key(
       &policy.cache_key,
+      ctx.scheme,
+      ctx.host,
+      ctx.uri,
+      ctx.request_headers,
+    );
+    let partition = expanded_cache_key(
+      &policy.partition_key,
       ctx.scheme,
       ctx.host,
       ctx.uri,
@@ -367,6 +406,7 @@ impl ResponseCache {
       .find(|(_, entry)| {
         entry.policy == policy.name
           && entry.base_key == base_key
+          && entry.partition == partition
           && entry.scheme == ctx.scheme
           && entry.host == ctx.host
           && entry.uri == ctx.uri.to_string()
@@ -375,7 +415,13 @@ impl ResponseCache {
       .map(|(key, _)| key.clone());
     let Some(key) = key else {
       drop(inner);
-      return self.lookup_shared(&policy.name, policy.background_refresh, &base_key, ctx);
+      return self.lookup_shared(
+        &policy.name,
+        policy.background_refresh,
+        &partition,
+        &base_key,
+        ctx,
+      );
     };
 
     let expired = inner
@@ -440,6 +486,7 @@ impl ResponseCache {
     &self,
     policy: &str,
     background_refresh: bool,
+    partition: &str,
     base_key: &str,
     ctx: CacheLookupContext<'_>,
   ) -> Option<CacheLookup> {
@@ -452,6 +499,7 @@ impl ResponseCache {
       policy,
       ctx.scheme,
       ctx.host,
+      partition,
       base_key,
       &uri,
       ctx.method,
@@ -499,7 +547,7 @@ impl ResponseCache {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
       return None;
     }
-    if request_no_store(ctx.request_headers) {
+    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
       return None;
     }
     let key = self.fill_key(ctx)?;
@@ -536,12 +584,12 @@ impl ResponseCache {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
       return CacheInsertOutcome::NotCacheable;
     }
-    if request_no_store(ctx.request_headers) {
-      return CacheInsertOutcome::NotCacheable;
-    }
     let Some(policy) = self.policy(ctx.policy_name).cloned() else {
       return CacheInsertOutcome::NotCacheable;
     };
+    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
+      return CacheInsertOutcome::NotCacheable;
+    }
     let Some(metadata) = cache_metadata(&self.config, &policy, ctx.request_headers, &entry) else {
       return CacheInsertOutcome::NotCacheable;
     };
@@ -552,13 +600,24 @@ impl ResponseCache {
       ctx.uri,
       ctx.request_headers,
     );
-    let variant_key = variant_key(&base_key, &metadata.vary);
-    let size = entry.body.len() + header_size(&entry.headers);
+    let partition = expanded_cache_key(
+      &policy.partition_key,
+      ctx.scheme,
+      ctx.host,
+      ctx.uri,
+      ctx.request_headers,
+    );
+    let variant_key = variant_key(&partition, &base_key, &metadata.vary);
+    let stored_headers = stored_response_headers(&entry.headers, &self.config);
+    let size = entry.body.len() + header_size(&stored_headers);
     if size > self.config.max_size_bytes {
       return CacheInsertOutcome::Rejected;
     }
 
     let mut inner = self.inner.lock().expect("cache lock poisoned");
+    if variant_count_exceeded(&inner, &policy, &partition, &base_key, &variant_key) {
+      return CacheInsertOutcome::Rejected;
+    }
     if !admit_entry(&mut inner, &policy, &variant_key, &entry) {
       return CacheInsertOutcome::Rejected;
     }
@@ -577,13 +636,14 @@ impl ResponseCache {
     let tags = extract_tags(&entry.headers, &policy);
     let stored = StoredEntry {
       policy: policy.name.clone(),
+      partition,
       base_key,
       variant_key: variant_key.clone(),
       scheme: ctx.scheme.to_string(),
       host: ctx.host.to_string(),
       uri: ctx.uri.to_string(),
       status: entry.status,
-      headers: entry.headers,
+      headers: stored_headers,
       body,
       expires_at: metadata.expires_at,
       stale_if_error_until: metadata.stale_if_error_until,
@@ -639,12 +699,27 @@ impl ResponseCache {
   }
 
   pub fn purge_exact(&self, policy: &str, scheme: &str, host: &str, uri: &str) -> usize {
+    self.purge_exact_partition(policy, scheme, host, uri, None)
+  }
+
+  pub fn purge_exact_partition(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+    partition: Option<&str>,
+  ) -> usize {
     let mut inner = self.inner.lock().expect("cache lock poisoned");
     let keys = inner
       .entries
       .iter()
       .filter(|(_, entry)| {
-        entry.policy == policy && entry.scheme == scheme && entry.host == host && entry.uri == uri
+        entry.policy == policy
+          && entry.scheme == scheme
+          && entry.host == host
+          && entry.uri == uri
+          && partition.is_none_or(|partition| entry.partition == partition)
       })
       .map(|(key, _)| key.clone())
       .collect::<Vec<_>>();
@@ -657,17 +732,29 @@ impl ResponseCache {
         .shared_state
         .as_ref()
         .filter(|shared| shared.has_cache())
-        .map(|shared| shared.cache_purge_exact(policy, scheme, host, uri))
+        .map(|shared| shared.cache_purge_exact(policy, scheme, host, uri, partition))
         .unwrap_or(0)
   }
 
   pub fn purge_prefix(&self, policy: &str, scheme: &str, host: &str, path_prefix: &str) -> usize {
+    self.purge_prefix_partition(policy, scheme, host, path_prefix, None)
+  }
+
+  pub fn purge_prefix_partition(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    path_prefix: &str,
+    partition: Option<&str>,
+  ) -> usize {
     let mut inner = self.inner.lock().expect("cache lock poisoned");
     let keys = inner
       .entries
       .iter()
       .filter(|(_, entry)| {
         entry.policy == policy
+          && partition.is_none_or(|partition| entry.partition == partition)
           && entry.scheme == scheme
           && entry.host == host
           && entry
@@ -687,7 +774,7 @@ impl ResponseCache {
         .shared_state
         .as_ref()
         .filter(|shared| shared.has_cache())
-        .map(|shared| shared.cache_purge_prefix(policy, scheme, host, path_prefix))
+        .map(|shared| shared.cache_purge_prefix(policy, scheme, host, path_prefix, partition))
         .unwrap_or(0)
   }
 
@@ -698,12 +785,24 @@ impl ResponseCache {
     scheme: Option<&str>,
     host: Option<&str>,
   ) -> usize {
+    self.purge_tag_partition(policy, tag, scheme, host, None)
+  }
+
+  pub fn purge_tag_partition(
+    &self,
+    policy: &str,
+    tag: &str,
+    scheme: Option<&str>,
+    host: Option<&str>,
+    partition: Option<&str>,
+  ) -> usize {
     let mut inner = self.inner.lock().expect("cache lock poisoned");
     let keys = inner
       .entries
       .iter()
       .filter(|(_, entry)| {
         entry.policy == policy
+          && partition.is_none_or(|partition| entry.partition == partition)
           && scheme.is_none_or(|scheme| entry.scheme == scheme)
           && host.is_none_or(|host| entry.host == host)
           && entry.tags.iter().any(|candidate| candidate == tag)
@@ -719,7 +818,7 @@ impl ResponseCache {
         .shared_state
         .as_ref()
         .filter(|shared| shared.has_cache())
-        .map(|shared| shared.cache_purge_tag(policy, tag, scheme, host))
+        .map(|shared| shared.cache_purge_tag(policy, tag, scheme, host, partition))
         .unwrap_or(0)
   }
 
@@ -742,6 +841,126 @@ impl ResponseCache {
       }
     }
     stats
+  }
+
+  pub fn strip_surrogate_control(&self, policy_name: Option<&str>) -> bool {
+    self.policy(policy_name).is_some()
+      && self.config.surrogate.enabled
+      && self.config.surrogate.strip_response_header
+  }
+
+  pub fn explain_key(
+    &self,
+    ctx: CacheLookupContext<'_>,
+    response_headers: Option<&HeaderMap>,
+  ) -> CacheKeyExplain {
+    let policy = self.policy(ctx.policy_name);
+    let mut reasons = Vec::new();
+    if !self.config.enabled {
+      reasons.push("cache disabled".to_string());
+    }
+    let cacheable_method = self.is_cacheable_method(ctx.method);
+    if !cacheable_method {
+      reasons.push("method not configured as cacheable".to_string());
+    }
+    let bypassed = request_no_store(ctx.request_headers, &self.bypass_request_headers);
+    if bypassed {
+      reasons.push("request carries a bypass header or Cache-Control: no-store".to_string());
+    }
+    let (policy_name, partition, base_key, vary_fields, variant_key) = if let Some(policy) = policy
+    {
+      let partition = expanded_cache_key(
+        &policy.partition_key,
+        ctx.scheme,
+        ctx.host,
+        ctx.uri,
+        ctx.request_headers,
+      );
+      let base_key = expanded_cache_key(
+        &policy.cache_key,
+        ctx.scheme,
+        ctx.host,
+        ctx.uri,
+        ctx.request_headers,
+      );
+      let (vary_fields, variant_key) = if let Some(headers) = response_headers {
+        match vary_matchers_result(
+          headers,
+          ctx.request_headers,
+          policy.max_vary_fields,
+          MAX_VARY_VALUE_BYTES,
+        ) {
+          Ok(vary) => {
+            let vary_fields = vary.iter().map(|item| item.name.clone()).collect();
+            let variant_key = Some(variant_key(&partition, &base_key, &vary));
+            (vary_fields, variant_key)
+          }
+          Err(reason) => {
+            reasons.push(reason.to_string());
+            (Vec::new(), None)
+          }
+        }
+      } else {
+        (Vec::new(), None)
+      };
+      (
+        policy.name.clone(),
+        partition,
+        base_key,
+        vary_fields,
+        variant_key,
+      )
+    } else {
+      reasons.push("unknown cache policy".to_string());
+      (
+        ctx.policy_name.unwrap_or("default").to_string(),
+        String::new(),
+        String::new(),
+        Vec::new(),
+        None,
+      )
+    };
+    CacheKeyExplain {
+      policy: policy_name,
+      enabled: self.config.enabled && policy.is_some(),
+      cacheable_method,
+      bypassed,
+      partition,
+      base_key,
+      variant_key,
+      vary_fields,
+      reasons,
+    }
+  }
+
+  pub fn remember_purge_nonce(&self, nonce: &str, ttl: Duration) -> bool {
+    let now = SystemTime::now();
+    let expires_at = now + ttl;
+    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    while let Some(oldest) = inner.purge_nonce_order.front() {
+      let expired = inner
+        .purge_nonces
+        .get(oldest)
+        .is_none_or(|expires| *expires <= now);
+      if !expired {
+        break;
+      }
+      if let Some(oldest) = inner.purge_nonce_order.pop_front() {
+        inner.purge_nonces.remove(&oldest);
+      }
+    }
+    if inner.purge_nonces.contains_key(nonce) {
+      return false;
+    }
+    inner.purge_nonces.insert(nonce.to_string(), expires_at);
+    inner.purge_nonce_order.push_back(nonce.to_string());
+    while inner.purge_nonces.len() > 16_384 {
+      let Some(oldest) = inner.purge_nonce_order.pop_front() else {
+        break;
+      };
+      inner.purge_nonces.remove(&oldest);
+    }
+    true
   }
 
   fn policy(&self, policy_name: Option<&str>) -> Option<&CachePolicyRuntime> {
@@ -813,9 +1032,17 @@ impl ResponseCache {
       ctx.uri,
       ctx.request_headers,
     );
+    let partition = expanded_cache_key(
+      &policy.partition_key,
+      ctx.scheme,
+      ctx.host,
+      ctx.uri,
+      ctx.request_headers,
+    );
     Some(format!(
-      "{}\n{}\n{}\n{}\n{}",
+      "{}\n{}\n{}\n{}\n{}\n{}",
       policy.name,
+      partition,
       ctx.method.as_str(),
       ctx.scheme,
       ctx.host,
@@ -1071,7 +1298,7 @@ fn cache_metadata(
   if entry.status == StatusCode::PARTIAL_CONTENT {
     return None;
   }
-  if !cacheable_status(config, entry.status) {
+  if !cacheable_status(policy, entry.status) {
     return None;
   }
   if response_has_set_cookie(&entry.headers) {
@@ -1082,53 +1309,88 @@ fn cache_metadata(
     return None;
   }
   let directives = cache_control_directives(&entry.headers);
-  if config.respect_cache_control && (directives.has("no-store") || directives.has("private")) {
+  let surrogate = config
+    .surrogate
+    .enabled
+    .then(|| surrogate_control_directives(&entry.headers))
+    .flatten();
+  if surrogate
+    .as_ref()
+    .is_some_and(|directives| directives.no_store)
+  {
     return None;
   }
-  let vary = vary_matchers(&entry.headers, request_headers)?;
-  let now = SystemTime::now();
-  let mut ttl = if config.respect_cache_control {
-    directives
-      .seconds("s-maxage")
-      .or_else(|| directives.seconds("max-age"))
-      .or_else(|| expires_ttl(&entry.headers, now))
-      .unwrap_or(policy.default_ttl_seconds)
-  } else {
-    policy.default_ttl_seconds
-  };
-  if !config.negative_statuses.is_empty()
-    && config
-      .negative_statuses
-      .iter()
-      .any(|status| StatusCode::from_u16(*status).ok() == Some(entry.status))
+  if surrogate.is_none()
+    && config.respect_cache_control
+    && (directives.has("no-store") || directives.has("private"))
   {
-    ttl = config.negative_ttl_seconds;
+    return None;
+  }
+  let vary = vary_matchers(
+    &entry.headers,
+    request_headers,
+    policy.max_vary_fields,
+    MAX_VARY_VALUE_BYTES,
+  )?;
+  let now = SystemTime::now();
+  let mut ttl = surrogate
+    .as_ref()
+    .and_then(|directives| directives.max_age)
+    .unwrap_or_else(|| {
+      if config.respect_cache_control {
+        directives
+          .seconds("s-maxage")
+          .or_else(|| directives.seconds("max-age"))
+          .or_else(|| expires_ttl(&entry.headers, now))
+          .unwrap_or(policy.default_ttl_seconds)
+      } else {
+        policy.default_ttl_seconds
+      }
+    });
+  if policy.negative_statuses.contains(&entry.status) {
+    ttl = policy.negative_ttl_seconds;
   }
   if ttl == 0 {
     return None;
   }
-  let must_revalidate = directives.has("no-cache")
-    || directives.has("must-revalidate")
-    || directives.has("proxy-revalidate");
+  let must_revalidate = surrogate.is_none()
+    && (directives.has("no-cache")
+      || directives.has("must-revalidate")
+      || directives.has("proxy-revalidate"));
   let expires_at = if must_revalidate {
     now
   } else {
     now + Duration::from_secs(ttl)
   };
-  let stale_if_error_seconds = if config.respect_cache_control {
-    directives
-      .seconds("stale-if-error")
-      .unwrap_or(config.stale_if_error_seconds)
+  let stale_if_error_seconds = surrogate
+    .as_ref()
+    .and_then(|directives| directives.stale_if_error)
+    .unwrap_or_else(|| {
+      if config.respect_cache_control {
+        directives
+          .seconds("stale-if-error")
+          .unwrap_or(config.stale_if_error_seconds)
+      } else {
+        config.stale_if_error_seconds
+      }
+    });
+  let stale_if_error_seconds = if policy.stale_if_error.max_upstream_stale_seconds > 0 {
+    stale_if_error_seconds.min(policy.stale_if_error.max_upstream_stale_seconds)
   } else {
-    config.stale_if_error_seconds
+    stale_if_error_seconds
   };
-  let stale_while_revalidate_seconds = if config.respect_cache_control {
-    directives
-      .seconds("stale-while-revalidate")
-      .unwrap_or(config.stale_while_revalidate_seconds)
-  } else {
-    config.stale_while_revalidate_seconds
-  };
+  let stale_while_revalidate_seconds = surrogate
+    .as_ref()
+    .and_then(|directives| directives.stale_while_revalidate)
+    .unwrap_or_else(|| {
+      if config.respect_cache_control {
+        directives
+          .seconds("stale-while-revalidate")
+          .unwrap_or(config.stale_while_revalidate_seconds)
+      } else {
+        config.stale_while_revalidate_seconds
+      }
+    });
   Some(ResponseMetadata {
     expires_at,
     stale_if_error_until: (stale_if_error_seconds > 0)
@@ -1140,7 +1402,7 @@ fn cache_metadata(
   })
 }
 
-fn cacheable_status(config: &CacheConfig, status: StatusCode) -> bool {
+fn cacheable_status(policy: &CachePolicyRuntime, status: StatusCode) -> bool {
   matches!(
     status,
     StatusCode::OK
@@ -1148,18 +1410,16 @@ fn cacheable_status(config: &CacheConfig, status: StatusCode) -> bool {
       | StatusCode::NO_CONTENT
       | StatusCode::MOVED_PERMANENTLY
       | StatusCode::PERMANENT_REDIRECT
-  ) || config
-    .negative_statuses
-    .iter()
-    .any(|candidate| StatusCode::from_u16(*candidate).ok() == Some(status))
+  ) || policy.negative_statuses.contains(&status)
 }
 
 fn response_has_set_cookie(headers: &HeaderMap) -> bool {
   headers.contains_key(http::header::SET_COOKIE)
 }
 
-fn request_no_store(headers: &HeaderMap) -> bool {
-  headers.contains_key(AUTHORIZATION) || cache_control_directives(headers).has("no-store")
+fn request_no_store(headers: &HeaderMap, bypass_headers: &[HeaderName]) -> bool {
+  bypass_headers.iter().any(|name| headers.contains_key(name))
+    || cache_control_directives(headers).has("no-store")
 }
 
 fn request_no_cache(headers: &HeaderMap) -> bool {
@@ -1184,28 +1444,52 @@ fn validator_headers(headers: &HeaderMap) -> HeaderMap {
 fn vary_matchers(
   response_headers: &HeaderMap,
   request_headers: &HeaderMap,
+  max_fields: usize,
+  max_value_bytes: usize,
 ) -> Option<Vec<VaryMatcher>> {
+  vary_matchers_result(
+    response_headers,
+    request_headers,
+    max_fields,
+    max_value_bytes,
+  )
+  .ok()
+}
+
+fn vary_matchers_result(
+  response_headers: &HeaderMap,
+  request_headers: &HeaderMap,
+  max_fields: usize,
+  max_value_bytes: usize,
+) -> Result<Vec<VaryMatcher>, &'static str> {
   let mut result = Vec::new();
   for value in response_headers.get_all(VARY) {
-    let value = value.to_str().ok()?;
+    let value = value.to_str().map_err(|_| "invalid Vary header")?;
     for name in value
       .split(',')
       .map(str::trim)
       .filter(|name| !name.is_empty())
     {
       if name == "*" {
-        return None;
+        return Err("Vary: * is not cacheable");
+      }
+      if result.len() >= max_fields {
+        return Err("too many Vary fields");
       }
       let lower = name.to_ascii_lowercase();
+      let value = header_values(request_headers, &lower);
+      if value.len() > max_value_bytes {
+        return Err("Vary value material is too large");
+      }
       result.push(VaryMatcher {
         name: lower.clone(),
-        value: header_values(request_headers, &lower),
+        value,
       });
     }
   }
   result.sort_by(|left, right| left.name.cmp(&right.name));
   result.dedup_by(|left, right| left.name == right.name);
-  Some(result)
+  Ok(result)
 }
 
 fn vary_matches(vary: &[VaryMatcher], request_headers: &HeaderMap) -> bool {
@@ -1247,6 +1531,14 @@ impl CacheControl {
   }
 }
 
+#[derive(Debug, Default)]
+struct SurrogateControl {
+  no_store: bool,
+  max_age: Option<u64>,
+  stale_if_error: Option<u64>,
+  stale_while_revalidate: Option<u64>,
+}
+
 fn cache_control_directives(headers: &HeaderMap) -> CacheControl {
   let mut directives = CacheControl::default();
   for value in headers.get_all(CACHE_CONTROL) {
@@ -1271,6 +1563,40 @@ fn cache_control_directives(headers: &HeaderMap) -> CacheControl {
     }
   }
   directives
+}
+
+fn surrogate_control_directives(headers: &HeaderMap) -> Option<SurrogateControl> {
+  let name = HeaderName::from_static(SURROGATE_CONTROL_HEADER);
+  let mut result = SurrogateControl::default();
+  let mut seen = false;
+  for value in headers.get_all(name) {
+    let Ok(value) = value.to_str() else {
+      continue;
+    };
+    for item in value.split(',').flat_map(|part| part.split(';')) {
+      let item = item.trim();
+      if item.is_empty() {
+        continue;
+      }
+      seen = true;
+      let (name, value) = item
+        .split_once('=')
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), Some(value.trim())))
+        .unwrap_or_else(|| (item.to_ascii_lowercase(), None));
+      match name.as_str() {
+        "no-store" => result.no_store = true,
+        "max-age" => result.max_age = value.and_then(|value| value.parse::<u64>().ok()),
+        "stale-if-error" => {
+          result.stale_if_error = value.and_then(|value| value.parse::<u64>().ok());
+        }
+        "stale-while-revalidate" => {
+          result.stale_while_revalidate = value.and_then(|value| value.parse::<u64>().ok());
+        }
+        _ => {}
+      }
+    }
+  }
+  seen.then_some(result)
 }
 
 fn expires_ttl(headers: &HeaderMap, now: SystemTime) -> Option<u64> {
@@ -1350,8 +1676,12 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> String {
     .unwrap_or_default()
 }
 
-fn variant_key(base_key: &str, vary: &[VaryMatcher]) -> String {
-  let mut key = base_key.to_string();
+fn variant_key(partition: &str, base_key: &str, vary: &[VaryMatcher]) -> String {
+  let mut key = String::new();
+  key.push_str("partition=");
+  key.push_str(partition);
+  key.push('\n');
+  key.push_str(base_key);
   for item in vary {
     key.push('\n');
     key.push_str(&item.name);
@@ -1418,6 +1748,34 @@ fn extract_tags(headers: &HeaderMap, policy: &CachePolicyRuntime) -> Vec<String>
     }
   }
   tags
+}
+
+fn stored_response_headers(headers: &HeaderMap, config: &CacheConfig) -> HeaderMap {
+  let mut headers = headers.clone();
+  if config.surrogate.enabled && config.surrogate.strip_response_header {
+    headers.remove(HeaderName::from_static(SURROGATE_CONTROL_HEADER));
+  }
+  headers
+}
+
+fn variant_count_exceeded(
+  inner: &CacheInner,
+  policy: &CachePolicyRuntime,
+  partition: &str,
+  base_key: &str,
+  variant_key: &str,
+) -> bool {
+  if inner.entries.contains_key(variant_key) {
+    return false;
+  }
+  let count = inner
+    .entries
+    .values()
+    .filter(|entry| {
+      entry.policy == policy.name && entry.partition == partition && entry.base_key == base_key
+    })
+    .count();
+  count >= policy.max_vary_variants_per_key
 }
 
 fn admit_entry(
@@ -1517,9 +1875,21 @@ fn policy_runtime(
       .cache_key
       .clone()
       .unwrap_or_else(|| config.cache_key.clone()),
+    partition_key: policy
+      .partition_key
+      .clone()
+      .unwrap_or_else(|| config.partition_key.clone()),
     default_ttl_seconds: policy
       .default_ttl_seconds
       .unwrap_or(config.default_ttl_seconds),
+    negative_statuses: policy
+      .negative_statuses
+      .as_ref()
+      .map(|statuses| cache_status_codes(statuses))
+      .unwrap_or_else(|| cache_status_codes(&config.negative_statuses)),
+    negative_ttl_seconds: policy
+      .negative_ttl_seconds
+      .unwrap_or(config.negative_ttl_seconds),
     memory_max_size_bytes: policy.memory_max_size_bytes.unwrap_or(default_memory_limit),
     disk_max_size_bytes: policy.disk_max_size_bytes.or(config.disk_max_size_bytes),
     tag_headers: cache_tag_headers(policy.tag_headers.as_ref().unwrap_or(&config.tag_headers)),
@@ -1527,6 +1897,10 @@ fn policy_runtime(
       .max_tags_per_entry
       .unwrap_or(config.max_tags_per_entry),
     max_tag_bytes: policy.max_tag_bytes.unwrap_or(config.max_tag_bytes),
+    max_vary_fields: policy.max_vary_fields.unwrap_or(config.max_vary_fields),
+    max_vary_variants_per_key: policy
+      .max_vary_variants_per_key
+      .unwrap_or(config.max_vary_variants_per_key),
     background_refresh: policy
       .background_refresh
       .unwrap_or(config.background_refresh),
@@ -1540,7 +1914,10 @@ fn policy_runtime(
     ),
     admission: admission_runtime(
       policy.admission.as_ref().unwrap_or(&config.admission),
-      &config.negative_statuses,
+      policy
+        .negative_statuses
+        .as_deref()
+        .unwrap_or(&config.negative_statuses),
     ),
     stale_if_error: policy
       .stale_if_error
@@ -1561,6 +1938,13 @@ fn cache_tag_headers(headers: &[String]) -> Vec<HeaderName> {
   headers
     .iter()
     .filter_map(|header| HeaderName::from_bytes(header.as_bytes()).ok())
+    .collect()
+}
+
+fn cache_status_codes(statuses: &[u16]) -> Vec<StatusCode> {
+  statuses
+    .iter()
+    .filter_map(|status| StatusCode::from_u16(*status).ok())
     .collect()
 }
 
@@ -1683,6 +2067,7 @@ fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
   };
   Some(SharedCacheEntry {
     policy: entry.policy.clone(),
+    partition: entry.partition.clone(),
     base_key: entry.base_key.clone(),
     variant_key: entry.variant_key.clone(),
     scheme: entry.scheme.clone(),
@@ -1694,6 +2079,8 @@ fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
       .iter()
       .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
       .collect(),
+    body_len: body.len(),
+    body_chunks: Vec::new(),
     body,
     expires_at_ms: system_time_ms(entry.expires_at),
     stale_if_error_until_ms: entry.stale_if_error_until.map(system_time_ms),
@@ -1832,6 +2219,7 @@ fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
   lines.push("version=1".to_string());
   for (key, value) in [
     ("policy", entry.policy.as_str()),
+    ("partition", entry.partition.as_str()),
     ("base_key", entry.base_key.as_str()),
     ("variant_key", entry.variant_key.as_str()),
     ("scheme", entry.scheme.as_str()),
@@ -1907,6 +2295,12 @@ fn decode_metadata(path: &Path, disk_dir: &Path) -> anyhow::Result<StoredEntry> 
       .and_then(|value| unb64(value))
   };
   let policy = get("policy")?;
+  let partition = values
+    .get("partition")
+    .and_then(|items| items.first())
+    .map(|value| unb64(value))
+    .transpose()?
+    .unwrap_or_default();
   let base_key = get("base_key")?;
   let variant_key = get("variant_key")?;
   let scheme = get("scheme")?;
@@ -1962,6 +2356,7 @@ fn decode_metadata(path: &Path, disk_dir: &Path) -> anyhow::Result<StoredEntry> 
     .collect();
   Ok(StoredEntry {
     policy,
+    partition,
     base_key,
     variant_key,
     scheme,
@@ -2032,657 +2427,5 @@ fn base64_decode(value: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn cache_key_expands_dynamic_tokens() {
-    let uri = "/asset/app.css?v=1&lang=en".parse::<Uri>().unwrap();
-    let mut headers = HeaderMap::new();
-    headers.insert("accept-language", HeaderValue::from_static("en-US"));
-    headers.insert(
-      "cookie",
-      HeaderValue::from_static("session=abc; theme=dark"),
-    );
-    let key = expanded_cache_key(
-      "{scheme}:{host}:{path}:{query:v}:{header:Accept-Language}:{cookie:theme}",
-      "https",
-      "example.test",
-      &uri,
-      &headers,
-    );
-    assert_eq!(key, "https:example.test:/asset/app.css:1:en-US:dark");
-  }
-
-  #[test]
-  fn range_entry_returns_partial_body() {
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("10"));
-    let entry = CacheEntry {
-      status: StatusCode::OK,
-      headers,
-      body: Bytes::from_static(b"0123456789"),
-    };
-    let mut request_headers = HeaderMap::new();
-    request_headers.insert(RANGE, HeaderValue::from_static("bytes=2-5"));
-    let entry = range_entry(entry, &Method::GET, &request_headers);
-    assert_eq!(entry.status, StatusCode::PARTIAL_CONTENT);
-    assert_eq!(entry.body, Bytes::from_static(b"2345"));
-    assert_eq!(entry.headers.get(CONTENT_RANGE).unwrap(), "bytes 2-5/10");
-  }
-
-  #[tokio::test]
-  async fn fill_permit_coalesces_followers_until_leader_drops() {
-    let config = CacheConfig {
-      enabled: true,
-      ..CacheConfig::default()
-    };
-    let cache = ResponseCache::new(&config, None).unwrap();
-    let uri = "/asset/app.css?v=1".parse::<Uri>().unwrap();
-    let headers = HeaderMap::new();
-    let ctx = CacheLookupContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &uri,
-      request_headers: &headers,
-    };
-    let guard = match cache.begin_fill(ctx.clone()).unwrap() {
-      CacheFillPermit::Leader(guard) => guard,
-      CacheFillPermit::Follower(_) | CacheFillPermit::SharedConflict => {
-        panic!("first fill should lead")
-      }
-    };
-    let waiter = match cache.begin_fill(ctx.clone()).unwrap() {
-      CacheFillPermit::Follower(waiter) => waiter,
-      CacheFillPermit::Leader(_) | CacheFillPermit::SharedConflict => {
-        panic!("second fill should wait")
-      }
-    };
-    let wait_task = tokio::spawn(waiter.wait());
-    tokio::task::yield_now().await;
-    assert!(!wait_task.is_finished());
-    drop(guard);
-    tokio::time::timeout(Duration::from_secs(1), wait_task)
-      .await
-      .unwrap()
-      .unwrap();
-    assert!(matches!(
-      cache.begin_fill(ctx).unwrap(),
-      CacheFillPermit::Leader(_) | CacheFillPermit::SharedConflict
-    ));
-  }
-
-  #[tokio::test]
-  async fn fill_waiter_times_out_without_leader_drop() {
-    let config = CacheConfig {
-      enabled: true,
-      ..CacheConfig::default()
-    };
-    let cache = ResponseCache::new(&config, None).unwrap();
-    let uri = "/asset/app.css?v=1".parse::<Uri>().unwrap();
-    let headers = HeaderMap::new();
-    let ctx = CacheLookupContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &uri,
-      request_headers: &headers,
-    };
-    let _guard = match cache.begin_fill(ctx.clone()).unwrap() {
-      CacheFillPermit::Leader(guard) => guard,
-      CacheFillPermit::Follower(_) | CacheFillPermit::SharedConflict => {
-        panic!("first fill should lead")
-      }
-    };
-    let waiter = match cache.begin_fill(ctx).unwrap() {
-      CacheFillPermit::Follower(waiter) => waiter,
-      CacheFillPermit::Leader(_) | CacheFillPermit::SharedConflict => {
-        panic!("second fill should wait")
-      }
-    };
-    assert!(!waiter.wait_timeout(Duration::from_millis(5)).await);
-  }
-
-  #[test]
-  fn cache_tag_purge_removes_matching_entries_only() {
-    let config = CacheConfig {
-      enabled: true,
-      ..CacheConfig::default()
-    };
-    let cache = ResponseCache::new(&config, None).unwrap();
-    let headers = HeaderMap::new();
-    let first_uri = "/asset/a.css".parse::<Uri>().unwrap();
-    let second_uri = "/asset/b.css".parse::<Uri>().unwrap();
-    let mut first_response_headers = HeaderMap::new();
-    first_response_headers.insert("surrogate-key", HeaderValue::from_static("assets css"));
-    let mut second_response_headers = HeaderMap::new();
-    second_response_headers.insert("surrogate-key", HeaderValue::from_static("assets js"));
-
-    for (uri, response_headers, body) in [
-      (&first_uri, first_response_headers, Bytes::from_static(b"a")),
-      (
-        &second_uri,
-        second_response_headers,
-        Bytes::from_static(b"b"),
-      ),
-    ] {
-      assert_eq!(
-        cache.insert(
-          CacheInsertContext {
-            policy_name: Some("default"),
-            scheme: "https",
-            host: "example.test",
-            method: &Method::GET,
-            uri,
-            request_headers: &headers,
-          },
-          CacheEntry {
-            status: StatusCode::OK,
-            headers: response_headers,
-            body,
-          },
-        ),
-        CacheInsertOutcome::Stored
-      );
-    }
-
-    assert_eq!(cache.purge_tag("default", "css", None, None), 1);
-    let first = CacheLookupContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &first_uri,
-      request_headers: &headers,
-    };
-    let second = CacheLookupContext {
-      uri: &second_uri,
-      ..first.clone()
-    };
-    assert!(cache.lookup(first).is_none());
-    assert!(matches!(cache.lookup(second), Some(CacheLookup::Fresh(_))));
-  }
-
-  #[test]
-  fn admission_min_hits_rejects_until_threshold() {
-    let config = CacheConfig {
-      enabled: true,
-      admission: CacheAdmissionConfig {
-        min_hits: 2,
-        ..CacheAdmissionConfig::default()
-      },
-      ..CacheConfig::default()
-    };
-    let cache = ResponseCache::new(&config, None).unwrap();
-    let uri = "/asset/app.css".parse::<Uri>().unwrap();
-    let headers = HeaderMap::new();
-    let ctx = CacheInsertContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &uri,
-      request_headers: &headers,
-    };
-    let entry = CacheEntry {
-      status: StatusCode::OK,
-      headers: HeaderMap::new(),
-      body: Bytes::from_static(b"body"),
-    };
-    assert_eq!(
-      cache.insert(ctx.clone(), entry.clone()),
-      CacheInsertOutcome::Rejected
-    );
-    assert!(
-      cache
-        .lookup(CacheLookupContext {
-          policy_name: Some("default"),
-          scheme: "https",
-          host: "example.test",
-          method: &Method::GET,
-          uri: &uri,
-          request_headers: &headers,
-        })
-        .is_none()
-    );
-    assert_eq!(cache.insert(ctx, entry), CacheInsertOutcome::Stored);
-  }
-
-  #[test]
-  fn stale_if_error_status_policy_matches_configured_status() {
-    let config = CacheConfig {
-      stale_if_error: CacheStaleIfErrorConfig {
-        statuses: vec![500, 502],
-        ..CacheStaleIfErrorConfig::default()
-      },
-      ..CacheConfig::default()
-    };
-    let cache = ResponseCache::new(&config, None).unwrap();
-    assert!(cache.stale_if_error_allows_status(Some("default"), StatusCode::BAD_GATEWAY));
-    assert!(!cache.stale_if_error_allows_status(Some("default"), StatusCode::SERVICE_UNAVAILABLE));
-  }
-
-  #[test]
-  fn stale_shared_hits_respect_named_policy_disabled_background_refresh() {
-    let config = cache_config_with_disabled_named_background_refresh();
-    let local = ResponseCache::new(&config, None).unwrap();
-    let shared = crate::shared_state::SharedState::test_memory("cache-bg-refresh-disabled");
-    let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
-    let second = ResponseCache::new(&config, Some(shared)).unwrap();
-    let request_headers = HeaderMap::new();
-    let mut no_cache_headers = HeaderMap::new();
-    no_cache_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    let local_uri = "/asset/local.css".parse::<Uri>().unwrap();
-    let shared_validator_uri = "/asset/shared-validator.css".parse::<Uri>().unwrap();
-    let shared_no_validator_uri = "/asset/shared-no-validator.css".parse::<Uri>().unwrap();
-
-    insert_stale_revalidate_entry(
-      &local,
-      &local_uri,
-      &request_headers,
-      Bytes::from_static(b"local"),
-      true,
-    );
-    insert_stale_revalidate_entry(
-      &first,
-      &shared_validator_uri,
-      &request_headers,
-      Bytes::from_static(b"shared-validator"),
-      true,
-    );
-    insert_stale_revalidate_entry(
-      &first,
-      &shared_no_validator_uri,
-      &request_headers,
-      Bytes::from_static(b"shared-no-validator"),
-      false,
-    );
-
-    std::thread::sleep(Duration::from_millis(1200));
-
-    assert_stale_background_refresh_disabled(&local, &local_uri, &request_headers);
-    assert_stale_background_refresh_disabled(&second, &shared_validator_uri, &request_headers);
-    // A repeated lookup catches stale L2 entries being promoted as newly fresh L1 entries.
-    assert_stale_background_refresh_disabled(&second, &shared_validator_uri, &request_headers);
-    assert_stale_background_refresh_disabled(&second, &shared_no_validator_uri, &no_cache_headers);
-  }
-
-  #[test]
-  fn background_refresh_permit_respects_disabled_named_policy() {
-    let config = cache_config_with_disabled_named_background_refresh();
-    let cache = ResponseCache::new(&config, None).unwrap();
-
-    assert!(
-      cache
-        .try_background_refresh_permit(Some("no-background-refresh"))
-        .is_none()
-    );
-    assert!(
-      cache
-        .try_background_refresh_permit(Some("default"))
-        .is_some()
-    );
-  }
-
-  #[test]
-  fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
-    let temp_dir = TestTempDir::new();
-    let config = CacheConfig {
-      enabled: true,
-      store: CacheStore::Disk,
-      disk_dir: Some(temp_dir.path.clone()),
-      disk_max_size_bytes: Some(1024 * 1024),
-      ..CacheConfig::default()
-    };
-    {
-      let cache = ResponseCache::new(&config, None).unwrap();
-      let uri = "/asset/app.css".parse::<Uri>().unwrap();
-      assert_eq!(
-        cache.insert(
-          CacheInsertContext {
-            policy_name: Some("default"),
-            scheme: "https",
-            host: "example.test",
-            method: &Method::GET,
-            uri: &uri,
-            request_headers: &HeaderMap::new(),
-          },
-          CacheEntry {
-            status: StatusCode::OK,
-            headers: HeaderMap::new(),
-            body: Bytes::from_static(b"disk-body"),
-          },
-        ),
-        CacheInsertOutcome::Stored
-      );
-    }
-    std::fs::write(temp_dir.path.join("orphan.body"), b"orphan").unwrap();
-    std::fs::write(temp_dir.path.join("stale.body.tmp"), b"tmp").unwrap();
-
-    let cache = ResponseCache::new(&config, None).unwrap();
-    let stats = cache.stats();
-    assert_eq!(stats.disk_recovered_entries_total, 1);
-    assert!(stats.disk_recovery_removed_files_total >= 2);
-    assert!(!temp_dir.path.join("orphan.body").exists());
-    assert!(!temp_dir.path.join("stale.body.tmp").exists());
-  }
-
-  #[test]
-  fn disk_cache_recovery_does_not_trust_metadata_body_path() {
-    let temp_dir = TestTempDir::new();
-    let cache_dir = temp_dir.path.join("cache");
-    std::fs::create_dir_all(&cache_dir).unwrap();
-    let outside_path = temp_dir.path.join("outside.txt");
-    std::fs::write(&outside_path, b"keep").unwrap();
-
-    let variant_key = "https:example.test:/asset/poison.css";
-    let meta_path = cache_file_path(&cache_dir, variant_key, CacheFileKind::Meta).unwrap();
-    let stored = StoredEntry {
-      policy: "default".to_string(),
-      base_key: "https:example.test:/asset/poison.css".to_string(),
-      variant_key: variant_key.to_string(),
-      scheme: "https".to_string(),
-      host: "example.test".to_string(),
-      uri: "/asset/poison.css".to_string(),
-      status: StatusCode::OK,
-      headers: HeaderMap::new(),
-      body: StoredBody::Disk(outside_path.clone()),
-      expires_at: UNIX_EPOCH + Duration::from_secs(1),
-      stale_if_error_until: None,
-      stale_while_revalidate_until: None,
-      must_revalidate: false,
-      vary: Vec::new(),
-      tags: Vec::new(),
-      size: 4,
-    };
-    std::fs::write(&meta_path, encode_metadata(&stored).unwrap()).unwrap();
-
-    let config = CacheConfig {
-      enabled: true,
-      store: CacheStore::Disk,
-      disk_dir: Some(cache_dir),
-      disk_max_size_bytes: Some(1024 * 1024),
-      ..CacheConfig::default()
-    };
-    let cache = ResponseCache::new(&config, None).unwrap();
-    let stats = cache.stats();
-
-    assert_eq!(stats.disk_recovered_entries_total, 0);
-    assert!(stats.disk_recovery_removed_files_total >= 1);
-    assert!(outside_path.exists());
-  }
-
-  fn cache_config_with_disabled_named_background_refresh() -> CacheConfig {
-    CacheConfig {
-      enabled: true,
-      policies: vec![crate::config::CachePolicyConfig {
-        name: "no-background-refresh".to_string(),
-        store: None,
-        cache_key: None,
-        default_ttl_seconds: None,
-        memory_max_size_bytes: None,
-        disk_max_size_bytes: None,
-        tag_headers: None,
-        max_tags_per_entry: None,
-        max_tag_bytes: None,
-        background_refresh: Some(false),
-        background_refresh_max_concurrent: None,
-        lock_wait_timeout_ms: None,
-        admission: None,
-        stale_if_error: None,
-        rules: Vec::new(),
-      }],
-      ..CacheConfig::default()
-    }
-  }
-
-  fn insert_stale_revalidate_entry(
-    cache: &ResponseCache,
-    uri: &Uri,
-    request_headers: &HeaderMap,
-    body: Bytes,
-    include_validator: bool,
-  ) {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-      CACHE_CONTROL,
-      HeaderValue::from_static("public, max-age=1, stale-while-revalidate=60, stale-if-error=60"),
-    );
-    if include_validator {
-      headers.insert(ETAG, HeaderValue::from_static("\"v1\""));
-    }
-
-    assert_eq!(
-      cache.insert(
-        CacheInsertContext {
-          policy_name: Some("no-background-refresh"),
-          scheme: "https",
-          host: "example.test",
-          method: &Method::GET,
-          uri,
-          request_headers,
-        },
-        CacheEntry {
-          status: StatusCode::OK,
-          headers,
-          body,
-        },
-      ),
-      CacheInsertOutcome::Stored
-    );
-  }
-
-  fn assert_stale_background_refresh_disabled(
-    cache: &ResponseCache,
-    uri: &Uri,
-    request_headers: &HeaderMap,
-  ) {
-    match cache.lookup(CacheLookupContext {
-      policy_name: Some("no-background-refresh"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri,
-      request_headers,
-    }) {
-      Some(CacheLookup::Stale(stale)) => assert!(
-        !stale.background_refresh,
-        "stale hit ignored disabled background_refresh policy"
-      ),
-      other => panic!("expected stale cache hit, got {other:?}"),
-    }
-  }
-
-  #[test]
-  fn shared_cache_tag_purge_removes_l2_entry() {
-    let shared = crate::shared_state::SharedState::test_memory("cache-tag-test");
-    let config = CacheConfig {
-      enabled: true,
-      ..CacheConfig::default()
-    };
-    let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
-    let second = ResponseCache::new(&config, Some(shared)).unwrap();
-    let uri = "/asset/app.css".parse::<Uri>().unwrap();
-    let request_headers = HeaderMap::new();
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert("cache-tag", HeaderValue::from_static("release-1"));
-    first.insert(
-      CacheInsertContext {
-        policy_name: Some("default"),
-        scheme: "https",
-        host: "example.test",
-        method: &Method::GET,
-        uri: &uri,
-        request_headers: &request_headers,
-      },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers,
-        body: Bytes::from_static(b"tagged"),
-      },
-    );
-    assert!(matches!(
-      second.lookup(CacheLookupContext {
-        policy_name: Some("default"),
-        scheme: "https",
-        host: "example.test",
-        method: &Method::GET,
-        uri: &uri,
-        request_headers: &request_headers,
-      }),
-      Some(CacheLookup::Fresh(_))
-    ));
-    assert_eq!(second.purge_tag("default", "release-1", None, None), 2);
-    assert!(
-      second
-        .lookup(CacheLookupContext {
-          policy_name: Some("default"),
-          scheme: "https",
-          host: "example.test",
-          method: &Method::GET,
-          uri: &uri,
-          request_headers: &request_headers,
-        })
-        .is_none()
-    );
-  }
-
-  struct TestTempDir {
-    path: PathBuf,
-  }
-
-  impl TestTempDir {
-    fn new() -> Self {
-      let path = Path::new("/tmp").join(format!(
-        "oxibelt-cache-test-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-          .duration_since(UNIX_EPOCH)
-          .unwrap()
-          .as_nanos()
-      ));
-      std::fs::create_dir_all(&path).unwrap();
-      Self { path }
-    }
-  }
-
-  impl Drop for TestTempDir {
-    fn drop(&mut self) {
-      let _ = std::fs::remove_dir_all(&self.path);
-    }
-  }
-
-  #[test]
-  fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
-    let shared = crate::shared_state::SharedState::test_memory("cache-test");
-    let config = CacheConfig {
-      enabled: true,
-      ..CacheConfig::default()
-    };
-    let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
-    let second = ResponseCache::new(&config, Some(shared)).unwrap();
-    let uri = "/asset/app.css?body=shared".parse::<Uri>().unwrap();
-    let headers = HeaderMap::new();
-    let ctx = CacheLookupContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &uri,
-      request_headers: &headers,
-    };
-
-    first.insert(
-      CacheInsertContext {
-        policy_name: Some("default"),
-        scheme: "https",
-        host: "example.test",
-        method: &Method::GET,
-        uri: &uri,
-        request_headers: &headers,
-      },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: HeaderMap::new(),
-        body: Bytes::from_static(b"shared-cache"),
-      },
-    );
-
-    match second.lookup(ctx.clone()) {
-      Some(CacheLookup::Fresh(entry)) => {
-        assert_eq!(entry.body, Bytes::from_static(b"shared-cache"))
-      }
-      other => panic!("expected shared cache hit, got {other:?}"),
-    }
-
-    assert_eq!(
-      second.purge_exact(
-        "default",
-        "https",
-        "example.test",
-        "/asset/app.css?body=shared"
-      ),
-      2
-    );
-    assert!(second.lookup(ctx).is_none());
-  }
-
-  #[test]
-  fn shared_cache_requires_exact_uri_when_cache_key_collides() {
-    let shared = crate::shared_state::SharedState::test_memory("cache-uri-isolation");
-    let config = CacheConfig {
-      enabled: true,
-      cache_key: "{scheme}:{host}:{path}".to_string(),
-      ..CacheConfig::default()
-    };
-    let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
-    let second = ResponseCache::new(&config, Some(shared)).unwrap();
-    let secret_uri = "/profile?token=secret".parse::<Uri>().unwrap();
-    let other_uri = "/profile?token=other".parse::<Uri>().unwrap();
-    let headers = HeaderMap::new();
-
-    first.insert(
-      CacheInsertContext {
-        policy_name: Some("default"),
-        scheme: "https",
-        host: "example.test",
-        method: &Method::GET,
-        uri: &secret_uri,
-        request_headers: &headers,
-      },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: HeaderMap::new(),
-        body: Bytes::from_static(b"secret-token-response"),
-      },
-    );
-
-    let other_ctx = CacheLookupContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &other_uri,
-      request_headers: &headers,
-    };
-    assert!(second.lookup(other_ctx).is_none());
-
-    let secret_ctx = CacheLookupContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &secret_uri,
-      request_headers: &headers,
-    };
-    match second.lookup(secret_ctx) {
-      Some(CacheLookup::Fresh(entry)) => {
-        assert_eq!(entry.body, Bytes::from_static(b"secret-token-response"))
-      }
-      other => panic!("expected exact URI shared cache hit, got {other:?}"),
-    }
-  }
-}
+#[path = "cache/tests.rs"]
+mod tests;

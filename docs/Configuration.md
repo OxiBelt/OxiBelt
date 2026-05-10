@@ -647,7 +647,10 @@ memory_auto_fraction = 0.5
 default_ttl_seconds = 60
 cache_methods = ["GET", "HEAD"]
 cache_key = "{scheme}:{host}:{uri}"
+partition_key = ""
 respect_cache_control = true
+stream_large_objects = true
+stream_chunk_bytes = 1048576
 stale_if_error_seconds = 30
 stale_while_revalidate_seconds = 30
 lock = true
@@ -655,10 +658,17 @@ lock_wait_timeout_ms = 10000
 tag_headers = ["Surrogate-Key", "Cache-Tag"]
 max_tags_per_entry = 32
 max_tag_bytes = 128
+max_vary_fields = 8
+max_vary_variants_per_key = 64
+bypass_request_headers = ["Authorization", "Cookie", "Proxy-Authorization"]
 background_refresh = true
 background_refresh_max_concurrent = 16
 negative_statuses = []
 negative_ttl_seconds = 0
+
+[cache.surrogate]
+enabled = true
+strip_response_header = true
 
 [cache.admission]
 statuses = [200, 203, 204, 301, 308]
@@ -671,6 +681,7 @@ max_tracked_keys = 16384
 connect_error = true
 read_timeout = true
 statuses = []
+max_upstream_stale_seconds = 0
 
 [[cache.policies]]
 name = "assets"
@@ -687,6 +698,12 @@ bearer_token_env = "OXIBELT_ADMIN_TOKEN"
 transport = "auto" # auto | tls | plaintext_allowlist | plaintext
 allow_insecure_plaintext = false
 plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
+
+[admin.cache_purge_signing]
+enabled = false
+key_env = "OXIBELT_CACHE_PURGE_HMAC_KEY"
+max_skew_seconds = 300
+nonce_ttl_seconds = 600
 
 [[admin.rbac.tokens]]
 name = "upstream-ops"
@@ -753,19 +770,19 @@ max_concurrent_responses = 0
 
 Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate`. OxiBelt only compresses downstream responses when the client permits an enabled encoding, the request does not carry `Cookie`, `Authorization`, or `Proxy-Authorization`, the response is not already encoded or secret-bearing, the status/MIME/size policy matches, and HTTP semantics such as `Cache-Control: no-transform` and range responses allow transformation. Responses with `Set-Cookie`, `Cache-Control: private`, or `Cache-Control: no-store` are not compressed. `max_concurrent_responses = 0` uses an automatic CPU budget.
 
-`cache.store = "tmpfs"` validates `tmpfs_dir` under `/dev/shm` when cache is enabled. `disk` and `memory_then_disk` require an explicit writable `disk_dir` and `disk_max_size_bytes`; OxiBelt does not choose a disk path implicitly. If `memory_then_disk` omits `memory_max_size_bytes`, OxiBelt uses `memory_auto_fraction` of the detected cgroup/container memory limit, falling back to system memory. `cache_key` supports `{scheme}`, `{host}`, `{uri}`, `{path}`, `{query}`, `{query:name}`, `{header:Name}`, and `{cookie:name}`. Named cache policies are selected by `routes.cache`; `default` refers to the top-level `[cache]` policy. Policy rules select storage after the upstream response MIME type is known. When `cache_backend` maps to a shared backend, the configured local cache remains L1 and the shared backend stores full cacheable objects, metadata, fill locks, and purge-visible L2 entries.
+`cache.store = "tmpfs"` validates `tmpfs_dir` under `/dev/shm` when cache is enabled. `disk` and `memory_then_disk` require an explicit writable `disk_dir` and `disk_max_size_bytes`; OxiBelt does not choose a disk path implicitly. If `memory_then_disk` omits `memory_max_size_bytes`, OxiBelt uses `memory_auto_fraction` of the detected cgroup/container memory limit, falling back to system memory. `cache_key` and `partition_key` support `{scheme}`, `{host}`, `{uri}`, `{path}`, `{query}`, `{query:name}`, `{header:Name}`, and `{cookie:name}`. Named cache policies are selected by `routes.cache`; `default` refers to the top-level `[cache]` policy. Policy rules select storage after the upstream response MIME type is known. When `cache_backend` maps to a shared backend, the configured local cache remains L1 and the shared backend stores full cacheable objects, metadata, fill locks, and purge-visible L2 entries.
 
-The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on configured upstream errors, serve cached byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`. `stale-if-error` serving is controlled separately for connect errors, read timeouts, and configured HTTP statuses.
+The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on configured upstream errors, serve cached byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`. Named policies may override negative-cache defaults so routes can opt into different negative caching by selecting a policy. `stale-if-error` serving is controlled separately for connect errors, read timeouts, configured HTTP statuses, and `max_upstream_stale_seconds`, where `0` leaves stale lifetime uncapped beyond the response metadata.
 
-`tag_headers` extracts whitespace- or comma-separated cache tags from response headers such as `Surrogate-Key` and `Cache-Tag`; admin tag purge can remove all entries carrying a tag. `background_refresh` serves a stale response immediately during `stale-while-revalidate` and refreshes eligible GET/HEAD responses in the background. OxiBelt skips background refresh for response-WAF inspected routes, HTTP/3 upstreams, and PROXY protocol egress routes, which continue to use foreground revalidation. `lock_wait_timeout_ms` bounds collapsed-forwarding followers so a stuck fill cannot block indefinitely.
+`[cache.surrogate]` parses `Surrogate-Control` for `no-store`, `max-age`, `stale-if-error`, and `stale-while-revalidate`. When enabled, those directives control OxiBelt cache metadata ahead of origin `Cache-Control`, and `strip_response_header = true` removes `Surrogate-Control` before downstream delivery and cached hits. `tag_headers` extracts whitespace- or comma-separated cache tags from response headers such as `Surrogate-Key` and `Cache-Tag`; admin tag purge can remove all entries carrying a tag. `background_refresh` serves a stale response immediately during `stale-while-revalidate` and refreshes eligible GET/HEAD responses in the background. OxiBelt skips background refresh for response-WAF inspected routes, HTTP/3 upstreams, and PROXY protocol egress routes, which continue to use foreground revalidation. `lock_wait_timeout_ms` bounds collapsed-forwarding followers so a stuck fill cannot block indefinitely.
 
-`[cache.admission]` filters what is admitted into cache after HTTP cacheability checks. `statuses` limits response status codes, `content_types` optionally limits MIME patterns, `max_body_bytes = 0` means unlimited, `min_hits` requires repeated fills before storing, and `max_tracked_keys` bounds frequency tracking memory. Named `[[cache.policies]]` may override tag headers, tag limits, background refresh settings, lock wait timeout, admission, and stale-if-error behavior.
+`[cache.admission]` filters what is admitted into cache after HTTP cacheability checks. `statuses` limits response status codes, `content_types` optionally limits MIME patterns, `max_body_bytes = 0` means unlimited, `min_hits` requires repeated fills before storing, and `max_tracked_keys` bounds frequency tracking memory. `max_vary_fields` and `max_vary_variants_per_key` reject unbounded `Vary` explosions before storing. `bypass_request_headers` keeps credential-bearing requests out of cache by default. `stream_large_objects = true` allows cacheable responses up to the cache size policy rather than only the proxy memory buffering limit. Named `[[cache.policies]]` may override partition keys, tag headers, tag limits, Vary limits, background refresh settings, lock wait timeout, admission, stale-if-error behavior, and negative-cache defaults.
 
 Cache poisoning defenses should be explicit in production configs. Keep `Authorization` and `Cookie` requests out of cache unless the cache key intentionally varies by a safe credential-derived token; include the effective `Host` in `cache_key`; rely on upstream `Vary` for negotiated headers; and prefer `{query:name}` allowlist-style keys over broad `{query}` when only selected query parameters affect the response.
 
 `[admin]` exposes operations APIs such as cache purge and upstream-pool runtime control. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>`, even when mTLS is enabled.
 
-`admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and roles. Roles are `viewer`, `cache_operator`, `upstream_operator`, `security_operator`, and `admin`; `admin` implies all scopes. Cache purge requires `cache_operator`; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`; dynamic policy automation APIs require `security_operator`. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
+`admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and roles. Roles are `viewer`, `cache_operator`, `upstream_operator`, `security_operator`, and `admin`; `admin` implies all scopes. Cache purge requires `cache_operator` or a valid `[admin.cache_purge_signing]` HMAC signature; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`; dynamic policy automation APIs require `security_operator`. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
 
 Admin lifecycle endpoints:
 
@@ -811,6 +828,17 @@ POST /cache/purge?policy=default&scheme=https&host=example.test&uri=/path
 POST /cache/purge-prefix?policy=default&scheme=https&host=example.test&path_prefix=/assets/
 POST /cache/purge-tag?policy=default&tag=release-2026-05-09
 ```
+
+Purge requests also accept optional `partition`. When `[admin.cache_purge_signing]` is enabled, purge requests may authenticate with `X-OxiBelt-Cache-Timestamp`, `X-OxiBelt-Cache-Nonce`, and `X-OxiBelt-Cache-Signature` instead of a bearer token. The signature is base64 HMAC-SHA256 over `OXIBELT-CACHE-PURGE-V1\n{method}\n{path_and_query}\n{sha256(body)}\n{timestamp}\n{nonce}`; signed purge requests must use an empty body.
+
+Admin cache diagnostics and warming endpoints:
+
+```sh
+POST /admin/v1/cache/key-explain
+POST /admin/v1/cache/warm
+```
+
+`key-explain` requires `viewer` and accepts `{ "policy": "default", "method": "GET", "scheme": "https", "host": "example.test", "uri": "/asset.css", "headers": {}, "response_headers": {} }`. It returns the selected policy, partition, base key, optional variant key, Vary fields, and cacheability reasons. `warm` requires `cache_operator` and accepts `{ "items": [{ "scheme": "https", "host": "example.test", "uri": "/asset.css", "method": "GET", "headers": {} }] }`; methods are limited to `GET` and `HEAD`, and each item returns `stored`, `not_cacheable`, `upstream_error`, or `validation_error`.
 
 Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics omit detailed WAF rule names, IDs, modes, routes, and per-rule hit counters because the metrics listener is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoint for that rule-level data.
 

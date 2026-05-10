@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use ring::digest;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
@@ -29,6 +30,7 @@ pub struct SharedState {
   operation_timeout: Duration,
   connection_lease: Duration,
   cache_lock: Duration,
+  cache_chunk_bytes: usize,
   rate_limits: Option<Arc<Backend>>,
   connection_limits: Option<Arc<Backend>>,
   person_proof: Option<Arc<Backend>>,
@@ -88,6 +90,8 @@ pub struct ConnectionScope<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedCacheEntry {
   pub policy: String,
+  #[serde(default)]
+  pub partition: String,
   pub base_key: String,
   pub variant_key: String,
   pub scheme: String,
@@ -95,7 +99,12 @@ pub struct SharedCacheEntry {
   pub uri: String,
   pub status: u16,
   pub headers: Vec<(String, Vec<u8>)>,
+  #[serde(default)]
   pub body: Vec<u8>,
+  #[serde(default)]
+  pub body_len: usize,
+  #[serde(default)]
+  pub body_chunks: Vec<String>,
   pub expires_at_ms: i64,
   pub stale_if_error_until_ms: Option<i64>,
   pub stale_while_revalidate_until_ms: Option<i64>,
@@ -162,6 +171,7 @@ impl SharedState {
       operation_timeout: Duration::from_millis(shared.operation_timeout_ms),
       connection_lease: Duration::from_millis(shared.connection_lease_ms),
       cache_lock: Duration::from_millis(shared.cache_lock_ms),
+      cache_chunk_bytes: config.cache.stream_chunk_bytes,
       rate_limits: pick(&shared.rate_limits_backend),
       connection_limits: pick(&shared.connection_limits_backend),
       person_proof: pick(&shared.person_proof_backend),
@@ -182,6 +192,7 @@ impl SharedState {
       operation_timeout: Duration::from_millis(500),
       connection_lease: Duration::from_secs(30),
       cache_lock: Duration::from_secs(5),
+      cache_chunk_bytes: 1_048_576,
       rate_limits: Some(backend.clone()),
       connection_limits: Some(backend.clone()),
       person_proof: Some(backend.clone()),
@@ -364,6 +375,7 @@ impl SharedState {
     policy: &str,
     scheme: &str,
     host: &str,
+    partition: &str,
     base_key: &str,
     uri: &str,
     method: &Method,
@@ -380,6 +392,7 @@ impl SharedState {
       if entry.policy != policy
         || entry.scheme != scheme
         || entry.host != host
+        || entry.partition != partition
         || entry.base_key != base_key
         || entry.uri != uri
         || !shared_vary_matches(&entry.vary, request_headers)
@@ -390,7 +403,7 @@ impl SharedState {
         let _ = backend.delete(&self.key(&format!("cache:entry:{}", entry.variant_key)));
         continue;
       }
-      let Some(cache_entry) = entry.to_cache_entry() else {
+      let Some(cache_entry) = self.shared_cache_entry_to_cache_entry(&entry) else {
         continue;
       };
       if method == Method::HEAD {
@@ -466,7 +479,24 @@ impl SharedState {
         .max(entry.expires_at_ms),
     );
     let key = self.key(&format!("cache:entry:{}", entry.variant_key));
-    match serde_json::to_vec(entry)
+    let mut entry = entry.clone();
+    entry.body_len = entry.body.len();
+    if entry.body.len() > self.cache_chunk_bytes {
+      let chunk_ttl = ttl;
+      let stem = shared_cache_chunk_stem(&entry.variant_key);
+      let mut chunks = Vec::new();
+      for (index, chunk) in entry.body.chunks(self.cache_chunk_bytes).enumerate() {
+        let chunk_key = self.key(&format!("cache:chunk:{stem}:{index}"));
+        if let Err(error) = backend.put(&chunk_key, chunk, chunk_ttl) {
+          warn!(error = %error, "failed to write shared cache body chunk");
+          return;
+        }
+        chunks.push(chunk_key);
+      }
+      entry.body.clear();
+      entry.body_chunks = chunks;
+    }
+    match serde_json::to_vec(&entry)
       .map_err(Into::into)
       .and_then(|value| backend.put(&key, &value, ttl))
     {
@@ -493,9 +523,20 @@ impl SharedState {
     }
   }
 
-  pub fn cache_purge_exact(&self, policy: &str, scheme: &str, host: &str, uri: &str) -> usize {
+  pub fn cache_purge_exact(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+    partition: Option<&str>,
+  ) -> usize {
     self.cache_purge(|entry| {
-      entry.policy == policy && entry.scheme == scheme && entry.host == host && entry.uri == uri
+      entry.policy == policy
+        && entry.scheme == scheme
+        && entry.host == host
+        && entry.uri == uri
+        && partition.is_none_or(|partition| entry.partition == partition)
     })
   }
 
@@ -505,11 +546,13 @@ impl SharedState {
     scheme: &str,
     host: &str,
     path_prefix: &str,
+    partition: Option<&str>,
   ) -> usize {
     self.cache_purge(|entry| {
       entry.policy == policy
         && entry.scheme == scheme
         && entry.host == host
+        && partition.is_none_or(|partition| entry.partition == partition)
         && entry
           .uri
           .parse::<Uri>()
@@ -524,9 +567,11 @@ impl SharedState {
     tag: &str,
     scheme: Option<&str>,
     host: Option<&str>,
+    partition: Option<&str>,
   ) -> usize {
     self.cache_purge(|entry| {
       entry.policy == policy
+        && partition.is_none_or(|partition| entry.partition == partition)
         && scheme.is_none_or(|scheme| entry.scheme == scheme)
         && host.is_none_or(|host| entry.host == host)
         && entry.tags.iter().any(|candidate| candidate == tag)
@@ -543,10 +588,28 @@ impl SharedState {
     let mut purged = 0;
     for (key, entry) in entries {
       if matches(&entry) && backend.delete(&key).is_ok() {
+        for chunk_key in &entry.body_chunks {
+          let _ = backend.delete(chunk_key);
+        }
         purged += 1;
       }
     }
     purged
+  }
+
+  fn shared_cache_entry_to_cache_entry(&self, entry: &SharedCacheEntry) -> Option<CacheEntry> {
+    if entry.body_chunks.is_empty() {
+      return entry.to_cache_entry();
+    }
+    let backend = self.cache.as_ref()?;
+    let mut body = Vec::with_capacity(entry.body_len);
+    for chunk_key in &entry.body_chunks {
+      let chunk = backend.get(chunk_key).ok().flatten()?;
+      body.extend_from_slice(&chunk);
+    }
+    let mut entry = entry.clone();
+    entry.body = body;
+    entry.to_cache_entry()
   }
 
   pub fn record_reload_generation(&self, config: &Config) {
@@ -701,6 +764,15 @@ impl Backend {
       Self::Postgres(pg) => pg.put(key, value, ttl),
       #[cfg(test)]
       Self::Memory(memory) => memory.put(key, value, ttl),
+    }
+  }
+
+  fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    match self {
+      Self::Redis(redis) => redis.get(key),
+      Self::Postgres(pg) => pg.get(key),
+      #[cfg(test)]
+      Self::Memory(memory) => memory.get(key),
     }
   }
 
@@ -946,6 +1018,15 @@ impl MemoryBackend {
         },
       );
     Ok(())
+  }
+
+  fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut values = self
+      .values
+      .lock()
+      .expect("memory shared state lock poisoned");
+    purge_expired_values(&mut values, now_unix_ms());
+    Ok(values.get(key).map(|value| value.value.clone()))
   }
 
   fn delete(&self, key: &str) -> anyhow::Result<()> {
@@ -1289,6 +1370,14 @@ return 1
     expect_ok(self.command(&args)?)
   }
 
+  fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    match self.command(&[b"GET".to_vec(), key.as_bytes().to_vec()])? {
+      Resp::Bulk(Some(value)) => Ok(Some(value)),
+      Resp::Bulk(None) | Resp::Nil => Ok(None),
+      other => bail!("unexpected Redis GET response: {other:?}"),
+    }
+  }
+
   fn delete(&self, key: &str) -> anyhow::Result<()> {
     let _ = self.command(&[b"DEL".to_vec(), key.as_bytes().to_vec()])?;
     Ok(())
@@ -1556,6 +1645,19 @@ impl PostgresBackend {
       .execute(&self.pool)
       .await?;
       Ok(())
+    })
+  }
+
+  fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    block_on_timeout(self.timeout, async {
+      let value: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT value FROM oxibelt_shared_state WHERE key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
+      )
+      .bind(key)
+      .bind(now_unix_ms())
+      .fetch_optional(&self.pool)
+      .await?;
+      Ok(value)
     })
   }
 
@@ -1910,6 +2012,10 @@ fn random_hex(bytes: usize) -> anyhow::Result<String> {
     .fill(&mut value)
     .map_err(|_| anyhow!("failed to generate shared cache lock token"))?;
   Ok(hex_encode(&value))
+}
+
+fn shared_cache_chunk_stem(variant_key: &str) -> String {
+  hex_encode(digest::digest(&digest::SHA256, variant_key.as_bytes()).as_ref())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

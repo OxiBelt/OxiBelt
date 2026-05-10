@@ -36,6 +36,9 @@ pub(crate) mod semantics;
 pub(crate) mod uri;
 pub(crate) mod version;
 
+pub(crate) mod warm;
+pub(crate) use warm::warm_cache_request;
+
 use self::body::{
   BodyTimeoutKind, CapturedBody, ProxyBody, boxed_error, capture_body_prefix, capture_prefix,
   error_is_timeout,
@@ -2806,17 +2809,29 @@ async fn maybe_cache_response(
   if !state.cache.policy_enabled(route_cache, method) {
     return response;
   }
-  let (parts, body) = response.into_parts();
+  let (mut parts, body) = response.into_parts();
+  let collect_limit = if state.config.cache.stream_large_objects {
+    state.config.cache.max_size_bytes
+  } else {
+    state.config.proxy.buffering.max_memory_body_bytes
+  };
   if body
     .size_hint()
     .upper()
-    .is_none_or(|upper| upper as usize > state.config.proxy.buffering.max_memory_body_bytes)
+    .is_none_or(|upper| upper as usize > collect_limit)
   {
+    if state.cache.strip_surrogate_control(route_cache) {
+      parts.headers.remove("surrogate-control");
+    }
     return Response::from_parts(parts, body);
   }
   match body.collect().await {
     Ok(collected) => {
       let bytes = collected.to_bytes();
+      let cache_headers = parts.headers.clone();
+      if state.cache.strip_surrogate_control(route_cache) {
+        parts.headers.remove("surrogate-control");
+      }
       match state.cache.insert(
         crate::cache::CacheInsertContext {
           policy_name: route_cache,
@@ -2828,7 +2843,7 @@ async fn maybe_cache_response(
         },
         crate::cache::CacheEntry {
           status: parts.status,
-          headers: parts.headers.clone(),
+          headers: cache_headers,
           body: bytes.clone(),
         },
       ) {

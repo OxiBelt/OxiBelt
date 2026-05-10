@@ -2300,6 +2300,159 @@ run_case_checks() {
         ),
         docker_case(
             "cache",
+            "signed-purge",
+            "HMAC signed cache purge works without bearer credentials and rejects replay",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response purge replay
+  response="$(client_request "example.test" "/app/signed-purge?cache_control=public" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+
+  purge="$(plain_client_request_with_headers_on_port 9092 "proxy" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/signed-purge?cache_control=public" 200 "POST" "" \
+    "X-OxiBelt-Cache-Timestamp: 1700000000" \
+    "X-OxiBelt-Cache-Nonce: matrix-signed-purge" \
+    "X-OxiBelt-Cache-Signature: 8PmsDoehRk/B9RyQnNWI9mWFMgXw6brivm7pa/5Da08=")"
+  assert_response_jq "${purge}" '.body == "purged=1\n"'
+
+  replay="$(plain_client_request_with_headers_on_port 9092 "proxy" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/signed-purge?cache_control=public" 401 "POST" "" \
+    "X-OxiBelt-Cache-Timestamp: 1700000000" \
+    "X-OxiBelt-Cache-Nonce: matrix-signed-purge" \
+    "X-OxiBelt-Cache-Signature: 8PmsDoehRk/B9RyQnNWI9mWFMgXw6brivm7pa/5Da08=")"
+  assert_response_jq "${replay}" '.body == "unauthorized"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "tenant-partition-isolation",
+            "cache partition keys isolate tenants sharing one URI",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path tenant_a tenant_b tenant_a_hit tenant_b_hit
+  path="/app/tenant?sequence_key=tenant-partition&body_sequence=tenant-a%7Ctenant-b%7Ctenant-miss&cache_control=public&content_type=text/plain"
+  tenant_a="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "X-Tenant-ID: tenant-a")"
+  tenant_b="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "X-Tenant-ID: tenant-b")"
+  assert_response_jq "${tenant_a}" '.body == "tenant-a"'
+  assert_response_jq "${tenant_b}" '.body == "tenant-b"'
+
+  docker rm -f "${http_container}" >/dev/null
+  tenant_a_hit="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "X-Tenant-ID: tenant-a")"
+  tenant_b_hit="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "X-Tenant-ID: tenant-b")"
+  assert_response_jq "${tenant_a_hit}" '.body == "tenant-a"'
+  assert_response_jq "${tenant_b_hit}" '.body == "tenant-b"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "surrogate-control",
+            "Surrogate-Control overrides origin no-store and is stripped downstream",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path first cached
+  path="/app/surrogate?sequence_key=surrogate-control&body_sequence=surrogate-a%7Csurrogate-b&cache_control=no-store&surrogate_control=max-age%3D60&content_type=text/plain"
+  first="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${first}" '.body == "surrogate-a" and (.headers["surrogate-control"] == null)'
+
+  docker rm -f "${http_container}" >/dev/null
+  cached="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${cached}" '.body == "surrogate-a" and (.headers["surrogate-control"] == null)'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "vary-explosion-rejection",
+            "Vary variant caps reject extra variants without poisoning cached variants",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path first rejected cached miss
+  path="/app/vary-cap?sequence_key=vary-cap&body_sequence=vary-a%7Cvary-b%7Cvary-c&vary=X-Variant&cache_control=public&content_type=text/plain"
+  first="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "X-Variant: a")"
+  rejected="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "X-Variant: b")"
+  assert_response_jq "${first}" '.body == "vary-a"'
+  assert_response_jq "${rejected}" '.body == "vary-b"'
+
+  docker rm -f "${http_container}" >/dev/null
+  cached="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "X-Variant: a")"
+  miss="$(client_request_with_headers "example.test" "${path}" 502 "GET" "" "X-Variant: b")"
+  assert_response_jq "${cached}" '.body == "vary-a"'
+  assert_response_jq "${miss}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "json-warming",
+            "admin JSON cache warming stores a GET response before client traffic",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path warm cached
+  path="/app/warm?body=warmed&cache_control=public&content_type=text/plain"
+  warm="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/cache/warm" 200 "POST" "{\"items\":[{\"scheme\":\"https\",\"host\":\"example.test\",\"uri\":\"${path}\"}]}" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${warm}" '(.body | fromjson | .items[0].result) == "stored"'
+
+  docker rm -f "${http_container}" >/dev/null
+  cached="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${cached}" '.body == "warmed"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "large-object-cache",
+            "large cacheable objects survive upstream removal",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path first cached
+  path="/app/large?body_repeat=131072&body_repeat_char=L&cache_control=public&content_type=text/plain"
+  first="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${first}" '(.body | length) == 131072'
+
+  docker rm -f "${http_container}" >/dev/null
+  cached="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${cached}" '(.body | length) == 131072'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
             "background-refresh",
             "stale-while-revalidate serves stale while refreshing in the background",
             ExpectStart::Success,
