@@ -425,3 +425,55 @@ tests/scripts/run-proxy-integration.sh
 8. Update documentation when behavior, configuration, commands, technical specifications, or CI workflows change.
 
 9. Ensure changes to configuration or technical behavior are reflected in the relevant Markdown files under `docs/`.
+
+## HTTP Proxy Security Requirements
+
+When modifying HTTP proxy behavior, explicitly consider:
+
+- conflicting `Content-Length` headers
+- `Transfer-Encoding` and `Content-Length` ambiguity
+- hop-by-hop header removal
+- `Connection` header token handling
+- `Upgrade` and WebSocket forwarding
+- `Host` and authority handling
+- absolute-form request targets
+- path normalization and percent-decoding
+- duplicate header behavior
+- request body size limits
+- response body size or streaming behavior
+- timeout and backpressure behavior
+- upstream connection reuse isolation
+
+Do not normalize, drop, merge, or forward security-sensitive headers without tests that describe the intended behavior.
+
+## Security Review Requirements
+
+OxiBelt is a public-facing reverse proxy and WAF. Treat all client-controlled HTTP, TLS, QUIC, header, body, path, routing, and OxiRule inputs as untrusted.
+
+For security-related changes, the agent must:
+
+1. Identify the affected trust boundary.
+2. Identify attacker-controlled inputs.
+3. Describe the vulnerability class or suspected vulnerability class.
+4. Add or update regression tests whenever practical.
+5. Prefer fail-closed behavior for security-sensitive decisions.
+6. Avoid introducing `unwrap`, `expect`, `panic!`, `todo!`, or `unreachable!` on externally reachable input paths.
+7. Avoid silently ignoring errors in proxying, TLS handling, routing, WAF evaluation, person-proof validation, rate limiting, configuration validation, or upstream forwarding.
+8. Run the relevant tests or clearly state why they could not be run.
+9. Summarize remaining risks and compatibility concerns.
+
+Security-sensitive decisions include:
+
+- WAF and OxiRule evaluation
+- route matching and route authorization
+- person-proof validation
+- bot, agent, and person classification
+- rate limiting
+- TLS policy decisions
+- upstream selection
+- request filtering
+- header normalization
+- body size enforcement
+- timeout enforcement
+
+If a security-sensitive operation fails, the default should be deny, block, challenge, or return a safe error unless there is a documented and tested reason to allow the request.
