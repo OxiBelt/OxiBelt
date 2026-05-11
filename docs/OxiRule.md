@@ -157,7 +157,7 @@ Rule selectors match by `rule_ids`, `tags`, or `msg_contains`; at least one sele
 
 Recommended rollout is monitor first, review `/admin/v1/waf/rule-hits`, add scoped allowlists or per-rule overrides for confirmed false positives, then switch CRS mode to `enforcing`. This mirrors the CRS tuning model while keeping OxiBelt's supported tuning surface in TOML rather than implementing the full ModSecurity exclusion language. See the official CRS [v4.25.0 LTS announcement](https://coreruleset.org/20260321/announcing-crs-v4-25-lts/), [false positives and tuning](https://coreruleset.org/docs/2-how-crs-works/2-3-false-positives-and-tuning/), and [installation](https://coreruleset.org/docs/1-getting-started/1-1-crs-installation/) references.
 
-Response body and native stream payload inspection are bounded by `waf.limits.max_body_inspection_bytes`, record whether the inspected prefix was truncated, and should be enabled only where the deployment needs response leak detection or upgraded-session payload policy. CRS compatibility mode does not inspect WebSocket frames/messages or WebTransport stream/datagram payloads.
+Response body and native stream payload inspection are bounded by `waf.limits.max_body_inspection_bytes`, record whether the inspected prefix was truncated, and should be enabled only where the deployment needs response leak detection or upgraded-session payload policy. For WebSocket stream WAF, an individual frame payload larger than this limit is closed fail-closed instead of being buffered and forwarded. CRS compatibility mode does not inspect WebSocket frames/messages or WebTransport stream/datagram payloads.
 
 ## Execution Phases
 
@@ -167,7 +167,7 @@ Response rules run after OxiBelt receives an upstream response or creates a synt
 
 Stream rules run after a WebSocket upgrade or WebTransport CONNECT session is established. They inspect both directions, including WebSocket raw frames, reassembled WebSocket messages, WebTransport stream chunks, and WebTransport datagrams. They can close the active stream/session with `close_stream`; request/response mutation and routing actions are not valid in stream phase. Generic HTTP Upgrade and CONNECT tunnels remain byte tunnels in v1.
 
-Rules that read request, response, or stream payload content trigger bounded prefix inspection before forwarding that side of the transaction. OxiBelt scans up to `waf.limits.max_body_inspection_bytes`, replays the captured prefix, and forwards data beyond the inspection window unchanged with `Body.IsTruncated = true` or `Stream.Payload.IsTruncated = true`.
+Rules that read request, response, or stream payload content trigger bounded prefix inspection before forwarding that side of the transaction. OxiBelt scans up to `waf.limits.max_body_inspection_bytes`, replays the captured prefix, and forwards data beyond the inspection window unchanged with `Body.IsTruncated = true` or `Stream.Payload.IsTruncated = true`, except that oversized WebSocket frames on stream-WAF routes are rejected before forwarding to keep proxy-owned frame buffers bounded.
 
 Rules run by ascending `priority`, with rule name as a tie-breaker. Tags created by request rules are visible to later request rules and to response rules for the same transaction.
 
@@ -783,7 +783,7 @@ Supported binary format checks include common image, audio, video, document, arc
 ## Protocol Notes
 
 - HTTP rules may inspect and mutate headers, URI metadata, methods, status, and bounded body metadata.
-- WebSocket request rules apply to the HTTP upgrade request. Stream-phase rules inspect raw frames before forwarding and reassemble text/binary messages up to `waf.limits.max_body_inspection_bytes` before releasing queued fragments.
+- WebSocket request rules apply to the HTTP upgrade request. Stream-phase rules inspect raw frames before forwarding, reject individual frame payloads larger than `waf.limits.max_body_inspection_bytes`, and reassemble text/binary messages up to that limit before releasing queued fragments.
 - WebRTC signaling HTTP requests can be inspected when they pass through OxiBelt; TURN media payloads are forwarded by WebRTC TURN listeners outside OxiRule/WAF inspection.
 - WebTransport over HTTP/3 exposes the CONNECT request as `Request.Protocol == 'webtransport'` with UDP/QUIC transport metadata. Stream-phase rules inspect WebTransport stream chunks and datagrams before forwarding. Stream IDs are exposed as `null` where the underlying crate API does not provide them.
 

@@ -16,6 +16,9 @@ use tracing::warn;
 
 mod webtransport;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) use webtransport::{
   blocked_close, check_webtransport_payload, webtransport_datagram_metadata,
   webtransport_stream_metadata,
@@ -417,8 +420,7 @@ where
 }
 
 fn websocket_max_frame_size(max_payload_bytes: usize) -> usize {
-  const MIN_FRAME_LIMIT: usize = 16 * 1024 * 1024;
-  max_payload_bytes.max(MIN_FRAME_LIMIT)
+  max_payload_bytes.saturating_add(1).max(1)
 }
 
 async fn read_owned_frame<R>(

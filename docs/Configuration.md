@@ -930,6 +930,8 @@ path_prefixes = ["/editor/"]
 reason = "editor intentionally submits HTML"
 ```
 
+`max_body_inspection_bytes` also bounds WebSocket stream-WAF frame buffering: an individual WebSocket frame payload larger than this value is closed fail-closed instead of being buffered for prefix inspection.
+
 Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. External rule entries use `path` and resolve under the oxirule directory. A rule entry must specify exactly one of `when` or `path`.
 
 ```toml

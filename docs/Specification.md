@@ -74,6 +74,7 @@ Upstream protocol support:
 Upgrade and extended protocol behavior:
 
 - WebSocket tunneling is implemented for HTTP/1.1 upgrade routes.
+- WebSocket stream-WAF routes reject individual frame payloads larger than `waf.limits.max_body_inspection_bytes` before forwarding.
 - Generic HTTP/1.1 upgrade and CONNECT tunneling are implemented when both global and route-level policy enables them.
 - CONNECT tunneling targets the selected route upstream origin, not the downstream request target.
 - WebTransport forwarding is supported for downstream HTTP/3 extended CONNECT requests when the selected upstream also uses HTTP/3 and has `webtransport = true`.

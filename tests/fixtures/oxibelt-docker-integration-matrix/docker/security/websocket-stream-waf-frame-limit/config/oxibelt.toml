@@ -1,0 +1,65 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = false
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = false
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[waf.limits]
+max_body_inspection_bytes = 1024
+
+[[upstreams]]
+name = "ws-upstream"
+origin = "http://ws-upstream:18081"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "ws-route"
+hosts = ["ws.example.test"]
+path_prefix = "/ws"
+upstream = "ws-upstream"
+
+[[routes.waf.rules]]
+name = "observe-websocket-stream"
+phase = "stream"
+mode = "monitor"
+priority = 10
+when = "Stream.Protocol == 'websocket' && Stream.Payload.contains('never-match')"
+
+[[routes.waf.rules.actions]]
+type = "close_stream"
