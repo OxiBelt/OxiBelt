@@ -4055,6 +4055,27 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "waf-helpers",
+            "udf-body-object",
+            "body object arguments passed into UDFs trigger request and response body inspection",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local request response
+  request="$(client_request_with_headers "example.test" "/app/udf-request" 403 "POST" "prefix blocked suffix" "Content-Type: text/plain")"
+  assert_response_jq "${request}" '.body == "udf request body blocked"'
+
+  response="$(client_request "example.test" "/app/udf-response?body=prefix%20leak%20suffix" 451)"
+  assert_response_jq "${response}" '.body == "udf response body blocked"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "waf-person-proof",
             "challenge-issued",
             "request-phase person proof challenge is issued",

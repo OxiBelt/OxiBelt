@@ -626,6 +626,126 @@ status = 502
 }
 
 #[test]
+fn udf_body_object_params_trigger_request_and_response_body_inspection() {
+    let temp_dir = common::TempDir::new("waf-udf-body-object-params");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-udf-body-object-params");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.pattern_sets]]
+name = "blocked-bodies"
+kind = "contains"
+patterns = ["blocked"]
+
+[[waf.pattern_sets]]
+name = "leak-bodies"
+kind = "contains"
+patterns = ["leak"]
+
+[[waf.functions]]
+name = "body_has_blocked"
+params = ["body"]
+expression = "body.containsAny('blocked-bodies')"
+
+[[waf.functions]]
+name = "nested_body_has_blocked"
+params = ["payload"]
+expression = "body_has_blocked(payload)"
+
+[[waf.functions]]
+name = "body_has_leak"
+params = ["body"]
+expression = "body.containsAny('leak-bodies')"
+
+[[waf.rules]]
+name = "block-request-body"
+phase = "request"
+priority = 10
+when = "nested_body_has_blocked(Request.Body)"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked request body"
+
+[[waf.rules]]
+name = "block-response-body"
+phase = "response"
+priority = 10
+when = "body_has_leak(Response.Body)"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 451
+body = "blocked response body"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert!(engine.requires_request_body_inspection("app-root"));
+    assert!(engine.requires_response_body_inspection("app-root"));
+
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let request_decision = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        b"prefix blocked suffix",
+        false,
+    ));
+    assert_eq!(
+        request_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let response_headers = HeaderMap::new();
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: Some(WafBodyInput {
+            bytes: b"prefix leak suffix",
+            is_truncated: false,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert_eq!(
+        response_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+}
+
+#[test]
 fn validation_rejects_invalid_udf_definitions_and_calls() {
     for (name, snippet, expected) in [
         (

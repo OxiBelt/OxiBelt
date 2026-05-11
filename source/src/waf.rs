@@ -39,8 +39,9 @@ use defaults::*;
 use expression::Parser;
 pub use functions::WafFunctionConfig;
 use functions::{
-  FunctionCallRef, FunctionKey, FunctionMap, compile_global_functions, compile_route_functions,
-  function_body_route_functions, resolve_function, validate_function_arity,
+  CompiledFunction, FunctionCallRef, FunctionKey, FunctionMap, compile_global_functions,
+  compile_route_functions, function_body_route_functions, resolve_function,
+  validate_function_arity,
 };
 use normalization::{
   normalize_cookie_pairs, normalize_header_pairs, normalize_query_pairs, normalized_http_path,
@@ -3118,6 +3119,24 @@ enum BinaryOp {
   Add,
 }
 
+#[derive(Default)]
+struct BodyBindings(Vec<String>, Vec<String>);
+
+impl BodyBindings {
+  fn bind(function: &CompiledFunction, args: &[Expr], caller: &Self) -> Self {
+    let mut bindings = Self::default();
+    for (param, arg) in function.params.iter().zip(args) {
+      if arg.is_request_body_expr_with_bindings(caller) {
+        bindings.0.push(param.clone());
+      }
+      if arg.is_response_body_expr_with_bindings(caller) {
+        bindings.1.push(param.clone());
+      }
+    }
+    bindings
+  }
+}
+
 impl Expr {
   fn validate_for_phase(&self, phase: WafPhase) -> anyhow::Result<()> {
     if phase == WafPhase::Request && self.references_ident("Response") {
@@ -3161,7 +3180,7 @@ impl Expr {
     for call in self.function_calls() {
       let function = resolve_function(call.name, global_functions, route_functions)
         .ok_or_else(|| anyhow!("unknown OxiRule function {}", call.name))?;
-      validate_function_arity(function, call.args_len)?;
+      validate_function_arity(function, call.args.len())?;
       let key = FunctionKey::from(function);
       if active.insert(key.clone()) {
         let body_route_functions = function_body_route_functions(function, route_functions);
@@ -3210,45 +3229,57 @@ impl Expr {
     }
   }
 
-  fn requires_request_body_inspection(&self) -> bool {
+  fn requires_request_body_inspection_with_bindings(&self, bindings: &BodyBindings) -> bool {
     match self {
       Self::Member(receiver, field) => {
-        receiver.requires_request_body_inspection()
+        receiver.requires_request_body_inspection_with_bindings(bindings)
           || (matches!(field.as_str(), "Bytes" | "Text" | "IsTruncated")
-            && receiver.is_request_body_expr())
+            && receiver.is_request_body_expr_with_bindings(bindings))
       }
       Self::Call(receiver, method, args) => {
-        receiver.requires_request_body_inspection()
-          || args.iter().any(Self::requires_request_body_inspection)
-          || (receiver.is_request_body_expr() && body_content_method(method))
-          || (receiver.is_request_body_bytes_expr() && bytes_content_method(method))
+        receiver.requires_request_body_inspection_with_bindings(bindings)
+          || args
+            .iter()
+            .any(|arg| arg.requires_request_body_inspection_with_bindings(bindings))
+          || (receiver.is_request_body_expr_with_bindings(bindings) && body_content_method(method))
+          || (receiver.is_request_body_bytes_expr_with_bindings(bindings)
+            && bytes_content_method(method))
       }
-      Self::FunctionCall(_, args) => args.iter().any(Self::requires_request_body_inspection),
-      Self::UnaryNot(expr) => expr.requires_request_body_inspection(),
+      Self::FunctionCall(_, args) => args
+        .iter()
+        .any(|arg| arg.requires_request_body_inspection_with_bindings(bindings)),
+      Self::UnaryNot(expr) => expr.requires_request_body_inspection_with_bindings(bindings),
       Self::Binary(left, _, right) => {
-        left.requires_request_body_inspection() || right.requires_request_body_inspection()
+        left.requires_request_body_inspection_with_bindings(bindings)
+          || right.requires_request_body_inspection_with_bindings(bindings)
       }
       Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
     }
   }
 
-  fn requires_response_body_inspection(&self) -> bool {
+  fn requires_response_body_inspection_with_bindings(&self, bindings: &BodyBindings) -> bool {
     match self {
       Self::Member(receiver, field) => {
-        receiver.requires_response_body_inspection()
+        receiver.requires_response_body_inspection_with_bindings(bindings)
           || (matches!(field.as_str(), "Bytes" | "Text" | "IsTruncated")
-            && receiver.is_response_body_expr())
+            && receiver.is_response_body_expr_with_bindings(bindings))
       }
       Self::Call(receiver, method, args) => {
-        receiver.requires_response_body_inspection()
-          || args.iter().any(Self::requires_response_body_inspection)
-          || (receiver.is_response_body_expr() && body_content_method(method))
-          || (receiver.is_response_body_bytes_expr() && bytes_content_method(method))
+        receiver.requires_response_body_inspection_with_bindings(bindings)
+          || args
+            .iter()
+            .any(|arg| arg.requires_response_body_inspection_with_bindings(bindings))
+          || (receiver.is_response_body_expr_with_bindings(bindings) && body_content_method(method))
+          || (receiver.is_response_body_bytes_expr_with_bindings(bindings)
+            && bytes_content_method(method))
       }
-      Self::FunctionCall(_, args) => args.iter().any(Self::requires_response_body_inspection),
-      Self::UnaryNot(expr) => expr.requires_response_body_inspection(),
+      Self::FunctionCall(_, args) => args
+        .iter()
+        .any(|arg| arg.requires_response_body_inspection_with_bindings(bindings)),
+      Self::UnaryNot(expr) => expr.requires_response_body_inspection_with_bindings(bindings),
       Self::Binary(left, _, right) => {
-        left.requires_response_body_inspection() || right.requires_response_body_inspection()
+        left.requires_response_body_inspection_with_bindings(bindings)
+          || right.requires_response_body_inspection_with_bindings(bindings)
       }
       Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
     }
@@ -3263,8 +3294,13 @@ impl Expr {
     }
   }
 
-  fn is_request_body_bytes_expr(&self) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_request_body_expr())
+  fn is_request_body_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
+    self.is_request_body_expr()
+      || matches!(self, Self::Ident(name) if bindings.0.iter().any(|param| param == name))
+  }
+
+  fn is_request_body_bytes_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
+    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_request_body_expr_with_bindings(bindings))
   }
 
   fn is_response_body_expr(&self) -> bool {
@@ -3276,8 +3312,13 @@ impl Expr {
     }
   }
 
-  fn is_response_body_bytes_expr(&self) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_response_body_expr())
+  fn is_response_body_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
+    self.is_response_body_expr()
+      || matches!(self, Self::Ident(name) if bindings.1.iter().any(|param| param == name))
+  }
+
+  fn is_response_body_bytes_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
+    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_response_body_expr_with_bindings(bindings))
   }
 
   fn is_request_expr(&self) -> bool {
@@ -3305,6 +3346,7 @@ impl Expr {
       global_functions,
       route_functions,
       &mut HashSet::new(),
+      &BodyBindings::default(),
     )
   }
 
@@ -3313,8 +3355,9 @@ impl Expr {
     global_functions: &FunctionMap,
     route_functions: Option<&FunctionMap>,
     active: &mut HashSet<FunctionKey>,
+    bindings: &BodyBindings,
   ) -> bool {
-    if self.requires_request_body_inspection() {
+    if self.requires_request_body_inspection_with_bindings(bindings) {
       return true;
     }
     self.function_calls().into_iter().any(|call| {
@@ -3326,12 +3369,14 @@ impl Expr {
         return false;
       }
       let body_route_functions = function_body_route_functions(function, route_functions);
+      let body_bindings = BodyBindings::bind(function, call.args, bindings);
       let result = function
         .expression
         .requires_request_body_inspection_with_functions_inner(
           global_functions,
           body_route_functions,
           active,
+          &body_bindings,
         );
       active.remove(&key);
       result
@@ -3347,6 +3392,7 @@ impl Expr {
       global_functions,
       route_functions,
       &mut HashSet::new(),
+      &BodyBindings::default(),
     )
   }
 
@@ -3355,8 +3401,9 @@ impl Expr {
     global_functions: &FunctionMap,
     route_functions: Option<&FunctionMap>,
     active: &mut HashSet<FunctionKey>,
+    bindings: &BodyBindings,
   ) -> bool {
-    if self.requires_response_body_inspection() {
+    if self.requires_response_body_inspection_with_bindings(bindings) {
       return true;
     }
     self.function_calls().into_iter().any(|call| {
@@ -3368,12 +3415,14 @@ impl Expr {
         return false;
       }
       let body_route_functions = function_body_route_functions(function, route_functions);
+      let body_bindings = BodyBindings::bind(function, call.args, bindings);
       let result = function
         .expression
         .requires_response_body_inspection_with_functions_inner(
           global_functions,
           body_route_functions,
           active,
+          &body_bindings,
         );
       active.remove(&key);
       result
@@ -3389,10 +3438,7 @@ impl Expr {
   fn collect_function_calls<'a>(&'a self, calls: &mut Vec<FunctionCallRef<'a>>) {
     match self {
       Self::FunctionCall(name, args) => {
-        calls.push(FunctionCallRef {
-          name,
-          args_len: args.len(),
-        });
+        calls.push(FunctionCallRef { name, args });
         for arg in args {
           arg.collect_function_calls(calls);
         }

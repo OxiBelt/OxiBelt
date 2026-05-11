@@ -47,7 +47,7 @@ impl From<&CompiledFunction> for FunctionKey {
 #[derive(Clone, Copy)]
 pub(super) struct FunctionCallRef<'a> {
   pub(super) name: &'a str,
-  pub(super) args_len: usize,
+  pub(super) args: &'a [Expr],
 }
 
 pub(super) fn compile_global_functions(
@@ -167,7 +167,7 @@ fn validate_function_node(
           call.name
         )
       })?;
-    validate_function_arity(callee, call.args_len)
+    validate_function_arity(callee, call.args.len())
       .with_context(|| format!("{scope} function {} calls {}", function.name, call.name))?;
     validate_function_node(
       scope,

@@ -1,0 +1,100 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.pattern_sets]]
+name = "blocked-bodies"
+kind = "contains"
+patterns = ["blocked"]
+
+[[waf.pattern_sets]]
+name = "leak-bodies"
+kind = "contains"
+patterns = ["leak"]
+
+[[waf.functions]]
+name = "body_has_blocked"
+params = ["body"]
+expression = "body.containsAny('blocked-bodies')"
+
+[[waf.functions]]
+name = "nested_body_has_blocked"
+params = ["payload"]
+expression = "body_has_blocked(payload)"
+
+[[waf.functions]]
+name = "body_has_leak"
+params = ["body"]
+expression = "body.containsAny('leak-bodies')"
+
+[[waf.rules]]
+name = "udf-request-body"
+phase = "request"
+priority = 10
+when = "Request.Http.Method == 'POST' && nested_body_has_blocked(Request.Body)"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "udf request body blocked"
+
+[[waf.rules]]
+name = "udf-response-body"
+phase = "response"
+priority = 10
+when = "body_has_leak(Response.Body)"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 451
+body = "udf response body blocked"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "http-upstream"
