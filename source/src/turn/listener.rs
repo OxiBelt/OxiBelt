@@ -334,8 +334,15 @@ async fn serve_turn_udp(
 
 struct UdpProxySession {
   upstream: Arc<UdpSocket>,
+  upstream_task: JoinHandle<()>,
   _selection: TurnPoolSelection,
   last_activity: Instant,
+}
+
+impl Drop for UdpProxySession {
+  fn drop(&mut self) {
+    self.upstream_task.abort();
+  }
 }
 
 async fn proxy_udp_packet(
@@ -362,7 +369,7 @@ async fn proxy_udp_packet(
     upstream.connect(upstream_addr).await?;
     let upstream_reader = upstream.clone();
     let downstream_writer = downstream.clone();
-    tokio::spawn(async move {
+    let upstream_task = tokio::spawn(async move {
       let mut buf = vec![0u8; 65_536];
       while let Ok(len) = upstream_reader.recv(&mut buf).await {
         if downstream_writer
@@ -376,6 +383,7 @@ async fn proxy_udp_packet(
     });
     entry.insert(UdpProxySession {
       upstream,
+      upstream_task,
       _selection: selection,
       last_activity: Instant::now(),
     });
@@ -513,6 +521,9 @@ fn expire_udp_sessions(
   let now = Instant::now();
   sessions.retain(|_, session| now.duration_since(session.last_activity) < idle_timeout);
 }
+
+#[cfg(test)]
+mod tests;
 
 async fn copy_bidirectional_with_idle(
   left: BoxedIo,
