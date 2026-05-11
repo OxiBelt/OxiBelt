@@ -150,24 +150,31 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
   use super::*;
   use http::HeaderValue;
+  use ring::rand::SystemRandom;
   use std::time::Duration;
 
   #[test]
   fn verifies_valid_cache_purge_signature() {
-    let key = [7u8; 32];
+    let rng = SystemRandom::new();
+    let key = ring::rand::generate::<[u8; 32]>(&rng)
+      .expect("test RNG should generate a cache purge signing key")
+      .expose();
     let timestamp = 1_700_000_000;
-    let nonce = "nonce-1";
+    let nonce_bytes = ring::rand::generate::<[u8; 16]>(&rng)
+      .expect("test RNG should generate a cache purge nonce")
+      .expose();
+    let nonce = base64::engine::general_purpose::STANDARD_NO_PAD.encode(nonce_bytes);
     let method = Method::POST;
     let path = "/cache/purge?policy=default";
     let body = b"";
-    let canonical = canonical_message(&method, path, body, timestamp, nonce);
+    let canonical = canonical_message(&method, path, body, timestamp, &nonce);
     let signature = hmac::sign(
       &hmac::Key::new(hmac::HMAC_SHA256, &key),
       canonical.as_bytes(),
     );
     let mut headers = HeaderMap::new();
     headers.insert(TIMESTAMP_HEADER, HeaderValue::from_static("1700000000"));
-    headers.insert(NONCE_HEADER, HeaderValue::from_static(nonce));
+    headers.insert(NONCE_HEADER, HeaderValue::from_str(&nonce).unwrap());
     headers.insert(
       SIGNATURE_HEADER,
       HeaderValue::from_str(&base64::engine::general_purpose::STANDARD.encode(signature.as_ref()))

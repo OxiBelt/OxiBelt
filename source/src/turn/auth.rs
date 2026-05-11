@@ -125,7 +125,8 @@ fn candidate_passwords(auth: &TurnAuthConfig, username: &str) -> anyhow::Result<
     }
   }
   if let Some(secret) = rest_secret(auth)?
-    && rest_username_is_valid(username)?
+    && let Some(expiry) = rest_username_expiry(username)?
+    && expiry >= unix_time()?
   {
     let signature = hmac_sha1(secret.as_bytes(), username.as_bytes());
     passwords.push(base64::engine::general_purpose::STANDARD.encode(signature));
@@ -133,14 +134,15 @@ fn candidate_passwords(auth: &TurnAuthConfig, username: &str) -> anyhow::Result<
   Ok(passwords)
 }
 
-fn rest_username_is_valid(username: &str) -> anyhow::Result<bool> {
+fn rest_username_expiry(username: &str) -> anyhow::Result<Option<u64>> {
   let Some((expiry, _rest)) = username.split_once(':') else {
-    return Ok(false);
+    return Ok(None);
   };
-  let expiry = expiry
-    .parse::<u64>()
-    .context("invalid TURN REST username timestamp")?;
-  Ok(expiry >= unix_time()?)
+  Ok(Some(
+    expiry
+      .parse::<u64>()
+      .context("invalid TURN REST username timestamp")?,
+  ))
 }
 
 fn rest_secret(auth: &TurnAuthConfig) -> anyhow::Result<Option<String>> {
@@ -217,11 +219,6 @@ mod tests {
   fn validate_mode_reports_missing_integrity() {
     let auth = TurnAuthConfig {
       mode: TurnAuthMode::Validate,
-      static_credentials: vec![crate::config::TurnStaticCredentialConfig {
-        username: "user".to_string(),
-        password: Some("pass".to_string()),
-        password_env: None,
-      }],
       ..TurnAuthConfig::default()
     };
     let raw = encode_message(ALLOCATE_REQUEST, [1u8; 12], &[]);
@@ -233,7 +230,12 @@ mod tests {
   }
 
   #[test]
-  fn rest_username_expiry_is_enforced() {
-    assert!(!rest_username_is_valid("1:user").unwrap());
+  fn rest_username_expiry_is_parsed() {
+    assert_eq!(rest_username_expiry("1:user").unwrap(), Some(1));
+  }
+
+  #[test]
+  fn username_without_rest_separator_has_no_expiry() {
+    assert_eq!(rest_username_expiry("user").unwrap(), None);
   }
 }
