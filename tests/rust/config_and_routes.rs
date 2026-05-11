@@ -3366,6 +3366,37 @@ body = "blocked"
 }
 
 #[test]
+fn oxirule_reload_equivalence_accepts_udf_only_changes() {
+    let temp_dir = common::TempDir::new("hot-reload-waf-udf-only");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload-udf");
+    let base_raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[waf]
+enabled = true
+mode = "enforcing"
+
+[[upstreams]]"#,
+    );
+    let changed_raw = base_raw.replace(
+        "[[upstreams]]",
+        r#"[[waf.functions]]
+name = "is_admin_path"
+params = ["path"]
+expression = "path.startsWith('/admin')"
+
+[[upstreams]]"#,
+    );
+
+    let base: Config = toml::from_str(&base_raw).expect("base config should parse");
+    let changed: Config = toml::from_str(&changed_raw).expect("changed config should parse");
+
+    base.validate().expect("base config should validate");
+    changed.validate().expect("changed config should validate");
+    assert!(base.non_waf_equivalent(&changed));
+    assert!(!base.waf_equivalent(&changed));
+}
+
+#[test]
 fn waf_rule_mode_parses_for_global_and_route_rules() {
     let temp_dir = common::TempDir::new("waf-rule-mode-parse");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-rule-mode");

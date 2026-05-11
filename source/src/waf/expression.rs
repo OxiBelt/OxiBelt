@@ -148,7 +148,11 @@ impl Parser {
       Token::String(value) => Ok(Expr::String(value)),
       Token::Ident(value) => {
         validate_identifier(&value)?;
-        Ok(Expr::Ident(value))
+        if self.consume(&Token::LParen) {
+          Ok(Expr::FunctionCall(value, self.parse_args()?))
+        } else {
+          Ok(Expr::Ident(value))
+        }
       }
       Token::LParen => {
         let expr = self.parse_or()?;

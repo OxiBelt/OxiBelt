@@ -23,17 +23,25 @@ use crate::limits::{LimitState, RateLimitCheck, RateLimitContext};
 use crate::routes::normalize_host;
 use crate::shared_state::SharedState;
 
+mod binary_format;
 mod body_scan;
 mod crs;
 mod defaults;
 mod expression;
+mod functions;
 pub(crate) mod normalization;
 mod person_proof;
 
+use binary_format::bytes_match_format;
 pub use crs::{CrsCompatibilityMatrix, compatibility_matrix as crs_compatibility_matrix};
 use crs::{CrsDecision, CrsEngine, WafCrsConfig, validate_crs_config};
 use defaults::*;
 use expression::Parser;
+pub use functions::WafFunctionConfig;
+use functions::{
+  FunctionCallRef, FunctionKey, FunctionMap, compile_global_functions, compile_route_functions,
+  function_body_route_functions, resolve_function, validate_function_arity,
+};
 use normalization::{
   normalize_cookie_pairs, normalize_header_pairs, normalize_query_pairs, normalized_http_path,
   normalized_http_query, normalized_http_uri,
@@ -57,6 +65,8 @@ pub struct WafConfig {
   #[serde(default)]
   pub crs: WafCrsConfig,
   #[serde(default)]
+  pub functions: Vec<WafFunctionConfig>,
+  #[serde(default)]
   pub rules: Vec<WafRuleConfig>,
   #[serde(default)]
   pub pattern_sets: Vec<WafPatternSetConfig>,
@@ -71,6 +81,7 @@ impl Default for WafConfig {
       duplicate_metadata_policy: WafDuplicateMetadataPolicy::FailClosed,
       limits: WafLimits::default(),
       crs: WafCrsConfig::default(),
+      functions: Vec::new(),
       rules: Vec::new(),
       pattern_sets: Vec::new(),
     }
@@ -79,6 +90,8 @@ impl Default for WafConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteWafConfig {
+  #[serde(default)]
+  pub functions: Vec<WafFunctionConfig>,
   #[serde(default)]
   pub rules: Vec<WafRuleConfig>,
 }
@@ -376,6 +389,7 @@ pub enum WafPatternSetKind {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExternalRuleFile {
   pub when: String,
   #[serde(default)]
@@ -498,23 +512,35 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
     .iter()
     .map(|pool| pool.name.as_str())
     .collect::<HashSet<_>>();
-  validate_scope(
-    "global WAF",
-    &config.waf.rules,
-    &config.waf.pattern_sets,
-    &config.waf.limits,
-    &upstream_names,
-    &pool_names,
-  )?;
+  let global_functions = compile_global_functions(&config.waf.functions)?;
+  let global_validation = WafValidationContext {
+    pattern_sets: &config.waf.pattern_sets,
+    global_functions: &global_functions,
+    route_functions: None,
+    limits: &config.waf.limits,
+    upstream_names: &upstream_names,
+    pool_names: &pool_names,
+  };
+  validate_scope("global WAF", &config.waf.rules, &global_validation)?;
 
   for route in &config.routes {
+    let route_functions = compile_route_functions(
+      &format!("route {} WAF", route.name),
+      &route.waf.functions,
+      &global_functions,
+    )?;
+    let route_validation = WafValidationContext {
+      pattern_sets: &config.waf.pattern_sets,
+      global_functions: &global_functions,
+      route_functions: Some(&route_functions),
+      limits: &config.waf.limits,
+      upstream_names: &upstream_names,
+      pool_names: &pool_names,
+    };
     validate_scope(
       &format!("route {} WAF", route.name),
       &route.waf.rules,
-      &config.waf.pattern_sets,
-      &config.waf.limits,
-      &upstream_names,
-      &pool_names,
+      &route_validation,
     )?;
   }
   validate_unique_rule_ids(config)?;
@@ -550,15 +576,21 @@ fn remember_rule_id(
   Ok(())
 }
 
+struct WafValidationContext<'a> {
+  pattern_sets: &'a [WafPatternSetConfig],
+  global_functions: &'a FunctionMap,
+  route_functions: Option<&'a FunctionMap>,
+  limits: &'a WafLimits,
+  upstream_names: &'a HashSet<&'a str>,
+  pool_names: &'a HashSet<&'a str>,
+}
+
 fn validate_scope(
   scope: &str,
   rules: &[WafRuleConfig],
-  pattern_sets: &[WafPatternSetConfig],
-  limits: &WafLimits,
-  upstream_names: &HashSet<&str>,
-  pool_names: &HashSet<&str>,
+  ctx: &WafValidationContext<'_>,
 ) -> anyhow::Result<()> {
-  validate_pattern_sets(pattern_sets, limits)?;
+  validate_pattern_sets(ctx.pattern_sets, ctx.limits)?;
 
   let mut names = HashSet::new();
   for rule in rules {
@@ -593,10 +625,17 @@ fn validate_scope(
       .parse()
       .with_context(|| format!("failed to parse WAF rule {} expression", rule.name))?;
     ast
-      .validate_for_phase(rule.phase)
+      .validate_for_phase_with_functions(rule.phase, ctx.global_functions, ctx.route_functions)
       .with_context(|| format!("invalid WAF rule {} expression", rule.name))?;
 
-    validate_actions(rule, upstream_names, pool_names, limits)?;
+    validate_actions(
+      rule,
+      ctx.upstream_names,
+      ctx.pool_names,
+      ctx.limits,
+      ctx.global_functions,
+      ctx.route_functions,
+    )?;
   }
 
   Ok(())
@@ -662,6 +701,8 @@ fn validate_actions(
   upstream_names: &HashSet<&str>,
   pool_names: &HashSet<&str>,
   limits: &WafLimits,
+  global_functions: &FunctionMap,
+  route_functions: Option<&FunctionMap>,
 ) -> anyhow::Result<()> {
   let mut mutations = 0usize;
   for action in &rule.actions {
@@ -680,9 +721,11 @@ fn validate_actions(
       }
       WafActionConfig::EmitAccessLog { fields } => {
         require_phase(rule, WafPhase::Response, "emit_access_log")?;
-        validate_access_log_field_configs(
+        validate_access_log_field_configs_with_functions(
           &format!("WAF rule {} emit_access_log", rule.name),
           fields,
+          global_functions,
+          route_functions,
         )?;
       }
       WafActionConfig::RouteToUpstream { upstream } => {
@@ -849,6 +892,16 @@ pub fn validate_access_log_field_configs(
   label: &str,
   fields: &[AccessLogFieldConfig],
 ) -> anyhow::Result<()> {
+  let empty_functions = FunctionMap::new();
+  validate_access_log_field_configs_with_functions(label, fields, &empty_functions, None)
+}
+
+fn validate_access_log_field_configs_with_functions(
+  label: &str,
+  fields: &[AccessLogFieldConfig],
+  global_functions: &FunctionMap,
+  route_functions: Option<&FunctionMap>,
+) -> anyhow::Result<()> {
   if fields.is_empty() {
     bail!("{label} must define at least one field");
   }
@@ -866,9 +919,10 @@ pub fn validate_access_log_field_configs(
       .parse()
       .with_context(|| format!("failed to parse {label} field {}", field.name))?;
     expression
-      .validate_for_phase(WafPhase::Response)
+      .validate_for_phase_with_functions(WafPhase::Response, global_functions, route_functions)
       .with_context(|| format!("invalid {label} field {}", field.name))?;
-    if expression.requires_request_body_inspection() {
+    if expression.requires_request_body_inspection_with_functions(global_functions, route_functions)
+    {
       bail!(
         "{label} field {} cannot read request body bytes",
         field.name
@@ -977,6 +1031,7 @@ pub struct WafEngine {
   duplicate_metadata_policy: WafDuplicateMetadataPolicy,
   limits: WafLimits,
   pattern_sets: HashMap<String, CompiledPatternSet>,
+  global_functions: Arc<FunctionMap>,
   global_rules: Vec<CompiledRule>,
   route_rules: HashMap<String, Vec<CompiledRule>>,
   crs: CrsEngine,
@@ -1014,15 +1069,23 @@ impl WafEngine {
       .unwrap_or_default();
     let rate_limits = rate_limits.unwrap_or_else(|| LimitState::new(shared_state.clone()));
     let pattern_sets = compile_pattern_sets(&config.waf.pattern_sets, &config.waf.limits)?;
+    let global_functions = Arc::new(compile_global_functions(&config.waf.functions)?);
     let crs = CrsEngine::compile(&config.waf.crs, &previous_crs_counters)?;
     let global_rules = compile_rules(
       &config.waf.rules,
       WafRuleScope::global(),
       config.waf.mode,
       &previous_counters,
+      global_functions.clone(),
+      None,
     )?;
     let mut route_rules = HashMap::new();
     for route in &config.routes {
+      let functions = Arc::new(compile_route_functions(
+        &format!("route {} WAF", route.name),
+        &route.waf.functions,
+        global_functions.as_ref(),
+      )?);
       route_rules.insert(
         route.name.clone(),
         compile_rules(
@@ -1030,6 +1093,8 @@ impl WafEngine {
           WafRuleScope::route(&route.name),
           config.waf.mode,
           &previous_counters,
+          global_functions.clone(),
+          Some(functions.clone()),
         )?,
       );
     }
@@ -1057,6 +1122,7 @@ impl WafEngine {
       duplicate_metadata_policy: config.waf.duplicate_metadata_policy,
       limits: config.waf.limits.clone(),
       pattern_sets,
+      global_functions,
       global_rules,
       route_rules,
       crs,
@@ -1224,6 +1290,7 @@ impl WafEngine {
   ) -> anyhow::Result<AccessLogRecord> {
     let mut tx = TransactionBudget::new(&self.limits);
     let person_proof = self.person_proof.evaluate_request(input.request);
+    let empty_functions = FunctionMap::new();
     let ctx = EvalContext {
       phase: WafPhase::Response,
       mode: self.mode,
@@ -1235,6 +1302,9 @@ impl WafEngine {
       stream: None,
       person_proof: &person_proof,
       pattern_sets: &self.pattern_sets,
+      global_functions: &empty_functions,
+      route_functions: None,
+      locals: &[],
       limits: &self.limits,
       duplicate_metadata_policy: self.duplicate_metadata_policy,
     };
@@ -1283,6 +1353,9 @@ impl WafEngine {
           stream: None,
           person_proof: &rule_person_proof,
           pattern_sets: &self.pattern_sets,
+          global_functions: self.global_functions.as_ref(),
+          route_functions: None,
+          locals: &[],
           limits: &self.limits,
           duplicate_metadata_policy: self.duplicate_metadata_policy,
         };
@@ -1359,6 +1432,9 @@ impl WafEngine {
         stream: None,
         person_proof: &person_proof,
         pattern_sets: &self.pattern_sets,
+        global_functions: self.global_functions.as_ref(),
+        route_functions: None,
+        locals: &[],
         limits: &self.limits,
         duplicate_metadata_policy: self.duplicate_metadata_policy,
       };
@@ -1410,6 +1486,9 @@ impl WafEngine {
         stream: Some(input),
         person_proof: &person_proof,
         pattern_sets: &self.pattern_sets,
+        global_functions: self.global_functions.as_ref(),
+        route_functions: None,
+        locals: &[],
         limits: &self.limits,
         duplicate_metadata_policy: self.duplicate_metadata_policy,
       };
@@ -1458,6 +1537,9 @@ impl WafEngine {
       rule_name: &rule.name,
       rule_id: rule.id.as_deref(),
       rule_tags: &rule.tags,
+      global_functions: rule.global_functions.as_ref(),
+      route_functions: rule.route_functions.as_deref(),
+      locals: &[],
       ..*ctx
     };
     let value = rule.expression.eval(&rule_ctx, tx)?;
@@ -1537,6 +1619,8 @@ fn compile_rules(
   scope: WafRuleScope,
   default_mode: WafMode,
   previous_counters: &HashMap<WafRuleHitKey, Arc<AtomicU64>>,
+  global_functions: Arc<FunctionMap>,
+  route_functions: Option<Arc<FunctionMap>>,
 ) -> anyhow::Result<Vec<CompiledRule>> {
   configs
     .iter()
@@ -1576,8 +1660,13 @@ fn compile_rules(
         hit_key,
         hit_counter,
         requires_request_body_inspection: rule.phase == WafPhase::Request
-          && expression.requires_request_body_inspection(),
+          && expression.requires_request_body_inspection_with_functions(
+            global_functions.as_ref(),
+            route_functions.as_deref(),
+          ),
         expression,
+        global_functions: global_functions.clone(),
+        route_functions: route_functions.clone(),
         actions,
         person_proof_policies,
       })
@@ -1792,6 +1881,8 @@ struct CompiledRule {
   hit_counter: Arc<AtomicU64>,
   requires_request_body_inspection: bool,
   expression: Expr,
+  global_functions: Arc<FunctionMap>,
+  route_functions: Option<Arc<FunctionMap>>,
   actions: Vec<CompiledAction>,
   person_proof_policies: Vec<PersonProofPolicy>,
 }
@@ -1820,7 +1911,13 @@ impl CompiledRule {
   }
 
   fn requires_response_body_inspection(&self) -> bool {
-    self.phase == WafPhase::Response && self.expression.requires_response_body_inspection()
+    self.phase == WafPhase::Response
+      && self
+        .expression
+        .requires_response_body_inspection_with_functions(
+          self.global_functions.as_ref(),
+          self.route_functions.as_deref(),
+        )
   }
 }
 
@@ -2273,6 +2370,9 @@ fn apply_response_actions(
           rule_id: rule.id.as_deref(),
           rule_tags: &rule.tags,
           response: Some(input),
+          global_functions: rule.global_functions.as_ref(),
+          route_functions: rule.route_functions.as_deref(),
+          locals: &[],
           ..*ctx
         };
         decision.access_logs.push(AccessLogRecord::from_fields(
@@ -2984,6 +3084,9 @@ struct EvalContext<'a> {
   stream: Option<WafStreamInput<'a>>,
   person_proof: &'a PersonProofRequestStatus,
   pattern_sets: &'a HashMap<String, CompiledPatternSet>,
+  global_functions: &'a FunctionMap,
+  route_functions: Option<&'a FunctionMap>,
+  locals: &'a [(&'a str, &'a Value)],
   limits: &'a WafLimits,
   duplicate_metadata_policy: WafDuplicateMetadataPolicy,
 }
@@ -2995,6 +3098,7 @@ enum Expr {
   Int(i64),
   String(String),
   Ident(String),
+  FunctionCall(String, Vec<Expr>),
   Member(Box<Expr>, String),
   Call(Box<Expr>, String, Vec<Expr>),
   UnaryNot(Box<Expr>),
@@ -3032,9 +3136,52 @@ impl Expr {
     Ok(())
   }
 
+  fn validate_for_phase_with_functions(
+    &self,
+    phase: WafPhase,
+    global_functions: &FunctionMap,
+    route_functions: Option<&FunctionMap>,
+  ) -> anyhow::Result<()> {
+    self.validate_for_phase(phase)?;
+    self.validate_called_functions_for_phase(
+      phase,
+      global_functions,
+      route_functions,
+      &mut HashSet::new(),
+    )
+  }
+
+  fn validate_called_functions_for_phase(
+    &self,
+    phase: WafPhase,
+    global_functions: &FunctionMap,
+    route_functions: Option<&FunctionMap>,
+    active: &mut HashSet<FunctionKey>,
+  ) -> anyhow::Result<()> {
+    for call in self.function_calls() {
+      let function = resolve_function(call.name, global_functions, route_functions)
+        .ok_or_else(|| anyhow!("unknown OxiRule function {}", call.name))?;
+      validate_function_arity(function, call.args_len)?;
+      let key = FunctionKey::from(function);
+      if active.insert(key.clone()) {
+        let body_route_functions = function_body_route_functions(function, route_functions);
+        function.expression.validate_for_phase(phase)?;
+        function.expression.validate_called_functions_for_phase(
+          phase,
+          global_functions,
+          body_route_functions,
+          active,
+        )?;
+        active.remove(&key);
+      }
+    }
+    Ok(())
+  }
+
   fn references_ident(&self, name: &str) -> bool {
     match self {
       Self::Ident(ident) => ident == name,
+      Self::FunctionCall(_, args) => args.iter().any(|arg| arg.references_ident(name)),
       Self::Member(receiver, _) | Self::UnaryNot(receiver) => receiver.references_ident(name),
       Self::Call(receiver, _, args) => {
         receiver.references_ident(name) || args.iter().any(|arg| arg.references_ident(name))
@@ -3054,6 +3201,7 @@ impl Expr {
         receiver.references_request_body_object()
           || args.iter().any(Self::references_request_body_object)
       }
+      Self::FunctionCall(_, args) => args.iter().any(Self::references_request_body_object),
       Self::UnaryNot(expr) => expr.references_request_body_object(),
       Self::Binary(left, _, right) => {
         left.references_request_body_object() || right.references_request_body_object()
@@ -3075,6 +3223,7 @@ impl Expr {
           || (receiver.is_request_body_expr() && body_content_method(method))
           || (receiver.is_request_body_bytes_expr() && bytes_content_method(method))
       }
+      Self::FunctionCall(_, args) => args.iter().any(Self::requires_request_body_inspection),
       Self::UnaryNot(expr) => expr.requires_request_body_inspection(),
       Self::Binary(left, _, right) => {
         left.requires_request_body_inspection() || right.requires_request_body_inspection()
@@ -3096,6 +3245,7 @@ impl Expr {
           || (receiver.is_response_body_expr() && body_content_method(method))
           || (receiver.is_response_body_bytes_expr() && bytes_content_method(method))
       }
+      Self::FunctionCall(_, args) => args.iter().any(Self::requires_response_body_inspection),
       Self::UnaryNot(expr) => expr.requires_response_body_inspection(),
       Self::Binary(left, _, right) => {
         left.requires_response_body_inspection() || right.requires_response_body_inspection()
@@ -3146,6 +3296,124 @@ impl Expr {
     matches!(self, Self::Member(receiver, field) if field == "Http" && receiver.is_response_expr())
   }
 
+  fn requires_request_body_inspection_with_functions(
+    &self,
+    global_functions: &FunctionMap,
+    route_functions: Option<&FunctionMap>,
+  ) -> bool {
+    self.requires_request_body_inspection_with_functions_inner(
+      global_functions,
+      route_functions,
+      &mut HashSet::new(),
+    )
+  }
+
+  fn requires_request_body_inspection_with_functions_inner(
+    &self,
+    global_functions: &FunctionMap,
+    route_functions: Option<&FunctionMap>,
+    active: &mut HashSet<FunctionKey>,
+  ) -> bool {
+    if self.requires_request_body_inspection() {
+      return true;
+    }
+    self.function_calls().into_iter().any(|call| {
+      let Some(function) = resolve_function(call.name, global_functions, route_functions) else {
+        return false;
+      };
+      let key = FunctionKey::from(function);
+      if !active.insert(key.clone()) {
+        return false;
+      }
+      let body_route_functions = function_body_route_functions(function, route_functions);
+      let result = function
+        .expression
+        .requires_request_body_inspection_with_functions_inner(
+          global_functions,
+          body_route_functions,
+          active,
+        );
+      active.remove(&key);
+      result
+    })
+  }
+
+  fn requires_response_body_inspection_with_functions(
+    &self,
+    global_functions: &FunctionMap,
+    route_functions: Option<&FunctionMap>,
+  ) -> bool {
+    self.requires_response_body_inspection_with_functions_inner(
+      global_functions,
+      route_functions,
+      &mut HashSet::new(),
+    )
+  }
+
+  fn requires_response_body_inspection_with_functions_inner(
+    &self,
+    global_functions: &FunctionMap,
+    route_functions: Option<&FunctionMap>,
+    active: &mut HashSet<FunctionKey>,
+  ) -> bool {
+    if self.requires_response_body_inspection() {
+      return true;
+    }
+    self.function_calls().into_iter().any(|call| {
+      let Some(function) = resolve_function(call.name, global_functions, route_functions) else {
+        return false;
+      };
+      let key = FunctionKey::from(function);
+      if !active.insert(key.clone()) {
+        return false;
+      }
+      let body_route_functions = function_body_route_functions(function, route_functions);
+      let result = function
+        .expression
+        .requires_response_body_inspection_with_functions_inner(
+          global_functions,
+          body_route_functions,
+          active,
+        );
+      active.remove(&key);
+      result
+    })
+  }
+
+  fn function_calls(&self) -> Vec<FunctionCallRef<'_>> {
+    let mut calls = Vec::new();
+    self.collect_function_calls(&mut calls);
+    calls
+  }
+
+  fn collect_function_calls<'a>(&'a self, calls: &mut Vec<FunctionCallRef<'a>>) {
+    match self {
+      Self::FunctionCall(name, args) => {
+        calls.push(FunctionCallRef {
+          name,
+          args_len: args.len(),
+        });
+        for arg in args {
+          arg.collect_function_calls(calls);
+        }
+      }
+      Self::Member(receiver, _) | Self::UnaryNot(receiver) => {
+        receiver.collect_function_calls(calls)
+      }
+      Self::Call(receiver, _, args) => {
+        receiver.collect_function_calls(calls);
+        for arg in args {
+          arg.collect_function_calls(calls);
+        }
+      }
+      Self::Binary(left, _, right) => {
+        left.collect_function_calls(calls);
+        right.collect_function_calls(calls);
+      }
+      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => {}
+    }
+  }
+
   fn eval(&self, ctx: &EvalContext<'_>, tx: &mut TransactionBudget) -> anyhow::Result<Value> {
     tx.step()?;
     match self {
@@ -3154,6 +3422,13 @@ impl Expr {
       Self::Int(value) => Ok(Value::Int(*value)),
       Self::String(value) => Ok(Value::String(value.clone())),
       Self::Ident(name) => eval_ident(name, ctx),
+      Self::FunctionCall(name, args) => {
+        let values = args
+          .iter()
+          .map(|arg| arg.eval(ctx, tx))
+          .collect::<anyhow::Result<Vec<_>>>()?;
+        eval_function_call(name, &values, ctx, tx)
+      }
       Self::Member(receiver, field) => {
         let value = receiver.eval(ctx, tx)?;
         eval_member(value, field, ctx)
@@ -3253,6 +3528,13 @@ enum ObjectRef {
 }
 
 fn eval_ident(name: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
+  if let Some((_, value)) = ctx
+    .locals
+    .iter()
+    .find(|(local_name, _)| *local_name == name)
+  {
+    return Ok((*value).clone());
+  }
   match name {
     "Context" => Ok(Value::Object(ObjectRef::Context)),
     "Request" => Ok(Value::Object(ObjectRef::Request)),
@@ -3263,6 +3545,29 @@ fn eval_ident(name: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
     "Stream" => bail!("Stream is available only in stream phase"),
     _ => bail!("unknown identifier {name}"),
   }
+}
+
+fn eval_function_call(
+  name: &str,
+  args: &[Value],
+  ctx: &EvalContext<'_>,
+  tx: &mut TransactionBudget,
+) -> anyhow::Result<Value> {
+  let function = resolve_function(name, ctx.global_functions, ctx.route_functions)
+    .ok_or_else(|| anyhow!("unknown OxiRule function {name}"))?;
+  validate_function_arity(function, args.len())?;
+  let locals = function
+    .params
+    .iter()
+    .zip(args.iter())
+    .map(|(param, value)| (param.as_str(), value))
+    .collect::<Vec<_>>();
+  let child_ctx = EvalContext {
+    route_functions: function_body_route_functions(function, ctx.route_functions),
+    locals: &locals,
+    ..*ctx
+  };
+  function.expression.eval(&child_ctx, tx)
 }
 
 fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
@@ -4688,268 +4993,6 @@ fn version_string(version: Version) -> String {
     _ => "unknown",
   }
   .to_string()
-}
-
-fn bytes_match_format(bytes: &[u8], format: &str) -> bool {
-  match normalize_binary_format(format).as_str() {
-    "7z" | "7zip" | "application/x-7z-compressed" => bytes.starts_with(b"\x37\x7a\xbc\xaf\x27\x1c"),
-    "alac" | "audio/alac" => is_alac(bytes),
-    "apng" | "image/apng" => is_apng(bytes),
-    "av1" | "video/av1" => is_av1(bytes),
-    "avif" | "image/avif" => is_isobmff_with_brand(bytes, &[b"avif", b"avis"]),
-    "bzip2" | "bz2" | "application/x-bzip2" => bytes.starts_with(b"BZh"),
-    "dirac" | "video/dirac" => bytes.starts_with(b"BBCD"),
-    "djvu" | "djv" | "image/vnd.djvu" => bytes.starts_with(b"AT&TFORM"),
-    "dvi" | "application/x-dvi" => bytes.starts_with(b"\xf7\x02"),
-    "elf" | "linux-exe" | "linux-executable" | "application/x-elf" => bytes.starts_with(b"\x7fELF"),
-    "epub" | "application/epub+zip" => is_zip_with(bytes, b"application/epub+zip"),
-    "exe"
-    | "pe"
-    | "pe32"
-    | "portable-executable"
-    | "windows-exe"
-    | "windows-executable"
-    | "application/x-msdownload"
-    | "application/vnd.microsoft.portable-executable" => is_pe_executable(bytes),
-    "exr" | "openexr" | "image/x-exr" => bytes.starts_with(b"\x76\x2f\x31\x01"),
-    "flac" | "audio/flac" => bytes.starts_with(b"fLaC"),
-    "flif" | "image/flif" => bytes.starts_with(b"FLIF"),
-    "gbr" | "gimp-brush" | "image/x-gimp-gbr" => is_gbr(bytes),
-    "gif" | "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-    "glb" | "gltf-binary" | "model/gltf-binary" => bytes.starts_with(b"glTF"),
-    "gzip" | "gz" | "application/gzip" | "application/x-gzip" => bytes.starts_with(b"\x1f\x8b\x08"),
-    "hdf" | "hdf4" | "application/x-hdf" => {
-      bytes.starts_with(b"\x0e\x03\x13\x01") || is_hdf5(bytes)
-    }
-    "hdf5" | "h5" | "application/x-hdf5" => is_hdf5(bytes),
-    "jpeg" | "jpg" | "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
-    "jpeg-2000" | "jpeg2000" | "jp2" | "j2k" | "image/jp2" => is_jpeg_2000(bytes),
-    "jpeg-xl" | "jpegxl" | "jxl" | "image/jxl" => is_jpeg_xl(bytes),
-    "lzip" | "application/x-lzip" => bytes.starts_with(b"LZIP"),
-    "maff" | "application/x-maff" => is_zip_with(bytes, b"index.rdf"),
-    "matroska" | "mkv" | "video/x-matroska" => is_ebml_doctype(bytes, b"matroska"),
-    "mng" | "video/x-mng" => bytes.starts_with(b"\x8aMNG\r\n\x1a\n"),
-    "mp3" | "audio/mpeg" => is_mp3(bytes),
-    "musepack" | "mpc" | "audio/x-musepack" => {
-      bytes.starts_with(b"MPCK") || bytes.starts_with(b"MP+")
-    }
-    "netcdf" | "nc" | "application/x-netcdf" => is_netcdf(bytes),
-    "odf" | "odt" | "ods" | "odp" | "odg" | "opendocument" => {
-      is_zip_with(bytes, b"application/vnd.oasis.opendocument")
-    }
-    "ogg" | "application/ogg" | "audio/ogg" | "video/ogg" => is_ogg(bytes),
-    "ooxml" | "office-open-xml" | "docx" | "xlsx" | "pptx" => is_ooxml(bytes),
-    "openraster" | "ora" | "image/openraster" => is_zip_with(bytes, b"application/x-openraster"),
-    "openxps" | "oxps" | "xps" | "application/oxps" | "application/vnd.ms-xpsdocument" => {
-      is_openxps(bytes)
-    }
-    "opus" | "audio/opus" => is_ogg_with(bytes, b"OpusHead"),
-    "pdf" | "pdf-a" | "pdf-e" | "pdf-raster" | "pdf-ua" | "pdf-x" | "application/pdf" => {
-      bytes.starts_with(b"%PDF-")
-    }
-    "png" | "image/png" => is_png(bytes),
-    "qoi" | "image/qoi" => bytes.starts_with(b"qoif"),
-    "speex" | "audio/speex" => is_ogg_with(bytes, b"Speex   "),
-    "tar" | "application/x-tar" => is_tar(bytes),
-    "theora" | "video/theora" => is_ogg_with(bytes, b"\x80theora"),
-    "vorbis" | "audio/vorbis" => is_ogg_with(bytes, b"\x01vorbis"),
-    "wavpack" | "wv" | "audio/wavpack" => bytes.starts_with(b"wvpk"),
-    "webp" | "image/webp" => is_webp(bytes),
-    "zip" | "application/zip" | "application/x-zip-compressed" => is_zip(bytes),
-    "webm" | "video/webm" | "audio/webm" => is_ebml_doctype(bytes, b"webm"),
-    "woff" | "font/woff" => bytes.starts_with(b"wOFF"),
-    "woff2" | "font/woff2" => bytes.starts_with(b"wOF2"),
-    "xcf" | "image/x-xcf" => bytes.starts_with(b"gimp xcf "),
-    "xz" | "application/x-xz" => bytes.starts_with(b"\xfd7zXZ\x00"),
-    "zim" | "application/x-zim" => bytes.starts_with(b"ZIM\x04"),
-    _ => false,
-  }
-}
-
-fn normalize_binary_format(format: &str) -> String {
-  format.trim().to_ascii_lowercase().replace(['_', ' '], "-")
-}
-
-fn is_zip(bytes: &[u8]) -> bool {
-  bytes.starts_with(b"PK\x03\x04")
-    || bytes.starts_with(b"PK\x05\x06")
-    || bytes.starts_with(b"PK\x07\x08")
-}
-
-fn is_png(bytes: &[u8]) -> bool {
-  bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-}
-
-fn is_apng(bytes: &[u8]) -> bool {
-  is_png(bytes) && png_contains_chunk(bytes, b"acTL")
-}
-
-fn png_contains_chunk(bytes: &[u8], chunk_type: &[u8; 4]) -> bool {
-  let mut offset = 8usize;
-  while offset + 8 <= bytes.len() {
-    let length = u32::from_be_bytes([
-      bytes[offset],
-      bytes[offset + 1],
-      bytes[offset + 2],
-      bytes[offset + 3],
-    ]) as usize;
-    if &bytes[offset + 4..offset + 8] == chunk_type {
-      return true;
-    }
-    let Some(next) = offset
-      .checked_add(8)
-      .and_then(|offset| offset.checked_add(length))
-      .and_then(|offset| offset.checked_add(4))
-    else {
-      return false;
-    };
-    if next <= offset {
-      return false;
-    }
-    offset = next;
-  }
-  false
-}
-
-fn is_webp(bytes: &[u8]) -> bool {
-  bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
-}
-
-fn is_gbr(bytes: &[u8]) -> bool {
-  bytes.len() >= 24 && &bytes[20..24] == b"GIMP"
-}
-
-fn is_jpeg_2000(bytes: &[u8]) -> bool {
-  bytes.starts_with(b"\x00\x00\x00\x0cjP  \r\n\x87\n") || bytes.starts_with(b"\xff\x4f\xff\x51")
-}
-
-fn is_jpeg_xl(bytes: &[u8]) -> bool {
-  bytes.starts_with(b"\xff\x0a") || is_isobmff_with_brand(bytes, &[b"jxl "])
-}
-
-fn is_isobmff_with_brand(bytes: &[u8], brands: &[&[u8; 4]]) -> bool {
-  if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
-    return false;
-  }
-  if brands.iter().any(|brand| &bytes[8..12] == brand.as_slice()) {
-    return true;
-  }
-
-  let box_size = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-  let limit = if box_size >= 16 && box_size <= bytes.len() {
-    box_size
-  } else {
-    bytes.len().min(256)
-  };
-  if limit <= 16 {
-    return false;
-  }
-  bytes[16..limit]
-    .chunks_exact(4)
-    .any(|brand| brands.iter().any(|expected| brand == expected.as_slice()))
-}
-
-fn is_alac(bytes: &[u8]) -> bool {
-  bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && byte_contains(bytes, b"alac")
-}
-
-fn is_av1(bytes: &[u8]) -> bool {
-  (bytes.len() >= 12 && bytes.starts_with(b"DKIF") && &bytes[8..12] == b"AV01")
-    || is_isobmff_with_brand(bytes, &[b"av01"])
-}
-
-fn is_ogg(bytes: &[u8]) -> bool {
-  bytes.starts_with(b"OggS")
-}
-
-fn is_ogg_with(bytes: &[u8], marker: &[u8]) -> bool {
-  is_ogg(bytes) && byte_contains(bytes, marker)
-}
-
-fn is_mp3(bytes: &[u8]) -> bool {
-  bytes.starts_with(b"ID3") || (bytes.len() >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0)
-}
-
-fn is_tar(bytes: &[u8]) -> bool {
-  bytes.len() >= 263 && (&bytes[257..263] == b"ustar\0" || &bytes[257..263] == b"ustar ")
-}
-
-fn is_ooxml(bytes: &[u8]) -> bool {
-  is_zip(bytes)
-    && byte_contains(bytes, b"[Content_Types].xml")
-    && (byte_contains(bytes, b"word/")
-      || byte_contains(bytes, b"xl/")
-      || byte_contains(bytes, b"ppt/"))
-}
-
-fn is_openxps(bytes: &[u8]) -> bool {
-  is_zip(bytes)
-    && (byte_contains(bytes, b"FixedDocumentSequence.fdseq")
-      || byte_contains(bytes, b"application/vnd.ms-package.xps")
-      || byte_contains(bytes, b"schemas.microsoft.com/xps/"))
-}
-
-fn is_zip_with(bytes: &[u8], marker: &[u8]) -> bool {
-  is_zip(bytes) && byte_contains(bytes, marker)
-}
-
-fn is_hdf5(bytes: &[u8]) -> bool {
-  bytes.starts_with(b"\x89HDF\r\n\x1a\n")
-}
-
-fn is_netcdf(bytes: &[u8]) -> bool {
-  bytes.starts_with(b"CDF\x01") || bytes.starts_with(b"CDF\x02") || bytes.starts_with(b"CDF\x05")
-}
-
-fn is_pe_executable(bytes: &[u8]) -> bool {
-  if bytes.len() < 0x40 || !bytes.starts_with(b"MZ") {
-    return false;
-  }
-  let pe_offset = u32::from_le_bytes([bytes[0x3c], bytes[0x3d], bytes[0x3e], bytes[0x3f]]) as usize;
-  pe_offset + 4 <= bytes.len() && &bytes[pe_offset..pe_offset + 4] == b"PE\0\0"
-}
-
-fn is_ebml_doctype(bytes: &[u8], expected_doctype: &[u8]) -> bool {
-  if !bytes.starts_with(b"\x1a\x45\xdf\xa3") {
-    return false;
-  }
-
-  let limit = bytes.len().min(4096);
-  let header = &bytes[..limit];
-  let Some(position) = header.windows(2).position(|window| window == b"\x42\x82") else {
-    return false;
-  };
-  let Some((size_len, doc_type_len)) = parse_ebml_vint(&header[position + 2..]) else {
-    return false;
-  };
-  let start = position + 2 + size_len;
-  let end = start + doc_type_len;
-  end <= header.len() && &header[start..end] == expected_doctype
-}
-
-fn byte_contains(bytes: &[u8], needle: &[u8]) -> bool {
-  !needle.is_empty()
-    && bytes.len() >= needle.len()
-    && bytes.windows(needle.len()).any(|window| window == needle)
-}
-
-fn parse_ebml_vint(bytes: &[u8]) -> Option<(usize, usize)> {
-  let first = *bytes.first()?;
-  for width in 1..=8 {
-    let marker = 1u8 << (8 - width);
-    if first & marker == 0 {
-      continue;
-    }
-    if bytes.len() < width {
-      return None;
-    }
-    let mut value = u64::from(first & !marker);
-    for byte in &bytes[1..width] {
-      value = (value << 8) | u64::from(*byte);
-    }
-    return usize::try_from(value).ok().map(|value| (width, value));
-  }
-  None
 }
 
 #[cfg(test)]

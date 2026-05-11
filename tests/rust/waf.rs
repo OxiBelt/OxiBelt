@@ -177,6 +177,593 @@ body = "slow down"
 }
 
 #[test]
+fn user_defined_functions_can_reuse_bounded_request_predicates() {
+    let temp_dir = common::TempDir::new("waf-udf-request");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-udf");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.functions]]
+name = "lower_contains"
+params = ["value", "needle"]
+expression = "value.lowerAscii().contains(needle)"
+
+[[waf.functions]]
+name = "blocked_path"
+params = ["path"]
+expression = "lower_contains(path, '/admin')"
+
+[[waf.rules]]
+name = "block-admin"
+phase = "request"
+priority = 10
+when = "blocked_path(Request.Http.Path)"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let decision = evaluate_simple_request(&engine, "/ADMIN/panel");
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn route_udf_overrides_global_for_route_rules_only() {
+    let temp_dir = common::TempDir::new("waf-udf-route-override");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-udf-route-override");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.functions]]
+name = "is_bad_path"
+params = ["path"]
+expression = "path.startsWith('/global')"
+
+[[waf.rules]]
+name = "global-block"
+phase = "request"
+priority = 10
+when = "is_bad_path(Request.Http.Path)"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "global"
+
+[[routes.waf.functions]]
+name = "is_bad_path"
+params = ["path"]
+expression = "path.startsWith('/route')"
+
+[[routes.waf.rules]]
+name = "route-block"
+phase = "request"
+priority = 20
+when = "is_bad_path(Request.Http.Path)"
+
+[[routes.waf.rules.actions]]
+type = "reject"
+status = 409
+body = "route"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let route_decision = evaluate_simple_request(&engine, "/route-only");
+    let global_decision = evaluate_simple_request(&engine, "/global-only");
+
+    assert_eq!(
+        route_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::CONFLICT)
+    );
+    assert_eq!(
+        route_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("route")
+    );
+    assert_eq!(
+        global_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+    assert_eq!(
+        global_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("global")
+    );
+}
+
+#[test]
+fn global_udf_body_keeps_global_resolution_inside_route_rules() {
+    let temp_dir = common::TempDir::new("waf-udf-lexical-global");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-udf-lexical-global");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.functions]]
+name = "is_bad_path"
+params = ["path"]
+expression = "path.startsWith('/global')"
+
+[[waf.functions]]
+name = "is_global_bad_path"
+params = ["path"]
+expression = "is_bad_path(path)"
+
+[[routes.waf.functions]]
+name = "is_bad_path"
+params = ["path"]
+expression = "path.startsWith('/route')"
+
+[[routes.waf.rules]]
+name = "route-calls-global"
+phase = "request"
+priority = 10
+when = "is_global_bad_path(Request.Http.Path)"
+
+[[routes.waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let route_decision = evaluate_simple_request(&engine, "/route-only");
+    let global_decision = evaluate_simple_request(&engine, "/global-only");
+
+    assert!(route_decision.terminal.is_none());
+    assert_eq!(
+        global_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn waf_access_log_fields_can_call_udfs() {
+    let temp_dir = common::TempDir::new("waf-udf-access-log");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-udf-access-log");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.functions]]
+name = "is_created"
+params = ["status"]
+expression = "status == 201"
+
+[[waf.rules]]
+name = "log-created"
+phase = "response"
+priority = 10
+when = "is_created(Response.Http.Status)"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+
+[[waf.rules.actions.fields]]
+name = "created"
+value = "is_created(Response.Http.Status)"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/created".parse().expect("URI should parse");
+
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(
+            &method,
+            &uri,
+            &headers,
+            &tags,
+            "203.0.113.10:49152".parse().unwrap(),
+        ),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::CREATED,
+        headers: &headers,
+        body: None,
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: None,
+        upstream_error: None,
+    });
+
+    assert_eq!(response_decision.access_logs.len(), 1);
+    assert!(
+        response_decision.access_logs[0]
+            .to_json_line()
+            .contains("\"created\":true")
+    );
+}
+
+#[test]
+fn system_access_log_fields_reject_udf_calls() {
+    let temp_dir = common::TempDir::new("system-access-log-udf-reject");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "system-access-log-udf-reject");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.functions]]
+name = "is_created"
+params = ["status"]
+expression = "status == 201"
+
+[logging.access_log]
+enabled = true
+fields = [
+  { name = "created", value = "is_created(Response.Http.Status)" },
+]
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    assert!(
+        format!("{error:#}").contains("unknown OxiRule function is_created"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn external_rule_files_cannot_define_udfs() {
+    let temp_dir = common::TempDir::new("external-rule-udf-reject");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rules_dir = temp_dir.path().join("oxirule").join("rules");
+    std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+    std::fs::create_dir_all(&cert_dir).expect("cert dir should be created");
+    std::fs::create_dir_all(&rules_dir).expect("rules dir should be created");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "external-rule-udf");
+    let raw = format!(
+        r#"{}
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "external"
+phase = "request"
+priority = 10
+path = "rules/external.oxirule.toml"
+"#,
+        common::minimal_config_toml_with_paths(
+            cert_path.file_name().unwrap().to_str().unwrap(),
+            key_path.file_name().unwrap().to_str().unwrap(),
+        )
+    );
+    std::fs::write(
+        rules_dir.join("external.oxirule.toml"),
+        r#"
+when = "true"
+
+[[functions]]
+name = "bad"
+expression = "true"
+
+[[actions]]
+type = "reject"
+status = 403
+"#,
+    )
+    .expect("external rule should be written");
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(&config_path, raw).expect("config should be written");
+
+    let error = Config::load(&config_path).expect_err("config load should reject functions");
+    assert!(
+        format!("{error:#}").contains("unknown field `functions`"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn udf_phase_validation_happens_at_call_site() {
+    for (name, phase, expression, expected) in [
+        (
+            "request-calls-response",
+            "request",
+            "response_is_error()",
+            "Response is unavailable",
+        ),
+        (
+            "response-calls-stream",
+            "response",
+            "stream_has_payload()",
+            "Stream is available only in stream-phase rules",
+        ),
+        (
+            "stream-calls-request-body",
+            "stream",
+            "request_body_has_secret()",
+            "Request.Body is unavailable",
+        ),
+    ] {
+        let temp_dir = common::TempDir::new(name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let action = if phase == "stream" {
+            r#"type = "close_stream""#
+        } else if phase == "response" {
+            r#"type = "continue_response""#
+        } else {
+            r#"type = "reject"
+status = 403"#
+        };
+        let base_config = common::minimal_config_toml(&cert_path, &key_path);
+        let raw = format!(
+            r#"{base_config}
+
+[waf]
+enabled = true
+
+[[waf.functions]]
+name = "response_is_error"
+expression = "Response.Http.Status >= 500"
+
+[[waf.functions]]
+name = "stream_has_payload"
+expression = "Stream.Payload.contains('secret')"
+
+[[waf.functions]]
+name = "request_body_has_secret"
+expression = "Request.Body.contains('secret')"
+
+[[waf.rules]]
+name = "{name}"
+phase = "{phase}"
+priority = 10
+when = "{expression}"
+
+[[waf.rules.actions]]
+{action}
+"#
+        );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains(expected),
+            "unexpected error for {name}: {error_chain}"
+        );
+    }
+}
+
+#[test]
+fn response_phase_can_call_response_udf() {
+    let temp_dir = common::TempDir::new("waf-udf-response-phase");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-udf-response-phase");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.functions]]
+name = "response_is_error"
+expression = "Response.Http.Status >= 500"
+
+[[waf.rules]]
+name = "reject-error"
+phase = "response"
+priority = 10
+when = "response_is_error()"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 502
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn validation_rejects_invalid_udf_definitions_and_calls() {
+    for (name, snippet, expected) in [
+        (
+            "duplicate-function",
+            r#"
+[[waf.functions]]
+name = "same"
+expression = "true"
+
+[[waf.functions]]
+name = "same"
+expression = "false"
+"#,
+            "duplicate OxiRule function same",
+        ),
+        (
+            "invalid-function-name",
+            r#"
+[[waf.functions]]
+name = "Request"
+expression = "true"
+"#,
+            "function name Request must be a valid OxiRule identifier",
+        ),
+        (
+            "reserved-function-name",
+            r#"
+[[waf.functions]]
+name = "return"
+expression = "true"
+"#,
+            "function name return must be a valid OxiRule identifier",
+        ),
+        (
+            "duplicate-param",
+            r#"
+[[waf.functions]]
+name = "has_value"
+params = ["value", "value"]
+expression = "value != null"
+"#,
+            "duplicate parameter value",
+        ),
+        (
+            "top-level-param-name",
+            r#"
+[[waf.functions]]
+name = "has_value"
+params = ["Stream"]
+expression = "Stream != null"
+"#,
+            "parameter Stream must be a valid OxiRule identifier",
+        ),
+        (
+            "unknown-function",
+            "",
+            "unknown OxiRule function missing_fn",
+        ),
+        ("bad-call-token", "", "unexpected token RParen"),
+        ("reserved-call-token", "", "forbidden OxiRule construct if"),
+        (
+            "arity-mismatch",
+            r#"
+[[waf.functions]]
+name = "one_arg"
+params = ["value"]
+expression = "value != null"
+"#,
+            "expects 1 arguments but got 0",
+        ),
+        (
+            "recursive-function",
+            r#"
+[[waf.functions]]
+name = "first"
+expression = "second()"
+
+[[waf.functions]]
+name = "second"
+expression = "first()"
+"#,
+            "recursive OxiRule function",
+        ),
+        (
+            "global-cannot-see-route-function",
+            r#"
+[[routes.waf.functions]]
+name = "route_only"
+params = ["path"]
+expression = "path.startsWith('/route')"
+"#,
+            "unknown OxiRule function route_only",
+        ),
+    ] {
+        let temp_dir = common::TempDir::new(name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let base_config = common::minimal_config_toml(&cert_path, &key_path);
+        let when = if name == "arity-mismatch" {
+            "one_arg()"
+        } else if name == "bad-call-token" {
+            "missing_fn(Request.Http.Path,)"
+        } else if name == "reserved-call-token" {
+            "if(Request.Http.Path)"
+        } else if name == "global-cannot-see-route-function" {
+            "route_only(Request.Http.Path)"
+        } else {
+            "missing_fn(Request.Http.Path)"
+        };
+        let raw = format!(
+            r#"{base_config}
+
+[waf]
+enabled = true
+{snippet}
+
+[[waf.rules]]
+name = "{name}"
+phase = "request"
+priority = 10
+when = "{when}"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+        );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains(expected),
+            "unexpected error for {name}: {error_chain}"
+        );
+    }
+}
+
+#[test]
 fn rate_limit_action_monitor_mode_does_not_consume_tokens() {
     let temp_dir = common::TempDir::new("waf-rate-limit-monitor");
     let (cert_path, key_path) =

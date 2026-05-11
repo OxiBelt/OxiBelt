@@ -93,6 +93,24 @@ patterns = ["(?i)<script", "(?i)javascript:"]
 
 Supported pattern set kinds are `contains` and `regex`.
 
+Bounded user-defined functions can be configured globally or per route:
+
+```toml
+[[waf.functions]]
+name = "is_bad_path"
+params = ["path"]
+expression = "path.lowerAscii().contains('/wp-admin')"
+
+[[routes.waf.functions]]
+name = "is_bad_path"
+params = ["path"]
+expression = "path.startsWith('/admin')"
+```
+
+Functions are expression-valued helpers evaluated inside the same OxiRule sandbox and budgets as the calling rule. Function names and parameters must be valid OxiRule identifiers, cannot use reserved keywords or top-level objects such as `Request`, `Response`, `Stream`, `Context`, or `DynamicPolicy`, and cannot repeat parameter names. Function bodies may return any existing OxiRule value; rule `when` expressions still must evaluate to `Bool`.
+
+Functions may call other functions when the call graph is acyclic. Global rules can call only global functions. Route rules can call global functions plus functions declared under that route; route functions override same-named global functions for that route. Global function bodies always resolve nested calls against global functions only, while route function bodies resolve against the route override set plus globals. Function bodies are phase-validated at call sites: a function that reads `Response` is valid only from response-phase expressions, and a function that reads `Stream` is valid only from stream-phase expressions. Function definitions are allowed in TOML configuration only; external `.oxirule.toml` rule files remain rule-body-only.
+
 ## CRS Compatibility
 
 OxiBelt can run a CRS-compatible WAF layer alongside OxiRule rules:
@@ -172,7 +190,7 @@ body = "Upstream unavailable"
 
 ## Expression Language
 
-Object properties use `PascalCase`, such as `Request.Http.Path`. Functions use `lowerCamelCase`, such as `startsWith` and `inCidr`.
+Object properties use `PascalCase`, such as `Request.Http.Path`. Built-in methods use `lowerCamelCase`, such as `startsWith` and `inCidr`. User-defined functions are called directly, such as `is_bad_path(Request.Http.Path)`.
 
 Supported literals:
 
@@ -235,7 +253,7 @@ Forbidden constructs:
 
 - `if`, `else`, `for`, `while`, `switch`, `try`, `catch`, `throw`.
 - `let`, `const`, assignment, mutation, classes, or `new`.
-- Functions, closures, callbacks, arrow functions, user-defined predicates, and imports.
+- Closures, callbacks, arrow functions, imperative function bodies, and imports. Declarative bounded user-defined functions are configured with `[[waf.functions]]` or `[[routes.waf.functions]]`.
 - `await`, promises, external I/O, file access, environment access, network access, clock access, random access, or process execution.
 - Unbounded loops, comprehensions, and map construction in v1.
 
@@ -447,7 +465,7 @@ value = "Response.Http.Status"
 
 The emitted newline-delimited JSON object always includes `event = "oxibelt.access"`, `timestamp_unix_ms`, and `scope = "waf"` unless a field named `scope` is explicitly configured. If `database.access_log.enabled = true`, OxiBelt also writes the same record to the configured PostgreSQL table.
 
-Field `value` may also be written as `expression`. Field expressions may read response-phase `Request`, `Response`, and `Context` values. They may evaluate to scalar JSON values (`Bool`, `Int`, `String`, or `Null`) or bounded JSON collections/objects exposed by the OxiRule object model, such as `Request.Headers`, `Request.QueryParams`, `Request.Cookies`, `Request.Tags`, `Context.RuleTags`, or `Request.Headers.getAll(...)`. Field names must match `[A-Za-z0-9_.-]{1,64}` and may not be `event` or `timestamp_unix_ms`. Fields that read request body bytes are rejected.
+Field `value` may also be written as `expression`. Field expressions may read response-phase `Request`, `Response`, and `Context` values and may call the same scoped user-defined functions available to the matching WAF rule. They may evaluate to scalar JSON values (`Bool`, `Int`, `String`, or `Null`) or bounded JSON collections/objects exposed by the OxiRule object model, such as `Request.Headers`, `Request.QueryParams`, `Request.Cookies`, `Request.Tags`, `Context.RuleTags`, or `Request.Headers.getAll(...)`. Field names must match `[A-Za-z0-9_.-]{1,64}` and may not be `event` or `timestamp_unix_ms`. Fields that read request body bytes are rejected. Request-wide system access-log fields under `[logging.access_log]` use the OxiRule expression language but do not receive WAF user-defined functions in v1.
 
 If `fields` is omitted, OxiBelt emits the default access-log field set. In that default set, `user_agent` is a bounded collection from `Request.Headers.getAll('User-Agent')`, so duplicate `User-Agent` headers are preserved instead of failing the whole log record.
 
@@ -777,8 +795,9 @@ OxiRule validation rejects:
 - Duplicate rule names in the same scope.
 - Duplicate non-empty public rule IDs.
 - Invalid rule IDs, rule tags, transaction tag keys, or Person proof `success_tag` values.
-- Unsupported phases, negative priorities, unsupported operators, unknown properties, or unknown functions.
-- Forbidden imperative constructs, callbacks, user-defined functions, imports, or external I/O.
+- Invalid function names or parameters, duplicate function names in one scope, duplicate parameters, unknown function calls, arity mismatches, or recursive function call graphs.
+- Unsupported phases, negative priorities, unsupported operators, unknown properties, or unknown built-in functions.
+- Forbidden imperative constructs, callbacks, imports, or external I/O.
 - Request-phase access to `Response`.
 - Stream-phase access to `Response` or `Request.Body`.
 - Response mutation actions in request-phase rules.

@@ -131,13 +131,15 @@ OxiRule is a CEL-like, declarative WAF model. It separates:
 
 Rules can be attached globally under `[[waf.rules]]` or under `[[routes.waf.rules]]`. They may be inline TOML rules or external `.oxirule.toml` files loaded from the OxiRule directory.
 
+Bounded user-defined functions can be attached globally under `[[waf.functions]]` or per route under `[[routes.waf.functions]]`. They are expression-valued, acyclic, evaluated under the caller's budgets, phase-validated where they are called, and available to WAF rule expressions plus WAF `emit_access_log` field expressions. Request-wide system access-log fields do not receive WAF functions in v1.
+
 Request-phase rules can reject, rate-limit, mutate request headers, set transaction tags, require Person proof, or choose an upstream/pool before forwarding. Response-phase rules can continue, replace, or reject responses, mutate response headers, and emit structured access logs.
 
 The optional CRS compatibility layer loads ModSecurity-style CRS setup/rule files from the OxiRule directory. It supports request/response phases 1 through 4, bounded request/response body prefix inspection with replay, normalized CRS transforms, `tx` variables, chained rules, macro expansion, `setvar`, paranoia-level tags, and anomaly scoring. CRS defaults to `monitor`; `enforcing` mode blocks at configured inbound/outbound anomaly thresholds. Unsupported CRS syntax fails closed during configuration load/compile.
 
 The rule engine is intentionally bounded:
 
-- No loops, callbacks, user-defined functions, imports, external I/O, or general-purpose scripting.
+- No loops, callbacks, imports, external I/O, or general-purpose scripting. User-defined functions are declarative bounded expressions, not imperative scripts.
 - Runtime, step, memory, regex, body-inspection, helper, and mutation budgets.
 - Bounded helper APIs for raw and normalized headers, query parameters, cookies, tags, body byte/text inspection, response body prefix inspection, body pattern scanning, and pattern sets.
 
@@ -218,4 +220,4 @@ The current implementation intentionally leaves these as future work:
 - WAF frame-level or datagram-level WebTransport inspection.
 - Downstream ECH configuration.
 - Advanced UDP/L4 proxying such as UDP stream proxying and TLS passthrough SNI routing.
-- General-purpose scripting, user-defined OxiRule functions, imports, loops, callbacks, and unbounded comprehensions.
+- General-purpose scripting, imports, loops, callbacks, and unbounded comprehensions.
