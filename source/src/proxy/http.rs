@@ -19,6 +19,7 @@ use crate::dynamic_policy::{DynamicPolicyContext, DynamicPolicyRequest};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::pools::PoolSelection;
+use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
 use crate::waf::{
   WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
@@ -606,6 +607,28 @@ where
   }
 
   if is_upgrade_request(&request) {
+    let stream_waf = StreamWafRequestContext::from_seed(
+      state.as_ref(),
+      StreamWafRequestSeed {
+        request_id: access_log.request_id.clone(),
+        transaction_id: access_log.transaction_id.clone(),
+        received_at_unix_ms: access_log.request_received_at_unix_ms,
+        method: request_method.clone(),
+        uri: request_uri.clone(),
+        version: request_version,
+        headers: request_headers.clone(),
+        peer_addr: client_addr,
+        downstream_host: host.clone(),
+        downstream_scheme,
+        route_name: resolved.route.name.clone(),
+        tcp_max_hop,
+        tls: tls.clone(),
+        protocol,
+        transport_network,
+        tags: tags.clone(),
+        dynamic_policy: access_log.dynamic_policy.clone(),
+      },
+    );
     if let Some(response) = handle_upgrade_request(
       request,
       &state,
@@ -614,6 +637,7 @@ where
       &host,
       downstream_scheme,
       &request_waf,
+      stream_waf,
       connection_limit_context.as_ref(),
       request_connection_permit,
       drain,
@@ -2079,6 +2103,7 @@ async fn handle_upgrade_request(
   downstream_host: &str,
   downstream_scheme: &str,
   request_waf: &crate::waf::RequestWafDecision,
+  stream_waf: Option<StreamWafRequestContext>,
   connection_limit_context: Option<&ConnectionLimitContext>,
   request_connection_permit: &mut Option<ConnectionPermit>,
   drain: ConnectionDrain,
@@ -2239,6 +2264,8 @@ async fn handle_upgrade_request(
   let upstream_upgrade = hyper::upgrade::on(&mut upstream_response);
   let pool_report = state.pools.clone();
   let upstream_name = upstream.name.clone();
+  let stream_waf_state = state.clone();
+  let websocket_stream_waf = if websocket_upgrade { stream_waf } else { None };
   let connection_limit_hold =
     TunnelConnectionLimitHold::capture(request_connection_permit, connection_limit_context);
   tokio::spawn(async move {
@@ -2246,13 +2273,25 @@ async fn handle_upgrade_request(
     let result = async {
       let downstream = downstream_upgrade.await?;
       let upstream = upstream_upgrade.await?;
-      copy_bidirectional_with_idle(
-        TokioIo::new(downstream),
-        TokioIo::new(upstream),
-        timeouts.websocket_idle,
-        drain,
-      )
-      .await?;
+      if let Some(stream_waf) = websocket_stream_waf {
+        crate::proxy::stream_waf::bridge_websocket(
+          TokioIo::new(downstream),
+          TokioIo::new(upstream),
+          stream_waf_state,
+          stream_waf,
+          timeouts.websocket_idle,
+          drain,
+        )
+        .await?;
+      } else {
+        copy_bidirectional_with_idle(
+          TokioIo::new(downstream),
+          TokioIo::new(upstream),
+          timeouts.websocket_idle,
+          drain,
+        )
+        .await?;
+      }
       Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     }
     .await;
@@ -2930,6 +2969,7 @@ pub(crate) struct PreparedWebTransport {
   pub(crate) upstream: UpstreamConfig,
   pub(crate) timeouts: EffectiveTimeouts,
   pub(crate) connection_limit_permit: Option<ConnectionPermit>,
+  pub(crate) stream_waf: Option<StreamWafRequestContext>,
   _pool_selection: Option<PoolSelection>,
 }
 
@@ -2952,6 +2992,9 @@ pub(crate) fn prepare_webtransport(
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
   let request_headers = request.headers().clone();
+  let request_id = crate::waf::new_access_log_id();
+  let transaction_id = crate::waf::new_access_log_id();
+  let received_at_unix_ms = crate::waf::current_unix_ms();
   let mut tags = std::collections::HashMap::new();
   let client_addr = match crate::identity::resolve_client_addr(
     &request_headers,
@@ -3025,9 +3068,9 @@ pub(crate) fn prepare_webtransport(
   let dynamic_policy_context = dynamic_policy.context;
 
   let request_waf = state.waf.evaluate_request(WafRequestInput {
-    request_id: "",
-    transaction_id: "",
-    received_at_unix_ms: crate::waf::current_unix_ms(),
+    request_id: &request_id,
+    transaction_id: &transaction_id,
+    received_at_unix_ms,
     method: &request_method,
     uri: &request_uri,
     version: http::Version::HTTP_3,
@@ -3048,6 +3091,29 @@ pub(crate) fn prepare_webtransport(
   for (key, value) in request_waf.tags {
     tags.insert(key, value);
   }
+
+  let stream_waf = StreamWafRequestContext::from_seed(
+    state,
+    StreamWafRequestSeed {
+      request_id,
+      transaction_id,
+      received_at_unix_ms,
+      method: request_method.clone(),
+      uri: request_uri.clone(),
+      version: http::Version::HTTP_3,
+      headers: request_headers.clone(),
+      peer_addr,
+      downstream_host: host.clone(),
+      downstream_scheme: "https",
+      route_name: resolved.route.name.clone(),
+      tcp_max_hop: None,
+      tls: Arc::new(tls.clone()),
+      protocol: WafProtocol::Webtransport,
+      transport_network: WafTransportNetwork::Udp,
+      tags: tags.clone(),
+      dynamic_policy: dynamic_policy_context.clone(),
+    },
+  );
 
   if let Some(terminal) = request_waf.terminal {
     return Err(Box::new(waf_terminal_response(
@@ -3173,6 +3239,7 @@ pub(crate) fn prepare_webtransport(
     upstream: upstream.clone(),
     timeouts,
     connection_limit_permit,
+    stream_waf,
     _pool_selection: pool_selection,
   })
 }

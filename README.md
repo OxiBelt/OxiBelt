@@ -14,7 +14,7 @@ The current implementation is a production-oriented foundation: configuration is
 - WebSocket tunneling, opt-in generic HTTP/1.1 Upgrade and CONNECT tunneling, gRPC-Web translation, and WebTransport forwarding over HTTP/3.
 - Forwarded-header normalization, trusted real-IP handling, PROXY protocol intake, TCP upstream/stream-target PROXY protocol egress, rate limits, connection limits, request limits, and bounded response cache support.
 - Opt-in TCP stream listeners for raw TCP forwarding to fixed targets.
-- OxiRule request and response WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, structured access logs, bounded body scanning, and optional CRS-compatible anomaly scoring.
+- OxiRule request, response, and stream WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, structured access logs, bounded HTTP body scanning, WebSocket/WebTransport payload inspection, and optional CRS-compatible anomaly scoring.
 - Request-wide structured system access logs with stdout and PostgreSQL sinks.
 - Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload, with graceful listener drain for in-flight requests and long-lived tunnels.
 

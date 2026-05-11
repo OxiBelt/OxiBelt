@@ -10,7 +10,9 @@ use oxibelt::config::Config;
 use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
     HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput, WafResponseInput,
-    WafTlsMetadata, WafTransportNetwork, compile_access_log_fields, crs_compatibility_matrix,
+    WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata,
+    WafTransportNetwork, WafWebSocketStreamMetadata, WafWebTransportStreamKind,
+    WafWebTransportStreamMetadata, compile_access_log_fields, crs_compatibility_matrix,
 };
 use ring::digest;
 
@@ -1034,6 +1036,273 @@ body = "response body"
             .find(|hit| hit.name == name)
             .unwrap_or_else(|| panic!("missing hit snapshot for {name}"));
         assert_eq!(hit.hits, 1, "expected {name} to match once");
+    }
+}
+
+#[test]
+fn stream_phase_close_stream_enforces_in_priority_order() {
+    let temp_dir = common::TempDir::new("waf-stream-priority");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-stream-priority");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "later-stream-close"
+phase = "stream"
+priority = 20
+when = "Stream.Payload.contains('block-me')"
+
+[[waf.rules.actions]]
+type = "close_stream"
+websocket_code = 4002
+reason = "later"
+
+[[waf.rules]]
+name = "first-stream-close"
+phase = "stream"
+priority = 10
+when = "Stream.Payload.contains('block-me')"
+
+[[waf.rules.actions]]
+type = "close_stream"
+websocket_code = 4001
+reason = "first"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert!(engine.requires_stream_inspection("app-root"));
+
+    let method = Method::GET;
+    let uri: Uri = "/ws".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let decision = engine.evaluate_stream(websocket_stream_input(
+        request_input(
+            &method,
+            &uri,
+            &headers,
+            &tags,
+            "203.0.113.10:49152".parse().unwrap(),
+        ),
+        WafStreamDirection::DownstreamToUpstream,
+        WafStreamUnit::WebsocketMessage,
+        b"please block-me",
+        false,
+        WafWebSocketStreamMetadata {
+            opcode: "message",
+            fin: true,
+            is_control: false,
+            message_opcode: Some("text"),
+            frame_payload_size: 15,
+        },
+    ));
+
+    let close = decision.close.expect("stream should be closed");
+    assert_eq!(close.websocket_code, 4001);
+    assert_eq!(close.webtransport_code, 1);
+    assert_eq!(close.reason, "first");
+    let first_hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.name == "first-stream-close")
+        .expect("first stream rule snapshot should exist");
+    assert_eq!(first_hit.hits, 1);
+    let later_hit = engine
+        .rule_hit_snapshots()
+        .into_iter()
+        .find(|hit| hit.name == "later-stream-close")
+        .expect("later stream rule snapshot should exist");
+    assert_eq!(later_hit.hits, 0);
+}
+
+#[test]
+fn stream_phase_websocket_payload_metadata_and_monitor_mode_match() {
+    let temp_dir = common::TempDir::new("waf-stream-websocket-metadata");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-stream-websocket-metadata");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.pattern_sets]]
+name = "stream-secrets"
+kind = "contains"
+patterns = ["needle"]
+
+[[waf.rules]]
+name = "websocket-stream-metadata"
+mode = "monitor"
+phase = "stream"
+priority = 10
+when = "Stream.Protocol == 'websocket' && Stream.Direction == 'downstream_to_upstream' && Stream.Unit == 'websocket_frame' && Stream.Payload.contains('needle') && Stream.Payload.matches('n.edle') && Stream.Payload.containsAny('stream-secrets') && Stream.Payload.Bytes.size() == 11 && Stream.Payload.Text.contains('needle') && Stream.Payload.IsTruncated && Stream.WebSocket.Opcode == 'text' && Stream.WebSocket.Fin && !Stream.WebSocket.IsControl && Stream.WebSocket.MessageOpcode == 'text' && Stream.WebSocket.FramePayloadSize == 99"
+
+[[waf.rules.actions]]
+type = "close_stream"
+websocket_code = 4000
+reason = "monitor"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::GET;
+    let uri: Uri = "/ws".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let decision = engine.evaluate_stream(websocket_stream_input(
+        request_input(
+            &method,
+            &uri,
+            &headers,
+            &tags,
+            "203.0.113.10:49152".parse().unwrap(),
+        ),
+        WafStreamDirection::DownstreamToUpstream,
+        WafStreamUnit::WebsocketFrame,
+        b"needle-text",
+        true,
+        WafWebSocketStreamMetadata {
+            opcode: "text",
+            fin: true,
+            is_control: false,
+            message_opcode: Some("text"),
+            frame_payload_size: 99,
+        },
+    ));
+
+    assert!(decision.close.is_none());
+    let hit = only_rule_hit(&engine);
+    assert_eq!(hit.name, "websocket-stream-metadata");
+    assert_eq!(hit.effective_mode, "monitor");
+}
+
+#[test]
+fn stream_phase_webtransport_payload_and_metadata_match() {
+    let temp_dir = common::TempDir::new("waf-stream-webtransport-metadata");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-stream-webtransport-metadata");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "monitor"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "webtransport-datagram"
+phase = "stream"
+priority = 10
+when = "Stream.Protocol == 'webtransport' && Stream.Direction == 'upstream_to_downstream' && Stream.Unit == 'webtransport_datagram' && Stream.Payload.contains('token') && Stream.WebTransport.DatagramSize == 42 && Stream.WebTransport.StreamKind == null && Stream.WebTransport.StreamId == null"
+
+[[waf.rules.actions]]
+type = "close_stream"
+webtransport_code = 44
+reason = "datagram"
+
+[[waf.rules]]
+name = "webtransport-stream-chunk"
+phase = "stream"
+priority = 20
+when = "Stream.Protocol == 'webtransport' && Stream.Direction == 'downstream_to_upstream' && Stream.Unit == 'webtransport_stream_chunk' && Stream.Payload.Text.contains('chunk') && Stream.WebTransport.StreamKind == 'bidi'"
+
+[[waf.rules.actions]]
+type = "close_stream"
+webtransport_code = 45
+reason = "chunk"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::CONNECT;
+    let uri: Uri = "/wt".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let tls = WafTlsMetadata::default();
+    let request = request_input_with_protocol_and_network(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+        &tls,
+        WafProtocol::Webtransport,
+        WafTransportNetwork::Udp,
+    );
+
+    let datagram = engine.evaluate_stream(WafStreamInput {
+        request,
+        protocol: WafStreamProtocol::Webtransport,
+        direction: WafStreamDirection::UpstreamToDownstream,
+        unit: WafStreamUnit::WebtransportDatagram,
+        payload: WafBodyInput {
+            bytes: b"token",
+            is_truncated: false,
+        },
+        websocket: None,
+        webtransport: Some(WafWebTransportStreamMetadata {
+            stream_kind: None,
+            stream_id: None,
+            datagram_size: Some(42),
+        }),
+    });
+    assert!(datagram.close.is_none());
+
+    let request = request_input_with_protocol_and_network(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+        &tls,
+        WafProtocol::Webtransport,
+        WafTransportNetwork::Udp,
+    );
+    let chunk = engine.evaluate_stream(WafStreamInput {
+        request,
+        protocol: WafStreamProtocol::Webtransport,
+        direction: WafStreamDirection::DownstreamToUpstream,
+        unit: WafStreamUnit::WebtransportStreamChunk,
+        payload: WafBodyInput {
+            bytes: b"chunk payload",
+            is_truncated: false,
+        },
+        websocket: None,
+        webtransport: Some(WafWebTransportStreamMetadata {
+            stream_kind: Some(WafWebTransportStreamKind::Bidi),
+            stream_id: None,
+            datagram_size: None,
+        }),
+    });
+    assert!(chunk.close.is_none());
+
+    for name in ["webtransport-datagram", "webtransport-stream-chunk"] {
+        let hit = engine
+            .rule_hit_snapshots()
+            .into_iter()
+            .find(|hit| hit.name == name)
+            .unwrap_or_else(|| panic!("missing hit snapshot for {name}"));
+        assert_eq!(hit.hits, 1, "expected {name} to match once");
+        assert_eq!(hit.effective_mode, "monitor");
     }
 }
 
@@ -3684,6 +3953,110 @@ status = 403
 }
 
 #[test]
+fn validation_rejects_request_body_and_response_access_in_stream_phase() {
+    for (name, expression, expected) in [
+        (
+            "stream-response-access",
+            "Response.Http.Status >= 500",
+            "Response is unavailable",
+        ),
+        (
+            "stream-request-body-access",
+            "Request.Body.contains('secret')",
+            "Request.Body is unavailable",
+        ),
+    ] {
+        let temp_dir = common::TempDir::new(name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let base_config = common::minimal_config_toml(&cert_path, &key_path);
+        let raw = format!(
+            r#"{base_config}
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "{name}"
+phase = "stream"
+priority = 1
+when = "{expression}"
+
+[[waf.rules.actions]]
+type = "close_stream"
+"#
+        );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains(expected),
+            "unexpected error for {name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn validation_rejects_stream_actions_in_wrong_phases() {
+    for (name, phase, action, expected) in [
+        (
+            "request-close-stream",
+            "request",
+            r#"type = "close_stream""#,
+            "action close_stream is not valid in Request phase",
+        ),
+        (
+            "stream-reject",
+            "stream",
+            r#"type = "reject"
+status = 403"#,
+            "action reject is not valid in Stream phase",
+        ),
+        (
+            "stream-reject-response",
+            "stream",
+            r#"type = "reject_response"
+status = 403"#,
+            "response terminal action is not valid in Stream phase",
+        ),
+    ] {
+        let temp_dir = common::TempDir::new(name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let when = if phase == "response" {
+            "Response.Http.Status == 200"
+        } else if phase == "stream" {
+            "Stream.Payload.contains('x')"
+        } else {
+            "true"
+        };
+        let base_config = common::minimal_config_toml(&cert_path, &key_path);
+        let raw = format!(
+            r#"{base_config}
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "{name}"
+phase = "{phase}"
+priority = 1
+when = "{when}"
+
+[[waf.rules.actions]]
+{action}
+"#
+        );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error for {name}: {error}"
+        );
+    }
+}
+
+#[test]
 fn validation_rejects_access_log_action_in_request_phase() {
     let temp_dir = common::TempDir::new("waf-access-log-phase");
     let (cert_path, key_path) =
@@ -4093,6 +4466,28 @@ fn request_input_with_protocol_and_network<'a>(
         transport_network,
         tags,
         dynamic_policy: test_dynamic_policy(),
+    }
+}
+
+fn websocket_stream_input<'a>(
+    request: WafRequestInput<'a>,
+    direction: WafStreamDirection,
+    unit: WafStreamUnit,
+    payload: &'a [u8],
+    is_truncated: bool,
+    websocket: WafWebSocketStreamMetadata<'a>,
+) -> WafStreamInput<'a> {
+    WafStreamInput {
+        request,
+        protocol: WafStreamProtocol::Websocket,
+        direction,
+        unit,
+        payload: WafBodyInput {
+            bytes: payload,
+            is_truncated,
+        },
+        websocket: Some(websocket),
+        webtransport: None,
     }
 }
 

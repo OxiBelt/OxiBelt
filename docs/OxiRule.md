@@ -139,7 +139,7 @@ Rule selectors match by `rule_ids`, `tags`, or `msg_contains`; at least one sele
 
 Recommended rollout is monitor first, review `/admin/v1/waf/rule-hits`, add scoped allowlists or per-rule overrides for confirmed false positives, then switch CRS mode to `enforcing`. This mirrors the CRS tuning model while keeping OxiBelt's supported tuning surface in TOML rather than implementing the full ModSecurity exclusion language. See the official CRS [v4.25.0 LTS announcement](https://coreruleset.org/20260321/announcing-crs-v4-25-lts/), [false positives and tuning](https://coreruleset.org/docs/2-how-crs-works/2-3-false-positives-and-tuning/), and [installation](https://coreruleset.org/docs/1-getting-started/1-1-crs-installation/) references.
 
-Response body inspection is bounded by `waf.limits.max_body_inspection_bytes`, records whether the inspected prefix was truncated, and should be enabled only where the deployment needs response leak detection. WebTransport frame and datagram payload inspection is not supported by CRS compatibility mode.
+Response body and native stream payload inspection are bounded by `waf.limits.max_body_inspection_bytes`, record whether the inspected prefix was truncated, and should be enabled only where the deployment needs response leak detection or upgraded-session payload policy. CRS compatibility mode does not inspect WebSocket frames/messages or WebTransport stream/datagram payloads.
 
 ## Execution Phases
 
@@ -147,11 +147,13 @@ Request rules run after OxiBelt parses the request and matches a route, but befo
 
 Response rules run after OxiBelt receives an upstream response or creates a synthetic upstream-error response, but before returning data to the downstream client. They can continue, replace, or reject the response, mutate response headers, and emit access logs.
 
-Rules that read request or response body content trigger bounded prefix inspection before forwarding that side of the transaction. OxiBelt scans up to `waf.limits.max_body_inspection_bytes`, replays the captured prefix, and forwards data beyond the inspection window unchanged with `Body.IsTruncated = true`.
+Stream rules run after a WebSocket upgrade or WebTransport CONNECT session is established. They inspect both directions, including WebSocket raw frames, reassembled WebSocket messages, WebTransport stream chunks, and WebTransport datagrams. They can close the active stream/session with `close_stream`; request/response mutation and routing actions are not valid in stream phase. Generic HTTP Upgrade and CONNECT tunnels remain byte tunnels in v1.
+
+Rules that read request, response, or stream payload content trigger bounded prefix inspection before forwarding that side of the transaction. OxiBelt scans up to `waf.limits.max_body_inspection_bytes`, replays the captured prefix, and forwards data beyond the inspection window unchanged with `Body.IsTruncated = true` or `Stream.Payload.IsTruncated = true`.
 
 Rules run by ascending `priority`, with rule name as a tie-breaker. Tags created by request rules are visible to later request rules and to response rules for the same transaction.
 
-`Response` is not available in request-phase expressions. Reading `Response.Http`, `Response.Headers`, `Response.Body`, or `Response.Upstream` from a request rule is a validation error.
+`Response` is not available in request-phase or stream-phase expressions. `Request.Body` is also unavailable in stream-phase expressions; use `Stream.Payload` for upgraded-session payload inspection.
 
 When upstream forwarding fails, response rules receive a synthetic response with a status such as `502`, `503`, or `504` and `Response.Upstream.Error` populated:
 
@@ -309,6 +311,18 @@ type = "reject_response"
 status = 403
 body = "Blocked response"
 ```
+
+Stream-phase terminal actions:
+
+```toml
+[[waf.rules.actions]]
+type = "close_stream"
+websocket_code = 1008
+webtransport_code = 1
+reason = "policy violation"
+```
+
+`close_stream` is valid only in stream-phase rules. If fields are omitted, WebSocket uses close code `1008`, WebTransport uses close/reset code `1`, and the reason is `policy violation`. WebSocket close reasons are limited to the protocol payload limit for a close frame.
 
 Request routing actions:
 
@@ -494,6 +508,15 @@ Response.Tls: TlsMetadata | Null
 Response.Tags: TagMap
 ```
 
+```text
+Stream.Protocol: 'websocket' | 'webtransport'
+Stream.Direction: 'downstream_to_upstream' | 'upstream_to_downstream'
+Stream.Unit: 'websocket_frame' | 'websocket_message' | 'webtransport_stream_chunk' | 'webtransport_datagram'
+Stream.Payload: BodyView
+Stream.WebSocket: WebSocketStreamMetadata
+Stream.WebTransport: WebTransportStreamMetadata
+```
+
 Important nested fields:
 
 ```text
@@ -598,6 +621,16 @@ UpstreamMetadata.Error: UpstreamError | Null
 
 UpstreamError.Code: 'dns_error' | 'connect_timeout' | 'connect_error' | 'tls_error' | 'read_timeout' | 'protocol_error'
 UpstreamError.Message: String
+
+WebSocketStreamMetadata.Opcode: 'continuation' | 'text' | 'binary' | 'close' | 'ping' | 'pong' | 'message'
+WebSocketStreamMetadata.Fin: Bool
+WebSocketStreamMetadata.IsControl: Bool
+WebSocketStreamMetadata.MessageOpcode: 'text' | 'binary' | Null
+WebSocketStreamMetadata.FramePayloadSize: Int
+
+WebTransportStreamMetadata.StreamKind: 'bidi' | 'uni' | Null
+WebTransportStreamMetadata.StreamId: Int | Null
+WebTransportStreamMetadata.DatagramSize: Int | Null
 ```
 
 ```text
@@ -706,7 +739,7 @@ Request.Body.matchesAny(PatternSetName): Bool
 Request.Body.scan(PatternSetName): BodyScanResult
 ```
 
-The same shape is supported for `Response.Body` in response-phase rules. Body content helpers are bounded by `waf.limits.max_body_inspection_bytes`; bytes beyond that prefix are replayed but not inspected.
+The same shape is supported for `Response.Body` in response-phase rules and `Stream.Payload` in stream-phase rules. Body content helpers are bounded by `waf.limits.max_body_inspection_bytes`; bytes beyond that prefix are replayed or forwarded but not inspected.
 
 `Body.scan(PatternSetName)` returns:
 
@@ -732,9 +765,9 @@ Supported binary format checks include common image, audio, video, document, arc
 ## Protocol Notes
 
 - HTTP rules may inspect and mutate headers, URI metadata, methods, status, and bounded body metadata.
-- WebSocket rules apply to the HTTP upgrade request; frame-level inspection is not implemented.
+- WebSocket request rules apply to the HTTP upgrade request. Stream-phase rules inspect raw frames before forwarding and reassemble text/binary messages up to `waf.limits.max_body_inspection_bytes` before releasing queued fragments.
 - WebRTC signaling HTTP requests can be inspected when they pass through OxiBelt; TURN media payloads are forwarded by WebRTC TURN listeners outside OxiRule/WAF inspection.
-- WebTransport over HTTP/3 exposes the CONNECT request as `Request.Protocol == 'webtransport'` with UDP/QUIC transport metadata. Frame-level and datagram payload inspection is not implemented.
+- WebTransport over HTTP/3 exposes the CONNECT request as `Request.Protocol == 'webtransport'` with UDP/QUIC transport metadata. Stream-phase rules inspect WebTransport stream chunks and datagrams before forwarding. Stream IDs are exposed as `null` where the underlying crate API does not provide them.
 
 ## Validation Summary
 
@@ -747,8 +780,11 @@ OxiRule validation rejects:
 - Unsupported phases, negative priorities, unsupported operators, unknown properties, or unknown functions.
 - Forbidden imperative constructs, callbacks, user-defined functions, imports, or external I/O.
 - Request-phase access to `Response`.
+- Stream-phase access to `Response` or `Request.Body`.
 - Response mutation actions in request-phase rules.
 - Request routing actions in response-phase rules.
+- Request, response, routing, rate-limit, tag, Person proof, and access-log actions in stream-phase rules.
+- `close_stream` outside stream phase.
 - `emit_access_log` outside response phase.
 - Header mutations or other mutations that exceed `max_mutations`.
 - Pattern sets that exceed configured count, length, regex, or budget limits.

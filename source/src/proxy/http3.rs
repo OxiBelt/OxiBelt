@@ -8,17 +8,16 @@ use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use h3::ext::Protocol;
-use h3_webtransport::server::{AcceptedBi, WebTransportSession};
+use h3_webtransport::server::WebTransportSession;
 use http_body_util::BodyExt;
 use hyper::body::Frame;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::{Mutex, oneshot};
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::config::{Config, ConnectionLimitIdentityMode, HttpVersion, UpstreamConfig};
 use crate::lifecycle::ConnectionDrain;
-use crate::limits::{ConnectionLimitContext, ConnectionPermit};
+use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{ProxyBody, boxed_error, channel_body};
@@ -33,6 +32,8 @@ type H3WebTransportSession = WebTransportSession<crate::quic::h3::Connection, By
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
 const H3_BODY_CHANNEL_CAPACITY: usize = 16;
+
+mod webtransport_bridge;
 
 #[derive(Clone, Default)]
 pub(crate) struct UpstreamH3Pools {
@@ -368,7 +369,7 @@ pub(crate) async fn handle_downstream_connection(
       let downstream_session = WebTransportSession::accept(request, stream, h3_connection)
         .await
         .context("failed to accept downstream WebTransport session")?;
-      bridge_webtransport(
+      webtransport_bridge::bridge_webtransport(
         downstream_session,
         upstream_session,
         peer_addr,
@@ -378,6 +379,7 @@ pub(crate) async fn handle_downstream_connection(
         prepared.timeouts,
         drain.clone(),
         prepared.connection_limit_permit.take(),
+        prepared.stream_waf.clone(),
       )
       .await?;
       return Ok(());
@@ -728,262 +730,6 @@ async fn connect_upstream_webtransport(
   .await
   .context("upstream WebTransport CONNECT timed out")?
   .context("upstream WebTransport CONNECT failed")
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn bridge_webtransport(
-  downstream: H3WebTransportSession,
-  upstream: web_transport_quinn::Session,
-  peer_addr: SocketAddr,
-  tls_metadata: Arc<crate::waf::WafTlsMetadata>,
-  connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
-  timeouts: EffectiveTimeouts,
-  mut drain: ConnectionDrain,
-  _connection_limit_permit: Option<ConnectionPermit>,
-) -> anyhow::Result<()> {
-  let downstream = Arc::new(downstream);
-  let upstream = Arc::new(upstream);
-  let (activity_tx, mut activity_rx) = mpsc::channel(64);
-  let mut tasks = JoinSet::new();
-  tasks.spawn(bridge_downstream_bidi(
-    downstream.clone(),
-    upstream.clone(),
-    peer_addr,
-    tls_metadata,
-    connection_limit_context,
-    state,
-    activity_tx.clone(),
-    drain.clone(),
-  ));
-  tasks.spawn(bridge_upstream_bidi(
-    downstream.clone(),
-    upstream.clone(),
-    activity_tx.clone(),
-  ));
-  tasks.spawn(bridge_downstream_uni(
-    downstream.clone(),
-    upstream.clone(),
-    activity_tx.clone(),
-  ));
-  tasks.spawn(bridge_upstream_uni(
-    downstream.clone(),
-    upstream.clone(),
-    activity_tx.clone(),
-  ));
-  tasks.spawn(bridge_downstream_datagrams(
-    downstream.clone(),
-    upstream.clone(),
-    activity_tx.clone(),
-  ));
-  tasks.spawn(bridge_upstream_datagrams(
-    downstream,
-    upstream,
-    activity_tx.clone(),
-  ));
-  drop(activity_tx);
-
-  let idle = tokio::time::sleep(timeouts.webtransport_idle);
-  tokio::pin!(idle);
-  let drain_close = drain.close_delay_elapsed();
-  tokio::pin!(drain_close);
-
-  loop {
-    tokio::select! {
-      result = tasks.join_next() => {
-        tasks.abort_all();
-        return match result {
-          Some(result) => result.context("WebTransport bridge task panicked")?,
-          None => Ok(()),
-        };
-      }
-      activity = activity_rx.recv() => {
-        if activity.is_none() {
-          return Ok(());
-        }
-        idle.as_mut().reset(tokio::time::Instant::now() + timeouts.webtransport_idle);
-      }
-      _ = &mut idle => {
-        tasks.abort_all();
-        return Err(anyhow::anyhow!("WebTransport bridge idle timeout elapsed"));
-      }
-      _ = &mut drain_close => {
-        tasks.abort_all();
-        return Ok(());
-      }
-    }
-  }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn bridge_downstream_bidi(
-  downstream: Arc<H3WebTransportSession>,
-  upstream: Arc<web_transport_quinn::Session>,
-  peer_addr: SocketAddr,
-  tls_metadata: Arc<crate::waf::WafTlsMetadata>,
-  connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
-  activity: mpsc::Sender<()>,
-  drain: ConnectionDrain,
-) -> anyhow::Result<()> {
-  loop {
-    match downstream.accept_bi().await? {
-      Some(AcceptedBi::BidiStream(_session_id, stream)) => {
-        let _ = activity.try_send(());
-        let (upstream_send, upstream_recv) = upstream.open_bi().await?;
-        tokio::spawn(copy_bidi_stream(
-          stream,
-          upstream_send,
-          upstream_recv,
-          activity.clone(),
-        ));
-      }
-      Some(AcceptedBi::Request(request, stream)) => {
-        if is_webtransport_request(&request) {
-          respond_to_h3_request(
-            stream,
-            text_response(
-              StatusCode::CONFLICT,
-              "additional WebTransport sessions on an active connection are not supported",
-            ),
-          )
-          .await?;
-        } else {
-          handle_h3_request(
-            request,
-            stream,
-            peer_addr,
-            tls_metadata.clone(),
-            connection_limit_context.clone(),
-            state.clone(),
-            drain.clone(),
-          )
-          .await?;
-        }
-      }
-      None => return Ok(()),
-    }
-  }
-}
-
-async fn bridge_upstream_bidi(
-  downstream: Arc<H3WebTransportSession>,
-  upstream: Arc<web_transport_quinn::Session>,
-  activity: mpsc::Sender<()>,
-) -> anyhow::Result<()> {
-  loop {
-    let (upstream_send, upstream_recv) = upstream.accept_bi().await?;
-    let _ = activity.try_send(());
-    let stream = downstream.open_bi(downstream.session_id()).await?;
-    tokio::spawn(copy_bidi_stream(
-      stream,
-      upstream_send,
-      upstream_recv,
-      activity.clone(),
-    ));
-  }
-}
-
-async fn bridge_downstream_uni(
-  downstream: Arc<H3WebTransportSession>,
-  upstream: Arc<web_transport_quinn::Session>,
-  activity: mpsc::Sender<()>,
-) -> anyhow::Result<()> {
-  loop {
-    let Some((_session_id, downstream_recv)) = downstream.accept_uni().await? else {
-      return Ok(());
-    };
-    let _ = activity.try_send(());
-    let upstream_send = upstream.open_uni().await?;
-    tokio::spawn(copy_one_way(
-      downstream_recv,
-      upstream_send,
-      activity.clone(),
-    ));
-  }
-}
-
-async fn bridge_upstream_uni(
-  downstream: Arc<H3WebTransportSession>,
-  upstream: Arc<web_transport_quinn::Session>,
-  activity: mpsc::Sender<()>,
-) -> anyhow::Result<()> {
-  loop {
-    let upstream_recv = upstream.accept_uni().await?;
-    let _ = activity.try_send(());
-    let downstream_send = downstream.open_uni(downstream.session_id()).await?;
-    tokio::spawn(copy_one_way(
-      upstream_recv,
-      downstream_send,
-      activity.clone(),
-    ));
-  }
-}
-
-async fn bridge_downstream_datagrams(
-  downstream: Arc<H3WebTransportSession>,
-  upstream: Arc<web_transport_quinn::Session>,
-  activity: mpsc::Sender<()>,
-) -> anyhow::Result<()> {
-  let mut reader = downstream.datagram_reader();
-  loop {
-    let datagram = reader.read_datagram().await?;
-    let _ = activity.try_send(());
-    let mut payload = datagram.into_payload();
-    let len = payload.remaining();
-    upstream.send_datagram(payload.copy_to_bytes(len))?;
-  }
-}
-
-async fn bridge_upstream_datagrams(
-  downstream: Arc<H3WebTransportSession>,
-  upstream: Arc<web_transport_quinn::Session>,
-  activity: mpsc::Sender<()>,
-) -> anyhow::Result<()> {
-  let mut sender = downstream.datagram_sender();
-  loop {
-    let datagram = upstream.read_datagram().await?;
-    let _ = activity.try_send(());
-    sender.send_datagram(datagram)?;
-  }
-}
-
-async fn copy_bidi_stream<D>(
-  downstream: D,
-  mut upstream_send: web_transport_quinn::SendStream,
-  mut upstream_recv: web_transport_quinn::RecvStream,
-  activity: mpsc::Sender<()>,
-) -> anyhow::Result<()>
-where
-  D: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-  let (mut downstream_recv, mut downstream_send) = tokio::io::split(downstream);
-  let downstream_to_upstream =
-    copy_one_way(&mut downstream_recv, &mut upstream_send, activity.clone());
-  let upstream_to_downstream = copy_one_way(&mut upstream_recv, &mut downstream_send, activity);
-  tokio::try_join!(downstream_to_upstream, upstream_to_downstream)?;
-  Ok(())
-}
-
-async fn copy_one_way<R, W>(
-  mut recv: R,
-  mut send: W,
-  activity: mpsc::Sender<()>,
-) -> anyhow::Result<()>
-where
-  R: AsyncRead + Unpin,
-  W: AsyncWrite + Unpin,
-{
-  let mut buffer = vec![0u8; 16 * 1024];
-  loop {
-    let read = recv.read(&mut buffer).await?;
-    if read == 0 {
-      send.shutdown().await?;
-      return Ok(());
-    }
-    send.write_all(&buffer[..read]).await?;
-    let _ = activity.try_send(());
-  }
 }
 
 async fn resolve_upstream_addr(origin: &url::Url) -> anyhow::Result<(String, SocketAddr)> {

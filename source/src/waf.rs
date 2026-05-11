@@ -25,11 +25,15 @@ use crate::shared_state::SharedState;
 
 mod body_scan;
 mod crs;
+mod defaults;
+mod expression;
 pub(crate) mod normalization;
 mod person_proof;
 
 pub use crs::{CrsCompatibilityMatrix, compatibility_matrix as crs_compatibility_matrix};
 use crs::{CrsDecision, CrsEngine, WafCrsConfig, validate_crs_config};
+use defaults::*;
+use expression::Parser;
 use normalization::{
   normalize_cookie_pairs, normalize_header_pairs, normalize_query_pairs, normalized_http_path,
   normalized_http_query, normalized_http_uri,
@@ -194,6 +198,7 @@ pub struct WafRuleConfig {
 pub enum WafPhase {
   Request,
   Response,
+  Stream,
 }
 
 impl WafPhase {
@@ -201,6 +206,7 @@ impl WafPhase {
     match self {
       Self::Request => "request",
       Self::Response => "response",
+      Self::Stream => "stream",
     }
   }
 }
@@ -299,6 +305,14 @@ pub enum WafActionConfig {
     success_tag: Option<String>,
     #[serde(default = "default_person_proof_status")]
     status: u16,
+  },
+  CloseStream {
+    #[serde(default = "default_websocket_close_code")]
+    websocket_code: u16,
+    #[serde(default = "default_webtransport_close_code")]
+    webtransport_code: u32,
+    #[serde(default = "default_stream_close_reason")]
+    reason: String,
   },
 }
 
@@ -772,6 +786,20 @@ fn validate_actions(
         validate_status(*status, &rule.name)?;
         validate_person_proof_settings(&rule.name, action)?;
       }
+      WafActionConfig::CloseStream {
+        websocket_code,
+        webtransport_code: _,
+        reason,
+      } => {
+        require_phase(rule, WafPhase::Stream, "close_stream")?;
+        validate_websocket_close_code(*websocket_code, &rule.name)?;
+        if reason.len() > 123 {
+          bail!(
+            "WAF rule {} close_stream reason exceeds 123 bytes",
+            rule.name
+          );
+        }
+      }
     }
   }
 
@@ -796,6 +824,13 @@ fn require_phase(rule: &WafRuleConfig, expected: WafPhase, action: &str) -> anyh
 fn validate_status(status: u16, rule_name: &str) -> anyhow::Result<()> {
   StatusCode::from_u16(status)
     .with_context(|| format!("WAF rule {rule_name} has invalid HTTP status {status}"))?;
+  Ok(())
+}
+
+fn validate_websocket_close_code(code: u16, rule_name: &str) -> anyhow::Result<()> {
+  if code < 1000 || matches!(code, 1004..=1006) || (1016..3000).contains(&code) || code >= 5000 {
+    bail!("WAF rule {rule_name} has invalid WebSocket close code {code}");
+  }
   Ok(())
 }
 
@@ -1092,6 +1127,10 @@ impl WafEngine {
           .any(|rule| rule.requires_response_body_inspection()))
   }
 
+  pub fn requires_stream_inspection(&self, route_name: &str) -> bool {
+    self.enabled && !self.rules_for(route_name, WafPhase::Stream).is_empty()
+  }
+
   pub fn evaluate_request(&self, input: WafRequestInput<'_>) -> RequestWafDecision {
     if !self.enabled {
       return RequestWafDecision::default();
@@ -1156,6 +1195,28 @@ impl WafEngine {
     }
   }
 
+  pub fn evaluate_stream(&self, input: WafStreamInput<'_>) -> WafStreamDecision {
+    if !self.enabled {
+      return WafStreamDecision::default();
+    }
+
+    match self.evaluate_stream_inner(input) {
+      Ok(decision) => decision,
+      Err(error) => match self.fail_policy {
+        WafFailPolicy::Open => {
+          warn!(error = %error, "WAF stream evaluation failed open");
+          WafStreamDecision::default()
+        }
+        WafFailPolicy::Closed => {
+          warn!(error = %error, "WAF stream evaluation failed closed");
+          WafStreamDecision {
+            close: Some(WafStreamClose::default()),
+          }
+        }
+      },
+    }
+  }
+
   pub fn build_system_access_log(
     &self,
     fields: &CompiledAccessLogFields,
@@ -1171,6 +1232,7 @@ impl WafEngine {
       rule_tags: &[],
       request: input.request,
       response: Some(input),
+      stream: None,
       person_proof: &person_proof,
       pattern_sets: &self.pattern_sets,
       limits: &self.limits,
@@ -1218,6 +1280,7 @@ impl WafEngine {
           rule_tags: &[],
           request,
           response: None,
+          stream: None,
           person_proof: &rule_person_proof,
           pattern_sets: &self.pattern_sets,
           limits: &self.limits,
@@ -1293,6 +1356,7 @@ impl WafEngine {
         rule_tags: &[],
         request: input.request,
         response: Some(input),
+        stream: None,
         person_proof: &person_proof,
         pattern_sets: &self.pattern_sets,
         limits: &self.limits,
@@ -1323,6 +1387,52 @@ impl WafEngine {
     apply_crs_response_decision(self.crs.evaluate_response(input)?, &mut decision);
     if decision.terminal.is_some() {
       return Ok(decision);
+    }
+
+    Ok(decision)
+  }
+
+  fn evaluate_stream_inner(&self, input: WafStreamInput<'_>) -> anyhow::Result<WafStreamDecision> {
+    let mut decision = WafStreamDecision::default();
+    let person_proof = self.person_proof.evaluate_request(input.request);
+    let mut tx = TransactionBudget::new(&self.limits);
+
+    for rule in self.rules_for(input.request.route_name, WafPhase::Stream) {
+      tx.check_total()?;
+      let ctx = EvalContext {
+        phase: WafPhase::Stream,
+        mode: rule.mode,
+        rule_name: "",
+        rule_id: None,
+        rule_tags: &[],
+        request: input.request,
+        response: None,
+        stream: Some(input),
+        person_proof: &person_proof,
+        pattern_sets: &self.pattern_sets,
+        limits: &self.limits,
+        duplicate_metadata_policy: self.duplicate_metadata_policy,
+      };
+      let matched = self.evaluate_rule(rule, &ctx, &mut tx)?;
+      if !matched {
+        continue;
+      }
+      rule.record_hit();
+      debug!(
+        rule = %rule.name,
+        rule_id = rule.id.as_deref().unwrap_or_default(),
+        internal_rule_id = %rule.internal_id,
+        mode = rule.mode.as_str(),
+        phase = "stream",
+        "WAF rule matched"
+      );
+      if rule.mode == WafMode::Monitor {
+        continue;
+      }
+      apply_stream_actions(rule, &mut decision, &mut tx)?;
+      if decision.close.is_some() {
+        return Ok(decision);
+      }
     }
 
     Ok(decision)
@@ -1824,6 +1934,97 @@ pub struct WafResponseInput<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct WafStreamInput<'a> {
+  pub request: WafRequestInput<'a>,
+  pub protocol: WafStreamProtocol,
+  pub direction: WafStreamDirection,
+  pub unit: WafStreamUnit,
+  pub payload: WafBodyInput<'a>,
+  pub websocket: Option<WafWebSocketStreamMetadata<'a>>,
+  pub webtransport: Option<WafWebTransportStreamMetadata>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum WafStreamProtocol {
+  Websocket,
+  Webtransport,
+}
+
+impl WafStreamProtocol {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Websocket => "websocket",
+      Self::Webtransport => "webtransport",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum WafStreamDirection {
+  DownstreamToUpstream,
+  UpstreamToDownstream,
+}
+
+impl WafStreamDirection {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::DownstreamToUpstream => "downstream_to_upstream",
+      Self::UpstreamToDownstream => "upstream_to_downstream",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum WafStreamUnit {
+  WebsocketFrame,
+  WebsocketMessage,
+  WebtransportStreamChunk,
+  WebtransportDatagram,
+}
+
+impl WafStreamUnit {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::WebsocketFrame => "websocket_frame",
+      Self::WebsocketMessage => "websocket_message",
+      Self::WebtransportStreamChunk => "webtransport_stream_chunk",
+      Self::WebtransportDatagram => "webtransport_datagram",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WafWebSocketStreamMetadata<'a> {
+  pub opcode: &'a str,
+  pub fin: bool,
+  pub is_control: bool,
+  pub message_opcode: Option<&'a str>,
+  pub frame_payload_size: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WafWebTransportStreamMetadata {
+  pub stream_kind: Option<WafWebTransportStreamKind>,
+  pub stream_id: Option<u64>,
+  pub datagram_size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum WafWebTransportStreamKind {
+  Bidi,
+  Uni,
+}
+
+impl WafWebTransportStreamKind {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Bidi => "bidi",
+      Self::Uni => "uni",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct WafUpstreamError<'a> {
   pub code: &'a str,
   pub message: &'a str,
@@ -1845,6 +2046,28 @@ pub struct ResponseWafDecision {
   pub terminal: Option<WafTerminalResponse>,
   pub response_header_mutations: Vec<HeaderMutation>,
   pub access_logs: Vec<AccessLogRecord>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WafStreamDecision {
+  pub close: Option<WafStreamClose>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct WafStreamClose {
+  pub websocket_code: u16,
+  pub webtransport_code: u32,
+  pub reason: String,
+}
+
+impl Default for WafStreamClose {
+  fn default() -> Self {
+    Self {
+      websocket_code: default_websocket_close_code(),
+      webtransport_code: default_webtransport_close_code(),
+      reason: default_stream_close_reason(),
+    }
+  }
 }
 
 fn record_request_tag(
@@ -2001,6 +2224,7 @@ fn apply_request_actions(
       | CompiledAction::Config(WafActionConfig::SetResponseHeader { .. })
       | CompiledAction::Config(WafActionConfig::RemoveResponseHeader { .. })
       | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
+      | CompiledAction::Config(WafActionConfig::CloseStream { .. })
       | CompiledAction::EmitAccessLog { .. } => {
         bail!("invalid request-phase WAF action in rule {}", rule.name);
       }
@@ -2067,10 +2291,56 @@ fn apply_response_actions(
       | CompiledAction::Config(WafActionConfig::SetTag { .. })
       | CompiledAction::Config(WafActionConfig::RateLimit { .. })
       | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
+      | CompiledAction::Config(WafActionConfig::CloseStream { .. })
       | CompiledAction::RequirePersonProof(_)
       | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. }) => {
         bail!("invalid response-phase WAF action in rule {}", rule.name);
       }
+    }
+  }
+  Ok(())
+}
+
+fn apply_stream_actions(
+  rule: &CompiledRule,
+  decision: &mut WafStreamDecision,
+  tx: &mut TransactionBudget,
+) -> anyhow::Result<()> {
+  let Some(action) = rule.actions.first() else {
+    return Ok(());
+  };
+
+  tx.count_mutation()?;
+  match action {
+    CompiledAction::Config(WafActionConfig::CloseStream {
+      websocket_code,
+      webtransport_code,
+      reason,
+    }) => {
+      decision.close = Some(WafStreamClose {
+        websocket_code: *websocket_code,
+        webtransport_code: *webtransport_code,
+        reason: reason.clone(),
+      });
+    }
+    CompiledAction::Config(WafActionConfig::Reject { .. })
+    | CompiledAction::Config(WafActionConfig::ContinueResponse)
+    | CompiledAction::Config(WafActionConfig::ReplaceResponse { .. })
+    | CompiledAction::Config(WafActionConfig::RejectResponse { .. })
+    | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. })
+    | CompiledAction::Config(WafActionConfig::RouteToPool { .. })
+    | CompiledAction::Config(WafActionConfig::RouteToUpstream { .. })
+    | CompiledAction::Config(WafActionConfig::SetLoadBalancingPolicy { .. })
+    | CompiledAction::Config(WafActionConfig::SetRequestHeader { .. })
+    | CompiledAction::Config(WafActionConfig::RemoveRequestHeader { .. })
+    | CompiledAction::Config(WafActionConfig::SetResponseHeader { .. })
+    | CompiledAction::Config(WafActionConfig::RemoveResponseHeader { .. })
+    | CompiledAction::Config(WafActionConfig::SetTag { .. })
+    | CompiledAction::Config(WafActionConfig::RateLimit { .. })
+    | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
+    | CompiledAction::RequirePersonProof(_)
+    | CompiledAction::EmitAccessLog { .. } => {
+      bail!("invalid stream-phase WAF action in rule {}", rule.name);
     }
   }
   Ok(())
@@ -2312,6 +2582,23 @@ impl AccessLogJsonValue {
       ObjectRef::RequestBody | ObjectRef::ResponseBody => {
         object_members_json(object, &["Size", "IsTruncated", "Text"], ctx)
       }
+      ObjectRef::StreamPayload => {
+        object_members_json(object, &["Size", "IsTruncated", "Text"], ctx)
+      }
+      ObjectRef::StreamWebSocket => object_members_json(
+        object,
+        &[
+          "Opcode",
+          "Fin",
+          "IsControl",
+          "MessageOpcode",
+          "FramePayloadSize",
+        ],
+        ctx,
+      ),
+      ObjectRef::StreamWebTransport => {
+        object_members_json(object, &["StreamKind", "StreamId", "DatagramSize"], ctx)
+      }
       ObjectRef::RequestClientPersonProof => object_members_json(
         object,
         &[
@@ -2367,7 +2654,7 @@ impl AccessLogJsonValue {
       ObjectRef::DynamicPolicy => {
         object_members_json(object, &["Matched", "Action", "Name", "Reason"], ctx)
       }
-      ObjectRef::Context | ObjectRef::Request | ObjectRef::Response => {
+      ObjectRef::Context | ObjectRef::Request | ObjectRef::Response | ObjectRef::Stream => {
         bail!("top-level OxiRule objects cannot be written as access-log fields")
       }
     }
@@ -2694,6 +2981,7 @@ struct EvalContext<'a> {
   rule_tags: &'a [String],
   request: WafRequestInput<'a>,
   response: Option<WafResponseInput<'a>>,
+  stream: Option<WafStreamInput<'a>>,
   person_proof: &'a PersonProofRequestStatus,
   pattern_sets: &'a HashMap<String, CompiledPatternSet>,
   limits: &'a WafLimits,
@@ -2731,6 +3019,16 @@ impl Expr {
     if phase == WafPhase::Request && self.references_ident("Response") {
       bail!("Response is unavailable in request-phase rules");
     }
+    if phase == WafPhase::Stream {
+      if self.references_ident("Response") {
+        bail!("Response is unavailable in stream-phase rules");
+      }
+      if self.references_request_body_object() {
+        bail!("Request.Body is unavailable in stream-phase rules");
+      }
+    } else if self.references_ident("Stream") {
+      bail!("Stream is available only in stream-phase rules");
+    }
     Ok(())
   }
 
@@ -2743,6 +3041,24 @@ impl Expr {
       }
       Self::Binary(left, _, right) => left.references_ident(name) || right.references_ident(name),
       Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) => false,
+    }
+  }
+
+  fn references_request_body_object(&self) -> bool {
+    match self {
+      Self::Member(receiver, field) => {
+        (field == "Body" && (receiver.is_request_expr() || receiver.is_request_http_expr()))
+          || receiver.references_request_body_object()
+      }
+      Self::Call(receiver, _, args) => {
+        receiver.references_request_body_object()
+          || args.iter().any(Self::references_request_body_object)
+      }
+      Self::UnaryNot(expr) => expr.references_request_body_object(),
+      Self::Binary(left, _, right) => {
+        left.references_request_body_object() || right.references_request_body_object()
+      }
+      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
     }
   }
 
@@ -2930,6 +3246,10 @@ enum ObjectRef {
   ResponseTransport,
   ResponseUpstream,
   ResponseUpstreamError,
+  Stream,
+  StreamPayload,
+  StreamWebSocket,
+  StreamWebTransport,
 }
 
 fn eval_ident(name: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
@@ -2938,7 +3258,9 @@ fn eval_ident(name: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
     "Request" => Ok(Value::Object(ObjectRef::Request)),
     "DynamicPolicy" => Ok(Value::Object(ObjectRef::DynamicPolicy)),
     "Response" if ctx.phase == WafPhase::Response => Ok(Value::Object(ObjectRef::Response)),
-    "Response" => bail!("Response is unavailable in request phase"),
+    "Response" => bail!("Response is unavailable in this phase"),
+    "Stream" if ctx.phase == WafPhase::Stream => Ok(Value::Object(ObjectRef::Stream)),
+    "Stream" => bail!("Stream is available only in stream phase"),
     _ => bail!("unknown identifier {name}"),
   }
 }
@@ -2995,6 +3317,147 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::DynamicPolicy, "Source") => {
       Ok(optional_string_value(&ctx.request.dynamic_policy.source))
     }
+    (ObjectRef::Stream, "Protocol") => Ok(Value::String(
+      ctx
+        .stream
+        .context("missing stream context")?
+        .protocol
+        .as_str()
+        .to_string(),
+    )),
+    (ObjectRef::Stream, "Direction") => Ok(Value::String(
+      ctx
+        .stream
+        .context("missing stream context")?
+        .direction
+        .as_str()
+        .to_string(),
+    )),
+    (ObjectRef::Stream, "Unit") => Ok(Value::String(
+      ctx
+        .stream
+        .context("missing stream context")?
+        .unit
+        .as_str()
+        .to_string(),
+    )),
+    (ObjectRef::Stream, "Payload") => Ok(Value::Object(ObjectRef::StreamPayload)),
+    (ObjectRef::Stream, "WebSocket") => {
+      if ctx
+        .stream
+        .context("missing stream context")?
+        .websocket
+        .is_some()
+      {
+        Ok(Value::Object(ObjectRef::StreamWebSocket))
+      } else {
+        Ok(Value::Null)
+      }
+    }
+    (ObjectRef::Stream, "WebTransport") => {
+      if ctx
+        .stream
+        .context("missing stream context")?
+        .webtransport
+        .is_some()
+      {
+        Ok(Value::Object(ObjectRef::StreamWebTransport))
+      } else {
+        Ok(Value::Null)
+      }
+    }
+    (ObjectRef::StreamPayload, "Size") => Ok(Value::Int(
+      ctx
+        .stream
+        .context("missing stream context")?
+        .payload
+        .bytes
+        .len() as i64,
+    )),
+    (ObjectRef::StreamPayload, "IsTruncated") => Ok(Value::Bool(
+      ctx
+        .stream
+        .context("missing stream context")?
+        .payload
+        .is_truncated,
+    )),
+    (ObjectRef::StreamPayload, "Bytes") => Ok(Value::Bytes(
+      ctx
+        .stream
+        .context("missing stream context")?
+        .payload
+        .bytes
+        .to_vec(),
+    )),
+    (ObjectRef::StreamPayload, "Text") => Ok(Value::String(body_scan::body_text(
+      ctx.stream.context("missing stream context")?.payload.bytes,
+    ))),
+    (ObjectRef::StreamWebSocket, "Opcode") => Ok(Value::String(
+      ctx
+        .stream
+        .and_then(|stream| stream.websocket)
+        .context("missing WebSocket stream context")?
+        .opcode
+        .to_string(),
+    )),
+    (ObjectRef::StreamWebSocket, "Fin") => Ok(Value::Bool(
+      ctx
+        .stream
+        .and_then(|stream| stream.websocket)
+        .context("missing WebSocket stream context")?
+        .fin,
+    )),
+    (ObjectRef::StreamWebSocket, "IsControl") => Ok(Value::Bool(
+      ctx
+        .stream
+        .and_then(|stream| stream.websocket)
+        .context("missing WebSocket stream context")?
+        .is_control,
+    )),
+    (ObjectRef::StreamWebSocket, "MessageOpcode") => Ok(
+      ctx
+        .stream
+        .and_then(|stream| stream.websocket)
+        .context("missing WebSocket stream context")?
+        .message_opcode
+        .map(|opcode| Value::String(opcode.to_string()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::StreamWebSocket, "FramePayloadSize") => Ok(Value::Int(
+      ctx
+        .stream
+        .and_then(|stream| stream.websocket)
+        .context("missing WebSocket stream context")?
+        .frame_payload_size as i64,
+    )),
+    (ObjectRef::StreamWebTransport, "StreamKind") => Ok(
+      ctx
+        .stream
+        .and_then(|stream| stream.webtransport)
+        .context("missing WebTransport stream context")?
+        .stream_kind
+        .map(|kind| Value::String(kind.as_str().to_string()))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::StreamWebTransport, "StreamId") => Ok(
+      ctx
+        .stream
+        .and_then(|stream| stream.webtransport)
+        .context("missing WebTransport stream context")?
+        .stream_id
+        .and_then(|id| i64::try_from(id).ok())
+        .map(Value::Int)
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::StreamWebTransport, "DatagramSize") => Ok(
+      ctx
+        .stream
+        .and_then(|stream| stream.webtransport)
+        .context("missing WebTransport stream context")?
+        .datagram_size
+        .map(|size| Value::Int(size as i64))
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::Request, "Id") => Ok(Value::String(ctx.request.request_id.to_string())),
     (ObjectRef::Request, "ReceivedAtUnixMs") => Ok(Value::Int(
       i64::try_from(ctx.request.received_at_unix_ms).unwrap_or(i64::MAX),
@@ -3496,6 +3959,9 @@ fn eval_call(
       args,
       ctx,
     ),
+    Value::Object(ObjectRef::StreamPayload) => {
+      eval_body_call(ctx.stream.map(|stream| stream.payload), method, args, ctx)
+    }
     _ => bail!("method {method} is not available on {:?}", value),
   }
 }
@@ -4487,118 +4953,7 @@ fn parse_ebml_vint(bytes: &[u8]) -> Option<(usize, usize)> {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::bytes_match_format;
-
-  #[test]
-  fn binary_format_helper_matches_attachment_formats_with_stable_signatures() {
-    let pe = {
-      let mut bytes = vec![0u8; 0x84];
-      bytes[0..2].copy_from_slice(b"MZ");
-      bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-      bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
-      bytes
-    };
-    let tar = {
-      let mut bytes = vec![0u8; 512];
-      bytes[257..263].copy_from_slice(b"ustar\0");
-      bytes
-    };
-
-    let cases: &[(&str, &[u8])] = &[
-      ("7z", b"\x37\x7a\xbc\xaf\x27\x1c\x00\x04"),
-      ("alac", b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00alac"),
-      (
-        "apng",
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00acTL\x00\x00\x00\x00",
-      ),
-      ("av1", b"DKIF\x00\x00\x00\x00AV01"),
-      ("avif", b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00mif1"),
-      ("bzip2", b"BZh9"),
-      ("dirac", b"BBCD"),
-      ("djvu", b"AT&TFORM"),
-      ("dvi", b"\xf7\x02"),
-      ("elf", b"\x7fELF\x02\x01\x01"),
-      ("epub", b"PK\x03\x04mimetypeapplication/epub+zip"),
-      ("exr", b"\x76\x2f\x31\x01"),
-      ("flac", b"fLaC"),
-      ("flif", b"FLIF"),
-      (
-        "gbr",
-        b"\x00\x00\x00\x1c\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x04GIMP",
-      ),
-      ("gif", b"GIF89a"),
-      ("glb", b"glTF\x02\x00\x00\x00"),
-      ("gzip", b"\x1f\x8b\x08"),
-      ("hdf4", b"\x0e\x03\x13\x01"),
-      ("hdf5", b"\x89HDF\r\n\x1a\n"),
-      ("jpeg", b"\xff\xd8\xff\xe0"),
-      ("jpeg-2000", b"\x00\x00\x00\x0cjP  \r\n\x87\n"),
-      ("jpeg-xl", b"\xff\x0a"),
-      ("lzip", b"LZIP"),
-      ("maff", b"PK\x03\x04index.rdf"),
-      ("mkv", b"\x1a\x45\xdf\xa3\x9f\x42\x82\x88matroska"),
-      ("mng", b"\x8aMNG\r\n\x1a\n"),
-      ("mp3", b"ID3\x04\x00"),
-      ("musepack", b"MPCK"),
-      ("netcdf", b"CDF\x01"),
-      (
-        "odf",
-        b"PK\x03\x04mimetypeapplication/vnd.oasis.opendocument.text",
-      ),
-      ("ogg", b"OggS"),
-      ("ooxml", b"PK\x03\x04[Content_Types].xmlword/document.xml"),
-      ("openraster", b"PK\x03\x04mimetypeapplication/x-openraster"),
-      ("openxps", b"PK\x03\x04FixedDocumentSequence.fdseq"),
-      ("opus", b"OggS\x00OpusHead"),
-      ("pdf", b"%PDF-1.7"),
-      ("png", b"\x89PNG\r\n\x1a\n"),
-      ("qoi", b"qoif"),
-      ("speex", b"OggS\x00Speex   "),
-      ("theora", b"OggS\x00\x80theora"),
-      ("vorbis", b"OggS\x00\x01vorbis"),
-      ("wavpack", b"wvpk"),
-      ("webm", b"\x1a\x45\xdf\xa3\x9f\x42\x82\x84webm"),
-      ("webp", b"RIFF\x00\x00\x00\x00WEBP"),
-      ("woff", b"wOFF"),
-      ("woff2", b"wOF2"),
-      ("xcf", b"gimp xcf "),
-      ("xz", b"\xfd7zXZ\x00"),
-      ("zim", b"ZIM\x04"),
-      ("zip", b"PK\x03\x04"),
-    ];
-
-    for (format, bytes) in cases {
-      assert!(
-        bytes_match_format(bytes, format),
-        "expected {format} to match"
-      );
-    }
-    assert!(bytes_match_format(&pe, "windows-exe"));
-    assert!(bytes_match_format(&tar, "tar"));
-  }
-
-  #[test]
-  fn binary_format_helper_leaves_text_and_filesystem_like_formats_unmatched() {
-    assert!(!bytes_match_format(b"<svg></svg>", "svg"));
-    assert!(!bytes_match_format(b"key: value\n", "yaml"));
-    assert!(!bytes_match_format(b"LUKS\xba\xbe", "luks"));
-    assert!(!bytes_match_format(b"OBJ text", "obj"));
-  }
-
-  #[test]
-  fn binary_format_helper_rejects_short_isobmff_without_panicking() {
-    for len in 12..=15 {
-      let mut bytes = vec![0u8; len];
-      bytes[4..8].copy_from_slice(b"ftyp");
-      bytes[8..12].copy_from_slice(b"nope");
-
-      assert!(!bytes_match_format(&bytes, "avif"));
-      assert!(!bytes_match_format(&bytes, "jpeg-xl"));
-      assert!(!bytes_match_format(&bytes, "av1"));
-    }
-  }
-}
+mod tests;
 
 fn pattern_set_matches(
   sets: &HashMap<String, CompiledPatternSet>,
@@ -4651,455 +5006,6 @@ fn ip_in_cidr(ip: &str, cidr: &str) -> anyhow::Result<bool> {
     }
     _ => Ok(false),
   }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
-  Ident(String),
-  String(String),
-  Int(i64),
-  True,
-  False,
-  Null,
-  Dot,
-  Comma,
-  LParen,
-  RParen,
-  Bang,
-  EqEq,
-  Ne,
-  Lt,
-  Le,
-  Gt,
-  Ge,
-  AndAnd,
-  OrOr,
-  Plus,
-  Invalid(char),
-  Eof,
-}
-
-struct Parser {
-  tokens: Vec<Token>,
-  position: usize,
-}
-
-impl Parser {
-  fn new(input: &str) -> Self {
-    Self {
-      tokens: tokenize(input),
-      position: 0,
-    }
-  }
-
-  fn parse(mut self) -> anyhow::Result<Expr> {
-    let expr = self.parse_or()?;
-    if !matches!(self.peek(), Token::Eof) {
-      bail!("unexpected token {:?}", self.peek());
-    }
-    Ok(expr)
-  }
-
-  fn parse_or(&mut self) -> anyhow::Result<Expr> {
-    let mut expr = self.parse_and()?;
-    while self.consume(&Token::OrOr) {
-      let right = self.parse_and()?;
-      expr = Expr::Binary(Box::new(expr), BinaryOp::Or, Box::new(right));
-    }
-    Ok(expr)
-  }
-
-  fn parse_and(&mut self) -> anyhow::Result<Expr> {
-    let mut expr = self.parse_equality()?;
-    while self.consume(&Token::AndAnd) {
-      let right = self.parse_equality()?;
-      expr = Expr::Binary(Box::new(expr), BinaryOp::And, Box::new(right));
-    }
-    Ok(expr)
-  }
-
-  fn parse_equality(&mut self) -> anyhow::Result<Expr> {
-    let mut expr = self.parse_comparison()?;
-    loop {
-      let op = if self.consume(&Token::EqEq) {
-        Some(BinaryOp::Eq)
-      } else if self.consume(&Token::Ne) {
-        Some(BinaryOp::Ne)
-      } else {
-        None
-      };
-      let Some(op) = op else {
-        break;
-      };
-      let right = self.parse_comparison()?;
-      expr = Expr::Binary(Box::new(expr), op, Box::new(right));
-    }
-    Ok(expr)
-  }
-
-  fn parse_comparison(&mut self) -> anyhow::Result<Expr> {
-    let mut expr = self.parse_additive()?;
-    loop {
-      let op = if self.consume(&Token::Lt) {
-        Some(BinaryOp::Lt)
-      } else if self.consume(&Token::Le) {
-        Some(BinaryOp::Le)
-      } else if self.consume(&Token::Gt) {
-        Some(BinaryOp::Gt)
-      } else if self.consume(&Token::Ge) {
-        Some(BinaryOp::Ge)
-      } else {
-        None
-      };
-      let Some(op) = op else {
-        break;
-      };
-      let right = self.parse_additive()?;
-      expr = Expr::Binary(Box::new(expr), op, Box::new(right));
-    }
-    Ok(expr)
-  }
-
-  fn parse_additive(&mut self) -> anyhow::Result<Expr> {
-    let mut expr = self.parse_unary()?;
-    while self.consume(&Token::Plus) {
-      let right = self.parse_unary()?;
-      expr = Expr::Binary(Box::new(expr), BinaryOp::Add, Box::new(right));
-    }
-    Ok(expr)
-  }
-
-  fn parse_unary(&mut self) -> anyhow::Result<Expr> {
-    if self.consume(&Token::Bang) {
-      return Ok(Expr::UnaryNot(Box::new(self.parse_unary()?)));
-    }
-    self.parse_postfix()
-  }
-
-  fn parse_postfix(&mut self) -> anyhow::Result<Expr> {
-    let mut expr = self.parse_primary()?;
-    while self.consume(&Token::Dot) {
-      let field = self.expect_ident()?;
-      if self.consume(&Token::LParen) {
-        let args = self.parse_args()?;
-        expr = Expr::Call(Box::new(expr), field, args);
-      } else {
-        expr = Expr::Member(Box::new(expr), field);
-      }
-    }
-    Ok(expr)
-  }
-
-  fn parse_primary(&mut self) -> anyhow::Result<Expr> {
-    match self.advance() {
-      Token::True => Ok(Expr::Bool(true)),
-      Token::False => Ok(Expr::Bool(false)),
-      Token::Null => Ok(Expr::Null),
-      Token::Int(value) => Ok(Expr::Int(value)),
-      Token::String(value) => Ok(Expr::String(value)),
-      Token::Ident(value) => {
-        validate_identifier(&value)?;
-        Ok(Expr::Ident(value))
-      }
-      Token::LParen => {
-        let expr = self.parse_or()?;
-        self.expect(Token::RParen)?;
-        Ok(expr)
-      }
-      token => bail!("unexpected token {:?}", token),
-    }
-  }
-
-  fn parse_args(&mut self) -> anyhow::Result<Vec<Expr>> {
-    let mut args = Vec::new();
-    if self.consume(&Token::RParen) {
-      return Ok(args);
-    }
-    loop {
-      args.push(self.parse_or()?);
-      if self.consume(&Token::RParen) {
-        break;
-      }
-      self.expect(Token::Comma)?;
-    }
-    Ok(args)
-  }
-
-  fn expect_ident(&mut self) -> anyhow::Result<String> {
-    match self.advance() {
-      Token::Ident(value) => {
-        validate_identifier(&value)?;
-        Ok(value)
-      }
-      token => bail!("expected identifier, got {:?}", token),
-    }
-  }
-
-  fn expect(&mut self, expected: Token) -> anyhow::Result<()> {
-    let token = self.advance();
-    if token == expected {
-      Ok(())
-    } else {
-      bail!("expected {:?}, got {:?}", expected, token)
-    }
-  }
-
-  fn consume(&mut self, expected: &Token) -> bool {
-    if self.peek() == expected {
-      self.position += 1;
-      true
-    } else {
-      false
-    }
-  }
-
-  fn advance(&mut self) -> Token {
-    let token = self.peek().clone();
-    if !matches!(token, Token::Eof) {
-      self.position += 1;
-    }
-    token
-  }
-
-  fn peek(&self) -> &Token {
-    self.tokens.get(self.position).unwrap_or(&Token::Eof)
-  }
-}
-
-fn tokenize(input: &str) -> Vec<Token> {
-  let mut chars = input.chars().peekable();
-  let mut tokens = Vec::new();
-
-  while let Some(ch) = chars.next() {
-    match ch {
-      ch if ch.is_whitespace() => {}
-      '\'' => {
-        let mut value = String::new();
-        while let Some(next) = chars.next() {
-          match next {
-            '\\' => {
-              if let Some(escaped) = chars.next() {
-                value.push(escaped);
-              }
-            }
-            '\'' => break,
-            other => value.push(other),
-          }
-        }
-        tokens.push(Token::String(value));
-      }
-      '0'..='9' => {
-        let mut value = ch.to_string();
-        while let Some(next) = chars.peek() {
-          if next.is_ascii_digit() {
-            value.push(chars.next().unwrap());
-          } else {
-            break;
-          }
-        }
-        tokens.push(Token::Int(value.parse().unwrap_or_default()));
-      }
-      'A'..='Z' | 'a'..='z' | '_' => {
-        let mut value = ch.to_string();
-        while let Some(next) = chars.peek() {
-          if next.is_ascii_alphanumeric() || *next == '_' {
-            value.push(chars.next().unwrap());
-          } else {
-            break;
-          }
-        }
-        tokens.push(match value.as_str() {
-          "true" => Token::True,
-          "false" => Token::False,
-          "null" => Token::Null,
-          _ => Token::Ident(value),
-        });
-      }
-      '.' => tokens.push(Token::Dot),
-      ',' => tokens.push(Token::Comma),
-      '(' => tokens.push(Token::LParen),
-      ')' => tokens.push(Token::RParen),
-      '+' => tokens.push(Token::Plus),
-      '!' if chars.peek() == Some(&'=') => {
-        chars.next();
-        tokens.push(Token::Ne);
-      }
-      '!' => tokens.push(Token::Bang),
-      '=' if chars.peek() == Some(&'=') => {
-        chars.next();
-        tokens.push(Token::EqEq);
-      }
-      '<' if chars.peek() == Some(&'=') => {
-        chars.next();
-        tokens.push(Token::Le);
-      }
-      '<' => tokens.push(Token::Lt),
-      '>' if chars.peek() == Some(&'=') => {
-        chars.next();
-        tokens.push(Token::Ge);
-      }
-      '>' => tokens.push(Token::Gt),
-      '&' if chars.peek() == Some(&'&') => {
-        chars.next();
-        tokens.push(Token::AndAnd);
-      }
-      '|' if chars.peek() == Some(&'|') => {
-        chars.next();
-        tokens.push(Token::OrOr);
-      }
-      _ => tokens.push(Token::Invalid(ch)),
-    }
-  }
-
-  tokens.push(Token::Eof);
-  tokens
-}
-
-fn validate_identifier(identifier: &str) -> anyhow::Result<()> {
-  match identifier {
-    "if" | "else" | "for" | "while" | "do" | "switch" | "let" | "const" | "function" | "import"
-    | "export" | "new" | "try" | "catch" | "throw" | "await" | "return" => {
-      bail!("forbidden OxiRule construct {identifier}")
-    }
-    _ => Ok(()),
-  }
-}
-
-fn default_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
-  [
-    ("request_id", "Request.Id"),
-    ("response_id", "Response.Id"),
-    ("transaction_id", "Context.TransactionId"),
-    ("method", "Request.Http.Method"),
-    ("uri", "Request.Http.Uri"),
-    ("path", "Request.Http.Path"),
-    ("query", "Request.Http.Query"),
-    ("request_version", "Request.Http.Version"),
-    ("host", "Request.Http.Host"),
-    ("user_agent", "Request.Headers.getAll('User-Agent')"),
-    ("client_ip", "Request.Client.Ip"),
-    ("client_port", "Request.Client.Port"),
-    ("protocol", "Request.Protocol"),
-    ("transport", "Request.Transport.Network"),
-    ("tls", "Request.Tls.Enabled"),
-    ("route", "Context.RouteName"),
-    ("status", "Response.Http.Status"),
-    ("reason", "Response.Http.Reason"),
-    ("response_body_bytes", "Response.Body.Size"),
-    ("upstream", "Response.Upstream.Name"),
-    ("upstream_pool", "Response.Upstream.Pool"),
-    ("upstream_scheme", "Response.Upstream.Scheme"),
-    (
-      "upstream_connect_time_ms",
-      "Response.Upstream.ConnectTimeMs",
-    ),
-    (
-      "upstream_first_byte_time_ms",
-      "Response.Upstream.FirstByteTimeMs",
-    ),
-    ("waf_rule", "Context.RuleName"),
-    ("waf_rule_id", "Context.RuleId"),
-    ("request_received_at_unix_ms", "Request.ReceivedAtUnixMs"),
-    ("response_received_at_unix_ms", "Response.ReceivedAtUnixMs"),
-  ]
-  .into_iter()
-  .map(|(name, value)| AccessLogFieldConfig {
-    name: name.to_string(),
-    value: value.to_string(),
-  })
-  .collect()
-}
-
-fn default_waf_rate_limit_status() -> u16 {
-  429
-}
-
-fn default_max_rule_runtime_ms() -> u64 {
-  5
-}
-
-fn default_max_total_waf_runtime_ms() -> u64 {
-  20
-}
-
-fn default_max_expression_steps() -> usize {
-  2_000
-}
-
-fn default_max_memory_bytes() -> usize {
-  262_144
-}
-
-fn default_max_string_bytes() -> usize {
-  8_192
-}
-
-fn default_max_body_inspection_bytes() -> usize {
-  1_048_576
-}
-
-fn default_max_header_count() -> usize {
-  128
-}
-
-fn default_max_header_value_bytes() -> usize {
-  8_192
-}
-
-fn default_max_mutations() -> usize {
-  32
-}
-
-fn default_max_regex_runtime_ms() -> u64 {
-  2
-}
-
-fn default_max_helper_items() -> usize {
-  128
-}
-
-fn default_max_helper_pattern_count() -> usize {
-  32
-}
-
-fn default_max_helper_result_bytes() -> usize {
-  8_192
-}
-
-fn default_max_person_proof_reuse_tokens() -> usize {
-  4_096
-}
-
-fn default_person_proof_difficulty() -> u8 {
-  18
-}
-
-fn default_person_proof_token_validity_seconds() -> u64 {
-  300
-}
-
-fn default_person_proof_cookie() -> String {
-  "__oxibelt_person_proof".to_string()
-}
-
-fn default_person_proof_token_bindings() -> Vec<PersonProofTokenBinding> {
-  vec![
-    PersonProofTokenBinding::UserAgent,
-    PersonProofTokenBinding::Route,
-    PersonProofTokenBinding::DirectPeerIpNetworkPrefix,
-  ]
-}
-
-fn default_person_proof_direct_peer_ipv4_prefix_bits() -> u8 {
-  24
-}
-
-fn default_person_proof_direct_peer_ipv6_prefix_bits() -> u8 {
-  56
-}
-
-fn default_person_proof_status() -> u16 {
-  403
 }
 
 pub fn request_protocol(headers: &HeaderMap) -> WafProtocol {
