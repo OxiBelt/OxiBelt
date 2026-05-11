@@ -336,7 +336,7 @@ When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/
 
 `quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets. `quic.socket.workers = 1` keeps a single downstream HTTP/3 endpoint. Set `workers > 1` only with `reuse_port = true`, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. Other QUIC transport, socket, and pool numeric values must be greater than zero; `max_udp_payload_size` must be in the QUIC-valid range `1200..=65527`.
 
-The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
+The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary HTTP/3 upstream requests use one-shot QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
 
 ## Proxy Sections
 

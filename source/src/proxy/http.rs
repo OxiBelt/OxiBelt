@@ -2368,9 +2368,7 @@ async fn send_one_shot_with_proxy_protocol(
   client_addr: std::net::SocketAddr,
   timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<Incoming>> {
-  if upstream_version == HttpVersion::H3 {
-    anyhow::bail!("PROXY protocol egress is not supported for HTTP/3 upstream");
-  }
+  let upstream_version = TcpUpstreamHttpVersion::from_http_version(upstream_version)?;
   let remote_addr = resolve_upstream_tcp_addr(&upstream.origin).await?;
   let mut stream = tokio::time::timeout(timeouts.upstream_connect, TcpStream::connect(remote_addr))
     .await
@@ -2407,17 +2405,42 @@ async fn send_one_shot_with_proxy_protocol(
     .context("upstream TLS handshake failed")?;
     tokio::time::timeout(
       timeouts.upstream_first_byte,
-      send_one_shot_over_io(tls, request, upstream_version),
+      send_one_shot_over_tcp_io(tls, request, upstream_version),
     )
     .await
     .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
   } else {
     tokio::time::timeout(
       timeouts.upstream_first_byte,
-      send_one_shot_over_io(stream, request, upstream_version),
+      send_one_shot_over_tcp_io(stream, request, upstream_version),
     )
     .await
     .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
+  }
+}
+
+#[derive(Clone, Copy)]
+enum TcpUpstreamHttpVersion {
+  H1,
+  H2,
+}
+
+impl TcpUpstreamHttpVersion {
+  fn from_http_version(version: HttpVersion) -> anyhow::Result<Self> {
+    match version {
+      HttpVersion::H1 => Ok(Self::H1),
+      HttpVersion::H2 => Ok(Self::H2),
+      HttpVersion::H3 => {
+        anyhow::bail!("PROXY protocol egress is not supported for HTTP/3 upstream")
+      }
+    }
+  }
+
+  fn as_alpn(self) -> &'static [u8] {
+    match self {
+      Self::H1 => b"http/1.1",
+      Self::H2 => b"h2",
+    }
   }
 }
 
@@ -2455,16 +2478,16 @@ fn should_report_upstream_request_failure(
   !(upstream_first_byte_timeout && grpc_timeout_caps.upstream_first_byte)
 }
 
-async fn send_one_shot_over_io<I>(
+async fn send_one_shot_over_tcp_io<I>(
   io: I,
   request: Request<ProxyBody>,
-  upstream_version: HttpVersion,
+  upstream_version: TcpUpstreamHttpVersion,
 ) -> anyhow::Result<Response<Incoming>>
 where
   I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
   match upstream_version {
-    HttpVersion::H1 => {
+    TcpUpstreamHttpVersion::H1 => {
       let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io))
         .await
         .context("failed to establish one-shot HTTP/1.1 upstream connection")?;
@@ -2478,7 +2501,7 @@ where
         .await
         .context("one-shot HTTP/1.1 upstream request failed")
     }
-    HttpVersion::H2 => {
+    TcpUpstreamHttpVersion::H2 => {
       let (mut sender, connection) =
         hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(io))
           .await
@@ -2493,7 +2516,6 @@ where
         .await
         .context("one-shot HTTP/2 upstream request failed")
     }
-    HttpVersion::H3 => anyhow::bail!("one-shot HTTP/3 upstream is not supported"),
   }
 }
 

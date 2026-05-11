@@ -41,11 +41,16 @@ struct ClientPool {
 }
 
 impl ClientPool {
-  fn for_version(&self, origin_scheme: &str, version: HttpVersion) -> UpstreamClientRef<'_> {
+  fn for_version(
+    &self,
+    origin_scheme: &str,
+    version: HttpVersion,
+  ) -> Option<UpstreamClientRef<'_>> {
     match version {
-      HttpVersion::H1 => UpstreamClientRef::Hyper(&self.h1_only),
-      HttpVersion::H2 if origin_scheme == "http" => UpstreamClientRef::H2c(&self.h2c),
-      HttpVersion::H2 | HttpVersion::H3 => UpstreamClientRef::Hyper(&self.negotiated),
+      HttpVersion::H1 => Some(UpstreamClientRef::Hyper(&self.h1_only)),
+      HttpVersion::H2 if origin_scheme == "http" => Some(UpstreamClientRef::H2c(&self.h2c)),
+      HttpVersion::H2 => Some(UpstreamClientRef::Hyper(&self.negotiated)),
+      HttpVersion::H3 => None,
     }
   }
 }
@@ -83,7 +88,7 @@ impl UpstreamClientPools {
     self
       .by_upstream
       .get(upstream_name)
-      .map(|pool| pool.for_version(origin_scheme, version))
+      .and_then(|pool| pool.for_version(origin_scheme, version))
   }
 }
 

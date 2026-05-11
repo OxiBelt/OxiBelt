@@ -366,11 +366,20 @@ pub(crate) async fn forward_request(
   state: &AppSnapshot,
   timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<ProxyBody>> {
-  let uri = request.uri().clone();
   if let Some(pool) = state.h3_clients.for_upstream(&upstream.name) {
     return pool.forward_request(request, upstream, timeouts).await;
   }
 
+  forward_one_shot_request(request, upstream, state, timeouts).await
+}
+
+pub(crate) async fn forward_one_shot_request(
+  request: Request<ProxyBody>,
+  upstream: &UpstreamConfig,
+  state: &AppSnapshot,
+  timeouts: EffectiveTimeouts,
+) -> anyhow::Result<Response<ProxyBody>> {
+  let uri = request.uri().clone();
   let quic_config = tls::build_upstream_quic_client_config(
     &state.config.proxy.trusted_ca_certs,
     &upstream.tls.ech,
@@ -387,18 +396,31 @@ pub(crate) async fn forward_request(
     timeouts.upstream_connect,
   )
   .await?;
-  let close_connection = connected.connection.clone();
-  let endpoint = connected.endpoint.clone();
-  let driver_task = connected.driver_task;
+  let guard = OneShotH3Connection {
+    _endpoint: connected.endpoint,
+    connection: connected.connection,
+    driver_task: connected.driver_task,
+  };
 
   let response = send_h3_request(connected.send_request, request, &uri, timeouts).await?;
   let (parts, body) = response.into_parts();
-  let close_body = wrap_body_close_connection(body, move || {
-    close_connection.close(0u32.into(), b"request complete");
-    driver_task.abort();
-    drop(endpoint);
-  });
+  let close_body = wrap_body_close_connection(body, move || drop(guard));
   Ok(Response::from_parts(parts, close_body))
+}
+
+struct OneShotH3Connection {
+  _endpoint: h3_quinn::quinn::Endpoint,
+  connection: h3_quinn::quinn::Connection,
+  driver_task: JoinHandle<()>,
+}
+
+impl Drop for OneShotH3Connection {
+  fn drop(&mut self) {
+    self
+      .connection
+      .close(0u32.into(), b"one-shot request complete");
+    self.driver_task.abort();
+  }
 }
 
 async fn send_h3_request(

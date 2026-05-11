@@ -65,7 +65,7 @@ Upstream protocol support:
 - HTTP/2 over `https://` uses TLS ALPN.
 - HTTP/2 over `http://` uses h2c with prior knowledge.
 - HTTP/3 requires an `https://` upstream origin.
-- Ordinary upstream HTTP/3 forwarding uses a per-upstream QUIC connection pool and multiplexes requests over pooled HTTP/3 connections. WebTransport uses a dedicated upstream QUIC connection per session.
+- Ordinary upstream HTTP/3 forwarding uses a per-upstream QUIC connection pool and multiplexes requests over pooled HTTP/3 connections when `quic.upstream_pool.enabled = true`; when disabled, each ordinary HTTP/3 upstream request uses a one-shot QUIC connection. WebTransport uses a dedicated upstream QUIC connection per session.
 - `proxy.auto_upgrade` controls the maximum upstream HTTP version OxiBelt may select.
 - Route-level `upstream_http_version` can override backend protocol selection within the selected upstream capability.
 - Route-level timeout overrides can adjust downstream body/send, upgrade idle, WebTransport idle, and upstream connect/first-byte/read/send behavior for individual routes. TLS handshake and downstream header read timeouts remain listener-wide.
