@@ -8,12 +8,11 @@ use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use h3::ext::Protocol;
-use h3_webtransport::server::WebTransportSession;
 use http_body_util::BodyExt;
 use hyper::body::Frame;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::config::{Config, ConnectionLimitIdentityMode, HttpVersion, UpstreamConfig};
 use crate::lifecycle::ConnectionDrain;
@@ -28,7 +27,7 @@ use crate::tls;
 
 type H3BidiStream = crate::quic::h3::BidiStream<Bytes>;
 type H3RequestStream = h3::server::RequestStream<H3BidiStream, Bytes>;
-type H3WebTransportSession = WebTransportSession<crate::quic::h3::Connection, Bytes>;
+type H3ServerConnection = h3::server::Connection<crate::quic::h3::Connection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
 const H3_BODY_CHANNEL_CAPACITY: usize = 16;
@@ -331,55 +330,17 @@ pub(crate) async fn handle_downstream_connection(
     }
 
     if is_webtransport_request(&request) {
-      let mut prepared = match http_proxy::prepare_webtransport(
-        &request,
-        peer_addr,
-        tls_metadata.as_ref(),
-        connection_limit_context.clone(),
-        state.snapshot().as_ref(),
-      ) {
-        Ok(prepared) => prepared,
-        Err(response) => {
-          respond_to_h3_request(stream, *response).await?;
-          continue;
-        }
-      };
-
-      let upstream_session =
-        match connect_upstream_webtransport(&prepared, state.snapshot().as_ref()).await {
-          Ok(session) => session,
-          Err(error) => {
-            warn!(
-                upstream = %prepared.upstream.name,
-                error = %error,
-                "failed to connect upstream WebTransport session"
-            );
-            respond_to_h3_request(
-              stream,
-              text_response(
-                StatusCode::BAD_GATEWAY,
-                "upstream WebTransport session failed",
-              ),
-            )
-            .await?;
-            continue;
-          }
-        };
-
-      let downstream_session = WebTransportSession::accept(request, stream, h3_connection)
-        .await
-        .context("failed to accept downstream WebTransport session")?;
-      webtransport_bridge::bridge_webtransport(
-        downstream_session,
-        upstream_session,
+      webtransport_bridge::serve_webtransport_connection(
+        h3_connection,
+        request,
+        stream,
         peer_addr,
         tls_metadata,
         connection_limit_context.clone(),
         state,
-        prepared.timeouts,
+        early_data.clone(),
+        shutdown,
         drain.clone(),
-        prepared.connection_limit_permit.take(),
-        prepared.stream_waf.clone(),
       )
       .await?;
       return Ok(());
