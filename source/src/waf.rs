@@ -29,6 +29,7 @@ mod crs;
 mod defaults;
 mod expression;
 mod functions;
+mod metadata;
 pub(crate) mod normalization;
 mod person_proof;
 
@@ -43,6 +44,7 @@ use functions::{
   compile_route_functions, function_body_route_functions, resolve_function,
   validate_function_arity,
 };
+pub use metadata::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 use normalization::{
   normalize_cookie_pairs, normalize_header_pairs, normalize_query_pairs, normalized_http_path,
   normalized_http_query, normalized_http_uri,
@@ -1968,59 +1970,6 @@ pub struct WafRequestInput<'a> {
 pub struct WafBodyInput<'a> {
   pub bytes: &'a [u8],
   pub is_truncated: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct WafTlsMetadata {
-  pub enabled: bool,
-  pub version: Option<String>,
-  pub cipher_suite: Option<String>,
-  pub sni: Option<String>,
-  pub alpn: Option<String>,
-  pub fingerprint: Option<String>,
-  pub fingerprint_scheme: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum WafProtocol {
-  Http,
-  Websocket,
-  Webrtc,
-  Webtransport,
-}
-
-impl WafProtocol {
-  fn as_str(self) -> &'static str {
-    match self {
-      Self::Http => "http",
-      Self::Websocket => "websocket",
-      Self::Webrtc => "webrtc",
-      Self::Webtransport => "webtransport",
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum WafTransportNetwork {
-  Tcp,
-  Udp,
-}
-
-impl WafTransportNetwork {
-  fn as_str(self) -> &'static str {
-    match self {
-      Self::Tcp => "tcp",
-      Self::Udp => "udp",
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct WafTransportMetadataInput<'a> {
-  pub tcp_mss: Option<u32>,
-  pub tcp_rtt_ms: Option<u64>,
-  pub udp_datagram_size: Option<usize>,
-  pub udp_connection_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -51,6 +51,7 @@ impl WebTransportSessionIndex {
     self.connect_stream_ids.contains_key(&session_id)
   }
 
+  #[cfg(test)]
   fn connect_stream_id(&self, session_id: SessionId) -> Option<StreamId> {
     self.connect_stream_ids.get(&session_id).copied()
   }
@@ -235,11 +236,8 @@ pub(super) async fn accept_webtransport_session(
     .await
     .context("failed to send downstream WebTransport response")?;
 
-  session_index.insert(connect_stream_id);
-  debug_assert_eq!(
-    session_index.connect_stream_id(session_id),
-    Some(connect_stream_id)
-  );
+  let inserted_session = session_index.insert(connect_stream_id);
+  debug_assert_eq!(inserted_session, session_id);
   let upstream = Arc::new(upstream);
   let stream_waf = prepared.stream_waf.take();
   let stream_waf_state = stream_waf.as_ref().map(|_| snapshot.clone());

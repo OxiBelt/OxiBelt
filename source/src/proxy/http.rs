@@ -54,7 +54,7 @@ use self::semantics::{configured_error_response, filter_trailers};
 use self::uri::{rewrite_uri, validate_downstream_path};
 use self::version::select_upstream_http_version;
 
-struct SystemAccessLogContext {
+struct SystemAccessLogContext<'a> {
   request_id: String,
   response_id: String,
   transaction_id: String,
@@ -72,10 +72,7 @@ struct SystemAccessLogContext {
   tls: Arc<WafTlsMetadata>,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
-  tcp_mss: Option<u32>,
-  tcp_rtt_ms: Option<u64>,
-  udp_datagram_size: Option<usize>,
-  udp_connection_id: Option<String>,
+  transport_metadata: WafTransportMetadataInput<'a>,
   tags: std::collections::HashMap<String, String>,
   dynamic_policy: DynamicPolicyContext,
   upstream_name: String,
@@ -87,7 +84,8 @@ struct SystemAccessLogContext {
   upstream_error_message: Option<String>,
 }
 
-impl SystemAccessLogContext {
+impl<'a> SystemAccessLogContext<'a> {
+  #[allow(clippy::too_many_arguments)]
   fn new<B>(
     request: &Request<B>,
     peer_addr: std::net::SocketAddr,
@@ -95,7 +93,7 @@ impl SystemAccessLogContext {
     tls: Arc<WafTlsMetadata>,
     protocol: WafProtocol,
     transport_network: WafTransportNetwork,
-    transport_metadata: WafTransportMetadataInput<'_>,
+    transport_metadata: WafTransportMetadataInput<'a>,
     downstream_scheme: &'static str,
   ) -> Self {
     Self {
@@ -116,10 +114,7 @@ impl SystemAccessLogContext {
       tls,
       protocol,
       transport_network,
-      tcp_mss: transport_metadata.tcp_mss,
-      tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
-      udp_datagram_size: transport_metadata.udp_datagram_size,
-      udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
+      transport_metadata,
       tags: std::collections::HashMap::new(),
       dynamic_policy: DynamicPolicyContext::default(),
       upstream_name: String::new(),
@@ -150,18 +145,13 @@ impl SystemAccessLogContext {
       tls: self.tls.as_ref(),
       protocol: self.protocol,
       transport_network: self.transport_network,
-      transport_metadata: WafTransportMetadataInput {
-        tcp_mss: self.tcp_mss,
-        tcp_rtt_ms: self.tcp_rtt_ms,
-        udp_datagram_size: self.udp_datagram_size,
-        udp_connection_id: self.udp_connection_id.as_deref(),
-      },
+      transport_metadata: self.transport_metadata,
       tags: &self.tags,
       dynamic_policy: &self.dynamic_policy,
     }
   }
 
-  fn response_input<'a>(&'a self, response: &'a Response<ProxyBody>) -> WafResponseInput<'a> {
+  fn response_input<'b>(&'b self, response: &'b Response<ProxyBody>) -> WafResponseInput<'b> {
     let upstream_error = self
       .upstream_error_code
       .as_deref()
@@ -192,7 +182,7 @@ impl SystemAccessLogContext {
 
 fn emit_system_access_log(
   state: &AppSnapshot,
-  context: &mut SystemAccessLogContext,
+  context: &mut SystemAccessLogContext<'_>,
   response: &Response<ProxyBody>,
 ) {
   if !state.system_access_log.enabled() {
@@ -207,7 +197,7 @@ fn emit_system_access_log(
 
 fn proxy_error_response(
   state: &AppSnapshot,
-  access_log: &SystemAccessLogContext,
+  access_log: &SystemAccessLogContext<'_>,
   status: StatusCode,
   message: &str,
   code: &str,
@@ -425,7 +415,7 @@ async fn handle_inner_impl<B>(
   _reject_connect: bool,
   downstream_scheme: &'static str,
   drain: ConnectionDrain,
-  access_log: &mut SystemAccessLogContext,
+  access_log: &mut SystemAccessLogContext<'_>,
   request_connection_permit: &mut Option<ConnectionPermit>,
 ) -> Response<ProxyBody>
 where
@@ -1853,7 +1843,7 @@ async fn handle_connect_request(
   connection_limit_context: Option<&ConnectionLimitContext>,
   request_connection_permit: &mut Option<ConnectionPermit>,
   drain: ConnectionDrain,
-  access_log: &mut SystemAccessLogContext,
+  access_log: &mut SystemAccessLogContext<'_>,
 ) -> Response<ProxyBody> {
   if !state.config.proxy.upgrades.connect_tunneling || !resolved.route.connect_tunneling {
     return text_response(
@@ -2143,7 +2133,7 @@ async fn handle_upgrade_request(
   connection_limit_context: Option<&ConnectionLimitContext>,
   request_connection_permit: &mut Option<ConnectionPermit>,
   drain: ConnectionDrain,
-  access_log: &mut SystemAccessLogContext,
+  access_log: &mut SystemAccessLogContext<'_>,
 ) -> Option<Response<ProxyBody>> {
   if request.version() != http::Version::HTTP_11 {
     return Some(text_response(

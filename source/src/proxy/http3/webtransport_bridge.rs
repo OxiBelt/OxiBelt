@@ -15,8 +15,8 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 
 use super::{
-  H3BidiStream, H3RequestStream, H3ServerConnection, handle_h3_request, is_webtransport_request,
-  rejects_unsafe_early_data, respond_to_h3_request,
+  H3BidiStream, H3DownstreamRequestContext, H3RequestStream, H3ServerConnection, handle_h3_request,
+  is_webtransport_request, rejects_unsafe_early_data, respond_to_h3_request,
 };
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
@@ -267,17 +267,15 @@ async fn handle_downstream_request(
     )
     .await?;
   } else {
-    let status = handle_h3_request(
-      request,
-      stream,
+    let context = H3DownstreamRequestContext {
       peer_addr,
       udp_connection_id,
       tls_metadata,
       connection_limit_context,
       state,
       drain,
-    )
-    .await?;
+    };
+    let status = handle_h3_request(request, stream, context).await?;
     debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
   }
 

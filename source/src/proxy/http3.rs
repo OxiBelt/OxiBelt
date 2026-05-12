@@ -34,6 +34,16 @@ const H3_BODY_CHANNEL_CAPACITY: usize = 16;
 
 mod webtransport_bridge;
 
+#[derive(Clone)]
+pub(super) struct H3DownstreamRequestContext {
+  peer_addr: SocketAddr,
+  udp_connection_id: Arc<str>,
+  tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
+  state: AppHandle,
+  drain: ConnectionDrain,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct UpstreamH3Pools {
   by_upstream: HashMap<String, Arc<UpstreamH3Pool>>,
@@ -352,17 +362,15 @@ pub(crate) async fn handle_downstream_connection(
       return Ok(());
     }
 
-    let status = handle_h3_request(
-      request,
-      stream,
+    let context = H3DownstreamRequestContext {
       peer_addr,
-      udp_connection_id.clone(),
-      tls_metadata.clone(),
-      connection_limit_context.clone(),
-      state.clone(),
-      drain.clone(),
-    )
-    .await?;
+      udp_connection_id: udp_connection_id.clone(),
+      tls_metadata: tls_metadata.clone(),
+      connection_limit_context: connection_limit_context.clone(),
+      state: state.clone(),
+      drain: drain.clone(),
+    };
+    let status = handle_h3_request(request, stream, context).await?;
     debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
   }
 }
@@ -544,22 +552,17 @@ where
 async fn handle_h3_request(
   request: Request<()>,
   stream: H3RequestStream,
-  peer_addr: SocketAddr,
-  udp_connection_id: Arc<str>,
-  tls_metadata: Arc<crate::waf::WafTlsMetadata>,
-  connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
-  drain: ConnectionDrain,
+  context: H3DownstreamRequestContext,
 ) -> anyhow::Result<StatusCode> {
   let (request, stream_receiver) = stream_h3_request_body(request, stream);
   let response = http_proxy::handle_http3(
     request,
-    peer_addr,
-    udp_connection_id.as_ref(),
-    tls_metadata,
-    connection_limit_context,
-    state,
-    drain,
+    context.peer_addr,
+    context.udp_connection_id.as_ref(),
+    context.tls_metadata,
+    context.connection_limit_context,
+    context.state,
+    context.drain,
   )
   .await;
   let status = response.status();
