@@ -215,6 +215,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "docker-alpine-musl-image-other",
         "docker-integration-matrix",
         "browser-webdriver",
+        "docker-performance",
     ];
 
     assert_eq!(

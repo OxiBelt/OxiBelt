@@ -163,9 +163,11 @@ Docker and integration checks:
 ```sh
 tests/scripts/build-targets.sh
 tests/scripts/run-proxy-integration.sh
+tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,nginx,caddy
 ```
 
 `tests/scripts/run-proxy-integration.sh` generates fresh TLS material for each run and cleans up test resources. The Docker matrix also covers reload behavior and browser-visible behavior where applicable.
+`tests/scripts/run-proxy-performance.sh` runs Docker-network performance smoke, benchmark, or soak profiles and writes `summary.md`, `results.json`, per-container logs, generated configs, and sampled Docker stats. See [docs/Performance.md](docs/Performance.md) for profile details and result interpretation.
 
 ## Current Non-Goals
 

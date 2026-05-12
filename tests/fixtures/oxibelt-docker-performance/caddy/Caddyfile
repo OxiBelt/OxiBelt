@@ -1,0 +1,17 @@
+{
+  admin off
+  auto_https off
+
+  servers :8443 {
+    protocols h1 h2 h3
+  }
+}
+
+:8443 {
+  tls /etc/caddy/fullchain.pem /etc/caddy/privkey.pem
+  reverse_proxy perf-upstream:18080
+}
+
+:8080 {
+  reverse_proxy perf-upstream:18080
+}
