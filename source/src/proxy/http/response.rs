@@ -6,7 +6,8 @@ use http_body_util::{BodyExt, Empty, Full};
 use crate::state::AppSnapshot;
 use crate::waf::{
   HeaderMutation, WafBodyInput, WafRequestInput, WafResponseInput, WafTerminalResponse,
-  WafTlsMetadata, WafTransportNetwork, WafUpstreamError, apply_header_mutations,
+  WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, WafUpstreamError,
+  apply_header_mutations,
 };
 
 use super::SystemAccessLogContext;
@@ -46,6 +47,7 @@ pub(super) fn upstream_error_response(
   tls: &WafTlsMetadata,
   protocol: crate::waf::WafProtocol,
   transport_network: WafTransportNetwork,
+  transport_metadata: WafTransportMetadataInput<'_>,
   request_body: Option<WafBodyInput<'_>>,
   tags: &std::collections::HashMap<String, String>,
   upstream_name: &str,
@@ -100,6 +102,7 @@ pub(super) fn upstream_error_response(
     tls,
     protocol,
     transport_network,
+    transport_metadata,
     tags,
     dynamic_policy: &access_log.dynamic_policy,
   };

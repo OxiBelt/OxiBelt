@@ -1959,6 +1959,7 @@ pub struct WafRequestInput<'a> {
   pub tls: &'a WafTlsMetadata,
   pub protocol: WafProtocol,
   pub transport_network: WafTransportNetwork,
+  pub transport_metadata: WafTransportMetadataInput<'a>,
   pub tags: &'a HashMap<String, String>,
   pub dynamic_policy: &'a DynamicPolicyContext,
 }
@@ -2012,6 +2013,14 @@ impl WafTransportNetwork {
       Self::Udp => "udp",
     }
   }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WafTransportMetadataInput<'a> {
+  pub tcp_mss: Option<u32>,
+  pub tcp_rtt_ms: Option<u64>,
+  pub udp_datagram_size: Option<usize>,
+  pub udp_connection_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2655,7 +2664,14 @@ impl AccessLogJsonValue {
       ),
       ObjectRef::RequestTransport => object_members_json(
         object,
-        &["Network", "RemoteIp", "RemotePort", "IsEncrypted"],
+        &[
+          "Network",
+          "RemoteIp",
+          "RemotePort",
+          "IsEncrypted",
+          "Tcp",
+          "Udp",
+        ],
         ctx,
       ),
       ObjectRef::RequestTransportTcp => {
@@ -3938,12 +3954,41 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         .map(|value| Value::String(value.clone()))
         .unwrap_or(Value::Null),
     ),
-    (ObjectRef::RequestTransportTcp, "Mss") | (ObjectRef::RequestTransportTcp, "RttMs") => {
-      Ok(Value::Null)
-    }
-    (ObjectRef::RequestTransportUdp, "DatagramSize")
-    | (ObjectRef::RequestTransportUdp, "FlowId")
-    | (ObjectRef::RequestTransportUdp, "ConnectionId") => Ok(Value::Null),
+    (ObjectRef::RequestTransportTcp, "Mss") => Ok(
+      ctx
+        .request
+        .transport_metadata
+        .tcp_mss
+        .map(|mss| Value::Int(i64::from(mss)))
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTransportTcp, "RttMs") => Ok(
+      ctx
+        .request
+        .transport_metadata
+        .tcp_rtt_ms
+        .and_then(|rtt| i64::try_from(rtt).ok())
+        .map(Value::Int)
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTransportUdp, "DatagramSize") => Ok(
+      ctx
+        .request
+        .transport_metadata
+        .udp_datagram_size
+        .and_then(|size| i64::try_from(size).ok())
+        .map(Value::Int)
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestTransportUdp, "FlowId") => Ok(Value::Null),
+    (ObjectRef::RequestTransportUdp, "ConnectionId") => Ok(
+      ctx
+        .request
+        .transport_metadata
+        .udp_connection_id
+        .map(|id| Value::String(id.to_string()))
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::RequestTransportUdp, "QuicDetected") => Ok(Value::Bool(true)),
     (ObjectRef::RequestNormalized, "Http") => Ok(Value::Object(ObjectRef::RequestNormalizedHttp)),
     (ObjectRef::RequestNormalized, "Headers") => {

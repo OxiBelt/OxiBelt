@@ -30,7 +30,8 @@ use crate::state::AppSnapshot;
 use crate::waf::{
   WafBodyInput, WafProtocol, WafRequestInput, WafStreamClose, WafStreamDecision,
   WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata,
-  WafTransportNetwork, WafWebSocketStreamMetadata, WafWebTransportStreamMetadata,
+  WafTransportMetadataInput, WafTransportNetwork, WafWebSocketStreamMetadata,
+  WafWebTransportStreamMetadata,
 };
 
 #[derive(Clone)]
@@ -50,6 +51,10 @@ pub(crate) struct StreamWafRequestContext {
   tls: Arc<WafTlsMetadata>,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
+  tcp_mss: Option<u32>,
+  tcp_rtt_ms: Option<u64>,
+  udp_datagram_size: Option<usize>,
+  udp_connection_id: Option<String>,
   tags: HashMap<String, String>,
   dynamic_policy: DynamicPolicyContext,
   max_payload_bytes: usize,
@@ -71,6 +76,10 @@ pub(crate) struct StreamWafRequestSeed {
   pub(crate) tls: Arc<WafTlsMetadata>,
   pub(crate) protocol: WafProtocol,
   pub(crate) transport_network: WafTransportNetwork,
+  pub(crate) tcp_mss: Option<u32>,
+  pub(crate) tcp_rtt_ms: Option<u64>,
+  pub(crate) udp_datagram_size: Option<usize>,
+  pub(crate) udp_connection_id: Option<String>,
   pub(crate) tags: HashMap<String, String>,
   pub(crate) dynamic_policy: DynamicPolicyContext,
 }
@@ -97,6 +106,10 @@ impl StreamWafRequestContext {
       tls: seed.tls,
       protocol: seed.protocol,
       transport_network: seed.transport_network,
+      tcp_mss: seed.tcp_mss,
+      tcp_rtt_ms: seed.tcp_rtt_ms,
+      udp_datagram_size: seed.udp_datagram_size,
+      udp_connection_id: seed.udp_connection_id,
       tags: seed.tags,
       dynamic_policy: seed.dynamic_policy,
       max_payload_bytes: state.config.waf.limits.max_body_inspection_bytes,
@@ -125,6 +138,12 @@ impl StreamWafRequestContext {
       tls: self.tls.as_ref(),
       protocol: self.protocol,
       transport_network: self.transport_network,
+      transport_metadata: WafTransportMetadataInput {
+        tcp_mss: self.tcp_mss,
+        tcp_rtt_ms: self.tcp_rtt_ms,
+        udp_datagram_size: self.udp_datagram_size,
+        udp_connection_id: self.udp_connection_id.as_deref(),
+      },
       tags: &self.tags,
       dynamic_policy: &self.dynamic_policy,
     }

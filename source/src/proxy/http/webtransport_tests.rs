@@ -12,7 +12,7 @@ use pretty_assertions::assert_eq;
 use super::prepare_webtransport;
 use crate::config::Config;
 use crate::state::AppSnapshot;
-use crate::waf::WafTlsMetadata;
+use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 fn parse_config(raw: &str) -> Config {
   let config: Config = toml::from_str(raw).expect("config should parse");
@@ -77,6 +77,7 @@ upstream = "app"
   let prepared = prepare_webtransport(
     &webtransport_request(),
     "203.0.113.10:45678".parse().unwrap(),
+    WafTransportMetadataInput::default(),
     &WafTlsMetadata::default(),
     &state,
   )
@@ -132,6 +133,7 @@ upstream_pool = "app-pool"
   let response = match prepare_webtransport(
     &webtransport_request(),
     "203.0.113.10:45678".parse().unwrap(),
+    WafTransportMetadataInput::default(),
     &WafTlsMetadata::default(),
     &state,
   ) {

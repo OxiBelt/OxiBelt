@@ -140,6 +140,7 @@ pub(super) async fn accept_webtransport_session(
   request: Request<()>,
   mut stream: H3RequestStream,
   peer_addr: SocketAddr,
+  udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
@@ -151,6 +152,10 @@ pub(super) async fn accept_webtransport_session(
   let mut prepared = match http_proxy::prepare_webtransport(
     &request,
     peer_addr,
+    crate::waf::WafTransportMetadataInput {
+      udp_connection_id: Some(udp_connection_id.as_ref()),
+      ..crate::waf::WafTransportMetadataInput::default()
+    },
     tls_metadata.as_ref(),
     snapshot.as_ref(),
   ) {

@@ -11,8 +11,9 @@ use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
     HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput, WafResponseInput,
     WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata,
-    WafTransportNetwork, WafWebSocketStreamMetadata, WafWebTransportStreamKind,
-    WafWebTransportStreamMetadata, compile_access_log_fields, crs_compatibility_matrix,
+    WafTransportMetadataInput, WafTransportNetwork, WafWebSocketStreamMetadata,
+    WafWebTransportStreamKind, WafWebTransportStreamMetadata, compile_access_log_fields,
+    crs_compatibility_matrix,
 };
 use ring::digest;
 
@@ -2645,6 +2646,55 @@ body = "blocked transport TLS metadata"
 }
 
 #[test]
+fn request_rule_can_match_tcp_mss_and_rtt_metadata() {
+    let temp_dir = common::TempDir::new("waf-tcp-socket-metadata");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-tcp-socket-metadata");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "reject-tcp-socket-metadata"
+phase = "request"
+priority = 10
+when = "Request.Transport.Tcp.Mss == 1460 && Request.Transport.Tcp.RttMs == 12"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked TCP socket metadata"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let mut input = request_input(&method, &uri, &headers, &tags, peer_addr);
+    input.transport_metadata = WafTransportMetadataInput {
+        tcp_mss: Some(1460),
+        tcp_rtt_ms: Some(12),
+        ..WafTransportMetadataInput::default()
+    };
+
+    let rejected = engine.evaluate_request(input);
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn request_rule_can_match_webtransport_udp_metadata() {
     let temp_dir = common::TempDir::new("waf-webtransport-udp");
     let (cert_path, key_path) =
@@ -2704,6 +2754,72 @@ body = "webtransport blocked"
     assert_eq!(
         rejected.terminal.as_ref().map(|terminal| terminal.status),
         Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn request_rule_can_match_udp_connection_id_and_null_datagram_size() {
+    let temp_dir = common::TempDir::new("waf-udp-connection-id");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-udp-connection-id");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "reject-udp-connection-id"
+phase = "request"
+priority = 10
+when = "Request.Transport.Udp.ConnectionId == 'quinn-stable:7' && Request.Transport.Udp.DatagramSize == null"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "blocked UDP connection id"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::GET;
+    let uri: Uri = "https://example.com/h3".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let tls = WafTlsMetadata {
+        enabled: true,
+        version: Some("TLSv1_3".to_string()),
+        cipher_suite: None,
+        sni: Some("example.com".to_string()),
+        alpn: Some("h3".to_string()),
+        fingerprint: Some("quic-fingerprint".to_string()),
+        fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
+    };
+    let mut input = request_input_with_protocol_and_network(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        &tls,
+        WafProtocol::Http,
+        WafTransportNetwork::Udp,
+    );
+    input.transport_metadata = WafTransportMetadataInput {
+        udp_connection_id: Some("quinn-stable:7"),
+        ..WafTransportMetadataInput::default()
+    };
+
+    let rejected = engine.evaluate_request(input);
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
     );
 }
 
@@ -2959,6 +3075,10 @@ name = "body_bytes"
 value = "Response.Body.Size"
 
 [[waf.rules.actions.fields]]
+name = "transport"
+value = "Request.Transport"
+
+[[waf.rules.actions.fields]]
 name = "upstream_name"
 value = "Response.Upstream.Name"
 
@@ -2982,15 +3102,21 @@ value = "Context.RuleName"
     let uri: Uri = "/search?q=one%20two".parse().expect("URI should parse");
     let mut response_headers = HeaderMap::new();
     response_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("12"));
+    let mut request = request_input(
+        &method,
+        &uri,
+        &request_headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    );
+    request.transport_metadata = WafTransportMetadataInput {
+        tcp_mss: Some(1460),
+        tcp_rtt_ms: Some(12),
+        ..WafTransportMetadataInput::default()
+    };
 
     let response_decision = engine.evaluate_response(WafResponseInput {
-        request: request_input(
-            &method,
-            &uri,
-            &request_headers,
-            &tags,
-            "203.0.113.10:49152".parse().unwrap(),
-        ),
+        request,
         response_id: "test-response-id",
         received_at_unix_ms: 1_700_000_000_123,
         version: http::Version::HTTP_11,
@@ -3014,6 +3140,7 @@ value = "Context.RuleName"
     assert!(line.contains("\"agent\":\"curl/8.0 \\\"quoted\\\"\""));
     assert!(line.contains("\"status_code\":201"));
     assert!(line.contains("\"body_bytes\":12"));
+    assert!(line.contains("\"transport\":{\"network\":\"tcp\",\"remoteip\":\"203.0.113.10\",\"remoteport\":49152,\"isencrypted\":true,\"tcp\":{\"sni\":null,\"alpn\":null,\"maxhop\":null,\"mss\":1460,\"rttms\":12},\"udp\":null}"));
     assert!(line.contains("\"upstream_name\":\"app\""));
     assert!(line.contains("\"matched_rule\":\"stdout-access\""));
     assert!(!line.contains("\"client_ip\":"));
@@ -5138,6 +5265,7 @@ fn request_input_with_transport<'a>(
         tls,
         protocol: WafProtocol::Http,
         transport_network: WafTransportNetwork::Tcp,
+        transport_metadata: WafTransportMetadataInput::default(),
         tags,
         dynamic_policy: test_dynamic_policy(),
     }
@@ -5171,6 +5299,7 @@ fn request_input_with_protocol_and_network<'a>(
         tls,
         protocol,
         transport_network,
+        transport_metadata: WafTransportMetadataInput::default(),
         tags,
         dynamic_policy: test_dynamic_policy(),
     }

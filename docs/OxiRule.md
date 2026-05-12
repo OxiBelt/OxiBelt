@@ -598,6 +598,8 @@ UdpMetadata.QuicDetected: Bool
 UdpMetadata.ConnectionId: String | Null
 ```
 
+`TcpMetadata.Mss` is populated from the accepted TCP socket's maximum segment size where the platform exposes it. `TcpMetadata.RttMs` is populated from Linux `TCP_INFO` RTT in milliseconds; unsupported platforms or socket option failures evaluate to `null`. `UdpMetadata.ConnectionId` is an OxiBelt-local QUIC connection identifier in the form `quinn-stable:<id>` when available. It is not the wire QUIC connection ID. Request-level `UdpMetadata.DatagramSize` is reserved because a single HTTP/3 request does not map cleanly to one UDP datagram; WebTransport datagram payload size is exposed separately as `Stream.WebTransport.DatagramSize`.
+
 ```text
 HttpRequestMetadata.Version: '1.0' | '1.1' | '2' | '3'
 HttpRequestMetadata.Method: String
@@ -668,7 +670,7 @@ Current implementation notes:
 - HTTP/3 TLS fingerprints use the `quinn-rustls-quic-v2` scheme.
 - `Request.Id`, `Response.Id`, `Context.TransactionId`, request/response receive timestamps, and upstream first-byte timing are populated for HTTP request-wide and OxiRule access-log contexts.
 - Upstream connect timing is populated only where the proxy can measure it directly; otherwise it evaluates to `null`.
-- Some local endpoint fields, connection IDs, byte counters, UDP datagram sizes, TCP MSS, and RTT fields are reserved and may evaluate to `null`.
+- Some local endpoint fields, byte counters, request-level UDP datagram sizes, TCP socket metadata, and unavailable connection identifiers are reserved and may evaluate to `null`.
 
 ## Bounded Helpers
 

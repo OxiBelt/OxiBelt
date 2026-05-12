@@ -23,7 +23,8 @@ use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
 use crate::waf::{
   WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
-  WafTransportNetwork, WafUpstreamError, apply_header_mutations, request_protocol,
+  WafTransportMetadataInput, WafTransportNetwork, WafUpstreamError, apply_header_mutations,
+  request_protocol,
 };
 
 pub(crate) mod body;
@@ -71,6 +72,10 @@ struct SystemAccessLogContext {
   tls: Arc<WafTlsMetadata>,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
+  tcp_mss: Option<u32>,
+  tcp_rtt_ms: Option<u64>,
+  udp_datagram_size: Option<usize>,
+  udp_connection_id: Option<String>,
   tags: std::collections::HashMap<String, String>,
   dynamic_policy: DynamicPolicyContext,
   upstream_name: String,
@@ -90,6 +95,7 @@ impl SystemAccessLogContext {
     tls: Arc<WafTlsMetadata>,
     protocol: WafProtocol,
     transport_network: WafTransportNetwork,
+    transport_metadata: WafTransportMetadataInput<'_>,
     downstream_scheme: &'static str,
   ) -> Self {
     Self {
@@ -110,6 +116,10 @@ impl SystemAccessLogContext {
       tls,
       protocol,
       transport_network,
+      tcp_mss: transport_metadata.tcp_mss,
+      tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
+      udp_datagram_size: transport_metadata.udp_datagram_size,
+      udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
       tags: std::collections::HashMap::new(),
       dynamic_policy: DynamicPolicyContext::default(),
       upstream_name: String::new(),
@@ -140,6 +150,12 @@ impl SystemAccessLogContext {
       tls: self.tls.as_ref(),
       protocol: self.protocol,
       transport_network: self.transport_network,
+      transport_metadata: WafTransportMetadataInput {
+        tcp_mss: self.tcp_mss,
+        tcp_rtt_ms: self.tcp_rtt_ms,
+        udp_datagram_size: self.udp_datagram_size,
+        udp_connection_id: self.udp_connection_id.as_deref(),
+      },
       tags: &self.tags,
       dynamic_policy: &self.dynamic_policy,
     }
@@ -284,6 +300,7 @@ pub(crate) async fn handle(
   request: Request<Incoming>,
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
+  transport_metadata: WafTransportMetadataInput<'static>,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
@@ -295,6 +312,7 @@ pub(crate) async fn handle(
     request,
     peer_addr,
     tcp_max_hop,
+    transport_metadata,
     tls,
     connection_limit_context,
     state,
@@ -310,6 +328,7 @@ pub(crate) async fn handle(
 pub(crate) async fn handle_http3(
   request: Request<ProxyBody>,
   peer_addr: std::net::SocketAddr,
+  udp_connection_id: &str,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
@@ -319,6 +338,10 @@ pub(crate) async fn handle_http3(
     request,
     peer_addr,
     None,
+    WafTransportMetadataInput {
+      udp_connection_id: Some(udp_connection_id),
+      ..WafTransportMetadataInput::default()
+    },
     tls,
     connection_limit_context,
     state,
@@ -336,6 +359,7 @@ async fn handle_inner<B>(
   request: Request<B>,
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
+  transport_metadata: WafTransportMetadataInput<'_>,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
@@ -357,6 +381,7 @@ where
     tls.clone(),
     protocol,
     transport_network,
+    transport_metadata,
     downstream_scheme,
   );
   let mut request_connection_permit = None;
@@ -364,6 +389,7 @@ where
     request,
     peer_addr,
     tcp_max_hop,
+    transport_metadata,
     tls,
     connection_limit_context,
     state.clone(),
@@ -390,6 +416,7 @@ async fn handle_inner_impl<B>(
   request: Request<B>,
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
+  transport_metadata: WafTransportMetadataInput<'_>,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: Arc<AppSnapshot>,
@@ -576,6 +603,7 @@ where
     tls: tls.as_ref(),
     protocol,
     transport_network,
+    transport_metadata,
     tags: &tags,
     dynamic_policy: &access_log.dynamic_policy,
   });
@@ -625,6 +653,10 @@ where
         tls: tls.clone(),
         protocol,
         transport_network,
+        tcp_mss: transport_metadata.tcp_mss,
+        tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
+        udp_datagram_size: transport_metadata.udp_datagram_size,
+        udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
         tags: tags.clone(),
         dynamic_policy: access_log.dynamic_policy.clone(),
       },
@@ -1171,6 +1203,7 @@ where
           tls.as_ref(),
           protocol,
           transport_network,
+          transport_metadata,
           request_body,
           &tags,
           &upstream.name,
@@ -1218,6 +1251,7 @@ where
           tls.as_ref(),
           protocol,
           transport_network,
+          transport_metadata,
           request_body,
           &tags,
           &upstream.name,
@@ -1330,6 +1364,7 @@ where
           tls.as_ref(),
           protocol,
           transport_network,
+          transport_metadata,
           request_body,
           &tags,
           &upstream.name,
@@ -1467,6 +1502,7 @@ where
       tls: tls.as_ref(),
       protocol,
       transport_network,
+      transport_metadata,
       tags: &tags,
       dynamic_policy: &access_log.dynamic_policy,
     };
@@ -2998,6 +3034,7 @@ pub(crate) struct PreparedWebTransport {
 pub(crate) fn prepare_webtransport(
   request: &Request<()>,
   peer_addr: std::net::SocketAddr,
+  transport_metadata: WafTransportMetadataInput<'_>,
   tls: &WafTlsMetadata,
   state: &AppSnapshot,
 ) -> Result<PreparedWebTransport, Box<Response<ProxyBody>>> {
@@ -3069,6 +3106,7 @@ pub(crate) fn prepare_webtransport(
     tls,
     protocol: WafProtocol::Webtransport,
     transport_network: WafTransportNetwork::Udp,
+    transport_metadata,
     tags: &tags,
     dynamic_policy: &dynamic_policy_context,
   });
@@ -3095,6 +3133,10 @@ pub(crate) fn prepare_webtransport(
       tls: Arc::new(tls.clone()),
       protocol: WafProtocol::Webtransport,
       transport_network: WafTransportNetwork::Udp,
+      tcp_mss: transport_metadata.tcp_mss,
+      tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
+      udp_datagram_size: transport_metadata.udp_datagram_size,
+      udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
       tags: tags.clone(),
       dynamic_policy: dynamic_policy_context.clone(),
     },

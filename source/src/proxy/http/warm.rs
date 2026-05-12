@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 use crate::lifecycle::ConnectionDrain;
 use crate::state::AppHandle;
-use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportNetwork};
+use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 
 use super::{full_body, handle_inner};
 
@@ -61,6 +61,7 @@ pub(crate) async fn warm_cache_request(
     request,
     peer_addr,
     None,
+    WafTransportMetadataInput::default(),
     tls,
     None,
     state.clone(),

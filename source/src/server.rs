@@ -40,7 +40,7 @@ use crate::stream::{BoundStreamListener, StreamListenerTask};
 use crate::tcp_hop;
 use crate::turn::{BoundTurnListener, TurnListenerTask};
 use crate::upstream_control;
-use crate::waf::WafTlsMetadata;
+use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod admin;
 use admin::json_response;
@@ -2002,6 +2002,12 @@ async fn handle_connection(
     tls_stream.get_ref().1,
     &client_hello_metadata,
   ));
+  let tcp_metadata = tcp_hop::transport_metadata(tls_stream.get_ref().0);
+  let transport_metadata = WafTransportMetadataInput {
+    tcp_mss: tcp_metadata.mss,
+    tcp_rtt_ms: tcp_metadata.rtt_ms,
+    ..WafTransportMetadataInput::default()
+  };
 
   let request_count = Arc::new(AtomicUsize::new(0));
   let service = service_fn(move |request: hyper::Request<Incoming>| {
@@ -2024,6 +2030,7 @@ async fn handle_connection(
             request,
             peer_addr,
             tcp_max_hop,
+            transport_metadata,
             tls_metadata,
             connection_limit_context.clone(),
             state,
@@ -2122,6 +2129,12 @@ async fn handle_plain_http_connection(
   let connection_limit_context =
     (connection_limit_identity == ConnectionLimitIdentityMode::FirstRequestRealIp && proxy_mode)
       .then(ConnectionLimitContext::default);
+  let tcp_metadata = tcp_hop::transport_metadata(&stream);
+  let transport_metadata = WafTransportMetadataInput {
+    tcp_mss: tcp_metadata.mss,
+    tcp_rtt_ms: tcp_metadata.rtt_ms,
+    ..WafTransportMetadataInput::default()
+  };
   let request_count = Arc::new(AtomicUsize::new(0));
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
@@ -2144,6 +2157,7 @@ async fn handle_plain_http_connection(
               request,
               peer_addr,
               None,
+              transport_metadata,
               Arc::new(WafTlsMetadata::default()),
               connection_limit_context.clone(),
               state,

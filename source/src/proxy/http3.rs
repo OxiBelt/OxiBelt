@@ -258,6 +258,7 @@ pub(crate) async fn handle_downstream_connection(
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let peer_addr = connection.remote_address();
+  let udp_connection_id: Arc<str> = format!("quinn-stable:{}", connection.stable_id()).into();
   let snapshot = state.snapshot();
   let _global_permit = snapshot
     .limits
@@ -339,6 +340,7 @@ pub(crate) async fn handle_downstream_connection(
         request,
         stream,
         peer_addr,
+        udp_connection_id.clone(),
         tls_metadata,
         connection_limit_context.clone(),
         state,
@@ -354,6 +356,7 @@ pub(crate) async fn handle_downstream_connection(
       request,
       stream,
       peer_addr,
+      udp_connection_id.clone(),
       tls_metadata.clone(),
       connection_limit_context.clone(),
       state.clone(),
@@ -542,6 +545,7 @@ async fn handle_h3_request(
   request: Request<()>,
   stream: H3RequestStream,
   peer_addr: SocketAddr,
+  udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: AppHandle,
@@ -551,6 +555,7 @@ async fn handle_h3_request(
   let response = http_proxy::handle_http3(
     request,
     peer_addr,
+    udp_connection_id.as_ref(),
     tls_metadata,
     connection_limit_context,
     state,
