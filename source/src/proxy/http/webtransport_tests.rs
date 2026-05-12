@@ -78,7 +78,6 @@ upstream = "app"
     &webtransport_request(),
     "203.0.113.10:45678".parse().unwrap(),
     &WafTlsMetadata::default(),
-    None,
     &state,
   )
   .expect("direct WebTransport route should prepare");
@@ -134,7 +133,6 @@ upstream_pool = "app-pool"
     &webtransport_request(),
     "203.0.113.10:45678".parse().unwrap(),
     &WafTlsMetadata::default(),
-    None,
     &state,
   ) {
     Ok(_) => panic!("pool route should be rejected with a response, not panic"),

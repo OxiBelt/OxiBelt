@@ -39,6 +39,7 @@ h2_container="oxibelt-h2-${run_id}"
 h2c_container="oxibelt-h2c-${run_id}"
 h1_stall_container="oxibelt-h1-stall-${run_id}"
 h3_container="oxibelt-h3-${run_id}"
+webtransport_container="oxibelt-webtransport-${run_id}"
 dns_container="oxibelt-dns-${run_id}"
 postgres_container="oxibelt-postgres-${run_id}"
 redis_container="oxibelt-redis-${run_id}"
@@ -80,6 +81,7 @@ collect_diagnostics() {
   docker logs "${h2c_container}" >"${logs_dir}/mock-h2c.log" 2>&1 || true
   docker logs "${h1_stall_container}" >"${logs_dir}/mock-h1-stall.log" 2>&1 || true
   docker logs "${h3_container}" >"${logs_dir}/mock-h3.log" 2>&1 || true
+  docker logs "${webtransport_container}" >"${logs_dir}/mock-webtransport.log" 2>&1 || true
   docker logs "${dns_container}" >"${logs_dir}/mock-dns.log" 2>&1 || true
   docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
   docker logs "${redis_container}" >"${logs_dir}/redis.log" 2>&1 || true
@@ -1034,6 +1036,48 @@ protocol_probe_generated_body_request() {
   fail_with_diagnostics "protocol probe generated-body request failed"
 }
 
+protocol_probe_webtransport_multiplex() {
+  local authority="$1"
+  local path="$2"
+  local sessions="$3"
+  local expect_statuses="$4"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for _attempt in $(seq 1 30); do
+    client_container="oxibelt-webtransport-client-${run_id}-${RANDOM}"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      webtransport-multiplex \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --sessions "${sessions}" \
+      --expect-statuses "${expect_statuses}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "WebTransport multiplex probe failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "WebTransport multiplex probe did not reach expected statuses ${expect_statuses}"
+}
+
 postgres_query() {
   local sql="$1"
   docker exec \
@@ -1108,6 +1152,7 @@ extendedKeyUsage = serverAuth
 DNS.1 = mock-https
 DNS.2 = mock-h2
 DNS.3 = mock-h3
+DNS.4 = mock-webtransport
 EOF
 
 cat >"${work_dir}/downstream.cnf" <<'EOF'
@@ -1267,7 +1312,7 @@ if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
     "${repo_root}/tests/docker/pq_probe" >/dev/null
 fi
 
-if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then
+if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" || "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
   docker build \
     -t "${protocol_probe_image}" \
     -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
@@ -1405,6 +1450,23 @@ if [[ "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then
   docker cp "${upstream_tls_dir}/server.pem" "${h3_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${h3_container}:/tls/server.key"
   docker start "${h3_container}" >/dev/null
+fi
+
+if [[ "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
+  docker create \
+    --name "${webtransport_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-webtransport \
+    "${protocol_probe_image}" \
+    webtransport-upstream \
+    --listen 0.0.0.0:18446 \
+    --cert /tls/server.pem \
+    --key /tls/server.key \
+    --name webtransport-upstream >/dev/null
+  docker cp "${upstream_tls_dir}/server.pem" "${webtransport_container}:/tls/server.pem"
+  docker cp "${upstream_tls_dir}/server.key" "${webtransport_container}:/tls/server.key"
+  docker start "${webtransport_container}" >/dev/null
 fi
 
 proxy_dns_args=()

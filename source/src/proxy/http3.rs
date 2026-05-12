@@ -281,6 +281,10 @@ pub(crate) async fn handle_downstream_connection(
   let connection_limit_context = (connection_limit_identity
     == ConnectionLimitIdentityMode::FirstRequestRealIp)
     .then(ConnectionLimitContext::default);
+  let max_webtransport_sessions_per_connection = snapshot
+    .config
+    .limits
+    .max_webtransport_sessions_per_connection;
   drop(snapshot);
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
   let early_data = crate::quic::h3::EarlyDataTracker::default();
@@ -289,7 +293,7 @@ pub(crate) async fn handle_downstream_connection(
     .enable_extended_connect(true)
     .enable_datagram(true)
     .enable_webtransport(true)
-    .max_webtransport_sessions(256)
+    .max_webtransport_sessions(max_webtransport_sessions_per_connection as u64)
     .build(quic_connection)
     .await
     .context("failed to establish downstream HTTP/3 connection")?;

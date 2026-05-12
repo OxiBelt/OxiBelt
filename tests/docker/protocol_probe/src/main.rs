@@ -75,6 +75,13 @@ struct H3UpstreamArgs {
     name: String,
 }
 
+struct WebTransportUpstreamArgs {
+    listen: SocketAddr,
+    cert: String,
+    key: String,
+    name: String,
+}
+
 struct DownstreamArgs {
     protocol: DownstreamProtocol,
     host: String,
@@ -90,6 +97,17 @@ struct DownstreamArgs {
     headers: HeaderMap,
     ca_cert: String,
     expect_status: Option<u16>,
+}
+
+struct WebTransportMultiplexArgs {
+    host: String,
+    port: u16,
+    server_name: String,
+    authority: String,
+    path: String,
+    ca_cert: String,
+    sessions: usize,
+    expect_statuses: Vec<u16>,
 }
 
 impl DownstreamArgs {
@@ -111,7 +129,13 @@ async fn main() -> anyhow::Result<()> {
         "h2c-upstream" => serve_h2c_upstream(parse_h2c_upstream_args(args)?).await,
         "h1-stall-upstream" => serve_h1_stall_upstream(parse_h1_stall_upstream_args(args)?).await,
         "h3-upstream" => serve_h3_upstream(parse_h3_upstream_args(args)?).await,
+        "webtransport-upstream" => {
+            serve_webtransport_upstream(parse_webtransport_upstream_args(args)?).await
+        }
         "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
+        "webtransport-multiplex" => {
+            run_webtransport_multiplex_client(parse_webtransport_multiplex_args(args)?).await
+        }
         _ => {
             usage();
             bail!("unknown command: {command}");
@@ -121,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]"
+    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv>"
   );
 }
 
@@ -212,6 +236,78 @@ fn parse_h3_upstream_args(args: impl Iterator<Item = String>) -> anyhow::Result<
         cert: parsed.cert,
         key: parsed.key,
         name: parsed.name,
+    })
+}
+
+fn parse_webtransport_upstream_args(
+    args: impl Iterator<Item = String>,
+) -> anyhow::Result<WebTransportUpstreamArgs> {
+    let parsed = parse_h2_upstream_args(args)?;
+    Ok(WebTransportUpstreamArgs {
+        listen: parsed.listen,
+        cert: parsed.cert,
+        key: parsed.key,
+        name: parsed.name,
+    })
+}
+
+fn parse_webtransport_multiplex_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<WebTransportMultiplexArgs> {
+    let mut host = None;
+    let mut port = None;
+    let mut server_name = None;
+    let mut authority = None;
+    let mut path = None;
+    let mut ca_cert = None;
+    let mut sessions = None;
+    let mut expect_statuses = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--host" => host = Some(value),
+            "--port" => port = Some(value.parse().context("invalid --port value")?),
+            "--server-name" => server_name = Some(value),
+            "--authority" => authority = Some(value),
+            "--path" => path = Some(validate_origin_form_path(&value)?),
+            "--ca-cert" => ca_cert = Some(value),
+            "--sessions" => {
+                let parsed = value.parse().context("invalid --sessions value")?;
+                if parsed == 0 {
+                    bail!("--sessions must be greater than zero");
+                }
+                sessions = Some(parsed);
+            }
+            "--expect-statuses" => {
+                let parsed = value
+                    .split(',')
+                    .map(|item| item.parse().context("invalid --expect-statuses value"))
+                    .collect::<anyhow::Result<Vec<u16>>>()?;
+                expect_statuses = Some(parsed);
+            }
+            _ => bail!("unknown webtransport-multiplex flag: {flag}"),
+        }
+    }
+
+    let sessions = sessions.ok_or_else(|| anyhow!("--sessions is required"))?;
+    let expect_statuses =
+        expect_statuses.ok_or_else(|| anyhow!("--expect-statuses is required"))?;
+    if expect_statuses.len() != sessions {
+        bail!("--expect-statuses count must match --sessions");
+    }
+    let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+    Ok(WebTransportMultiplexArgs {
+        host: host.ok_or_else(|| anyhow!("--host is required"))?,
+        port: port.ok_or_else(|| anyhow!("--port is required"))?,
+        authority: authority.unwrap_or_else(|| server_name.clone()),
+        server_name,
+        path: path.ok_or_else(|| anyhow!("--path is required"))?,
+        ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+        sessions,
+        expect_statuses,
     })
 }
 
@@ -605,6 +701,55 @@ async fn serve_h3_upstream(args: H3UpstreamArgs) -> anyhow::Result<()> {
     }
 }
 
+async fn serve_webtransport_upstream(args: WebTransportUpstreamArgs) -> anyhow::Result<()> {
+    let mut server = web_transport_quinn::ServerBuilder::new()
+        .with_addr(args.listen)
+        .with_certificate(
+            load_certs(Path::new(&args.cert))?,
+            load_private_key(Path::new(&args.key))?,
+        )
+        .context("failed to build WebTransport upstream server")?;
+    let upstream_name = Arc::<str>::from(args.name);
+
+    while let Some(request) = server.accept().await {
+        let upstream_name = upstream_name.clone();
+        tokio::spawn(async move {
+            if let Err(error) = handle_webtransport_upstream_request(request, upstream_name).await {
+                eprintln!("WebTransport upstream session failed: {error:#}");
+            }
+        });
+    }
+
+    Ok(())
+}
+
+async fn handle_webtransport_upstream_request(
+    request: web_transport_quinn::Request,
+    upstream_name: Arc<str>,
+) -> anyhow::Result<()> {
+    let session = request
+        .ok()
+        .await
+        .with_context(|| format!("failed to accept {upstream_name} WebTransport session"))?;
+    loop {
+        tokio::select! {
+            result = session.accept_bi() => {
+                let (mut send, mut recv) = result.context("failed to accept WebTransport bidi stream")?;
+                let bytes = recv.read_to_end(64 * 1024).await.context("failed to read WebTransport bidi stream")?;
+                send.write_all(&bytes).await.context("failed to echo WebTransport bidi stream")?;
+                send.finish().context("failed to finish WebTransport bidi stream")?;
+            }
+            result = session.read_datagram() => {
+                let bytes = result.context("failed to read WebTransport datagram")?;
+                session.send_datagram(bytes).context("failed to echo WebTransport datagram")?;
+            }
+            _ = session.closed() => {
+                return Ok(());
+            }
+        }
+    }
+}
+
 async fn handle_h3_upstream_connection(
     connection: h3_quinn::quinn::Connection,
     upstream_name: Arc<str>,
@@ -799,6 +944,103 @@ async fn run_downstream_client(args: DownstreamArgs) -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
+}
+
+async fn run_webtransport_multiplex_client(
+    args: WebTransportMultiplexArgs,
+) -> anyhow::Result<()> {
+    let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3")?;
+    let quic_crypto =
+        QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
+    let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
+    let remote_addr = resolve_remote_addr(&args.host, args.port).await?;
+    let endpoint = Endpoint::client(client_bind_addr(remote_addr))
+        .context("failed to create downstream QUIC endpoint")?;
+    let quinn_connection = endpoint
+        .connect_with(quic_config, remote_addr, &args.server_name)
+        .with_context(|| {
+            format!(
+                "failed to start downstream WebTransport connection to {}",
+                args.host
+            )
+        })?
+        .await
+        .context("failed to connect downstream WebTransport")?;
+    let close_connection = quinn_connection.clone();
+    let h3_connection = h3_quinn::Connection::new(quinn_connection);
+    let (mut driver, mut send_request) = h3::client::builder()
+        .enable_extended_connect(true)
+        .enable_datagram(true)
+        .build::<_, _, Bytes>(h3_connection)
+        .await
+        .context("failed to establish downstream HTTP/3 client")?;
+    let driver_task = tokio::spawn(async move {
+        let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let mut statuses = Vec::with_capacity(args.sessions);
+    let mut held_streams = Vec::new();
+    for index in 0..args.sessions {
+        let request = webtransport_connect_request(&args, index)?;
+        let mut stream = send_request
+            .send_request(request)
+            .await
+            .with_context(|| format!("failed to send WebTransport CONNECT #{index}"))?;
+        let response = tokio::time::timeout(Duration::from_secs(10), stream.recv_response())
+            .await
+            .with_context(|| format!("timed out waiting for WebTransport CONNECT #{index}"))?
+            .with_context(|| format!("failed to receive WebTransport CONNECT #{index} response"))?;
+        let status = response.status().as_u16();
+        statuses.push(status);
+        held_streams.push(stream);
+    }
+
+    if statuses != args.expect_statuses {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+              "statuses": statuses,
+              "expected_statuses": args.expect_statuses,
+            })
+        );
+        bail!("WebTransport multiplex statuses did not match expected statuses");
+    }
+
+    close_connection.close(0u32.into(), b"probe complete");
+    drop(held_streams);
+    let _ = driver_task.await;
+
+    println!(
+        "{}",
+        serde_json::json!({
+          "statuses": statuses,
+        })
+    );
+    Ok(())
+}
+
+fn webtransport_connect_request(
+    args: &WebTransportMultiplexArgs,
+    index: usize,
+) -> anyhow::Result<Request<()>> {
+    let separator = if args.path.contains('?') { '&' } else { '?' };
+    let uri: Uri = format!(
+        "https://{}{}{}probe_session={}",
+        args.authority, args.path, separator, index
+    )
+    .parse()
+    .context("failed to build WebTransport CONNECT URI")?;
+    let mut request = Request::builder()
+        .method(Method::CONNECT)
+        .uri(uri)
+        .version(Version::HTTP_3)
+        .header("sec-webtransport-http3-draft", "draft02")
+        .body(())
+        .context("failed to build WebTransport CONNECT request")?;
+    request
+        .extensions_mut()
+        .insert(h3::ext::Protocol::WEB_TRANSPORT);
+    Ok(request)
 }
 
 async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {

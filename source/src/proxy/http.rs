@@ -457,17 +457,17 @@ where
   match state.config.limits.connection_limit_identity {
     ConnectionLimitIdentityMode::ProxyProtocol => {}
     ConnectionLimitIdentityMode::FirstRequestRealIp => {
-      let acquire = || {
+      let acquire = |ip| {
         state.limits.acquire_ip_connection(
-          client_addr.ip(),
+          ip,
           &state.config.limits,
           &state.config.connection_limits,
         )
       };
       let result = if let Some(context) = connection_limit_context.as_ref() {
-        context.bind_first_request(acquire)
+        context.bind_first_request(client_addr.ip(), acquire)
       } else {
-        acquire().map(|permit| {
+        acquire(client_addr.ip()).map(|permit| {
           *request_connection_permit = Some(permit);
         })
       };
@@ -2985,12 +2985,12 @@ fn full_body(bytes: bytes::Bytes) -> ProxyBody {
 }
 
 pub(crate) struct PreparedWebTransport {
+  pub(crate) client_addr: std::net::SocketAddr,
   pub(crate) target_url: url::Url,
   pub(crate) headers: http::HeaderMap,
   pub(crate) protocols: Vec<String>,
   pub(crate) upstream: UpstreamConfig,
   pub(crate) timeouts: EffectiveTimeouts,
-  pub(crate) connection_limit_permit: Option<ConnectionPermit>,
   pub(crate) stream_waf: Option<StreamWafRequestContext>,
   _pool_selection: Option<PoolSelection>,
 }
@@ -2999,7 +2999,6 @@ pub(crate) fn prepare_webtransport(
   request: &Request<()>,
   peer_addr: std::net::SocketAddr,
   tls: &WafTlsMetadata,
-  connection_limit_context: Option<ConnectionLimitContext>,
   state: &AppSnapshot,
 ) -> Result<PreparedWebTransport, Box<Response<ProxyBody>>> {
   let host = extract_host(request).unwrap_or_default();
@@ -3032,42 +3031,6 @@ pub(crate) fn prepare_webtransport(
       )));
     }
   };
-  let connection_limit_permit = match state.config.limits.connection_limit_identity {
-    ConnectionLimitIdentityMode::ProxyProtocol => None,
-    ConnectionLimitIdentityMode::FirstRequestRealIp => {
-      let acquire = || {
-        state.limits.acquire_ip_connection(
-          client_addr.ip(),
-          &state.config.limits,
-          &state.config.connection_limits,
-        )
-      };
-      if let Some(context) = connection_limit_context.as_ref() {
-        if let Err(status) = context.bind_first_request(acquire) {
-          return Err(Box::new(text_response(status, "connection limit exceeded")));
-        }
-        None
-      } else {
-        match acquire() {
-          Ok(permit) => Some(permit),
-          Err(status) => {
-            return Err(Box::new(text_response(status, "connection limit exceeded")));
-          }
-        }
-      }
-    }
-    ConnectionLimitIdentityMode::PerRequestRealIp => match state.limits.acquire_ip_connection(
-      client_addr.ip(),
-      &state.config.limits,
-      &state.config.connection_limits,
-    ) {
-      Ok(permit) => Some(permit),
-      Err(status) => {
-        return Err(Box::new(text_response(status, "connection limit exceeded")));
-      }
-    },
-  };
-
   let Some(resolved) = state.route_table.resolve(&host, &path, &state.upstreams) else {
     return Err(Box::new(text_response(
       StatusCode::NOT_FOUND,
@@ -3255,12 +3218,12 @@ pub(crate) fn prepare_webtransport(
   let protocols = parse_webtransport_protocols(&headers);
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
   Ok(PreparedWebTransport {
+    client_addr,
     target_url,
     headers,
     protocols,
     upstream: upstream.clone(),
     timeouts,
-    connection_limit_permit,
     stream_waf,
     _pool_selection: pool_selection,
   })
@@ -3365,7 +3328,7 @@ mod tests {
     let ip = "203.0.113.11".parse().unwrap();
     let context = ConnectionLimitContext::default();
     context
-      .bind_first_request(|| limit_state.acquire_ip_connection(ip, &limits, &[]))
+      .bind_first_request(ip, |ip| limit_state.acquire_ip_connection(ip, &limits, &[]))
       .expect("first request context should bind");
     let mut request_permit = None;
 

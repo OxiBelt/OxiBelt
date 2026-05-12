@@ -35,6 +35,7 @@ struct Needs {
     h2c_upstream: bool,
     h1_stall_upstream: bool,
     h3_upstream: bool,
+    webtransport_upstream: bool,
     dns_server: bool,
     protocol_probe: bool,
     pq_probe: bool,
@@ -199,6 +200,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     manifest.push_str(&format!(
         "CASE_NEED_H3_UPSTREAM={}\n",
         bool_env(case.needs.h3_upstream)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_WEBTRANSPORT_UPSTREAM={}\n",
+        bool_env(case.needs.webtransport_upstream)
     ));
     manifest.push_str(&format!(
         "CASE_NEED_DNS_SERVER={}\n",
@@ -1312,6 +1317,25 @@ print(f"completed {count} short-lived connections with {workers} workers")
     fail_with_diagnostics "short-lived connection load client failed"
   fi
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "security",
+            "webtransport-session-limit",
+            "multiplexed WebTransport sessions are limited per client on one HTTP/3 connection",
+            ExpectStart::Success,
+            Needs {
+                protocol_probe: true,
+                webtransport_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_webtransport_multiplex "example.test" "/wt/session" 2 "200,429")"
+  assert_response_jq "${response}" '.statuses == [200, 429]'
 }
 "#,
             None,

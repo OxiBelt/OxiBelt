@@ -715,6 +715,54 @@ upstream_send_timeout_ms = 10000
 }
 
 #[test]
+fn webtransport_session_limits_default_to_connection_limits_and_parse_overrides() {
+    let temp_dir = common::TempDir::new("webtransport-session-limit-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "webtransport-session-limit-config");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let default_config: Config = toml::from_str(&base).expect("config should parse");
+    default_config.validate().expect("config should validate");
+
+    assert_eq!(
+        default_config.limits.effective_max_webtransport_sessions(),
+        default_config.limits.max_connections
+    );
+    assert_eq!(
+        default_config
+            .limits
+            .effective_max_webtransport_sessions_per_ip(),
+        default_config.limits.max_connections_per_ip
+    );
+    assert_eq!(
+        default_config
+            .limits
+            .max_webtransport_sessions_per_connection,
+        256
+    );
+
+    let raw = format!(
+        r#"
+{}
+
+[limits]
+max_webtransport_sessions = 32
+max_webtransport_sessions_per_ip = 4
+max_webtransport_sessions_per_connection = 2
+"#,
+        base
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(config.limits.effective_max_webtransport_sessions(), 32);
+    assert_eq!(
+        config.limits.effective_max_webtransport_sessions_per_ip(),
+        4
+    );
+    assert_eq!(config.limits.max_webtransport_sessions_per_connection, 2);
+}
+
+#[test]
 fn route_timeout_values_must_be_positive_when_configured() {
     let temp_dir = common::TempDir::new("timeout-invalid");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "timeout-invalid");

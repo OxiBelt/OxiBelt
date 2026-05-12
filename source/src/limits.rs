@@ -13,6 +13,12 @@ use crate::config::{
 };
 use crate::shared_state::{ConnectionScope, SharedState};
 
+#[path = "limits/context.rs"]
+mod context;
+#[path = "limits/webtransport.rs"]
+mod webtransport;
+pub use context::ConnectionLimitContext;
+
 pub const DEFAULT_RATE_LIMIT_MAX_BUCKETS: usize = 16_384;
 
 pub fn default_rate_limit_max_buckets() -> usize {
@@ -128,6 +134,7 @@ struct ConnectionCounts {
   total: usize,
   per_ip: HashMap<IpAddr, usize>,
   named: HashMap<(String, IpAddr), usize>,
+  scoped: HashMap<String, usize>,
 }
 
 #[derive(Debug)]
@@ -143,6 +150,7 @@ enum ConnectionAcquireKind {
   Total,
   Ip(IpAddr),
   Named { name: String, ip: IpAddr },
+  Scoped(String),
 }
 
 #[derive(Debug, Default)]
@@ -150,6 +158,7 @@ struct LocalConnectionRelease {
   total: bool,
   ip: Option<IpAddr>,
   names: Vec<String>,
+  scopes: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -291,6 +300,11 @@ impl LimitState {
             return Err(spec.status);
           }
         }
+        ConnectionAcquireKind::Scoped(scope) => {
+          if counts.scoped.get(scope).copied().unwrap_or(0) >= spec.limit {
+            return Err(spec.status);
+          }
+        }
       }
     }
     let mut local_release = LocalConnectionRelease::default();
@@ -308,6 +322,10 @@ impl LimitState {
           *counts.named.entry((name.clone(), ip)).or_insert(0) += 1;
           local_release.ip = Some(ip);
           local_release.names.push(name);
+        }
+        ConnectionAcquireKind::Scoped(scope) => {
+          *counts.scoped.entry(scope.clone()).or_insert(0) += 1;
+          local_release.scopes.push(scope);
         }
       }
     }
@@ -462,6 +480,9 @@ impl LimitState {
         decrement_or_remove(&mut counts.named, &(name.clone(), ip));
       }
     }
+    for scope in &release.scopes {
+      decrement_or_remove(&mut counts.scoped, scope);
+    }
   }
 
   fn release_shared_connection(&self, scopes: &[String]) {
@@ -484,28 +505,6 @@ impl Drop for ConnectionPermit {
     } else {
       self.state.release_shared_connection(&self.shared_scopes);
     }
-  }
-}
-
-#[derive(Clone, Default)]
-pub struct ConnectionLimitContext {
-  first_request: Arc<Mutex<Option<ConnectionPermit>>>,
-}
-
-impl ConnectionLimitContext {
-  pub fn bind_first_request<F>(&self, acquire: F) -> Result<(), StatusCode>
-  where
-    F: FnOnce() -> Result<ConnectionPermit, StatusCode>,
-  {
-    let mut first_request = self
-      .first_request
-      .lock()
-      .expect("first request connection limit lock poisoned");
-    if first_request.is_some() {
-      return Ok(());
-    }
-    *first_request = Some(acquire()?);
-    Ok(())
   }
 }
 

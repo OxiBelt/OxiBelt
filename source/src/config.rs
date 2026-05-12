@@ -11,9 +11,14 @@ use url::Url;
 use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 
 mod dynamic_policy;
+mod limits;
 mod stream;
 mod turn;
 pub use dynamic_policy::*;
+use limits::{
+  default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
+  default_max_webtransport_sessions_per_connection,
+};
 pub use stream::*;
 pub use turn::*;
 
@@ -770,6 +775,9 @@ impl Config {
   fn validate_limits(&self) -> anyhow::Result<()> {
     if self.limits.max_connections == 0
       || self.limits.max_connections_per_ip == 0
+      || self.limits.max_webtransport_sessions == Some(0)
+      || self.limits.max_webtransport_sessions_per_ip == Some(0)
+      || self.limits.max_webtransport_sessions_per_connection == 0
       || self.limits.max_requests_per_connection == 0
       || self.limits.client_header_timeout_ms == 0
       || self.limits.client_body_timeout_ms == 0
@@ -1932,6 +1940,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "connection_limit_identity",
       "max_connections",
       "max_connections_per_ip",
+      "max_webtransport_sessions",
+      "max_webtransport_sessions_per_connection",
+      "max_webtransport_sessions_per_ip",
       "max_header_name_bytes",
       "max_header_value_bytes",
       "max_headers",
@@ -3724,6 +3735,12 @@ pub struct LimitsConfig {
   #[serde(default = "default_max_connections_per_ip")]
   pub max_connections_per_ip: usize,
   #[serde(default)]
+  pub max_webtransport_sessions: Option<usize>,
+  #[serde(default)]
+  pub max_webtransport_sessions_per_ip: Option<usize>,
+  #[serde(default = "default_max_webtransport_sessions_per_connection")]
+  pub max_webtransport_sessions_per_connection: usize,
+  #[serde(default)]
   pub connection_limit_identity: ConnectionLimitIdentityMode,
   #[serde(default = "default_max_requests_per_connection")]
   pub max_requests_per_connection: usize,
@@ -3760,6 +3777,9 @@ impl Default for LimitsConfig {
     Self {
       max_connections: default_max_connections(),
       max_connections_per_ip: default_max_connections_per_ip(),
+      max_webtransport_sessions: None,
+      max_webtransport_sessions_per_ip: None,
+      max_webtransport_sessions_per_connection: default_max_webtransport_sessions_per_connection(),
       connection_limit_identity: ConnectionLimitIdentityMode::default(),
       max_requests_per_connection: default_max_requests_per_connection(),
       client_header_timeout_ms: default_client_header_timeout_ms(),
@@ -5502,18 +5522,6 @@ fn default_session_ticket_rotation_seconds() -> u64 {
 
 fn default_tls_client_auth_verify_depth() -> u8 {
   4
-}
-
-fn default_max_connections() -> usize {
-  65_536
-}
-
-fn default_max_connections_per_ip() -> usize {
-  128
-}
-
-fn default_max_requests_per_connection() -> usize {
-  1_000
 }
 
 fn default_client_header_timeout_ms() -> u64 {
