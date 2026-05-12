@@ -78,7 +78,7 @@ Upgrade and extended protocol behavior:
 - Generic HTTP/1.1 upgrade and CONNECT tunneling are implemented when both global and route-level policy enables them.
 - CONNECT tunneling targets the selected route upstream origin, not the downstream request target.
 - WebTransport forwarding is supported for downstream HTTP/3 extended CONNECT requests when the selected upstream also uses HTTP/3 and has `webtransport = true`.
-- WebTransport stream and datagram payload inspection is outside the current WAF implementation.
+- Native OxiRule stream-phase WAF rules can inspect WebTransport stream chunks and datagrams in both directions before forwarding and can close the active session with `close_stream`. The CRS compatibility layer does not inspect WebSocket or WebTransport stream payloads.
 - WebRTC media forwarding is supported through TURN listeners. Signaling HTTP requests can still be routed and inspected as ordinary HTTP traffic, while TURN media payloads are forwarded outside WAF inspection.
 
 ## TLS and Identity
@@ -213,12 +213,19 @@ Relative paths must be normalized, must not contain `.` or `..` components, and 
 
 ## Non-Goals and Reserved Work
 
-The current implementation intentionally leaves these as future work:
+OxiBelt intentionally leaves these out of scope by design:
 
-- ACME HTTP-01 challenge handling.
+- ACME challenge handling, including HTTP-01 and DNS-01.
+- General-purpose scripting, imports, loops, callbacks, and unbounded comprehensions.
+
+Provision and renew public TLS certificates outside OxiBelt with an ACME client such as Certbot. Containerized deployments may use the `certbot/certbot` Docker image and mount the generated certificate material into OxiBelt's cert directory.
+
+Security rationale: ACME account keys, DNS provider API tokens, and challenge credentials should live outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised proxy should not also hold credentials that can issue arbitrary new TLS certificates. DNS-01 credentials are especially sensitive because a stolen DNS provider token can affect certificate issuance for every zone or name that token can modify.
+
+The current implementation reserves or defers this work:
+
 - Live OCSP fetch and refresh workers.
 - Sticky-cookie upstream sessions.
-- WAF frame-level or datagram-level WebTransport inspection.
+- CRS stream-payload inspection for WebSocket and WebTransport traffic.
 - Downstream ECH configuration.
 - Advanced UDP/L4 proxying such as UDP stream proxying and TLS passthrough SNI routing.
-- General-purpose scripting, imports, loops, callbacks, and unbounded comprehensions.

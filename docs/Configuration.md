@@ -294,6 +294,10 @@ mode = "disabled" # disabled | static_file | live_fetch
 
 `cert_chain` and `private_key` are required. `tls.client_auth.ca_certs` is required when client authentication mode is not `off`. `tls.ocsp.mode = "static_file"` requires `response_file`; `live_fetch` is reserved and rejected. HTTP/3 requires `tls.min_version = "tls1.3"`.
 
+OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, or certificate renewal itself. Provision and renew TLS files with external automation such as Certbot or the `certbot/certbot` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
+
+Keep ACME credentials, DNS-01 provider tokens, and renewal state out of the OxiBelt process/container. This limits blast radius if a proxy vulnerability ever exposes process memory or permits remote code execution: the running proxy may have access to its configured certificate material, but it should not also have the DNS or ACME credentials needed to mint arbitrary new certificates.
+
 ## QUIC Sections
 
 ```toml

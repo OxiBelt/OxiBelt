@@ -161,4 +161,8 @@ tests/scripts/run-proxy-integration.sh
 
 ## Current Non-Goals
 
-The current implementation intentionally leaves ACME HTTP-01 handling, live OCSP fetch/refresh, sticky-cookie upstream sessions, and advanced UDP/L4 proxying such as general UDP stream proxying and TLS passthrough SNI routing as future work. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
+OxiBelt intentionally keeps ACME challenge handling, including HTTP-01 and DNS-01, out of scope and expects external certificate automation to provision TLS material. Use an ACME client such as Certbot, including the `certbot/certbot` Docker image when containerized renewal fits your deployment, then point OxiBelt at the generated certificate and key files.
+
+This keeps ACME account keys, DNS provider API tokens, and challenge credentials outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised process should not also contain the credentials needed to issue arbitrary new TLS certificates, especially through DNS-01 provider tokens.
+
+Live OCSP fetch/refresh, sticky-cookie upstream sessions, downstream ECH configuration, and advanced UDP/L4 proxying such as general UDP stream proxying and TLS passthrough SNI routing remain reserved or deferred. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
