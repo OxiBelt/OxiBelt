@@ -238,11 +238,7 @@ fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
     .downstream_tls_cert_chain
     .as_ref()
     .ok_or_else(|| anyhow::anyhow!("missing configured tls.cert_chain path"))?;
-  let private_key = config
-    .source_paths
-    .downstream_tls_private_key
-    .as_ref()
-    .ok_or_else(|| anyhow::anyhow!("missing configured tls.private_key path"))?;
+  let private_key = config.source_paths.downstream_tls_private_key.as_ref();
 
   let ocsp = config
     .source_paths
@@ -262,7 +258,10 @@ fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
   old_quic.host_key_file = quic_host_key_file;
   config.tls = TlsConfig {
     cert_chain: canonicalize_under_base("tls.cert_chain", cert_dir, cert_chain)?,
-    private_key: canonicalize_under_base("tls.private_key", cert_dir, private_key)?,
+    private_key: private_key
+      .map(|path| canonicalize_under_base("tls.private_key", cert_dir, path))
+      .transpose()?,
+    remote_signer: old_tls.remote_signer,
     min_version: old_tls.min_version,
     max_version: old_tls.max_version,
     session_tickets: old_tls.session_tickets,

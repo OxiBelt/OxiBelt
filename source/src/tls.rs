@@ -26,9 +26,7 @@ pub fn build_server_config(
   listeners: &ListenerConfig,
 ) -> anyhow::Result<Arc<ServerConfig>> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-  let certs = load_certs(&tls.cert_chain)?;
-  let key = load_private_key(&tls.private_key)?;
-  let mut certified_key = CertifiedKey::from_der(certs, key, &provider)
+  let mut certified_key = load_downstream_certified_key(tls, &provider)
     .context("failed to create rustls certified key")?;
   certified_key.ocsp = load_ocsp_response(tls)?;
 
@@ -65,9 +63,7 @@ pub fn build_quic_server_config(
   quic_host_key_base_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<QuinnServerConfig> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-  let certs = load_certs(&tls.cert_chain)?;
-  let key = load_private_key(&tls.private_key)?;
-  let mut certified_key = CertifiedKey::from_der(certs, key, &provider)
+  let mut certified_key = load_downstream_certified_key(tls, &provider)
     .context("failed to create rustls certified key")?;
   certified_key.ocsp = load_ocsp_response(tls)?;
 
@@ -147,14 +143,15 @@ pub fn build_turn_server_config(
     .cert_chain
     .as_ref()
     .unwrap_or(&default_tls.cert_chain);
-  let private_key = listener_tls
-    .private_key
-    .as_ref()
-    .unwrap_or(&default_tls.private_key);
-  let certs = load_certs(cert_chain)?;
-  let key = load_private_key(private_key)?;
-  let certified_key = CertifiedKey::from_der(certs, key, &provider)
-    .context("failed to create TURN rustls certified key")?;
+  let private_key = listener_tls.private_key.as_ref();
+  let certified_key = load_turn_certified_key(
+    cert_chain,
+    private_key,
+    listener_tls,
+    default_tls,
+    &provider,
+  )
+  .context("failed to create TURN rustls certified key")?;
   let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
   let versions = tls_protocol_versions(default_tls.min_version, default_tls.max_version);
   let builder = ServerConfig::builder_with_provider(provider)
@@ -165,6 +162,90 @@ pub fn build_turn_server_config(
     .with_cert_resolver(Arc::new(cert_resolver));
   server_config.alpn_protocols = Vec::new();
   Ok(Arc::new(server_config))
+}
+
+fn load_downstream_certified_key(
+  tls: &TlsConfig,
+  provider: &rustls::crypto::CryptoProvider,
+) -> anyhow::Result<CertifiedKey> {
+  let certs = load_certs(&tls.cert_chain)?;
+  if tls.remote_signer.enabled {
+    let signing_key = crate::remote_signer::RemoteSigningKey::connect(
+      &tls.remote_signer,
+      &tls.remote_signer.key_id,
+      end_entity_cert(&certs)?,
+    )?;
+    let certified_key = CertifiedKey::new(certs, signing_key);
+    match certified_key.keys_match() {
+      Ok(()) | Err(rustls::Error::InconsistentKeys(rustls::InconsistentKeys::Unknown)) => {
+        Ok(certified_key)
+      }
+      Err(error) => Err(error).context("remote signer key does not match certificate"),
+    }
+  } else {
+    let private_key = tls
+      .private_key
+      .as_ref()
+      .ok_or_else(|| anyhow!("tls.private_key is required unless remote signing is enabled"))?;
+    let key = load_private_key(private_key)?;
+    CertifiedKey::from_der(certs, key, provider).context("failed to load local TLS private key")
+  }
+}
+
+fn load_turn_certified_key(
+  cert_chain: &std::path::Path,
+  private_key: Option<&std::path::PathBuf>,
+  listener_tls: &TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+  provider: &rustls::crypto::CryptoProvider,
+) -> anyhow::Result<CertifiedKey> {
+  let certs = load_certs(cert_chain)?;
+  if let Some(private_key) = private_key {
+    let key = load_private_key(private_key)?;
+    return CertifiedKey::from_der(certs, key, provider)
+      .context("failed to load local TURN TLS private key");
+  }
+  if let Some(key_id) = &listener_tls.remote_signer_key_id {
+    return load_remote_turn_certified_key(certs, default_tls, key_id);
+  }
+  if default_tls.remote_signer.enabled {
+    load_remote_turn_certified_key(certs, default_tls, &default_tls.remote_signer.key_id)
+  } else {
+    let private_key = default_tls
+      .private_key
+      .as_ref()
+      .ok_or_else(|| anyhow!("tls.private_key is required for TURN TLS"))?;
+    let key = load_private_key(private_key)?;
+    CertifiedKey::from_der(certs, key, provider)
+      .context("failed to load default local TURN TLS private key")
+  }
+}
+
+fn load_remote_turn_certified_key(
+  certs: Vec<CertificateDer<'static>>,
+  default_tls: &TlsConfig,
+  key_id: &str,
+) -> anyhow::Result<CertifiedKey> {
+  let signing_key = crate::remote_signer::RemoteSigningKey::connect(
+    &default_tls.remote_signer,
+    key_id,
+    end_entity_cert(&certs)?,
+  )?;
+  let certified_key = CertifiedKey::new(certs, signing_key);
+  match certified_key.keys_match() {
+    Ok(()) | Err(rustls::Error::InconsistentKeys(rustls::InconsistentKeys::Unknown)) => {
+      Ok(certified_key)
+    }
+    Err(error) => Err(error).context("remote TURN signer key does not match certificate"),
+  }
+}
+
+fn end_entity_cert<'a>(
+  certs: &'a [CertificateDer<'static>],
+) -> anyhow::Result<&'a CertificateDer<'static>> {
+  certs
+    .first()
+    .ok_or_else(|| anyhow!("certificate chain must include an end-entity certificate"))
 }
 
 #[derive(Debug)]

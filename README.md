@@ -136,7 +136,15 @@ docker run --rm -p 8443:8443 \
   oxibelt
 ```
 
-Mounted files must be readable by UID `10001`. For private keys, prefer ownership or group permissions over broad world-readable permissions.
+Mounted files must be readable by UID `10001`. For private keys, prefer ownership or group permissions over broad world-readable permissions. For stronger isolation, enable `[tls.remote_signer]` and run `oxibelt-keysigner` as a separate UID that can read private keys while OxiBelt can only read certificate chains and connect to the signer Unix socket.
+
+When remote signing is used with `--read-only`, the signer socket directory must be a writable tmpfs or volume because Unix socket bind creates a filesystem entry. For example:
+
+```sh
+--tmpfs /run/oxibelt-keysigner:rw,noexec,nosuid,nodev,mode=0770
+```
+
+In a sidecar deployment, mount the same socket directory into both the OxiBelt container and the signer container. Mount private keys read-only into the signer container only; OxiBelt should receive certificate chains and socket access, not private key files.
 
 For certificate renewal workflows, mount stable certificate/key paths under `/etc/oxibelt/cert` and enable `runtime.hot_reload.mode = "downstream_tls"` or `full`. OxiBelt tracks symlink target changes so renewed certificate files can be imported without restarting the process.
 
@@ -163,6 +171,6 @@ tests/scripts/run-proxy-integration.sh
 
 OxiBelt intentionally keeps ACME challenge handling, including HTTP-01 and DNS-01, out of scope and expects external certificate automation to provision TLS material. Use an ACME client such as Certbot, including the `certbot/certbot` Docker image when containerized renewal fits your deployment, then point OxiBelt at the generated certificate and key files.
 
-This keeps ACME account keys, DNS provider API tokens, and challenge credentials outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised process should not also contain the credentials needed to issue arbitrary new TLS certificates, especially through DNS-01 provider tokens.
+This keeps ACME account keys, DNS provider API tokens, challenge credentials, and optionally TLS private keys outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised process should not also contain the credentials needed to issue arbitrary new TLS certificates or export configured private keys, especially through DNS-01 provider tokens.
 
 Live OCSP fetch/refresh, sticky-cookie upstream sessions, downstream ECH configuration, and advanced UDP/L4 proxying such as general UDP stream proxying and TLS passthrough SNI routing remain reserved or deferred. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.

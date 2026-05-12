@@ -540,6 +540,107 @@ max_version = "tls1.2"
 }
 
 #[test]
+fn remote_tls_signer_config_accepts_no_private_key_and_rejects_unsafe_combinations() {
+    let token_env = "OXIBELT_KEYSIGNER_TOKEN_CONFIG_TEST";
+    unsafe {
+        std::env::set_var(
+            token_env,
+            base64::engine::general_purpose::STANDARD.encode([11u8; 32]),
+        );
+    }
+    let temp_dir = common::TempDir::new("remote-tls-signer-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "remote-tls-signer-config");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let remote_block = format!(
+        r#"[tls.remote_signer]
+enabled = true
+socket_path = "/run/oxibelt-keysigner/sign.sock"
+key_id = "edge-default"
+token_env = "{token_env}"
+"#
+    );
+
+    let remote_only = base
+        .replace(&format!("private_key = \"{}\"\n", key_path.display()), "")
+        .replace("[tls.ocsp]", &format!("{remote_block}\n[tls.ocsp]"));
+    let config: Config = toml::from_str(&remote_only).expect("config should parse");
+    config
+        .validate()
+        .expect("remote signer should replace local private key");
+
+    let both = base.replace("[tls.ocsp]", &format!("{remote_block}\n[tls.ocsp]"));
+    let config: Config = toml::from_str(&both).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("private_key and remote signer must be mutually exclusive");
+    assert!(
+        error
+            .to_string()
+            .contains("tls.private_key must not be set"),
+        "unexpected error: {error}"
+    );
+
+    let tls12_without_opt_in = remote_only.replace(
+        &format!("cert_chain = \"{}\"\n", cert_path.display()),
+        &format!(
+            "cert_chain = \"{}\"\nmin_version = \"tls1.2\"\n",
+            cert_path.display()
+        ),
+    );
+    let config: Config = toml::from_str(&tls12_without_opt_in).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("TLS 1.2 remote signing requires explicit opt-in");
+    assert!(
+        error
+            .to_string()
+            .contains("allow_tls12_unstructured_signing"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn turn_tls_remote_signer_override_requires_global_remote_signer() {
+    let temp_dir = common::TempDir::new("turn-remote-signer-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-remote-signer-config");
+    let raw = format!(
+        r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-tls"
+
+[[turn_upstream_pools.servers]]
+origin = "turns://turn.example.test:5349"
+
+[[webrtc_turn_listeners]]
+name = "turn"
+mode = "proxy_pool"
+bind_tls = "127.0.0.1:5349"
+tls_pool = "turn-tls"
+
+[webrtc_turn_listeners.tls]
+cert_chain = "{}"
+remote_signer_key_id = "turn-key"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path),
+        cert_path.display()
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("TURN remote signer override requires global remote signer config");
+    assert!(
+        error
+            .to_string()
+            .contains("tls.remote_signer.enabled = true"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn admin_tls_validation_rejects_invalid_versions_and_missing_client_auth_roots() {
     unsafe {
         std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
@@ -2508,7 +2609,7 @@ upstream = "app"
     let expected_ech_config_list_path = ech_config_list_path.canonicalize().unwrap();
 
     assert_eq!(config.tls.cert_chain, cert_path);
-    assert_eq!(config.tls.private_key, key_path);
+    assert_eq!(config.tls.private_key.as_deref(), Some(key_path.as_path()));
     assert_eq!(
         config.tls.ocsp.response_file.as_deref(),
         Some(expected_ocsp_path.as_path())
@@ -2928,7 +3029,7 @@ upstream = "app"
 
     config.validate().expect("config should validate");
     assert_eq!(config.tls.cert_chain, cert_path);
-    assert_eq!(config.tls.private_key, key_path);
+    assert_eq!(config.tls.private_key.as_deref(), Some(key_path.as_path()));
     assert_eq!(config.upstreams.len(), 1);
     assert_eq!(config.upstreams[0].name, "app");
     assert_eq!(config.routes.len(), 1);

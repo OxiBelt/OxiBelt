@@ -2,14 +2,25 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use base64::Engine;
 use h3_quinn::quinn::Endpoint;
 use oxibelt::config::{
     ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, TlsClientAuthConfig,
-    TlsClientAuthMode, TlsConfig, TlsVersion, UpstreamEchConfig, UpstreamEchMode,
+    TlsClientAuthMode, TlsConfig, TlsRemoteSignerConfig, TlsVersion, TurnListenerTlsConfig,
+    UpstreamEchConfig, UpstreamEchMode,
 };
+use oxibelt::remote_signer::{self, SignerServerConfig};
 use oxibelt::tls;
+use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UnixStream};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+static NEXT_REMOTE_SIGNER_ID: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn upstream_tls_client_accepts_extra_root_certificates() {
@@ -89,6 +100,219 @@ fn server_config_sets_alpn_from_listener_flags() {
     assert_eq!(server_config.alpn_protocols, vec![b"http/1.1".to_vec()]);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_server_config_accepts_handshake_with_remote_signer() {
+    let temp_dir = common::TempDir::new("remote-signer-tcp");
+    let (ca_cert_path, ca_key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-ca");
+    let (cert_path, key_path) = common::create_ca_signed_server_cert(
+        temp_dir.path(),
+        "remote-tcp",
+        &ca_cert_path,
+        &ca_key_path,
+    );
+    let token_env = remote_signer_token_env("TCP");
+    let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, &token_env, false).await;
+    let tls_config = remote_tls_config(
+        cert_path.clone(),
+        signer.socket_path.clone(),
+        "edge-default",
+        &token_env,
+        false,
+    );
+    let listeners = ListenerConfig {
+        https_bind: "127.0.0.1:8443".parse().unwrap(),
+        http_bind: None,
+        http_mode: Default::default(),
+        http1: true,
+        http2: true,
+        http3: false,
+        proxy_protocol: ProxyProtocolConfig::default(),
+    };
+    let server_config =
+        tls::build_server_config(&tls_config, &listeners).expect("server config should build");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("server listener should bind");
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("server should accept");
+        TlsAcceptor::from(server_config)
+            .accept(stream)
+            .await
+            .expect("server TLS handshake should complete");
+    });
+
+    let client_config =
+        tls::build_upstream_client_config(&[ca_cert_path], &UpstreamEchConfig::default())
+            .expect("client config should build");
+    let stream = TcpStream::connect(addr)
+        .await
+        .expect("client should connect to server");
+    TlsConnector::from(Arc::new(client_config))
+        .connect("remote-tcp".try_into().unwrap(), stream)
+        .await
+        .expect("client TLS handshake should complete");
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_server_config_accepts_handshake_with_remote_signer() {
+    let temp_dir = common::TempDir::new("remote-signer-quic");
+    let (ca_cert_path, ca_key_path) = common::create_self_signed_cert(temp_dir.path(), "quic-ca");
+    let (cert_path, key_path) = common::create_ca_signed_server_cert(
+        temp_dir.path(),
+        "downstream",
+        &ca_cert_path,
+        &ca_key_path,
+    );
+    let token_env = remote_signer_token_env("QUIC");
+    let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, &token_env, false).await;
+    let tls_config = remote_tls_config(
+        cert_path.clone(),
+        signer.socket_path.clone(),
+        "edge-default",
+        &token_env,
+        false,
+    );
+
+    quic_connect_without_client_certificate(&tls_config, &ca_cert_path)
+        .await
+        .expect("QUIC handshake should complete with remote signer");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_signer_rejects_spki_mismatch() {
+    let temp_dir = common::TempDir::new("remote-signer-spki");
+    let (cert_path, _key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-spki");
+    let (_other_cert, other_key) =
+        common::create_self_signed_cert(temp_dir.path(), "remote-spki-other");
+    let token_env = remote_signer_token_env("SPKI");
+    let signer =
+        start_remote_signer(&temp_dir, "edge-default", &other_key, &token_env, false).await;
+    let tls_config = remote_tls_config(
+        cert_path,
+        signer.socket_path.clone(),
+        "edge-default",
+        &token_env,
+        false,
+    );
+    let listeners = ListenerConfig {
+        https_bind: "127.0.0.1:8443".parse().unwrap(),
+        http_bind: None,
+        http_mode: Default::default(),
+        http1: true,
+        http2: true,
+        http3: false,
+        proxy_protocol: ProxyProtocolConfig::default(),
+    };
+    let error = tls::build_server_config(&tls_config, &listeners)
+        .expect_err("SPKI mismatch must reject remote signer");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("does not match"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_signer_protocol_rejects_bad_token_unknown_key_and_invalid_contexts() {
+    let temp_dir = common::TempDir::new("remote-signer-protocol");
+    let (_cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-proto");
+    let token_env = remote_signer_token_env("PROTO");
+    let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, &token_env, false).await;
+    let good_token = remote_signer_token();
+    let bad_token = base64::engine::general_purpose::STANDARD.encode([99u8; 32]);
+
+    let response = signer
+        .request(json!({
+            "type": "describe_key",
+            "token": bad_token,
+            "key_id": "edge-default"
+        }))
+        .await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "unauthorized");
+
+    let response = signer
+        .request(json!({
+            "type": "describe_key",
+            "token": good_token,
+            "key_id": "missing"
+        }))
+        .await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "unknown_key");
+
+    let response = signer
+        .request(json!({
+            "type": "sign",
+            "token": good_token,
+            "key_id": "edge-default",
+            "scheme": u16::from(rustls::SignatureScheme::RSA_PSS_SHA256),
+            "context": "tls13_server_certificate_verify",
+            "message": base64::engine::general_purpose::STANDARD.encode(b"not tls13")
+        }))
+        .await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "invalid_tls13_message");
+
+    let response = signer
+        .request(json!({
+            "type": "sign",
+            "token": good_token,
+            "key_id": "edge-default",
+            "scheme": u16::from(rustls::SignatureScheme::RSA_PSS_SHA256),
+            "context": "tls12_unstructured",
+            "message": base64::engine::general_purpose::STANDARD.encode(b"tls12 input")
+        }))
+        .await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "tls12_disabled");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_signer_protocol_allows_tls12_when_sidecar_opts_in() {
+    let temp_dir = common::TempDir::new("remote-signer-tls12");
+    let (_cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-tls12");
+    let token_env = remote_signer_token_env("TLS12");
+    let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, &token_env, true).await;
+    let response = signer
+        .request(json!({
+            "type": "sign",
+            "token": remote_signer_token(),
+            "key_id": "edge-default",
+            "scheme": u16::from(rustls::SignatureScheme::RSA_PSS_SHA256),
+            "context": "tls12_unstructured",
+            "message": base64::engine::general_purpose::STANDARD.encode(b"tls12 input")
+        }))
+        .await;
+    assert_eq!(response["type"], "sign");
+    assert!(response["signature"].as_str().unwrap().len() > 64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_server_config_builds_with_remote_signer_override() {
+    let temp_dir = common::TempDir::new("remote-signer-turn");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-turn");
+    let token_env = remote_signer_token_env("TURN");
+    let signer = start_remote_signer(&temp_dir, "turn-key", &key_path, &token_env, false).await;
+    let default_tls = remote_tls_config(
+        cert_path.clone(),
+        signer.socket_path.clone(),
+        "turn-key",
+        &token_env,
+        false,
+    );
+    let listener_tls = TurnListenerTlsConfig {
+        cert_chain: Some(cert_path),
+        private_key: None,
+        remote_signer_key_id: Some("turn-key".to_string()),
+    };
+    tls::build_turn_server_config(&listener_tls, &default_tls)
+        .expect("TURN TLS config should build with remote signer override");
+}
+
 #[test]
 fn quic_server_config_rejects_invalid_client_auth_roots() {
     let temp_dir = common::TempDir::new("quic-invalid-client-auth");
@@ -161,7 +385,8 @@ fn downstream_tls_config(
 ) -> TlsConfig {
     TlsConfig {
         cert_chain: cert_path,
-        private_key: key_path,
+        private_key: Some(key_path),
+        remote_signer: TlsRemoteSignerConfig::default(),
         min_version: TlsVersion::Tls13,
         max_version: TlsVersion::Tls13,
         session_tickets: true,
@@ -169,6 +394,132 @@ fn downstream_tls_config(
         client_auth,
         ocsp: OcspConfig::default(),
     }
+}
+
+fn remote_tls_config(
+    cert_path: PathBuf,
+    socket_path: PathBuf,
+    key_id: &str,
+    token_env: &str,
+    allow_tls12_unstructured_signing: bool,
+) -> TlsConfig {
+    TlsConfig {
+        cert_chain: cert_path,
+        private_key: None,
+        remote_signer: TlsRemoteSignerConfig {
+            enabled: true,
+            socket_path,
+            key_id: key_id.to_string(),
+            token_env: token_env.to_string(),
+            connect_timeout_ms: 5000,
+            sign_timeout_ms: 5000,
+            allow_tls12_unstructured_signing,
+        },
+        min_version: TlsVersion::Tls13,
+        max_version: TlsVersion::Tls13,
+        session_tickets: true,
+        session_ticket_rotation_seconds: 86_400,
+        client_auth: TlsClientAuthConfig::default(),
+        ocsp: OcspConfig::default(),
+    }
+}
+
+struct RemoteSignerTestServer {
+    socket_path: PathBuf,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RemoteSignerTestServer {
+    async fn request(&self, value: serde_json::Value) -> serde_json::Value {
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .await
+            .expect("test client should connect to signer");
+        let bytes = serde_json::to_vec(&value).expect("request should serialize");
+        stream
+            .write_all(&(bytes.len() as u32).to_be_bytes())
+            .await
+            .expect("request length should write");
+        stream
+            .write_all(&bytes)
+            .await
+            .expect("request body should write");
+        let mut len = [0u8; 4];
+        stream
+            .read_exact(&mut len)
+            .await
+            .expect("response length should read");
+        let mut bytes = vec![0u8; u32::from_be_bytes(len) as usize];
+        stream
+            .read_exact(&mut bytes)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&bytes).expect("response should parse")
+    }
+}
+
+impl Drop for RemoteSignerTestServer {
+    fn drop(&mut self) {
+        let _ = self.thread.take();
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+async fn start_remote_signer(
+    _temp_dir: &common::TempDir,
+    key_id: &str,
+    key_path: &Path,
+    token_env: &str,
+    allow_tls12_unstructured_signing: bool,
+) -> RemoteSignerTestServer {
+    unsafe {
+        std::env::set_var(token_env, remote_signer_token());
+    }
+    let id = NEXT_REMOTE_SIGNER_ID.fetch_add(1, Ordering::Relaxed);
+    let socket_path = std::env::temp_dir().join(format!("obks-{}-{id}.sock", std::process::id()));
+    let config = SignerServerConfig {
+        socket_path: socket_path.clone(),
+        socket_mode: 0o600,
+        keys: vec![(key_id.to_string(), key_path.to_path_buf())],
+        token_env: token_env.to_string(),
+        allow_peer_uids: Vec::new(),
+        allow_peer_gids: Vec::new(),
+        allow_tls12_unstructured_signing,
+    };
+    let thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("remote signer test runtime should build");
+        runtime.block_on(async move {
+            remote_signer::serve(config)
+                .await
+                .expect("remote signer should serve");
+        });
+    });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            return RemoteSignerTestServer {
+                socket_path,
+                thread: Some(thread),
+            };
+        }
+        assert!(
+            !thread.is_finished(),
+            "remote signer thread exited before binding"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("remote signer socket was not created");
+}
+
+fn remote_signer_token_env(prefix: &str) -> String {
+    let id = NEXT_REMOTE_SIGNER_ID.fetch_add(1, Ordering::Relaxed);
+    format!("OXIBELT_KEYSIGNER_{prefix}_{id}")
+}
+
+fn remote_signer_token() -> String {
+    base64::engine::general_purpose::STANDARD.encode([23u8; 32])
 }
 
 async fn quic_connect_without_client_certificate(

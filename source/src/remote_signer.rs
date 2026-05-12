@@ -1,0 +1,711 @@
+use std::collections::HashMap;
+use std::fmt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, anyhow, bail};
+use base64::Engine;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
+use rustls::sign::{Signer, SigningKey};
+use rustls::{Error as RustlsError, SignatureAlgorithm, SignatureScheme};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream as TokioUnixStream};
+use tracing::{info, warn};
+
+use crate::config::TlsRemoteSignerConfig;
+
+const MAX_FRAME_LEN: usize = 1024 * 1024;
+const TLS13_SERVER_CERT_VERIFY_CONTEXT: &[u8; 34] = b"TLS 1.3, server CertificateVerify\x00";
+
+static PREFERRED_SIGNATURE_SCHEMES: &[SignatureScheme] = &[
+  SignatureScheme::RSA_PSS_SHA512,
+  SignatureScheme::RSA_PSS_SHA384,
+  SignatureScheme::RSA_PSS_SHA256,
+  SignatureScheme::ECDSA_NISTP521_SHA512,
+  SignatureScheme::ECDSA_NISTP384_SHA384,
+  SignatureScheme::ECDSA_NISTP256_SHA256,
+  SignatureScheme::ED25519,
+  SignatureScheme::RSA_PKCS1_SHA512,
+  SignatureScheme::RSA_PKCS1_SHA384,
+  SignatureScheme::RSA_PKCS1_SHA256,
+];
+
+#[derive(Clone)]
+pub struct RemoteSigningKey {
+  client: RemoteSignerClient,
+  key_id: String,
+  public_key: Vec<u8>,
+  algorithm: SignatureAlgorithm,
+  schemes: Vec<SignatureScheme>,
+}
+
+impl RemoteSigningKey {
+  pub fn connect(
+    config: &TlsRemoteSignerConfig,
+    key_id: &str,
+    certificate: &CertificateDer<'_>,
+  ) -> anyhow::Result<Arc<dyn SigningKey>> {
+    let client = RemoteSignerClient::from_config(config)?;
+    let description = client.describe_key(key_id)?;
+    let certificate_spki = certificate_spki(certificate)
+      .context("failed to parse configured TLS certificate public key")?;
+    if description.public_key != certificate_spki {
+      bail!("remote signer key {key_id} does not match configured TLS certificate public key");
+    }
+    if description.schemes.is_empty() {
+      bail!("remote signer key {key_id} did not report any supported TLS signature schemes");
+    }
+    Ok(Arc::new(Self {
+      client,
+      key_id: key_id.to_string(),
+      public_key: description.public_key,
+      algorithm: description.algorithm,
+      schemes: description.schemes,
+    }))
+  }
+}
+
+impl SigningKey for RemoteSigningKey {
+  fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+    self
+      .schemes
+      .iter()
+      .copied()
+      .find(|scheme| offered.contains(scheme))
+      .map(|scheme| {
+        Box::new(RemoteSigner {
+          client: self.client.clone(),
+          key_id: self.key_id.clone(),
+          scheme,
+        }) as Box<dyn Signer>
+      })
+  }
+
+  fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
+    Some(SubjectPublicKeyInfoDer::from(self.public_key.clone()))
+  }
+
+  fn algorithm(&self) -> SignatureAlgorithm {
+    self.algorithm
+  }
+}
+
+impl fmt::Debug for RemoteSigningKey {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("RemoteSigningKey")
+      .field("key_id", &self.key_id)
+      .field("algorithm", &self.algorithm)
+      .field("schemes", &self.schemes)
+      .finish()
+  }
+}
+
+#[derive(Clone)]
+struct RemoteSignerClient {
+  socket_path: PathBuf,
+  token: [u8; 32],
+  connect_timeout: Duration,
+  sign_timeout: Duration,
+  allow_tls12_unstructured_signing: bool,
+}
+
+impl RemoteSignerClient {
+  fn from_config(config: &TlsRemoteSignerConfig) -> anyhow::Result<Self> {
+    Ok(Self {
+      socket_path: config.socket_path.clone(),
+      token: load_token_from_env(&config.token_env)?,
+      connect_timeout: Duration::from_millis(config.connect_timeout_ms),
+      sign_timeout: Duration::from_millis(config.sign_timeout_ms),
+      allow_tls12_unstructured_signing: config.allow_tls12_unstructured_signing,
+    })
+  }
+
+  fn describe_key(&self, key_id: &str) -> anyhow::Result<RemoteKeyDescription> {
+    match self.request(RemoteSignerRequest::DescribeKey {
+      token: token_to_wire(&self.token),
+      key_id: key_id.to_string(),
+    })? {
+      RemoteSignerResponse::DescribeKey {
+        public_key,
+        algorithm,
+        schemes,
+      } => Ok(RemoteKeyDescription {
+        public_key: decode_base64("remote signer public_key", &public_key)?,
+        algorithm: parse_signature_algorithm(&algorithm)?,
+        schemes: parse_signature_schemes(&schemes),
+      }),
+      RemoteSignerResponse::Error { code, message } => {
+        bail!("remote signer describe_key failed: {code}: {message}")
+      }
+      _ => bail!("remote signer returned unexpected describe_key response"),
+    }
+  }
+
+  fn sign(
+    &self,
+    key_id: &str,
+    scheme: SignatureScheme,
+    message: &[u8],
+  ) -> Result<Vec<u8>, RustlsError> {
+    let context = if is_tls13_server_certificate_verify_message(message) {
+      SignContext::Tls13ServerCertificateVerify
+    } else if self.allow_tls12_unstructured_signing {
+      SignContext::Tls12Unstructured
+    } else {
+      return Err(RustlsError::General(
+        "remote signer refused non-TLS 1.3 server CertificateVerify signing input".to_string(),
+      ));
+    };
+
+    let response = self.request(RemoteSignerRequest::Sign {
+      token: token_to_wire(&self.token),
+      key_id: key_id.to_string(),
+      scheme: u16::from(scheme),
+      context,
+      message: base64::engine::general_purpose::STANDARD.encode(message),
+    });
+    match response {
+      Ok(RemoteSignerResponse::Sign { signature }) => {
+        decode_base64("remote signer signature", &signature)
+          .map_err(|error| RustlsError::General(error.to_string()))
+      }
+      Ok(RemoteSignerResponse::Error { code, message }) => Err(RustlsError::General(format!(
+        "remote signer sign failed: {code}: {message}"
+      ))),
+      Ok(_) => Err(RustlsError::General(
+        "remote signer returned unexpected sign response".to_string(),
+      )),
+      Err(error) => Err(RustlsError::General(format!(
+        "remote signer request failed: {error}"
+      ))),
+    }
+  }
+
+  fn request(&self, request: RemoteSignerRequest) -> anyhow::Result<RemoteSignerResponse> {
+    let mut stream = connect_with_timeout(self.socket_path.clone(), self.connect_timeout)
+      .with_context(|| format!("failed to connect to {}", self.socket_path.display()))?;
+    stream
+      .set_read_timeout(Some(self.sign_timeout))
+      .context("failed to set remote signer read timeout")?;
+    stream
+      .set_write_timeout(Some(self.sign_timeout))
+      .context("failed to set remote signer write timeout")?;
+    write_sync_frame(&mut stream, &request)?;
+    read_sync_frame(&mut stream)
+  }
+}
+
+#[derive(Debug)]
+struct RemoteSigner {
+  client: RemoteSignerClient,
+  key_id: String,
+  scheme: SignatureScheme,
+}
+
+impl Signer for RemoteSigner {
+  fn sign(&self, message: &[u8]) -> Result<Vec<u8>, RustlsError> {
+    self.client.sign(&self.key_id, self.scheme, message)
+  }
+
+  fn scheme(&self) -> SignatureScheme {
+    self.scheme
+  }
+}
+
+impl fmt::Debug for RemoteSignerClient {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("RemoteSignerClient")
+      .field("socket_path", &self.socket_path)
+      .field("connect_timeout", &self.connect_timeout)
+      .field("sign_timeout", &self.sign_timeout)
+      .field(
+        "allow_tls12_unstructured_signing",
+        &self.allow_tls12_unstructured_signing,
+      )
+      .finish()
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct SignerServerConfig {
+  pub socket_path: PathBuf,
+  pub socket_mode: u32,
+  pub keys: Vec<(String, PathBuf)>,
+  pub token_env: String,
+  pub allow_peer_uids: Vec<u32>,
+  pub allow_peer_gids: Vec<u32>,
+  pub allow_tls12_unstructured_signing: bool,
+}
+
+pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
+  let token = load_token_from_env(&config.token_env)?;
+  let keys = Arc::new(load_server_keys(&config.keys)?);
+  let listener = bind_listener(&config.socket_path, config.socket_mode)?;
+  let allow_tls12_unstructured_signing = config.allow_tls12_unstructured_signing;
+  info!(
+    socket_path = %config.socket_path.display(),
+    keys = keys.len(),
+    "remote TLS private-key signer listening"
+  );
+
+  let allow_peer_uids = Arc::new(config.allow_peer_uids);
+  let allow_peer_gids = Arc::new(config.allow_peer_gids);
+  loop {
+    let (stream, _) = listener.accept().await?;
+    let keys = keys.clone();
+    let allow_peer_uids = allow_peer_uids.clone();
+    let allow_peer_gids = allow_peer_gids.clone();
+    tokio::spawn(async move {
+      if let Err(error) = handle_connection(
+        stream,
+        keys,
+        token,
+        allow_peer_uids,
+        allow_peer_gids,
+        allow_tls12_unstructured_signing,
+      )
+      .await
+      {
+        warn!("remote signer connection failed: {error}");
+      }
+    });
+  }
+}
+
+async fn handle_connection(
+  mut stream: TokioUnixStream,
+  keys: Arc<HashMap<String, ServerKey>>,
+  token: [u8; 32],
+  allow_peer_uids: Arc<Vec<u32>>,
+  allow_peer_gids: Arc<Vec<u32>>,
+  allow_tls12_unstructured_signing: bool,
+) -> anyhow::Result<()> {
+  if !peer_is_allowed(&stream, &allow_peer_uids, &allow_peer_gids)? {
+    write_async_frame(
+      &mut stream,
+      &RemoteSignerResponse::Error {
+        code: "forbidden_peer".to_string(),
+        message: "peer credentials are not allowed".to_string(),
+      },
+    )
+    .await?;
+    return Ok(());
+  }
+
+  let request: RemoteSignerRequest = read_async_frame(&mut stream).await?;
+  let response = process_request(request, &keys, &token, allow_tls12_unstructured_signing);
+  write_async_frame(&mut stream, &response).await?;
+  Ok(())
+}
+
+fn process_request(
+  request: RemoteSignerRequest,
+  keys: &HashMap<String, ServerKey>,
+  token: &[u8; 32],
+  allow_tls12_unstructured_signing: bool,
+) -> RemoteSignerResponse {
+  if !request_token_is_valid(request.token(), token) {
+    return RemoteSignerResponse::Error {
+      code: "unauthorized".to_string(),
+      message: "invalid signer token".to_string(),
+    };
+  }
+
+  match request {
+    RemoteSignerRequest::DescribeKey { key_id, .. } => match keys.get(&key_id) {
+      Some(key) => RemoteSignerResponse::DescribeKey {
+        public_key: base64::engine::general_purpose::STANDARD.encode(&key.public_key),
+        algorithm: signature_algorithm_name(key.algorithm).to_string(),
+        schemes: key.schemes.iter().copied().map(u16::from).collect(),
+      },
+      None => RemoteSignerResponse::Error {
+        code: "unknown_key".to_string(),
+        message: "unknown key id".to_string(),
+      },
+    },
+    RemoteSignerRequest::Sign {
+      key_id,
+      scheme,
+      context,
+      message,
+      ..
+    } => {
+      let Some(key) = keys.get(&key_id) else {
+        return RemoteSignerResponse::Error {
+          code: "unknown_key".to_string(),
+          message: "unknown key id".to_string(),
+        };
+      };
+      let Ok(message) = decode_base64("signing message", &message) else {
+        return RemoteSignerResponse::Error {
+          code: "invalid_request".to_string(),
+          message: "signing message must be base64".to_string(),
+        };
+      };
+      match context {
+        SignContext::Tls13ServerCertificateVerify => {
+          if !is_tls13_server_certificate_verify_message(&message) {
+            return RemoteSignerResponse::Error {
+              code: "invalid_tls13_message".to_string(),
+              message: "message is not a TLS 1.3 server CertificateVerify input".to_string(),
+            };
+          }
+        }
+        SignContext::Tls12Unstructured => {
+          if !allow_tls12_unstructured_signing {
+            return RemoteSignerResponse::Error {
+              code: "tls12_disabled".to_string(),
+              message: "TLS 1.2 unstructured signing is disabled".to_string(),
+            };
+          }
+        }
+      }
+      let scheme = SignatureScheme::from(scheme);
+      let Some(signer) = key.key.choose_scheme(&[scheme]) else {
+        return RemoteSignerResponse::Error {
+          code: "unsupported_scheme".to_string(),
+          message: "key does not support requested signature scheme".to_string(),
+        };
+      };
+      match signer.sign(&message) {
+        Ok(signature) => RemoteSignerResponse::Sign {
+          signature: base64::engine::general_purpose::STANDARD.encode(signature),
+        },
+        Err(error) => RemoteSignerResponse::Error {
+          code: "signing_failed".to_string(),
+          message: error.to_string(),
+        },
+      }
+    }
+  }
+}
+
+#[derive(Debug)]
+struct ServerKey {
+  key: Arc<dyn SigningKey>,
+  public_key: Vec<u8>,
+  algorithm: SignatureAlgorithm,
+  schemes: Vec<SignatureScheme>,
+}
+
+fn load_server_keys(keys: &[(String, PathBuf)]) -> anyhow::Result<HashMap<String, ServerKey>> {
+  let mut loaded = HashMap::new();
+  for (key_id, path) in keys {
+    if key_id.trim().is_empty() {
+      bail!("remote signer key id must not be empty");
+    }
+    if loaded.contains_key(key_id) {
+      bail!("duplicate remote signer key id {key_id}");
+    }
+    let key = load_signing_key(path)
+      .with_context(|| format!("failed to load remote signer key {key_id}"))?;
+    let public_key = key
+      .public_key()
+      .ok_or_else(|| anyhow!("key {key_id} does not expose a public key"))?
+      .as_ref()
+      .to_vec();
+    let schemes = supported_schemes(key.as_ref());
+    if schemes.is_empty() {
+      bail!("remote signer key {key_id} does not support any TLS signature schemes");
+    }
+    loaded.insert(
+      key_id.clone(),
+      ServerKey {
+        algorithm: key.algorithm(),
+        key,
+        public_key,
+        schemes,
+      },
+    );
+  }
+  if loaded.is_empty() {
+    bail!("remote signer requires at least one --key entry");
+  }
+  Ok(loaded)
+}
+
+fn load_signing_key(path: &Path) -> anyhow::Result<Arc<dyn SigningKey>> {
+  let bytes = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+  let mut cursor = bytes.as_slice();
+  let key = rustls_pemfile::private_key(&mut cursor)
+    .with_context(|| format!("failed to parse private key from {}", path.display()))?
+    .ok_or_else(|| anyhow!("no private key found in {}", path.display()))?;
+  rustls::crypto::aws_lc_rs::sign::any_supported_type(&private_key_to_static(key))
+    .map_err(|error| anyhow!("failed to load private key: {error}"))
+}
+
+fn private_key_to_static(key: PrivateKeyDer<'_>) -> PrivateKeyDer<'static> {
+  key.clone_key()
+}
+
+fn supported_schemes(key: &dyn SigningKey) -> Vec<SignatureScheme> {
+  PREFERRED_SIGNATURE_SCHEMES
+    .iter()
+    .copied()
+    .filter(|scheme| key.choose_scheme(&[*scheme]).is_some())
+    .collect()
+}
+
+fn bind_listener(path: &Path, mode: u32) -> anyhow::Result<UnixListener> {
+  if let Some(parent) = path.parent()
+    && !parent.as_os_str().is_empty()
+  {
+    std::fs::create_dir_all(parent)
+      .with_context(|| format!("failed to create socket directory {}", parent.display()))?;
+  }
+  match std::fs::symlink_metadata(path) {
+    Ok(metadata) if metadata.file_type().is_socket() => {
+      std::fs::remove_file(path)
+        .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
+    }
+    Ok(_) => bail!("{} exists and is not a Unix socket", path.display()),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    Err(error) => {
+      return Err(error)
+        .with_context(|| format!("failed to inspect socket path {}", path.display()));
+    }
+  }
+  let listener = UnixListener::bind(path)
+    .with_context(|| format!("failed to bind Unix socket {}", path.display()))?;
+  std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+  Ok(listener)
+}
+
+fn peer_is_allowed(
+  stream: &TokioUnixStream,
+  allow_peer_uids: &[u32],
+  allow_peer_gids: &[u32],
+) -> anyhow::Result<bool> {
+  if allow_peer_uids.is_empty() && allow_peer_gids.is_empty() {
+    return Ok(true);
+  }
+  let credentials = stream
+    .peer_cred()
+    .context("failed to read peer credentials")?;
+  Ok(allow_peer_uids.contains(&credentials.uid()) || allow_peer_gids.contains(&credentials.gid()))
+}
+
+fn certificate_spki(certificate: &CertificateDer<'_>) -> anyhow::Result<Vec<u8>> {
+  let cert = webpki::EndEntityCert::try_from(certificate)
+    .map_err(|error| anyhow!("failed to parse certificate: {error}"))?;
+  Ok(cert.subject_public_key_info().as_ref().to_vec())
+}
+
+fn is_tls13_server_certificate_verify_message(message: &[u8]) -> bool {
+  let prefix_len = 64 + TLS13_SERVER_CERT_VERIFY_CONTEXT.len();
+  if message.len() <= prefix_len {
+    return false;
+  }
+  let hash_len = message.len() - prefix_len;
+  matches!(hash_len, 32 | 48 | 64)
+    && message[..64].iter().all(|byte| *byte == b' ')
+    && &message[64..prefix_len] == TLS13_SERVER_CERT_VERIFY_CONTEXT
+}
+
+fn connect_with_timeout(
+  path: PathBuf,
+  timeout: Duration,
+) -> anyhow::Result<std::os::unix::net::UnixStream> {
+  let (tx, rx) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    let _ = tx.send(std::os::unix::net::UnixStream::connect(path));
+  });
+  match rx.recv_timeout(timeout) {
+    Ok(Ok(stream)) => Ok(stream),
+    Ok(Err(error)) => Err(error.into()),
+    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(anyhow!("connect timed out")),
+    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+      Err(anyhow!("connect worker exited before returning a result"))
+    }
+  }
+}
+
+fn load_token_from_env(env_name: &str) -> anyhow::Result<[u8; 32]> {
+  let raw = std::env::var(env_name).with_context(|| format!("failed to read {env_name}"))?;
+  let decoded = base64::engine::general_purpose::STANDARD
+    .decode(raw.trim())
+    .with_context(|| format!("{env_name} must contain base64"))?;
+  decoded
+    .try_into()
+    .map_err(|_| anyhow!("{env_name} must contain exactly 32 bytes"))
+}
+
+fn token_to_wire(token: &[u8; 32]) -> String {
+  base64::engine::general_purpose::STANDARD.encode(token)
+}
+
+fn request_token_is_valid(raw_token: &str, expected: &[u8; 32]) -> bool {
+  let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(raw_token.trim()) else {
+    return false;
+  };
+  let Ok(decoded) = <[u8; 32]>::try_from(decoded.as_slice()) else {
+    return false;
+  };
+  expected.ct_eq(&decoded).into()
+}
+
+fn decode_base64(field: &str, value: &str) -> anyhow::Result<Vec<u8>> {
+  base64::engine::general_purpose::STANDARD
+    .decode(value)
+    .with_context(|| format!("{field} must contain base64"))
+}
+
+fn parse_signature_schemes(values: &[u16]) -> Vec<SignatureScheme> {
+  PREFERRED_SIGNATURE_SCHEMES
+    .iter()
+    .copied()
+    .filter(|scheme| values.contains(&u16::from(*scheme)))
+    .collect()
+}
+
+fn parse_signature_algorithm(value: &str) -> anyhow::Result<SignatureAlgorithm> {
+  match value {
+    "rsa" => Ok(SignatureAlgorithm::RSA),
+    "ecdsa" => Ok(SignatureAlgorithm::ECDSA),
+    "ed25519" => Ok(SignatureAlgorithm::ED25519),
+    "ed448" => Ok(SignatureAlgorithm::ED448),
+    _ => bail!("unsupported remote signer key algorithm {value}"),
+  }
+}
+
+fn signature_algorithm_name(algorithm: SignatureAlgorithm) -> &'static str {
+  match algorithm {
+    SignatureAlgorithm::RSA => "rsa",
+    SignatureAlgorithm::ECDSA => "ecdsa",
+    SignatureAlgorithm::ED25519 => "ed25519",
+    SignatureAlgorithm::ED448 => "ed448",
+    _ => "unknown",
+  }
+}
+
+fn write_sync_frame<T: Serialize>(
+  stream: &mut std::os::unix::net::UnixStream,
+  value: &T,
+) -> anyhow::Result<()> {
+  let bytes = serde_json::to_vec(value)?;
+  if bytes.len() > MAX_FRAME_LEN {
+    bail!("remote signer frame is too large");
+  }
+  stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
+  stream.write_all(&bytes)?;
+  Ok(())
+}
+
+fn read_sync_frame<T: DeserializeOwned>(
+  stream: &mut std::os::unix::net::UnixStream,
+) -> anyhow::Result<T> {
+  let mut len = [0u8; 4];
+  stream.read_exact(&mut len)?;
+  let len = u32::from_be_bytes(len) as usize;
+  if len > MAX_FRAME_LEN {
+    bail!("remote signer frame is too large");
+  }
+  let mut bytes = vec![0u8; len];
+  stream.read_exact(&mut bytes)?;
+  Ok(serde_json::from_slice(&bytes)?)
+}
+
+async fn write_async_frame<T: Serialize>(
+  stream: &mut TokioUnixStream,
+  value: &T,
+) -> anyhow::Result<()> {
+  let bytes = serde_json::to_vec(value)?;
+  if bytes.len() > MAX_FRAME_LEN {
+    bail!("remote signer frame is too large");
+  }
+  stream
+    .write_all(&(bytes.len() as u32).to_be_bytes())
+    .await?;
+  stream.write_all(&bytes).await?;
+  Ok(())
+}
+
+async fn read_async_frame<T: DeserializeOwned>(stream: &mut TokioUnixStream) -> anyhow::Result<T> {
+  let mut len = [0u8; 4];
+  stream.read_exact(&mut len).await?;
+  let len = u32::from_be_bytes(len) as usize;
+  if len > MAX_FRAME_LEN {
+    bail!("remote signer frame is too large");
+  }
+  let mut bytes = vec![0u8; len];
+  stream.read_exact(&mut bytes).await?;
+  Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[derive(Debug)]
+struct RemoteKeyDescription {
+  public_key: Vec<u8>,
+  algorithm: SignatureAlgorithm,
+  schemes: Vec<SignatureScheme>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RemoteSignerRequest {
+  DescribeKey {
+    token: String,
+    key_id: String,
+  },
+  Sign {
+    token: String,
+    key_id: String,
+    scheme: u16,
+    context: SignContext,
+    message: String,
+  },
+}
+
+impl RemoteSignerRequest {
+  fn token(&self) -> &str {
+    match self {
+      Self::DescribeKey { token, .. } | Self::Sign { token, .. } => token,
+    }
+  }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RemoteSignerResponse {
+  DescribeKey {
+    public_key: String,
+    algorithm: String,
+    schemes: Vec<u16>,
+  },
+  Sign {
+    signature: String,
+  },
+  Error {
+    code: String,
+    message: String,
+  },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SignContext {
+  Tls13ServerCertificateVerify,
+  Tls12Unstructured,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn tls13_server_certificate_verify_detection_is_strict() {
+    let mut message = vec![b' '; 64];
+    message.extend_from_slice(TLS13_SERVER_CERT_VERIFY_CONTEXT);
+    message.extend_from_slice(&[7u8; 32]);
+    assert!(is_tls13_server_certificate_verify_message(&message));
+
+    message[0] = b'!';
+    assert!(!is_tls13_server_certificate_verify_message(&message));
+  }
+}

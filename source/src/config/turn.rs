@@ -389,18 +389,38 @@ pub struct TurnListenerTlsConfig {
   pub cert_chain: Option<PathBuf>,
   #[serde(default)]
   pub private_key: Option<PathBuf>,
+  #[serde(default)]
+  pub remote_signer_key_id: Option<String>,
 }
 
 impl TurnListenerTlsConfig {
   pub fn has_override(&self) -> bool {
-    self.cert_chain.is_some() || self.private_key.is_some()
+    self.cert_chain.is_some() || self.private_key.is_some() || self.remote_signer_key_id.is_some()
   }
 
   fn validate(&self, listener_name: &str) -> anyhow::Result<()> {
-    match (&self.cert_chain, &self.private_key) {
-      (Some(_), Some(_)) | (None, None) => Ok(()),
+    match (
+      &self.cert_chain,
+      &self.private_key,
+      &self.remote_signer_key_id,
+    ) {
+      (None, None, None) => Ok(()),
+      (Some(_), Some(_), None) => Ok(()),
+      (Some(_), None, Some(key_id)) => {
+        if key_id.trim().is_empty() {
+          bail!(
+            "WebRTC TURN listener {} tls.remote_signer_key_id must not be empty",
+            listener_name
+          );
+        }
+        Ok(())
+      }
+      (Some(_), Some(_), Some(_)) => bail!(
+        "WebRTC TURN listener {} tls override must set exactly one of private_key or remote_signer_key_id",
+        listener_name
+      ),
       _ => bail!(
-        "WebRTC TURN listener {} tls override requires both cert_chain and private_key",
+        "WebRTC TURN listener {} tls override requires cert_chain and exactly one of private_key or remote_signer_key_id",
         listener_name
       ),
     }

@@ -26,6 +26,7 @@ pub mod proxy_protocol;
 pub mod proxy_protocol_egress;
 pub mod quic;
 pub mod reload;
+pub mod remote_signer;
 pub mod routes;
 pub mod runtime;
 pub mod server;

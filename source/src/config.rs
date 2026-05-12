@@ -13,6 +13,7 @@ use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 mod dynamic_policy;
 mod limits;
 mod stream;
+mod tls;
 mod turn;
 pub use dynamic_policy::*;
 use limits::{
@@ -20,6 +21,7 @@ use limits::{
   default_max_webtransport_sessions_per_connection,
 };
 pub use stream::*;
+pub use tls::*;
 pub use turn::*;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -258,20 +260,22 @@ impl Config {
       .remember_downstream_tls_file(tls_cert_chain_logical.clone());
     self.source_paths.downstream_tls_cert_chain = Some(tls_cert_chain_logical);
 
-    let (tls_private_key, tls_private_key_logical) =
-      resolve_existing_local_config_file_path_with_logical(
-        "tls.private_key",
-        &path_roots.cert_dir,
-        &self.tls.private_key,
-      )?;
-    self.tls.private_key = tls_private_key;
-    self
-      .source_paths
-      .remember_runtime_file(tls_private_key_logical.clone());
-    self
-      .source_paths
-      .remember_downstream_tls_file(tls_private_key_logical.clone());
-    self.source_paths.downstream_tls_private_key = Some(tls_private_key_logical);
+    if let Some(private_key) = self.tls.private_key.take() {
+      let (tls_private_key, tls_private_key_logical) =
+        resolve_existing_local_config_file_path_with_logical(
+          "tls.private_key",
+          &path_roots.cert_dir,
+          &private_key,
+        )?;
+      self.tls.private_key = Some(tls_private_key);
+      self
+        .source_paths
+        .remember_runtime_file(tls_private_key_logical.clone());
+      self
+        .source_paths
+        .remember_downstream_tls_file(tls_private_key_logical.clone());
+      self.source_paths.downstream_tls_private_key = Some(tls_private_key_logical);
+    }
 
     self.tls.ocsp.response_file = self
       .tls
@@ -1376,6 +1380,21 @@ impl Config {
     if self.tls.min_version > self.tls.max_version {
       bail!("tls.min_version must be less than or equal to tls.max_version");
     }
+    if self.tls.remote_signer.enabled {
+      if self.tls.private_key.is_some() {
+        bail!("tls.private_key must not be set when tls.remote_signer.enabled = true");
+      }
+      self.tls.remote_signer.validate("tls.remote_signer")?;
+      if self.tls.min_version == TlsVersion::Tls12
+        && !self.tls.remote_signer.allow_tls12_unstructured_signing
+      {
+        bail!(
+          "tls.remote_signer.allow_tls12_unstructured_signing must be true when remote signing is enabled with tls.min_version = \"tls1.2\""
+        );
+      }
+    } else if self.tls.private_key.is_none() {
+      bail!("tls.private_key is required unless tls.remote_signer.enabled = true");
+    }
     if self.tls.session_ticket_rotation_seconds == 0 {
       bail!("tls.session_ticket_rotation_seconds must be greater than 0");
     }
@@ -1386,6 +1405,14 @@ impl Config {
       && self.tls.client_auth.ca_certs.is_empty()
     {
       bail!("tls.client_auth.ca_certs is required when client_auth mode is not off");
+    }
+    for listener in &self.webrtc_turn_listeners {
+      if listener.tls.remote_signer_key_id.is_some() && !self.tls.remote_signer.enabled {
+        bail!(
+          "WebRTC TURN listener {} tls.remote_signer_key_id requires tls.remote_signer.enabled = true",
+          listener.name
+        );
+      }
     }
     Ok(())
   }
@@ -1855,8 +1882,18 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "min_version",
       "ocsp",
       "private_key",
+      "remote_signer",
       "session_ticket_rotation_seconds",
       "session_tickets",
+    ][..],
+    "tls.remote_signer" => &[
+      "allow_tls12_unstructured_signing",
+      "connect_timeout_ms",
+      "enabled",
+      "key_id",
+      "sign_timeout_ms",
+      "socket_path",
+      "token_env",
     ][..],
     "tls.ocsp" => &["mode", "response_file"][..],
     "tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
@@ -2299,7 +2336,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       &["password", "password_env", "username"][..]
     }
     "webrtc_turn_listeners.relay_port_range" => &["end", "start"][..],
-    "webrtc_turn_listeners.tls" => &["cert_chain", "private_key"][..],
+    "webrtc_turn_listeners.tls" => &["cert_chain", "private_key", "remote_signer_key_id"][..],
     "rate_limits" => &[
       "burst",
       "key",
@@ -3072,88 +3109,6 @@ pub enum ProxyProtocolVersion {
   V2,
   #[default]
   Any,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct TlsConfig {
-  pub cert_chain: PathBuf,
-  pub private_key: PathBuf,
-  #[serde(default = "default_tls_min_version")]
-  pub min_version: TlsVersion,
-  #[serde(default = "default_tls_max_version")]
-  pub max_version: TlsVersion,
-  #[serde(default = "default_true")]
-  pub session_tickets: bool,
-  #[serde(default = "default_session_ticket_rotation_seconds")]
-  pub session_ticket_rotation_seconds: u64,
-  #[serde(default)]
-  pub client_auth: TlsClientAuthConfig,
-  #[serde(default)]
-  pub ocsp: OcspConfig,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
-#[serde(rename_all = "lowercase")]
-pub enum TlsVersion {
-  #[serde(rename = "tls1.2")]
-  Tls12,
-  #[serde(rename = "tls1.3")]
-  Tls13,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct TlsClientAuthConfig {
-  #[serde(default)]
-  pub mode: TlsClientAuthMode,
-  #[serde(default)]
-  pub ca_certs: Vec<PathBuf>,
-  #[serde(default = "default_tls_client_auth_verify_depth")]
-  pub verify_depth: u8,
-}
-
-impl Default for TlsClientAuthConfig {
-  fn default() -> Self {
-    Self {
-      mode: TlsClientAuthMode::Off,
-      ca_certs: Vec::new(),
-      verify_depth: default_tls_client_auth_verify_depth(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum TlsClientAuthMode {
-  #[default]
-  Off,
-  Optional,
-  Require,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct OcspConfig {
-  #[serde(default)]
-  pub mode: OcspMode,
-  #[serde(default)]
-  pub response_file: Option<PathBuf>,
-}
-
-impl Default for OcspConfig {
-  fn default() -> Self {
-    Self {
-      mode: OcspMode::Disabled,
-      response_file: None,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum OcspMode {
-  #[default]
-  Disabled,
-  StaticFile,
-  LiveFetch,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -5506,22 +5461,6 @@ fn default_compression_mime_types() -> Vec<String> {
   .into_iter()
   .map(str::to_string)
   .collect()
-}
-
-fn default_tls_min_version() -> TlsVersion {
-  TlsVersion::Tls13
-}
-
-fn default_tls_max_version() -> TlsVersion {
-  TlsVersion::Tls13
-}
-
-fn default_session_ticket_rotation_seconds() -> u64 {
-  86_400
-}
-
-fn default_tls_client_auth_verify_depth() -> u8 {
-  4
 }
 
 fn default_client_header_timeout_ms() -> u64 {

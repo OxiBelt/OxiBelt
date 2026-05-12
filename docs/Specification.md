@@ -83,15 +83,17 @@ Upgrade and extended protocol behavior:
 
 ## TLS and Identity
 
-Downstream TLS uses configured certificate and private key files from the cert directory. OxiBelt supports TLS 1.2 through TLS 1.3 for TCP TLS; HTTP/3 requires TLS 1.3.
+Downstream TLS uses configured certificate files from the cert directory and either a local private key file or an IPC remote private-key signer. OxiBelt supports TLS 1.2 through TLS 1.3 for TCP TLS; HTTP/3 requires TLS 1.3.
 
 Supported downstream TLS features:
 
-- Server certificate chain and private key loading.
+- Server certificate chain loading with local private key loading or Unix socket remote signing.
 - Optional or required downstream client certificate authentication.
 - Client CA roots from configured cert-directory files.
 - Static file-based OCSP stapling.
 - Session tickets with configurable rotation interval.
+
+Remote private-key signing is intended to keep downstream and TURN TLS private keys outside the OxiBelt process memory. OxiBelt connects to `oxibelt-keysigner` over a Unix domain socket, authenticates with a base64 32-byte token, verifies that the signer-reported public key matches the configured certificate, and requests signatures through rustls' signing interface. The signer defaults to TLS 1.3 server CertificateVerify inputs only; TLS 1.2 unstructured signing requires explicit opt-in on both OxiBelt and the signer sidecar.
 
 Upstream TLS behavior:
 

@@ -53,11 +53,13 @@ RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
         ln -sf "${libgcc_s_path}" /tmp/oxibelt-libgcc/libgcc_s.so && \
         export LIBRARY_PATH="/tmp/oxibelt-libgcc:$(dirname "${libgcc_s_path}")${LIBRARY_PATH:+:${LIBRARY_PATH}}"; \
       fi && \
-      cargo build --locked --release -p oxibelt --bin oxibelt --target "${OXIBELT_RUST_TARGET}" && \
+      cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --target "${OXIBELT_RUST_TARGET}" && \
       cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt" /tmp/oxibelt; \
+      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt-keysigner" /tmp/oxibelt-keysigner; \
     else \
-      cargo build --locked --release -p oxibelt --bin oxibelt && \
+      cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner && \
       cp target/release/oxibelt /tmp/oxibelt; \
+      cp target/release/oxibelt-keysigner /tmp/oxibelt-keysigner; \
     fi
 
 FROM ${OXIBELT_RUNTIME_IMAGE} AS runtime
@@ -84,9 +86,11 @@ RUN apk add --no-cache ca-certificates libgcc && \
 
 WORKDIR /app
 COPY --from=builder /tmp/oxibelt /usr/local/bin/oxibelt
+COPY --from=builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner
 COPY source/config/oxibelt.toml /etc/oxibelt/config/oxibelt.toml
 
 RUN chmod 0755 /usr/local/bin/oxibelt && \
+    chmod 0755 /usr/local/bin/oxibelt-keysigner && \
     chmod 0755 /etc/oxibelt /etc/oxibelt/config /etc/oxibelt/cert /etc/oxibelt/oxirule && \
     chmod 0755 /var/cache/oxibelt && \
     chmod 0644 /etc/oxibelt/config/oxibelt.toml

@@ -282,6 +282,15 @@ max_version = "tls1.3"
 session_tickets = true
 session_ticket_rotation_seconds = 86400
 
+[tls.remote_signer]
+enabled = false
+# socket_path = "/run/oxibelt-keysigner/sign.sock"
+# key_id = "edge-default"
+token_env = "OXIBELT_KEYSIGNER_TOKEN"
+connect_timeout_ms = 250
+sign_timeout_ms = 1000
+allow_tls12_unstructured_signing = false
+
 [tls.client_auth]
 mode = "off" # off | optional | require
 ca_certs = []
@@ -292,11 +301,26 @@ mode = "disabled" # disabled | static_file | live_fetch
 # response_file = "ocsp.der"
 ```
 
-`cert_chain` and `private_key` are required. `tls.client_auth.ca_certs` is required when client authentication mode is not `off`. `tls.ocsp.mode = "static_file"` requires `response_file`; `live_fetch` is reserved and rejected. HTTP/3 requires `tls.min_version = "tls1.3"`.
+`cert_chain` is always required. `private_key` is required unless `tls.remote_signer.enabled = true`; when remote signing is enabled, `private_key` must not be set. The remote signer uses a Unix domain socket and a base64 32-byte token from `token_env`; `socket_path` must be absolute, and `key_id` selects the signer-held key. By default, remote signing is limited to TLS 1.3 server CertificateVerify inputs. Set `allow_tls12_unstructured_signing = true` only when TLS 1.2 compatibility is required and the signer sidecar is started with the same opt-in.
+
+Run the sidecar as a separate UID that can read private key files. OxiBelt should be able to read certificate chains and connect to the socket, but should not be able to read private keys. The sidecar command is:
+
+```sh
+oxibelt-keysigner \
+  --socket /run/oxibelt-keysigner/sign.sock \
+  --key edge-default=/etc/oxibelt/cert/privkey.pem \
+  --token-env OXIBELT_KEYSIGNER_TOKEN \
+  --socket-mode 0660 \
+  --allow-peer-uid 10001
+```
+
+Remote signing is compatible with read-only root filesystems, but the socket directory itself must be writable. The signer creates the Unix socket file at `socket_path`, so a container started with `--read-only` should provide a tmpfs or shared volume for the parent directory, for example `--tmpfs /run/oxibelt-keysigner:rw,noexec,nosuid,nodev,mode=0770`. In a sidecar deployment, mount that same socket directory into both containers. Mount private keys read-only into the signer container only; OxiBelt should receive certificate chains and the signer socket, not private key files. If the signer cannot create the socket, OxiBelt cannot describe the remote key: startup fails for initial config load, and hot reload rejects the new TLS config while preserving the active one.
+
+`tls.client_auth.ca_certs` is required when client authentication mode is not `off`. `tls.ocsp.mode = "static_file"` requires `response_file`; `live_fetch` is reserved and rejected. HTTP/3 requires `tls.min_version = "tls1.3"`.
 
 OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, or certificate renewal itself. Provision and renew TLS files with external automation such as Certbot or the `certbot/certbot` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
 
-Keep ACME credentials, DNS-01 provider tokens, and renewal state out of the OxiBelt process/container. This limits blast radius if a proxy vulnerability ever exposes process memory or permits remote code execution: the running proxy may have access to its configured certificate material, but it should not also have the DNS or ACME credentials needed to mint arbitrary new certificates.
+Keep ACME credentials, DNS-01 provider tokens, renewal state, and private signing keys out of the OxiBelt process/container when possible. This limits blast radius if a proxy vulnerability ever exposes process memory or permits remote code execution: the running proxy may have access to certificate chains and remote signing capability, but it should not also contain private keys or the DNS/ACME credentials needed to mint arbitrary new certificates. A compromised OxiBelt process that still has signer socket and token access may request signatures while that access remains valid, so socket permissions, peer UID/GID allowlists, token rotation, and process isolation remain important.
 
 ## QUIC Sections
 
@@ -1208,7 +1232,7 @@ username = "media-user"
 password_env = "OXIBELT_TURN_MEDIA_PASSWORD"
 ```
 
-`mode = "edge_relay"` makes OxiBelt allocate UDP relay sockets and advertise `public_ip` with a port from `relay_port_range`. It requires enforced TURN authentication and rejects open relay configurations. TURN over TLS reuses `[tls]` certificate material by default; set `[webrtc_turn_listeners.tls] cert_chain` and `private_key` to override it for a listener. TURN payloads are protocol-forwarded only; OxiRule/WAF inspection applies to signaling HTTP, not SRTP/media payloads.
+`mode = "edge_relay"` makes OxiBelt allocate UDP relay sockets and advertise `public_ip` with a port from `relay_port_range`. It requires enforced TURN authentication and rejects open relay configurations. TURN over TLS reuses `[tls]` certificate material by default; set `[webrtc_turn_listeners.tls] cert_chain` plus exactly one of `private_key` or `remote_signer_key_id` to override it for a listener. `remote_signer_key_id` uses the global `[tls.remote_signer]` socket and token. TURN payloads are protocol-forwarded only; OxiRule/WAF inspection applies to signaling HTTP, not SRTP/media payloads.
 
 Route-level WAF example:
 
