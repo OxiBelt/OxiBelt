@@ -105,6 +105,7 @@ struct WebTransportMultiplexArgs {
     server_name: String,
     authority: String,
     path: String,
+    headers: HeaderMap,
     ca_cert: String,
     sessions: usize,
     expect_statuses: Vec<u16>,
@@ -145,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv>"
+    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]"
   );
 }
 
@@ -259,6 +260,7 @@ fn parse_webtransport_multiplex_args(
     let mut server_name = None;
     let mut authority = None;
     let mut path = None;
+    let mut headers = HeaderMap::new();
     let mut ca_cert = None;
     let mut sessions = None;
     let mut expect_statuses = None;
@@ -273,6 +275,7 @@ fn parse_webtransport_multiplex_args(
             "--server-name" => server_name = Some(value),
             "--authority" => authority = Some(value),
             "--path" => path = Some(validate_origin_form_path(&value)?),
+            "--header" => insert_header(&mut headers, &value)?,
             "--ca-cert" => ca_cert = Some(value),
             "--sessions" => {
                 let parsed = value.parse().context("invalid --sessions value")?;
@@ -305,6 +308,7 @@ fn parse_webtransport_multiplex_args(
         authority: authority.unwrap_or_else(|| server_name.clone()),
         server_name,
         path: path.ok_or_else(|| anyhow!("--path is required"))?,
+        headers,
         ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
         sessions,
         expect_statuses,
@@ -354,15 +358,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
                     bail!("--body-chunk-size must be greater than zero");
                 }
             }
-            "--header" => {
-                let (name, value) = value
-                    .split_once(':')
-                    .ok_or_else(|| anyhow!("invalid --header value; expected name:value"))?;
-                headers.insert(
-                    HeaderName::try_from(name.trim()).context("invalid --header name")?,
-                    HeaderValue::from_str(value.trim()).context("invalid --header value")?,
-                );
-            }
+            "--header" => insert_header(&mut headers, &value)?,
             "--ca-cert" => ca_cert = Some(value),
             "--expect-status" => {
                 expect_status = Some(value.parse().context("invalid --expect-status value")?);
@@ -388,6 +384,17 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
         expect_status,
     })
+}
+
+fn insert_header(headers: &mut HeaderMap, raw: &str) -> anyhow::Result<()> {
+    let (name, value) = raw
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid --header value; expected name:value"))?;
+    headers.insert(
+        HeaderName::try_from(name.trim()).context("invalid --header name")?,
+        HeaderValue::from_str(value.trim()).context("invalid --header value")?,
+    );
+    Ok(())
 }
 
 fn validate_origin_form_path(raw_path: &str) -> anyhow::Result<String> {
@@ -1037,6 +1044,7 @@ fn webtransport_connect_request(
         .header("sec-webtransport-http3-draft", "draft02")
         .body(())
         .context("failed to build WebTransport CONNECT request")?;
+    request.headers_mut().extend(args.headers.clone());
     request
         .extensions_mut()
         .insert(h3::ext::Protocol::WEB_TRANSPORT);

@@ -1041,6 +1041,8 @@ protocol_probe_webtransport_multiplex() {
   local path="$2"
   local sessions="$3"
   local expect_statuses="$4"
+  shift 4
+  local extra_args=("$@")
   local output=""
   local status=0
   local client_container=""
@@ -1060,7 +1062,8 @@ protocol_probe_webtransport_multiplex() {
       --path "${path}" \
       --ca-cert /tmp/proxy-ca.pem \
       --sessions "${sessions}" \
-      --expect-statuses "${expect_statuses}" >/dev/null
+      --expect-statuses "${expect_statuses}" \
+      "${extra_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
     if output="$(docker start -a "${client_container}" 2>&1)"; then

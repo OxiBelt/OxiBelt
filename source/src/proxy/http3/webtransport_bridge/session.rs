@@ -17,14 +17,18 @@ use tracing::warn;
 use super::super::{H3RequestStream, connect_upstream_webtransport, respond_to_h3_request};
 use super::connection::DownstreamWebTransportConnection;
 use super::{DispatcherEvent, DownstreamBidiStream, DownstreamUniRecvStream};
-use crate::config::ConnectionLimitIdentityMode;
-use crate::limits::{ConnectionLimitContext, ConnectionPermit};
+use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::response::text_response;
 use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContext};
 use crate::state::{AppHandle, AppSnapshot};
 use crate::waf::{WafStreamClose, WafStreamDirection, WafWebTransportStreamKind};
+
+#[path = "session/connection_limits.rs"]
+mod connection_limits;
+
+use connection_limits::{WebTransportSessionPermits, acquire_webtransport_session_permits};
 
 const WEBTRANSPORT_DRAFT_HEADER: &str = "sec-webtransport-http3-draft";
 const WEBTRANSPORT_DRAFT_VALUE: &str = "draft02";
@@ -69,7 +73,7 @@ fn session_id_for_stream_id(stream_id: StreamId) -> SessionId {
 pub(super) struct ActiveWebTransportSession {
   upstream: Arc<web_transport_quinn::Session>,
   connect_stream: H3RequestStream,
-  _webtransport_session_permit: ConnectionPermit,
+  _connection_permits: WebTransportSessionPermits,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
   timeouts: EffectiveTimeouts,
@@ -184,12 +188,12 @@ pub(super) async fn accept_webtransport_session(
     return Ok(());
   }
 
-  let webtransport_session_permit = match acquire_webtransport_session_permit(
+  let connection_permits = match acquire_webtransport_session_permits(
     prepared.client_addr.ip(),
     connection_limit_context.as_ref(),
     snapshot.as_ref(),
   ) {
-    Ok(permit) => permit,
+    Ok(permits) => permits,
     Err(status) => {
       respond_to_h3_request(stream, text_response(status, "connection limit exceeded")).await?;
       return Ok(());
@@ -255,7 +259,7 @@ pub(super) async fn accept_webtransport_session(
     ActiveWebTransportSession {
       upstream,
       connect_stream: stream,
-      _webtransport_session_permit: webtransport_session_permit,
+      _connection_permits: connection_permits,
       stream_waf_state,
       stream_waf,
       timeouts: prepared.timeouts,
@@ -264,26 +268,6 @@ pub(super) async fn accept_webtransport_session(
     },
   );
   Ok(())
-}
-
-fn acquire_webtransport_session_permit(
-  client_ip: std::net::IpAddr,
-  connection_limit_context: Option<&ConnectionLimitContext>,
-  state: &AppSnapshot,
-) -> Result<ConnectionPermit, StatusCode> {
-  let limit_ip = match state.config.limits.connection_limit_identity {
-    ConnectionLimitIdentityMode::ProxyProtocol | ConnectionLimitIdentityMode::PerRequestRealIp => {
-      client_ip
-    }
-    ConnectionLimitIdentityMode::FirstRequestRealIp => connection_limit_context
-      .map(|context| context.bind_or_get_first_request_ip(client_ip))
-      .unwrap_or(client_ip),
-  };
-  state.limits.acquire_webtransport_session(
-    limit_ip,
-    &state.config.limits,
-    &state.config.connection_limits,
-  )
 }
 
 fn spawn_upstream_session_tasks(
