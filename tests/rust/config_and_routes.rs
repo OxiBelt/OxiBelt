@@ -3174,6 +3174,51 @@ mime_types = ["application/json", "application/*+json"]
 }
 
 #[test]
+fn compression_policy_names_reject_reserved_route_keywords() {
+    for reserved_name in ["default", "off"] {
+        let test_name = format!("compression-policy-reserved-{reserved_name}");
+        let temp_dir = common::TempDir::new(&test_name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), &test_name);
+        let raw = common::minimal_config_toml(&cert_path, &key_path)
+            + &format!(
+                r#"
+
+[[compression.policies]]
+name = "{reserved_name}"
+"#
+            );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("reserved compression policy name should fail");
+        let expected = format!("compression policy name {reserved_name} is reserved");
+
+        assert!(
+            error.to_string().contains(&expected),
+            "unexpected error for {reserved_name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn routes_accept_reserved_compression_route_keywords() {
+    for route_compression in ["default", "off"] {
+        let test_name = format!("compression-route-keyword-{route_compression}");
+        let temp_dir = common::TempDir::new(&test_name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), &test_name);
+        let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+            "upstream = \"app\"",
+            &format!("upstream = \"app\"\ncompression = \"{route_compression}\""),
+        );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+
+        config.validate().expect("config should validate");
+    }
+}
+
+#[test]
 fn routes_reject_unknown_compression_policies() {
     let temp_dir = common::TempDir::new("compression-policy-unknown");
     let (cert_path, key_path) =
