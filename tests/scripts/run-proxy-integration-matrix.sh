@@ -60,6 +60,19 @@ trap cleanup EXIT
 
 mkdir -p "${case_dir}" "${cert_dir}" "${upstream_tls_dir}" "${postgres_tls_dir}" "${logs_dir}"
 
+unique_docker_container_name() {
+  local prefix="$1"
+  local attempt="${2:-0}"
+
+  printf '%s-%s-%s-%s-%s-%s' \
+    "${prefix}" \
+    "${run_id}" \
+    "${BASHPID:-$$}" \
+    "${attempt}" \
+    "${RANDOM}" \
+    "$(date +%s%N)"
+}
+
 cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
   materialize \
   --suite docker \
@@ -181,8 +194,8 @@ client_request_with_headers_to_target() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -249,8 +262,8 @@ client_request_with_headers_on_port() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -300,7 +313,7 @@ probe_client_request_with_headers() {
   local status=0
   local client_container=""
 
-  client_container="oxibelt-probe-client-${run_id}-${RANDOM}"
+  client_container="$(unique_docker_container_name "oxibelt-probe-client")"
   docker create \
     --name "${client_container}" \
     --label "${test_label}" \
@@ -342,7 +355,7 @@ slow_body_client_request() {
   local status=0
   local client_container=""
 
-  client_container="oxibelt-slow-body-client-${run_id}-${RANDOM}"
+  client_container="$(unique_docker_container_name "oxibelt-slow-body-client")"
   docker create \
     --name "${client_container}" \
     --label "${test_label}" \
@@ -394,7 +407,7 @@ split_body_client_request() {
   local status=0
   local client_container=""
 
-  client_container="oxibelt-split-body-client-${run_id}-${RANDOM}"
+  client_container="$(unique_docker_container_name "oxibelt-split-body-client")"
   docker create \
     --name "${client_container}" \
     --label "${test_label}" \
@@ -461,8 +474,8 @@ plain_client_request_with_headers_on_port() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-plain-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-plain-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -515,8 +528,8 @@ plain_client_request_with_headers_to_target() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-plain-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-plain-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -559,8 +572,8 @@ proxy_protocol_client_request() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-proxy-protocol-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-proxy-protocol-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -601,7 +614,8 @@ probe_proxy_protocol_client_request() {
   local path="$3"
   local output=""
   local status=0
-  local client_container="oxibelt-proxy-protocol-probe-${run_id}-${RANDOM}"
+  local client_container
+  client_container="$(unique_docker_container_name "oxibelt-proxy-protocol-probe")"
 
   docker create \
     --name "${client_container}" \
@@ -643,7 +657,7 @@ start_holding_client_request_with_headers() {
     header_args+=(--header "${header}")
   done
 
-  HOLDING_CLIENT_CONTAINER="oxibelt-holding-client-${run_id}-${RANDOM}"
+  HOLDING_CLIENT_CONTAINER="$(unique_docker_container_name "oxibelt-holding-client")"
   HOLDING_CLIENT_LOG="${logs_dir}/${HOLDING_CLIENT_CONTAINER}.log"
   local proxy_args=()
   if [[ -n "${proxy_line}" ]]; then
@@ -706,7 +720,7 @@ start_holding_upgrade_client_request_with_headers() {
     header_args+=(--header "${header}")
   done
 
-  HOLDING_CLIENT_CONTAINER="oxibelt-holding-upgrade-client-${run_id}-${RANDOM}"
+  HOLDING_CLIENT_CONTAINER="$(unique_docker_container_name "oxibelt-holding-upgrade-client")"
   HOLDING_CLIENT_LOG="${logs_dir}/${HOLDING_CLIENT_CONTAINER}.log"
   docker create \
     --name "${HOLDING_CLIENT_CONTAINER}" \
@@ -747,7 +761,7 @@ start_holding_connect_tunnel_request_with_headers() {
     header_args+=(--header "${header}")
   done
 
-  HOLDING_CLIENT_CONTAINER="oxibelt-holding-connect-client-${run_id}-${RANDOM}"
+  HOLDING_CLIENT_CONTAINER="$(unique_docker_container_name "oxibelt-holding-connect-client")"
   HOLDING_CLIENT_LOG="${logs_dir}/${HOLDING_CLIENT_CONTAINER}.log"
   docker create \
     --name "${HOLDING_CLIENT_CONTAINER}" \
@@ -796,8 +810,8 @@ upgrade_client_request_with_headers() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-upgrade-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-upgrade-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -851,8 +865,8 @@ connect_tunnel_request_with_headers() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-connect-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-connect-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -901,8 +915,8 @@ protocol_probe_client() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-protocol-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-protocol-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -951,8 +965,8 @@ protocol_probe_client_with_headers() {
     header_args+=(--header "${header}")
   done
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-protocol-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-protocol-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -1000,8 +1014,8 @@ protocol_probe_generated_body_request() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-protocol-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-protocol-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
@@ -1047,8 +1061,8 @@ protocol_probe_webtransport_multiplex() {
   local status=0
   local client_container=""
 
-  for _attempt in $(seq 1 30); do
-    client_container="oxibelt-webtransport-client-${run_id}-${RANDOM}"
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-webtransport-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
       --label "${test_label}" \
