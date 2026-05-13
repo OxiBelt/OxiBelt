@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 
 use http::{HeaderMap, Method, Request, Response, Uri, Version};
 
@@ -9,7 +10,7 @@ use crate::waf::{
 };
 
 use super::body::ProxyBody;
-use super::headers::extract_host;
+static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
 
 struct SystemAccessLogRequest {
   method: Method,
@@ -30,11 +31,11 @@ pub(crate) struct SystemAccessLogContext<'a> {
   pub(super) downstream_scheme: &'static str,
   pub(super) route_name: String,
   pub(super) tcp_max_hop: Option<u8>,
-  pub(super) tls: Arc<WafTlsMetadata>,
+  pub(super) tls: Option<Arc<WafTlsMetadata>>,
   pub(super) protocol: WafProtocol,
   pub(super) transport_network: WafTransportNetwork,
   pub(super) transport_metadata: WafTransportMetadataInput<'a>,
-  pub(super) tags: std::collections::HashMap<String, String>,
+  pub(super) tags: Option<HashMap<String, String>>,
   pub(super) dynamic_policy: DynamicPolicyContext,
   pub(super) upstream_name: String,
   pub(super) upstream_pool: Option<String>,
@@ -51,7 +52,7 @@ impl<'a> SystemAccessLogContext<'a> {
     request: &Request<B>,
     peer_addr: std::net::SocketAddr,
     tcp_max_hop: Option<u8>,
-    tls: Arc<WafTlsMetadata>,
+    tls: Option<Arc<WafTlsMetadata>>,
     protocol: WafProtocol,
     transport_network: WafTransportNetwork,
     transport_metadata: WafTransportMetadataInput<'a>,
@@ -70,10 +71,10 @@ impl<'a> SystemAccessLogContext<'a> {
       response_id: None,
       transaction_id: None,
       request: request_snapshot,
-      request_received_at_unix_ms: crate::waf::current_unix_ms(),
+      request_received_at_unix_ms: 0,
       response_received_at_unix_ms: 0,
       client_addr: peer_addr,
-      downstream_host: extract_host(request).unwrap_or_default(),
+      downstream_host: String::new(),
       downstream_scheme,
       route_name: String::new(),
       tcp_max_hop,
@@ -81,7 +82,7 @@ impl<'a> SystemAccessLogContext<'a> {
       protocol,
       transport_network,
       transport_metadata,
-      tags: std::collections::HashMap::new(),
+      tags: None,
       dynamic_policy: DynamicPolicyContext::default(),
       upstream_name: String::new(),
       upstream_pool: None,
@@ -94,6 +95,7 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn ensure_request_id(&mut self) {
+    self.ensure_request_received_at();
     if self.request_id.is_none() {
       self.request_id = Some(crate::waf::new_access_log_id());
     }
@@ -110,6 +112,45 @@ impl<'a> SystemAccessLogContext<'a> {
     self.ensure_request_ids();
     if self.response_id.is_none() {
       self.response_id = Some(crate::waf::new_access_log_id());
+    }
+  }
+
+  pub(super) fn system_access_log_enabled(&self) -> bool {
+    self.request.is_some()
+  }
+
+  pub(super) fn set_downstream_host(&mut self, host: &str) {
+    if self.system_access_log_enabled() {
+      self.downstream_host.clear();
+      self.downstream_host.push_str(host);
+    }
+  }
+
+  pub(super) fn set_route_name(&mut self, route_name: &str) {
+    if self.system_access_log_enabled() {
+      self.route_name.clear();
+      self.route_name.push_str(route_name);
+    }
+  }
+
+  pub(super) fn set_tags(&mut self, tags: Option<HashMap<String, String>>) {
+    if self.system_access_log_enabled() {
+      self.tags = tags;
+    }
+  }
+
+  pub(super) fn set_upstream(&mut self, upstream_name: &str, upstream_scheme: &str) {
+    if self.system_access_log_enabled() {
+      self.upstream_name.clear();
+      self.upstream_name.push_str(upstream_name);
+      self.upstream_scheme.clear();
+      self.upstream_scheme.push_str(upstream_scheme);
+    }
+  }
+
+  pub(super) fn set_upstream_pool(&mut self, upstream_pool: String) {
+    if self.system_access_log_enabled() {
+      self.upstream_pool = Some(upstream_pool);
     }
   }
 
@@ -138,11 +179,14 @@ impl<'a> SystemAccessLogContext<'a> {
     &'b mut self,
     response: &'b Response<ProxyBody>,
   ) -> Option<WafResponseInput<'b>> {
+    self.request.as_ref()?;
+    self.tls.as_ref()?;
     self.ensure_response_ids();
     if self.response_received_at_unix_ms == 0 {
       self.response_received_at_unix_ms = crate::waf::current_unix_ms();
     }
     let request = self.request.as_ref()?;
+    let tls = self.tls.as_deref()?;
     let upstream_error = self
       .upstream_error_code
       .as_deref()
@@ -163,11 +207,11 @@ impl<'a> SystemAccessLogContext<'a> {
         downstream_scheme: self.downstream_scheme,
         route_name: &self.route_name,
         tcp_max_hop: self.tcp_max_hop,
-        tls: self.tls.as_ref(),
+        tls,
         protocol: self.protocol,
         transport_network: self.transport_network,
         transport_metadata: self.transport_metadata,
-        tags: &self.tags,
+        tags: self.tags(),
         dynamic_policy: &self.dynamic_policy,
       },
       response_id: self.response_id(),
@@ -186,8 +230,21 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn record_upstream_error(&mut self, code: &str, message: &str) {
+    if !self.system_access_log_enabled() {
+      return;
+    }
     self.upstream_error_code = Some(code.to_string());
     self.upstream_error_message = Some(message.to_string());
+  }
+
+  pub(super) fn tags(&self) -> &HashMap<String, String> {
+    self.tags.as_ref().unwrap_or(&EMPTY_TAGS)
+  }
+
+  fn ensure_request_received_at(&mut self) {
+    if self.request_received_at_unix_ms == 0 {
+      self.request_received_at_unix_ms = crate::waf::current_unix_ms();
+    }
   }
 }
 
@@ -207,7 +264,7 @@ mod tests {
       &request,
       "127.0.0.1:12345".parse().unwrap(),
       None,
-      Arc::new(WafTlsMetadata::default()),
+      Some(Arc::new(WafTlsMetadata::default())),
       WafProtocol::Http,
       WafTransportNetwork::Tcp,
       WafTransportMetadataInput::default(),
@@ -218,12 +275,16 @@ mod tests {
     assert!(context.request_id.is_none());
     assert!(context.response_id.is_none());
     assert!(context.transaction_id.is_none());
+    assert_eq!(context.request_received_at_unix_ms, 0);
     assert!(context.request.is_none());
+    assert!(context.downstream_host.is_empty());
+    assert!(context.tags().is_empty());
 
     context.ensure_request_id();
     assert!(context.request_id.is_some());
     assert!(context.response_id.is_none());
     assert!(context.transaction_id.is_none());
+    assert_ne!(context.request_received_at_unix_ms, 0);
 
     context.ensure_response_ids();
     assert!(context.request_id.is_some());
@@ -242,7 +303,7 @@ mod tests {
       &request,
       "127.0.0.1:12345".parse().unwrap(),
       None,
-      Arc::new(WafTlsMetadata::default()),
+      Some(Arc::new(WafTlsMetadata::default())),
       WafProtocol::Http,
       WafTransportNetwork::Tcp,
       WafTransportMetadataInput::default(),
@@ -253,5 +314,37 @@ mod tests {
     let snapshot = context.request.as_ref().expect("snapshot should exist");
     assert_eq!(snapshot.uri, "https://example.com/path");
     assert_eq!(snapshot.headers["x-test"], "1");
+  }
+
+  #[test]
+  fn host_and_tags_are_lazy() {
+    let request = Request::builder()
+      .uri("https://example.com/path")
+      .header("host", "example.com")
+      .body(())
+      .expect("request should build");
+    let mut context = SystemAccessLogContext::new(
+      &request,
+      "127.0.0.1:12345".parse().unwrap(),
+      None,
+      None,
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      false,
+    );
+
+    assert!(context.downstream_host.is_empty());
+    assert!(context.tags().is_empty());
+
+    context.set_downstream_host("example.com");
+    context.set_tags(Some(HashMap::from([(
+      "role".to_string(),
+      "api".to_string(),
+    )])));
+
+    assert!(context.downstream_host.is_empty());
+    assert!(context.tags().is_empty());
   }
 }

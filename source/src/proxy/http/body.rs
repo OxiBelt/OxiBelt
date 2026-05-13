@@ -17,7 +17,15 @@ pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
 pub(crate) type ProxyBodyFrame = Result<Frame<Bytes>, BoxError>;
 const TIMEOUT_BODY_CHANNEL_CAPACITY: usize = 16;
+pub(crate) const KNOWN_SMALL_BODY_MAX_BYTES: usize = 16 * 1024;
 type TerminalBodyError = Arc<Mutex<Option<BoxError>>>;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KnownSmallResponseBody;
+
+pub(crate) fn is_known_small_response_body_len(len: usize) -> bool {
+  len <= KNOWN_SMALL_BODY_MAX_BYTES
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedBody {
@@ -611,5 +619,15 @@ mod tests {
     let size_hint = timed_body.size_hint();
     assert_eq!(size_hint.lower(), 3);
     assert_eq!(size_hint.upper(), Some(3));
+  }
+
+  #[test]
+  fn known_small_response_body_threshold_is_bounded() {
+    assert!(super::is_known_small_response_body_len(
+      super::KNOWN_SMALL_BODY_MAX_BYTES
+    ));
+    assert!(!super::is_known_small_response_body_len(
+      super::KNOWN_SMALL_BODY_MAX_BYTES + 1
+    ));
   }
 }

@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::TlsAcceptor;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::{
   AdminConfig, AdminRole, AdminTransportMode, ConnectionLimitIdentityMode, HttpListenerMode,
@@ -43,6 +43,7 @@ use crate::upstream_control;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod admin;
+mod connection_errors;
 use admin::json_response;
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
@@ -1816,7 +1817,7 @@ async fn serve_tcp(
                   ).await,
                 };
                 if let Err(error) = result {
-                    warn!(peer = %peer_addr, error = %error, "downstream connection closed with error");
+                    connection_errors::log_tcp(peer_addr, &error);
                 }
             });
         }
@@ -1884,6 +1885,7 @@ async fn serve_http3(
               connection_state.snapshot().lifecycle.subscribe(),
               long_connection_close_delay,
             );
+            let peer_addr = connecting.remote_address();
             connections.spawn(async move {
                 match connecting.await {
                     Ok(connection) => {
@@ -1893,7 +1895,7 @@ async fn serve_http3(
                           connection_shutdown,
                           connection_drain,
                         ).await {
-                            warn!(error = %error, "HTTP/3 downstream connection closed with error");
+                            connection_errors::log_http3(peer_addr, &error);
                         }
                     }
                     Err(error) => {
@@ -2067,10 +2069,7 @@ async fn handle_connection(
         (&mut connection).await
       }
     };
-    result.map_err(|error| {
-      error!(peer = %peer_addr, error = %error, "HTTP/2 downstream connection failed");
-      anyhow::anyhow!(error)
-    })?;
+    result.map_err(|error| anyhow::anyhow!(error))?;
   } else {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
@@ -2103,10 +2102,7 @@ async fn handle_connection(
         (&mut connection).await
       }
     };
-    result.map_err(|error| {
-      error!(peer = %peer_addr, error = %error, "HTTP/1.1 downstream connection failed");
-      anyhow::anyhow!(error)
-    })?;
+    result.map_err(|error| anyhow::anyhow!(error))?;
   }
 
   Ok(())
@@ -2202,10 +2198,7 @@ async fn handle_plain_http_connection(
       (&mut connection).await
     }
   };
-  result.map_err(|error| {
-    error!(peer = %peer_addr, error = %error, "plain HTTP downstream connection failed");
-    anyhow::anyhow!(error)
-  })?;
+  result.map_err(|error| anyhow::anyhow!(error))?;
   Ok(())
 }
 

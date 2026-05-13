@@ -270,6 +270,10 @@ impl DynamicPolicyRuntime {
     DynamicPolicyContext::default()
   }
 
+  pub fn enabled(&self) -> bool {
+    self.inner.is_some()
+  }
+
   pub fn evaluate(
     &self,
     request: DynamicPolicyRequest<'_>,

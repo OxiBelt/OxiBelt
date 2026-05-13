@@ -204,6 +204,9 @@ impl PoolState {
   }
 
   pub fn report_success(&self, upstream_name: &str) {
+    if self.pools.is_empty() {
+      return;
+    }
     if let Some((pool, server)) = self.find_pool_server(upstream_name) {
       if let Some(shared) = &self.shared_state
         && let Ok(Some(healthy)) = shared.pool_report(
@@ -228,6 +231,9 @@ impl PoolState {
   }
 
   pub fn report_failure(&self, upstream_name: &str) {
+    if self.pools.is_empty() {
+      return;
+    }
     if let Some((pool, server)) = self.find_pool_server(upstream_name) {
       if let Some(shared) = &self.shared_state
         && let Ok(Some(healthy)) = shared.pool_report(

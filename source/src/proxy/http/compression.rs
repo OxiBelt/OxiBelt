@@ -7,8 +7,8 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use http::header::{
   ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE,
-  CONTENT_TYPE, COOKIE, ETAG, HeaderMap, HeaderValue, PROXY_AUTHORIZATION, RANGE, SET_COOKIE,
-  TRAILER, VARY,
+  CONTENT_TYPE, COOKIE, ETAG, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHORIZATION, RANGE,
+  SET_COOKIE, TRAILER, VARY,
 };
 use http::{Method, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
@@ -19,7 +19,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::config::{CompressionConfig, CompressionPolicyConfig};
 
-use super::body::{ProxyBody, boxed_error};
+use super::body::{KnownSmallResponseBody, ProxyBody, boxed_error};
 
 const ENCODING_PREFERENCE: [CompressionEncoding; 4] = [
   CompressionEncoding::Br,
@@ -155,6 +155,7 @@ pub(crate) fn maybe_compress_response(
   if !response_is_eligible(&parts.headers, parts.status, &policy) {
     return Response::from_parts(parts, body);
   }
+  parts.extensions.remove::<KnownSmallResponseBody>();
 
   parts.headers.insert(
     CONTENT_ENCODING,
@@ -165,6 +166,22 @@ pub(crate) fn maybe_compress_response(
   weaken_strong_etag(&mut parts.headers);
 
   Response::from_parts(parts, compress_body(body, encoding, permit))
+}
+
+pub(crate) fn request_header_subset(headers: &HeaderMap) -> HeaderMap {
+  let mut subset = HeaderMap::new();
+  append_all(&mut subset, headers, RANGE);
+  append_all(&mut subset, headers, COOKIE);
+  append_all(&mut subset, headers, AUTHORIZATION);
+  append_all(&mut subset, headers, PROXY_AUTHORIZATION);
+  append_all(&mut subset, headers, ACCEPT_ENCODING);
+  subset
+}
+
+fn append_all(subset: &mut HeaderMap, headers: &HeaderMap, name: HeaderName) {
+  for value in headers.get_all(&name) {
+    subset.append(name.clone(), value.clone());
+  }
 }
 
 fn policy_for_route<'a>(
@@ -494,6 +511,20 @@ mod tests {
     let mut request_headers = HeaderMap::new();
     request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
     request_headers
+  }
+
+  #[test]
+  fn request_header_subset_keeps_only_compression_inputs() {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    headers.insert(COOKIE, HeaderValue::from_static("session=1"));
+    headers.insert("x-unrelated", HeaderValue::from_static("ignored"));
+
+    let subset = request_header_subset(&headers);
+
+    assert_eq!(subset[ACCEPT_ENCODING], "gzip");
+    assert_eq!(subset[COOKIE], "session=1");
+    assert!(!subset.contains_key("x-unrelated"));
   }
 
   fn assert_response_is_not_compressed(response: &Response<ProxyBody>) {

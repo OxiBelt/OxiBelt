@@ -67,7 +67,13 @@ pub(crate) fn rewrite_uri(
 
   let upstream_path = join_paths(&origin.base_path, &rewritten_path);
   let path_and_query = match downstream_uri.query() {
-    Some(query) => format!("{upstream_path}?{query}"),
+    Some(query) => {
+      let mut value = String::with_capacity(upstream_path.len() + 1 + query.len());
+      value.push_str(&upstream_path);
+      value.push('?');
+      value.push_str(query);
+      value
+    }
     None => upstream_path,
   };
 
@@ -86,9 +92,20 @@ fn join_paths(base: &str, suffix: &str) -> String {
 
   match (left.is_empty(), right.is_empty()) {
     (true, true) => "/".to_string(),
-    (true, false) => format!("/{right}"),
+    (true, false) => {
+      let mut path = String::with_capacity(right.len() + 1);
+      path.push('/');
+      path.push_str(right);
+      path
+    }
     (false, true) => left.to_string(),
-    (false, false) => format!("{left}/{right}"),
+    (false, false) => {
+      let mut path = String::with_capacity(left.len() + 1 + right.len());
+      path.push_str(left);
+      path.push('/');
+      path.push_str(right);
+      path
+    }
   }
 }
 

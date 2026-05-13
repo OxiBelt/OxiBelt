@@ -12,15 +12,19 @@ use crate::waf::{
 };
 
 use super::SystemAccessLogContext;
-use super::body::{BoxError, ProxyBody};
+use super::body::{BoxError, KnownSmallResponseBody, ProxyBody, is_known_small_response_body_len};
 use super::semantics::{configured_error_response, grpc_upstream_error_response};
 
 pub(crate) fn text_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
+  let body_len = message.len();
   let body = Full::new(Bytes::copy_from_slice(message.as_bytes()))
     .map_err(|never| -> BoxError { match never {} })
     .boxed();
   let mut response = Response::new(body);
   *response.status_mut() = status;
+  if is_known_small_response_body_len(body_len) {
+    response.extensions_mut().insert(KnownSmallResponseBody);
+  }
   response
 }
 
@@ -156,5 +160,6 @@ fn empty_response(status: StatusCode) -> Response<ProxyBody> {
     .boxed();
   let mut response = Response::new(body);
   *response.status_mut() = status;
+  response.extensions_mut().insert(KnownSmallResponseBody);
   response
 }
