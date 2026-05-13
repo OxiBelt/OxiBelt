@@ -2109,6 +2109,7 @@ async fn dial_tunnel_upstream(
   let mut stream = tokio::time::timeout(timeouts.upstream_connect, TcpStream::connect(remote_addr))
     .await
     .context("upstream tunnel connect timed out")??;
+  crate::tcp_socket::enable_tcp_nodelay(&stream, remote_addr, "upstream tunnel");
   crate::proxy_protocol_egress::write_header(
     &mut stream,
     upstream.proxy_protocol_egress,
@@ -2399,6 +2400,7 @@ async fn send_one_shot_with_proxy_protocol(
   let mut stream = tokio::time::timeout(timeouts.upstream_connect, TcpStream::connect(remote_addr))
     .await
     .context("upstream connect timed out")??;
+  crate::tcp_socket::enable_tcp_nodelay(&stream, remote_addr, "one-shot upstream");
   crate::proxy_protocol_egress::write_header(
     &mut stream,
     upstream.proxy_protocol_egress,

@@ -306,6 +306,7 @@ fn build_client_pool(
   let mut h1_http = HttpConnector::new();
   h1_http.enforce_http(false);
   h1_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
+  h1_http.set_nodelay(true);
   let h1_connector = HttpsConnectorBuilder::new()
     .with_tls_config(h1_tls_config)
     .https_or_http()
@@ -318,6 +319,7 @@ fn build_client_pool(
   let mut negotiated_http = HttpConnector::new();
   negotiated_http.enforce_http(false);
   negotiated_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
+  negotiated_http.set_nodelay(true);
   let negotiated_connector = HttpsConnectorBuilder::new()
     .with_tls_config(negotiated_tls_config)
     .https_or_http()
@@ -333,6 +335,7 @@ fn build_client_pool(
   h2c_builder.pool_idle_timeout(Duration::from_millis(upstream.idle_timeout_ms));
   let mut h2c_http = HttpConnector::new();
   h2c_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
+  h2c_http.set_nodelay(true);
   let h2c = h2c_builder.build(h2c_http);
 
   Ok(ClientPool {

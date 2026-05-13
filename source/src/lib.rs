@@ -34,6 +34,7 @@ pub mod shared_state;
 pub mod state;
 pub mod stream;
 mod tcp_hop;
+mod tcp_socket;
 pub mod tls;
 pub mod turn;
 pub mod upstream_control;

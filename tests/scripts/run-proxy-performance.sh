@@ -14,6 +14,10 @@ Environment:
   OXIBELT_PERF_CONCURRENCY         load concurrency override
   OXIBELT_PERF_SOAK_SECONDS        soak duration override
   OXIBELT_PERF_MAX_P99_MS          sanity ceiling for load p99 latency
+  OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS
+                                      OxiBelt H1/H2 baseline p50 latency ceiling
+  OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS
+                                      OxiBelt H1/H2 baseline p99 latency ceiling
   OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, configs, and stats here
   KEEP_TEST_ARTIFACTS=1            keep tests/.tmp performance work directory
 EOF
@@ -99,6 +103,8 @@ warmup_seconds="${OXIBELT_PERF_WARMUP_SECONDS:-${default_warmup}}"
 concurrency="${OXIBELT_PERF_CONCURRENCY:-${default_concurrency}}"
 soak_seconds="${OXIBELT_PERF_SOAK_SECONDS:-${default_soak}}"
 max_p99_ms="${OXIBELT_PERF_MAX_P99_MS:-10000}"
+tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-20}"
+tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-35}"
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -288,6 +294,24 @@ assert_result() {
   if jq -e --argjson max "${max_p99_ms}" '(.p99_ms // 0) > $max' >/dev/null <<<"${json}"; then
     fail_with_diagnostics "performance probe exceeded p99 sanity ceiling (${p99}ms > ${max_p99_ms}ms): $(jq -r '.label' <<<"${json}")"
   fi
+}
+
+assert_oxibelt_tcp_baseline() {
+  local label json p50 p99
+  for label in oxibelt-h1-keepalive oxibelt-h2; do
+    json="$(jq -c --arg label "${label}" 'select(.label == $label and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+    if [[ -z "${json}" ]]; then
+      fail_with_diagnostics "missing OxiBelt TCP baseline result: ${label}"
+    fi
+    p50="$(jq -r '.p50_ms // 0' <<<"${json}")"
+    p99="$(jq -r '.p99_ms // 0' <<<"${json}")"
+    if jq -e --argjson max "${tcp_baseline_max_p50_ms}" '(.p50_ms // 0) > $max' >/dev/null <<<"${json}"; then
+      fail_with_diagnostics "OxiBelt TCP baseline p50 exceeded latency-floor gate (${p50}ms > ${tcp_baseline_max_p50_ms}ms): ${label}"
+    fi
+    if jq -e --argjson max "${tcp_baseline_max_p99_ms}" '(.p99_ms // 0) > $max' >/dev/null <<<"${json}"; then
+      fail_with_diagnostics "OxiBelt TCP baseline p99 exceeded latency-floor gate (${p99}ms > ${tcp_baseline_max_p99_ms}ms): ${label}"
+    fi
+  done
 }
 
 record_skip() {
@@ -648,6 +672,7 @@ sleep 1
 if has_comparator oxibelt; then
   start_oxibelt baseline oxibelt
   run_common_loads oxibelt oxibelt 1
+  assert_oxibelt_tcp_baseline
   run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
   if [[ "${profile}" == "smoke" ]]; then
     run_load "oxibelt-smoke-soak" h1 oxibelt "/perf/smoke-soak?body=ok" "${soak_seconds}" "${concurrency}"

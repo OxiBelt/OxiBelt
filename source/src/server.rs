@@ -187,6 +187,7 @@ async fn serve_ops_listener(
             continue;
           }
         };
+        crate::tcp_socket::enable_tcp_nodelay(&stream, peer_addr, "ops listener");
         let state = state.clone();
         tokio::spawn(async move {
           let service = service_fn(move |request: hyper::Request<Incoming>| {
@@ -261,6 +262,7 @@ async fn serve_admin_listener(
             continue;
           }
         };
+        crate::tcp_socket::enable_tcp_nodelay(&stream, peer_addr, "admin listener");
         let state = state.clone();
         tokio::spawn(async move {
           if let Err(error) = handle_admin_connection(stream, peer_addr, configured_bind, state).await {
@@ -1787,6 +1789,7 @@ async fn serve_tcp(
                     continue;
                 }
             };
+            crate::tcp_socket::enable_tcp_nodelay(&stream, peer_addr, "downstream listener");
 
             let connection_state = state.clone();
             let connection_shutdown = shutdown.clone();
