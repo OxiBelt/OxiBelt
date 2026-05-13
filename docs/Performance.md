@@ -47,6 +47,8 @@ CI thresholds are sanity gates, not competitive claims. The job fails when the p
 
 nginx and Caddy are measured as common reverse-proxy baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, and stress scenarios is measured separately. nginx HTTP/3 is included only when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped. Caddy is configured with its documented `h1 h2 h3` server protocol support.
 
+The performance fixtures raise generic connection and per-connection request caps so benchmark and soak profiles measure proxy throughput instead of exercising OxiBelt's default limit-enforcement safeguards.
+
 References:
 
 - Caddy server protocols: https://caddyserver.com/docs/caddyfile/options

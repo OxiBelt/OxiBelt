@@ -15,6 +15,13 @@ http1 = true
 http2 = true
 http3 = false
 
+[limits]
+max_connections = 200000
+max_connections_per_ip = 200000
+max_webtransport_sessions = 200000
+max_webtransport_sessions_per_ip = 200000
+max_requests_per_connection = 10000000
+
 [tls]
 cert_chain = "fullchain.pem"
 private_key = "privkey.pem"
