@@ -214,6 +214,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "docker-alpine-musl-image-amd64",
         "docker-alpine-musl-image-other",
         "docker-integration-matrix",
+        "remote-signer-dos-docker",
         "browser-webdriver",
         "docker-performance",
     ];

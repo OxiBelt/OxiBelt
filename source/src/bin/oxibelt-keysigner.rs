@@ -1,8 +1,12 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use oxibelt::remote_signer::{self, SignerServerConfig};
+use oxibelt::remote_signer::{
+  self, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
+  SignerServerConfig,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-keysigner")]
@@ -19,6 +23,12 @@ struct Cli {
 
   #[arg(long, default_value = "0660", value_parser = parse_socket_mode)]
   socket_mode: u32,
+
+  #[arg(long, default_value_t = DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS, value_parser = parse_nonzero_usize)]
+  max_connections: usize,
+
+  #[arg(long, default_value_t = DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, value_parser = parse_nonzero_u64)]
+  io_timeout_ms: u64,
 
   #[arg(long = "allow-peer-uid")]
   allow_peer_uids: Vec<u32>,
@@ -39,6 +49,8 @@ async fn main() -> anyhow::Result<()> {
     socket_mode: cli.socket_mode,
     keys: cli.keys,
     token_env: cli.token_env,
+    max_connections: cli.max_connections,
+    io_timeout: Duration::from_millis(cli.io_timeout_ms),
     allow_peer_uids: cli.allow_peer_uids,
     allow_peer_gids: cli.allow_peer_gids,
     allow_tls12_unstructured_signing: cli.allow_tls12_unstructured_signing,
@@ -62,4 +74,24 @@ fn parse_key(value: &str) -> anyhow::Result<(String, PathBuf)> {
 fn parse_socket_mode(value: &str) -> anyhow::Result<u32> {
   u32::from_str_radix(value.trim_start_matches('0'), 8)
     .with_context(|| format!("invalid octal socket mode {value}"))
+}
+
+fn parse_nonzero_usize(value: &str) -> anyhow::Result<usize> {
+  let parsed = value
+    .parse::<usize>()
+    .with_context(|| format!("invalid positive integer {value}"))?;
+  if parsed == 0 {
+    bail!("value must be greater than 0");
+  }
+  Ok(parsed)
+}
+
+fn parse_nonzero_u64(value: &str) -> anyhow::Result<u64> {
+  let parsed = value
+    .parse::<u64>()
+    .with_context(|| format!("invalid positive integer {value}"))?;
+  if parsed == 0 {
+    bail!("value must be greater than 0");
+  }
+  Ok(parsed)
 }

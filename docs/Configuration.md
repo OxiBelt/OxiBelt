@@ -311,8 +311,12 @@ oxibelt-keysigner \
   --key edge-default=/etc/oxibelt/cert/privkey.pem \
   --token-env OXIBELT_KEYSIGNER_TOKEN \
   --socket-mode 0660 \
+  --max-connections 256 \
+  --io-timeout-ms 5000 \
   --allow-peer-uid 10001
 ```
+
+The signer enforces its own IPC availability controls before token validation: `--max-connections` caps concurrently handled Unix-socket clients, and `--io-timeout-ms` bounds request-frame reads and response writes so idle or trickled local peers cannot hold signer tasks indefinitely. Keep the socket directory and mode restrictive, and prefer `--allow-peer-uid` or `--allow-peer-gid` in sidecar deployments.
 
 Remote signing is compatible with read-only root filesystems, but the socket directory itself must be writable. The signer creates the Unix socket file at `socket_path`, so a container started with `--read-only` should provide a tmpfs or shared volume for the parent directory, for example `--tmpfs /run/oxibelt-keysigner:rw,noexec,nosuid,nodev,mode=0770`. In a sidecar deployment, mount that same socket directory into both containers. Mount private keys read-only into the signer container only; OxiBelt should receive certificate chains and the signer socket, not private key files. If the signer cannot create the socket, OxiBelt cannot describe the remote key: startup fails for initial config load, and hot reload rejects the new TLS config while preserving the active one.
 

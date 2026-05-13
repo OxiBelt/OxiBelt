@@ -144,7 +144,7 @@ When remote signing is used with `--read-only`, the signer socket directory must
 --tmpfs /run/oxibelt-keysigner:rw,noexec,nosuid,nodev,mode=0770
 ```
 
-In a sidecar deployment, mount the same socket directory into both the OxiBelt container and the signer container. Mount private keys read-only into the signer container only; OxiBelt should receive certificate chains and socket access, not private key files.
+In a sidecar deployment, mount the same socket directory into both the OxiBelt container and the signer container. Mount private keys read-only into the signer container only; OxiBelt should receive certificate chains and socket access, not private key files. Keep signer IPC bounded with the default `oxibelt-keysigner` connection cap and I/O deadline, and use peer UID/GID allowlists where possible.
 
 For certificate renewal workflows, mount stable certificate/key paths under `/etc/oxibelt/cert` and enable `runtime.hot_reload.mode = "downstream_tls"` or `full`. OxiBelt tracks symlink target changes so renewed certificate files can be imported without restarting the process.
 

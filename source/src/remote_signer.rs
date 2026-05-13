@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,16 +10,21 @@ use base64::Engine;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
 use rustls::sign::{Signer, SigningKey};
 use rustls::{Error as RustlsError, SignatureAlgorithm, SignatureScheme};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream as TokioUnixStream};
+use tokio::sync::{Semaphore, TryAcquireError};
 use tracing::{info, warn};
 
 use crate::config::TlsRemoteSignerConfig;
+use protocol::{
+  RemoteSignerRequest, RemoteSignerResponse, SignContext, read_async_frame_with_timeout,
+  read_sync_frame, write_async_frame_with_timeout, write_sync_frame,
+};
 
-const MAX_FRAME_LEN: usize = 1024 * 1024;
+mod protocol;
+
+pub const DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS: usize = 256;
+pub const DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS: u64 = 5_000;
 const TLS13_SERVER_CERT_VERIFY_CONTEXT: &[u8; 34] = b"TLS 1.3, server CertificateVerify\x00";
 
 static PREFERRED_SIGNATURE_SCHEMES: &[SignatureScheme] = &[
@@ -238,36 +242,60 @@ pub struct SignerServerConfig {
   pub socket_mode: u32,
   pub keys: Vec<(String, PathBuf)>,
   pub token_env: String,
+  pub max_connections: usize,
+  pub io_timeout: Duration,
   pub allow_peer_uids: Vec<u32>,
   pub allow_peer_gids: Vec<u32>,
   pub allow_tls12_unstructured_signing: bool,
 }
 
 pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
+  if config.max_connections == 0 {
+    bail!("remote signer max_connections must be greater than 0");
+  }
+  if config.io_timeout.is_zero() {
+    bail!("remote signer io_timeout must be greater than 0");
+  }
+
   let token = load_token_from_env(&config.token_env)?;
   let keys = Arc::new(load_server_keys(&config.keys)?);
   let listener = bind_listener(&config.socket_path, config.socket_mode)?;
+  let max_connections = config.max_connections;
+  let io_timeout = config.io_timeout;
   let allow_tls12_unstructured_signing = config.allow_tls12_unstructured_signing;
   info!(
     socket_path = %config.socket_path.display(),
     keys = keys.len(),
+    max_connections,
+    io_timeout_ms = io_timeout.as_millis(),
     "remote TLS private-key signer listening"
   );
 
   let allow_peer_uids = Arc::new(config.allow_peer_uids);
   let allow_peer_gids = Arc::new(config.allow_peer_gids);
+  let connection_permits = Arc::new(Semaphore::new(max_connections));
   loop {
     let (stream, _) = listener.accept().await?;
+    let permit = match connection_permits.clone().try_acquire_owned() {
+      Ok(permit) => permit,
+      Err(TryAcquireError::NoPermits) => {
+        warn!("remote signer connection limit reached; closing accepted connection");
+        continue;
+      }
+      Err(TryAcquireError::Closed) => bail!("remote signer connection limiter closed"),
+    };
     let keys = keys.clone();
     let allow_peer_uids = allow_peer_uids.clone();
     let allow_peer_gids = allow_peer_gids.clone();
     tokio::spawn(async move {
+      let _permit = permit;
       if let Err(error) = handle_connection(
         stream,
         keys,
         token,
         allow_peer_uids,
         allow_peer_gids,
+        io_timeout,
         allow_tls12_unstructured_signing,
       )
       .await
@@ -284,23 +312,25 @@ async fn handle_connection(
   token: [u8; 32],
   allow_peer_uids: Arc<Vec<u32>>,
   allow_peer_gids: Arc<Vec<u32>>,
+  io_timeout: Duration,
   allow_tls12_unstructured_signing: bool,
 ) -> anyhow::Result<()> {
   if !peer_is_allowed(&stream, &allow_peer_uids, &allow_peer_gids)? {
-    write_async_frame(
+    write_async_frame_with_timeout(
       &mut stream,
       &RemoteSignerResponse::Error {
         code: "forbidden_peer".to_string(),
         message: "peer credentials are not allowed".to_string(),
       },
+      io_timeout,
     )
     .await?;
     return Ok(());
   }
 
-  let request: RemoteSignerRequest = read_async_frame(&mut stream).await?;
+  let request: RemoteSignerRequest = read_async_frame_with_timeout(&mut stream, io_timeout).await?;
   let response = process_request(request, &keys, &token, allow_tls12_unstructured_signing);
-  write_async_frame(&mut stream, &response).await?;
+  write_async_frame_with_timeout(&mut stream, &response, io_timeout).await?;
   Ok(())
 }
 
@@ -585,113 +615,11 @@ fn signature_algorithm_name(algorithm: SignatureAlgorithm) -> &'static str {
   }
 }
 
-fn write_sync_frame<T: Serialize>(
-  stream: &mut std::os::unix::net::UnixStream,
-  value: &T,
-) -> anyhow::Result<()> {
-  let bytes = serde_json::to_vec(value)?;
-  if bytes.len() > MAX_FRAME_LEN {
-    bail!("remote signer frame is too large");
-  }
-  stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
-  stream.write_all(&bytes)?;
-  Ok(())
-}
-
-fn read_sync_frame<T: DeserializeOwned>(
-  stream: &mut std::os::unix::net::UnixStream,
-) -> anyhow::Result<T> {
-  let mut len = [0u8; 4];
-  stream.read_exact(&mut len)?;
-  let len = u32::from_be_bytes(len) as usize;
-  if len > MAX_FRAME_LEN {
-    bail!("remote signer frame is too large");
-  }
-  let mut bytes = vec![0u8; len];
-  stream.read_exact(&mut bytes)?;
-  Ok(serde_json::from_slice(&bytes)?)
-}
-
-async fn write_async_frame<T: Serialize>(
-  stream: &mut TokioUnixStream,
-  value: &T,
-) -> anyhow::Result<()> {
-  let bytes = serde_json::to_vec(value)?;
-  if bytes.len() > MAX_FRAME_LEN {
-    bail!("remote signer frame is too large");
-  }
-  stream
-    .write_all(&(bytes.len() as u32).to_be_bytes())
-    .await?;
-  stream.write_all(&bytes).await?;
-  Ok(())
-}
-
-async fn read_async_frame<T: DeserializeOwned>(stream: &mut TokioUnixStream) -> anyhow::Result<T> {
-  let mut len = [0u8; 4];
-  stream.read_exact(&mut len).await?;
-  let len = u32::from_be_bytes(len) as usize;
-  if len > MAX_FRAME_LEN {
-    bail!("remote signer frame is too large");
-  }
-  let mut bytes = vec![0u8; len];
-  stream.read_exact(&mut bytes).await?;
-  Ok(serde_json::from_slice(&bytes)?)
-}
-
 #[derive(Debug)]
 struct RemoteKeyDescription {
   public_key: Vec<u8>,
   algorithm: SignatureAlgorithm,
   schemes: Vec<SignatureScheme>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum RemoteSignerRequest {
-  DescribeKey {
-    token: String,
-    key_id: String,
-  },
-  Sign {
-    token: String,
-    key_id: String,
-    scheme: u16,
-    context: SignContext,
-    message: String,
-  },
-}
-
-impl RemoteSignerRequest {
-  fn token(&self) -> &str {
-    match self {
-      Self::DescribeKey { token, .. } | Self::Sign { token, .. } => token,
-    }
-  }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum RemoteSignerResponse {
-  DescribeKey {
-    public_key: String,
-    algorithm: String,
-    schemes: Vec<u16>,
-  },
-  Sign {
-    signature: String,
-  },
-  Error {
-    code: String,
-    message: String,
-  },
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SignContext {
-  Tls13ServerCertificateVerify,
-  Tls12Unstructured,
 }
 
 #[cfg(test)]

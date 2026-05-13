@@ -13,7 +13,10 @@ use oxibelt::config::{
     TlsClientAuthMode, TlsConfig, TlsRemoteSignerConfig, TlsVersion, TurnListenerTlsConfig,
     UpstreamEchConfig, UpstreamEchMode,
 };
-use oxibelt::remote_signer::{self, SignerServerConfig};
+use oxibelt::remote_signer::{
+    self, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
+    SignerServerConfig,
+};
 use oxibelt::tls;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -272,6 +275,59 @@ async fn remote_signer_protocol_rejects_bad_token_unknown_key_and_invalid_contex
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_signer_closes_idle_connections_and_recovers() {
+    let temp_dir = common::TempDir::new("remote-signer-idle-timeout");
+    let (_cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-idle");
+    let token_env = remote_signer_token_env("IDLE");
+    let signer = start_remote_signer_with_limits(
+        &temp_dir,
+        "edge-default",
+        &key_path,
+        &token_env,
+        false,
+        2,
+        Duration::from_millis(100),
+    )
+    .await;
+
+    let mut idle_connections = Vec::new();
+    for _ in 0..2 {
+        idle_connections.push(
+            UnixStream::connect(&signer.socket_path)
+                .await
+                .expect("idle attacker connection should connect"),
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    for stream in &mut idle_connections {
+        let mut byte = [0u8; 1];
+        let closed =
+            match tokio::time::timeout(Duration::from_millis(100), stream.read(&mut byte)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => true,
+                Ok(Ok(_)) | Err(_) => false,
+            };
+        assert!(
+            closed,
+            "idle connection should be closed by signer read timeout"
+        );
+    }
+
+    let response = signer
+        .request(json!({
+            "type": "describe_key",
+            "token": remote_signer_token(),
+            "key_id": "edge-default"
+        }))
+        .await;
+    assert_eq!(response["type"], "describe_key");
+    assert!(
+        !response["schemes"].as_array().unwrap().is_empty(),
+        "legitimate request should still be served after idle peers time out"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_signer_protocol_allows_tls12_when_sidecar_opts_in() {
     let temp_dir = common::TempDir::new("remote-signer-tls12");
     let (_cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-tls12");
@@ -471,6 +527,27 @@ async fn start_remote_signer(
     token_env: &str,
     allow_tls12_unstructured_signing: bool,
 ) -> RemoteSignerTestServer {
+    start_remote_signer_with_limits(
+        _temp_dir,
+        key_id,
+        key_path,
+        token_env,
+        allow_tls12_unstructured_signing,
+        DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
+        Duration::from_millis(DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS),
+    )
+    .await
+}
+
+async fn start_remote_signer_with_limits(
+    _temp_dir: &common::TempDir,
+    key_id: &str,
+    key_path: &Path,
+    token_env: &str,
+    allow_tls12_unstructured_signing: bool,
+    max_connections: usize,
+    io_timeout: Duration,
+) -> RemoteSignerTestServer {
     unsafe {
         std::env::set_var(token_env, remote_signer_token());
     }
@@ -481,6 +558,8 @@ async fn start_remote_signer(
         socket_mode: 0o600,
         keys: vec![(key_id.to_string(), key_path.to_path_buf())],
         token_env: token_env.to_string(),
+        max_connections,
+        io_timeout,
         allow_peer_uids: Vec::new(),
         allow_peer_gids: Vec::new(),
         allow_tls12_unstructured_signing,
