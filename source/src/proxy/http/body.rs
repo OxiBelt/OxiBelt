@@ -126,9 +126,6 @@ where
   B::Error: Into<BoxError> + Send + Sync + 'static,
 {
   let size_hint = body.size_hint();
-  if is_empty_size_hint(&size_hint) {
-    return body.map_err(Into::into).boxed();
-  }
 
   ReadTimeoutBody {
     body: Box::pin(body),
@@ -146,9 +143,6 @@ pub(crate) fn with_send_timeout(
   kind: BodyTimeoutKind,
 ) -> ProxyBody {
   let size_hint = body.size_hint();
-  if is_empty_size_hint(&size_hint) {
-    return body;
-  }
 
   let terminal_error = Arc::new(Mutex::new(None));
   let (sender, wrapped) = channel_body_with_size_hint_and_terminal_error(
@@ -193,10 +187,6 @@ fn store_terminal_error(terminal_error: &TerminalBodyError, error: BoxError) {
   if terminal_error.is_none() {
     *terminal_error = Some(error);
   }
-}
-
-fn is_empty_size_hint(size_hint: &SizeHint) -> bool {
-  size_hint.upper() == Some(0)
 }
 
 pub(crate) async fn capture_prefix<B>(
@@ -448,7 +438,7 @@ mod tests {
   use bytes::Bytes;
   use http::Request;
   use http_body_util::{BodyExt, Empty, Full};
-  use hyper::body::{Body as _, Frame};
+  use hyper::body::{Body as _, Frame, SizeHint};
   use std::time::Duration;
 
   use super::{
@@ -526,6 +516,46 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn read_timeout_body_times_out_zero_size_hint_pending_body() {
+    let (_sender, pending_body) = super::channel_body_with_size_hint(1, exact_zero_size_hint());
+    let timed_body = with_read_timeout(
+      pending_body,
+      Duration::from_millis(5),
+      BodyTimeoutKind::DownstreamRequestRead,
+    );
+
+    let error = timed_body
+      .collect()
+      .await
+      .expect_err("zero-size-hint pending body should time out");
+    assert!(error_is_timeout(
+      &error,
+      BodyTimeoutKind::DownstreamRequestRead
+    ));
+  }
+
+  #[tokio::test]
+  async fn capture_prefix_times_out_zero_size_hint_pending_body() {
+    let (_sender, pending_body) = super::channel_body_with_size_hint(1, exact_zero_size_hint());
+    let timed_body = with_read_timeout(
+      pending_body,
+      Duration::from_millis(5),
+      BodyTimeoutKind::DownstreamRequestRead,
+    );
+    let request = Request::builder()
+      .body(timed_body)
+      .expect("request should build");
+
+    let error = capture_prefix(request, 8)
+      .await
+      .expect_err("WAF-style capture should inherit body read timeout");
+    assert!(error_is_timeout(
+      &error,
+      BodyTimeoutKind::DownstreamRequestRead
+    ));
+  }
+
+  #[tokio::test]
   async fn send_timeout_body_returns_typed_timeout_after_buffered_frames() {
     let (sender, pending_body) = channel_body(TIMEOUT_BODY_CHANNEL_CAPACITY + 1);
     for _ in 0..=TIMEOUT_BODY_CHANNEL_CAPACITY {
@@ -554,6 +584,35 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn send_timeout_body_applies_to_zero_size_hint_source_body() {
+    let (sender, pending_body) =
+      super::channel_body_with_size_hint(TIMEOUT_BODY_CHANNEL_CAPACITY + 1, exact_zero_size_hint());
+    for _ in 0..=TIMEOUT_BODY_CHANNEL_CAPACITY {
+      sender
+        .send(Ok(Frame::data(Bytes::from_static(b"x"))))
+        .await
+        .expect("source body should accept queued frame");
+    }
+    drop(sender);
+
+    let timed_body = with_send_timeout(
+      pending_body,
+      Duration::from_millis(5),
+      BodyTimeoutKind::UpstreamRequestSend,
+    );
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let error = timed_body
+      .collect()
+      .await
+      .expect_err("send timeout should apply even when size hint is exact zero");
+    assert!(error_is_timeout(
+      &error,
+      BodyTimeoutKind::UpstreamRequestSend
+    ));
+  }
+
+  #[tokio::test]
   async fn send_timeout_body_collects_ready_body() {
     let body = Full::new(Bytes::from_static(b"abc"))
       .map_err(|never| -> BoxError { match never {} })
@@ -573,7 +632,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn timeout_wrappers_skip_known_empty_bodies() {
+  async fn timeout_wrappers_allow_completed_empty_bodies() {
     let read_body = Empty::<Bytes>::new()
       .map_err(|never| -> BoxError { match never {} })
       .boxed();
@@ -629,5 +688,11 @@ mod tests {
     assert!(!super::is_known_small_response_body_len(
       super::KNOWN_SMALL_BODY_MAX_BYTES + 1
     ));
+  }
+
+  fn exact_zero_size_hint() -> SizeHint {
+    let mut size_hint = SizeHint::new();
+    size_hint.set_exact(0);
+    size_hint
   }
 }

@@ -1050,6 +1050,54 @@ protocol_probe_generated_body_request() {
   fail_with_diagnostics "protocol probe generated-body request failed"
 }
 
+protocol_probe_zero_length_body_delay_request() {
+  local authority="$1"
+  local path="$2"
+  local expect_status="$3"
+  local method="$4"
+  local delay_ms="$5"
+  shift 5
+  local extra_args=("$@")
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-zero-length-protocol-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      downstream \
+      --protocol h2 \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --method "${method}" \
+      --zero-length-body-end-delay-ms "${delay_ms}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --expect-status "${expect_status}" \
+      "${extra_args[@]}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker start -a "${client_container}" 2>&1)"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "protocol probe zero-length delayed-body client failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "protocol probe zero-length delayed-body request failed"
+}
+
 protocol_probe_webtransport_multiplex() {
   local authority="$1"
   local path="$2"

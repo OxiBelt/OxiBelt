@@ -1,0 +1,70 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = false
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "inspect-zero-length-body"
+phase = "request"
+priority = 100
+when = "Request.Http.Path.endsWith('/zero-length-stall') && Request.Body.contains('never-match-zero-length-body')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "unexpected body match"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 5000
+first_byte_timeout_ms = 5000
+read_timeout_ms = 5000
+send_timeout_ms = 5000
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "zero-length-body-timeout"
+hosts = ["example.test"]
+path_prefix = "/app"
+upstream = "http-upstream"
+
+[routes.timeouts]
+client_body_timeout_ms = 300

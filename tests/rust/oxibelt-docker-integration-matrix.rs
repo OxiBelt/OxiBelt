@@ -2086,6 +2086,25 @@ run_case_checks() {
         ),
         docker_case(
             "timeouts",
+            "zero-length-body-timeout",
+            "HTTP/2 zero-length bodies that delay END_STREAM still hit client body timeout",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_zero_length_body_delay_request "example.test" "/app/zero-length-stall" 408 "POST" 1200)"
+  assert_response_jq "${response}" '.body == "request body timed out"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "timeouts",
             "route-upstream-read-timeout",
             "route-level upstream read timeout fails a stalled buffered response",
             ExpectStart::Success,

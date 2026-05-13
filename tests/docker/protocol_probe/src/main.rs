@@ -2,10 +2,13 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::env;
 use std::fs;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
@@ -18,7 +21,7 @@ use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_T
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
-use hyper::body::{Frame, Incoming};
+use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -93,6 +96,7 @@ struct DownstreamArgs {
     body: String,
     body_bytes: Option<usize>,
     body_chunk_size: usize,
+    zero_length_body_end_delay_ms: Option<u64>,
     omit_content_length: bool,
     headers: HeaderMap,
     ca_cert: String,
@@ -113,6 +117,9 @@ struct WebTransportMultiplexArgs {
 
 impl DownstreamArgs {
     fn body_len(&self) -> usize {
+        if self.zero_length_body_end_delay_ms.is_some() {
+            return 0;
+        }
         self.body_bytes.unwrap_or(self.body.len())
     }
 }
@@ -146,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]"
+    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]"
   );
 }
 
@@ -326,6 +333,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     let mut body = String::new();
     let mut body_bytes = None;
     let mut body_chunk_size = 16 * 1024;
+    let mut zero_length_body_end_delay_ms = None;
     let mut omit_content_length = false;
     let mut headers = HeaderMap::new();
     let mut ca_cert = None;
@@ -358,6 +366,13 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
                     bail!("--body-chunk-size must be greater than zero");
                 }
             }
+            "--zero-length-body-end-delay-ms" => {
+                zero_length_body_end_delay_ms = Some(
+                    value
+                        .parse()
+                        .context("invalid --zero-length-body-end-delay-ms value")?,
+                );
+            }
             "--header" => insert_header(&mut headers, &value)?,
             "--ca-cert" => ca_cert = Some(value),
             "--expect-status" => {
@@ -368,8 +383,17 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     }
 
     let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+    let protocol = protocol.ok_or_else(|| anyhow!("--protocol is required"))?;
+    if zero_length_body_end_delay_ms.is_some() {
+        if !matches!(protocol, DownstreamProtocol::H2) {
+            bail!("--zero-length-body-end-delay-ms is only supported for HTTP/2");
+        }
+        if body_bytes.is_some() || !body.is_empty() {
+            bail!("--zero-length-body-end-delay-ms cannot be combined with request body data");
+        }
+    }
     Ok(DownstreamArgs {
-        protocol: protocol.ok_or_else(|| anyhow!("--protocol is required"))?,
+        protocol,
         host: host.ok_or_else(|| anyhow!("--host is required"))?,
         port: port.ok_or_else(|| anyhow!("--port is required"))?,
         authority: authority.unwrap_or_else(|| server_name.clone()),
@@ -379,6 +403,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         body,
         body_bytes,
         body_chunk_size,
+        zero_length_body_end_delay_ms,
         omit_content_length,
         headers,
         ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
@@ -1187,6 +1212,10 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
 }
 
 fn downstream_h2_body(args: &DownstreamArgs) -> BoxBody<Bytes, Infallible> {
+    if let Some(delay_ms) = args.zero_length_body_end_delay_ms {
+        return DelayedEndZeroLengthBody::new(Duration::from_millis(delay_ms)).boxed();
+    }
+
     if let Some(total) = args.body_bytes {
         let chunk_size = args.body_chunk_size;
         return StreamBody::new(futures_util::stream::unfold(
@@ -1204,6 +1233,51 @@ fn downstream_h2_body(args: &DownstreamArgs) -> BoxBody<Bytes, Infallible> {
     }
 
     Full::new(Bytes::from(args.body.clone())).boxed()
+}
+
+struct DelayedEndZeroLengthBody {
+    sleep: Pin<Box<tokio::time::Sleep>>,
+    finished: bool,
+}
+
+impl DelayedEndZeroLengthBody {
+    fn new(delay: Duration) -> Self {
+        Self {
+            sleep: Box::pin(tokio::time::sleep(delay)),
+            finished: false,
+        }
+    }
+}
+
+impl hyper::body::Body for DelayedEndZeroLengthBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.finished {
+            return Poll::Ready(None);
+        }
+
+        if self.sleep.as_mut().poll(cx).is_ready() {
+            self.finished = true;
+            return Poll::Ready(None);
+        }
+
+        Poll::Pending
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.finished
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let mut size_hint = SizeHint::new();
+        size_hint.set_exact(0);
+        size_hint
+    }
 }
 
 fn downstream_client_config(path: &Path, alpn: &[u8]) -> anyhow::Result<ClientConfig> {
