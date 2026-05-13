@@ -371,6 +371,27 @@ run_stress() {
   sample_stats "${label}"
 }
 
+h3_probe_succeeds() {
+  local host="$1"
+  local json
+  if ! json="$(run_probe_json load \
+    --label "h3-ready-${host}" \
+    --protocol h3 \
+    --host "${host}" \
+    --port 8443 \
+    --server-name proxy \
+    --authority example.test \
+    --path "/ready?body=ok" \
+    --ca-cert /tls/proxy-ca.pem \
+    --duration-seconds 1 \
+    --warmup-seconds 0 \
+    --concurrency 1 \
+    --expect-status 200)"; then
+    return 1
+  fi
+  jq -e '(.requests // 0) > 0 and (.errors // 0) == 0 and ((.statuses["200"] // 0) > 0)' >/dev/null <<<"${json}"
+}
+
 wait_for_tls_proxy() {
   local host="$1"
   local attempt
@@ -500,7 +521,11 @@ run_common_loads() {
   run_load "${comparator}-h1-keepalive" h1 "${host}" "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
   run_load "${comparator}-h2" h2 "${host}" "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
   if [[ "${supports_h3}" == "1" ]]; then
-    run_load "${comparator}-h3" h3 "${host}" "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+    if h3_probe_succeeds "${host}"; then
+      run_load "${comparator}-h3" h3 "${host}" "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+    else
+      record_skip "${comparator}-h3" load h3 "HTTP/3 support was detected, but a functional QUIC probe did not complete"
+    fi
   else
     record_skip "${comparator}-h3" load h3 "HTTP/3 is not available for this comparator image"
   fi
