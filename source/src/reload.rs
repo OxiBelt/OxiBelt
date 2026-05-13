@@ -107,6 +107,7 @@ impl ReloadManager {
     let snapshot = AppSnapshot {
       route_table: RouteTable::new(config.routes.clone()),
       upstreams: active.upstreams.clone(),
+      upstream_uri_parts: active.upstream_uri_parts.clone(),
       config,
       clients: active.clients.clone(),
       h3_clients: active.h3_clients.clone(),
@@ -125,6 +126,7 @@ impl ReloadManager {
       waf,
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
+      alt_svc_header_value: active.alt_svc_header_value.clone(),
     };
     state.replace(snapshot);
     self.last_fingerprints = fingerprints;
@@ -189,6 +191,7 @@ impl ReloadManager {
     let snapshot = AppSnapshot {
       route_table: active.route_table.clone(),
       upstreams: active.upstreams.clone(),
+      upstream_uri_parts: active.upstream_uri_parts.clone(),
       config,
       clients: active.clients.clone(),
       h3_clients: active.h3_clients.clone(),
@@ -207,6 +210,7 @@ impl ReloadManager {
       waf: active.waf.clone(),
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
+      alt_svc_header_value: active.alt_svc_header_value.clone(),
     };
     let pending = listeners.prepare(&snapshot).await?;
     state.replace(snapshot);

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Body, Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -12,10 +12,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::config::{
-  Config, ConnectionLimitIdentityMode, HttpVersion, ProxyProtocolEgressMode, RouteConfig,
-  UpstreamConfig,
+  Config, ConnectionLimitIdentityMode, ErrorResponseMode, HttpVersion, ProxyProtocolEgressMode,
+  RouteConfig, UpstreamConfig,
 };
-use crate::dynamic_policy::{DynamicPolicyContext, DynamicPolicyRequest};
+use crate::dynamic_policy::DynamicPolicyRequest;
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::pools::PoolSelection;
@@ -23,10 +23,10 @@ use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
 use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
 use crate::waf::{
   WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
-  WafTransportMetadataInput, WafTransportNetwork, WafUpstreamError, apply_header_mutations,
-  request_protocol,
+  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations, request_protocol,
 };
 
+pub(crate) mod access_log;
 pub(crate) mod body;
 pub(crate) mod buffering;
 pub(crate) mod compression;
@@ -41,6 +41,7 @@ pub(crate) mod version;
 pub(crate) mod warm;
 pub(crate) use warm::warm_cache_request;
 
+pub(crate) use self::access_log::SystemAccessLogContext;
 use self::body::{
   BodyTimeoutKind, CapturedBody, ProxyBody, boxed_error, capture_body_prefix, capture_prefix,
   error_is_timeout,
@@ -54,132 +55,6 @@ use self::semantics::{configured_error_response, filter_trailers};
 use self::uri::{rewrite_uri, validate_downstream_path};
 use self::version::select_upstream_http_version;
 
-struct SystemAccessLogContext<'a> {
-  request_id: String,
-  response_id: String,
-  transaction_id: String,
-  request_received_at_unix_ms: u64,
-  response_received_at_unix_ms: u64,
-  method: Method,
-  uri: http::Uri,
-  version: http::Version,
-  headers: HeaderMap,
-  client_addr: std::net::SocketAddr,
-  downstream_host: String,
-  downstream_scheme: &'static str,
-  route_name: String,
-  tcp_max_hop: Option<u8>,
-  tls: Arc<WafTlsMetadata>,
-  protocol: WafProtocol,
-  transport_network: WafTransportNetwork,
-  transport_metadata: WafTransportMetadataInput<'a>,
-  tags: std::collections::HashMap<String, String>,
-  dynamic_policy: DynamicPolicyContext,
-  upstream_name: String,
-  upstream_pool: Option<String>,
-  upstream_scheme: String,
-  upstream_connect_time_ms: Option<u64>,
-  upstream_first_byte_time_ms: Option<u64>,
-  upstream_error_code: Option<String>,
-  upstream_error_message: Option<String>,
-}
-
-impl<'a> SystemAccessLogContext<'a> {
-  #[allow(clippy::too_many_arguments)]
-  fn new<B>(
-    request: &Request<B>,
-    peer_addr: std::net::SocketAddr,
-    tcp_max_hop: Option<u8>,
-    tls: Arc<WafTlsMetadata>,
-    protocol: WafProtocol,
-    transport_network: WafTransportNetwork,
-    transport_metadata: WafTransportMetadataInput<'a>,
-    downstream_scheme: &'static str,
-  ) -> Self {
-    Self {
-      request_id: crate::waf::new_access_log_id(),
-      response_id: crate::waf::new_access_log_id(),
-      transaction_id: crate::waf::new_access_log_id(),
-      request_received_at_unix_ms: crate::waf::current_unix_ms(),
-      response_received_at_unix_ms: 0,
-      method: request.method().clone(),
-      uri: request.uri().clone(),
-      version: request.version(),
-      headers: request.headers().clone(),
-      client_addr: peer_addr,
-      downstream_host: extract_host(request).unwrap_or_default(),
-      downstream_scheme,
-      route_name: String::new(),
-      tcp_max_hop,
-      tls,
-      protocol,
-      transport_network,
-      transport_metadata,
-      tags: std::collections::HashMap::new(),
-      dynamic_policy: DynamicPolicyContext::default(),
-      upstream_name: String::new(),
-      upstream_pool: None,
-      upstream_scheme: String::new(),
-      upstream_connect_time_ms: None,
-      upstream_first_byte_time_ms: None,
-      upstream_error_code: None,
-      upstream_error_message: None,
-    }
-  }
-
-  fn request_input(&self) -> WafRequestInput<'_> {
-    WafRequestInput {
-      request_id: &self.request_id,
-      transaction_id: &self.transaction_id,
-      received_at_unix_ms: self.request_received_at_unix_ms,
-      method: &self.method,
-      uri: &self.uri,
-      version: self.version,
-      headers: &self.headers,
-      body: None,
-      peer_addr: self.client_addr,
-      downstream_host: &self.downstream_host,
-      downstream_scheme: self.downstream_scheme,
-      route_name: &self.route_name,
-      tcp_max_hop: self.tcp_max_hop,
-      tls: self.tls.as_ref(),
-      protocol: self.protocol,
-      transport_network: self.transport_network,
-      transport_metadata: self.transport_metadata,
-      tags: &self.tags,
-      dynamic_policy: &self.dynamic_policy,
-    }
-  }
-
-  fn response_input<'b>(&'b self, response: &'b Response<ProxyBody>) -> WafResponseInput<'b> {
-    let upstream_error = self
-      .upstream_error_code
-      .as_deref()
-      .zip(self.upstream_error_message.as_deref())
-      .map(|(code, message)| WafUpstreamError { code, message });
-    WafResponseInput {
-      request: self.request_input(),
-      response_id: &self.response_id,
-      received_at_unix_ms: self.response_received_at_unix_ms,
-      version: response.version(),
-      status: response.status(),
-      headers: response.headers(),
-      body: None,
-      upstream_name: &self.upstream_name,
-      upstream_pool: self.upstream_pool.as_deref(),
-      upstream_scheme: &self.upstream_scheme,
-      upstream_connect_time_ms: self.upstream_connect_time_ms,
-      upstream_first_byte_time_ms: self.upstream_first_byte_time_ms,
-      upstream_error,
-    }
-  }
-
-  fn record_upstream_error(&mut self, code: &str, message: &str) {
-    self.upstream_error_code = Some(code.to_string());
-    self.upstream_error_message = Some(message.to_string());
-  }
-}
-
 fn emit_system_access_log(
   state: &AppSnapshot,
   context: &mut SystemAccessLogContext<'_>,
@@ -188,21 +63,30 @@ fn emit_system_access_log(
   if !state.system_access_log.enabled() {
     return;
   }
-  if context.response_received_at_unix_ms == 0 {
-    context.response_received_at_unix_ms = crate::waf::current_unix_ms();
+  if let Some(input) = context.response_input(response) {
+    state.system_access_log.emit(&state.waf, input);
   }
-  let input = context.response_input(response);
-  state.system_access_log.emit(&state.waf, input);
 }
 
 fn proxy_error_response(
   state: &AppSnapshot,
-  access_log: &SystemAccessLogContext<'_>,
+  access_log: &mut SystemAccessLogContext<'_>,
   status: StatusCode,
   message: &str,
   code: &str,
 ) -> Response<ProxyBody> {
-  configured_error_response(&state.config, &access_log.request_id, status, message, code)
+  if state.config.proxy.http.errors.mode == ErrorResponseMode::Json {
+    access_log.ensure_request_id();
+    configured_error_response(
+      &state.config,
+      access_log.request_id(),
+      status,
+      message,
+      code,
+    )
+  } else {
+    configured_error_response(&state.config, "", status, message, code)
+  }
 }
 
 fn elapsed_ms(started_at: Instant) -> u64 {
@@ -373,6 +257,7 @@ where
     transport_network,
     transport_metadata,
     downstream_scheme,
+    state.system_access_log.enabled(),
   );
   let mut request_connection_permit = None;
   let response = handle_inner_impl(
@@ -576,27 +461,32 @@ where
   };
   let request_body = captured_body.as_ref().map(waf_body_input);
 
-  let request_waf = state.waf.evaluate_request(WafRequestInput {
-    request_id: &access_log.request_id,
-    transaction_id: &access_log.transaction_id,
-    received_at_unix_ms: access_log.request_received_at_unix_ms,
-    method: &request_method,
-    uri: &request_uri,
-    version: request_version,
-    headers: &request_headers,
-    body: request_body,
-    peer_addr: client_addr,
-    downstream_host: &host,
-    downstream_scheme,
-    route_name: &resolved.route.name,
-    tcp_max_hop,
-    tls: tls.as_ref(),
-    protocol,
-    transport_network,
-    transport_metadata,
-    tags: &tags,
-    dynamic_policy: &access_log.dynamic_policy,
-  });
+  let request_waf = if state.waf.enabled() {
+    access_log.ensure_request_ids();
+    state.waf.evaluate_request(WafRequestInput {
+      request_id: access_log.request_id(),
+      transaction_id: access_log.transaction_id(),
+      received_at_unix_ms: access_log.request_received_at_unix_ms,
+      method: &request_method,
+      uri: &request_uri,
+      version: request_version,
+      headers: &request_headers,
+      body: request_body,
+      peer_addr: client_addr,
+      downstream_host: &host,
+      downstream_scheme,
+      route_name: &resolved.route.name,
+      tcp_max_hop,
+      tls: tls.as_ref(),
+      protocol,
+      transport_network,
+      transport_metadata,
+      tags: &tags,
+      dynamic_policy: &access_log.dynamic_policy,
+    })
+  } else {
+    Default::default()
+  };
 
   for (key, value) in &request_waf.tags {
     tags.insert(key.clone(), value.clone());
@@ -625,32 +515,37 @@ where
   }
 
   if is_upgrade_request(&request) {
-    let stream_waf = StreamWafRequestContext::from_seed(
-      state.as_ref(),
-      StreamWafRequestSeed {
-        request_id: access_log.request_id.clone(),
-        transaction_id: access_log.transaction_id.clone(),
-        received_at_unix_ms: access_log.request_received_at_unix_ms,
-        method: request_method.clone(),
-        uri: request_uri.clone(),
-        version: request_version,
-        headers: request_headers.clone(),
-        peer_addr: client_addr,
-        downstream_host: host.clone(),
-        downstream_scheme,
-        route_name: resolved.route.name.clone(),
-        tcp_max_hop,
-        tls: tls.clone(),
-        protocol,
-        transport_network,
-        tcp_mss: transport_metadata.tcp_mss,
-        tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
-        udp_datagram_size: transport_metadata.udp_datagram_size,
-        udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
-        tags: tags.clone(),
-        dynamic_policy: access_log.dynamic_policy.clone(),
-      },
-    );
+    let stream_waf = if state.waf.requires_stream_inspection(&resolved.route.name) {
+      access_log.ensure_request_ids();
+      StreamWafRequestContext::from_seed(
+        state.as_ref(),
+        StreamWafRequestSeed {
+          request_id: access_log.request_id().to_string(),
+          transaction_id: access_log.transaction_id().to_string(),
+          received_at_unix_ms: access_log.request_received_at_unix_ms,
+          method: request_method.clone(),
+          uri: request_uri.clone(),
+          version: request_version,
+          headers: request_headers.clone(),
+          peer_addr: client_addr,
+          downstream_host: host.clone(),
+          downstream_scheme,
+          route_name: resolved.route.name.clone(),
+          tcp_max_hop,
+          tls: tls.clone(),
+          protocol,
+          transport_network,
+          tcp_mss: transport_metadata.tcp_mss,
+          tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
+          udp_datagram_size: transport_metadata.udp_datagram_size,
+          udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
+          tags: tags.clone(),
+          dynamic_policy: access_log.dynamic_policy.clone(),
+        },
+      )
+    } else {
+      None
+    };
     if let Some(response) = handle_upgrade_request(
       request,
       &state,
@@ -772,8 +667,12 @@ where
     Err(error) => return request_buffering_error_response(error),
   };
 
+  let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
+    warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
+    return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
+  };
   let target_uri = match rewrite_uri(
-    &upstream.origin,
+    upstream_uri,
     resolved.route.path_prefix.as_str(),
     resolved.route.replace_prefix_with.as_deref(),
     request.uri(),
@@ -813,13 +712,17 @@ where
   }
   let outbound = outbound
     .map(|body| filter_trailers(body, state.config.proxy.http.trailers, native_grpc_request));
-  let mut outbound = outbound.map(|body| {
-    body::with_send_timeout(
-      body,
-      timeouts.upstream_send,
-      BodyTimeoutKind::UpstreamRequestSend,
-    )
-  });
+  let mut outbound = if upstream_version == HttpVersion::H3 {
+    outbound
+  } else {
+    outbound.map(|body| {
+      body::with_send_timeout(
+        body,
+        timeouts.upstream_send,
+        BodyTimeoutKind::UpstreamRequestSend,
+      )
+    })
+  };
 
   let cache_enabled_for_route = state
     .cache
@@ -847,7 +750,11 @@ where
           &state.config.compression,
           &state.compression,
         );
-        return with_downstream_response_timeout(response, timeouts.response_send);
+        return with_downstream_response_timeout(
+          response,
+          timeouts.response_send,
+          transport_network,
+        );
       }
       crate::cache::CacheLookup::Stale(stale) => {
         if stale.background_refresh
@@ -878,7 +785,11 @@ where
             &state.config.compression,
             &state.compression,
           );
-          return with_downstream_response_timeout(response, timeouts.response_send);
+          return with_downstream_response_timeout(
+            response,
+            timeouts.response_send,
+            transport_network,
+          );
         }
         if !stale.request_headers.is_empty() {
           state.metrics.record_cache_revalidation();
@@ -900,7 +811,11 @@ where
             &state.config.compression,
             &state.compression,
           );
-          return with_downstream_response_timeout(response, timeouts.response_send);
+          return with_downstream_response_timeout(
+            response,
+            timeouts.response_send,
+            transport_network,
+          );
         }
       }
       crate::cache::CacheLookup::Revalidate(revalidation) => {
@@ -953,7 +868,11 @@ where
                   &state.config.compression,
                   &state.compression,
                 );
-                return with_downstream_response_timeout(response, timeouts.response_send);
+                return with_downstream_response_timeout(
+                  response,
+                  timeouts.response_send,
+                  transport_network,
+                );
               }
               crate::cache::CacheLookup::Stale(stale) => {
                 if stale.background_refresh
@@ -990,7 +909,11 @@ where
                     &state.config.compression,
                     &state.compression,
                   );
-                  return with_downstream_response_timeout(response, timeouts.response_send);
+                  return with_downstream_response_timeout(
+                    response,
+                    timeouts.response_send,
+                    transport_network,
+                  );
                 }
                 if !stale.request_headers.is_empty() {
                   state.metrics.record_cache_revalidation();
@@ -1013,7 +936,11 @@ where
                     &state.config.compression,
                     &state.compression,
                   );
-                  return with_downstream_response_timeout(response, timeouts.response_send);
+                  return with_downstream_response_timeout(
+                    response,
+                    timeouts.response_send,
+                    transport_network,
+                  );
                 }
               }
               crate::cache::CacheLookup::Revalidate(revalidation) => {
@@ -1063,7 +990,11 @@ where
                   &state.config.compression,
                   &state.compression,
                 );
-                return with_downstream_response_timeout(response, timeouts.response_send);
+                return with_downstream_response_timeout(
+                  response,
+                  timeouts.response_send,
+                  transport_network,
+                );
               }
               crate::cache::CacheLookup::Stale(stale) => {
                 if stale.background_refresh
@@ -1100,7 +1031,11 @@ where
                     &state.config.compression,
                     &state.compression,
                   );
-                  return with_downstream_response_timeout(response, timeouts.response_send);
+                  return with_downstream_response_timeout(
+                    response,
+                    timeouts.response_send,
+                    transport_network,
+                  );
                 }
                 if !stale.request_headers.is_empty() {
                   state.metrics.record_cache_revalidation();
@@ -1123,7 +1058,11 @@ where
                     &state.config.compression,
                     &state.compression,
                   );
-                  return with_downstream_response_timeout(response, timeouts.response_send);
+                  return with_downstream_response_timeout(
+                    response,
+                    timeouts.response_send,
+                    transport_network,
+                  );
                 }
               }
               crate::cache::CacheLookup::Revalidate(revalidation) => {
@@ -1198,7 +1137,6 @@ where
           &tags,
           &upstream.name,
           upstream.origin.scheme(),
-          access_log.upstream_pool.as_deref(),
           access_log.upstream_connect_time_ms,
           access_log.upstream_first_byte_time_ms,
           "read_timeout",
@@ -1246,7 +1184,6 @@ where
           &tags,
           &upstream.name,
           upstream.origin.scheme(),
-          access_log.upstream_pool.as_deref(),
           access_log.upstream_connect_time_ms,
           access_log.upstream_first_byte_time_ms,
           "connect_error",
@@ -1359,7 +1296,6 @@ where
           &tags,
           &upstream.name,
           upstream.origin.scheme(),
-          access_log.upstream_pool.as_deref(),
           access_log.upstream_connect_time_ms,
           access_log.upstream_first_byte_time_ms,
           error_code,
@@ -1422,7 +1358,7 @@ where
       &state.config.compression,
       &state.compression,
     );
-    return with_downstream_response_timeout(response, timeouts.response_send);
+    return with_downstream_response_timeout(response, timeouts.response_send, transport_network);
   }
   let body = body::with_read_timeout(
     body,
@@ -1474,10 +1410,11 @@ where
   let response_body = captured_response_body.as_ref().map(waf_body_input);
 
   if state.waf.has_response_rules(&resolved.route.name) {
+    access_log.ensure_response_ids();
     access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
     let request_input = WafRequestInput {
-      request_id: &access_log.request_id,
-      transaction_id: &access_log.transaction_id,
+      request_id: access_log.request_id(),
+      transaction_id: access_log.transaction_id(),
       received_at_unix_ms: access_log.request_received_at_unix_ms,
       method: &request_method,
       uri: &request_uri,
@@ -1498,7 +1435,7 @@ where
     };
     let response_waf = state.waf.evaluate_response(WafResponseInput {
       request: request_input,
-      response_id: &access_log.response_id,
+      response_id: access_log.response_id(),
       received_at_unix_ms: access_log.response_received_at_unix_ms,
       version: parts.version,
       status: parts.status,
@@ -1563,7 +1500,8 @@ where
     &state.config.compression,
     &state.compression,
   );
-  let response = with_downstream_response_timeout(response, timeouts.response_send);
+  let response =
+    with_downstream_response_timeout(response, timeouts.response_send, transport_network);
   state.metrics.record_response(response.status());
   response
 }
@@ -1587,10 +1525,7 @@ fn apply_alt_svc_header(
   if !should_add_alt_svc(status, state, downstream_scheme, request_version) {
     return;
   }
-  if let Ok(value) = HeaderValue::from_str(&alt_svc_header_value(
-    state.config.listeners.https_bind.port(),
-    &state.config.quic.alt_svc,
-  )) {
+  if let Some(value) = state.alt_svc_header_value.clone() {
     headers.insert(http::header::ALT_SVC, value);
   }
 }
@@ -1611,15 +1546,22 @@ fn should_add_alt_svc(
     && status != StatusCode::SWITCHING_PROTOCOLS
 }
 
-fn alt_svc_header_value(https_port: u16, config: &crate::config::QuicAltSvcConfig) -> String {
-  let mut value = format!("h3=\":{https_port}\"; ma={}", config.max_age_seconds);
-  if config.persist {
-    value.push_str("; persist=1");
+fn with_downstream_response_timeout(
+  response: Response<ProxyBody>,
+  timeout: Duration,
+  transport_network: WafTransportNetwork,
+) -> Response<ProxyBody> {
+  if transport_network == WafTransportNetwork::Udp {
+    return mark_downstream_response_timeout(response, timeout);
   }
-  value
+
+  let response = mark_downstream_response_timeout(response, timeout);
+  let (parts, body) = response.into_parts();
+  let body = body::with_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
+  Response::from_parts(parts, body)
 }
 
-fn with_downstream_response_timeout(
+fn mark_downstream_response_timeout(
   response: Response<ProxyBody>,
   timeout: Duration,
 ) -> Response<ProxyBody> {
@@ -1627,7 +1569,6 @@ fn with_downstream_response_timeout(
   parts
     .extensions
     .insert(DownstreamResponseSendTimeout(timeout));
-  let body = body::with_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
   Response::from_parts(parts, body)
 }
 
@@ -2210,8 +2151,15 @@ async fn handle_upgrade_request(
       "selected upstream does not allow WebSocket",
     ));
   }
+  let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
+    warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
+    return Some(text_response(
+      StatusCode::BAD_GATEWAY,
+      "upstream URI is not configured",
+    ));
+  };
   let target_uri = match rewrite_uri(
-    &upstream.origin,
+    upstream_uri,
     resolved.route.path_prefix.as_str(),
     resolved.route.replace_prefix_with.as_deref(),
     request.uri(),
@@ -3042,8 +2990,6 @@ pub(crate) fn prepare_webtransport(
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
   let request_headers = request.headers().clone();
-  let request_id = crate::waf::new_access_log_id();
-  let transaction_id = crate::waf::new_access_log_id();
   let received_at_unix_ms = crate::waf::current_unix_ms();
   let mut tags = std::collections::HashMap::new();
   let client_addr = match crate::identity::resolve_client_addr(
@@ -3081,58 +3027,40 @@ pub(crate) fn prepare_webtransport(
   }
   let dynamic_policy_context = dynamic_policy.context;
 
-  let request_waf = state.waf.evaluate_request(WafRequestInput {
-    request_id: &request_id,
-    transaction_id: &transaction_id,
-    received_at_unix_ms,
-    method: &request_method,
-    uri: &request_uri,
-    version: http::Version::HTTP_3,
-    headers: &request_headers,
-    body: None,
-    peer_addr,
-    downstream_host: &host,
-    downstream_scheme: "https",
-    route_name: &resolved.route.name,
-    tcp_max_hop: None,
-    tls,
-    protocol: WafProtocol::Webtransport,
-    transport_network: WafTransportNetwork::Udp,
-    transport_metadata,
-    tags: &tags,
-    dynamic_policy: &dynamic_policy_context,
-  });
+  let mut request_ids = None;
+  let request_waf = if state.waf.enabled() {
+    let request_id = crate::waf::new_access_log_id();
+    let transaction_id = crate::waf::new_access_log_id();
+    let decision = state.waf.evaluate_request(WafRequestInput {
+      request_id: &request_id,
+      transaction_id: &transaction_id,
+      received_at_unix_ms,
+      method: &request_method,
+      uri: &request_uri,
+      version: http::Version::HTTP_3,
+      headers: &request_headers,
+      body: None,
+      peer_addr,
+      downstream_host: &host,
+      downstream_scheme: "https",
+      route_name: &resolved.route.name,
+      tcp_max_hop: None,
+      tls,
+      protocol: WafProtocol::Webtransport,
+      transport_network: WafTransportNetwork::Udp,
+      transport_metadata,
+      tags: &tags,
+      dynamic_policy: &dynamic_policy_context,
+    });
+    request_ids = Some((request_id, transaction_id));
+    decision
+  } else {
+    Default::default()
+  };
 
   for (key, value) in request_waf.tags {
     tags.insert(key, value);
   }
-
-  let stream_waf = StreamWafRequestContext::from_seed(
-    state,
-    StreamWafRequestSeed {
-      request_id,
-      transaction_id,
-      received_at_unix_ms,
-      method: request_method.clone(),
-      uri: request_uri.clone(),
-      version: http::Version::HTTP_3,
-      headers: request_headers.clone(),
-      peer_addr,
-      downstream_host: host.clone(),
-      downstream_scheme: "https",
-      route_name: resolved.route.name.clone(),
-      tcp_max_hop: None,
-      tls: Arc::new(tls.clone()),
-      protocol: WafProtocol::Webtransport,
-      transport_network: WafTransportNetwork::Udp,
-      tcp_mss: transport_metadata.tcp_mss,
-      tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
-      udp_datagram_size: transport_metadata.udp_datagram_size,
-      udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
-      tags: tags.clone(),
-      dynamic_policy: dynamic_policy_context.clone(),
-    },
-  );
 
   if let Some(terminal) = request_waf.terminal {
     return Err(Box::new(waf_terminal_response(
@@ -3140,6 +3068,43 @@ pub(crate) fn prepare_webtransport(
       &request_waf.response_header_mutations,
     )));
   }
+
+  let stream_waf = if state.waf.requires_stream_inspection(&resolved.route.name) {
+    let (request_id, transaction_id) = request_ids.unwrap_or_else(|| {
+      (
+        crate::waf::new_access_log_id(),
+        crate::waf::new_access_log_id(),
+      )
+    });
+    StreamWafRequestContext::from_seed(
+      state,
+      StreamWafRequestSeed {
+        request_id,
+        transaction_id,
+        received_at_unix_ms,
+        method: request_method.clone(),
+        uri: request_uri.clone(),
+        version: http::Version::HTTP_3,
+        headers: request_headers.clone(),
+        peer_addr,
+        downstream_host: host.clone(),
+        downstream_scheme: "https",
+        route_name: resolved.route.name.clone(),
+        tcp_max_hop: None,
+        tls: Arc::new(tls.clone()),
+        protocol: WafProtocol::Webtransport,
+        transport_network: WafTransportNetwork::Udp,
+        tcp_mss: transport_metadata.tcp_mss,
+        tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
+        udp_datagram_size: transport_metadata.udp_datagram_size,
+        udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
+        tags: tags.clone(),
+        dynamic_policy: dynamic_policy_context.clone(),
+      },
+    )
+  } else {
+    None
+  };
 
   let mut pool_selection = None;
   let upstream = if let Some(upstream_name) = request_waf.upstream_override.as_deref() {
@@ -3214,8 +3179,15 @@ pub(crate) fn prepare_webtransport(
     )));
   }
 
+  let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
+    warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
+    return Err(Box::new(text_response(
+      StatusCode::BAD_GATEWAY,
+      "upstream URI is not configured",
+    )));
+  };
   let target_uri = rewrite_uri(
-    &upstream.origin,
+    upstream_uri,
     resolved.route.path_prefix.as_str(),
     resolved.route.replace_prefix_with.as_deref(),
     request.uri(),
@@ -3311,16 +3283,21 @@ mod tests {
     config
   }
 
-  #[test]
-  fn alt_svc_header_value_formats_persist() {
-    let config = crate::config::QuicAltSvcConfig {
-      enabled: true,
-      max_age_seconds: 60,
-      persist: true,
-    };
+  #[tokio::test]
+  async fn app_snapshot_precomputes_alt_svc_header_value() {
+    let temp_dir = common::TempDir::new("alt-svc-precompute");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "alt-svc-precompute");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+      "http3 = false",
+      "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 60\npersist = true",
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
 
     assert_eq!(
-      alt_svc_header_value(8443, &config),
+      state.alt_svc_header_value.as_ref().unwrap(),
       "h3=\":8443\"; ma=60; persist=1"
     );
   }

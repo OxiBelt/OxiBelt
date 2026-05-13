@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Context;
 use bytes::Bytes;
+use http::HeaderValue;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -21,6 +22,7 @@ use crate::metrics::Metrics;
 use crate::pools::PoolState;
 use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
+use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
 use crate::shared_state::SharedState;
@@ -121,6 +123,7 @@ pub struct AppSnapshot {
   pub config: Config,
   pub route_table: RouteTable,
   pub upstreams: Vec<UpstreamConfig>,
+  pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub clients: UpstreamClientPools,
   pub(crate) h3_clients: UpstreamH3Pools,
   pub limits: Arc<LimitState>,
@@ -138,6 +141,7 @@ pub struct AppSnapshot {
   pub waf: WafEngine,
   pub access_logs: AccessLogSinks,
   pub system_access_log: SystemAccessLog,
+  pub(crate) alt_svc_header_value: Option<HeaderValue>,
 }
 
 impl AppSnapshot {
@@ -152,6 +156,7 @@ impl AppSnapshot {
     let route_table = RouteTable::new(config.routes.clone());
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
+    let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
     let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs)
       .context("failed to build upstream HTTP clients")?;
     let h3_clients =
@@ -214,11 +219,14 @@ impl AppSnapshot {
     let system_access_log = SystemAccessLog::new(&config.logging.access_log)
       .await
       .context("failed to build system access log")?;
+    let alt_svc_header_value = build_alt_svc_header_value(&config)
+      .context("failed to build precomputed Alt-Svc header value")?;
 
     Ok(Self {
       config,
       route_table,
       upstreams,
+      upstream_uri_parts,
       clients,
       h3_clients,
       limits,
@@ -236,6 +244,7 @@ impl AppSnapshot {
       waf,
       access_logs,
       system_access_log,
+      alt_svc_header_value,
     })
   }
 
@@ -246,17 +255,21 @@ impl AppSnapshot {
     let route_table = RouteTable::new(config.routes.clone());
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
+    let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
     let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs)
       .context("failed to build upstream HTTP clients")?;
     let h3_clients =
       UpstreamH3Pools::new(&upstreams, &config).context("failed to build upstream HTTP/3 pools")?;
     let pools = PoolState::new(&config.upstream_pools, previous.shared_state.clone());
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
+    let alt_svc_header_value = build_alt_svc_header_value(&config)
+      .context("failed to build precomputed Alt-Svc header value")?;
 
     Ok(Self {
       config,
       route_table,
       upstreams,
+      upstream_uri_parts,
       clients,
       h3_clients,
       limits: previous.limits.clone(),
@@ -274,8 +287,42 @@ impl AppSnapshot {
       waf: previous.waf.clone(),
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
+      alt_svc_header_value,
     })
   }
+}
+
+fn build_upstream_uri_parts(
+  upstreams: &[UpstreamConfig],
+) -> anyhow::Result<HashMap<String, UpstreamUriParts>> {
+  upstreams
+    .iter()
+    .map(|upstream| {
+      Ok((
+        upstream.name.clone(),
+        UpstreamUriParts::from_url(&upstream.origin)
+          .with_context(|| format!("failed to precompute URI parts for {}", upstream.name))?,
+      ))
+    })
+    .collect()
+}
+
+fn build_alt_svc_header_value(config: &Config) -> anyhow::Result<Option<HeaderValue>> {
+  if !config.listeners.http3 || !config.quic.alt_svc.enabled {
+    return Ok(None);
+  }
+
+  let mut value = format!(
+    "h3=\":{}\"; ma={}",
+    config.listeners.https_bind.port(),
+    config.quic.alt_svc.max_age_seconds
+  );
+  if config.quic.alt_svc.persist {
+    value.push_str("; persist=1");
+  }
+  HeaderValue::from_str(&value)
+    .map(Some)
+    .context("invalid Alt-Svc header value")
 }
 
 fn build_clients(

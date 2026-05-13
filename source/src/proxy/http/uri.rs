@@ -1,5 +1,27 @@
 use http::Uri;
-use url::Url;
+use url::{Position, Url};
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct UpstreamUriParts {
+  scheme: String,
+  authority: String,
+  base_path: String,
+}
+
+impl UpstreamUriParts {
+  pub(crate) fn from_url(origin: &Url) -> anyhow::Result<Self> {
+    let authority = origin[Position::BeforeUsername..Position::AfterPort].to_string();
+    if authority.is_empty() {
+      anyhow::bail!("upstream origin is missing an authority: {origin}");
+    }
+
+    Ok(Self {
+      scheme: origin.scheme().to_string(),
+      authority,
+      base_path: origin.path().to_string(),
+    })
+  }
+}
 
 pub(crate) fn validate_downstream_path(path: &str) -> anyhow::Result<()> {
   if path
@@ -24,7 +46,7 @@ pub(crate) fn validate_downstream_path(path: &str) -> anyhow::Result<()> {
 }
 
 pub(crate) fn rewrite_uri(
-  origin: &Url,
+  origin: &UpstreamUriParts,
   route_prefix: &str,
   replace_prefix_with: Option<&str>,
   downstream_uri: &Uri,
@@ -43,15 +65,18 @@ pub(crate) fn rewrite_uri(
     incoming_path.to_string()
   };
 
-  let upstream_path = join_paths(origin.path(), &rewritten_path);
+  let upstream_path = join_paths(&origin.base_path, &rewritten_path);
+  let path_and_query = match downstream_uri.query() {
+    Some(query) => format!("{upstream_path}?{query}"),
+    None => upstream_path,
+  };
 
-  let mut rewritten = origin.clone();
-  rewritten.set_path(&upstream_path);
-  rewritten.set_query(downstream_uri.query());
-  rewritten
-    .as_str()
-    .parse()
-    .map_err(|error| anyhow::anyhow!("failed to parse rewritten URI {}: {error}", rewritten))
+  Uri::builder()
+    .scheme(origin.scheme.as_str())
+    .authority(origin.authority.as_str())
+    .path_and_query(path_and_query.as_str())
+    .build()
+    .map_err(|error| anyhow::anyhow!("failed to build rewritten URI: {error}"))
 }
 
 fn join_paths(base: &str, suffix: &str) -> String {
@@ -83,13 +108,42 @@ mod tests {
 
   #[test]
   fn rewrite_uri_replaces_prefix() {
-    let origin = Url::parse("https://backend.internal/root").unwrap();
+    let origin =
+      UpstreamUriParts::from_url(&Url::parse("https://backend.internal/root").unwrap()).unwrap();
     let uri = "https://example.com/v1/users?id=1".parse().unwrap();
 
     let rewritten = rewrite_uri(&origin, "/v1", Some("/"), &uri).unwrap();
     assert_eq!(
       rewritten.to_string(),
       "https://backend.internal/root/users?id=1"
+    );
+  }
+
+  #[test]
+  fn rewrite_uri_preserves_query_without_url_clone() {
+    let origin =
+      UpstreamUriParts::from_url(&Url::parse("http://backend.internal/base").unwrap()).unwrap();
+    let uri = "/api/search?q=rust&sort=desc".parse().unwrap();
+
+    let rewritten = rewrite_uri(&origin, "/api", Some("/v2"), &uri).unwrap();
+    assert_eq!(
+      rewritten.to_string(),
+      "http://backend.internal/base/v2/search?q=rust&sort=desc"
+    );
+  }
+
+  #[test]
+  fn rewrite_uri_handles_absolute_form_request_targets() {
+    let origin =
+      UpstreamUriParts::from_url(&Url::parse("https://backend.internal/root").unwrap()).unwrap();
+    let uri = "http://public.example.com/api/users?active=true"
+      .parse()
+      .unwrap();
+
+    let rewritten = rewrite_uri(&origin, "/api", Some("/internal"), &uri).unwrap();
+    assert_eq!(
+      rewritten.to_string(),
+      "https://backend.internal/root/internal/users?active=true"
     );
   }
 

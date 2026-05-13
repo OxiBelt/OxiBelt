@@ -11,6 +11,7 @@ use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::sync::mpsc;
+use tokio::time::Sleep;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
@@ -113,35 +114,22 @@ fn channel_body_with_size_hint_and_terminal_error(
 
 pub(crate) fn with_read_timeout<B>(body: B, timeout: Duration, kind: BodyTimeoutKind) -> ProxyBody
 where
-  B: Body<Data = Bytes> + Send + 'static,
+  B: Body<Data = Bytes> + Send + Sync + 'static,
   B::Error: Into<BoxError> + Send + Sync + 'static,
 {
   let size_hint = body.size_hint();
-  let (sender, wrapped) = channel_body_with_size_hint(TIMEOUT_BODY_CHANNEL_CAPACITY, size_hint);
-  tokio::spawn(async move {
-    let mut body = Box::pin(body);
-    loop {
-      match tokio::time::timeout(timeout, body.as_mut().frame()).await {
-        Ok(Some(Ok(frame))) => {
-          if sender.send(Ok(frame)).await.is_err() {
-            break;
-          }
-        }
-        Ok(Some(Err(error))) => {
-          let _ = sender.send(Err(error.into())).await;
-          break;
-        }
-        Ok(None) => break,
-        Err(_) => {
-          let _ = sender
-            .send(Err(boxed_error(BodyTimeoutError::new(kind))))
-            .await;
-          break;
-        }
-      }
-    }
-  });
-  wrapped
+  if is_empty_size_hint(&size_hint) {
+    return body.map_err(Into::into).boxed();
+  }
+
+  ReadTimeoutBody {
+    body: Box::pin(body),
+    timeout,
+    kind,
+    sleep: None,
+    size_hint,
+  }
+  .boxed()
 }
 
 pub(crate) fn with_send_timeout(
@@ -150,6 +138,10 @@ pub(crate) fn with_send_timeout(
   kind: BodyTimeoutKind,
 ) -> ProxyBody {
   let size_hint = body.size_hint();
+  if is_empty_size_hint(&size_hint) {
+    return body;
+  }
+
   let terminal_error = Arc::new(Mutex::new(None));
   let (sender, wrapped) = channel_body_with_size_hint_and_terminal_error(
     TIMEOUT_BODY_CHANNEL_CAPACITY,
@@ -193,6 +185,10 @@ fn store_terminal_error(terminal_error: &TerminalBodyError, error: BoxError) {
   if terminal_error.is_none() {
     *terminal_error = Some(error);
   }
+}
+
+fn is_empty_size_hint(size_hint: &SizeHint) -> bool {
+  size_hint.upper() == Some(0)
 }
 
 pub(crate) async fn capture_prefix<B>(
@@ -302,6 +298,14 @@ struct ChannelBody {
   terminal_error: Option<TerminalBodyError>,
 }
 
+struct ReadTimeoutBody<B> {
+  body: Pin<Box<B>>,
+  timeout: Duration,
+  kind: BodyTimeoutKind,
+  sleep: Option<Pin<Box<Sleep>>>,
+  size_hint: SizeHint,
+}
+
 struct DropGuardBody<T> {
   body: ProxyBody,
   _guard: T,
@@ -329,6 +333,50 @@ impl Body for ChannelBody {
       Poll::Ready(None) => Poll::Ready(self.take_terminal_error().map(Err)),
       poll => poll,
     }
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    self.size_hint.clone()
+  }
+}
+
+impl<B> Body for ReadTimeoutBody<B>
+where
+  B: Body<Data = Bytes>,
+  B::Error: Into<BoxError>,
+{
+  type Data = Bytes;
+  type Error = BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    if self.sleep.is_none() {
+      let timeout = self.timeout;
+      self.sleep = Some(Box::pin(tokio::time::sleep(timeout)));
+    }
+
+    match self.body.as_mut().poll_frame(cx) {
+      Poll::Ready(frame) => {
+        self.sleep = None;
+        return Poll::Ready(frame.map(|result| result.map_err(Into::into)));
+      }
+      Poll::Pending => {}
+    }
+
+    if let Some(sleep) = self.sleep.as_mut()
+      && sleep.as_mut().poll(cx).is_ready()
+    {
+      self.sleep = None;
+      return Poll::Ready(Some(Err(boxed_error(BodyTimeoutError::new(self.kind)))));
+    }
+
+    Poll::Pending
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.body.is_end_stream()
   }
 
   fn size_hint(&self) -> SizeHint {
@@ -391,7 +439,7 @@ where
 mod tests {
   use bytes::Bytes;
   use http::Request;
-  use http_body_util::{BodyExt, Full};
+  use http_body_util::{BodyExt, Empty, Full};
   use hyper::body::{Body as _, Frame};
   use std::time::Duration;
 
@@ -514,6 +562,39 @@ mod tests {
       .expect("ready body should collect")
       .to_bytes();
     assert_eq!(collected.as_ref(), b"abc");
+  }
+
+  #[tokio::test]
+  async fn timeout_wrappers_skip_known_empty_bodies() {
+    let read_body = Empty::<Bytes>::new()
+      .map_err(|never| -> BoxError { match never {} })
+      .boxed();
+    let read_body = with_read_timeout(
+      read_body,
+      Duration::from_millis(5),
+      BodyTimeoutKind::DownstreamRequestRead,
+    );
+    let read_bytes = read_body
+      .collect()
+      .await
+      .expect("empty read body should collect")
+      .to_bytes();
+    assert!(read_bytes.is_empty());
+
+    let send_body = Empty::<Bytes>::new()
+      .map_err(|never| -> BoxError { match never {} })
+      .boxed();
+    let send_body = with_send_timeout(
+      send_body,
+      Duration::from_millis(5),
+      BodyTimeoutKind::DownstreamResponseSend,
+    );
+    let send_bytes = send_body
+      .collect()
+      .await
+      .expect("empty send body should collect")
+      .to_bytes();
+    assert!(send_bytes.is_empty());
   }
 
   #[tokio::test]

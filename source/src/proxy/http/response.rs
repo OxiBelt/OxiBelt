@@ -3,6 +3,7 @@ use http::header::HeaderMap;
 use http::{Method, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full};
 
+use crate::config::ErrorResponseMode;
 use crate::state::AppSnapshot;
 use crate::waf::{
   HeaderMutation, WafBodyInput, WafRequestInput, WafResponseInput, WafTerminalResponse,
@@ -52,13 +53,12 @@ pub(super) fn upstream_error_response(
   tags: &std::collections::HashMap<String, String>,
   upstream_name: &str,
   upstream_scheme: &str,
-  upstream_pool: Option<&str>,
   upstream_connect_time_ms: Option<u64>,
   upstream_first_byte_time_ms: Option<u64>,
   upstream_error_code: &str,
   error_message: &str,
   request_response_mutations: &[HeaderMutation],
-  access_log: &SystemAccessLogContext,
+  access_log: &mut SystemAccessLogContext<'_>,
 ) -> Response<ProxyBody> {
   let status = if upstream_error_code.contains("timeout") {
     StatusCode::GATEWAY_TIMEOUT
@@ -72,9 +72,16 @@ pub(super) fn upstream_error_response(
     error_message,
   )
   .unwrap_or_else(|| {
+    if state.config.proxy.http.errors.mode == ErrorResponseMode::Json {
+      access_log.ensure_request_id();
+    }
     configured_error_response(
       &state.config,
-      &access_log.request_id,
+      if state.config.proxy.http.errors.mode == ErrorResponseMode::Json {
+        access_log.request_id()
+      } else {
+        ""
+      },
       status,
       "upstream request failed",
       upstream_error_code,
@@ -85,9 +92,10 @@ pub(super) fn upstream_error_response(
     return response;
   }
 
+  access_log.ensure_response_ids();
   let request = WafRequestInput {
-    request_id: &access_log.request_id,
-    transaction_id: &access_log.transaction_id,
+    request_id: access_log.request_id(),
+    transaction_id: access_log.transaction_id(),
     received_at_unix_ms: access_log.request_received_at_unix_ms,
     method: request_method,
     uri: request_uri,
@@ -108,14 +116,14 @@ pub(super) fn upstream_error_response(
   };
   let response_waf = state.waf.evaluate_response(WafResponseInput {
     request,
-    response_id: &access_log.response_id,
+    response_id: access_log.response_id(),
     received_at_unix_ms: crate::waf::current_unix_ms(),
     version: http::Version::HTTP_11,
     status,
     headers: response.headers(),
     body: None,
     upstream_name,
-    upstream_pool,
+    upstream_pool: access_log.upstream_pool.as_deref(),
     upstream_scheme,
     upstream_connect_time_ms,
     upstream_first_byte_time_ms,
