@@ -2453,6 +2453,11 @@ enabled = true
 mode = "enforcing"
 fail_policy = "closed"
 
+[waf.limits]
+max_rule_runtime_ms = 500
+max_total_waf_runtime_ms = 1000
+max_regex_runtime_ms = 100
+
 [[waf.pattern_sets]]
 name = "stream-secrets"
 kind = "contains"
