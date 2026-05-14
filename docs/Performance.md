@@ -31,6 +31,8 @@ OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS=35
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
 
+In GitHub Actions, `workflow_dispatch` also accepts `performance_iterations`, which defaults to `5`. Reduce it for long manual `benchmark` or `soak` runs when the default repeated sampling would exceed the job budget.
+
 ## Artifacts
 
 The runner writes:
@@ -41,11 +43,11 @@ The runner writes:
 - `logs/`: per-container logs.
 - `configs/`: generated effective proxy configs and TLS material used for the run.
 
-CI uploads these artifacts from the `docker-performance` job. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
+CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards. Each shard uploads one artifact named `oxibelt-docker-performance-<profile>-shard-<n>` and stores repeated samples under `run-1/` through `run-5/` by default. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
 
 ## Interpreting Results
 
-CI thresholds are sanity gates, not competitive claims. The job fails when the probe cannot complete requests, sees request errors in load/handshake scenarios, produces no traffic, or crosses the configured p99 latency ceiling. It also applies a narrower OxiBelt H1/H2 baseline latency-floor gate after the baseline HTTP/1.1, HTTP/2, and HTTP/3 rows are collected; override `OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS` and `OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS` when intentionally running on slower or noisier hosts. Noisy shared runners can move RPS and tail latency substantially, so compare trends across repeated runs and inspect `docker-stats.jsonl` before treating a single result as a regression.
+CI thresholds are sanity gates, not competitive claims. The job fails when the probe cannot complete requests, sees request errors in load/handshake scenarios, produces no traffic, or crosses the configured p99 latency ceiling. It also applies a narrower OxiBelt H1/H2 baseline latency-floor gate after the baseline HTTP/1.1, HTTP/2, and HTTP/3 rows are collected; override `OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS` and `OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS` when intentionally running on slower or noisier hosts. Noisy shared runners can move RPS and tail latency substantially, so compare trends across repeated runs and shards and inspect `docker-stats.jsonl` before treating a single result as a regression.
 
 nginx and Caddy are measured as common reverse-proxy baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, and stress scenarios is measured separately. nginx HTTP/3 is included only when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped. Caddy is configured with its documented `h1 h2 h3` server protocol support.
 

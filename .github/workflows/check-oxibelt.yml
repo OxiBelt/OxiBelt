@@ -16,6 +16,11 @@ on:
           - smoke
           - benchmark
           - soak
+      performance_iterations:
+        description: Docker performance iterations per runner shard
+        required: false
+        default: "5"
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -431,17 +436,32 @@ jobs:
           retention-days: 7
 
   docker-performance:
-    name: Docker performance (${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }})
-    runs-on: ubuntu-latest
+    name: Docker performance (${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}, shard ${{ matrix.shard }})
+    runs-on: ${{ matrix.runner }}
     needs:
       - docker-integration-matrix
       - remote-signer-dos-docker
       - browser-webdriver
     permissions:
       contents: read
-    timeout-minutes: 180
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            runner: ubuntu-latest
+          - shard: 2
+            runner: ubuntu-latest
+          - shard: 3
+            runner: ubuntu-latest
+          - shard: 4
+            runner: ubuntu-latest
+          - shard: 5
+            runner: ubuntu-latest
     env:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
+      PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
 
     steps:
       - name: Checkout
@@ -459,14 +479,24 @@ jobs:
       - name: Run Docker performance profile
         env:
           OXIBELT_DOCKER_IMAGE: oxibelt:alpine-musl-amd64
-          OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-performance
-        run: tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --comparators oxibelt,nginx,caddy
+          PERFORMANCE_SHARD: ${{ matrix.shard }}
+        run: |
+          if [[ ! "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "performance_iterations must be a positive integer; got '${PERFORMANCE_ITERATIONS}'" >&2
+            exit 2
+          fi
+
+          for iteration in $(seq 1 "${PERFORMANCE_ITERATIONS}"); do
+            echo "Running Docker performance profile ${PERFORMANCE_PROFILE} shard ${PERFORMANCE_SHARD}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
+            OXIBELT_TEST_ARTIFACT_DIR="${RUNNER_TEMP}/oxibelt-performance/shard-${PERFORMANCE_SHARD}/run-${iteration}" \
+              tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --comparators oxibelt,nginx,caddy
+          done
 
       - name: Upload Docker performance artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}
-          path: ${{ runner.temp }}/oxibelt-performance
+          name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/oxibelt-performance/shard-${{ matrix.shard }}
           if-no-files-found: ignore
           retention-days: 14

@@ -236,3 +236,53 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         );
     }
 }
+
+#[test]
+fn docker_performance_job_uses_sharded_repeated_sampling() {
+    let workflow = workflow_text();
+
+    assert!(
+        workflow.contains("performance_iterations:"),
+        "workflow_dispatch should expose the Docker performance iteration count"
+    );
+    assert!(
+        workflow.contains("PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}"),
+        "docker-performance should default to five iterations outside manual dispatch"
+    );
+    assert!(
+        workflow.contains("timeout-minutes: 360"),
+        "docker-performance should allow repeated smoke and benchmark samples"
+    );
+
+    for shard in 1..=5 {
+        assert!(
+            workflow.contains(&format!(
+                "- shard: {shard}\n            runner: ubuntu-latest"
+            )),
+            "docker-performance should include ubuntu-latest shard {shard}"
+        );
+    }
+
+    assert!(
+        workflow.contains("PERFORMANCE_SHARD: ${{ matrix.shard }}"),
+        "docker-performance should expose the current shard to the run loop"
+    );
+    assert!(
+        workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),
+        "docker-performance should loop over the configured iteration count"
+    );
+    assert!(
+        workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${RUNNER_TEMP}/oxibelt-performance/shard-${PERFORMANCE_SHARD}/run-${iteration}\""),
+        "docker-performance should isolate artifacts by shard and iteration"
+    );
+    assert!(
+        workflow.contains(
+            "oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-shard-${{ matrix.shard }}"
+        ),
+        "docker-performance artifact names should include the shard"
+    );
+    assert!(
+        workflow.contains("path: ${{ runner.temp }}/oxibelt-performance/shard-${{ matrix.shard }}"),
+        "docker-performance should upload one grouped artifact per shard"
+    );
+}
