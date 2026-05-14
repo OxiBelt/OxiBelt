@@ -1422,41 +1422,35 @@ where
   apply_security_headers(&mut parts.headers, &state.config.security.headers);
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
-  let (body, captured_response_body) = if response_body_need.requires_prefix() {
-    let content_length = parts
-      .headers
-      .get(http::header::CONTENT_LENGTH)
-      .and_then(|value| value.to_str().ok())
-      .and_then(|value| value.parse::<u64>().ok());
-    if response_body_is_definitely_empty(parts.version, &parts.headers) {
-      (body, Some(empty_captured_body()))
-    } else {
-      match capture_body_prefix(
-        body,
-        state.config.waf.limits.max_body_inspection_bytes,
-        content_length,
-      )
-      .await
-      {
-        Ok((body, captured)) => (body, Some(captured)),
-        Err(error) => {
-          if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) {
+  let (body, captured_response_body) =
+    match response_body_capture_decision(parts.version, &parts.headers, response_body_need) {
+      WafBodyCaptureDecision::Skip => (body, None),
+      WafBodyCaptureDecision::Empty => (body, Some(empty_captured_body())),
+      WafBodyCaptureDecision::Prefix => {
+        match capture_body_prefix(
+          body,
+          state.config.waf.limits.max_body_inspection_bytes,
+          positive_content_length(&parts.headers),
+        )
+        .await
+        {
+          Ok((body, captured)) => (body, Some(captured)),
+          Err(error) => {
+            if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) {
+              return text_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream response body timed out",
+              );
+            }
+            warn!(error = %error, "failed to read upstream response body for WAF inspection");
             return text_response(
-              StatusCode::GATEWAY_TIMEOUT,
-              "upstream response body timed out",
+              StatusCode::BAD_GATEWAY,
+              "failed to read upstream response body",
             );
           }
-          warn!(error = %error, "failed to read upstream response body for WAF inspection");
-          return text_response(
-            StatusCode::BAD_GATEWAY,
-            "failed to read upstream response body",
-          );
         }
       }
-    }
-  } else {
-    (body, None)
-  };
+    };
   let response_body = captured_response_body.as_ref().map(waf_body_input);
 
   if response_waf_enabled {
@@ -3046,21 +3040,79 @@ async fn capture_request_body_for_waf(
   body_need: BodyNeed,
   limit: usize,
 ) -> Result<(Request<ProxyBody>, Option<CapturedBody>), self::body::BoxError> {
-  if !body_need.requires_prefix() {
-    return Ok((request, None));
+  match request_body_capture_decision(request.version(), request.headers(), body_need) {
+    WafBodyCaptureDecision::Skip => Ok((request, None)),
+    WafBodyCaptureDecision::Empty => Ok((request, Some(empty_captured_body()))),
+    WafBodyCaptureDecision::Prefix => capture_prefix(request, limit)
+      .await
+      .map(|(request, captured)| (request, Some(captured))),
   }
-  if request_body_is_definitely_empty(request.version(), request.headers()) {
-    return Ok((request, Some(empty_captured_body())));
-  }
-  capture_prefix(request, limit)
-    .await
-    .map(|(request, captured)| (request, Some(captured)))
 }
 
 fn empty_captured_body() -> CapturedBody {
   CapturedBody {
     bytes: bytes::Bytes::new(),
     is_truncated: false,
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WafBodyCaptureDecision {
+  Skip,
+  Empty,
+  Prefix,
+}
+
+fn request_body_capture_decision(
+  version: http::Version,
+  headers: &HeaderMap,
+  body_need: BodyNeed,
+) -> WafBodyCaptureDecision {
+  body_capture_decision(
+    version,
+    headers,
+    body_need,
+    request_body_is_definitely_empty,
+  )
+}
+
+fn response_body_capture_decision(
+  version: http::Version,
+  headers: &HeaderMap,
+  body_need: BodyNeed,
+) -> WafBodyCaptureDecision {
+  body_capture_decision(
+    version,
+    headers,
+    body_need,
+    response_body_is_definitely_empty,
+  )
+}
+
+fn body_capture_decision(
+  version: http::Version,
+  headers: &HeaderMap,
+  body_need: BodyNeed,
+  body_is_definitely_empty: fn(http::Version, &HeaderMap) -> bool,
+) -> WafBodyCaptureDecision {
+  match body_need {
+    BodyNeed::None => WafBodyCaptureDecision::Skip,
+    BodyNeed::SizeOnly => {
+      if body_is_definitely_empty(version, headers) {
+        WafBodyCaptureDecision::Empty
+      } else if positive_content_length(headers).is_some() {
+        WafBodyCaptureDecision::Skip
+      } else {
+        WafBodyCaptureDecision::Prefix
+      }
+    }
+    BodyNeed::PrefixBytes => {
+      if body_is_definitely_empty(version, headers) {
+        WafBodyCaptureDecision::Empty
+      } else {
+        WafBodyCaptureDecision::Prefix
+      }
+    }
   }
 }
 
@@ -3086,11 +3138,27 @@ fn content_length_is_exact_zero(headers: &HeaderMap) -> bool {
   values.next().is_none() && value.to_str().ok().is_some_and(|value| value.trim() == "0")
 }
 
+fn positive_content_length(headers: &HeaderMap) -> Option<u64> {
+  if headers.contains_key(http::header::TRANSFER_ENCODING) {
+    return None;
+  }
+  let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
+  let value = values.next()?;
+  if values.next().is_some() {
+    return None;
+  }
+  let length = value.to_str().ok()?.trim().parse::<u64>().ok()?;
+  (length > 0).then_some(length)
+}
+
 #[cfg(test)]
 mod cache_tests;
 
 #[cfg(test)]
 mod webtransport_tests;
+
+#[cfg(test)]
+mod body_capture_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3102,87 +3170,14 @@ mod tests {
   }
 
   use pretty_assertions::assert_eq;
-  use std::pin::Pin;
-  use std::task::{Context, Poll};
 
   use super::*;
   use crate::config::Config;
-  use hyper::body::{Frame, SizeHint};
 
   fn parse_config(raw: &str) -> Config {
     let config: Config = toml::from_str(raw).expect("config should parse");
     config.validate().expect("config should validate");
     config
-  }
-
-  struct PanicBody;
-
-  impl Body for PanicBody {
-    type Data = bytes::Bytes;
-    type Error = body::BoxError;
-
-    fn poll_frame(
-      self: Pin<&mut Self>,
-      _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-      panic!("body should not be polled");
-    }
-
-    fn size_hint(&self) -> SizeHint {
-      SizeHint::new()
-    }
-  }
-
-  fn panic_body() -> ProxyBody {
-    PanicBody.boxed()
-  }
-
-  #[tokio::test]
-  async fn size_only_request_body_capture_does_not_poll_body() {
-    let request = Request::builder()
-      .uri("https://example.com/upload")
-      .body(panic_body())
-      .expect("request should build");
-
-    let (_request, captured) = capture_request_body_for_waf(request, BodyNeed::SizeOnly, 8)
-      .await
-      .expect("size-only capture should be skipped");
-
-    assert!(captured.is_none());
-  }
-
-  #[tokio::test]
-  async fn prefix_request_body_capture_reads_body() {
-    let request = Request::builder()
-      .uri("https://example.com/upload")
-      .body(full_body(bytes::Bytes::from_static(b"abc")))
-      .expect("request should build");
-
-    let (_request, captured) = capture_request_body_for_waf(request, BodyNeed::PrefixBytes, 8)
-      .await
-      .expect("prefix capture should succeed");
-
-    assert_eq!(
-      captured.expect("body should be captured").bytes.as_ref(),
-      b"abc"
-    );
-  }
-
-  #[tokio::test]
-  async fn exact_empty_request_body_uses_empty_capture_without_polling() {
-    let request = Request::builder()
-      .uri("https://example.com/upload")
-      .header(http::header::CONTENT_LENGTH, "0")
-      .body(panic_body())
-      .expect("request should build");
-
-    let (_request, captured) = capture_request_body_for_waf(request, BodyNeed::PrefixBytes, 8)
-      .await
-      .expect("empty capture should succeed");
-    let captured = captured.expect("empty body should be captured");
-
-    assert!(captured.bytes.is_empty());
-    assert!(!captured.is_truncated);
   }
 
   #[test]

@@ -128,26 +128,35 @@ def send_http_request(
   hold_after_headers_ms=0,
   body_split_at=None,
   body_split_delay_ms=0,
+  chunked_body=False,
 ):
   request_lines = [
     f"{method} {target_path} HTTP/1.1",
     f"Host: {host_header}",
   ]
   has_content_length = False
+  has_transfer_encoding = False
   for name, value in headers:
     if name.lower() == "host":
       continue
     if name.lower() == "content-length":
       has_content_length = True
+    if name.lower() == "transfer-encoding":
+      has_transfer_encoding = True
     request_lines.append(f"{name}: {value}")
-  if not has_content_length:
+  if chunked_body:
+    if not has_transfer_encoding:
+      request_lines.append("Transfer-Encoding: chunked")
+  elif not has_content_length:
     request_lines.append(f"Content-Length: {len(body)}")
   request_lines.append(f"Connection: {connection}")
   head = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8")
   sock.sendall(head)
   if slow_body_delay_ms > 0 and body:
     time.sleep(slow_body_delay_ms / 1000.0)
-  if body_split_at is None:
+  if chunked_body:
+    send_chunked_body(sock, body, body_split_at, body_split_delay_ms)
+  elif body_split_at is None:
     sock.sendall(body)
   else:
     split_at = max(0, min(body_split_at, len(body)))
@@ -156,6 +165,22 @@ def send_http_request(
       time.sleep(body_split_delay_ms / 1000.0)
     sock.sendall(body[split_at:])
   return read_http_response(sock, hold_after_headers_ms)
+
+
+def send_chunked_body(sock, body, body_split_at=None, body_split_delay_ms=0):
+  if body_split_at is None:
+    chunks = [body] if body else []
+  else:
+    split_at = max(0, min(body_split_at, len(body)))
+    chunks = [body[:split_at], body[split_at:]]
+
+  for index, chunk in enumerate(chunk for chunk in chunks if chunk):
+    sock.sendall(f"{len(chunk):x}\r\n".encode("ascii"))
+    sock.sendall(chunk)
+    sock.sendall(b"\r\n")
+    if index == 0 and body_split_delay_ms > 0:
+      time.sleep(body_split_delay_ms / 1000.0)
+  sock.sendall(b"0\r\n\r\n")
 
 
 def request_direct(args, target_path, host_header, headers, body):
@@ -173,6 +198,7 @@ def request_direct(args, target_path, host_header, headers, body):
       args.hold_after_headers_ms,
       args.body_split_at,
       args.body_split_delay_ms,
+      args.chunked_body,
     )
   finally:
     sock.close()
@@ -193,6 +219,7 @@ def request_with_proxy_protocol(args, target_path, host_header, headers, body):
       args.hold_after_headers_ms,
       args.body_split_at,
       args.body_split_delay_ms,
+      args.chunked_body,
     )
   finally:
     sock.close()
@@ -291,6 +318,7 @@ def main() -> int:
   parser.add_argument("--hold-after-headers-ms", type=int, default=0)
   parser.add_argument("--body-split-at", type=int)
   parser.add_argument("--body-split-delay-ms", type=int, default=0)
+  parser.add_argument("--chunked-body", action="store_true")
   args = parser.parse_args()
 
   try:

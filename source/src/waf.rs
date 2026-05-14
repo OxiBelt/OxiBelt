@@ -3977,12 +3977,7 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::ResponseHttp, "Body") => Ok(Value::Object(ObjectRef::ResponseBody)),
     (ObjectRef::ResponseBody, "Size") => {
       let response = ctx.response.context("missing response context")?;
-      Ok(Value::Int(
-        response
-          .body
-          .map(|body| body.bytes.len() as i64)
-          .unwrap_or_else(|| content_length(response.headers)),
-      ))
+      Ok(Value::Int(body_size(response.headers, response.body)))
     }
     (ObjectRef::ResponseBody, "IsTruncated") => Ok(Value::Bool(
       ctx
@@ -4856,21 +4851,34 @@ where
   names.into_iter().any(|name| !seen.insert(name))
 }
 
-fn content_length(headers: &HeaderMap) -> i64 {
-  headers
-    .get(http::header::CONTENT_LENGTH)
-    .and_then(|value| value.to_str().ok())
-    .and_then(|value| value.parse::<i64>().ok())
-    .unwrap_or(0)
+fn content_length(headers: &HeaderMap) -> Option<i64> {
+  if headers.contains_key(http::header::TRANSFER_ENCODING) {
+    return None;
+  }
+  let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
+  let value = values.next()?;
+  if values.next().is_some() {
+    return None;
+  }
+  let length = value.to_str().ok()?.trim().parse::<u64>().ok()?;
+  if length == 0 {
+    return None;
+  }
+  Some(i64::try_from(length).unwrap_or(i64::MAX))
 }
 
 fn body_size(headers: &HeaderMap, body: Option<WafBodyInput<'_>>) -> i64 {
-  let size = content_length(headers);
-  if size > 0 {
-    size
-  } else {
-    body.map(|body| body.bytes.len() as i64).unwrap_or(0)
-  }
+  content_length(headers).unwrap_or_else(|| {
+    body
+      .map(|body| {
+        let size = body
+          .bytes
+          .len()
+          .saturating_add(usize::from(body.is_truncated));
+        i64::try_from(size).unwrap_or(i64::MAX)
+      })
+      .unwrap_or(0)
+  })
 }
 
 fn version_string(version: Version) -> String {

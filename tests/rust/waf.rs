@@ -747,7 +747,7 @@ body = "blocked response body"
 }
 
 #[test]
-fn request_body_size_only_rules_are_planned_without_prefix_capture() {
+fn request_body_size_only_rules_are_planned_as_size_only() {
     let engine = compile_waf_fragment(
         "waf-request-body-size-only-plan",
         r#"
@@ -789,6 +789,152 @@ status = 403
 
     assert_eq!(engine.request_body_need("app-root"), BodyNeed::SizeOnly);
     assert!(!engine.requires_request_body_inspection("app-root"));
+}
+
+#[test]
+fn request_body_size_uses_captured_unknown_length_body() {
+    let engine = compile_waf_fragment(
+        "waf-request-body-size-captured-unknown",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "large-body"
+phase = "request"
+priority = 10
+when = "Request.Body.Size > 8"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 413
+"#,
+    );
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+
+    let decision = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+        b"123456789",
+        false,
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::PAYLOAD_TOO_LARGE)
+    );
+}
+
+#[test]
+fn request_body_size_uses_truncated_capture_lower_bound() {
+    let engine = compile_waf_fragment(
+        "waf-request-body-size-truncated-lower-bound",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "large-body"
+phase = "request"
+priority = 10
+when = "Request.Body.Size > 8"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 413
+"#,
+    );
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let complete = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        b"12345678",
+        false,
+    ));
+    assert!(complete.terminal.is_none());
+
+    let truncated = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        b"12345678",
+        true,
+    ));
+    assert_eq!(
+        truncated.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::PAYLOAD_TOO_LARGE)
+    );
+}
+
+#[test]
+fn request_body_size_prefers_positive_content_length() {
+    let engine = compile_waf_fragment(
+        "waf-request-body-size-content-length",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "large-body"
+phase = "request"
+priority = 10
+when = "Request.Body.Size > 8"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 413
+"#,
+    );
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let mut small_length_headers = HeaderMap::new();
+    small_length_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("4"));
+
+    let allowed = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &small_length_headers,
+        &tags,
+        peer_addr,
+        b"123456789",
+        false,
+    ));
+    assert!(allowed.terminal.is_none());
+
+    let mut large_length_headers = HeaderMap::new();
+    large_length_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("9"));
+    let rejected = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &large_length_headers,
+        &tags,
+        peer_addr,
+    ));
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::PAYLOAD_TOO_LARGE)
+    );
 }
 
 #[test]
@@ -840,7 +986,7 @@ status = 403
 }
 
 #[test]
-fn response_body_size_only_rules_are_planned_without_prefix_capture() {
+fn response_body_size_only_rules_are_planned_as_size_only() {
     let engine = compile_waf_fragment(
         "waf-response-body-size-only-plan",
         r#"
@@ -866,6 +1012,200 @@ type = "continue_response"
 
     assert_eq!(engine.response_body_need("app-root"), BodyNeed::SizeOnly);
     assert!(!engine.requires_response_body_inspection("app-root"));
+}
+
+#[test]
+fn response_body_size_uses_captured_unknown_length_body() {
+    let engine = compile_waf_fragment(
+        "waf-response-body-size-captured-unknown",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "large-response"
+phase = "response"
+priority = 10
+when = "Response.Body.Size > 8"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 451
+"#,
+    );
+    let method = Method::GET;
+    let uri: Uri = "/download".parse().expect("URI should parse");
+    let request_headers = HeaderMap::new();
+    let response_headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: Some(WafBodyInput {
+            bytes: b"123456789",
+            is_truncated: false,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+}
+
+#[test]
+fn response_body_size_uses_truncated_capture_lower_bound() {
+    let engine = compile_waf_fragment(
+        "waf-response-body-size-truncated-lower-bound",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "large-response"
+phase = "response"
+priority = 10
+when = "Response.Body.Size > 8"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 451
+"#,
+    );
+    let method = Method::GET;
+    let uri: Uri = "/download".parse().expect("URI should parse");
+    let request_headers = HeaderMap::new();
+    let response_headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let complete = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: Some(WafBodyInput {
+            bytes: b"12345678",
+            is_truncated: false,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert!(complete.terminal.is_none());
+
+    let truncated = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: Some(WafBodyInput {
+            bytes: b"12345678",
+            is_truncated: true,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert_eq!(
+        truncated.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+}
+
+#[test]
+fn response_body_size_prefers_positive_content_length() {
+    let engine = compile_waf_fragment(
+        "waf-response-body-size-content-length",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "large-response"
+phase = "response"
+priority = 10
+when = "Response.Body.Size > 8"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 451
+"#,
+    );
+    let method = Method::GET;
+    let uri: Uri = "/download".parse().expect("URI should parse");
+    let request_headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let mut small_length_headers = HeaderMap::new();
+    small_length_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("4"));
+
+    let allowed = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &small_length_headers,
+        body: Some(WafBodyInput {
+            bytes: b"123456789",
+            is_truncated: false,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert!(allowed.terminal.is_none());
+
+    let mut large_length_headers = HeaderMap::new();
+    large_length_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("9"));
+    let rejected = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &large_length_headers,
+        body: None,
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
 }
 
 #[test]

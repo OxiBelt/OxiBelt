@@ -57,6 +57,7 @@ class EchoHandler(BaseHTTPRequestHandler):
     body_delay_ms = _query_int(query, "body_delay_ms", 0)
     body_split_at = _query_int(query, "body_split_at", -1)
     body_split_delay_ms = _query_int(query, "body_split_delay_ms", 0)
+    chunked_response = query.get("chunked_response", ["0"])[0] == "1"
     status = 200
     if parsed.path.startswith("/status/"):
       try:
@@ -136,11 +137,16 @@ class EchoHandler(BaseHTTPRequestHandler):
     vary = query.get("vary", [""])[0]
     if vary:
       self.send_header("vary", vary)
-    self.send_header("content-length", str(len(encoded)))
+    if chunked_response:
+      self.send_header("transfer-encoding", "chunked")
+    else:
+      self.send_header("content-length", str(len(encoded)))
     self.end_headers()
     if body_delay_ms > 0:
       time.sleep(body_delay_ms / 1000.0)
-    if 0 <= body_split_at < len(encoded):
+    if chunked_response:
+      self._write_chunked_body(encoded, body_split_at, body_split_delay_ms)
+    elif 0 <= body_split_at < len(encoded):
       self.wfile.write(encoded[:body_split_at])
       self.wfile.flush()
       if body_split_delay_ms > 0:
@@ -148,6 +154,20 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.wfile.write(encoded[body_split_at:])
     else:
       self.wfile.write(encoded)
+
+  def _write_chunked_body(self, encoded, body_split_at, body_split_delay_ms):
+    if 0 <= body_split_at < len(encoded):
+      chunks = [encoded[:body_split_at], encoded[body_split_at:]]
+    else:
+      chunks = [encoded]
+    for index, chunk in enumerate(chunk for chunk in chunks if chunk):
+      self.wfile.write(f"{len(chunk):x}\r\n".encode("ascii"))
+      self.wfile.write(chunk)
+      self.wfile.write(b"\r\n")
+      self.wfile.flush()
+      if index == 0 and body_split_delay_ms > 0:
+        time.sleep(body_split_delay_ms / 1000.0)
+    self.wfile.write(b"0\r\n\r\n")
 
   def _handle_upgrade(self):
     upgrade = self.headers.get("upgrade")
