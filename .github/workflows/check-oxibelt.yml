@@ -486,11 +486,22 @@ jobs:
             exit 2
           fi
 
+          failed_iterations=()
           for iteration in $(seq 1 "${PERFORMANCE_ITERATIONS}"); do
             echo "Running Docker performance profile ${PERFORMANCE_PROFILE} shard ${PERFORMANCE_SHARD}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
+            status=0
             OXIBELT_TEST_ARTIFACT_DIR="${RUNNER_TEMP}/oxibelt-performance/shard-${PERFORMANCE_SHARD}/run-${iteration}" \
-              tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --comparators oxibelt,nginx,caddy
+              tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --comparators oxibelt,nginx,caddy || status=$?
+            if [[ "${status}" != "0" ]]; then
+              failed_iterations+=("${iteration}:${status}")
+              echo "::error title=Docker performance iteration failed::profile=${PERFORMANCE_PROFILE} shard=${PERFORMANCE_SHARD} iteration=${iteration} status=${status}"
+            fi
           done
+
+          if (( ${#failed_iterations[@]} > 0 )); then
+            printf 'Docker performance failed in %d iteration(s): %s\n' "${#failed_iterations[@]}" "${failed_iterations[*]}" >&2
+            exit 1
+          fi
 
       - name: Upload Docker performance artifacts
         if: always()

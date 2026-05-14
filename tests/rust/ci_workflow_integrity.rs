@@ -272,6 +272,22 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should loop over the configured iteration count"
     );
     assert!(
+        workflow.contains("failed_iterations=()"),
+        "docker-performance should aggregate failed iterations instead of stopping early"
+    );
+    assert!(
+        workflow.contains("|| status=$?"),
+        "docker-performance should record iteration failures and continue the shard"
+    );
+    assert!(
+        workflow.contains("failed_iterations+=(\"${iteration}:${status}\")"),
+        "docker-performance should keep a shard-local list of failed iterations"
+    );
+    assert!(
+        workflow.contains("if (( ${#failed_iterations[@]} > 0 )); then"),
+        "docker-performance should fail after all configured iterations have run"
+    );
+    assert!(
         workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${RUNNER_TEMP}/oxibelt-performance/shard-${PERFORMANCE_SHARD}/run-${iteration}\""),
         "docker-performance should isolate artifacts by shard and iteration"
     );

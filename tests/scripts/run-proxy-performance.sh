@@ -20,7 +20,7 @@ Environment:
                                       OxiBelt H1/H2 baseline p99 latency ceiling
   OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO
                                       test-only OxiBelt baseline fixture override
-  OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, configs, and stats here
+  OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, probe logs, configs, and stats here
   KEEP_TEST_ARTIFACTS=1            keep tests/.tmp performance work directory
 EOF
 }
@@ -63,6 +63,7 @@ fixture_root="${repo_root}/tests/fixtures/oxibelt-docker-performance"
 run_id="$(date +%s)-$$-${RANDOM}"
 work_dir="${repo_root}/tests/.tmp/performance-${run_id}"
 logs_dir="${work_dir}/logs"
+probe_logs_dir="${work_dir}/probe-logs"
 configs_dir="${work_dir}/configs"
 tls_dir="${work_dir}/proxy-tls"
 results_jsonl="${work_dir}/results.jsonl"
@@ -122,7 +123,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${logs_dir}" "${configs_dir}" "${tls_dir}"
+mkdir -p "${logs_dir}" "${probe_logs_dir}" "${configs_dir}" "${tls_dir}"
 : >"${results_jsonl}"
 : >"${stats_jsonl}"
 
@@ -221,7 +222,18 @@ sample_stats() {
 
 run_probe_json() {
   local probe_container="oxibelt-perf-probe-${run_id}-${RANDOM}"
-  local output status json
+  local output status json probe_label previous_arg probe_log_name probe_log_path arg
+  probe_label="probe"
+  previous_arg=""
+  for arg in "$@"; do
+    if [[ "${previous_arg}" == "--label" ]]; then
+      probe_label="${arg}"
+      break
+    fi
+    previous_arg="${arg}"
+  done
+  probe_log_name="${probe_label//[^A-Za-z0-9_.-]/_}"
+  probe_log_path="${probe_logs_dir}/${probe_log_name}.log"
   docker create \
     --name "${probe_container}" \
     --label "${test_label}" \
@@ -232,6 +244,12 @@ run_probe_json() {
 
   status=0
   output="$(docker start -a "${probe_container}" 2>&1)" || status=$?
+  {
+    printf 'Command: perf-probe'
+    printf ' %q' "$@"
+    printf '\n\n'
+    printf '%s\n' "${output}"
+  } >"${probe_log_path}"
   docker rm -f "${probe_container}" >/dev/null 2>&1 || true
   if [[ "${status}" != "0" ]]; then
     echo "${output}" >&2
@@ -635,6 +653,7 @@ finalize_results() {
     echo "- results.json"
     echo "- docker-stats.jsonl"
     echo "- logs/"
+    echo "- probe-logs/"
     echo "- configs/"
   } >>"${summary_md}"
 }

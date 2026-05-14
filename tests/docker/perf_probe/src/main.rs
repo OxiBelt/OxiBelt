@@ -25,6 +25,8 @@ use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
 
+const MAX_ERROR_SAMPLES: usize = 8;
+
 #[derive(Clone, Copy)]
 enum Protocol {
     H1,
@@ -119,6 +121,7 @@ struct StatsInner {
     errors: u64,
     statuses: BTreeMap<u16, u64>,
     latency: Histogram<u64>,
+    error_samples: Vec<String>,
 }
 
 impl SharedStats {
@@ -129,6 +132,7 @@ impl SharedStats {
                 errors: 0,
                 statuses: BTreeMap::new(),
                 latency: Histogram::new(3).context("failed to create latency histogram")?,
+                error_samples: Vec::new(),
             })),
         })
     }
@@ -142,6 +146,10 @@ impl SharedStats {
         *inner.statuses.entry(status).or_insert(0) += 1;
         if status != expect_status {
             inner.errors += 1;
+            push_error_sample(
+                &mut inner,
+                format!("unexpected status {status}, expected {expect_status}"),
+            );
         }
         let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
         let _ = inner.latency.record(micros.max(1));
@@ -166,12 +174,13 @@ impl SharedStats {
         *inner.statuses.entry(status).or_insert(0) += 1;
     }
 
-    fn record_error(&self) {
+    fn record_error_sample(&self, message: impl Into<String>) {
         let mut inner = self
             .inner
             .lock()
             .expect("stats mutex should not be poisoned");
         inner.errors += 1;
+        push_error_sample(&mut inner, message);
     }
 
     fn snapshot(&self) -> StatsSnapshot {
@@ -186,7 +195,14 @@ impl SharedStats {
             p50_ms: percentile_ms(&inner.latency, 50.0),
             p95_ms: percentile_ms(&inner.latency, 95.0),
             p99_ms: percentile_ms(&inner.latency, 99.0),
+            error_samples: inner.error_samples.clone(),
         }
+    }
+}
+
+fn push_error_sample(inner: &mut StatsInner, message: impl Into<String>) {
+    if inner.error_samples.len() < MAX_ERROR_SAMPLES {
+        inner.error_samples.push(message.into());
     }
 }
 
@@ -197,6 +213,7 @@ struct StatsSnapshot {
     p50_ms: f64,
     p95_ms: f64,
     p99_ms: f64,
+    error_samples: Vec<String>,
 }
 
 #[tokio::main]
@@ -532,6 +549,7 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
             "p95_ms": snapshot.p95_ms,
             "p99_ms": snapshot.p99_ms,
             "statuses": status_json(snapshot.statuses),
+            "error_samples": snapshot.error_samples,
         })
     );
     Ok(())
@@ -565,12 +583,36 @@ async fn run_load_phase(
 async fn h1_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, record: bool) {
     while Instant::now() < deadline {
         if let Err(error) = h1_connection_loop(&args, deadline, &stats, record).await {
-            if record {
-                stats.record_error();
+            if record_worker_error("h1", &error, deadline, &stats, record) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            eprintln!("h1 worker reconnecting after error: {error:#}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+}
+
+fn worker_error_is_in_window(record: bool, deadline: Instant) -> bool {
+    record && Instant::now() < deadline
+}
+
+fn record_worker_error(
+    protocol: &str,
+    error: &anyhow::Error,
+    deadline: Instant,
+    stats: &SharedStats,
+    record: bool,
+) -> bool {
+    let message = format!("{error:#}");
+    let before_deadline = Instant::now() < deadline;
+    if worker_error_is_in_window(record, deadline) {
+        stats.record_error_sample(message.clone());
+        eprintln!("{protocol} worker reconnecting after error: {message}");
+        true
+    } else if before_deadline {
+        eprintln!("{protocol} worker reconnecting after unrecorded error: {message}");
+        true
+    } else {
+        eprintln!("{protocol} worker stopped after phase-boundary error: {message}");
+        false
     }
 }
 
@@ -620,11 +662,9 @@ async fn h1_connection_loop(
 async fn h2_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, record: bool) {
     while Instant::now() < deadline {
         if let Err(error) = h2_connection_loop(&args, deadline, &stats, record).await {
-            if record {
-                stats.record_error();
+            if record_worker_error("h2", &error, deadline, &stats, record) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            eprintln!("h2 worker reconnecting after error: {error:#}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -676,11 +716,9 @@ async fn h2_connection_loop(
 async fn h3_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, record: bool) {
     while Instant::now() < deadline {
         if let Err(error) = h3_connection_loop(&args, deadline, &stats, record).await {
-            if record {
-                stats.record_error();
+            if record_worker_error("h3", &error, deadline, &stats, record) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            eprintln!("h3 worker reconnecting after error: {error:#}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -803,8 +841,9 @@ async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
                 match result {
                     Ok(()) => stats.record_success(started.elapsed()),
                     Err(error) => {
-                        stats.record_error();
-                        eprintln!("handshake failed: {error:#}");
+                        let message = format!("{error:#}");
+                        stats.record_error_sample(message.clone());
+                        eprintln!("handshake failed: {message}");
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }
@@ -830,6 +869,7 @@ async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
             "p50_ms": snapshot.p50_ms,
             "p95_ms": snapshot.p95_ms,
             "p99_ms": snapshot.p99_ms,
+            "error_samples": snapshot.error_samples,
         })
     );
     Ok(())
@@ -858,8 +898,9 @@ async fn run_stress(args: StressArgs) -> anyhow::Result<()> {
                 Ok(Some(status)) => stats.record_status(status),
                 Ok(None) => stats.record_success(args.duration),
                 Err(error) => {
-                    stats.record_error();
-                    eprintln!("stress connection failed: {error:#}");
+                    let message = format!("{error:#}");
+                    stats.record_error_sample(message.clone());
+                    eprintln!("stress connection failed: {message}");
                 }
             }
         }));
@@ -879,6 +920,7 @@ async fn run_stress(args: StressArgs) -> anyhow::Result<()> {
             "requests": snapshot.requests,
             "errors": snapshot.errors,
             "statuses": status_json(snapshot.statuses),
+            "error_samples": snapshot.error_samples,
         })
     );
     Ok(())
@@ -1121,4 +1163,82 @@ fn status_json(statuses: BTreeMap<u16, u64>) -> serde_json::Value {
             .map(|(status, count)| (status.to_string(), serde_json::json!(count)))
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sampled_error_messages_are_bounded() {
+        let stats = SharedStats::new().expect("stats should initialize");
+
+        for index in 0..(MAX_ERROR_SAMPLES + 3) {
+            stats.record_error_sample(format!("error-{index}"));
+        }
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.errors, (MAX_ERROR_SAMPLES + 3) as u64);
+        assert_eq!(snapshot.error_samples.len(), MAX_ERROR_SAMPLES);
+        assert_eq!(snapshot.error_samples[0], "error-0");
+        assert_eq!(
+            snapshot.error_samples[MAX_ERROR_SAMPLES - 1],
+            format!("error-{}", MAX_ERROR_SAMPLES - 1)
+        );
+    }
+
+    #[test]
+    fn status_mismatch_is_sampled_as_request_error() {
+        let stats = SharedStats::new().expect("stats should initialize");
+
+        stats.record_response(503, Duration::from_millis(1), 200);
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.errors, 1);
+        assert_eq!(snapshot.statuses.get(&503), Some(&1));
+        assert_eq!(
+            snapshot.error_samples,
+            vec!["unexpected status 503, expected 200"]
+        );
+    }
+
+    #[test]
+    fn phase_boundary_worker_errors_are_not_counted() {
+        let stats = SharedStats::new().expect("stats should initialize");
+        let error = anyhow!("connection reset by peer");
+        let future_deadline = Instant::now() + Duration::from_secs(1);
+        let past_deadline = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("one millisecond before now should be representable");
+
+        assert!(!record_worker_error(
+            "h1",
+            &error,
+            past_deadline,
+            &stats,
+            true
+        ));
+        assert_eq!(stats.snapshot().errors, 0);
+
+        assert!(record_worker_error(
+            "h1",
+            &error,
+            future_deadline,
+            &stats,
+            false
+        ));
+        assert_eq!(stats.snapshot().errors, 0);
+
+        assert!(record_worker_error(
+            "h1",
+            &error,
+            future_deadline,
+            &stats,
+            true
+        ));
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.errors, 1);
+        assert_eq!(snapshot.error_samples, vec!["connection reset by peer"]);
+    }
 }
