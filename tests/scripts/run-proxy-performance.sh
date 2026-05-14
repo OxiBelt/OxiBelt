@@ -18,6 +18,8 @@ Environment:
                                       OxiBelt H1/H2 baseline p50 latency ceiling
   OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS
                                       OxiBelt H1/H2 baseline p99 latency ceiling
+  OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO
+                                      test-only OxiBelt baseline fixture override
   OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, configs, and stats here
   KEEP_TEST_ARTIFACTS=1            keep tests/.tmp performance work directory
 EOF
@@ -105,6 +107,7 @@ soak_seconds="${OXIBELT_PERF_SOAK_SECONDS:-${default_soak}}"
 max_p99_ms="${OXIBELT_PERF_MAX_P99_MS:-10000}"
 tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-20}"
 tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-35}"
+oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -541,18 +544,31 @@ detect_nginx_h3() {
 run_common_loads() {
   local comparator="$1"
   local host="$2"
-  local supports_h3="$3"
+  local h3_mode="$3"
   run_load "${comparator}-h1-keepalive" h1 "${host}" "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
   run_load "${comparator}-h2" h2 "${host}" "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
-  if [[ "${supports_h3}" == "1" ]]; then
-    if h3_probe_succeeds "${host}"; then
-      run_load "${comparator}-h3" h3 "${host}" "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
-    else
-      record_skip "${comparator}-h3" load h3 "HTTP/3 support was detected, but a functional QUIC probe did not complete"
-    fi
-  else
-    record_skip "${comparator}-h3" load h3 "HTTP/3 is not available for this comparator image"
-  fi
+  case "${h3_mode}" in
+    required)
+      if h3_probe_succeeds "${host}"; then
+        run_load "${comparator}-h3" h3 "${host}" "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+      else
+        fail_with_diagnostics "mandatory HTTP/3 probe failed for ${comparator}: functional QUIC probe did not complete"
+      fi
+      ;;
+    optional)
+      if h3_probe_succeeds "${host}"; then
+        run_load "${comparator}-h3" h3 "${host}" "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+      else
+        record_skip "${comparator}-h3" load h3 "optional HTTP/3 support was detected, but a functional QUIC probe did not complete"
+      fi
+      ;;
+    disabled)
+      record_skip "${comparator}-h3" load h3 "HTTP/3 is not available for this comparator image"
+      ;;
+    *)
+      fail_with_diagnostics "invalid HTTP/3 performance mode for ${comparator}: ${h3_mode}"
+      ;;
+  esac
 }
 
 run_oxibelt_specific_benchmarks() {
@@ -577,7 +593,7 @@ run_oxibelt_specific_benchmarks() {
 }
 
 run_oxibelt_soak_and_stress() {
-  start_oxibelt baseline oxibelt
+  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
   run_load "oxibelt-soak-h1" h1 oxibelt "/perf/soak?body=ok" "${soak_seconds}" "${concurrency}"
   run_stress "oxibelt-slowloris" slowloris 32 5 1024
   run_stress "oxibelt-large-header" large-header 8 1 65536
@@ -591,7 +607,7 @@ run_manual_soak_presets() {
   local fd_limit
   fd_limit="$(ulimit -n || echo 1024)"
   IFS=',' read -r -a preset_values <<<"${presets}"
-  start_oxibelt baseline oxibelt
+  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
   local preset
   for preset in "${preset_values[@]}"; do
     if ! [[ "${preset}" =~ ^[0-9]+$ ]]; then
@@ -670,8 +686,8 @@ docker run -d \
 sleep 1
 
 if has_comparator oxibelt; then
-  start_oxibelt baseline oxibelt
-  run_common_loads oxibelt oxibelt 1
+  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+  run_common_loads oxibelt oxibelt required
   assert_oxibelt_tcp_baseline
   run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
   if [[ "${profile}" == "smoke" ]]; then
@@ -681,12 +697,16 @@ fi
 
 if has_comparator nginx; then
   start_nginx
-  run_common_loads nginx nginx "${nginx_h3_supported}"
+  nginx_h3_mode=disabled
+  if [[ "${nginx_h3_supported}" == "1" ]]; then
+    nginx_h3_mode=optional
+  fi
+  run_common_loads nginx nginx "${nginx_h3_mode}"
 fi
 
 if has_comparator caddy; then
   start_caddy
-  run_common_loads caddy caddy 1
+  run_common_loads caddy caddy required
 fi
 
 if has_comparator oxibelt && [[ "${profile}" == "benchmark" || "${profile}" == "soak" ]]; then

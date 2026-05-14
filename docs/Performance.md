@@ -12,7 +12,7 @@ tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,ngi
 
 Profiles:
 
-- `smoke`: short HTTP/1.1 keep-alive, HTTP/2, HTTP/3 where available, TLS handshake sanity, and a short OxiBelt soak.
+- `smoke`: short HTTP/1.1 keep-alive, HTTP/2, mandatory OxiBelt/Caddy HTTP/3, optional nginx HTTP/3 where available, TLS handshake sanity, and a short OxiBelt soak.
 - `benchmark`: longer comparator runs plus OxiBelt WAF, CRS, cache, and stress scenarios.
 - `soak`: long OxiBelt-focused concurrency presets and stress scenarios. This is intended for manual or scheduled runs, not every pull request.
 
@@ -31,6 +31,8 @@ OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS=35
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
 
+`OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO` is reserved for test fixtures that intentionally replace the baseline OxiBelt config. Normal local and CI performance runs should leave it unset.
+
 In GitHub Actions, `workflow_dispatch` also accepts `performance_iterations`, which defaults to `5`. Reduce it for long manual `benchmark` or `soak` runs when the default repeated sampling would exceed the job budget.
 
 ## Artifacts
@@ -47,9 +49,9 @@ CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards. Ea
 
 ## Interpreting Results
 
-CI thresholds are sanity gates, not competitive claims. The job fails when the probe cannot complete requests, sees request errors in load/handshake scenarios, produces no traffic, or crosses the configured p99 latency ceiling. It also applies a narrower OxiBelt H1/H2 baseline latency-floor gate after the baseline HTTP/1.1, HTTP/2, and HTTP/3 rows are collected; override `OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS` and `OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS` when intentionally running on slower or noisier hosts. Noisy shared runners can move RPS and tail latency substantially, so compare trends across repeated runs and shards and inspect `docker-stats.jsonl` before treating a single result as a regression.
+CI thresholds are sanity gates, not competitive claims. The job fails when the probe cannot complete requests, sees request errors in load/handshake scenarios, produces no traffic, or crosses the configured p99 latency ceiling. OxiBelt and Caddy HTTP/3 are mandatory gates: if their functional QUIC readiness probe fails, the job fails instead of recording a skipped row. It also applies a narrower OxiBelt H1/H2 baseline latency-floor gate after the baseline HTTP/1.1, HTTP/2, and HTTP/3 rows are collected; override `OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS` and `OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS` when intentionally running on slower or noisier hosts. Noisy shared runners can move RPS and tail latency substantially, so compare trends across repeated runs and shards and inspect `docker-stats.jsonl` before treating a single result as a regression.
 
-nginx and Caddy are measured as common reverse-proxy baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, and stress scenarios is measured separately. nginx HTTP/3 is included only when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped. Caddy is configured with its documented `h1 h2 h3` server protocol support.
+nginx and Caddy are measured as common reverse-proxy baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, and stress scenarios is measured separately. nginx HTTP/3 is included only when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped. If nginx reports HTTP/3 support but the functional QUIC probe cannot complete, that comparator row is also skipped because nginx HTTP/3 availability is image-dependent. Caddy is configured with its documented `h1 h2 h3` server protocol support and is treated as a mandatory HTTP/3 comparator.
 
 The performance fixtures raise generic connection and per-connection request caps so benchmark and soak profiles measure proxy throughput instead of exercising OxiBelt's or nginx's default limit-enforcement safeguards.
 

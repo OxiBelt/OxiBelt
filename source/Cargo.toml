@@ -85,3 +85,7 @@ path = "../tests/rust/kernel_extension_security.rs"
 [[test]]
 name = "ci_workflow_integrity"
 path = "../tests/rust/ci_workflow_integrity.rs"
+
+[[test]]
+name = "performance_gate_integrity"
+path = "../tests/rust/performance_gate_integrity.rs"
