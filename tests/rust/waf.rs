@@ -9,9 +9,9 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
-    HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput, WafResponseInput,
-    WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata,
-    WafTransportMetadataInput, WafTransportNetwork, WafWebSocketStreamMetadata,
+    BodyNeed, HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput,
+    WafResponseInput, WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit,
+    WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, WafWebSocketStreamMetadata,
     WafWebTransportStreamKind, WafWebTransportStreamMetadata, compile_access_log_fields,
     crs_compatibility_matrix,
 };
@@ -742,6 +742,272 @@ body = "blocked response body"
             .terminal
             .as_ref()
             .map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+}
+
+#[test]
+fn request_body_size_only_rules_are_planned_without_prefix_capture() {
+    let engine = compile_waf_fragment(
+        "waf-request-body-size-only-plan",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.functions]]
+name = "large_body"
+params = ["body"]
+expression = "body.Size > 8"
+
+[[waf.rules]]
+name = "global-size-only"
+phase = "request"
+priority = 10
+when = "large_body(Request.Body)"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+
+[[routes.waf.functions]]
+name = "route_large_body"
+params = ["body"]
+expression = "body.Size > 16"
+
+[[routes.waf.rules]]
+name = "route-size-only"
+phase = "request"
+priority = 20
+when = "route_large_body(Request.Body)"
+
+[[routes.waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+    );
+
+    assert_eq!(engine.request_body_need("app-root"), BodyNeed::SizeOnly);
+    assert!(!engine.requires_request_body_inspection("app-root"));
+}
+
+#[test]
+fn request_body_content_rules_are_planned_with_prefix_capture() {
+    for (index, expression) in [
+        "Request.Body.Text.contains('secret')",
+        "Request.Body.Bytes.size() > 0",
+        "Request.Body.contains('secret')",
+        "Request.Body.matches('sec.*')",
+        "Request.Body.scan('body-patterns').Matched",
+        "Request.Body.isFormat('png')",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let engine = compile_waf_fragment(
+            &format!("waf-request-body-prefix-plan-{index}"),
+            &format!(
+                r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.pattern_sets]]
+name = "body-patterns"
+kind = "contains"
+patterns = ["secret"]
+
+[[waf.rules]]
+name = "prefix-rule"
+phase = "request"
+priority = 10
+when = "{expression}"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+            ),
+        );
+
+        assert_eq!(
+            engine.request_body_need("app-root"),
+            BodyNeed::PrefixBytes,
+            "{expression}"
+        );
+        assert!(engine.requires_request_body_inspection("app-root"));
+    }
+}
+
+#[test]
+fn response_body_size_only_rules_are_planned_without_prefix_capture() {
+    let engine = compile_waf_fragment(
+        "waf-response-body-size-only-plan",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.functions]]
+name = "large_response"
+params = ["body"]
+expression = "body.Size > 8"
+
+[[waf.rules]]
+name = "response-size-only"
+phase = "response"
+priority = 10
+when = "large_response(Response.Body)"
+
+[[waf.rules.actions]]
+type = "continue_response"
+"#,
+    );
+
+    assert_eq!(engine.response_body_need("app-root"), BodyNeed::SizeOnly);
+    assert!(!engine.requires_response_body_inspection("app-root"));
+}
+
+#[test]
+fn response_body_content_rules_are_planned_with_prefix_capture() {
+    for (index, expression) in [
+        "Response.Body.Text.contains('secret')",
+        "Response.Body.Bytes.size() > 0",
+        "Response.Body.contains('secret')",
+        "Response.Body.matches('sec.*')",
+        "Response.Body.scan('body-patterns').Matched",
+        "Response.Body.isFormat('png')",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let engine = compile_waf_fragment(
+            &format!("waf-response-body-prefix-plan-{index}"),
+            &format!(
+                r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.pattern_sets]]
+name = "body-patterns"
+kind = "contains"
+patterns = ["secret"]
+
+[[waf.rules]]
+name = "prefix-rule"
+phase = "response"
+priority = 10
+when = "{expression}"
+
+[[waf.rules.actions]]
+type = "continue_response"
+"#
+            ),
+        );
+
+        assert_eq!(
+            engine.response_body_need("app-root"),
+            BodyNeed::PrefixBytes,
+            "{expression}"
+        );
+        assert!(engine.requires_response_body_inspection("app-root"));
+    }
+}
+
+#[test]
+fn empty_captured_request_body_text_evaluates_as_empty_string() {
+    let engine = compile_waf_fragment(
+        "waf-empty-request-body-text",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "empty-body"
+phase = "request"
+priority = 10
+when = "Request.Body.Text == ''"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+"#,
+    );
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+
+    let decision = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+        b"",
+        false,
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::IM_A_TEAPOT)
+    );
+}
+
+#[test]
+fn empty_captured_response_body_text_evaluates_as_empty_string() {
+    let engine = compile_waf_fragment(
+        "waf-empty-response-body-text",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "empty-body"
+phase = "response"
+priority = 10
+when = "Response.Body.Text == ''"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 451
+"#,
+    );
+    let method = Method::GET;
+    let uri: Uri = "/".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+
+    let decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(
+            &method,
+            &uri,
+            &headers,
+            &tags,
+            "203.0.113.10:49152".parse().unwrap(),
+        ),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &headers,
+        body: Some(WafBodyInput {
+            bytes: b"",
+            is_truncated: false,
+        }),
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
         Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
     );
 }
@@ -5160,6 +5426,19 @@ fn only_rule_hit(engine: &WafEngine) -> oxibelt::waf::WafRuleHitSnapshot {
     let snapshots = engine.rule_hit_snapshots();
     assert_eq!(snapshots.len(), 1);
     snapshots.into_iter().next().expect("rule hit should exist")
+}
+
+fn compile_waf_fragment(test_name: &str, fragment: &str) -> WafEngine {
+    let temp_dir = common::TempDir::new(test_name);
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), test_name);
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        fragment
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    WafEngine::new(&config).expect("WAF should compile")
 }
 
 fn request_input<'a>(

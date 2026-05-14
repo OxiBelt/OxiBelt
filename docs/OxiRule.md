@@ -169,6 +169,8 @@ Stream rules run after a WebSocket upgrade or WebTransport CONNECT session is es
 
 Rules that read request, response, or stream payload content trigger bounded prefix inspection before forwarding that side of the transaction. OxiBelt scans up to `waf.limits.max_body_inspection_bytes`, replays the captured prefix, and forwards data beyond the inspection window unchanged with `Body.IsTruncated = true` or `Stream.Payload.IsTruncated = true`, except that oversized WebSocket frames on stream-WAF routes are rejected before forwarding to keep proxy-owned frame buffers bounded.
 
+Rules that read only `Request.Body.Size` or `Response.Body.Size` do not trigger prefix body capture. Size-only rules use the parsed `Content-Length` when it is present and valid, or `0` otherwise. Rules that read `Body.Text`, `Body.Bytes`, `Body.IsTruncated`, or body helper methods such as `contains`, `matches`, `scan`, and `isFormat` still trigger bounded prefix inspection. When prefix inspection is required but the HTTP metadata proves the body is empty, OxiBelt evaluates body text and bytes against an empty captured body without polling the stream.
+
 Rules run by ascending `priority`, with rule name as a tie-breaker. Tags created by request rules are visible to later request rules and to response rules for the same transaction.
 
 `Response` is not available in request-phase or stream-phase expressions. `Request.Body` is also unavailable in stream-phase expressions; use `Stream.Payload` for upgraded-session payload inspection.

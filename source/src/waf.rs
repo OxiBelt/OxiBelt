@@ -32,6 +32,7 @@ mod functions;
 mod metadata;
 pub(crate) mod normalization;
 mod person_proof;
+mod plan;
 
 use binary_format::bytes_match_format;
 pub use crs::{CrsCompatibilityMatrix, compatibility_matrix as crs_compatibility_matrix};
@@ -40,9 +41,8 @@ use defaults::*;
 use expression::Parser;
 pub use functions::WafFunctionConfig;
 use functions::{
-  CompiledFunction, FunctionCallRef, FunctionKey, FunctionMap, compile_global_functions,
-  compile_route_functions, function_body_route_functions, resolve_function,
-  validate_function_arity,
+  FunctionCallRef, FunctionKey, FunctionMap, compile_global_functions, compile_route_functions,
+  function_body_route_functions, resolve_function, validate_function_arity,
 };
 pub use metadata::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 use normalization::{
@@ -52,6 +52,8 @@ use normalization::{
 use person_proof::{
   PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
 };
+pub use plan::BodyNeed;
+use plan::{WafRoutePlan, phase_plan};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafConfig {
@@ -924,7 +926,9 @@ fn validate_access_log_field_configs_with_functions(
     expression
       .validate_for_phase_with_functions(WafPhase::Response, global_functions, route_functions)
       .with_context(|| format!("invalid {label} field {}", field.name))?;
-    if expression.requires_request_body_inspection_with_functions(global_functions, route_functions)
+    if expression
+      .request_body_need_with_functions(global_functions, route_functions)
+      .requires_prefix()
     {
       bail!(
         "{label} field {} cannot read request body bytes",
@@ -1037,6 +1041,8 @@ pub struct WafEngine {
   global_functions: Arc<FunctionMap>,
   global_rules: Vec<CompiledRule>,
   route_rules: HashMap<String, Vec<CompiledRule>>,
+  default_route_plan: WafRoutePlan,
+  route_plans: HashMap<String, WafRoutePlan>,
   crs: CrsEngine,
   rate_limits: Arc<LimitState>,
   person_proof: PersonProofEngine,
@@ -1117,6 +1123,8 @@ impl WafEngine {
     } else {
       None
     };
+    let (default_route_plan, route_plans) =
+      build_route_plans(config, &global_rules, &route_rules, &crs);
 
     Ok(Self {
       enabled: config.waf.enabled,
@@ -1128,6 +1136,8 @@ impl WafEngine {
       global_functions,
       global_rules,
       route_rules,
+      default_route_plan,
+      route_plans,
       crs,
       rate_limits,
       person_proof,
@@ -1141,6 +1151,17 @@ impl WafEngine {
 
   pub fn enabled(&self) -> bool {
     self.enabled
+  }
+
+  pub(crate) fn route_plan(&self, route_name: &str) -> &WafRoutePlan {
+    if self.enabled {
+      self
+        .route_plans
+        .get(route_name)
+        .unwrap_or(&self.default_route_plan)
+    } else {
+      &self.default_route_plan
+    }
   }
 
   pub fn rule_hit_snapshots(&self) -> Vec<WafRuleHitSnapshot> {
@@ -1165,43 +1186,42 @@ impl WafEngine {
   }
 
   pub fn has_response_rules(&self, route_name: &str) -> bool {
-    self.enabled
-      && (self.crs.enabled()
-        || self
-          .global_rules
-          .iter()
-          .any(|rule| rule.phase == WafPhase::Response)
-        || self
-          .route_rules
-          .get(route_name)
-          .map(|rules| rules.iter().any(|rule| rule.phase == WafPhase::Response))
-          .unwrap_or(false))
+    self.route_plan(route_name).response().enabled()
+  }
+
+  pub fn has_request_rules(&self, route_name: &str) -> bool {
+    self.route_plan(route_name).request().enabled()
   }
 
   pub fn requires_request_body_inspection(&self, route_name: &str) -> bool {
-    self.enabled
-      && (self.crs.requires_request_body_inspection()
-        || self
-          .rules_for(route_name, WafPhase::Request)
-          .iter()
-          .any(|rule| rule.requires_request_body_inspection))
+    self
+      .route_plan(route_name)
+      .request_body_need()
+      .requires_prefix()
   }
 
   pub fn requires_response_body_inspection(&self, route_name: &str) -> bool {
-    self.enabled
-      && (self.crs.requires_response_body_inspection()
-        || self
-          .rules_for(route_name, WafPhase::Response)
-          .iter()
-          .any(|rule| rule.requires_response_body_inspection()))
+    self
+      .route_plan(route_name)
+      .response()
+      .body_need()
+      .requires_prefix()
+  }
+
+  pub fn request_body_need(&self, route_name: &str) -> BodyNeed {
+    self.route_plan(route_name).request_body_need()
+  }
+
+  pub fn response_body_need(&self, route_name: &str) -> BodyNeed {
+    self.route_plan(route_name).response().body_need()
   }
 
   pub fn requires_stream_inspection(&self, route_name: &str) -> bool {
-    self.enabled && !self.rules_for(route_name, WafPhase::Stream).is_empty()
+    self.route_plan(route_name).stream().enabled()
   }
 
   pub fn evaluate_request(&self, input: WafRequestInput<'_>) -> RequestWafDecision {
-    if !self.enabled {
+    if !self.enabled || !self.route_plan(input.route_name).request().enabled() {
       return RequestWafDecision::default();
     }
 
@@ -1239,7 +1259,12 @@ impl WafEngine {
   }
 
   pub fn evaluate_response(&self, input: WafResponseInput<'_>) -> ResponseWafDecision {
-    if !self.enabled {
+    if !self.enabled
+      || !self
+        .route_plan(input.request.route_name)
+        .response()
+        .enabled()
+    {
       return ResponseWafDecision::default();
     }
 
@@ -1265,7 +1290,7 @@ impl WafEngine {
   }
 
   pub fn evaluate_stream(&self, input: WafStreamInput<'_>) -> WafStreamDecision {
-    if !self.enabled {
+    if !self.enabled || !self.route_plan(input.request.route_name).stream().enabled() {
       return WafStreamDecision::default();
     }
 
@@ -1337,7 +1362,7 @@ impl WafEngine {
     }
 
     let mut tx = TransactionBudget::new(&self.limits);
-    for rule in self.rules_for(input.route_name, WafPhase::Request) {
+    for rule in self.route_plan(input.route_name).request().rules() {
       tx.check_total()?;
       let rule_person_proof = self.person_proof_status_for_rule(&person_proof, rule);
       let matched = {
@@ -1422,7 +1447,7 @@ impl WafEngine {
     let person_proof = self.person_proof.evaluate_request(input.request);
     let mut tx = TransactionBudget::new(&self.limits);
 
-    for rule in self.rules_for(input.request.route_name, WafPhase::Response) {
+    for rule in self.route_plan(input.request.route_name).response().rules() {
       tx.check_total()?;
       let ctx = EvalContext {
         phase: WafPhase::Response,
@@ -1476,7 +1501,7 @@ impl WafEngine {
     let person_proof = self.person_proof.evaluate_request(input.request);
     let mut tx = TransactionBudget::new(&self.limits);
 
-    for rule in self.rules_for(input.request.route_name, WafPhase::Stream) {
+    for rule in self.route_plan(input.request.route_name).stream().rules() {
       tx.check_total()?;
       let ctx = EvalContext {
         phase: WafPhase::Stream,
@@ -1549,28 +1574,6 @@ impl WafEngine {
     value
       .as_bool()
       .with_context(|| format!("WAF rule {} expression did not evaluate to Bool", rule.name))
-  }
-
-  fn rules_for(&self, route_name: &str, phase: WafPhase) -> Vec<&CompiledRule> {
-    let mut rules = self
-      .global_rules
-      .iter()
-      .chain(
-        self
-          .route_rules
-          .get(route_name)
-          .into_iter()
-          .flat_map(|rules| rules.iter()),
-      )
-      .filter(|rule| rule.phase == phase)
-      .collect::<Vec<_>>();
-    rules.sort_by(|left, right| {
-      left
-        .priority
-        .cmp(&right.priority)
-        .then_with(|| left.name.cmp(&right.name))
-    });
-    rules
   }
 
   fn person_proof_status_for_rule(
@@ -1650,6 +1653,10 @@ fn compile_rules(
         mode,
       };
       let hit_counter = previous_counters.get(&hit_key).cloned().unwrap_or_default();
+      let request_body_need = expression
+        .request_body_need_with_functions(global_functions.as_ref(), route_functions.as_deref());
+      let response_body_need = expression
+        .response_body_need_with_functions(global_functions.as_ref(), route_functions.as_deref());
       Ok(CompiledRule {
         name: rule.name.clone(),
         id: rule.id.clone().filter(|id| !id.is_empty()),
@@ -1662,11 +1669,8 @@ fn compile_rules(
         mode,
         hit_key,
         hit_counter,
-        requires_request_body_inspection: rule.phase == WafPhase::Request
-          && expression.requires_request_body_inspection_with_functions(
-            global_functions.as_ref(),
-            route_functions.as_deref(),
-          ),
+        request_body_need,
+        response_body_need,
         expression,
         global_functions: global_functions.clone(),
         route_functions: route_functions.clone(),
@@ -1675,6 +1679,63 @@ fn compile_rules(
       })
     })
     .collect()
+}
+
+fn build_route_plans(
+  config: &Config,
+  global_rules: &[CompiledRule],
+  route_rules: &HashMap<String, Vec<CompiledRule>>,
+  crs: &CrsEngine,
+) -> (WafRoutePlan, HashMap<String, WafRoutePlan>) {
+  let reject_duplicate_metadata =
+    config.waf.duplicate_metadata_policy == WafDuplicateMetadataPolicy::RejectRequest;
+  let build = |rules: &[CompiledRule]| {
+    if !config.waf.enabled {
+      return WafRoutePlan::disabled();
+    }
+    WafRoutePlan::new(
+      phase_plan(
+        global_rules,
+        rules,
+        WafPhase::Request,
+        crs.has_request_rules() || reject_duplicate_metadata,
+        if crs.requires_request_body_inspection() {
+          BodyNeed::PrefixBytes
+        } else {
+          BodyNeed::None
+        },
+      ),
+      phase_plan(
+        global_rules,
+        rules,
+        WafPhase::Response,
+        crs.has_response_rules(),
+        if crs.requires_response_body_inspection() {
+          BodyNeed::PrefixBytes
+        } else {
+          BodyNeed::None
+        },
+      ),
+      phase_plan(global_rules, rules, WafPhase::Stream, false, BodyNeed::None),
+    )
+  };
+  let default_route_plan = build(&[]);
+  let route_plans = config
+    .routes
+    .iter()
+    .map(|route| {
+      (
+        route.name.clone(),
+        build(
+          route_rules
+            .get(&route.name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        ),
+      )
+    })
+    .collect();
+  (default_route_plan, route_plans)
 }
 
 #[derive(Clone)]
@@ -1882,7 +1943,8 @@ struct CompiledRule {
   mode: WafMode,
   hit_key: WafRuleHitKey,
   hit_counter: Arc<AtomicU64>,
-  requires_request_body_inspection: bool,
+  request_body_need: BodyNeed,
+  response_body_need: BodyNeed,
   expression: Expr,
   global_functions: Arc<FunctionMap>,
   route_functions: Option<Arc<FunctionMap>>,
@@ -1911,16 +1973,6 @@ impl CompiledRule {
       latest_inbound_blocking_score: None,
       latest_outbound_blocking_score: None,
     }
-  }
-
-  fn requires_response_body_inspection(&self) -> bool {
-    self.phase == WafPhase::Response
-      && self
-        .expression
-        .requires_response_body_inspection_with_functions(
-          self.global_functions.as_ref(),
-          self.route_functions.as_deref(),
-        )
   }
 }
 
@@ -3084,24 +3136,6 @@ enum BinaryOp {
   Add,
 }
 
-#[derive(Default)]
-struct BodyBindings(Vec<String>, Vec<String>);
-
-impl BodyBindings {
-  fn bind(function: &CompiledFunction, args: &[Expr], caller: &Self) -> Self {
-    let mut bindings = Self::default();
-    for (param, arg) in function.params.iter().zip(args) {
-      if arg.is_request_body_expr_with_bindings(caller) {
-        bindings.0.push(param.clone());
-      }
-      if arg.is_response_body_expr_with_bindings(caller) {
-        bindings.1.push(param.clone());
-      }
-    }
-    bindings
-  }
-}
-
 impl Expr {
   fn validate_for_phase(&self, phase: WafPhase) -> anyhow::Result<()> {
     if phase == WafPhase::Request && self.references_ident("Response") {
@@ -3194,98 +3228,6 @@ impl Expr {
     }
   }
 
-  fn requires_request_body_inspection_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    match self {
-      Self::Member(receiver, field) => {
-        receiver.requires_request_body_inspection_with_bindings(bindings)
-          || (matches!(field.as_str(), "Bytes" | "Text" | "IsTruncated")
-            && receiver.is_request_body_expr_with_bindings(bindings))
-      }
-      Self::Call(receiver, method, args) => {
-        receiver.requires_request_body_inspection_with_bindings(bindings)
-          || args
-            .iter()
-            .any(|arg| arg.requires_request_body_inspection_with_bindings(bindings))
-          || (receiver.is_request_body_expr_with_bindings(bindings) && body_content_method(method))
-          || (receiver.is_request_body_bytes_expr_with_bindings(bindings)
-            && bytes_content_method(method))
-      }
-      Self::FunctionCall(_, args) => args
-        .iter()
-        .any(|arg| arg.requires_request_body_inspection_with_bindings(bindings)),
-      Self::UnaryNot(expr) => expr.requires_request_body_inspection_with_bindings(bindings),
-      Self::Binary(left, _, right) => {
-        left.requires_request_body_inspection_with_bindings(bindings)
-          || right.requires_request_body_inspection_with_bindings(bindings)
-      }
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
-    }
-  }
-
-  fn requires_response_body_inspection_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    match self {
-      Self::Member(receiver, field) => {
-        receiver.requires_response_body_inspection_with_bindings(bindings)
-          || (matches!(field.as_str(), "Bytes" | "Text" | "IsTruncated")
-            && receiver.is_response_body_expr_with_bindings(bindings))
-      }
-      Self::Call(receiver, method, args) => {
-        receiver.requires_response_body_inspection_with_bindings(bindings)
-          || args
-            .iter()
-            .any(|arg| arg.requires_response_body_inspection_with_bindings(bindings))
-          || (receiver.is_response_body_expr_with_bindings(bindings) && body_content_method(method))
-          || (receiver.is_response_body_bytes_expr_with_bindings(bindings)
-            && bytes_content_method(method))
-      }
-      Self::FunctionCall(_, args) => args
-        .iter()
-        .any(|arg| arg.requires_response_body_inspection_with_bindings(bindings)),
-      Self::UnaryNot(expr) => expr.requires_response_body_inspection_with_bindings(bindings),
-      Self::Binary(left, _, right) => {
-        left.requires_response_body_inspection_with_bindings(bindings)
-          || right.requires_response_body_inspection_with_bindings(bindings)
-      }
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
-    }
-  }
-
-  fn is_request_body_expr(&self) -> bool {
-    match self {
-      Self::Member(receiver, field) if field == "Body" => {
-        receiver.is_request_expr() || receiver.is_request_http_expr()
-      }
-      _ => false,
-    }
-  }
-
-  fn is_request_body_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    self.is_request_body_expr()
-      || matches!(self, Self::Ident(name) if bindings.0.iter().any(|param| param == name))
-  }
-
-  fn is_request_body_bytes_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_request_body_expr_with_bindings(bindings))
-  }
-
-  fn is_response_body_expr(&self) -> bool {
-    match self {
-      Self::Member(receiver, field) if field == "Body" => {
-        receiver.is_response_expr() || receiver.is_response_http_expr()
-      }
-      _ => false,
-    }
-  }
-
-  fn is_response_body_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    self.is_response_body_expr()
-      || matches!(self, Self::Ident(name) if bindings.1.iter().any(|param| param == name))
-  }
-
-  fn is_response_body_bytes_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_response_body_expr_with_bindings(bindings))
-  }
-
   fn is_request_expr(&self) -> bool {
     matches!(self, Self::Ident(name) if name == "Request")
   }
@@ -3300,98 +3242,6 @@ impl Expr {
 
   fn is_response_http_expr(&self) -> bool {
     matches!(self, Self::Member(receiver, field) if field == "Http" && receiver.is_response_expr())
-  }
-
-  fn requires_request_body_inspection_with_functions(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-  ) -> bool {
-    self.requires_request_body_inspection_with_functions_inner(
-      global_functions,
-      route_functions,
-      &mut HashSet::new(),
-      &BodyBindings::default(),
-    )
-  }
-
-  fn requires_request_body_inspection_with_functions_inner(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    active: &mut HashSet<FunctionKey>,
-    bindings: &BodyBindings,
-  ) -> bool {
-    if self.requires_request_body_inspection_with_bindings(bindings) {
-      return true;
-    }
-    self.function_calls().into_iter().any(|call| {
-      let Some(function) = resolve_function(call.name, global_functions, route_functions) else {
-        return false;
-      };
-      let key = FunctionKey::from(function);
-      if !active.insert(key.clone()) {
-        return false;
-      }
-      let body_route_functions = function_body_route_functions(function, route_functions);
-      let body_bindings = BodyBindings::bind(function, call.args, bindings);
-      let result = function
-        .expression
-        .requires_request_body_inspection_with_functions_inner(
-          global_functions,
-          body_route_functions,
-          active,
-          &body_bindings,
-        );
-      active.remove(&key);
-      result
-    })
-  }
-
-  fn requires_response_body_inspection_with_functions(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-  ) -> bool {
-    self.requires_response_body_inspection_with_functions_inner(
-      global_functions,
-      route_functions,
-      &mut HashSet::new(),
-      &BodyBindings::default(),
-    )
-  }
-
-  fn requires_response_body_inspection_with_functions_inner(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    active: &mut HashSet<FunctionKey>,
-    bindings: &BodyBindings,
-  ) -> bool {
-    if self.requires_response_body_inspection_with_bindings(bindings) {
-      return true;
-    }
-    self.function_calls().into_iter().any(|call| {
-      let Some(function) = resolve_function(call.name, global_functions, route_functions) else {
-        return false;
-      };
-      let key = FunctionKey::from(function);
-      if !active.insert(key.clone()) {
-        return false;
-      }
-      let body_route_functions = function_body_route_functions(function, route_functions);
-      let body_bindings = BodyBindings::bind(function, call.args, bindings);
-      let result = function
-        .expression
-        .requires_response_body_inspection_with_functions_inner(
-          global_functions,
-          body_route_functions,
-          active,
-          &body_bindings,
-        );
-      active.remove(&key);
-      result
-    })
   }
 
   fn function_calls(&self) -> Vec<FunctionCallRef<'_>> {

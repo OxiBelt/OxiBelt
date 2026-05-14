@@ -99,8 +99,12 @@ impl CrsEngine {
     })
   }
 
-  pub(crate) fn enabled(&self) -> bool {
-    self.enabled
+  pub(crate) fn has_request_rules(&self) -> bool {
+    self.has_phase_rule(1) || self.has_phase_rule(2)
+  }
+
+  pub(crate) fn has_response_rules(&self) -> bool {
+    self.has_phase_rule(3) || self.has_phase_rule(4)
   }
 
   pub(crate) fn active_hit_counters(&self) -> HashMap<CrsHitKey, Arc<AtomicU64>> {
@@ -131,6 +135,14 @@ impl CrsEngine {
               .iter()
               .any(CrsVariable::requires_response_body)
         }
+        CrsEntry::Marker(_) => false,
+      })
+  }
+
+  fn has_phase_rule(&self, phase: u8) -> bool {
+    self.enabled
+      && self.rules.iter().any(|entry| match entry {
+        CrsEntry::Rule(rule) => rule.phase == phase,
         CrsEntry::Marker(_) => false,
       })
   }
