@@ -115,6 +115,21 @@ struct WebTransportMultiplexArgs {
     expect_statuses: Vec<u16>,
 }
 
+struct WebTransportReloadGatedArgs {
+    host: String,
+    port: u16,
+    server_name: String,
+    authority: String,
+    path: String,
+    http_path: String,
+    headers: HeaderMap,
+    ca_cert: String,
+    first_ready_path: String,
+    resume_path: String,
+    expect_initial_status: u16,
+    expect_drained_status: u16,
+}
+
 impl DownstreamArgs {
     fn body_len(&self) -> usize {
         if self.zero_length_body_end_delay_ms.is_some() {
@@ -144,6 +159,9 @@ async fn main() -> anyhow::Result<()> {
         "webtransport-multiplex" => {
             run_webtransport_multiplex_client(parse_webtransport_multiplex_args(args)?).await
         }
+        "webtransport-reload-gated" => {
+            run_webtransport_reload_gated_client(parse_webtransport_reload_gated_args(args)?).await
+        }
         _ => {
             usage();
             bail!("unknown command: {command}");
@@ -153,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]"
+    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]"
   );
 }
 
@@ -319,6 +337,75 @@ fn parse_webtransport_multiplex_args(
         ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
         sessions,
         expect_statuses,
+    })
+}
+
+fn parse_webtransport_reload_gated_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<WebTransportReloadGatedArgs> {
+    let mut host = None;
+    let mut port = None;
+    let mut server_name = None;
+    let mut authority = None;
+    let mut path = None;
+    let mut http_path = None;
+    let mut headers = HeaderMap::new();
+    let mut ca_cert = None;
+    let mut first_ready_path = None;
+    let mut resume_path = None;
+    let mut expect_initial_status = None;
+    let mut expect_drained_status = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--host" => host = Some(value),
+            "--port" => port = Some(value.parse().context("invalid --port value")?),
+            "--server-name" => server_name = Some(value),
+            "--authority" => authority = Some(value),
+            "--path" => path = Some(validate_origin_form_path(&value)?),
+            "--http-path" => http_path = Some(validate_origin_form_path(&value)?),
+            "--header" => insert_header(&mut headers, &value)?,
+            "--ca-cert" => ca_cert = Some(value),
+            "--first-ready-path" => first_ready_path = Some(value),
+            "--resume-path" => resume_path = Some(value),
+            "--expect-initial-status" => {
+                expect_initial_status = Some(
+                    value
+                        .parse()
+                        .context("invalid --expect-initial-status value")?,
+                );
+            }
+            "--expect-drained-status" => {
+                expect_drained_status = Some(
+                    value
+                        .parse()
+                        .context("invalid --expect-drained-status value")?,
+                );
+            }
+            _ => bail!("unknown webtransport-reload-gated flag: {flag}"),
+        }
+    }
+
+    let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+    Ok(WebTransportReloadGatedArgs {
+        host: host.ok_or_else(|| anyhow!("--host is required"))?,
+        port: port.ok_or_else(|| anyhow!("--port is required"))?,
+        authority: authority.unwrap_or_else(|| server_name.clone()),
+        server_name,
+        path: path.ok_or_else(|| anyhow!("--path is required"))?,
+        http_path: http_path.ok_or_else(|| anyhow!("--http-path is required"))?,
+        headers,
+        ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+        first_ready_path: first_ready_path
+            .ok_or_else(|| anyhow!("--first-ready-path is required"))?,
+        resume_path: resume_path.ok_or_else(|| anyhow!("--resume-path is required"))?,
+        expect_initial_status: expect_initial_status
+            .ok_or_else(|| anyhow!("--expect-initial-status is required"))?,
+        expect_drained_status: expect_drained_status
+            .ok_or_else(|| anyhow!("--expect-drained-status is required"))?,
     })
 }
 
@@ -978,9 +1065,7 @@ async fn run_downstream_client(args: DownstreamArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_webtransport_multiplex_client(
-    args: WebTransportMultiplexArgs,
-) -> anyhow::Result<()> {
+async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> anyhow::Result<()> {
     let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3")?;
     let quic_crypto =
         QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
@@ -1051,6 +1136,135 @@ async fn run_webtransport_multiplex_client(
     Ok(())
 }
 
+async fn run_webtransport_reload_gated_client(
+    args: WebTransportReloadGatedArgs,
+) -> anyhow::Result<()> {
+    let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3")?;
+    let quic_crypto =
+        QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
+    let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
+    let remote_addr = resolve_remote_addr(&args.host, args.port).await?;
+    let endpoint = Endpoint::client(client_bind_addr(remote_addr))
+        .context("failed to create downstream QUIC endpoint")?;
+    let quinn_connection = endpoint
+        .connect_with(quic_config, remote_addr, &args.server_name)
+        .with_context(|| {
+            format!(
+                "failed to start downstream WebTransport connection to {}",
+                args.host
+            )
+        })?
+        .await
+        .context("failed to connect downstream WebTransport")?;
+    let close_connection = quinn_connection.clone();
+    let h3_connection = h3_quinn::Connection::new(quinn_connection);
+    let (mut driver, mut send_request) = h3::client::builder()
+        .enable_extended_connect(true)
+        .enable_datagram(true)
+        .build::<_, _, Bytes>(h3_connection)
+        .await
+        .context("failed to establish downstream HTTP/3 client")?;
+    let driver_task = tokio::spawn(async move {
+        let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let initial_request = webtransport_reload_connect_request(&args, 0)?;
+    let mut initial_stream = send_request
+        .send_request(initial_request)
+        .await
+        .context("failed to send initial WebTransport CONNECT")?;
+    let initial_response =
+        tokio::time::timeout(Duration::from_secs(10), initial_stream.recv_response())
+            .await
+            .context("timed out waiting for initial WebTransport CONNECT")?
+            .context("failed to receive initial WebTransport CONNECT response")?;
+    let initial_status = initial_response.status().as_u16();
+    if initial_status != args.expect_initial_status {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+              "initial_webtransport_status": initial_status,
+              "expected_initial_status": args.expect_initial_status,
+            })
+        );
+        bail!("initial WebTransport status did not match expected status");
+    }
+
+    fs::write(&args.first_ready_path, b"ready").with_context(|| {
+        format!(
+            "failed to write first-ready marker {}",
+            args.first_ready_path
+        )
+    })?;
+    wait_for_path(&args.resume_path, Duration::from_secs(30))
+        .await
+        .with_context(|| format!("timed out waiting for resume marker {}", args.resume_path))?;
+
+    let drained_webtransport_request = webtransport_reload_connect_request(&args, 1)?;
+    let mut drained_webtransport_stream = send_request
+        .send_request(drained_webtransport_request)
+        .await
+        .context("failed to send drained WebTransport CONNECT")?;
+    let drained_webtransport_response = tokio::time::timeout(
+        Duration::from_secs(10),
+        drained_webtransport_stream.recv_response(),
+    )
+    .await
+    .context("timed out waiting for drained WebTransport CONNECT")?
+    .context("failed to receive drained WebTransport CONNECT response")?;
+    let drained_webtransport_status = drained_webtransport_response.status().as_u16();
+    drain_h3_response_body(&mut drained_webtransport_stream)
+        .await
+        .context("failed to drain rejected WebTransport response body")?;
+
+    let http_request = h3_get_request(&args.authority, &args.http_path, &args.headers)?;
+    let mut http_stream = send_request
+        .send_request(http_request)
+        .await
+        .context("failed to send drained HTTP/3 request")?;
+    http_stream
+        .finish()
+        .await
+        .context("failed to finish drained HTTP/3 request")?;
+    let http_response = tokio::time::timeout(Duration::from_secs(10), http_stream.recv_response())
+        .await
+        .context("timed out waiting for drained HTTP/3 response")?
+        .context("failed to receive drained HTTP/3 response")?;
+    let drained_http_status = http_response.status().as_u16();
+    drain_h3_response_body(&mut http_stream)
+        .await
+        .context("failed to drain rejected HTTP/3 response body")?;
+
+    if drained_webtransport_status != args.expect_drained_status
+        || drained_http_status != args.expect_drained_status
+    {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+              "initial_webtransport_status": initial_status,
+              "drained_webtransport_status": drained_webtransport_status,
+              "drained_http_status": drained_http_status,
+              "expected_drained_status": args.expect_drained_status,
+            })
+        );
+        bail!("drained WebTransport connection accepted a stale-snapshot request");
+    }
+
+    close_connection.close(0u32.into(), b"probe complete");
+    drop(initial_stream);
+    let _ = driver_task.await;
+
+    println!(
+        "{}",
+        serde_json::json!({
+          "initial_webtransport_status": initial_status,
+          "drained_webtransport_status": drained_webtransport_status,
+          "drained_http_status": drained_http_status,
+        })
+    );
+    Ok(())
+}
+
 fn webtransport_connect_request(
     args: &WebTransportMultiplexArgs,
     index: usize,
@@ -1074,6 +1288,73 @@ fn webtransport_connect_request(
         .extensions_mut()
         .insert(h3::ext::Protocol::WEB_TRANSPORT);
     Ok(request)
+}
+
+fn webtransport_reload_connect_request(
+    args: &WebTransportReloadGatedArgs,
+    index: usize,
+) -> anyhow::Result<Request<()>> {
+    let separator = if args.path.contains('?') { '&' } else { '?' };
+    let uri: Uri = format!(
+        "https://{}{}{}probe_session={}",
+        args.authority, args.path, separator, index
+    )
+    .parse()
+    .context("failed to build WebTransport CONNECT URI")?;
+    let mut request = Request::builder()
+        .method(Method::CONNECT)
+        .uri(uri)
+        .version(Version::HTTP_3)
+        .header("sec-webtransport-http3-draft", "draft02")
+        .body(())
+        .context("failed to build WebTransport CONNECT request")?;
+    request.headers_mut().extend(args.headers.clone());
+    request
+        .extensions_mut()
+        .insert(h3::ext::Protocol::WEB_TRANSPORT);
+    Ok(request)
+}
+
+fn h3_get_request(authority: &str, path: &str, headers: &HeaderMap) -> anyhow::Result<Request<()>> {
+    let uri: Uri = format!("https://{authority}{path}")
+        .parse()
+        .context("failed to build HTTP/3 GET URI")?;
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .version(Version::HTTP_3)
+        .body(())
+        .context("failed to build HTTP/3 GET request")?;
+    request.headers_mut().extend(headers.clone());
+    Ok(request)
+}
+
+async fn drain_h3_response_body(
+    stream: &mut h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+) -> anyhow::Result<()> {
+    while let Some(mut chunk) = tokio::time::timeout(Duration::from_secs(10), stream.recv_data())
+        .await
+        .context("timed out reading HTTP/3 response body")?
+        .context("failed to read HTTP/3 response body")?
+    {
+        let len = chunk.remaining();
+        let _ = chunk.copy_to_bytes(len);
+    }
+    Ok(())
+}
+
+async fn wait_for_path(path: &str, timeout: Duration) -> anyhow::Result<()> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if Path::new(path).exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .context("timed out waiting for path")?;
+    Ok(())
 }
 
 async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {

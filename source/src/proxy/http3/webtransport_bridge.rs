@@ -241,6 +241,15 @@ async fn handle_downstream_request(
   drain: ConnectionDrain,
   events: mpsc::Sender<DispatcherEvent>,
 ) -> anyhow::Result<()> {
+  if drain.is_draining() {
+    respond_to_h3_request(
+      stream,
+      text_response(StatusCode::SERVICE_UNAVAILABLE, "draining"),
+    )
+    .await?;
+    return Ok(());
+  }
+
   let is_early_data = early_data.take(stream.id());
   if rejects_unsafe_early_data(&request, state.config.quic.zero_rtt, is_early_data) {
     respond_to_h3_request(stream, text_response(StatusCode::TOO_EARLY, "too early")).await?;

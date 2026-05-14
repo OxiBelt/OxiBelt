@@ -147,7 +147,7 @@ impl ConnectionDrain {
     }
   }
 
-  fn is_draining(&self) -> bool {
+  pub(crate) fn is_draining(&self) -> bool {
     *self.listener.borrow()
       || *self.lifecycle.borrow()
       || self
@@ -297,6 +297,44 @@ mod tests {
     assert_eq!(lifecycle.reason(), "shutdown");
   }
 
+  #[test]
+  fn connection_drain_reports_all_drain_sources() {
+    let lifecycle = LifecycleState::default();
+    let (listener_tx, listener_rx) = watch::channel(false);
+    let (data_plane_tx, data_plane_rx) = watch::channel(false);
+    let drain = ConnectionDrain::with_data_plane(
+      listener_rx,
+      lifecycle.subscribe(),
+      data_plane_rx,
+      Duration::from_millis(1),
+    );
+
+    assert!(!drain.is_draining());
+
+    listener_tx
+      .send(true)
+      .expect("listener drain signal should send");
+    assert!(drain.is_draining());
+    listener_tx
+      .send(false)
+      .expect("listener ready signal should send");
+    assert!(!drain.is_draining());
+
+    lifecycle.set_admin_draining();
+    assert!(drain.is_draining());
+    lifecycle.clear_admin_draining();
+    assert!(!drain.is_draining());
+
+    data_plane_tx
+      .send(true)
+      .expect("data-plane drain signal should send");
+    assert!(drain.is_draining());
+    data_plane_tx
+      .send(false)
+      .expect("data-plane ready signal should send");
+    assert!(!drain.is_draining());
+  }
+
   #[tokio::test]
   async fn connection_drain_waits_for_signal_then_delay() {
     let lifecycle = LifecycleState::default();
@@ -317,6 +355,34 @@ mod tests {
     let _ = listener_tx.send(true);
     task.await.expect("drain task should finish");
     assert!(started.elapsed() >= Duration::from_millis(25));
+  }
+
+  #[tokio::test]
+  async fn connection_drain_waits_for_data_plane_signal_then_delay() {
+    let lifecycle = LifecycleState::default();
+    let (listener_tx, listener_rx) = watch::channel(false);
+    let (data_plane_tx, data_plane_rx) = watch::channel(false);
+    let mut drain = ConnectionDrain::with_data_plane(
+      listener_rx,
+      lifecycle.subscribe(),
+      data_plane_rx,
+      Duration::from_millis(25),
+    );
+
+    let task = tokio::spawn(async move {
+      drain.close_delay_elapsed().await;
+    });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!task.is_finished());
+
+    let signaled = std::time::Instant::now();
+    data_plane_tx
+      .send(true)
+      .expect("data-plane drain signal should send");
+    task.await.expect("data-plane drain task should finish");
+    assert!(signaled.elapsed() >= Duration::from_millis(25));
+
+    drop(listener_tx);
   }
 
   #[tokio::test]

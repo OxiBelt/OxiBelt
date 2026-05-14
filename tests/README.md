@@ -17,7 +17,7 @@
 - `fixtures/oxibelt-docker-performance/`: OxiBelt, nginx, and Caddy configuration fixtures used by the performance runner.
 - `docker/mock_upstream/client.py`: test-only HTTPS client used by the integration script. It only connects to the Docker-network proxy endpoint and trusts the generated proxy CA instead of disabling certificate verification.
 - `docker/mock_upstream/server.py`: test-only echo upstream. When TLS is enabled, it requires TLS 1.2 or newer.
-- `docker/protocol_probe/`: test-only Rust probe that provides HTTP/2 TLS and cleartext h2c upstreams plus HTTP/2 or HTTP/3 downstream clients for protocol proxying matrix cases.
+- `docker/protocol_probe/`: test-only Rust probe that provides HTTP/2 TLS and cleartext h2c upstreams, HTTP/2 or HTTP/3 downstream clients, and WebTransport reload probes for protocol proxying and stale-snapshot drain matrix cases.
 - `docker/perf_probe/`: test-only Rust upstream and load generator for HTTP/1.1, HTTP/2, HTTP/3, TLS handshake, and plain-TCP stress measurements.
 - `docker/postgres/`: test-only PostgreSQL image used by database access-log matrix cases.
 
@@ -25,4 +25,4 @@ The Docker integration flow avoids host bind mounts on purpose. It uses `docker 
 
 The Docker performance flow follows the same constraint. It copies generated TLS material and configs into containers instead of relying on bind mounts, and removes test containers, networks, and test-only images by label during cleanup.
 
-Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, and `hot-reload/full-config-tls-listener-rebind`. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.
+Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, `hot-reload/full-config-tls-listener-rebind`, and `hot-reload/webtransport-stale-snapshot-drain`. The WebTransport drain case keeps an existing session open through the long-connection grace window while asserting new streams on that drained HTTP/3 bridge are rejected. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.
