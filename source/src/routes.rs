@@ -1,19 +1,61 @@
-use crate::config::{RouteConfig, UpstreamConfig};
+use crate::config::{
+  BufferingMode, Config, ErrorResponseMode, RouteConfig, SecurityHeadersConfig, UpstreamConfig,
+};
 
 #[derive(Debug, Clone)]
 pub struct RouteTable {
-  routes: Vec<RouteConfig>,
+  routes: Vec<RouteEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct RouteEntry {
+  route: RouteConfig,
+  execution_plan: RouteExecutionPlan,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct RouteExecutionPlan {
+  pub can_plain_proxy_fast_path: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute<'a> {
   pub route: &'a RouteConfig,
   pub upstream: Option<&'a UpstreamConfig>,
+  pub execution_plan: &'a RouteExecutionPlan,
 }
 
 impl RouteTable {
-  pub fn new(routes: Vec<RouteConfig>) -> Self {
-    Self { routes }
+  pub fn new(config: &Config) -> Self {
+    Self {
+      routes: config
+        .routes
+        .iter()
+        .cloned()
+        .map(|route| {
+          let execution_plan = RouteExecutionPlan {
+            can_plain_proxy_fast_path: can_plain_proxy_fast_path(config, &route),
+          };
+          RouteEntry {
+            route,
+            execution_plan,
+          }
+        })
+        .collect(),
+    }
+  }
+
+  #[cfg(test)]
+  fn from_routes_for_tests(routes: Vec<RouteConfig>) -> Self {
+    Self {
+      routes: routes
+        .into_iter()
+        .map(|route| RouteEntry {
+          route,
+          execution_plan: RouteExecutionPlan::default(),
+        })
+        .collect(),
+    }
   }
 
   pub fn resolve<'a>(
@@ -23,10 +65,11 @@ impl RouteTable {
     upstreams: &'a [UpstreamConfig],
   ) -> Option<ResolvedRoute<'a>> {
     let normalized_host = normalize_host(host);
-    let mut best: Option<(&RouteConfig, usize, usize)> = None;
+    let mut best: Option<(&RouteEntry, usize, usize)> = None;
 
-    for route in &self.routes {
-      let Some(host_score) = route
+    for entry in &self.routes {
+      let Some(host_score) = entry
+        .route
         .hosts
         .iter()
         .filter_map(|pattern| match_host_pattern(pattern, &normalized_host))
@@ -35,26 +78,56 @@ impl RouteTable {
         continue;
       };
 
-      if !path_prefix_matches(&route.path_prefix, path) {
+      if !path_prefix_matches(&entry.route.path_prefix, path) {
         continue;
       }
 
-      let score = (host_score, route.path_prefix.len());
+      let score = (host_score, entry.route.path_prefix.len());
       match best {
         Some((_, best_host_score, best_path_len))
           if best_host_score > score.0
             || (best_host_score == score.0 && best_path_len >= score.1) => {}
-        _ => best = Some((route, score.0, score.1)),
+        _ => best = Some((entry, score.0, score.1)),
       }
     }
 
-    let (route, _, _) = best?;
+    let (entry, _, _) = best?;
+    let route = &entry.route;
     let upstream = route
       .upstream
       .as_deref()
       .and_then(|name| upstreams.iter().find(|item| item.name == name));
-    Some(ResolvedRoute { route, upstream })
+    Some(ResolvedRoute {
+      route,
+      upstream,
+      execution_plan: &entry.execution_plan,
+    })
   }
+}
+
+fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
+  !config.waf.enabled
+    && !config.logging.access_log.enabled
+    && config.rate_limits.is_empty()
+    && !config.dynamic_policy.enabled
+    && !config.compression.enabled
+    && route.upstream_pool.is_none()
+    && !route.grpc_web
+    && !route.generic_http_upgrade
+    && !route.connect_tunneling
+    && route.buffering.request.is_none()
+    && route.buffering.response.is_none()
+    && config.proxy.buffering.request == BufferingMode::Streaming
+    && config.proxy.buffering.response == BufferingMode::Streaming
+    && config.proxy.http.errors.mode != ErrorResponseMode::Json
+    && security_headers_disabled(&config.security.headers)
+}
+
+fn security_headers_disabled(config: &SecurityHeadersConfig) -> bool {
+  !config.hsts
+    && config.x_content_type_options.is_none()
+    && config.referrer_policy.is_none()
+    && config.permissions_policy.is_none()
 }
 
 pub fn normalize_host(raw: &str) -> String {
@@ -173,7 +246,7 @@ mod tests {
       },
     ];
     let upstreams = vec![upstream("wild"), upstream("exact")];
-    let table = RouteTable::new(routes);
+    let table = RouteTable::from_routes_for_tests(routes);
 
     let resolved = table.resolve("api.example.com", "/v1", &upstreams).unwrap();
     assert_eq!(resolved.route.name, "exact");
@@ -218,7 +291,7 @@ mod tests {
       },
     ];
     let upstreams = vec![upstream("root"), upstream("api")];
-    let table = RouteTable::new(routes);
+    let table = RouteTable::from_routes_for_tests(routes);
 
     let resolved = table
       .resolve("example.com", "/api/users", &upstreams)

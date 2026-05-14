@@ -22,7 +22,7 @@ use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::response::text_response;
 use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContext};
-use crate::state::{AppHandle, AppSnapshot};
+use crate::state::AppSnapshot;
 use crate::waf::{WafStreamClose, WafStreamDirection, WafWebTransportStreamKind};
 
 #[path = "session/connection_limits.rs"]
@@ -148,12 +148,11 @@ pub(super) async fn accept_webtransport_session(
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
+  snapshot: Arc<AppSnapshot>,
   events: mpsc::Sender<DispatcherEvent>,
 ) -> anyhow::Result<()> {
   let connect_stream_id = stream.id();
   let session_id = session_id_for_stream_id(connect_stream_id);
-  let snapshot = state.snapshot();
   let mut prepared = match http_proxy::prepare_webtransport(
     &request,
     peer_addr,

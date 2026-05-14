@@ -7,10 +7,7 @@ use http_body_util::BodyExt;
 use hyper::body::Body;
 use tracing::warn;
 
-use crate::config::{
-  BufferingMode, ErrorResponseMode, HttpVersion, ProxyProtocolEgressMode, RouteConfig,
-  SecurityHeadersConfig,
-};
+use crate::config::{HttpVersion, ProxyProtocolEgressMode};
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, boxed_error};
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request};
@@ -35,29 +32,16 @@ impl PlainProxyFastPath {
   pub(crate) fn eligible<B>(
     request: &Request<B>,
     state: &AppSnapshot,
-    route: &RouteConfig,
+    resolved: &ResolvedRoute<'_>,
     method: &Method,
   ) -> bool
   where
     B: Body,
   {
-    !state.waf.enabled()
-      && !state.system_access_log.enabled()
-      && state.config.rate_limits.is_empty()
-      && !state.config.dynamic_policy.enabled
-      && !state.dynamic_policy.enabled()
-      && !state.config.compression.enabled
-      && !state.cache.policy_enabled(route.cache.as_deref(), method)
-      && route.upstream_pool.is_none()
-      && !route.grpc_web
-      && !route.generic_http_upgrade
-      && !route.connect_tunneling
-      && route.buffering.request.is_none()
-      && route.buffering.response.is_none()
-      && state.config.proxy.buffering.request == BufferingMode::Streaming
-      && state.config.proxy.buffering.response == BufferingMode::Streaming
-      && state.config.proxy.http.errors.mode != ErrorResponseMode::Json
-      && security_headers_disabled(&state.config.security.headers)
+    resolved.execution_plan.can_plain_proxy_fast_path
+      && !state
+        .cache
+        .policy_enabled(resolved.route.cache.as_deref(), method)
       && !semantics::is_native_grpc_request(request.headers(), &state.config)
       && !is_upgrade_request(request)
       && method != Method::CONNECT
@@ -222,13 +206,6 @@ impl PlainProxyFastPath {
   }
 }
 
-fn security_headers_disabled(config: &SecurityHeadersConfig) -> bool {
-  !config.hsts
-    && config.x_content_type_options.is_none()
-    && config.referrer_policy.is_none()
-    && config.permissions_policy.is_none()
-}
-
 #[cfg(test)]
 mod tests {
   use bytes::Bytes;
@@ -261,6 +238,22 @@ mod tests {
       .expect("request should build")
   }
 
+  fn resolved_route(state: &AppSnapshot) -> ResolvedRoute<'_> {
+    state
+      .route_table
+      .resolve("example.com", "/", &state.upstreams)
+      .expect("route should resolve")
+  }
+
+  fn plain_fast_path_plan(config: &Config) -> bool {
+    let table = crate::routes::RouteTable::new(config);
+    table
+      .resolve("example.com", "/", &config.upstreams)
+      .expect("route should resolve")
+      .execution_plan
+      .can_plain_proxy_fast_path
+  }
+
   #[tokio::test]
   async fn plain_route_is_eligible_when_optional_features_are_off() {
     let temp_dir = common::TempDir::new("plain-fast-path");
@@ -272,11 +265,13 @@ mod tests {
     let state = AppSnapshot::new(parse_config(&raw))
       .await
       .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
 
+    assert!(resolved.execution_plan.can_plain_proxy_fast_path);
     assert!(PlainProxyFastPath::eligible(
       &request(),
       &state,
-      &state.config.routes[0],
+      &resolved,
       &Method::GET
     ));
   }
@@ -323,10 +318,12 @@ burst = 1
       let state = AppSnapshot::new(parse_config(&raw))
         .await
         .expect("snapshot should initialize");
+      let resolved = resolved_route(&state);
+      assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
       assert!(!PlainProxyFastPath::eligible(
         &request(),
         &state,
-        &state.config.routes[0],
+        &resolved,
         &Method::GET
       ));
     }
@@ -341,53 +338,23 @@ burst = 1
       "[compression]\nenabled = true",
       "[compression]\nenabled = false",
     );
-    let mut state = AppSnapshot::new(parse_config(&base))
-      .await
-      .expect("snapshot should initialize");
+    let mut config = parse_config(&base);
+    assert!(plain_fast_path_plan(&config));
 
-    state.config.dynamic_policy.enabled = true;
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &state.config.routes[0],
-      &Method::GET
-    ));
-    state.config.dynamic_policy.enabled = false;
+    config.routes[0].upstream_pool = Some("app-pool".to_string());
+    assert!(!plain_fast_path_plan(&config));
+    config.routes[0].upstream_pool = None;
 
-    state.config.routes[0].upstream_pool = Some("app-pool".to_string());
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &state.config.routes[0],
-      &Method::GET
-    ));
-    state.config.routes[0].upstream_pool = None;
+    config.routes[0].grpc_web = true;
+    assert!(!plain_fast_path_plan(&config));
+    config.routes[0].grpc_web = false;
 
-    state.config.routes[0].grpc_web = true;
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &state.config.routes[0],
-      &Method::GET
-    ));
-    state.config.routes[0].grpc_web = false;
+    config.routes[0].generic_http_upgrade = true;
+    assert!(!plain_fast_path_plan(&config));
+    config.routes[0].generic_http_upgrade = false;
 
-    state.config.routes[0].generic_http_upgrade = true;
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &state.config.routes[0],
-      &Method::GET
-    ));
-    state.config.routes[0].generic_http_upgrade = false;
-
-    state.config.routes[0].buffering.request = Some(BufferingMode::Memory);
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &state.config.routes[0],
-      &Method::GET
-    ));
+    config.routes[0].buffering.request = Some(crate::config::BufferingMode::Memory);
+    assert!(!plain_fast_path_plan(&config));
   }
 
   #[tokio::test]
@@ -416,10 +383,12 @@ cache_methods = ["GET"]
     let state = AppSnapshot::new(parse_config(&cached))
       .await
       .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
+    assert!(resolved.execution_plan.can_plain_proxy_fast_path);
     assert!(!PlainProxyFastPath::eligible(
       &request(),
       &state,
-      &state.config.routes[0],
+      &resolved,
       &Method::GET
     ));
 
@@ -434,16 +403,20 @@ request = "memory"
     let state = AppSnapshot::new(parse_config(&buffered))
       .await
       .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
+    assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
     assert!(!PlainProxyFastPath::eligible(
       &request(),
       &state,
-      &state.config.routes[0],
+      &resolved,
       &Method::GET
     ));
 
     let state = AppSnapshot::new(parse_config(&base))
       .await
       .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
+    assert!(resolved.execution_plan.can_plain_proxy_fast_path);
     let upgrade = Request::builder()
       .uri("https://example.com/")
       .header(http::header::CONNECTION, "upgrade")
@@ -457,7 +430,7 @@ request = "memory"
     assert!(!PlainProxyFastPath::eligible(
       &upgrade,
       &state,
-      &state.config.routes[0],
+      &resolved,
       &Method::GET
     ));
   }

@@ -21,7 +21,7 @@ use super::{
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http::response::text_response;
-use crate::state::AppHandle;
+use crate::state::AppSnapshot;
 use crate::waf::WafStreamClose;
 
 mod connection;
@@ -73,7 +73,7 @@ pub(super) async fn serve_webtransport_connection(
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
+  state: Arc<AppSnapshot>,
   early_data: crate::quic::h3::EarlyDataTracker,
   mut shutdown: watch::Receiver<bool>,
   drain: ConnectionDrain,
@@ -236,17 +236,13 @@ async fn handle_downstream_request(
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
+  state: Arc<AppSnapshot>,
   early_data: crate::quic::h3::EarlyDataTracker,
   drain: ConnectionDrain,
   events: mpsc::Sender<DispatcherEvent>,
 ) -> anyhow::Result<()> {
   let is_early_data = early_data.take(stream.id());
-  if rejects_unsafe_early_data(
-    &request,
-    state.snapshot().config.quic.zero_rtt,
-    is_early_data,
-  ) {
+  if rejects_unsafe_early_data(&request, state.config.quic.zero_rtt, is_early_data) {
     respond_to_h3_request(stream, text_response(StatusCode::TOO_EARLY, "too early")).await?;
     return Ok(());
   }

@@ -67,6 +67,7 @@ impl LifecycleState {
 pub(crate) struct ConnectionDrain {
   listener: watch::Receiver<bool>,
   lifecycle: watch::Receiver<bool>,
+  data_plane: Option<watch::Receiver<bool>>,
   close_delay: Duration,
 }
 
@@ -79,6 +80,21 @@ impl ConnectionDrain {
     Self {
       listener,
       lifecycle,
+      data_plane: None,
+      close_delay,
+    }
+  }
+
+  pub(crate) fn with_data_plane(
+    listener: watch::Receiver<bool>,
+    lifecycle: watch::Receiver<bool>,
+    data_plane: watch::Receiver<bool>,
+    close_delay: Duration,
+  ) -> Self {
+    Self {
+      listener,
+      lifecycle,
+      data_plane: Some(data_plane),
       close_delay,
     }
   }
@@ -89,21 +105,76 @@ impl ConnectionDrain {
   }
 
   pub(crate) async fn wait_for_drain(&mut self) {
-    if *self.listener.borrow() || *self.lifecycle.borrow() {
+    if self.is_draining() {
       return;
     }
 
-    loop {
-      tokio::select! {
-        changed = self.listener.changed() => {
-          if changed.is_err() || *self.listener.borrow() {
-            return;
+    if let Some(data_plane) = &mut self.data_plane {
+      loop {
+        tokio::select! {
+          changed = self.listener.changed() => {
+            if changed.is_err() || *self.listener.borrow() {
+              return;
+            }
+          }
+          changed = self.lifecycle.changed() => {
+            if changed.is_err() || *self.lifecycle.borrow() {
+              return;
+            }
+          }
+          changed = data_plane.changed() => {
+            if changed.is_err() || *data_plane.borrow() {
+              return;
+            }
           }
         }
-        changed = self.lifecycle.changed() => {
-          if changed.is_err() || *self.lifecycle.borrow() {
-            return;
+      }
+    } else {
+      loop {
+        tokio::select! {
+          changed = self.listener.changed() => {
+            if changed.is_err() || *self.listener.borrow() {
+              return;
+            }
           }
+          changed = self.lifecycle.changed() => {
+            if changed.is_err() || *self.lifecycle.borrow() {
+              return;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  fn is_draining(&self) -> bool {
+    *self.listener.borrow()
+      || *self.lifecycle.borrow()
+      || self
+        .data_plane
+        .as_ref()
+        .is_some_and(|drain| *drain.borrow())
+  }
+}
+
+pub(crate) async fn wait_for_listener_or_data_plane_drain(
+  listener: &mut watch::Receiver<bool>,
+  data_plane: &mut watch::Receiver<bool>,
+) {
+  if *listener.borrow() || *data_plane.borrow() {
+    return;
+  }
+
+  loop {
+    tokio::select! {
+      changed = listener.changed() => {
+        if changed.is_err() || *listener.borrow() {
+          return;
+        }
+      }
+      changed = data_plane.changed() => {
+        if changed.is_err() || *data_plane.borrow() {
+          return;
         }
       }
     }

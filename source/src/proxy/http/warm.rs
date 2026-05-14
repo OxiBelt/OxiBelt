@@ -57,6 +57,7 @@ pub(crate) async fn warm_cache_request(
     sni: Some(host.to_string()),
     ..WafTlsMetadata::default()
   });
+  let snapshot = state.snapshot();
   let response = handle_inner(
     request,
     peer_addr,
@@ -64,7 +65,7 @@ pub(crate) async fn warm_cache_request(
     WafTransportMetadataInput::default(),
     tls,
     None,
-    state.clone(),
+    snapshot.clone(),
     WafProtocol::Http,
     WafTransportNetwork::Tcp,
     false,
@@ -74,7 +75,6 @@ pub(crate) async fn warm_cache_request(
   .await;
   let status = response.status();
   let _ = response.into_body().collect().await;
-  let snapshot = state.snapshot();
   let result = snapshot
     .route_table
     .resolve(host, uri.path(), &snapshot.upstreams)

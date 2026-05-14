@@ -11,6 +11,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use std::time::Duration;
+use tokio::sync::watch;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::cache::ResponseCache;
@@ -96,13 +97,27 @@ impl UpstreamClientPools {
 
 #[derive(Clone)]
 pub struct AppHandle {
-  current: Arc<RwLock<Arc<AppSnapshot>>>,
+  current: Arc<RwLock<AppGeneration>>,
+}
+
+struct AppGeneration {
+  snapshot: Arc<AppSnapshot>,
+  data_plane_drain: watch::Sender<bool>,
+}
+
+pub(crate) struct AppConnectionSnapshot {
+  pub(crate) snapshot: Arc<AppSnapshot>,
+  pub(crate) data_plane_drain: watch::Receiver<bool>,
 }
 
 impl AppHandle {
   pub fn new(snapshot: AppSnapshot) -> Self {
+    let (data_plane_drain, _) = watch::channel(false);
     Self {
-      current: Arc::new(RwLock::new(Arc::new(snapshot))),
+      current: Arc::new(RwLock::new(AppGeneration {
+        snapshot: Arc::new(snapshot),
+        data_plane_drain,
+      })),
     }
   }
 
@@ -111,11 +126,31 @@ impl AppHandle {
       .current
       .read()
       .expect("app snapshot lock poisoned")
+      .snapshot
       .clone()
   }
 
+  pub(crate) fn connection_snapshot(&self) -> AppConnectionSnapshot {
+    let current = self.current.read().expect("app snapshot lock poisoned");
+    AppConnectionSnapshot {
+      snapshot: current.snapshot.clone(),
+      data_plane_drain: current.data_plane_drain.subscribe(),
+    }
+  }
+
   pub fn replace(&self, snapshot: AppSnapshot) {
-    *self.current.write().expect("app snapshot lock poisoned") = Arc::new(snapshot);
+    let (data_plane_drain, _) = watch::channel(false);
+    let previous = {
+      let mut current = self.current.write().expect("app snapshot lock poisoned");
+      std::mem::replace(
+        &mut *current,
+        AppGeneration {
+          snapshot: Arc::new(snapshot),
+          data_plane_drain,
+        },
+      )
+    };
+    let _ = previous.data_plane_drain.send(true);
   }
 }
 
@@ -153,7 +188,7 @@ impl AppSnapshot {
     config: Config,
     previous: Option<&AppSnapshot>,
   ) -> anyhow::Result<Self> {
-    let route_table = RouteTable::new(config.routes.clone());
+    let route_table = RouteTable::new(&config);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
@@ -252,7 +287,7 @@ impl AppSnapshot {
     config: Config,
     previous: &AppSnapshot,
   ) -> anyhow::Result<Self> {
-    let route_table = RouteTable::new(config.routes.clone());
+    let route_table = RouteTable::new(&config);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
@@ -390,4 +425,53 @@ fn build_client_pool(
     negotiated,
     h2c,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  fn parse_config(raw: &str) -> Config {
+    let config: Config = toml::from_str(raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    config
+  }
+
+  #[tokio::test]
+  async fn replace_signals_old_data_plane_generation_and_installs_fresh_one() {
+    let temp_dir = common::TempDir::new("app-generation-drain");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "app-generation-drain");
+    let initial = common::minimal_config_toml(&cert_path, &key_path);
+    let reloaded = initial.replace(
+      "[compression]\nenabled = true",
+      "[compression]\nenabled = false",
+    );
+    let handle = AppHandle::new(
+      AppSnapshot::new(parse_config(&initial))
+        .await
+        .expect("initial snapshot should initialize"),
+    );
+    let old_connection = handle.connection_snapshot();
+    assert!(old_connection.snapshot.config.compression.enabled);
+    assert!(!*old_connection.data_plane_drain.borrow());
+
+    handle.replace(
+      AppSnapshot::new(parse_config(&reloaded))
+        .await
+        .expect("replacement snapshot should initialize"),
+    );
+
+    assert!(*old_connection.data_plane_drain.borrow());
+    let new_connection = handle.connection_snapshot();
+    assert!(!new_connection.snapshot.config.compression.enabled);
+    assert!(!*new_connection.data_plane_drain.borrow());
+  }
 }

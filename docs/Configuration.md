@@ -239,7 +239,7 @@ poll_interval_ms = 2000
 
 `unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` is optional; when omitted, Tokio chooses its default multi-thread worker count. `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers = 1` keeps the compatibility path. Set `workers > 1` only with `reuse_port = true`, which creates one `SO_REUSEPORT` listener socket per worker. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
 
-`[runtime.drain]` controls reload and shutdown draining. `graceful_timeout_ms` is the maximum time a stopped listener generation waits for active HTTP/1.1 and HTTP/2 requests to finish before force-closing remaining connection tasks. `long_connection_close_delay_ms` protects upgraded WebSocket/generic Upgrade, CONNECT, WebTransport, and TCP stream bridges after a drain signal before they are closed. `shutdown_delay_ms` marks the instance draining and waits before listener drain begins; `0` is allowed. `graceful_timeout_ms` and `long_connection_close_delay_ms` must be greater than zero.
+`[runtime.drain]` controls reload and shutdown draining. `graceful_timeout_ms` is the maximum time a stopped listener generation waits for active HTTP/1.1 and HTTP/2 requests to finish before force-closing remaining connection tasks. Successful reloads also drain existing HTTP connections that captured the previous data-plane snapshot, even when listener binds do not change, so new requests use the replacement snapshot on new connections. `long_connection_close_delay_ms` protects upgraded WebSocket/generic Upgrade, CONNECT, WebTransport, and TCP stream bridges after a drain signal before they are closed. `shutdown_delay_ms` marks the instance draining and waits before listener drain begins; `0` is allowed. `graceful_timeout_ms` and `long_connection_close_delay_ms` must be greater than zero.
 
 `poll_interval_ms` must be greater than zero. CLI flags `--hot-reload-mode` and `--hot-reload-poll-interval-ms` override TOML values and emit warnings when they differ.
 
@@ -252,7 +252,7 @@ Reload modes:
 
 Reload failures keep the previous active state.
 
-Successful full reloads start replacement listeners before draining old listener generations. Local readiness stays OK for a successful reload because the active replacement snapshot is serving; existing requests on the old generation finish within `graceful_timeout_ms`, and long-lived upgraded or stream connections keep their drain grace from `long_connection_close_delay_ms`.
+Successful full reloads start replacement listeners before draining old listener generations. Successful OxiRule, downstream TLS, full, and runtime pool snapshot replacements drain previous HTTP connection generations as well. Local readiness stays OK for a successful reload because the active replacement snapshot is serving; existing requests on the old generation finish within `graceful_timeout_ms`, and long-lived upgraded or stream connections keep their drain grace from `long_connection_close_delay_ms`.
 
 ## Listeners and TLS
 

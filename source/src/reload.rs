@@ -105,7 +105,7 @@ impl ReloadManager {
     )
     .context("failed to rebuild WAF engine")?;
     let snapshot = AppSnapshot {
-      route_table: RouteTable::new(config.routes.clone()),
+      route_table: RouteTable::new(&config),
       upstreams: active.upstreams.clone(),
       upstream_uri_parts: active.upstream_uri_parts.clone(),
       config,

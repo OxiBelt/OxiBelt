@@ -26,7 +26,7 @@ use crate::config::{
   RuntimeOverrides, UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
 };
 use crate::identity::Cidr;
-use crate::lifecycle::{ConnectionDrain, TaskRegistry};
+use crate::lifecycle::{ConnectionDrain, TaskRegistry, wait_for_listener_or_data_plane_drain};
 use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::pool_health;
@@ -44,6 +44,8 @@ use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod admin;
 mod connection_errors;
+#[cfg(test)]
+mod reload_tests;
 use admin::json_response;
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
@@ -1792,11 +1794,14 @@ async fn serve_tcp(
             };
             crate::tcp_socket::enable_tcp_nodelay(&stream, peer_addr, "downstream listener");
 
-            let connection_state = state.clone();
+            let connection_state = state.connection_snapshot();
             let connection_shutdown = shutdown.clone();
-            let connection_drain = ConnectionDrain::new(
+            let connection_snapshot = connection_state.snapshot;
+            let data_plane_drain = connection_state.data_plane_drain;
+            let connection_drain = ConnectionDrain::with_data_plane(
               connection_shutdown.clone(),
-              connection_state.snapshot().lifecycle.subscribe(),
+              connection_snapshot.lifecycle.subscribe(),
+              data_plane_drain.clone(),
               long_connection_close_delay,
             );
             connections.spawn(async move {
@@ -1804,15 +1809,17 @@ async fn serve_tcp(
                   TcpListenerKind::Https => handle_connection(
                     stream,
                     peer_addr,
-                    connection_state,
+                    connection_snapshot,
                     connection_shutdown,
+                    data_plane_drain,
                     connection_drain,
                   ).await,
                   TcpListenerKind::PlainHttp => handle_plain_http_connection(
                     stream,
                     peer_addr,
-                    connection_state,
+                    connection_snapshot,
                     connection_shutdown,
+                    data_plane_drain,
                     connection_drain,
                   ).await,
                 };
@@ -1872,17 +1879,20 @@ async fn serve_http3(
             let Some(connecting) = connecting else {
                 return Ok(());
             };
-            if state.snapshot().config.quic.retry && !connecting.remote_address_validated() && connecting.may_retry() {
+            let connection_state = state.connection_snapshot();
+            let connection_snapshot = connection_state.snapshot;
+            let data_plane_drain = connection_state.data_plane_drain;
+            if connection_snapshot.config.quic.retry && !connecting.remote_address_validated() && connecting.may_retry() {
                 if let Err(error) = connecting.retry() {
                     warn!(error = %error, "failed to send QUIC Retry packet");
                 }
                 continue;
             }
-            let connection_state = state.clone();
             let connection_shutdown = shutdown.clone();
-            let connection_drain = ConnectionDrain::new(
+            let connection_drain = ConnectionDrain::with_data_plane(
               connection_shutdown.clone(),
-              connection_state.snapshot().lifecycle.subscribe(),
+              connection_snapshot.lifecycle.subscribe(),
+              data_plane_drain.clone(),
               long_connection_close_delay,
             );
             let peer_addr = connecting.remote_address();
@@ -1891,8 +1901,9 @@ async fn serve_http3(
                     Ok(connection) => {
                         if let Err(error) = http3::handle_downstream_connection(
                           connection,
-                          connection_state,
+                          connection_snapshot,
                           connection_shutdown,
+                          data_plane_drain,
                           connection_drain,
                         ).await {
                             connection_errors::log_http3(peer_addr, &error);
@@ -1954,11 +1965,11 @@ pub(crate) fn downstream_quic_tls_metadata(
 async fn handle_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
-  state: AppHandle,
+  handshake_state: Arc<AppSnapshot>,
   mut shutdown: watch::Receiver<bool>,
+  mut data_plane_drain: watch::Receiver<bool>,
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
-  let handshake_state = state.snapshot();
   let _global_permit = acquire_global_connection_permit(&handshake_state)?;
   let (stream, peer_addr) = proxy_protocol::accept_proxy_header(
     stream,
@@ -2015,8 +2026,9 @@ async fn handle_connection(
   };
 
   let request_count = Arc::new(AtomicUsize::new(0));
+  let request_state = handshake_state.clone();
   let service = service_fn(move |request: hyper::Request<Incoming>| {
-    let state = state.clone();
+    let state = request_state.clone();
     let tls_metadata = tls_metadata.clone();
     let request_count = request_count.clone();
     let connection_limit_context = connection_limit_context.clone();
@@ -2024,7 +2036,7 @@ async fn handle_connection(
     async move {
       Ok::<_, Infallible>(
         if request_count.fetch_add(1, Ordering::Relaxed)
-          >= state.snapshot().config.limits.max_requests_per_connection
+          >= state.config.limits.max_requests_per_connection
         {
           text_response(
             StatusCode::TOO_MANY_REQUESTS,
@@ -2057,15 +2069,13 @@ async fn handle_connection(
     ));
     let connection = builder.serve_connection(TokioIo::new(tls_stream), service);
     tokio::pin!(connection);
-    if *shutdown.borrow() {
+    if *shutdown.borrow() || *data_plane_drain.borrow() {
       connection.as_mut().graceful_shutdown();
     }
     let result = tokio::select! {
       result = &mut connection => result,
-      changed = shutdown.changed() => {
-        if changed.is_ok() && *shutdown.borrow() {
-          connection.as_mut().graceful_shutdown();
-        }
+      _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+        connection.as_mut().graceful_shutdown();
         (&mut connection).await
       }
     };
@@ -2090,15 +2100,13 @@ async fn handle_connection(
       .serve_connection(TokioIo::new(tls_stream), service)
       .with_upgrades();
     tokio::pin!(connection);
-    if *shutdown.borrow() {
+    if *shutdown.borrow() || *data_plane_drain.borrow() {
       connection.as_mut().graceful_shutdown();
     }
     let result = tokio::select! {
       result = &mut connection => result,
-      changed = shutdown.changed() => {
-        if changed.is_ok() && *shutdown.borrow() {
-          connection.as_mut().graceful_shutdown();
-        }
+      _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+        connection.as_mut().graceful_shutdown();
         (&mut connection).await
       }
     };
@@ -2111,11 +2119,11 @@ async fn handle_connection(
 async fn handle_plain_http_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
-  state: AppHandle,
+  snapshot: Arc<AppSnapshot>,
   mut shutdown: watch::Receiver<bool>,
+  mut data_plane_drain: watch::Receiver<bool>,
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
-  let snapshot = state.snapshot();
   let _global_permit = acquire_global_connection_permit(&snapshot)?;
   let connection_limit_identity = snapshot.config.limits.connection_limit_identity;
   let proxy_mode = snapshot.config.listeners.http_mode == HttpListenerMode::Proxy;
@@ -2135,17 +2143,18 @@ async fn handle_plain_http_connection(
     ..WafTransportMetadataInput::default()
   };
   let request_count = Arc::new(AtomicUsize::new(0));
+  let request_state = snapshot.clone();
   let service = service_fn(move |request: hyper::Request<Incoming>| {
-    let state = state.clone();
+    let state = request_state.clone();
     let request_count = request_count.clone();
     let connection_limit_context = connection_limit_context.clone();
     let drain = drain.clone();
     async move {
-      let response = match state.snapshot().config.listeners.http_mode {
+      let response = match state.config.listeners.http_mode {
         crate::config::HttpListenerMode::RedirectToHttps => redirect_to_https(&request),
         crate::config::HttpListenerMode::Proxy => {
           if request_count.fetch_add(1, Ordering::Relaxed)
-            >= state.snapshot().config.limits.max_requests_per_connection
+            >= state.config.limits.max_requests_per_connection
           {
             text_response(
               StatusCode::TOO_MANY_REQUESTS,
@@ -2186,15 +2195,13 @@ async fn handle_plain_http_connection(
     .serve_connection(TokioIo::new(stream), service)
     .with_upgrades();
   tokio::pin!(connection);
-  if *shutdown.borrow() {
+  if *shutdown.borrow() || *data_plane_drain.borrow() {
     connection.as_mut().graceful_shutdown();
   }
   let result = tokio::select! {
     result = &mut connection => result,
-    changed = shutdown.changed() => {
-      if changed.is_ok() && *shutdown.borrow() {
-        connection.as_mut().graceful_shutdown();
-      }
+    _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+      connection.as_mut().graceful_shutdown();
       (&mut connection).await
     }
   };

@@ -22,7 +22,7 @@ use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
-use crate::state::{AppHandle, AppSnapshot, UpstreamClientRef};
+use crate::state::{AppSnapshot, UpstreamClientRef};
 use crate::waf::{
   BodyNeed, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
   WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations, request_protocol,
@@ -188,7 +188,7 @@ pub(crate) async fn handle(
   transport_metadata: WafTransportMetadataInput<'static>,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
+  state: Arc<AppSnapshot>,
   downstream_scheme: &'static str,
   drain: ConnectionDrain,
 ) -> Response<ProxyBody> {
@@ -216,7 +216,7 @@ pub(crate) async fn handle_http3(
   udp_connection_id: &str,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
+  state: Arc<AppSnapshot>,
   drain: ConnectionDrain,
 ) -> Response<ProxyBody> {
   handle_inner(
@@ -247,7 +247,7 @@ async fn handle_inner<B>(
   transport_metadata: WafTransportMetadataInput<'_>,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
+  state: Arc<AppSnapshot>,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
   _reject_connect: bool,
@@ -258,7 +258,6 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
-  let state = state.snapshot();
   let system_access_log_enabled = state.system_access_log.enabled();
   let mut access_log = SystemAccessLogContext::new(
     &request,
@@ -460,7 +459,7 @@ where
     )
   });
 
-  if fast_path::PlainProxyFastPath::eligible(&request, &state, resolved.route, &request_method) {
+  if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved, &request_method) {
     return fast_path::PlainProxyFastPath::handle(
       request,
       state.clone(),

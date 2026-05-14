@@ -22,7 +22,7 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{ProxyBody, boxed_error, channel_body};
 use crate::proxy::http::response::text_response;
 use crate::server::downstream_quic_tls_metadata;
-use crate::state::{AppHandle, AppSnapshot};
+use crate::state::AppSnapshot;
 use crate::tls;
 
 type H3BidiStream = crate::quic::h3::BidiStream<Bytes>;
@@ -40,7 +40,7 @@ pub(super) struct H3DownstreamRequestContext {
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
-  state: AppHandle,
+  state: Arc<AppSnapshot>,
   drain: ConnectionDrain,
 }
 
@@ -263,13 +263,13 @@ async fn connect_h3_upstream(
 
 pub(crate) async fn handle_downstream_connection(
   connection: h3_quinn::quinn::Connection,
-  state: AppHandle,
+  snapshot: Arc<AppSnapshot>,
   mut shutdown: tokio::sync::watch::Receiver<bool>,
+  mut data_plane_drain: tokio::sync::watch::Receiver<bool>,
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let peer_addr = connection.remote_address();
   let udp_connection_id: Arc<str> = format!("quinn-stable:{}", connection.stable_id()).into();
-  let snapshot = state.snapshot();
   let _global_permit = snapshot
     .limits
     .acquire_global_connection(&snapshot.config.limits)
@@ -296,7 +296,6 @@ pub(crate) async fn handle_downstream_connection(
     .config
     .limits
     .max_webtransport_sessions_per_connection;
-  drop(snapshot);
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
   let early_data = crate::quic::h3::EarlyDataTracker::default();
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
@@ -310,13 +309,19 @@ pub(crate) async fn handle_downstream_connection(
     .context("failed to establish downstream HTTP/3 connection")?;
 
   loop {
-    if *shutdown.borrow() {
+    if *shutdown.borrow() || *data_plane_drain.borrow() {
       return Ok(());
     }
     let resolver = tokio::select! {
       biased;
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
+          return Ok(());
+        }
+        continue;
+      }
+      changed = data_plane_drain.changed() => {
+        if changed.is_ok() && *data_plane_drain.borrow() {
           return Ok(());
         }
         continue;
@@ -335,11 +340,7 @@ pub(crate) async fn handle_downstream_connection(
       .context("failed to resolve downstream HTTP/3 request")?;
     let is_early_data = early_data.take(stream.id());
 
-    if rejects_unsafe_early_data(
-      &request,
-      state.snapshot().config.quic.zero_rtt,
-      is_early_data,
-    ) {
+    if rejects_unsafe_early_data(&request, snapshot.config.quic.zero_rtt, is_early_data) {
       respond_to_h3_request(stream, text_response(StatusCode::TOO_EARLY, "too early")).await?;
       continue;
     }
@@ -353,7 +354,7 @@ pub(crate) async fn handle_downstream_connection(
         udp_connection_id.clone(),
         tls_metadata,
         connection_limit_context.clone(),
-        state,
+        snapshot,
         early_data.clone(),
         shutdown,
         drain.clone(),
@@ -367,7 +368,7 @@ pub(crate) async fn handle_downstream_connection(
       udp_connection_id: udp_connection_id.clone(),
       tls_metadata: tls_metadata.clone(),
       connection_limit_context: connection_limit_context.clone(),
-      state: state.clone(),
+      state: snapshot.clone(),
       drain: drain.clone(),
     };
     let status = handle_h3_request(request, stream, context).await?;
