@@ -1428,7 +1428,7 @@ where
       .get(http::header::CONTENT_LENGTH)
       .and_then(|value| value.to_str().ok())
       .and_then(|value| value.parse::<u64>().ok());
-    if response_body_is_definitely_empty(&parts.headers) {
+    if response_body_is_definitely_empty(parts.version, &parts.headers) {
       (body, Some(empty_captured_body()))
     } else {
       match capture_body_prefix(
@@ -1753,7 +1753,7 @@ impl TunnelConnectionLimitHold {
   }
 }
 
-fn error_indicates_body_timeout(error: &anyhow::Error, kind: BodyTimeoutKind) -> bool {
+pub(super) fn error_indicates_body_timeout(error: &anyhow::Error, kind: BodyTimeoutKind) -> bool {
   error.chain().any(|cause| {
     cause
       .downcast_ref::<body::BodyTimeoutError>()
@@ -3049,7 +3049,7 @@ async fn capture_request_body_for_waf(
   if !body_need.requires_prefix() {
     return Ok((request, None));
   }
-  if request_body_is_definitely_empty(request.headers()) {
+  if request_body_is_definitely_empty(request.version(), request.headers()) {
     return Ok((request, Some(empty_captured_body())));
   }
   capture_prefix(request, limit)
@@ -3064,12 +3064,18 @@ fn empty_captured_body() -> CapturedBody {
   }
 }
 
-fn request_body_is_definitely_empty(headers: &HeaderMap) -> bool {
-  content_length_is_exact_zero(headers) && !headers.contains_key(http::header::TRANSFER_ENCODING)
+fn request_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
+  http1_body_is_definitely_empty(version, headers)
 }
 
-fn response_body_is_definitely_empty(headers: &HeaderMap) -> bool {
-  content_length_is_exact_zero(headers) && !headers.contains_key(http::header::TRANSFER_ENCODING)
+fn response_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
+  http1_body_is_definitely_empty(version, headers)
+}
+
+fn http1_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
+  matches!(version, http::Version::HTTP_10 | http::Version::HTTP_11)
+    && content_length_is_exact_zero(headers)
+    && !headers.contains_key(http::header::TRANSFER_ENCODING)
 }
 
 fn content_length_is_exact_zero(headers: &HeaderMap) -> bool {
@@ -3177,6 +3183,28 @@ mod tests {
 
     assert!(captured.bytes.is_empty());
     assert!(!captured.is_truncated);
+  }
+
+  #[test]
+  fn http2_content_length_zero_is_not_definitive_until_end_stream() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      http::header::CONTENT_LENGTH,
+      http::HeaderValue::from_static("0"),
+    );
+
+    assert!(request_body_is_definitely_empty(
+      http::Version::HTTP_11,
+      &headers
+    ));
+    assert!(!request_body_is_definitely_empty(
+      http::Version::HTTP_2,
+      &headers
+    ));
+    assert!(!response_body_is_definitely_empty(
+      http::Version::HTTP_2,
+      &headers
+    ));
   }
 
   #[tokio::test]

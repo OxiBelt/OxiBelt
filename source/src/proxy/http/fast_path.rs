@@ -23,8 +23,8 @@ use crate::state::AppSnapshot;
 use crate::waf::{HeaderMutation, WafTransportNetwork};
 
 use super::{
-  EffectiveTimeouts, apply_alt_svc_header, is_idempotent, send_with_retry,
-  with_downstream_response_timeout,
+  EffectiveTimeouts, apply_alt_svc_header, error_indicates_body_timeout, is_idempotent,
+  send_with_retry, with_downstream_response_timeout,
 };
 
 const EMPTY_MUTATIONS: &[HeaderMutation] = &[];
@@ -158,6 +158,9 @@ impl PlainProxyFastPath {
     {
       Ok(response) => response,
       Err(error) => {
+        if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
+          return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
+        }
         state.pools.report_failure(&upstream.name);
         warn!(error = %error, upstream = %upstream.name, "upstream fast-path request failed");
         let message = error.to_string();
