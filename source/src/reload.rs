@@ -148,6 +148,7 @@ impl ReloadManager {
     {
       return Ok(false);
     }
+    validate_full_reload_runtime_compatibility(&active.config, &config)?;
 
     let snapshot = AppSnapshot::new_with_previous(config, Some(active.as_ref())).await?;
     let pending = listeners.prepare(&snapshot).await?;
@@ -229,6 +230,20 @@ impl ReloadManager {
     config.validate()?;
     Ok(config)
   }
+}
+
+fn validate_full_reload_runtime_compatibility(
+  active: &Config,
+  replacement: &Config,
+) -> anyhow::Result<()> {
+  if replacement.runtime.worker_threads != active.runtime.worker_threads {
+    bail!(
+      "full hot reload rejected because runtime.worker_threads changed from {} to {}; restart OxiBelt to resize the Tokio runtime",
+      active.runtime.worker_threads,
+      replacement.runtime.worker_threads
+    );
+  }
+  Ok(())
 }
 
 fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
@@ -381,6 +396,47 @@ mod tests {
 
     let _ = fs::remove_dir_all(&root);
     assert_ne!(first_fingerprint, second_fingerprint);
+  }
+
+  #[test]
+  fn full_reload_rejects_runtime_worker_thread_resize() {
+    let active = parse_worker_reload_config(2);
+    let replacement = parse_worker_reload_config(3);
+
+    let error = validate_full_reload_runtime_compatibility(&active, &replacement)
+      .expect_err("runtime worker resize should require process restart");
+    assert!(
+      error
+        .to_string()
+        .contains("runtime.worker_threads changed from 2 to 3"),
+      "unexpected error: {error}"
+    );
+  }
+
+  fn parse_worker_reload_config(worker_threads: usize) -> Config {
+    toml::from_str(&format!(
+      r#"
+[runtime]
+worker_threads = {worker_threads}
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 1024
+accept_error_backoff_ms = 50
+
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+"#
+    ))
+    .expect("test config should parse")
   }
 
   fn test_artifact_root() -> PathBuf {

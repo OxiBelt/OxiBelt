@@ -6,7 +6,14 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+worker_threads = "auto"
 
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
 [listeners]
 https_bind = "0.0.0.0:8443"
 http_bind = "0.0.0.0:8080"
@@ -60,3 +67,22 @@ name = "main-route"
 hosts = ["example.test"]
 path_prefix = "/"
 upstream = "perf-upstream"
+
+[quic]
+retry = true
+host_key_file = "quic-host-key.b64"
+
+[quic.transport]
+max_concurrent_bidi_streams = 512
+max_concurrent_uni_streams = 512
+idle_timeout_ms = 30000
+datagram_receive_buffer_bytes = 1048576
+datagram_send_buffer_bytes = 1048576
+max_udp_payload_size = 1472
+gso = true
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = "auto"
+reuse_port = true

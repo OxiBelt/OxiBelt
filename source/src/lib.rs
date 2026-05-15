@@ -58,6 +58,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
   runtime::init_tracing(&config.logging)?;
   config.validate()?;
+  config.log_worker_resolution();
   tls::install_default_provider()?;
 
   let state = AppHandle::new(

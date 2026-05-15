@@ -153,8 +153,9 @@ pub fn load_host_key(base_dir: &Path, path: &Path) -> anyhow::Result<[u8; QUIC_H
       canonical_path.display()
     )
   })?;
+  let encoded: String = raw.chars().filter(|c| !c.is_ascii_whitespace()).collect();
   let decoded = base64::engine::general_purpose::STANDARD
-    .decode(raw.trim())
+    .decode(encoded.as_bytes())
     .with_context(|| {
       format!(
         "failed to decode base64 QUIC host key from {}",

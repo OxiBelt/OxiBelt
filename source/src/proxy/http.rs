@@ -3208,7 +3208,7 @@ mod tests {
       common::create_self_signed_cert(temp_dir.path(), "alt-svc-precompute");
     let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
       "http3 = false",
-      "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 60\npersist = true",
+      "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 60\npersist = true\n\n[quic.socket]\nworkers = \"auto\"\nreuse_port = true",
     );
     let state = AppSnapshot::new(parse_config(&raw))
       .await
@@ -3401,7 +3401,7 @@ upstream_first_byte_timeout_ms = 5000
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "alt-svc-helper");
     let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
       "http3 = false",
-      "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 120\npersist = false",
+      "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 120\npersist = false\n\n[quic.socket]\nworkers = \"auto\"\nreuse_port = true",
     );
     let state = AppSnapshot::new(parse_config(&raw))
       .await

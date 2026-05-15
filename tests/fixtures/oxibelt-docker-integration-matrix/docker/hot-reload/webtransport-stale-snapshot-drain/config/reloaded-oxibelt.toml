@@ -6,7 +6,14 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+worker_threads = "auto"
 
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
 [runtime.drain]
 graceful_timeout_ms = 5000
 long_connection_close_delay_ms = 5000
@@ -91,3 +98,9 @@ name = "http-route"
 hosts = ["example.test"]
 path_prefix = "/app"
 upstream = "alt-upstream"
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = "auto"
+reuse_port = true

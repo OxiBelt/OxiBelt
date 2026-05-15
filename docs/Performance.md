@@ -32,7 +32,7 @@ OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS=35
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
 
-`OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO` is reserved for test fixtures that intentionally replace the baseline OxiBelt config. Normal local and CI performance runs should leave it unset.
+`OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO` is reserved for test fixtures that intentionally replace the baseline OxiBelt config. Normal local and CI performance runs should leave it unset. The default baseline follows the release-oriented auto-worker profile: runtime, TCP accept, and HTTP/3 socket workers resolve from Rust `available_parallelism()` with `1.0` multipliers, TCP/UDP `SO_REUSEPORT` enabled, backlog `8192`, and explicit QUIC socket buffers.
 
 In GitHub Actions, `workflow_dispatch` also accepts `performance_iterations`, which defaults to `5`. Reduce it for long manual `benchmark` or `soak` runs when the default repeated sampling would exceed the job budget.
 
@@ -47,6 +47,8 @@ The runner writes:
 - `probe-logs/`: stdout and stderr captured from each probe scenario.
 - `configs/`: generated effective proxy configs and TLS material used for the run.
 
+The runner generates one-run TLS material and a one-run 64-byte QUIC host key under `configs/*/cert/`. The performance baseline enables `quic.host_key_file` only against that generated key so Retry/stateless reset token behavior is stable within the run without baking shared key material into fixtures or images.
+
 CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards. Each shard uploads one artifact named `oxibelt-docker-performance-<profile>-shard-<n>` and stores repeated samples under `run-1/` through `run-5/` by default. The workflow keeps running later iterations in the same shard after one iteration fails, then fails the job at the end with the failed iteration list so artifacts stay complete. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
 
 ## Interpreting Results
@@ -55,7 +57,7 @@ CI thresholds are sanity gates, not competitive claims. The job fails when the p
 
 nginx and Caddy are measured as common reverse-proxy baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, and stress scenarios is measured separately. nginx HTTP/3 is included only when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped. If nginx reports HTTP/3 support but the functional QUIC probe cannot complete, that comparator row is also skipped because nginx HTTP/3 availability is image-dependent. Caddy is configured with its documented `h1 h2 h3` server protocol support and is treated as a mandatory HTTP/3 comparator.
 
-The performance fixtures raise generic connection and per-connection request caps so benchmark and soak profiles measure proxy throughput instead of exercising OxiBelt's or nginx's default limit-enforcement safeguards.
+The performance fixtures raise generic connection and per-connection request caps so benchmark and soak profiles measure proxy throughput instead of exercising OxiBelt's or nginx's default limit-enforcement safeguards. Release builds use thin LTO, one codegen unit, and stripped debuginfo; `panic = "abort"` is intentionally not set so postmortem behavior stays conservative.
 
 References:
 

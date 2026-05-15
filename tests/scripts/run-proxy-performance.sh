@@ -187,7 +187,9 @@ EOF
     -config "${work_dir}/downstream.cnf" \
     -keyout "${tls_dir}/privkey.pem" \
     -out "${tls_dir}/fullchain.pem" >/dev/null 2>&1
+  openssl rand -base64 64 >"${tls_dir}/quic-host-key.b64"
   chmod 0644 "${tls_dir}/fullchain.pem" "${tls_dir}/privkey.pem"
+  chmod 0644 "${tls_dir}/quic-host-key.b64"
 }
 
 copy_artifacts() {

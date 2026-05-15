@@ -2,7 +2,7 @@
 
 OxiBelt is a Rust reverse proxy for Linux edge deployments. It terminates downstream TLS, routes HTTP traffic by host and path, forwards to HTTP/1.1, HTTP/2, or HTTP/3 upstreams, and can apply OxiRule WAF policy on the request and response path.
 
-The current implementation is a production-oriented foundation: configuration is TOML, state is process-local by default with optional shared-state backends, Docker is the canonical release environment, and the default runtime assumptions fit non-root containers with read-only root filesystems.
+The current implementation is a production-oriented foundation: configuration is TOML, state is process-local by default with optional shared-state backends, Docker is the canonical release environment, and the default runtime assumptions fit non-root containers with read-only root filesystems while using available CPU parallelism for runtime and listener workers.
 
 ## Capabilities
 
@@ -138,6 +138,8 @@ docker run --rm -p 8443:8443 \
 
 Mounted files must be readable by UID `10001`. For private keys, prefer ownership or group permissions over broad world-readable permissions. For stronger isolation, enable `[tls.remote_signer]` and run `oxibelt-keysigner` as a separate UID that can read private keys while OxiBelt can only read certificate chains and connect to the signer Unix socket.
 
+The default release configuration uses `worker_threads = "auto"`, `runtime.accept.workers = "auto"`, and `quic.socket.workers = "auto"`. Auto sizing uses Rust `std::thread::available_parallelism()` with configurable multipliers, so container CPU limits are reflected without adding cgroup-specific code. Multi-worker TCP and HTTP/3 listeners require explicit `reuse_port = true`. If HTTP/3 Retry/stateless reset tokens should remain stable across restarts, mount a deployment-local 64-byte base64 `quic.host_key_file` under `/etc/oxibelt/cert`; the image does not include shared key material.
+
 When remote signing is used with `--read-only`, the signer socket directory must be a writable tmpfs or volume because Unix socket bind creates a filesystem entry. For example:
 
 ```sh
@@ -168,6 +170,8 @@ tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,ngi
 
 `tests/scripts/run-proxy-integration.sh` generates fresh TLS material for each run and cleans up test resources. The Docker matrix also covers reload behavior and browser-visible behavior where applicable.
 `tests/scripts/run-proxy-performance.sh` runs Docker-network performance smoke, benchmark, or soak profiles and writes `summary.md`, `results.json`, per-container logs, generated configs, and sampled Docker stats. See [docs/Performance.md](docs/Performance.md) for profile details and result interpretation.
+
+Release builds use thin LTO, one codegen unit, and stripped debuginfo. `panic = "abort"` is intentionally not enabled.
 
 ## Current Non-Goals
 

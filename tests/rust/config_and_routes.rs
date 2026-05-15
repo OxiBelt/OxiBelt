@@ -10,7 +10,7 @@ use oxibelt::config::{
     EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode,
     HotReloadMode, OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
     QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -55,8 +55,14 @@ fn protocol_operations_defaults_are_disabled() {
     assert!(config.stream_listeners.is_empty());
 }
 
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+}
+
 #[test]
-fn accept_scaling_defaults_are_single_worker() {
+fn accept_scaling_defaults_are_auto_workers() {
     let temp_dir = common::TempDir::new("accept-defaults");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "accept-defaults");
     let raw = common::minimal_config_toml(&cert_path, &key_path);
@@ -64,30 +70,30 @@ fn accept_scaling_defaults_are_single_worker() {
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
 
-    assert_eq!(config.runtime.worker_threads, None);
-    assert_eq!(config.runtime.accept.workers, 1);
-    assert!(!config.runtime.accept.reuse_port);
-    assert_eq!(config.runtime.accept.backlog, 1024);
-    assert_eq!(config.runtime.accept.accept_error_backoff_ms, 50);
-    assert_eq!(config.quic.socket.workers, 1);
+    let expected = available_parallelism();
+    assert_eq!(config.runtime.worker_threads, expected);
+    assert_eq!(config.runtime.accept.workers, expected);
+    assert!(config.runtime.accept.reuse_port);
+    assert_eq!(config.runtime.accept.backlog, 8192);
+    assert_eq!(config.runtime.accept.accept_error_backoff_ms, 10);
+    assert_eq!(config.quic.socket.workers, expected);
     assert!(!config.quic.socket.reuse_port);
+    assert_eq!(config.runtime.worker_multipliers.runtime, 1.0);
+    assert_eq!(config.runtime.worker_multipliers.accept, 1.0);
+    assert_eq!(config.runtime.worker_multipliers.quic_socket, 1.0);
 }
 
 #[test]
 fn accept_scaling_custom_values_parse() {
     let temp_dir = common::TempDir::new("accept-custom");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "accept-custom");
-    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
-        "unprivileged_mode = true",
-        r#"unprivileged_mode = true
-worker_threads = 2
-
-[runtime.accept]
-workers = 2
-reuse_port = true
-backlog = 2048
-accept_error_backoff_ms = 75"#,
-    ) + r#"
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("worker_threads = \"auto\"", "worker_threads = 2")
+        .replace(
+            "workers = \"auto\"\nreuse_port = true\nbacklog = 8192\naccept_error_backoff_ms = 10",
+            "workers = 2\nreuse_port = true\nbacklog = 2048\naccept_error_backoff_ms = 75",
+        )
+        + r#"
 
 [quic.socket]
 receive_buffer_bytes = 1048576
@@ -99,13 +105,47 @@ reuse_port = true
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
 
-    assert_eq!(config.runtime.worker_threads, Some(2));
+    assert_eq!(config.runtime.worker_threads, 2);
     assert_eq!(config.runtime.accept.workers, 2);
     assert!(config.runtime.accept.reuse_port);
     assert_eq!(config.runtime.accept.backlog, 2048);
     assert_eq!(config.runtime.accept.accept_error_backoff_ms, 75);
     assert_eq!(config.quic.socket.workers, 2);
     assert!(config.quic.socket.reuse_port);
+}
+
+#[test]
+fn auto_worker_multipliers_parse_and_round_up() {
+    let temp_dir = common::TempDir::new("accept-multipliers");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "accept-multipliers");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[runtime.accept]",
+        r#"[runtime.worker_multipliers]
+runtime = 1.5
+accept = 0.5
+quic_socket = 2.0
+
+[runtime.accept]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    let available = available_parallelism();
+    assert_eq!(
+        config.runtime.worker_threads,
+        resolve_auto_worker_count(available, 1.5).unwrap()
+    );
+    assert_eq!(
+        config.runtime.accept.workers,
+        resolve_auto_worker_count(available, 0.5).unwrap()
+    );
+    assert_eq!(
+        config.quic.socket.workers,
+        resolve_auto_worker_count(available, 2.0).unwrap()
+    );
+    assert_eq!(resolve_auto_worker_count(3, 1.5).unwrap(), 5);
 }
 
 #[test]
@@ -116,37 +156,28 @@ fn accept_scaling_rejects_invalid_values() {
 
     let cases = [
         (
-            base.replace(
-                "unprivileged_mode = true",
-                "unprivileged_mode = true\nworker_threads = 0",
-            ),
+            base.replace("worker_threads = \"auto\"", "worker_threads = 0"),
             "runtime.worker_threads must be greater than 0",
         ),
         (
-            base.replace(
-                "unprivileged_mode = true",
-                "unprivileged_mode = true\n\n[runtime.accept]\nworkers = 0",
-            ),
+            base.replace("workers = \"auto\"", "workers = 0"),
             "runtime.accept.workers must be greater than 0",
         ),
         (
             base.replace(
-                "unprivileged_mode = true",
-                "unprivileged_mode = true\n\n[runtime.accept]\nworkers = 2",
+                "workers = \"auto\"\nreuse_port = true",
+                "workers = 2\nreuse_port = false",
             ),
             "runtime.accept.reuse_port must be true",
         ),
         (
-            base.replace(
-                "unprivileged_mode = true",
-                "unprivileged_mode = true\n\n[runtime.accept]\nbacklog = 0",
-            ),
+            base.replace("backlog = 8192", "backlog = 0"),
             "runtime.accept.backlog must be greater than 0",
         ),
         (
             base.replace(
-                "unprivileged_mode = true",
-                "unprivileged_mode = true\n\n[runtime.accept]\naccept_error_backoff_ms = 0",
+                "accept_error_backoff_ms = 10",
+                "accept_error_backoff_ms = 0",
             ),
             "runtime.accept.accept_error_backoff_ms must be greater than 0",
         ),
@@ -155,18 +186,30 @@ fn accept_scaling_rejects_invalid_values() {
             "quic.socket.workers must be greater than 0",
         ),
         (
-            format!("{base}\n\n[quic.socket]\nworkers = 2\n"),
+            format!(
+                "{}\n\n[quic.socket]\nworkers = 2\nreuse_port = false\n",
+                base.replace("http3 = false", "http3 = true")
+            ),
             "quic.socket.reuse_port must be true",
+        ),
+        (
+            base.replace(
+                "[runtime.accept]",
+                "[runtime.worker_multipliers]\nruntime = 0\n\n[runtime.accept]",
+            ),
+            "runtime.worker_multipliers.runtime must be a finite number greater than 0",
         ),
     ];
 
     for (raw, expected) in cases {
-        let config: Config = toml::from_str(&raw).expect("config should parse");
-        let error = config.validate().expect_err("validation should fail");
-        assert!(
-            error.to_string().contains(expected),
-            "unexpected error: {error}"
-        );
+        let error = match toml::from_str::<Config>(&raw) {
+            Ok(config) => config
+                .validate()
+                .expect_err("validation should fail")
+                .to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains(expected), "unexpected error: {error}");
     }
 }
 
@@ -1560,6 +1603,30 @@ connection_url = "redis://:secret@redis.example:6379/0"
 }
 
 #[test]
+fn effective_config_dump_resolves_auto_worker_counts() {
+    let temp_dir = common::TempDir::new("effective-workers");
+    let config_path = write_loadable_config(&temp_dir, "effective-workers", |raw| raw);
+
+    let rendered =
+        toml::to_string_pretty(&Config::load_effective_toml_redacted(&config_path).unwrap())
+            .expect("effective TOML should serialize");
+    let expected = available_parallelism();
+
+    assert!(
+        rendered.contains(&format!("worker_threads = {expected}")),
+        "effective config should contain resolved runtime worker count: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("workers = {expected}")),
+        "effective config should contain resolved accept worker count: {rendered}"
+    );
+    assert!(
+        !rendered.contains("\"auto\""),
+        "effective config should not keep auto worker strings: {rendered}"
+    );
+}
+
+#[test]
 fn admin_transport_plaintext_requires_explicit_insecure_opt_in() {
     unsafe {
         std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
@@ -2192,6 +2259,23 @@ fn quic_host_key_loader_accepts_key_under_base_directory() {
 }
 
 #[test]
+fn quic_host_key_loader_accepts_wrapped_base64() {
+    let temp_dir = common::TempDir::new("quic-host-key-wrapped");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    let host_key_path = cert_dir.join("quic-host-key.b64");
+    let bytes = [11u8; 64];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let wrapped = format!("{}\n{}\n", &encoded[..64], &encoded[64..]);
+    std::fs::write(&host_key_path, wrapped).expect("failed to write wrapped host key");
+
+    assert_eq!(
+        load_host_key(&cert_dir, &host_key_path).expect("host key should load"),
+        bytes
+    );
+}
+
+#[test]
 fn quic_host_key_loader_rejects_wrong_length() {
     let temp_dir = common::TempDir::new("quic-host-key-short");
     let cert_dir = temp_dir.path().join("cert");
@@ -2550,6 +2634,13 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
 
 [listeners]
 https_bind = "127.0.0.1:8443"
@@ -3661,6 +3752,13 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
 
 [listeners]
 https_bind = "127.0.0.1:8443"
@@ -3810,8 +3908,14 @@ fn oxirule_reload_equivalence_rejects_non_waf_changes() {
 fn downstream_http3_listener_validates() {
     let temp_dir = common::TempDir::new("downstream-http3");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "downstream-h3");
-    let raw =
-        common::minimal_config_toml(&cert_path, &key_path).replace("http3 = false", "http3 = true");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("http3 = false", "http3 = true")
+        + r#"
+
+[quic.socket]
+workers = "auto"
+reuse_port = true
+"#;
 
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("HTTP/3 listener should validate");
@@ -3949,6 +4053,15 @@ fn route_can_reference_pool_without_direct_upstreams() {
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "pool-only-route");
     let raw = format!(
         r#"
+[runtime]
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
 [listeners]
 https_bind = "127.0.0.1:8443"
 http1 = true
@@ -4024,6 +4137,13 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
 
 [listeners]
 https_bind = "127.0.0.1:8443"

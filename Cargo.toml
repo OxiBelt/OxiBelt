@@ -2,3 +2,8 @@
 members = ["source"]
 default-members = ["source"]
 resolver = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

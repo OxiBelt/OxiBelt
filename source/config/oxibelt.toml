@@ -14,13 +14,18 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
-# worker_threads = 8
+worker_threads = "auto"
+
+[runtime.worker_multipliers]
+runtime = 1.0
+accept = 1.0
+quic_socket = 1.0
 
 [runtime.accept]
-workers = 1
-reuse_port = false
-backlog = 1024
-accept_error_backoff_ms = 50
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
 
 [runtime.drain]
 graceful_timeout_ms = 30000
@@ -37,7 +42,7 @@ http_bind = "0.0.0.0:8080"
 http_mode = "redirect_to_https"
 http1 = true
 http2 = true
-http3 = false
+http3 = true
 
 [listeners.proxy_protocol]
 enabled = false
@@ -70,8 +75,11 @@ verify_depth = 4
 mode = "disabled"
 
 [quic]
-retry = false
+retry = true
 zero_rtt = "off"
+# For stable QUIC Retry/stateless reset tokens across restarts, generate
+# 64 random bytes, base64 encode them, and mount the file under the cert dir:
+#   openssl rand -base64 64 > /etc/oxibelt/cert/quic-host-key.b64
 # host_key_file = "quic-host-key.b64"
 
 [quic.alt_svc]
@@ -80,8 +88,8 @@ max_age_seconds = 86400
 persist = false
 
 [quic.transport]
-max_concurrent_bidi_streams = 100
-max_concurrent_uni_streams = 100
+max_concurrent_bidi_streams = 512
+max_concurrent_uni_streams = 512
 idle_timeout_ms = 30000
 datagram_receive_buffer_bytes = 1048576
 datagram_send_buffer_bytes = 1048576
@@ -89,10 +97,10 @@ max_udp_payload_size = 1472
 gso = true
 
 [quic.socket]
-receive_buffer_bytes = 0
-send_buffer_bytes = 0
-workers = 1
-reuse_port = false
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = "auto"
+reuse_port = true
 
 [quic.upstream_pool]
 enabled = true

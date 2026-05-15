@@ -61,6 +61,7 @@ include = ["conf.d/*.toml"]
 [logging.access_log.database]
 [logging.access_log.database.tls]
 [runtime]
+[runtime.worker_multipliers]
 [runtime.accept]
 [runtime.drain]
 [runtime.hot_reload]
@@ -219,13 +220,18 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
-# worker_threads = 8
+worker_threads = "auto"
+
+[runtime.worker_multipliers]
+runtime = 1.0
+accept = 1.0
+quic_socket = 1.0
 
 [runtime.accept]
-workers = 1
-reuse_port = false
-backlog = 1024
-accept_error_backoff_ms = 50
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
 
 [runtime.drain]
 graceful_timeout_ms = 30000
@@ -237,7 +243,9 @@ mode = "off" # off | oxirule | downstream_tls | full
 poll_interval_ms = 2000
 ```
 
-`unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` is optional; when omitted, Tokio chooses its default multi-thread worker count. `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers = 1` keeps the compatibility path. Set `workers > 1` only with `reuse_port = true`, which creates one `SO_REUSEPORT` listener socket per worker. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
+`unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` accepts a positive integer or `"auto"`; omitted values default to `"auto"`. Auto worker sizing uses Rust `std::thread::available_parallelism()`, falls back to `1` when detection fails, multiplies by `[runtime.worker_multipliers].runtime`, and rounds up. Full hot reload rejects changes to the resolved `runtime.worker_threads` value because the Tokio runtime cannot be resized in-process.
+
+`[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].accept`. Set `reuse_port = true` whenever the resolved worker count can be greater than one; OxiBelt fails startup instead of silently enabling `SO_REUSEPORT`. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
 
 `[runtime.drain]` controls reload and shutdown draining. `graceful_timeout_ms` is the maximum time a stopped listener generation waits for active HTTP/1.1 and HTTP/2 requests to finish before force-closing remaining connection tasks. Successful reloads also drain existing HTTP connections that captured the previous data-plane snapshot, even when listener binds do not change, so new requests use the replacement snapshot on new connections. `long_connection_close_delay_ms` protects upgraded WebSocket/generic Upgrade, CONNECT, WebTransport, and TCP stream bridges after a drain signal before they are closed; drained WebTransport bridges keep existing sessions for that grace window but reject new request streams immediately. `shutdown_delay_ms` marks the instance draining and waits before listener drain begins; `0` is allowed. `graceful_timeout_ms` and `long_connection_close_delay_ms` must be greater than zero.
 
@@ -330,7 +338,7 @@ Keep ACME credentials, DNS-01 provider tokens, renewal state, and private signin
 
 ```toml
 [quic]
-retry = false
+retry = true
 zero_rtt = "off" # off | safe_methods
 # host_key_file = "quic-host-key.b64"
 
@@ -340,8 +348,8 @@ max_age_seconds = 86400
 persist = false
 
 [quic.transport]
-max_concurrent_bidi_streams = 100
-max_concurrent_uni_streams = 100
+max_concurrent_bidi_streams = 512
+max_concurrent_uni_streams = 512
 idle_timeout_ms = 30000
 datagram_receive_buffer_bytes = 1048576
 datagram_send_buffer_bytes = 1048576
@@ -349,10 +357,10 @@ max_udp_payload_size = 1472
 gso = true
 
 [quic.socket]
-receive_buffer_bytes = 0
-send_buffer_bytes = 0
-workers = 1
-reuse_port = false
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = "auto"
+reuse_port = true
 
 [quic.upstream_pool]
 enabled = true
@@ -362,11 +370,11 @@ max_lifetime_ms = 600000
 
 `retry = true` enables QUIC Retry/address validation for unvalidated downstream HTTP/3 connection attempts. `zero_rtt = "safe_methods"` enables QUIC TLS early data and rejects unsafe requests that the QUIC transport reports as early data with `425 Too Early`; only early-data `GET` and `HEAD` are accepted.
 
-`host_key_file` is optional and is resolved under the cert directory. It must contain base64 for exactly 64 random bytes. OxiBelt derives QUIC stateless reset and Retry/validation token keys from this material. The file is included in runtime reload fingerprints and in downstream TLS reload inputs.
+`host_key_file` is optional and is resolved under the cert directory. It must contain base64 for exactly 64 random bytes. OxiBelt derives QUIC stateless reset and Retry/validation token keys from this material. The file is included in runtime reload fingerprints and in downstream TLS reload inputs. Do not reuse a key baked into an image; generate deployment-local material, for example `openssl rand -base64 64 > /etc/oxibelt/cert/quic-host-key.b64`, then mount it with the rest of the certificate material.
 
 When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/1.1 and HTTP/2 responses advertise `Alt-Svc: h3=":<https port>"; ma=<max_age_seconds>`. `persist = true` appends `; persist=1`. OxiBelt does not add `Alt-Svc` to downstream HTTP/3 responses, plain HTTP responses, or `101 Switching Protocols`.
 
-`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets. `quic.socket.workers = 1` keeps a single downstream HTTP/3 endpoint. Set `workers > 1` only with `reuse_port = true`, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. Other QUIC transport, socket, and pool numeric values must be greater than zero; `max_udp_payload_size` must be in the QUIC-valid range `1200..=65527`.
+`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets, and startup fails if the OS rejects an explicitly configured buffer size. `quic.socket.workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].quic_socket`. When HTTP/3 is enabled, set `reuse_port = true` whenever the resolved worker count can be greater than one, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. Other QUIC transport, socket, and pool numeric values must be greater than zero; `max_udp_payload_size` must be in the QUIC-valid range `1200..=65527`.
 
 The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary HTTP/3 upstream requests use one-shot QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
 
@@ -1263,7 +1271,7 @@ Configuration validation rejects:
 - No enabled downstream HTTP versions.
 - Privileged listener ports when `runtime.unprivileged_mode = true`.
 - Non-Linux runtime when `runtime.linux_only = true`.
-- Invalid hot reload mode, zero `worker_threads`, zero `poll_interval_ms`, zero accept worker/backlog/backoff values, or accept/QUIC worker counts greater than one without `reuse_port = true`.
+- Invalid hot reload mode, zero worker counts, non-positive worker multipliers, zero `poll_interval_ms`, zero accept backlog/backoff values, accept worker counts greater than one without `runtime.accept.reuse_port = true`, or HTTP/3 QUIC socket worker counts greater than one without `quic.socket.reuse_port = true`.
 - No upstreams/pools, no routes, duplicate names, empty route hosts, or unknown route targets.
 - Routes that set both `upstream` and `upstream_pool`, or neither.
 - Unsafe route paths.

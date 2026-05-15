@@ -15,6 +15,7 @@ mod limits;
 mod stream;
 mod tls;
 mod turn;
+mod workers;
 pub use dynamic_policy::*;
 use limits::{
   default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
@@ -23,61 +24,141 @@ use limits::{
 pub use stream::*;
 pub use tls::*;
 pub use turn::*;
+pub use workers::*;
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-  #[serde(default)]
   pub config: ConfigBehaviorConfig,
-  #[serde(default)]
   pub logging: LoggingConfig,
-  #[serde(default)]
   pub runtime: RuntimeConfig,
   pub listeners: ListenerConfig,
   pub tls: TlsConfig,
-  #[serde(default)]
   pub quic: QuicConfig,
-  #[serde(default)]
   pub proxy: ProxyConfig,
-  #[serde(default)]
   pub limits: LimitsConfig,
-  #[serde(default)]
   pub rate_limits: Vec<RateLimitConfig>,
-  #[serde(default)]
   pub connection_limits: Vec<ConnectionLimitConfig>,
-  #[serde(default)]
   pub compression: CompressionConfig,
-  #[serde(default)]
   pub cache: CacheConfig,
-  #[serde(default)]
   pub admin: AdminConfig,
-  #[serde(default)]
   pub metrics: MetricsConfig,
-  #[serde(default)]
   pub health: HealthConfig,
-  #[serde(default)]
   pub security: SecurityConfig,
-  #[serde(default)]
   pub database: DatabaseConfig,
-  #[serde(default)]
   pub shared_state: SharedStateConfig,
-  #[serde(default)]
   pub dynamic_policy: DynamicPolicyConfig,
-  #[serde(default)]
   pub upstreams: Vec<UpstreamConfig>,
-  #[serde(default)]
   pub upstream_pools: Vec<UpstreamPoolConfig>,
-  #[serde(default)]
   pub turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
-  #[serde(default)]
   pub stream_listeners: Vec<StreamListenerConfig>,
-  #[serde(default)]
   pub webrtc_turn_listeners: Vec<WebRtcTurnListenerConfig>,
-  #[serde(default)]
   pub routes: Vec<RouteConfig>,
-  #[serde(default)]
   pub waf: WafConfig,
-  #[serde(skip)]
   pub source_paths: ConfigSourcePaths,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawConfig {
+  #[serde(default)]
+  config: ConfigBehaviorConfig,
+  #[serde(default)]
+  logging: LoggingConfig,
+  #[serde(default)]
+  runtime: RawRuntimeConfig,
+  listeners: ListenerConfig,
+  tls: TlsConfig,
+  #[serde(default)]
+  quic: RawQuicConfig,
+  #[serde(default)]
+  proxy: ProxyConfig,
+  #[serde(default)]
+  limits: LimitsConfig,
+  #[serde(default)]
+  rate_limits: Vec<RateLimitConfig>,
+  #[serde(default)]
+  connection_limits: Vec<ConnectionLimitConfig>,
+  #[serde(default)]
+  compression: CompressionConfig,
+  #[serde(default)]
+  cache: CacheConfig,
+  #[serde(default)]
+  admin: AdminConfig,
+  #[serde(default)]
+  metrics: MetricsConfig,
+  #[serde(default)]
+  health: HealthConfig,
+  #[serde(default)]
+  security: SecurityConfig,
+  #[serde(default)]
+  database: DatabaseConfig,
+  #[serde(default)]
+  shared_state: SharedStateConfig,
+  #[serde(default)]
+  dynamic_policy: DynamicPolicyConfig,
+  #[serde(default)]
+  upstreams: Vec<UpstreamConfig>,
+  #[serde(default)]
+  upstream_pools: Vec<UpstreamPoolConfig>,
+  #[serde(default)]
+  turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
+  #[serde(default)]
+  stream_listeners: Vec<StreamListenerConfig>,
+  #[serde(default)]
+  webrtc_turn_listeners: Vec<WebRtcTurnListenerConfig>,
+  #[serde(default)]
+  routes: Vec<RouteConfig>,
+  #[serde(default)]
+  waf: WafConfig,
+}
+
+impl TryFrom<RawConfig> for Config {
+  type Error = anyhow::Error;
+
+  fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
+    let parallelism = WorkerParallelism::detect();
+    let runtime = RuntimeConfig::resolve(raw.runtime, parallelism)?;
+    let quic = QuicConfig::resolve(raw.quic, runtime.worker_multipliers, parallelism)?;
+    Ok(Self {
+      config: raw.config,
+      logging: raw.logging,
+      runtime,
+      listeners: raw.listeners,
+      tls: raw.tls,
+      quic,
+      proxy: raw.proxy,
+      limits: raw.limits,
+      rate_limits: raw.rate_limits,
+      connection_limits: raw.connection_limits,
+      compression: raw.compression,
+      cache: raw.cache,
+      admin: raw.admin,
+      metrics: raw.metrics,
+      health: raw.health,
+      security: raw.security,
+      database: raw.database,
+      shared_state: raw.shared_state,
+      dynamic_policy: raw.dynamic_policy,
+      upstreams: raw.upstreams,
+      upstream_pools: raw.upstream_pools,
+      turn_upstream_pools: raw.turn_upstream_pools,
+      stream_listeners: raw.stream_listeners,
+      webrtc_turn_listeners: raw.webrtc_turn_listeners,
+      routes: raw.routes,
+      waf: raw.waf,
+      source_paths: ConfigSourcePaths::default(),
+    })
+  }
+}
+
+impl<'de> Deserialize<'de> for Config {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    RawConfig::deserialize(deserializer)?
+      .try_into()
+      .map_err(serde::de::Error::custom)
+  }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -183,8 +264,32 @@ impl Config {
     let loaded = load_toml_with_includes(path)?;
     validate_merged_toml_shape(&loaded.value)?;
     let mut value = loaded.value;
+    let config = Self::load(path)?;
+    config.validate()?;
+    config.write_resolved_workers_to_toml(&mut value)?;
     redact_effective_toml(&mut value);
     Ok(value)
+  }
+
+  pub fn log_worker_resolution(&self) {
+    let resolution = self.runtime.worker_resolution;
+    if let Some(error) = resolution.fallback_error {
+      tracing::warn!(
+        error,
+        fallback_parallelism = resolution.available_parallelism,
+        "worker auto-scaling fell back to one available thread"
+      );
+    }
+    tracing::info!(
+      available_parallelism = resolution.available_parallelism,
+      runtime_multiplier = resolution.runtime_multiplier,
+      accept_multiplier = resolution.accept_multiplier,
+      quic_socket_multiplier = resolution.quic_socket_multiplier,
+      runtime_worker_threads = self.runtime.worker_threads,
+      accept_workers = self.runtime.accept.workers,
+      quic_socket_workers = self.quic.socket.workers,
+      "resolved worker auto-scaling"
+    );
   }
 
   pub fn apply_runtime_overrides(&mut self, overrides: &RuntimeOverrides) -> Vec<String> {
@@ -208,6 +313,39 @@ impl Config {
       self.runtime.hot_reload.poll_interval_ms = poll_interval_ms;
     }
     warnings
+  }
+
+  fn write_resolved_workers_to_toml(&self, value: &mut toml::Value) -> anyhow::Result<()> {
+    set_toml_integer_path(
+      value,
+      &["runtime", "worker_threads"],
+      self.runtime.worker_threads,
+    )?;
+    set_toml_float_path(
+      value,
+      &["runtime", "worker_multipliers", "runtime"],
+      self.runtime.worker_multipliers.runtime,
+    )?;
+    set_toml_float_path(
+      value,
+      &["runtime", "worker_multipliers", "accept"],
+      self.runtime.worker_multipliers.accept,
+    )?;
+    set_toml_float_path(
+      value,
+      &["runtime", "worker_multipliers", "quic_socket"],
+      self.runtime.worker_multipliers.quic_socket,
+    )?;
+    set_toml_integer_path(
+      value,
+      &["runtime", "accept", "workers"],
+      self.runtime.accept.workers,
+    )?;
+    set_toml_integer_path(
+      value,
+      &["quic", "socket", "workers"],
+      self.quic.socket.workers,
+    )
   }
 
   pub fn non_waf_equivalent(&self, other: &Self) -> bool {
@@ -455,7 +593,7 @@ impl Config {
     self.validate_metrics_and_health()?;
     self.validate_security_headers()?;
     self.validate_tls()?;
-    self.quic.validate()?;
+    self.quic.validate(self.listeners.http3)?;
     self.logging.validate()?;
 
     if self.runtime.linux_only && !cfg!(target_os = "linux") {
@@ -1851,8 +1989,10 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "memory_only_state",
       "read_only_rootfs_compatible",
       "unprivileged_mode",
+      "worker_multipliers",
       "worker_threads",
     ][..],
+    "runtime.worker_multipliers" => &["accept", "quic_socket", "runtime"][..],
     "runtime.accept" => &[
       "accept_error_backoff_ms",
       "backlog",
@@ -2383,6 +2523,46 @@ fn redact_effective_toml(value: &mut toml::Value) {
   }
 }
 
+fn set_toml_integer_path(
+  value: &mut toml::Value,
+  path: &[&str],
+  resolved: usize,
+) -> anyhow::Result<()> {
+  let resolved = i64::try_from(resolved).context("resolved worker count is too large")?;
+  set_toml_value_path(value, path, toml::Value::Integer(resolved))
+}
+
+fn set_toml_float_path(
+  value: &mut toml::Value,
+  path: &[&str],
+  resolved: f64,
+) -> anyhow::Result<()> {
+  set_toml_value_path(value, path, toml::Value::Float(resolved))
+}
+
+fn set_toml_value_path(
+  value: &mut toml::Value,
+  path: &[&str],
+  resolved: toml::Value,
+) -> anyhow::Result<()> {
+  let Some((leaf, parents)) = path.split_last() else {
+    return Ok(());
+  };
+  let mut current = value
+    .as_table_mut()
+    .ok_or_else(|| anyhow!("effective TOML root must be a table"))?;
+  for key in parents {
+    let entry = current
+      .entry((*key).to_string())
+      .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    current = entry
+      .as_table_mut()
+      .ok_or_else(|| anyhow!("effective TOML path {} must be a table", parents.join(".")))?;
+  }
+  current.insert((*leaf).to_string(), resolved);
+  Ok(())
+}
+
 fn load_toml_with_includes(path: &Path) -> anyhow::Result<LoadedToml> {
   let mut stack = Vec::new();
   load_toml_document(path, &mut stack)
@@ -2868,93 +3048,6 @@ impl Default for LoggingAccessLogConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct RuntimeConfig {
-  #[serde(default = "default_true")]
-  pub linux_only: bool,
-  #[serde(default = "default_true")]
-  pub read_only_rootfs_compatible: bool,
-  #[serde(default = "default_true")]
-  pub memory_only_state: bool,
-  #[serde(default = "default_true")]
-  pub unprivileged_mode: bool,
-  #[serde(default)]
-  pub worker_threads: Option<usize>,
-  #[serde(default)]
-  pub accept: RuntimeAcceptConfig,
-  #[serde(default)]
-  pub drain: RuntimeDrainConfig,
-  #[serde(default)]
-  pub hot_reload: HotReloadConfig,
-}
-
-impl Default for RuntimeConfig {
-  fn default() -> Self {
-    Self {
-      linux_only: true,
-      read_only_rootfs_compatible: true,
-      memory_only_state: true,
-      unprivileged_mode: true,
-      worker_threads: None,
-      accept: RuntimeAcceptConfig::default(),
-      drain: RuntimeDrainConfig::default(),
-      hot_reload: HotReloadConfig::default(),
-    }
-  }
-}
-
-impl RuntimeConfig {
-  fn validate(&self) -> anyhow::Result<()> {
-    if self.worker_threads == Some(0) {
-      bail!("runtime.worker_threads must be greater than 0");
-    }
-    self.accept.validate()?;
-    self.drain.validate()?;
-    self.hot_reload.validate()
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct RuntimeAcceptConfig {
-  #[serde(default = "default_one_usize")]
-  pub workers: usize,
-  #[serde(default)]
-  pub reuse_port: bool,
-  #[serde(default = "default_runtime_accept_backlog")]
-  pub backlog: u32,
-  #[serde(default = "default_accept_error_backoff_ms")]
-  pub accept_error_backoff_ms: u64,
-}
-
-impl Default for RuntimeAcceptConfig {
-  fn default() -> Self {
-    Self {
-      workers: default_one_usize(),
-      reuse_port: false,
-      backlog: default_runtime_accept_backlog(),
-      accept_error_backoff_ms: default_accept_error_backoff_ms(),
-    }
-  }
-}
-
-impl RuntimeAcceptConfig {
-  fn validate(&self) -> anyhow::Result<()> {
-    if self.workers == 0 {
-      bail!("runtime.accept.workers must be greater than 0");
-    }
-    if self.workers > 1 && !self.reuse_port {
-      bail!("runtime.accept.reuse_port must be true when runtime.accept.workers is greater than 1");
-    }
-    if self.backlog == 0 {
-      bail!("runtime.accept.backlog must be greater than 0");
-    }
-    if self.accept_error_backoff_ms == 0 {
-      bail!("runtime.accept.accept_error_backoff_ms must be greater than 0");
-    }
-    Ok(())
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeDrainConfig {
   #[serde(default = "default_drain_graceful_timeout_ms")]
   pub graceful_timeout_ms: u64,
@@ -3111,65 +3204,6 @@ pub enum ProxyProtocolVersion {
   Any,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct QuicConfig {
-  #[serde(default)]
-  pub retry: bool,
-  #[serde(default)]
-  pub zero_rtt: QuicZeroRttMode,
-  #[serde(default)]
-  pub host_key_file: Option<PathBuf>,
-  #[serde(default)]
-  pub alt_svc: QuicAltSvcConfig,
-  #[serde(default)]
-  pub transport: QuicTransportConfig,
-  #[serde(default)]
-  pub socket: QuicSocketConfig,
-  #[serde(default)]
-  pub upstream_pool: QuicUpstreamPoolConfig,
-}
-
-impl Default for QuicConfig {
-  fn default() -> Self {
-    Self {
-      retry: false,
-      zero_rtt: QuicZeroRttMode::Off,
-      host_key_file: None,
-      alt_svc: QuicAltSvcConfig::default(),
-      transport: QuicTransportConfig::default(),
-      socket: QuicSocketConfig::default(),
-      upstream_pool: QuicUpstreamPoolConfig::default(),
-    }
-  }
-}
-
-impl QuicConfig {
-  pub fn validate(&self) -> anyhow::Result<()> {
-    if self.alt_svc.max_age_seconds == 0 {
-      bail!("quic.alt_svc.max_age_seconds must be greater than 0");
-    }
-    if self.transport.max_concurrent_bidi_streams == 0
-      || self.transport.max_concurrent_uni_streams == 0
-      || self.transport.idle_timeout_ms == 0
-      || self.transport.datagram_receive_buffer_bytes == 0
-      || self.transport.datagram_send_buffer_bytes == 0
-    {
-      bail!("quic.transport numeric values must be greater than 0");
-    }
-    if !(1200..=65_527).contains(&self.transport.max_udp_payload_size) {
-      bail!("quic.transport.max_udp_payload_size must be between 1200 and 65527");
-    }
-    if self.upstream_pool.max_connections_per_upstream == 0 {
-      bail!("quic.upstream_pool.max_connections_per_upstream must be greater than 0");
-    }
-    if self.upstream_pool.max_lifetime_ms == 0 {
-      bail!("quic.upstream_pool.max_lifetime_ms must be greater than 0");
-    }
-    self.socket.validate()?;
-    Ok(())
-  }
-}
-
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum QuicZeroRttMode {
@@ -3227,41 +3261,6 @@ impl Default for QuicTransportConfig {
       max_udp_payload_size: default_quic_max_udp_payload_size(),
       gso: true,
     }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct QuicSocketConfig {
-  #[serde(default)]
-  pub receive_buffer_bytes: usize,
-  #[serde(default)]
-  pub send_buffer_bytes: usize,
-  #[serde(default = "default_one_usize")]
-  pub workers: usize,
-  #[serde(default)]
-  pub reuse_port: bool,
-}
-
-impl Default for QuicSocketConfig {
-  fn default() -> Self {
-    Self {
-      receive_buffer_bytes: 0,
-      send_buffer_bytes: 0,
-      workers: default_one_usize(),
-      reuse_port: false,
-    }
-  }
-}
-
-impl QuicSocketConfig {
-  fn validate(&self) -> anyhow::Result<()> {
-    if self.workers == 0 {
-      bail!("quic.socket.workers must be greater than 0");
-    }
-    if self.workers > 1 && !self.reuse_port {
-      bail!("quic.socket.reuse_port must be true when quic.socket.workers is greater than 1");
-    }
-    Ok(())
   }
 }
 
@@ -5378,10 +5377,6 @@ fn default_drain_graceful_timeout_ms() -> u64 {
 
 fn default_drain_long_connection_close_delay_ms() -> u64 {
   300_000
-}
-
-fn default_one_usize() -> usize {
-  1
 }
 
 fn default_runtime_accept_backlog() -> u32 {

@@ -44,6 +44,14 @@ http1 = true
 http2 = true
 http3 = true
 
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+
+[quic.socket]
+workers = "auto"
+reuse_port = true
+
 [tls]
 cert_chain = "{cert}"
 private_key = "{key}"
@@ -102,6 +110,14 @@ https_bind = "127.0.0.1:8443"
 http1 = true
 http2 = true
 http3 = true
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+
+[quic.socket]
+workers = "auto"
+reuse_port = true
 
 [tls]
 cert_chain = "{cert}"
