@@ -38,6 +38,7 @@ pub(crate) mod headers;
 pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod semantics;
+pub(crate) mod static_files;
 pub(crate) mod uri;
 pub(crate) mod version;
 pub(crate) mod webtransport;
@@ -536,6 +537,51 @@ where
 
   if let Some(terminal) = request_waf.terminal {
     return waf_terminal_response(terminal, &request_waf.response_header_mutations);
+  }
+
+  if let Some(static_root) = resolved.route.static_root.as_deref() {
+    if request_waf.upstream_override.is_some() || request_waf.upstream_pool_override.is_some() {
+      warn!(
+        route = %resolved.route.name,
+        "WAF selected an upstream target for a static route"
+      );
+      return text_response(
+        StatusCode::BAD_GATEWAY,
+        "WAF selected an upstream target for a static route",
+      );
+    }
+    access_log.set_upstream("static", "file");
+    let response = static_files::serve(
+      &request,
+      &resolved.route.name,
+      &resolved.route.path_prefix,
+      static_root,
+    )
+    .await;
+    return static_files::finalize_response(
+      response,
+      state.as_ref(),
+      resolved.route,
+      &request_waf,
+      response_waf_enabled,
+      response_body_need,
+      &request_method,
+      &request_uri,
+      request_version,
+      request.headers(),
+      client_addr,
+      &host,
+      tcp_max_hop,
+      tls.as_ref(),
+      protocol,
+      transport_network,
+      transport_metadata,
+      downstream_scheme,
+      request_body,
+      tags_ref(&tags),
+      access_log,
+    )
+    .await;
   }
 
   if request_method == Method::CONNECT {

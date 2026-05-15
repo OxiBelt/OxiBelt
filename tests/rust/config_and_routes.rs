@@ -4099,6 +4099,107 @@ upstream_pool = "app-pool"
     assert_eq!(config.routes[0].upstream_pool.as_deref(), Some("app-pool"));
 }
 
+#[test]
+fn static_route_can_validate_without_upstreams() {
+    let temp_dir = common::TempDir::new("static-route-config");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "static-route");
+    let static_root = temp_dir.path().join("public");
+    std::fs::create_dir_all(&static_root).expect("static root should be created");
+    let raw = format!(
+        r#"
+[runtime]
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "{cert}"
+private_key = "{key}"
+
+[tls.ocsp]
+mode = "disabled"
+
+[[routes]]
+name = "assets"
+hosts = ["static.example.com"]
+path_prefix = "/assets"
+static_root = "{static_root}"
+"#,
+        cert = cert_path.display(),
+        key = key_path.display(),
+        static_root = static_root.display(),
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config
+        .validate()
+        .expect("static-only route should validate");
+    assert!(config.upstreams.is_empty());
+    assert_eq!(
+        config.routes[0].static_root.as_deref(),
+        Some(static_root.as_path())
+    );
+}
+
+#[test]
+fn static_route_rejects_multiple_targets() {
+    let temp_dir = common::TempDir::new("static-route-targets");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "static-targets");
+    let static_root = temp_dir.path().join("public");
+    std::fs::create_dir_all(&static_root).expect("static root should be created");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        &format!(
+            "upstream = \"app\"\nstatic_root = \"{}\"",
+            static_root.display()
+        ),
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("route with multiple targets should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("exactly one of upstream, upstream_pool, or static_root"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn static_route_rejects_missing_root() {
+    let temp_dir = common::TempDir::new("static-route-missing");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "static-missing");
+    let missing_root = temp_dir.path().join("missing");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        &format!("static_root = \"{}\"", missing_root.display()),
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("missing static root should fail");
+
+    assert!(
+        error.to_string().contains("static_root is invalid"),
+        "unexpected error: {error}"
+    );
+}
+
 fn write_loadable_config(
     temp_dir: &common::TempDir,
     common_name: &str,

@@ -529,6 +529,17 @@ impl Config {
     }
     self.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     for route in &mut self.routes {
+      if let Some(static_root) = route.static_root.as_ref() {
+        let resolved = if static_root.is_absolute() {
+          static_root.clone()
+        } else {
+          validate_relative_path("routes.static_root", static_root)?;
+          path_roots.config_dir.join(static_root)
+        };
+        route.static_root = Some(crate::proxy::http::static_files::validate_static_root(
+          &resolved,
+        )?);
+      }
       route.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     }
     Ok(())
@@ -598,10 +609,6 @@ impl Config {
 
     if self.runtime.linux_only && !cfg!(target_os = "linux") {
       bail!("this build is configured for Linux only");
-    }
-
-    if !self.routes.is_empty() && self.upstreams.is_empty() && self.upstream_pools.is_empty() {
-      bail!("at least one upstream or upstream pool must be configured");
     }
 
     if self.routes.is_empty()
@@ -783,37 +790,60 @@ impl Config {
       if let Some(replacement) = &route.replace_prefix_with {
         validate_route_path_value(&route.name, "replace_prefix_with", replacement)?;
       }
-      match (&route.upstream, &route.upstream_pool) {
-        (Some(upstream), None) => {
-          if !upstream_names.contains(upstream) {
+      let target_count = usize::from(route.upstream.is_some())
+        + usize::from(route.upstream_pool.is_some())
+        + usize::from(route.static_root.is_some());
+      if target_count != 1 {
+        bail!(
+          "route {} must set exactly one of upstream, upstream_pool, or static_root",
+          route.name
+        );
+      }
+      match (&route.upstream, &route.upstream_pool, &route.static_root) {
+        (Some(upstream), None, None) if !upstream_names.contains(upstream) => {
+          bail!(
+            "route {} references unknown upstream {}",
+            route.name,
+            upstream
+          );
+        }
+        (None, Some(pool), None) if !pool_names.contains(pool) => {
+          bail!(
+            "route {} references unknown upstream_pool {}",
+            route.name,
+            pool
+          );
+        }
+        (Some(_), None, None) | (None, Some(_), None) => {}
+        (None, None, Some(static_root)) => {
+          crate::proxy::http::static_files::validate_static_root(static_root)
+            .with_context(|| format!("route {} static_root is invalid", route.name))?;
+          if route.replace_prefix_with.is_some() {
             bail!(
-              "route {} references unknown upstream {}",
-              route.name,
-              upstream
+              "route {} cannot set replace_prefix_with when static_root is configured",
+              route.name
+            );
+          }
+          if route.cache.is_some() {
+            bail!(
+              "route {} cannot set cache when static_root is configured",
+              route.name
+            );
+          }
+          if route.upstream_http_version.is_some() {
+            bail!(
+              "route {} cannot set upstream_http_version when static_root is configured",
+              route.name
+            );
+          }
+          if route.generic_http_upgrade || route.connect_tunneling || route.grpc_web {
+            bail!(
+              "route {} cannot enable upstream-only route features when static_root is configured",
+              route.name
             );
           }
         }
-        (None, Some(pool)) => {
-          if !pool_names.contains(pool) {
-            bail!(
-              "route {} references unknown upstream_pool {}",
-              route.name,
-              pool
-            );
-          }
-        }
-        (Some(_), Some(_)) => {
-          bail!(
-            "route {} must set exactly one of upstream or upstream_pool, not both",
-            route.name
-          );
-        }
-        (None, None) => {
-          bail!(
-            "route {} must set exactly one of upstream or upstream_pool",
-            route.name
-          );
-        }
+        _ => {}
       }
       if let Some(cache) = &route.cache
         && cache != "default"
@@ -1829,6 +1859,7 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.replace_prefix_with == right.replace_prefix_with
         && left.upstream == right.upstream
         && left.upstream_pool == right.upstream_pool
+        && left.static_root == right.static_root
         && left.upstream_http_version == right.upstream_http_version
         && left.generic_http_upgrade == right.generic_http_upgrade
         && left.connect_tunneling == right.connect_tunneling
@@ -2406,6 +2437,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "connect_tunneling",
       "generic_http_upgrade",
       "grpc_web",
+      "static_root",
       "upstream",
       "upstream_http_version",
       "upstream_pool",
@@ -5209,6 +5241,8 @@ pub struct RouteConfig {
   pub upstream: Option<String>,
   #[serde(default)]
   pub upstream_pool: Option<String>,
+  #[serde(default)]
+  pub static_root: Option<PathBuf>,
   #[serde(default)]
   pub upstream_http_version: Option<HttpVersion>,
   #[serde(default)]

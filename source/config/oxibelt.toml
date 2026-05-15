@@ -553,3 +553,12 @@ upstream = "app"
 generic_http_upgrade = false
 connect_tunneling = false
 grpc_web = false
+
+#[[routes]]
+#name = "static-assets"
+#hosts = ["assets.example.com"]
+#path_prefix = "/assets"
+#static_root = "public"
+#generic_http_upgrade = false
+#connect_tunneling = false
+#grpc_web = false

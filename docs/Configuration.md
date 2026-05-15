@@ -108,9 +108,8 @@ include = ["conf.d/*.toml"]
 
 Required routing inputs:
 
-- At least one of `[[upstreams]]` or `[[upstream_pools]]`.
-- At least one `[[routes]]`.
-- Each route must set exactly one of `upstream` or `upstream_pool`.
+- At least one `[[routes]]`; upstreams and upstream pools are optional when every route serves local static files.
+- Each route must set exactly one of `upstream`, `upstream_pool`, or `static_root`.
 
 ## Includes
 
@@ -1114,6 +1113,7 @@ path_prefix = "/v1"
 replace_prefix_with = "/"
 upstream = "app"
 # upstream_pool = "app-pool"
+# static_root = "public"
 # upstream_http_version = "h2" # h1 | h2 | h3
 # generic_http_upgrade = false
 # connect_tunneling = false
@@ -1151,11 +1151,13 @@ Fields:
 - `hosts`: host match list; defaults to `["*"]`.
 - `path_prefix`: path prefix match; defaults to `/`.
 - `replace_prefix_with`: optional upstream path prefix replacement.
-- `upstream` or `upstream_pool`: exactly one target.
+- `upstream`, `upstream_pool`, or `static_root`: exactly one target.
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
+
+`static_root` enables the built-in static file server for the route. The value must resolve to an existing directory; absolute paths are accepted, and relative paths loaded through `Config::load` resolve under the configuration directory. OxiBelt strips the matched `path_prefix`, percent-decodes each remaining path segment, and serves only regular files whose canonical path stays under `static_root`. Directory listing is forbidden, and symlinks are allowed only when their canonical target remains inside the static root. Static routes accept `GET` and `HEAD`, emit `ETag`, `Last-Modified`, and `Accept-Ranges`, support a single `Range: bytes=...` request, and honor `If-None-Match` and `If-Modified-Since`. Request WAF, response WAF, rate limits, dynamic policy, security headers, compression, and Alt-Svc still apply. Static routes reject upstream-only options such as `replace_prefix_with`, `cache`, `upstream_http_version`, `generic_http_upgrade`, `connect_tunneling`, and `grpc_web`.
 
 ## TCP Stream Listeners
 

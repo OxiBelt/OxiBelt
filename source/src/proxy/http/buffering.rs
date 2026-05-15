@@ -646,6 +646,7 @@ private_key = "/tmp/key.pem"
       replace_prefix_with: None,
       upstream: Some("app".to_string()),
       upstream_pool: None,
+      static_root: None,
       upstream_http_version: None,
       generic_http_upgrade: false,
       connect_tunneling: false,

@@ -108,6 +108,7 @@ fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
     && config.rate_limits.is_empty()
     && !config.dynamic_policy.enabled
     && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
+    && route.static_root.is_none()
     && route.upstream_pool.is_none()
     && !route.grpc_web
     && !route.generic_http_upgrade
@@ -206,6 +207,7 @@ mod tests {
         replace_prefix_with: None,
         upstream: Some("wild".into()),
         upstream_pool: None,
+        static_root: None,
         upstream_http_version: None,
         generic_http_upgrade: false,
         connect_tunneling: false,
@@ -223,6 +225,7 @@ mod tests {
         replace_prefix_with: None,
         upstream: Some("exact".into()),
         upstream_pool: None,
+        static_root: None,
         upstream_http_version: None,
         generic_http_upgrade: false,
         connect_tunneling: false,
@@ -251,6 +254,7 @@ mod tests {
         replace_prefix_with: None,
         upstream: Some("root".into()),
         upstream_pool: None,
+        static_root: None,
         upstream_http_version: None,
         generic_http_upgrade: false,
         connect_tunneling: false,
@@ -268,6 +272,7 @@ mod tests {
         replace_prefix_with: None,
         upstream: Some("api".into()),
         upstream_pool: None,
+        static_root: None,
         upstream_http_version: None,
         generic_http_upgrade: false,
         connect_tunneling: false,
