@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
@@ -35,7 +34,11 @@ use crate::waf::{
   WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
 };
 
+mod open;
 mod path;
+#[cfg(test)]
+use self::open::verify_opened_file;
+use self::open::{OpenedStaticFile, StaticOpenError, open_verified_file};
 pub(crate) use self::path::{StaticPathError, resolve_request_path};
 
 const STATIC_BODY_CHANNEL_CHUNK_BYTES: usize = 64 * 1024;
@@ -56,7 +59,7 @@ pub(crate) enum StaticBodyPlan {
 
 #[derive(Debug)]
 pub(crate) struct StaticFileBodyPlan {
-  pub(crate) root: PathBuf,
+  pub(crate) file: File,
   pub(crate) path: PathBuf,
   pub(crate) offset: u64,
   pub(crate) len: u64,
@@ -136,19 +139,17 @@ pub(crate) async fn plan_response(
     }
   };
 
-  let metadata = match tokio::fs::metadata(&path).await {
-    Ok(metadata) => metadata,
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+  let opened = match open_verified_file(&root, &path).await {
+    Ok(opened) => opened,
+    Err(StaticOpenError::NotFound) => {
       return text_plan(StatusCode::NOT_FOUND, "not found");
     }
-    Err(error) => {
-      warn!(error = %error, route = %route_name, path = %path.display(), "failed to inspect static file");
+    Err(StaticOpenError::Forbidden(error)) => {
+      warn!(error = %error, route = %route_name, path = %path.display(), "failed to open static file");
       return text_plan(StatusCode::FORBIDDEN, "forbidden");
     }
   };
-  if !metadata.is_file() {
-    return text_plan(StatusCode::FORBIDDEN, "forbidden");
-  }
+  let OpenedStaticFile { file, metadata } = opened;
 
   let len = metadata.len();
   let modified = metadata.modified().ok();
@@ -166,8 +167,8 @@ pub(crate) async fn plan_response(
     RangeSelection::Full => file_plan(
       method,
       StatusCode::OK,
-      root,
       path,
+      file,
       FileContentPlan {
         offset: 0,
         body_len: len,
@@ -181,8 +182,8 @@ pub(crate) async fn plan_response(
       file_plan(
         method,
         StatusCode::PARTIAL_CONTENT,
-        root,
         path,
+        file,
         FileContentPlan {
           offset: start,
           body_len,
@@ -344,27 +345,30 @@ pub(crate) async fn response_from_plan(
   let mut response = match body {
     StaticBodyPlan::Empty => Response::new(empty_body()),
     StaticBodyPlan::Text(message) => text_response(status, message),
-    StaticBodyPlan::File(file) => match file_body(
-      file.root,
-      file.path.clone(),
-      file.offset,
-      file.len,
-      inline_max_bytes,
-    )
-    .await
-    {
-      Ok((body, known_small)) => {
-        let mut response = Response::new(body);
-        if known_small {
-          response.extensions_mut().insert(KnownSmallResponseBody);
+    StaticBodyPlan::File(file) => {
+      let path = file.path.clone();
+      match file_body(
+        file.file,
+        path.clone(),
+        file.offset,
+        file.len,
+        inline_max_bytes,
+      )
+      .await
+      {
+        Ok((body, known_small)) => {
+          let mut response = Response::new(body);
+          if known_small {
+            response.extensions_mut().insert(KnownSmallResponseBody);
+          }
+          response
         }
-        response
+        Err(error) => {
+          warn!(error = %error, path = %path.display(), "failed to read static file");
+          return text_response(StatusCode::NOT_FOUND, "not found");
+        }
       }
-      Err(error) => {
-        warn!(error = %error, path = %file.path.display(), "failed to open static file");
-        return text_response(StatusCode::NOT_FOUND, "not found");
-      }
-    },
+    }
   };
   *response.status_mut() = status;
   for (name, value) in headers {
@@ -384,8 +388,8 @@ struct FileContentPlan {
 fn file_plan(
   method: &Method,
   status: StatusCode,
-  root: PathBuf,
   path: PathBuf,
+  file: File,
   content: FileContentPlan,
   etag: &str,
   modified: Option<SystemTime>,
@@ -401,7 +405,7 @@ fn file_plan(
     StaticBodyPlan::Empty
   } else {
     StaticBodyPlan::File(StaticFileBodyPlan {
-      root,
+      file,
       path,
       offset: content.offset,
       len: content.body_len,
@@ -415,13 +419,12 @@ fn file_plan(
 }
 
 async fn file_body(
-  root: PathBuf,
+  mut file: File,
   path: PathBuf,
   offset: u64,
   len: u64,
   inline_max_bytes: usize,
 ) -> anyhow::Result<(ProxyBody, bool)> {
-  let mut file = open_verified_file(&root, &path).await?;
   file
     .seek(std::io::SeekFrom::Start(offset))
     .await
@@ -436,31 +439,6 @@ async fn file_body(
     return Ok((full_body(Bytes::from(bytes)), true));
   }
   Ok((reader_body(file.take(len), len), false))
-}
-
-pub(crate) async fn open_verified_file(root: &Path, path: &Path) -> anyhow::Result<File> {
-  let file = File::open(path)
-    .await
-    .with_context(|| format!("failed to open static file {}", path.display()))?;
-  verify_opened_file(&file, root)
-    .with_context(|| format!("static file fd failed validation {}", path.display()))?;
-  let metadata = file
-    .metadata()
-    .await
-    .with_context(|| format!("failed to inspect opened static file {}", path.display()))?;
-  if !metadata.is_file() {
-    bail!("opened static file is not a regular file");
-  }
-  Ok(file)
-}
-
-fn verify_opened_file(file: &File, root: &Path) -> anyhow::Result<()> {
-  let target = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
-    .context("failed to resolve opened static file descriptor")?;
-  if !target.starts_with(root) {
-    bail!("opened static file descriptor escapes static_root");
-  }
-  Ok(())
 }
 
 fn reader_body<R>(reader: R, len: u64) -> ProxyBody

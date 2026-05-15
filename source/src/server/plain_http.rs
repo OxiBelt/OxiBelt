@@ -398,8 +398,7 @@ async fn write_static_plan(
     StaticBodyPlan::Empty => {}
     StaticBodyPlan::Text(_) => bail!("sendfile fast path cannot write text static body"),
     StaticBodyPlan::File(file) => {
-      let input = static_files::open_verified_file(&file.root, &file.path).await?;
-      sendfile_all(stream, &input, file.offset, file.len).await?;
+      sendfile_all(stream, &file.file, file.offset, file.len).await?;
       debug!(
         path = %file.path.display(),
         bytes = file.len,

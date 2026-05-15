@@ -104,6 +104,44 @@ async fn rejects_symlink_escape() {
 }
 
 #[tokio::test]
+async fn planned_response_body_uses_original_verified_fd_after_path_swap() {
+  let temp_dir = common::TempDir::new("static-fd-race");
+  let root = temp_dir.path().join("public");
+  let public_path = root.join("race.txt");
+  let outside = temp_dir.path().join("outside-secret.txt");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(&public_path, "public race body")
+    .await
+    .unwrap();
+  tokio::fs::write(&outside, "outside secret body")
+    .await
+    .unwrap();
+  let request = request("/assets/race.txt");
+
+  let plan = plan_response(
+    request.method(),
+    request.headers(),
+    request.uri().path(),
+    "assets",
+    "/assets",
+    &root,
+  )
+  .await;
+  assert_eq!(plan.status, StatusCode::OK);
+  assert!(matches!(&plan.body, StaticBodyPlan::File(_)));
+
+  tokio::fs::remove_file(&public_path).await.unwrap();
+  std::os::unix::fs::symlink(&outside, &public_path).unwrap();
+
+  let response = response_from_plan(plan, 16 * 1024).await;
+
+  assert_eq!(response.status(), StatusCode::OK);
+  let body = response.into_body().collect().await.unwrap().to_bytes();
+  assert_eq!(body, Bytes::from_static(b"public race body"));
+  assert_ne!(body, Bytes::from_static(b"outside secret body"));
+}
+
+#[tokio::test]
 async fn supports_single_byte_range() {
   let temp_dir = common::TempDir::new("static-range");
   let root = temp_dir.path().join("public");
