@@ -238,11 +238,45 @@ fn high_volume_load_error_inside_budget_is_allowed() {
 
     assert!(
         run.output.status.success(),
-        "one load transport error across more than one million requests should stay inside the default CI budget"
+        "one load transport error across more than one million requests should stay inside the configured budget"
     );
     assert!(
         !run.events.contains("FAIL"),
         "in-budget load errors should not trip the failure hook"
+    );
+}
+
+#[test]
+fn observed_smoke_soak_reconnect_burst_inside_default_budget_is_allowed() {
+    let run = assert_result_harness(
+        r#"{"type":"load","label":"oxibelt-smoke-soak","requests":1479776,"errors":2,"p99_ms":3}"#,
+        "100",
+    );
+
+    assert!(
+        run.output.status.success(),
+        "two load transport errors across the observed smoke-soak volume should stay inside the default CI budget"
+    );
+    assert!(
+        !run.events.contains("FAIL"),
+        "observed in-budget smoke soak reconnects should not trip the failure hook"
+    );
+}
+
+#[test]
+fn load_errors_above_relaxed_default_budget_still_fail() {
+    let run = assert_result_harness(
+        r#"{"type":"load","label":"oxibelt-smoke-soak","requests":1000000,"errors":101,"p99_ms":3}"#,
+        "100",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "load errors above the relaxed CI budget should still fail the performance gate"
+    );
+    assert!(
+        run.events
+            .contains("FAIL performance probe reported request errors: oxibelt-smoke-soak")
     );
 }
 
