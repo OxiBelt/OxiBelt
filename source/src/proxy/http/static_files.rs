@@ -324,7 +324,7 @@ pub(super) async fn finalize_response(
   response
 }
 
-fn static_response_send_timeout(state: &AppSnapshot, route: &RouteConfig) -> Duration {
+pub(crate) fn static_response_send_timeout(state: &AppSnapshot, route: &RouteConfig) -> Duration {
   Duration::from_millis(
     route
       .timeouts

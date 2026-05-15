@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -15,7 +16,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use nix::errno::Errno;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, trace};
@@ -26,6 +27,7 @@ use crate::config::{
 use crate::lifecycle::{ConnectionDrain, wait_for_listener_or_data_plane_drain};
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http;
+use crate::proxy::http::body::{BodyTimeoutError, BodyTimeoutKind};
 use crate::proxy::http::response::text_response;
 use crate::proxy::http::static_files::{self, StaticBodyPlan, StaticResponsePlan};
 use crate::routes::normalize_host;
@@ -34,6 +36,12 @@ use crate::tcp_hop;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 const READ_CHUNK_BYTES: usize = 4096;
+const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
+
+struct TimedStaticResponsePlan {
+  response: StaticResponsePlan,
+  response_send_timeout: Duration,
+}
 
 pub(super) enum SendfilePreflight {
   Done,
@@ -273,7 +281,7 @@ pub(super) async fn try_sendfile_fast_path(
     buffer = next_buffer;
 
     let close_after_response = header_has_token(&request.headers, CONNECTION, "close");
-    let status = plan.status;
+    let status = plan.response.status;
     if let Err(error) = write_static_plan(&mut stream, plan, !close_after_response).await {
       debug!(error = %error, peer = %peer_addr, "plain HTTP static sendfile response failed");
       return Ok(SendfilePreflight::Done);
@@ -329,7 +337,7 @@ fn security_headers_disabled(config: &Config) -> bool {
 async fn eligible_static_plan(
   request: &ParsedPlainRequest,
   snapshot: &AppSnapshot,
-) -> Option<StaticResponsePlan> {
+) -> Option<TimedStaticResponsePlan> {
   if request.version != 1
     || (request.method != Method::GET && request.method != Method::HEAD)
     || !request.target.starts_with('/')
@@ -377,7 +385,10 @@ async fn eligible_static_plan(
   )
   .await;
   if matches!(&plan.body, StaticBodyPlan::Empty | StaticBodyPlan::File(_)) {
-    Some(plan)
+    Some(TimedStaticResponsePlan {
+      response: plan,
+      response_send_timeout: static_files::static_response_send_timeout(snapshot, resolved.route),
+    })
   } else {
     None
   }
@@ -385,20 +396,31 @@ async fn eligible_static_plan(
 
 async fn write_static_plan(
   stream: &mut TcpStream,
-  plan: StaticResponsePlan,
+  plan: TimedStaticResponsePlan,
   keep_alive: bool,
 ) -> anyhow::Result<()> {
+  let TimedStaticResponsePlan {
+    response,
+    response_send_timeout,
+  } = plan;
   let StaticResponsePlan {
     status,
     headers,
     body,
-  } = plan;
-  write_response_head(stream, status, &headers, keep_alive).await?;
+  } = response;
+  write_response_head(stream, status, &headers, keep_alive, response_send_timeout).await?;
   match body {
     StaticBodyPlan::Empty => {}
     StaticBodyPlan::Text(_) => bail!("sendfile fast path cannot write text static body"),
     StaticBodyPlan::File(file) => {
-      sendfile_all(stream, &file.file, file.offset, file.len).await?;
+      sendfile_all(
+        stream,
+        &file.file,
+        file.offset,
+        file.len,
+        response_send_timeout,
+      )
+      .await?;
       debug!(
         path = %file.path.display(),
         bytes = file.len,
@@ -414,7 +436,8 @@ async fn write_response_head(
   status: StatusCode,
   headers: &HeaderMap,
   keep_alive: bool,
-) -> io::Result<()> {
+  response_send_timeout: Duration,
+) -> anyhow::Result<()> {
   let reason = status.canonical_reason().unwrap_or("");
   let mut head = Vec::with_capacity(256 + headers.len() * 48);
   head.extend_from_slice(format!("HTTP/1.1 {} {reason}\r\n", status.as_u16()).as_bytes());
@@ -430,7 +453,12 @@ async fn write_response_head(
     head.extend_from_slice(b"Connection: close\r\n");
   }
   head.extend_from_slice(b"\r\n");
-  stream.write_all(&head).await
+  downstream_send_timeout(
+    response_send_timeout,
+    stream.write_all(&head),
+    "static sendfile response head write failed",
+  )
+  .await
 }
 
 async fn sendfile_all(
@@ -438,23 +466,45 @@ async fn sendfile_all(
   file: &tokio::fs::File,
   offset: u64,
   len: u64,
+  response_send_timeout: Duration,
 ) -> anyhow::Result<()> {
   let mut remaining = len;
   let mut offset = libc::off64_t::try_from(offset).context("static file offset is too large")?;
   while remaining > 0 {
-    stream
-      .writable()
-      .await
-      .context("static sendfile socket wait failed")?;
-    let count = remaining.min(usize::MAX as u64) as usize;
-    match nix::sys::sendfile::sendfile64(stream, file, Some(&mut offset), count) {
+    downstream_send_timeout(
+      response_send_timeout,
+      stream.writable(),
+      "static sendfile socket wait failed",
+    )
+    .await?;
+    let count = remaining.min(SENDFILE_CHUNK_BYTES as u64) as usize;
+    match stream.try_io(Interest::WRITABLE, || {
+      nix::sys::sendfile::sendfile64(stream, file, Some(&mut offset), count).map_err(|error| {
+        if error == Errno::EAGAIN {
+          io::Error::from(io::ErrorKind::WouldBlock)
+        } else {
+          io::Error::from_raw_os_error(error as i32)
+        }
+      })
+    }) {
       Ok(0) => bail!("static sendfile wrote zero bytes"),
       Ok(sent) => remaining = remaining.saturating_sub(sent as u64),
-      Err(Errno::EAGAIN) => continue,
+      Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
       Err(error) => return Err(error).context("static sendfile syscall failed"),
     }
   }
   Ok(())
+}
+
+async fn downstream_send_timeout<T>(
+  timeout: Duration,
+  operation: impl Future<Output = io::Result<T>>,
+  context: &'static str,
+) -> anyhow::Result<T> {
+  match tokio::time::timeout(timeout, operation).await {
+    Ok(result) => result.context(context),
+    Err(_) => Err(BodyTimeoutError::new(BodyTimeoutKind::DownstreamResponseSend).into()),
+  }
 }
 
 enum ReadRequestOutcome {
@@ -630,115 +680,4 @@ fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool 
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-  mod common {
-    include!(concat!(
-      env!("CARGO_MANIFEST_DIR"),
-      "/../tests/rust/common/mod.rs"
-    ));
-  }
-
-  fn parsed(raw: &[u8]) -> ParsedPlainRequest {
-    match parse_buffered_request(raw, 16) {
-      ParseResult::Complete {
-        header_len,
-        request,
-      } => ParsedPlainRequest {
-        method: request.method,
-        target: request.target,
-        version: request.version,
-        headers: request.headers,
-        raw: raw[..header_len].to_vec(),
-        remaining: raw[header_len..].to_vec(),
-      },
-      _ => panic!("request should parse"),
-    }
-  }
-
-  #[test]
-  fn parser_preserves_pipelined_bytes_for_fallback() {
-    let request =
-      parsed(b"GET /static/app.txt HTTP/1.1\r\nHost: example.test\r\n\r\nGET /next HTTP/1.1\r\n");
-
-    assert_eq!(request.target, "/static/app.txt");
-    assert_eq!(request.remaining, b"GET /next HTTP/1.1\r\n");
-  }
-
-  #[test]
-  fn header_token_matching_is_case_insensitive() {
-    let request = parsed(
-      b"GET /static/app.txt HTTP/1.1\r\nHost: example.test\r\nConnection: keep-alive, Upgrade\r\n\r\n",
-    );
-
-    assert!(header_has_token(&request.headers, CONNECTION, "upgrade"));
-  }
-
-  #[tokio::test]
-  async fn eligible_plain_static_get_uses_pre_hyper_sendfile_path() {
-    let temp_dir = common::TempDir::new("plain-sendfile");
-    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "plain-sendfile");
-    let root = temp_dir.path().join("public");
-    tokio::fs::create_dir_all(&root).await.unwrap();
-    tokio::fs::write(root.join("app.txt"), "hello sendfile")
-      .await
-      .unwrap();
-    let raw = format!(
-      "{}{}",
-      common::minimal_config_toml(&cert_path, &key_path)
-        .replace(
-          "[listeners]\n",
-          "[listeners]\nhttp_bind = \"127.0.0.1:8080\"\nhttp_mode = \"proxy\"\n",
-        )
-        .replace(
-          "[compression]\nenabled = true",
-          "[compression]\nenabled = false",
-        )
-        .replace(
-          "path_prefix = \"/\"\nupstream = \"app\"",
-          &format!(
-            "path_prefix = \"/static\"\nstatic_root = \"{}\"",
-            root.display()
-          ),
-        ),
-      r#"
-
-[proxy.static_files]
-sendfile = "auto"
-"#
-    );
-    let config: Config = toml::from_str(&raw).expect("config should parse");
-    config.validate().expect("config should validate");
-    let snapshot = Arc::new(
-      AppSnapshot::new(config)
-        .await
-        .expect("snapshot should initialize"),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-      let (stream, peer_addr) = listener.accept().await.unwrap();
-      let (_shutdown_tx, mut shutdown) = watch::channel(false);
-      let (_drain_tx, mut drain) = watch::channel(false);
-      let result = try_sendfile_fast_path(stream, peer_addr, &snapshot, &mut shutdown, &mut drain)
-        .await
-        .unwrap();
-      assert!(matches!(result, SendfilePreflight::Done));
-    });
-
-    let mut client = TcpStream::connect(addr).await.unwrap();
-    client
-      .write_all(b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
-      .await
-      .unwrap();
-    let mut response = Vec::new();
-    client.read_to_end(&mut response).await.unwrap();
-    server.await.unwrap();
-    let response = String::from_utf8(response).unwrap();
-
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    assert!(response.ends_with("hello sendfile"));
-  }
-}
+mod tests;
