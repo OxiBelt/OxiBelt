@@ -436,7 +436,7 @@ jobs:
           retention-days: 7
 
   docker-performance:
-    name: Docker performance (${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}, shard ${{ matrix.shard }})
+    name: Docker performance (${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}, ${{ matrix.serving_type }}, shard ${{ matrix.shard }})
     runs-on: ${{ matrix.runner }}
     needs:
       - docker-integration-matrix
@@ -448,20 +448,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - shard: 1
-            runner: ubuntu-latest
-          - shard: 2
-            runner: ubuntu-latest
-          - shard: 3
-            runner: ubuntu-latest
-          - shard: 4
-            runner: ubuntu-latest
-          - shard: 5
-            runner: ubuntu-latest
+        runner:
+          - ubuntu-latest
+        shard:
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+        serving_type:
+          - reverse-proxy
+          - static-files
+          - oxibelt-features
+          - oxibelt-soak-stress
     env:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
       PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
+      PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}
 
     steps:
       - name: Checkout
@@ -488,13 +491,13 @@ jobs:
 
           failed_iterations=()
           for iteration in $(seq 1 "${PERFORMANCE_ITERATIONS}"); do
-            echo "Running Docker performance profile ${PERFORMANCE_PROFILE} shard ${PERFORMANCE_SHARD}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
+            echo "Running Docker performance profile ${PERFORMANCE_PROFILE} serving type ${PERFORMANCE_SERVING_TYPE} shard ${PERFORMANCE_SHARD}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
             status=0
-            OXIBELT_TEST_ARTIFACT_DIR="${RUNNER_TEMP}/oxibelt-performance/shard-${PERFORMANCE_SHARD}/run-${iteration}" \
-              tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --comparators oxibelt,nginx,caddy || status=$?
+            OXIBELT_TEST_ARTIFACT_DIR="${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}/run-${iteration}" \
+              tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --serving-type "${PERFORMANCE_SERVING_TYPE}" --comparators oxibelt,nginx,caddy || status=$?
             if [[ "${status}" != "0" ]]; then
               failed_iterations+=("${iteration}:${status}")
-              echo "::error title=Docker performance iteration failed::profile=${PERFORMANCE_PROFILE} shard=${PERFORMANCE_SHARD} iteration=${iteration} status=${status}"
+              echo "::error title=Docker performance iteration failed::profile=${PERFORMANCE_PROFILE} serving_type=${PERFORMANCE_SERVING_TYPE} shard=${PERFORMANCE_SHARD} iteration=${iteration} status=${status}"
             fi
           done
 
@@ -507,7 +510,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/oxibelt-performance/shard-${{ matrix.shard }}
+          name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-${{ matrix.serving_type }}-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/oxibelt-performance/${{ matrix.serving_type }}/shard-${{ matrix.shard }}
           if-no-files-found: ignore
           retention-days: 14

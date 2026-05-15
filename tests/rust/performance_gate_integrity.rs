@@ -10,9 +10,12 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn performance_script_path() -> PathBuf {
+    repo_root().join("tests/scripts/run-proxy-performance.sh")
+}
+
 fn performance_script_text() -> String {
-    fs::read_to_string(repo_root().join("tests/scripts/run-proxy-performance.sh"))
-        .expect("performance script should be readable")
+    fs::read_to_string(performance_script_path()).expect("performance script should be readable")
 }
 
 fn extract_bash_function(script: &str, function_name: &str) -> String {
@@ -70,6 +73,15 @@ fn run_common_loads_harness(h3_mode: &str, probe_result: &str) -> HarnessRun {
 }
 
 fn run_static_loads_harness(profile: &str, h3_mode: &str, probe_result: &str) -> HarnessRun {
+    run_static_loads_harness_for("oxibelt", profile, h3_mode, probe_result)
+}
+
+fn run_static_loads_harness_for(
+    comparator: &str,
+    profile: &str,
+    h3_mode: &str,
+    probe_result: &str,
+) -> HarnessRun {
     let functions = format!(
         "{}\n\n{}",
         extract_bash_function(&performance_script_text(), "run_static_h3_load"),
@@ -90,6 +102,7 @@ fn run_static_loads_harness(profile: &str, h3_mode: &str, probe_result: &str) ->
 
     let output = Command::new("bash")
         .arg(&harness_path)
+        .env("COMPARATOR", comparator)
         .env("EVENTS_FILE", &events_path)
         .env("PROFILE", profile)
         .env("H3_MODE", h3_mode)
@@ -203,7 +216,7 @@ h3_probe_succeeds() {{
 
 {functions}
 
-run_static_loads oxibelt oxibelt "${{H3_MODE:?}}"
+run_static_loads "${{COMPARATOR:?}}" "${{COMPARATOR:?}}" "${{H3_MODE:?}}"
 "#
     );
     fs::write(path, harness).expect("Bash harness should be writable");
@@ -316,6 +329,54 @@ fn smoke_static_loads_use_cleartext_h1_without_h3_probe() {
 }
 
 #[test]
+fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
+    let script = performance_script_text();
+
+    assert!(
+        script.contains("serving_type=\"all\""),
+        "performance script should default to the legacy combined serving type"
+    );
+    assert!(
+        script.contains(
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress"
+        ),
+        "usage should document every supported serving type"
+    );
+    for serving_type in [
+        "all",
+        "reverse-proxy",
+        "static-files",
+        "oxibelt-features",
+        "oxibelt-soak-stress",
+    ] {
+        assert!(
+            script.contains(serving_type),
+            "performance script should recognize serving type {serving_type}"
+        );
+    }
+}
+
+#[test]
+fn invalid_serving_type_fails_with_usage_before_docker_setup() {
+    let output = Command::new("bash")
+        .arg(performance_script_path())
+        .arg("--serving-type")
+        .arg("not-a-serving-type")
+        .output()
+        .expect("performance script should execute");
+
+    assert!(
+        !output.status.success(),
+        "invalid serving types should fail before the Docker harness starts"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("usage: tests/scripts/run-proxy-performance.sh"),
+        "invalid serving type should print usage, got: {stderr}"
+    );
+}
+
+#[test]
 fn benchmark_static_required_h3_probe_failure_fails_closed() {
     let run = run_static_loads_harness("benchmark", "required", "failure");
 
@@ -340,6 +401,42 @@ fn benchmark_static_required_h3_probe_failure_fails_closed() {
         run.events
             .contains("FAIL mandatory HTTP/3 probe failed for oxibelt static files")
     );
+}
+
+#[test]
+fn benchmark_static_caddy_required_h3_probe_failure_fails_closed() {
+    let run = run_static_loads_harness_for("caddy", "benchmark", "required", "failure");
+
+    assert!(
+        !run.output.status.success(),
+        "Caddy static HTTP/3 probe failure should fail because it is mandatory"
+    );
+    assert!(
+        run.events
+            .contains("FAIL mandatory HTTP/3 probe failed for caddy static files")
+    );
+    assert!(
+        !run.events.contains("SKIP caddy-static-1k-h3"),
+        "mandatory Caddy static HTTP/3 failures must not be downgraded to skips"
+    );
+}
+
+#[test]
+fn benchmark_static_nginx_optional_h3_probe_failure_records_skip() {
+    let run = run_static_loads_harness_for("nginx", "benchmark", "optional", "failure");
+
+    assert!(
+        run.output.status.success(),
+        "nginx static HTTP/3 probe failure should be skipped when support is optional"
+    );
+    assert!(run.events.contains("PROBE nginx"));
+    assert!(
+        run.events.contains(
+            "SKIP nginx-static-1k-h3 load h3 optional HTTP/3 support was detected, but a functional QUIC probe did not complete"
+        ),
+        "optional nginx static HTTP/3 probe failures should remain explicit skips"
+    );
+    assert!(!run.events.contains("LOAD nginx-static-1k-h3 h3"));
 }
 
 #[test]

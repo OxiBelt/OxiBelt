@@ -16,6 +16,14 @@ Profiles:
 - `benchmark`: longer comparator runs plus OxiBelt WAF, CRS, cache, and stress scenarios.
 - `soak`: long OxiBelt-focused concurrency presets and stress scenarios. This is intended for manual or scheduled runs, not every pull request.
 
+Serving type filters:
+
+- `all`: run the legacy combined local set.
+- `reverse-proxy`: common OxiBelt, nginx, and Caddy H1/H2/H3 reverse-proxy rows plus the OxiBelt TLS handshake row.
+- `static-files`: static file rows for `/static/1k.bin`, `/static/16k.bin`, and `/static/1m.bin` according to the selected profile.
+- `oxibelt-features`: OxiBelt-only WAF, CRS, and cache rows.
+- `oxibelt-soak-stress`: OxiBelt smoke soak, benchmark stress, or soak concurrency rows according to the selected profile.
+
 Useful environment overrides:
 
 ```sh
@@ -53,7 +61,7 @@ The runner writes:
 
 The runner generates one-run TLS material and a one-run 64-byte QUIC host key under `configs/*/cert/`. The performance baseline enables `quic.host_key_file` only against that generated key so Retry/stateless reset token behavior is stable within the run without baking shared key material into fixtures or images.
 
-CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards. Each shard uploads one artifact named `oxibelt-docker-performance-<profile>-shard-<n>` and stores repeated samples under `run-1/` through `run-5/` by default. The workflow keeps running later iterations in the same shard after one iteration fails, then fails the job at the end with the failed iteration list so artifacts stay complete. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
+CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards for each serving type. Push and pull-request smoke runs intentionally collect all serving-type groups so reverse-proxy, static-file, OxiBelt feature, and soak/stress evidence land in separate artifacts. Each shard uploads one artifact named `oxibelt-docker-performance-<profile>-<serving_type>-shard-<n>` and stores repeated samples under `run-1/` through `run-5/` by default. The workflow keeps running later iterations in the same shard after one iteration fails, then fails the job at the end with the failed iteration list so artifacts stay complete. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
 
 ## Interpreting Results
 

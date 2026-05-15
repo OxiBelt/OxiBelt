@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--comparators oxibelt,nginx,caddy]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress] [--comparators oxibelt,nginx,caddy]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -28,12 +28,17 @@ EOF
 }
 
 profile="smoke"
+serving_type="all"
 comparators="oxibelt,nginx,caddy"
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --profile)
       profile="${2:-}"
+      shift 2
+      ;;
+    --serving-type)
+      serving_type="${2:-}"
       shift 2
       ;;
     --comparators)
@@ -53,6 +58,14 @@ done
 
 case "${profile}" in
   smoke|benchmark|soak) ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
+case "${serving_type}" in
+  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress) ;;
   *)
     usage
     exit 2
@@ -727,6 +740,112 @@ run_manual_soak_presets() {
   done
 }
 
+run_reverse_proxy_group() {
+  if has_comparator oxibelt; then
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+    run_common_loads oxibelt oxibelt required
+    assert_oxibelt_tcp_baseline
+    run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
+  fi
+
+  if has_comparator nginx; then
+    start_nginx
+    nginx_h3_mode=disabled
+    if [[ "${nginx_h3_supported}" == "1" ]]; then
+      nginx_h3_mode=optional
+    fi
+    run_common_loads nginx nginx "${nginx_h3_mode}"
+  fi
+
+  if has_comparator caddy; then
+    start_caddy
+    run_common_loads caddy caddy required
+  fi
+}
+
+run_static_files_group() {
+  if has_comparator oxibelt; then
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+    run_static_loads oxibelt oxibelt required
+  fi
+
+  if has_comparator nginx; then
+    start_nginx
+    nginx_h3_mode=disabled
+    if [[ "${nginx_h3_supported}" == "1" ]]; then
+      nginx_h3_mode=optional
+    fi
+    run_static_loads nginx nginx "${nginx_h3_mode}"
+  fi
+
+  if has_comparator caddy; then
+    start_caddy
+    run_static_loads caddy caddy required
+  fi
+}
+
+run_oxibelt_features_group() {
+  if has_comparator oxibelt; then
+    run_oxibelt_specific_benchmarks
+  fi
+}
+
+run_oxibelt_soak_stress_group() {
+  if ! has_comparator oxibelt; then
+    return
+  fi
+
+  if [[ "${profile}" == "smoke" ]]; then
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+    run_load "oxibelt-smoke-soak" h1 oxibelt "/perf/smoke-soak?body=ok" "${soak_seconds}" "${concurrency}"
+  elif [[ "${profile}" == "benchmark" ]]; then
+    run_oxibelt_soak_and_stress
+  elif [[ "${profile}" == "soak" ]]; then
+    run_manual_soak_presets
+    run_oxibelt_soak_and_stress
+  fi
+}
+
+run_all_serving_types() {
+  if has_comparator oxibelt; then
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+    run_common_loads oxibelt oxibelt required
+    run_static_loads oxibelt oxibelt required
+    assert_oxibelt_tcp_baseline
+    run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
+    if [[ "${profile}" == "smoke" ]]; then
+      run_load "oxibelt-smoke-soak" h1 oxibelt "/perf/smoke-soak?body=ok" "${soak_seconds}" "${concurrency}"
+    fi
+  fi
+
+  if has_comparator nginx; then
+    start_nginx
+    nginx_h3_mode=disabled
+    if [[ "${nginx_h3_supported}" == "1" ]]; then
+      nginx_h3_mode=optional
+    fi
+    run_common_loads nginx nginx "${nginx_h3_mode}"
+    run_static_loads nginx nginx "${nginx_h3_mode}"
+  fi
+
+  if has_comparator caddy; then
+    start_caddy
+    run_common_loads caddy caddy required
+    run_static_loads caddy caddy required
+  fi
+
+  if has_comparator oxibelt && [[ "${profile}" == "benchmark" || "${profile}" == "soak" ]]; then
+    run_oxibelt_specific_benchmarks
+  fi
+
+  if has_comparator oxibelt && [[ "${profile}" == "benchmark" ]]; then
+    run_oxibelt_soak_and_stress
+  elif has_comparator oxibelt && [[ "${profile}" == "soak" ]]; then
+    run_manual_soak_presets
+    run_oxibelt_soak_and_stress
+  fi
+}
+
 finalize_results() {
   if [[ -s "${results_jsonl}" ]]; then
     jq -s '.' "${results_jsonl}" >"${results_json}"
@@ -752,6 +871,7 @@ cat >"${summary_md}" <<EOF
 # OxiBelt Docker Performance (${profile})
 
 - Run id: \`${run_id}\`
+- Serving type: \`${serving_type}\`
 - Comparators: \`${comparators}\`
 - Duration: \`${duration_seconds}s\`
 - Warmup: \`${warmup_seconds}s\`
@@ -792,48 +912,28 @@ docker run -d \
 
 sleep 1
 
-if has_comparator oxibelt; then
-  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
-  run_common_loads oxibelt oxibelt required
-  run_static_loads oxibelt oxibelt required
-  assert_oxibelt_tcp_baseline
-  run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
-  if [[ "${profile}" == "smoke" ]]; then
-    run_load "oxibelt-smoke-soak" h1 oxibelt "/perf/smoke-soak?body=ok" "${soak_seconds}" "${concurrency}"
-  fi
-fi
-
-if has_comparator nginx; then
-  start_nginx
-  nginx_h3_mode=disabled
-  if [[ "${nginx_h3_supported}" == "1" ]]; then
-    nginx_h3_mode=optional
-  fi
-  run_common_loads nginx nginx "${nginx_h3_mode}"
-  run_static_loads nginx nginx "${nginx_h3_mode}"
-fi
-
-if has_comparator caddy; then
-  start_caddy
-  run_common_loads caddy caddy required
-  run_static_loads caddy caddy required
-fi
-
-if has_comparator oxibelt && [[ "${profile}" == "benchmark" || "${profile}" == "soak" ]]; then
-  run_oxibelt_specific_benchmarks
-fi
-
-if has_comparator oxibelt && [[ "${profile}" == "benchmark" ]]; then
-  run_oxibelt_soak_and_stress
-elif has_comparator oxibelt && [[ "${profile}" == "soak" ]]; then
-  run_manual_soak_presets
-  run_oxibelt_soak_and_stress
-fi
+case "${serving_type}" in
+  all)
+    run_all_serving_types
+    ;;
+  reverse-proxy)
+    run_reverse_proxy_group
+    ;;
+  static-files)
+    run_static_files_group
+    ;;
+  oxibelt-features)
+    run_oxibelt_features_group
+    ;;
+  oxibelt-soak-stress)
+    run_oxibelt_soak_stress_group
+    ;;
+esac
 
 stop_active_proxy
 collect_logs
 finalize_results
 copy_artifacts
 
-echo "Docker performance profile ${profile} completed"
+echo "Docker performance profile ${profile} serving type ${serving_type} completed"
 echo "Summary: ${summary_md}"

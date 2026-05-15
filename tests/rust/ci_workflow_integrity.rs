@@ -254,18 +254,35 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should allow repeated smoke and benchmark samples"
     );
 
+    assert!(
+        workflow.contains("serving_type:"),
+        "docker-performance should define a serving-type matrix axis"
+    );
     for shard in 1..=5 {
         assert!(
-            workflow.contains(&format!(
-                "- shard: {shard}\n            runner: ubuntu-latest"
-            )),
-            "docker-performance should include ubuntu-latest shard {shard}"
+            workflow.contains(&format!("          - {shard}")),
+            "docker-performance should include shard {shard}"
+        );
+    }
+    for serving_type in [
+        "reverse-proxy",
+        "static-files",
+        "oxibelt-features",
+        "oxibelt-soak-stress",
+    ] {
+        assert!(
+            workflow.contains(&format!("          - {serving_type}")),
+            "docker-performance should include serving type {serving_type}"
         );
     }
 
     assert!(
         workflow.contains("PERFORMANCE_SHARD: ${{ matrix.shard }}"),
         "docker-performance should expose the current shard to the run loop"
+    );
+    assert!(
+        workflow.contains("PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}"),
+        "docker-performance should expose the current serving type to the run loop"
     );
     assert!(
         workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),
@@ -288,17 +305,21 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should fail after all configured iterations have run"
     );
     assert!(
-        workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${RUNNER_TEMP}/oxibelt-performance/shard-${PERFORMANCE_SHARD}/run-${iteration}\""),
-        "docker-performance should isolate artifacts by shard and iteration"
+        workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}/run-${iteration}\""),
+        "docker-performance should isolate artifacts by serving type, shard, and iteration"
     );
     assert!(
         workflow.contains(
-            "oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-shard-${{ matrix.shard }}"
+            "oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-${{ matrix.serving_type }}-shard-${{ matrix.shard }}"
         ),
-        "docker-performance artifact names should include the shard"
+        "docker-performance artifact names should include the serving type and shard"
     );
     assert!(
-        workflow.contains("path: ${{ runner.temp }}/oxibelt-performance/shard-${{ matrix.shard }}"),
-        "docker-performance should upload one grouped artifact per shard"
+        workflow.contains("path: ${{ runner.temp }}/oxibelt-performance/${{ matrix.serving_type }}/shard-${{ matrix.shard }}"),
+        "docker-performance should upload one grouped artifact per serving type and shard"
+    );
+    assert!(
+        workflow.contains("--serving-type \"${PERFORMANCE_SERVING_TYPE}\""),
+        "docker-performance should pass the serving-type matrix value into the performance script"
     );
 }
