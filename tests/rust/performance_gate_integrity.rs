@@ -69,6 +69,38 @@ fn run_common_loads_harness(h3_mode: &str, probe_result: &str) -> HarnessRun {
     HarnessRun { output, events }
 }
 
+fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) -> HarnessRun {
+    let functions = format!(
+        "{}\n\n{}",
+        extract_bash_function(&performance_script_text(), "load_errors_within_budget"),
+        extract_bash_function(&performance_script_text(), "assert_result")
+    );
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-assert-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    write_assert_result_harness(&harness_path, &functions);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("PROBE_JSON", probe_json)
+        .env("MAX_LOAD_ERRORS_PER_MILLION", max_load_errors_per_million)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
 fn write_harness(path: &Path, run_common_loads: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
@@ -101,6 +133,30 @@ h3_probe_succeeds() {{
 {run_common_loads}
 
 run_common_loads oxibelt oxibelt "${{H3_MODE:?}}"
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_assert_result_harness(path: &Path, functions: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+json="${{PROBE_JSON:?}}"
+max_p99_ms=10000
+max_load_errors_per_million="${{MAX_LOAD_ERRORS_PER_MILLION:?}}"
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{functions}
+
+assert_result "${{json}}"
 "#
     );
     fs::write(path, harness).expect("Bash harness should be writable");
@@ -170,6 +226,74 @@ fn disabled_h3_records_skip_without_probe() {
         run.events
             .contains("SKIP oxibelt-h3 load h3 HTTP/3 is not available for this comparator image"),
         "disabled HTTP/3 should record a clear unavailable skip"
+    );
+}
+
+#[test]
+fn high_volume_load_error_inside_budget_is_allowed() {
+    let run = assert_result_harness(
+        r#"{"type":"load","label":"oxibelt-smoke-soak","requests":1500000,"errors":1,"p99_ms":3}"#,
+        "1",
+    );
+
+    assert!(
+        run.output.status.success(),
+        "one load transport error across more than one million requests should stay inside the default CI budget"
+    );
+    assert!(
+        !run.events.contains("FAIL"),
+        "in-budget load errors should not trip the failure hook"
+    );
+}
+
+#[test]
+fn load_error_above_budget_fails() {
+    let run = assert_result_harness(
+        r#"{"type":"load","label":"oxibelt-smoke-soak","requests":500000,"errors":1,"p99_ms":3}"#,
+        "1",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "load errors above the per-million budget should fail the performance gate"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.output.stderr)
+            .contains("performance probe reported request errors: oxibelt-smoke-soak")
+    );
+}
+
+#[test]
+fn strict_zero_load_error_budget_still_fails_any_load_error() {
+    let run = assert_result_harness(
+        r#"{"type":"load","label":"oxibelt-smoke-soak","requests":1500000,"errors":1,"p99_ms":3}"#,
+        "0",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "setting the budget to zero should restore strict no-error behavior"
+    );
+    assert!(
+        run.events
+            .contains("FAIL performance probe reported request errors: oxibelt-smoke-soak")
+    );
+}
+
+#[test]
+fn handshake_errors_are_not_covered_by_load_error_budget() {
+    let run = assert_result_harness(
+        r#"{"type":"handshake","label":"oxibelt-tls-handshake-h2","handshakes":1500000,"errors":1,"p99_ms":3}"#,
+        "1",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "handshake errors should remain strict failures"
+    );
+    assert!(
+        run.events
+            .contains("FAIL performance probe reported request errors: oxibelt-tls-handshake-h2")
     );
 }
 

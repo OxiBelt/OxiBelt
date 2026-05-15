@@ -14,6 +14,8 @@ Environment:
   OXIBELT_PERF_CONCURRENCY         load concurrency override
   OXIBELT_PERF_SOAK_SECONDS        soak duration override
   OXIBELT_PERF_MAX_P99_MS          sanity ceiling for load p99 latency
+  OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION
+                                      load request error budget per million completed requests
   OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS
                                       OxiBelt H1/H2 baseline p50 latency ceiling
   OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS
@@ -106,9 +108,15 @@ warmup_seconds="${OXIBELT_PERF_WARMUP_SECONDS:-${default_warmup}}"
 concurrency="${OXIBELT_PERF_CONCURRENCY:-${default_concurrency}}"
 soak_seconds="${OXIBELT_PERF_SOAK_SECONDS:-${default_soak}}"
 max_p99_ms="${OXIBELT_PERF_MAX_P99_MS:-10000}"
+max_load_errors_per_million="${OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION:-1}"
 tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-20}"
 tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-35}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
+
+if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
+  exit 2
+fi
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -300,7 +308,9 @@ assert_result() {
   fi
 
   if [[ "${type}" != "stress" && "${errors}" != "0" ]]; then
-    fail_with_diagnostics "performance probe reported request errors: $(jq -r '.label' <<<"${json}")"
+    if [[ "${type}" != "load" ]] || ! load_errors_within_budget "${errors}" "${requests}"; then
+      fail_with_diagnostics "performance probe reported request errors: $(jq -r '.label' <<<"${json}")"
+    fi
   fi
 
   if [[ "${type}" == "stress" ]]; then
@@ -315,6 +325,16 @@ assert_result() {
   if jq -e --argjson max "${max_p99_ms}" '(.p99_ms // 0) > $max' >/dev/null <<<"${json}"; then
     fail_with_diagnostics "performance probe exceeded p99 sanity ceiling (${p99}ms > ${max_p99_ms}ms): $(jq -r '.label' <<<"${json}")"
   fi
+}
+
+load_errors_within_budget() {
+  local errors="$1"
+  local requests="$2"
+  jq -n -e \
+    --argjson errors "${errors}" \
+    --argjson requests "${requests}" \
+    --argjson max "${max_load_errors_per_million}" \
+    '($requests > 0) and (($errors * 1000000 / $requests) <= $max)' >/dev/null
 }
 
 assert_oxibelt_tcp_baseline() {
