@@ -22,8 +22,8 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 use crate::config::{
-  AdminConfig, AdminRole, AdminTransportMode, ConnectionLimitIdentityMode, HttpListenerMode,
-  RuntimeOverrides, UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
+  AdminConfig, AdminRole, AdminTransportMode, ConnectionLimitIdentityMode, RuntimeOverrides,
+  UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
 };
 use crate::identity::Cidr;
 use crate::lifecycle::{ConnectionDrain, TaskRegistry, wait_for_listener_or_data_plane_drain};
@@ -44,6 +44,7 @@ use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod admin;
 mod connection_errors;
+mod plain_http;
 #[cfg(test)]
 mod reload_tests;
 use admin::json_response;
@@ -1814,7 +1815,7 @@ async fn serve_tcp(
                     data_plane_drain,
                     connection_drain,
                   ).await,
-                  TcpListenerKind::PlainHttp => handle_plain_http_connection(
+                  TcpListenerKind::PlainHttp => plain_http::handle_connection(
                     stream,
                     peer_addr,
                     connection_snapshot,
@@ -2113,99 +2114,6 @@ async fn handle_connection(
     result.map_err(|error| anyhow::anyhow!(error))?;
   }
 
-  Ok(())
-}
-
-async fn handle_plain_http_connection(
-  stream: TcpStream,
-  peer_addr: SocketAddr,
-  snapshot: Arc<AppSnapshot>,
-  mut shutdown: watch::Receiver<bool>,
-  mut data_plane_drain: watch::Receiver<bool>,
-  drain: ConnectionDrain,
-) -> anyhow::Result<()> {
-  let _global_permit = acquire_global_connection_permit(&snapshot)?;
-  let connection_limit_identity = snapshot.config.limits.connection_limit_identity;
-  let proxy_mode = snapshot.config.listeners.http_mode == HttpListenerMode::Proxy;
-  let _ip_permit =
-    if connection_limit_identity == ConnectionLimitIdentityMode::ProxyProtocol || !proxy_mode {
-      Some(acquire_ip_connection_permit(&snapshot, peer_addr)?)
-    } else {
-      None
-    };
-  let connection_limit_context =
-    (connection_limit_identity == ConnectionLimitIdentityMode::FirstRequestRealIp && proxy_mode)
-      .then(ConnectionLimitContext::default);
-  let tcp_metadata = tcp_hop::transport_metadata(&stream);
-  let transport_metadata = WafTransportMetadataInput {
-    tcp_mss: tcp_metadata.mss,
-    tcp_rtt_ms: tcp_metadata.rtt_ms,
-    ..WafTransportMetadataInput::default()
-  };
-  let request_count = Arc::new(AtomicUsize::new(0));
-  let request_state = snapshot.clone();
-  let service = service_fn(move |request: hyper::Request<Incoming>| {
-    let state = request_state.clone();
-    let request_count = request_count.clone();
-    let connection_limit_context = connection_limit_context.clone();
-    let drain = drain.clone();
-    async move {
-      let response = match state.config.listeners.http_mode {
-        crate::config::HttpListenerMode::RedirectToHttps => redirect_to_https(&request),
-        crate::config::HttpListenerMode::Proxy => {
-          if request_count.fetch_add(1, Ordering::Relaxed)
-            >= state.config.limits.max_requests_per_connection
-          {
-            text_response(
-              StatusCode::TOO_MANY_REQUESTS,
-              "too many requests on this connection",
-            )
-          } else {
-            http::handle(
-              request,
-              peer_addr,
-              None,
-              transport_metadata,
-              Arc::new(WafTlsMetadata::default()),
-              connection_limit_context.clone(),
-              state,
-              "http",
-              drain,
-            )
-            .await
-          }
-        }
-        crate::config::HttpListenerMode::Off => {
-          text_response(StatusCode::NOT_FOUND, "HTTP listener is disabled")
-        }
-      };
-      Ok::<_, Infallible>(response)
-    }
-  });
-  let mut builder = hyper::server::conn::http1::Builder::new();
-  builder
-    .timer(TokioTimer::new())
-    .header_read_timeout(Duration::from_millis(
-      snapshot.config.limits.client_header_timeout_ms,
-    ))
-    .max_headers(snapshot.config.limits.max_headers)
-    .max_buf_size(snapshot.config.limits.max_total_header_bytes.max(8192))
-    .keep_alive(true);
-  let connection = builder
-    .serve_connection(TokioIo::new(stream), service)
-    .with_upgrades();
-  tokio::pin!(connection);
-  if *shutdown.borrow() || *data_plane_drain.borrow() {
-    connection.as_mut().graceful_shutdown();
-  }
-  let result = tokio::select! {
-    result = &mut connection => result,
-    _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
-      connection.as_mut().graceful_shutdown();
-      (&mut connection).await
-    }
-  };
-  result.map_err(|error| anyhow::anyhow!(error))?;
   Ok(())
 }
 

@@ -24,6 +24,15 @@ fn request(path: &str) -> Request<Empty<Bytes>> {
     .expect("request should build")
 }
 
+async fn serve_test(
+  request: &Request<Empty<Bytes>>,
+  route_name: &str,
+  route_prefix: &str,
+  static_root: &Path,
+) -> Response<ProxyBody> {
+  serve(request, route_name, route_prefix, static_root, 16 * 1024).await
+}
+
 #[tokio::test]
 async fn serves_regular_file_with_validator_headers() {
   let temp_dir = common::TempDir::new("static-ok");
@@ -33,7 +42,7 @@ async fn serves_regular_file_with_validator_headers() {
     .await
     .unwrap();
 
-  let response = serve(&request("/assets/app.txt"), "assets", "/assets", &root).await;
+  let response = serve_test(&request("/assets/app.txt"), "assets", "/assets", &root).await;
 
   assert_eq!(response.status(), StatusCode::OK);
   assert_eq!(
@@ -59,7 +68,7 @@ async fn head_uses_file_headers_without_body() {
     .body(Empty::new())
     .unwrap();
 
-  let response = serve(&request, "assets", "/assets", &root).await;
+  let response = serve_test(&request, "assets", "/assets", &root).await;
 
   assert_eq!(response.status(), StatusCode::OK);
   assert_eq!(response.headers().get(CONTENT_LENGTH).unwrap(), "5");
@@ -75,7 +84,7 @@ async fn rejects_directory_listing() {
     .await
     .unwrap();
 
-  let response = serve(&request("/assets/nested"), "assets", "/assets", &root).await;
+  let response = serve_test(&request("/assets/nested"), "assets", "/assets", &root).await;
 
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
@@ -89,7 +98,7 @@ async fn rejects_symlink_escape() {
   tokio::fs::write(&outside, "secret").await.unwrap();
   std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
 
-  let response = serve(&request("/assets/link.txt"), "assets", "/assets", &root).await;
+  let response = serve_test(&request("/assets/link.txt"), "assets", "/assets", &root).await;
 
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
@@ -107,7 +116,7 @@ async fn supports_single_byte_range() {
     .headers_mut()
     .insert(RANGE, HeaderValue::from_static("bytes=6-11"));
 
-  let response = serve(&request, "assets", "/assets", &root).await;
+  let response = serve_test(&request, "assets", "/assets", &root).await;
 
   assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
   assert_eq!(
@@ -126,16 +135,78 @@ async fn conditional_etag_returns_not_modified() {
   tokio::fs::write(root.join("app.txt"), "hello")
     .await
     .unwrap();
-  let first = serve(&request("/assets/app.txt"), "assets", "/assets", &root).await;
+  let first = serve_test(&request("/assets/app.txt"), "assets", "/assets", &root).await;
   let etag = first.headers().get(ETAG).unwrap().clone();
   let mut request = request("/assets/app.txt");
   request.headers_mut().insert(IF_NONE_MATCH, etag);
 
-  let response = serve(&request, "assets", "/assets", &root).await;
+  let response = serve_test(&request, "assets", "/assets", &root).await;
 
   assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
   let body = response.into_body().collect().await.unwrap().to_bytes();
   assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn small_file_inline_threshold_marks_known_small_body() {
+  let temp_dir = common::TempDir::new("static-inline");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "small")
+    .await
+    .unwrap();
+
+  let response = serve(&request("/assets/app.txt"), "assets", "/assets", &root, 16).await;
+
+  assert_eq!(response.status(), StatusCode::OK);
+  assert!(
+    response
+      .extensions()
+      .get::<KnownSmallResponseBody>()
+      .is_some()
+  );
+  let body = response.into_body().collect().await.unwrap().to_bytes();
+  assert_eq!(body, Bytes::from_static(b"small"));
+}
+
+#[tokio::test]
+async fn zero_inline_threshold_uses_streaming_body() {
+  let temp_dir = common::TempDir::new("static-no-inline");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "small")
+    .await
+    .unwrap();
+
+  let response = serve(&request("/assets/app.txt"), "assets", "/assets", &root, 0).await;
+
+  assert_eq!(response.status(), StatusCode::OK);
+  assert!(
+    response
+      .extensions()
+      .get::<KnownSmallResponseBody>()
+      .is_none()
+  );
+  let body = response.into_body().collect().await.unwrap().to_bytes();
+  assert_eq!(body, Bytes::from_static(b"small"));
+}
+
+#[tokio::test]
+async fn opened_file_validation_rejects_fd_outside_static_root() {
+  let temp_dir = common::TempDir::new("static-fd-root");
+  let root = temp_dir.path().join("public");
+  let outside = temp_dir.path().join("outside.txt");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(&outside, "secret").await.unwrap();
+  let file = tokio::fs::File::open(&outside).await.unwrap();
+  let root = root.canonicalize().unwrap();
+
+  let error = verify_opened_file(&file, &root).unwrap_err();
+
+  assert!(
+    error.to_string().contains("escapes static_root"),
+    "unexpected error: {error}"
+  );
 }
 
 #[test]

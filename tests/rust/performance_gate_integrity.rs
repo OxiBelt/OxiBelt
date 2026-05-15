@@ -69,6 +69,39 @@ fn run_common_loads_harness(h3_mode: &str, probe_result: &str) -> HarnessRun {
     HarnessRun { output, events }
 }
 
+fn run_static_loads_harness(profile: &str, h3_mode: &str, probe_result: &str) -> HarnessRun {
+    let functions = format!(
+        "{}\n\n{}",
+        extract_bash_function(&performance_script_text(), "run_static_h3_load"),
+        extract_bash_function(&performance_script_text(), "run_static_loads")
+    );
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-static-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    write_static_loads_harness(&harness_path, &functions);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("PROFILE", profile)
+        .env("H3_MODE", h3_mode)
+        .env("PROBE_RESULT", probe_result)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
 fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) -> HarnessRun {
     let functions = format!(
         "{}\n\n{}",
@@ -133,6 +166,44 @@ h3_probe_succeeds() {{
 {run_common_loads}
 
 run_common_loads oxibelt oxibelt "${{H3_MODE:?}}"
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_static_loads_harness(path: &Path, functions: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+profile="${{PROFILE:?}}"
+duration_seconds=1
+concurrency=1
+events="${{EVENTS_FILE:?}}"
+probe_result="${{PROBE_RESULT:?}}"
+
+run_load() {{
+  printf 'LOAD %s %s %s %s %s %s\n' "$@" >>"${{events}}"
+}}
+
+record_skip() {{
+  printf 'SKIP %s %s %s %s\n' "$1" "$2" "$3" "$4" >>"${{events}}"
+}}
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+h3_probe_succeeds() {{
+  printf 'PROBE %s\n' "$1" >>"${{events}}"
+  [[ "${{probe_result}}" == "success" ]]
+}}
+
+{functions}
+
+run_static_loads oxibelt oxibelt "${{H3_MODE:?}}"
 "#
     );
     fs::write(path, harness).expect("Bash harness should be writable");
@@ -226,6 +297,48 @@ fn disabled_h3_records_skip_without_probe() {
         run.events
             .contains("SKIP oxibelt-h3 load h3 HTTP/3 is not available for this comparator image"),
         "disabled HTTP/3 should record a clear unavailable skip"
+    );
+}
+
+#[test]
+fn smoke_static_loads_use_cleartext_h1_without_h3_probe() {
+    let run = run_static_loads_harness("smoke", "required", "failure");
+
+    assert!(run.output.status.success(), "smoke static h1c should run");
+    assert!(
+        run.events
+            .contains("LOAD oxibelt-static-16k-h1c h1c oxibelt /static/16k.bin")
+    );
+    assert!(
+        !run.events.contains("PROBE oxibelt"),
+        "smoke static sanity row should not require an H3 probe"
+    );
+}
+
+#[test]
+fn benchmark_static_required_h3_probe_failure_fails_closed() {
+    let run = run_static_loads_harness("benchmark", "required", "failure");
+
+    assert!(
+        !run.output.status.success(),
+        "required static HTTP/3 probe failure should fail the performance gate"
+    );
+    assert!(
+        run.events
+            .contains("LOAD oxibelt-static-1k-h1c h1c oxibelt /static/1k.bin")
+    );
+    assert!(
+        run.events
+            .contains("LOAD oxibelt-static-1k-h1 h1 oxibelt /static/1k.bin")
+    );
+    assert!(
+        run.events
+            .contains("LOAD oxibelt-static-1k-h2 h2 oxibelt /static/1k.bin")
+    );
+    assert!(run.events.contains("PROBE oxibelt"));
+    assert!(
+        run.events
+            .contains("FAIL mandatory HTTP/3 probe failed for oxibelt static files")
     );
 }
 

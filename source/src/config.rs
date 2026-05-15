@@ -2102,6 +2102,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "http",
       "real_ip",
       "retry",
+      "static_files",
       "trusted_ca_certs",
       "upgrades",
     ][..],
@@ -2141,6 +2142,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "proxy.http.grpc" => &["enabled", "respect_grpc_timeout", "retry"][..],
     "proxy.http.errors" => &["mode"][..],
+    "proxy.static_files" => &["inline_max_bytes", "sendfile"][..],
     "limits" => &[
       "client_body_timeout_ms",
       "client_header_timeout_ms",
@@ -3335,7 +3337,34 @@ pub struct ProxyConfig {
   #[serde(default)]
   pub http: ProxyHttpConfig,
   #[serde(default)]
+  pub static_files: ProxyStaticFilesConfig,
+  #[serde(default)]
   pub trusted_ca_certs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+pub struct ProxyStaticFilesConfig {
+  #[serde(default)]
+  pub sendfile: StaticFilesSendfileMode,
+  #[serde(default = "default_static_files_inline_max_bytes")]
+  pub inline_max_bytes: usize,
+}
+
+impl Default for ProxyStaticFilesConfig {
+  fn default() -> Self {
+    Self {
+      sendfile: StaticFilesSendfileMode::Off,
+      inline_max_bytes: default_static_files_inline_max_bytes(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum StaticFilesSendfileMode {
+  #[default]
+  Off,
+  Auto,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -5552,6 +5581,10 @@ fn default_retry_on() -> Vec<RetryCondition> {
     RetryCondition::Status503,
     RetryCondition::Status504,
   ]
+}
+
+fn default_static_files_inline_max_bytes() -> usize {
+  16 * 1024
 }
 
 fn default_buffering_max_memory_body_bytes() -> usize {

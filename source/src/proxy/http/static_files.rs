@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
@@ -11,14 +14,14 @@ use http::header::{
   IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RANGE,
 };
 use http::{HeaderMap, Method, Request, Response, StatusCode};
-use http_body_util::{BodyExt, Empty, StreamBody};
-use hyper::body::{Body, Frame};
+use http_body_util::{BodyExt, Empty, Full, StreamBody};
+use hyper::body::{Body, Frame, SizeHint};
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 
-use super::body::{BoxError, ProxyBody, boxed_error};
+use super::body::{BoxError, KnownSmallResponseBody, ProxyBody, boxed_error};
 use super::response::{apply_security_headers, text_response, waf_terminal_response};
 use super::{
   SystemAccessLogContext, WafBodyCaptureDecision, apply_alt_svc_header, capture_body_prefix,
@@ -32,7 +35,32 @@ use crate::waf::{
   WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
 };
 
+mod path;
+pub(crate) use self::path::{StaticPathError, resolve_request_path};
+
 const STATIC_BODY_CHANNEL_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct StaticResponsePlan {
+  pub(crate) status: StatusCode,
+  pub(crate) headers: HeaderMap,
+  pub(crate) body: StaticBodyPlan,
+}
+
+#[derive(Debug)]
+pub(crate) enum StaticBodyPlan {
+  Empty,
+  Text(&'static str),
+  File(StaticFileBodyPlan),
+}
+
+#[derive(Debug)]
+pub(crate) struct StaticFileBodyPlan {
+  pub(crate) root: PathBuf,
+  pub(crate) path: PathBuf,
+  pub(crate) offset: u64,
+  pub(crate) len: u64,
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum RangeSelection {
@@ -59,85 +87,110 @@ pub(crate) async fn serve<B>(
   route_name: &str,
   route_prefix: &str,
   static_root: &Path,
+  inline_max_bytes: usize,
 ) -> Response<ProxyBody>
 where
   B: Body<Data = Bytes> + Send + Sync + 'static,
 {
-  if request.method() != Method::GET && request.method() != Method::HEAD {
-    let mut response = text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
-    response
-      .headers_mut()
+  let plan = plan_response(
+    request.method(),
+    request.headers(),
+    request.uri().path(),
+    route_name,
+    route_prefix,
+    static_root,
+  )
+  .await;
+  response_from_plan(plan, inline_max_bytes).await
+}
+
+pub(crate) async fn plan_response(
+  method: &Method,
+  headers: &HeaderMap,
+  request_path: &str,
+  route_name: &str,
+  route_prefix: &str,
+  static_root: &Path,
+) -> StaticResponsePlan {
+  if method != Method::GET && method != Method::HEAD {
+    let mut plan = text_plan(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+    plan
+      .headers
       .insert(ALLOW, HeaderValue::from_static("GET, HEAD"));
-    return response;
+    return plan;
   }
 
   let root = match validate_static_root(static_root) {
     Ok(root) => root,
     Err(error) => {
       warn!(error = %error, route = %route_name, "static_root is not usable");
-      return text_response(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
+      return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
     }
   };
-  let path = match resolve_request_path(&root, route_prefix, request.uri().path()) {
+  let path = match resolve_request_path(&root, route_prefix, request_path) {
     Ok(path) => path,
-    Err(StaticPathError::NotFound) => return text_response(StatusCode::NOT_FOUND, "not found"),
-    Err(StaticPathError::Forbidden) => return text_response(StatusCode::FORBIDDEN, "forbidden"),
+    Err(StaticPathError::NotFound) => return text_plan(StatusCode::NOT_FOUND, "not found"),
+    Err(StaticPathError::Forbidden) => return text_plan(StatusCode::FORBIDDEN, "forbidden"),
     Err(StaticPathError::Invalid) => {
-      return text_response(StatusCode::BAD_REQUEST, "invalid static file path");
+      return text_plan(StatusCode::BAD_REQUEST, "invalid static file path");
     }
   };
 
   let metadata = match tokio::fs::metadata(&path).await {
     Ok(metadata) => metadata,
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-      return text_response(StatusCode::NOT_FOUND, "not found");
+      return text_plan(StatusCode::NOT_FOUND, "not found");
     }
     Err(error) => {
       warn!(error = %error, route = %route_name, path = %path.display(), "failed to inspect static file");
-      return text_response(StatusCode::FORBIDDEN, "forbidden");
+      return text_plan(StatusCode::FORBIDDEN, "forbidden");
     }
   };
   if !metadata.is_file() {
-    return text_response(StatusCode::FORBIDDEN, "forbidden");
+    return text_plan(StatusCode::FORBIDDEN, "forbidden");
   }
 
   let len = metadata.len();
   let modified = metadata.modified().ok();
   let etag = etag_for_metadata(&metadata);
-  if conditional_not_modified(request, &etag, modified) {
-    return not_modified_response(&etag, modified);
+  if conditional_not_modified(headers, &etag, modified) {
+    return not_modified_plan(&etag, modified);
   }
 
-  let range = match request.headers().get(RANGE) {
+  let range = match headers.get(RANGE) {
     Some(value) => parse_range(value, len),
     None => RangeSelection::Full,
   };
   match range {
-    RangeSelection::NotSatisfiable => range_not_satisfiable_response(len),
-    RangeSelection::Full => {
-      file_response(
-        request.method(),
-        StatusCode::OK,
-        path,
-        len,
-        None,
-        &etag,
-        modified,
-      )
-      .await
-    }
+    RangeSelection::NotSatisfiable => range_not_satisfiable_plan(len),
+    RangeSelection::Full => file_plan(
+      method,
+      StatusCode::OK,
+      root,
+      path,
+      FileContentPlan {
+        offset: 0,
+        body_len: len,
+        content_range: None,
+      },
+      &etag,
+      modified,
+    ),
     RangeSelection::Partial { start, end } => {
       let body_len = end - start + 1;
-      file_response(
-        request.method(),
+      file_plan(
+        method,
         StatusCode::PARTIAL_CONTENT,
+        root,
         path,
-        body_len,
-        Some((start, end, len)),
+        FileContentPlan {
+          offset: start,
+          body_len,
+          content_range: Some((start, end, len)),
+        },
         &etag,
         modified,
       )
-      .await
     }
   }
 }
@@ -279,145 +332,183 @@ fn static_response_send_timeout(state: &AppSnapshot, route: &RouteConfig) -> Dur
   )
 }
 
-fn resolve_request_path(
-  root: &Path,
-  route_prefix: &str,
-  request_path: &str,
-) -> Result<PathBuf, StaticPathError> {
-  let relative = if route_prefix == "/" {
-    request_path.trim_start_matches('/')
-  } else if request_path == route_prefix {
-    ""
-  } else {
-    request_path
-      .strip_prefix(route_prefix)
-      .ok_or(StaticPathError::NotFound)?
-      .trim_start_matches('/')
-  };
-
-  let mut candidate = root.to_path_buf();
-  for raw_segment in relative.split('/') {
-    if raw_segment.is_empty() {
-      continue;
-    }
-    let segment = percent_decode_segment(raw_segment)?;
-    if segment == "." || segment == ".." {
-      return Err(StaticPathError::Forbidden);
-    }
-    if segment
-      .bytes()
-      .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
-    {
-      return Err(StaticPathError::Invalid);
-    }
-    candidate.push(segment);
-  }
-
-  let canonical = match candidate.canonicalize() {
-    Ok(path) => path,
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-      return Err(StaticPathError::NotFound);
-    }
-    Err(_) => return Err(StaticPathError::Forbidden),
-  };
-  if !canonical.starts_with(root) {
-    return Err(StaticPathError::Forbidden);
-  }
-  Ok(canonical)
-}
-
-fn percent_decode_segment(segment: &str) -> Result<String, StaticPathError> {
-  let bytes = segment.as_bytes();
-  let mut decoded = Vec::with_capacity(bytes.len());
-  let mut index = 0;
-  while index < bytes.len() {
-    if bytes[index] != b'%' {
-      decoded.push(bytes[index]);
-      index += 1;
-      continue;
-    }
-    if index + 2 >= bytes.len() {
-      return Err(StaticPathError::Invalid);
-    }
-    let high = hex_value(bytes[index + 1]).ok_or(StaticPathError::Invalid)?;
-    let low = hex_value(bytes[index + 2]).ok_or(StaticPathError::Invalid)?;
-    decoded.push((high << 4) | low);
-    index += 3;
-  }
-  String::from_utf8(decoded).map_err(|_| StaticPathError::Invalid)
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-  match byte {
-    b'0'..=b'9' => Some(byte - b'0'),
-    b'a'..=b'f' => Some(byte - b'a' + 10),
-    b'A'..=b'F' => Some(byte - b'A' + 10),
-    _ => None,
-  }
-}
-
-async fn file_response(
-  method: &Method,
-  status: StatusCode,
-  path: PathBuf,
-  body_len: u64,
-  content_range: Option<(u64, u64, u64)>,
-  etag: &str,
-  modified: Option<SystemTime>,
+pub(crate) async fn response_from_plan(
+  plan: StaticResponsePlan,
+  inline_max_bytes: usize,
 ) -> Response<ProxyBody> {
-  let mut response = if method == Method::HEAD || body_len == 0 {
-    Response::new(empty_body())
-  } else {
-    match file_body(
-      path.clone(),
-      content_range.map(|(start, _, _)| start),
-      body_len,
+  let StaticResponsePlan {
+    status,
+    headers,
+    body,
+  } = plan;
+  let mut response = match body {
+    StaticBodyPlan::Empty => Response::new(empty_body()),
+    StaticBodyPlan::Text(message) => text_response(status, message),
+    StaticBodyPlan::File(file) => match file_body(
+      file.root,
+      file.path.clone(),
+      file.offset,
+      file.len,
+      inline_max_bytes,
     )
     .await
     {
-      Ok(body) => Response::new(body),
+      Ok((body, known_small)) => {
+        let mut response = Response::new(body);
+        if known_small {
+          response.extensions_mut().insert(KnownSmallResponseBody);
+        }
+        response
+      }
       Err(error) => {
-        warn!(error = %error, path = %path.display(), "failed to open static file");
+        warn!(error = %error, path = %file.path.display(), "failed to open static file");
         return text_response(StatusCode::NOT_FOUND, "not found");
       }
-    }
+    },
   };
   *response.status_mut() = status;
-  set_common_headers(response.headers_mut(), &path, body_len, etag, modified);
-  if let Some((start, end, full_len)) = content_range
-    && let Ok(value) = HeaderValue::from_str(&format!("bytes {start}-{end}/{full_len}"))
-  {
-    response.headers_mut().insert(CONTENT_RANGE, value);
+  for (name, value) in headers {
+    if let Some(name) = name {
+      response.headers_mut().insert(name, value);
+    }
   }
   response
 }
 
-async fn file_body(path: PathBuf, start: Option<u64>, len: u64) -> anyhow::Result<ProxyBody> {
-  let mut file = File::open(&path)
-    .await
-    .with_context(|| format!("failed to open static file {}", path.display()))?;
-  if let Some(start) = start {
-    file
-      .seek(std::io::SeekFrom::Start(start))
-      .await
-      .with_context(|| format!("failed to seek static file {}", path.display()))?;
-  }
-  Ok(reader_body(file.take(len)))
+struct FileContentPlan {
+  offset: u64,
+  body_len: u64,
+  content_range: Option<(u64, u64, u64)>,
 }
 
-fn reader_body<R>(reader: R) -> ProxyBody
+fn file_plan(
+  method: &Method,
+  status: StatusCode,
+  root: PathBuf,
+  path: PathBuf,
+  content: FileContentPlan,
+  etag: &str,
+  modified: Option<SystemTime>,
+) -> StaticResponsePlan {
+  let mut headers = HeaderMap::new();
+  set_common_headers(&mut headers, &path, content.body_len, etag, modified);
+  if let Some((start, end, full_len)) = content.content_range
+    && let Ok(value) = HeaderValue::from_str(&format!("bytes {start}-{end}/{full_len}"))
+  {
+    headers.insert(CONTENT_RANGE, value);
+  }
+  let body = if method == Method::HEAD || content.body_len == 0 {
+    StaticBodyPlan::Empty
+  } else {
+    StaticBodyPlan::File(StaticFileBodyPlan {
+      root,
+      path,
+      offset: content.offset,
+      len: content.body_len,
+    })
+  };
+  StaticResponsePlan {
+    status,
+    headers,
+    body,
+  }
+}
+
+async fn file_body(
+  root: PathBuf,
+  path: PathBuf,
+  offset: u64,
+  len: u64,
+  inline_max_bytes: usize,
+) -> anyhow::Result<(ProxyBody, bool)> {
+  let mut file = open_verified_file(&root, &path).await?;
+  file
+    .seek(std::io::SeekFrom::Start(offset))
+    .await
+    .with_context(|| format!("failed to seek static file {}", path.display()))?;
+  if inline_max_bytes > 0 && len <= inline_max_bytes as u64 {
+    let mut bytes = Vec::with_capacity(len as usize);
+    file
+      .take(len)
+      .read_to_end(&mut bytes)
+      .await
+      .with_context(|| format!("failed to read static file {}", path.display()))?;
+    return Ok((full_body(Bytes::from(bytes)), true));
+  }
+  Ok((reader_body(file.take(len), len), false))
+}
+
+pub(crate) async fn open_verified_file(root: &Path, path: &Path) -> anyhow::Result<File> {
+  let file = File::open(path)
+    .await
+    .with_context(|| format!("failed to open static file {}", path.display()))?;
+  verify_opened_file(&file, root)
+    .with_context(|| format!("static file fd failed validation {}", path.display()))?;
+  let metadata = file
+    .metadata()
+    .await
+    .with_context(|| format!("failed to inspect opened static file {}", path.display()))?;
+  if !metadata.is_file() {
+    bail!("opened static file is not a regular file");
+  }
+  Ok(file)
+}
+
+fn verify_opened_file(file: &File, root: &Path) -> anyhow::Result<()> {
+  let target = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+    .context("failed to resolve opened static file descriptor")?;
+  if !target.starts_with(root) {
+    bail!("opened static file descriptor escapes static_root");
+  }
+  Ok(())
+}
+
+fn reader_body<R>(reader: R, len: u64) -> ProxyBody
 where
   R: AsyncRead + Unpin + Send + Sync + 'static,
 {
   let stream = ReaderStream::with_capacity(reader, STATIC_BODY_CHANNEL_CHUNK_BYTES)
     .map(|result| result.map(Frame::data).map_err(boxed_error));
-  BodyExt::boxed(StreamBody::new(stream))
+  BodyExt::boxed(ExactSizeBody {
+    inner: StreamBody::new(stream),
+    len,
+  })
+}
+
+fn full_body(bytes: Bytes) -> ProxyBody {
+  Full::new(bytes)
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed()
 }
 
 fn empty_body() -> ProxyBody {
   Empty::<Bytes>::new()
     .map_err(|never| -> BoxError { match never {} })
     .boxed()
+}
+
+struct ExactSizeBody<B> {
+  inner: B,
+  len: u64,
+}
+
+impl<B> Body for ExactSizeBody<B>
+where
+  B: Body<Data = Bytes> + Unpin,
+{
+  type Data = Bytes;
+  type Error = B::Error;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut TaskContext<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    Pin::new(&mut self.inner).poll_frame(cx)
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::with_exact(self.len)
+  }
 }
 
 fn set_common_headers(
@@ -445,44 +536,48 @@ fn set_common_headers(
   );
 }
 
-fn not_modified_response(etag: &str, modified: Option<SystemTime>) -> Response<ProxyBody> {
-  let mut response = Response::new(empty_body());
-  *response.status_mut() = StatusCode::NOT_MODIFIED;
-  response
-    .headers_mut()
-    .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+fn not_modified_plan(etag: &str, modified: Option<SystemTime>) -> StaticResponsePlan {
+  let mut headers = HeaderMap::new();
+  headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
   if let Ok(value) = HeaderValue::from_str(etag) {
-    response.headers_mut().insert(ETAG, value);
+    headers.insert(ETAG, value);
   }
   if let Some(modified) = modified
     && let Ok(value) = HeaderValue::from_str(&httpdate::fmt_http_date(modified))
   {
-    response.headers_mut().insert(LAST_MODIFIED, value);
+    headers.insert(LAST_MODIFIED, value);
   }
-  response
+  StaticResponsePlan {
+    status: StatusCode::NOT_MODIFIED,
+    headers,
+    body: StaticBodyPlan::Empty,
+  }
 }
 
-fn range_not_satisfiable_response(len: u64) -> Response<ProxyBody> {
-  let mut response = Response::new(empty_body());
-  *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
-  response
-    .headers_mut()
-    .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+fn range_not_satisfiable_plan(len: u64) -> StaticResponsePlan {
+  let mut headers = HeaderMap::new();
+  headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
   if let Ok(value) = HeaderValue::from_str(&format!("bytes */{len}")) {
-    response.headers_mut().insert(CONTENT_RANGE, value);
+    headers.insert(CONTENT_RANGE, value);
   }
-  response
-    .headers_mut()
-    .insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
-  response
+  headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+  StaticResponsePlan {
+    status: StatusCode::RANGE_NOT_SATISFIABLE,
+    headers,
+    body: StaticBodyPlan::Empty,
+  }
 }
 
-fn conditional_not_modified<B>(
-  request: &Request<B>,
-  etag: &str,
-  modified: Option<SystemTime>,
-) -> bool {
-  if let Some(value) = request.headers().get(IF_NONE_MATCH)
+fn text_plan(status: StatusCode, message: &'static str) -> StaticResponsePlan {
+  StaticResponsePlan {
+    status,
+    headers: HeaderMap::new(),
+    body: StaticBodyPlan::Text(message),
+  }
+}
+
+fn conditional_not_modified(headers: &HeaderMap, etag: &str, modified: Option<SystemTime>) -> bool {
+  if let Some(value) = headers.get(IF_NONE_MATCH)
     && let Ok(value) = value.to_str()
   {
     return value
@@ -493,8 +588,7 @@ fn conditional_not_modified<B>(
   let Some(modified) = modified.map(truncate_to_http_date_precision) else {
     return false;
   };
-  request
-    .headers()
+  headers
     .get(IF_MODIFIED_SINCE)
     .and_then(|value| value.to_str().ok())
     .and_then(|value| httpdate::parse_http_date(value).ok())
@@ -605,13 +699,6 @@ fn content_type_for_path(path: &Path) -> &'static str {
     "zst" => "application/zstd",
     _ => "application/octet-stream",
   }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum StaticPathError {
-  NotFound,
-  Forbidden,
-  Invalid,
 }
 
 #[cfg(test)]

@@ -146,6 +146,10 @@ max_memory_body_bytes = 1048576
 max_temp_file_bytes = 0
 # temp_dir = "/var/cache/oxibelt"
 
+[proxy.static_files]
+sendfile = "off" # off | auto
+inline_max_bytes = 16384
+
 [proxy.http]
 early_hints = "drop"
 trailers = "pass"

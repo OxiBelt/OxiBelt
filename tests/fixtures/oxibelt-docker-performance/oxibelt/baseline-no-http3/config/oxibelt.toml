@@ -43,6 +43,10 @@ trusted_ca_certs = []
 enabled = true
 max_http_version = "h2"
 
+[proxy.static_files]
+sendfile = "auto"
+inline_max_bytes = 16384
+
 [compression]
 enabled = false
 
@@ -61,6 +65,12 @@ preserve_host = false
 websocket = false
 webrtc = false
 webtransport = false
+
+[[routes]]
+name = "static-route"
+hosts = ["example.test"]
+path_prefix = "/static"
+static_root = "/etc/oxibelt/static"
 
 [[routes]]
 name = "main-route"

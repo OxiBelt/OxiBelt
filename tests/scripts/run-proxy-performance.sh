@@ -68,6 +68,7 @@ logs_dir="${work_dir}/logs"
 probe_logs_dir="${work_dir}/probe-logs"
 configs_dir="${work_dir}/configs"
 tls_dir="${work_dir}/proxy-tls"
+static_dir="${work_dir}/static"
 results_jsonl="${work_dir}/results.jsonl"
 results_json="${work_dir}/results.json"
 summary_md="${work_dir}/summary.md"
@@ -131,7 +132,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${logs_dir}" "${probe_logs_dir}" "${configs_dir}" "${tls_dir}"
+mkdir -p "${logs_dir}" "${probe_logs_dir}" "${configs_dir}" "${tls_dir}" "${static_dir}"
 : >"${results_jsonl}"
 : >"${stats_jsonl}"
 
@@ -190,6 +191,12 @@ EOF
   openssl rand -base64 64 >"${tls_dir}/quic-host-key.b64"
   chmod 0644 "${tls_dir}/fullchain.pem" "${tls_dir}/privkey.pem"
   chmod 0644 "${tls_dir}/quic-host-key.b64"
+}
+
+generate_static_files() {
+  openssl rand 1024 >"${static_dir}/1k.bin"
+  openssl rand 16384 >"${static_dir}/16k.bin"
+  openssl rand 1048576 >"${static_dir}/1m.bin"
 }
 
 copy_artifacts() {
@@ -379,12 +386,16 @@ run_load() {
   local path="$4"
   local duration="$5"
   local conc="$6"
+  local port="8443"
   local json
+  if [[ "${protocol}" == "h1c" ]]; then
+    port="8080"
+  fi
   json="$(run_probe_json load \
     --label "${label}" \
     --protocol "${protocol}" \
     --host "${host}" \
-    --port 8443 \
+    --port "${port}" \
     --server-name proxy \
     --authority example.test \
     --path "${path}" \
@@ -396,6 +407,57 @@ run_load() {
   append_result "${json}"
   assert_result "${json}"
   sample_stats "${label}"
+}
+
+run_static_h3_load() {
+  local comparator="$1"
+  local host="$2"
+  local h3_mode="$3"
+  local size="$4"
+  local path="$5"
+  case "${h3_mode}" in
+    required)
+      if h3_probe_succeeds "${host}"; then
+        run_load "${comparator}-static-${size}-h3" h3 "${host}" "${path}" "${duration_seconds}" "${concurrency}"
+      else
+        fail_with_diagnostics "mandatory HTTP/3 probe failed for ${comparator} static files: functional QUIC probe did not complete"
+      fi
+      ;;
+    optional)
+      if h3_probe_succeeds "${host}"; then
+        run_load "${comparator}-static-${size}-h3" h3 "${host}" "${path}" "${duration_seconds}" "${concurrency}"
+      else
+        record_skip "${comparator}-static-${size}-h3" load h3 "optional HTTP/3 support was detected, but a functional QUIC probe did not complete"
+      fi
+      ;;
+    disabled)
+      record_skip "${comparator}-static-${size}-h3" load h3 "HTTP/3 is not available for this comparator image"
+      ;;
+    *)
+      fail_with_diagnostics "invalid HTTP/3 performance mode for ${comparator} static files: ${h3_mode}"
+      ;;
+  esac
+}
+
+run_static_loads() {
+  local comparator="$1"
+  local host="$2"
+  local h3_mode="$3"
+  if [[ "${profile}" == "smoke" ]]; then
+    run_load "${comparator}-static-16k-h1c" h1c "${host}" "/static/16k.bin" "${duration_seconds}" "${concurrency}"
+    return
+  fi
+  if [[ "${profile}" != "benchmark" ]]; then
+    return
+  fi
+  local size path
+  for size in 1k 16k 1m; do
+    path="/static/${size}.bin"
+    run_load "${comparator}-static-${size}-h1c" h1c "${host}" "${path}" "${duration_seconds}" "${concurrency}"
+    run_load "${comparator}-static-${size}-h1" h1 "${host}" "${path}" "${duration_seconds}" "${concurrency}"
+    run_load "${comparator}-static-${size}-h2" h2 "${host}" "${path}" "${duration_seconds}" "${concurrency}"
+    run_static_h3_load "${comparator}" "${host}" "${h3_mode}" "${size}" "${path}"
+  done
 }
 
 run_handshake() {
@@ -513,6 +575,7 @@ start_oxibelt() {
     "${oxibelt_image}" >/dev/null
   docker cp "${fixture_dir}/config/." "${container}:/etc/oxibelt/config"
   docker cp "${tls_dir}/." "${container}:/etc/oxibelt/cert"
+  docker cp "${static_dir}/." "${container}:/etc/oxibelt/static"
   if [[ -d "${fixture_dir}/oxirule" ]]; then
     docker cp "${fixture_dir}/oxirule/." "${container}:/etc/oxibelt/oxirule"
   fi
@@ -543,6 +606,7 @@ start_nginx() {
   docker cp "${fixture_root}/nginx/${config}" "${container}:/etc/nginx/nginx.conf"
   docker cp "${tls_dir}/fullchain.pem" "${container}:/etc/nginx/fullchain.pem"
   docker cp "${tls_dir}/privkey.pem" "${container}:/etc/nginx/privkey.pem"
+  docker cp "${static_dir}/." "${container}:/srv/static"
   docker start "${container}" >/dev/null
   active_proxy_container="${container}"
   if ! wait_for_tls_proxy nginx; then
@@ -566,6 +630,7 @@ start_caddy() {
   docker cp "${fixture_root}/caddy/Caddyfile" "${container}:/etc/caddy/Caddyfile"
   docker cp "${tls_dir}/fullchain.pem" "${container}:/etc/caddy/fullchain.pem"
   docker cp "${tls_dir}/privkey.pem" "${container}:/etc/caddy/privkey.pem"
+  docker cp "${static_dir}/." "${container}:/srv/static"
   docker start "${container}" >/dev/null
   active_proxy_container="${container}"
   if ! wait_for_tls_proxy caddy; then
@@ -681,6 +746,7 @@ finalize_results() {
 }
 
 generate_tls
+generate_static_files
 
 cat >"${summary_md}" <<EOF
 # OxiBelt Docker Performance (${profile})
@@ -729,6 +795,7 @@ sleep 1
 if has_comparator oxibelt; then
   start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
   run_common_loads oxibelt oxibelt required
+  run_static_loads oxibelt oxibelt required
   assert_oxibelt_tcp_baseline
   run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
   if [[ "${profile}" == "smoke" ]]; then
@@ -743,11 +810,13 @@ if has_comparator nginx; then
     nginx_h3_mode=optional
   fi
   run_common_loads nginx nginx "${nginx_h3_mode}"
+  run_static_loads nginx nginx "${nginx_h3_mode}"
 fi
 
 if has_comparator caddy; then
   start_caddy
   run_common_loads caddy caddy required
+  run_static_loads caddy caddy required
 fi
 
 if has_comparator oxibelt && [[ "${profile}" == "benchmark" || "${profile}" == "soak" ]]; then

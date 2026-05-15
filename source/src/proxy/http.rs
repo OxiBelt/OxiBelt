@@ -556,6 +556,7 @@ where
       &resolved.route.name,
       &resolved.route.path_prefix,
       static_root,
+      state.config.proxy.static_files.inline_max_bytes,
     )
     .await;
     return static_files::finalize_response(

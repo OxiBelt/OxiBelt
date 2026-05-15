@@ -1,0 +1,745 @@
+use std::convert::Infallible;
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use ::http::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING, UPGRADE};
+use ::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use anyhow::{Context as AnyhowContext, bail};
+use httparse::Status;
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use nix::errno::Errno;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpStream;
+use tokio::sync::watch;
+use tracing::{debug, trace};
+
+use crate::config::{
+  Config, ConnectionLimitIdentityMode, HttpListenerMode, StaticFilesSendfileMode,
+};
+use crate::lifecycle::{ConnectionDrain, wait_for_listener_or_data_plane_drain};
+use crate::limits::ConnectionLimitContext;
+use crate::proxy::http;
+use crate::proxy::http::response::text_response;
+use crate::proxy::http::static_files::{self, StaticBodyPlan, StaticResponsePlan};
+use crate::routes::normalize_host;
+use crate::state::AppSnapshot;
+use crate::tcp_hop;
+use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
+
+const READ_CHUNK_BYTES: usize = 4096;
+
+pub(super) enum SendfilePreflight {
+  Done,
+  Continue {
+    io: PlainHttpIo,
+    served_requests: usize,
+  },
+}
+
+impl SendfilePreflight {
+  pub(super) fn into_continue(self) -> Option<(PlainHttpIo, usize)> {
+    match self {
+      Self::Done => None,
+      Self::Continue {
+        io,
+        served_requests,
+      } => Some((io, served_requests)),
+    }
+  }
+}
+
+pub(super) struct PlainHttpIo {
+  stream: TcpStream,
+  prefix: Vec<u8>,
+  prefix_offset: usize,
+}
+
+impl PlainHttpIo {
+  fn new(stream: TcpStream, prefix: Vec<u8>) -> Self {
+    Self {
+      stream,
+      prefix,
+      prefix_offset: 0,
+    }
+  }
+}
+
+impl AsyncRead for PlainHttpIo {
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<()>> {
+    if self.prefix_offset < self.prefix.len() {
+      let remaining = &self.prefix[self.prefix_offset..];
+      let to_copy = remaining.len().min(buf.remaining());
+      buf.put_slice(&remaining[..to_copy]);
+      self.prefix_offset += to_copy;
+      if self.prefix_offset == self.prefix.len() {
+        self.prefix.clear();
+        self.prefix_offset = 0;
+      }
+      return Poll::Ready(Ok(()));
+    }
+    Pin::new(&mut self.stream).poll_read(cx, buf)
+  }
+}
+
+impl AsyncWrite for PlainHttpIo {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<io::Result<usize>> {
+    Pin::new(&mut self.stream).poll_write(cx, buf)
+  }
+
+  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.stream).poll_flush(cx)
+  }
+
+  fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.stream).poll_shutdown(cx)
+  }
+}
+
+pub(super) async fn handle_connection(
+  stream: TcpStream,
+  peer_addr: SocketAddr,
+  snapshot: Arc<AppSnapshot>,
+  mut shutdown: watch::Receiver<bool>,
+  mut data_plane_drain: watch::Receiver<bool>,
+  drain: ConnectionDrain,
+) -> anyhow::Result<()> {
+  let _global_permit = super::acquire_global_connection_permit(&snapshot)?;
+  let connection_limit_identity = snapshot.config.limits.connection_limit_identity;
+  let proxy_mode = snapshot.config.listeners.http_mode == HttpListenerMode::Proxy;
+  let _ip_permit =
+    if connection_limit_identity == ConnectionLimitIdentityMode::ProxyProtocol || !proxy_mode {
+      Some(super::acquire_ip_connection_permit(&snapshot, peer_addr)?)
+    } else {
+      None
+    };
+  let connection_limit_context =
+    (connection_limit_identity == ConnectionLimitIdentityMode::FirstRequestRealIp && proxy_mode)
+      .then(ConnectionLimitContext::default);
+  let tcp_metadata = tcp_hop::transport_metadata(&stream);
+  let transport_metadata = WafTransportMetadataInput {
+    tcp_mss: tcp_metadata.mss,
+    tcp_rtt_ms: tcp_metadata.rtt_ms,
+    ..WafTransportMetadataInput::default()
+  };
+  let Some((io, served_requests)) = try_sendfile_fast_path(
+    stream,
+    peer_addr,
+    &snapshot,
+    &mut shutdown,
+    &mut data_plane_drain,
+  )
+  .await?
+  .into_continue() else {
+    return Ok(());
+  };
+  let request_count = Arc::new(AtomicUsize::new(served_requests));
+  let request_state = snapshot.clone();
+  let service = service_fn(move |request: hyper::Request<Incoming>| {
+    let state = request_state.clone();
+    let request_count = request_count.clone();
+    let connection_limit_context = connection_limit_context.clone();
+    let drain = drain.clone();
+    async move {
+      let response = match state.config.listeners.http_mode {
+        HttpListenerMode::RedirectToHttps => super::redirect_to_https(&request),
+        HttpListenerMode::Proxy => {
+          if request_count.fetch_add(1, Ordering::Relaxed)
+            >= state.config.limits.max_requests_per_connection
+          {
+            text_response(
+              StatusCode::TOO_MANY_REQUESTS,
+              "too many requests on this connection",
+            )
+          } else {
+            http::handle(
+              request,
+              peer_addr,
+              None,
+              transport_metadata,
+              Arc::new(WafTlsMetadata::default()),
+              connection_limit_context.clone(),
+              state,
+              "http",
+              drain,
+            )
+            .await
+          }
+        }
+        HttpListenerMode::Off => text_response(StatusCode::NOT_FOUND, "HTTP listener is disabled"),
+      };
+      Ok::<_, Infallible>(response)
+    }
+  });
+  let mut builder = hyper::server::conn::http1::Builder::new();
+  builder
+    .timer(TokioTimer::new())
+    .header_read_timeout(Duration::from_millis(
+      snapshot.config.limits.client_header_timeout_ms,
+    ))
+    .max_headers(snapshot.config.limits.max_headers)
+    .max_buf_size(snapshot.config.limits.max_total_header_bytes.max(8192))
+    .keep_alive(true);
+  let connection = builder
+    .serve_connection(TokioIo::new(io), service)
+    .with_upgrades();
+  tokio::pin!(connection);
+  if *shutdown.borrow() || *data_plane_drain.borrow() {
+    connection.as_mut().graceful_shutdown();
+  }
+  let result = tokio::select! {
+    result = &mut connection => result,
+    _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+      connection.as_mut().graceful_shutdown();
+      (&mut connection).await
+    }
+  };
+  result.map_err(|error| anyhow::anyhow!(error))?;
+  Ok(())
+}
+
+pub(super) async fn try_sendfile_fast_path(
+  mut stream: TcpStream,
+  peer_addr: SocketAddr,
+  snapshot: &Arc<AppSnapshot>,
+  shutdown: &mut watch::Receiver<bool>,
+  data_plane_drain: &mut watch::Receiver<bool>,
+) -> anyhow::Result<SendfilePreflight> {
+  if let Some(reason) = sendfile_disabled_reason(snapshot.as_ref()) {
+    trace!(reason, "plain HTTP static sendfile fast path skipped");
+    return Ok(SendfilePreflight::Continue {
+      io: PlainHttpIo::new(stream, Vec::new()),
+      served_requests: 0,
+    });
+  }
+
+  let mut buffer = Vec::new();
+  let mut served_requests = 0_usize;
+  loop {
+    if served_requests >= snapshot.config.limits.max_requests_per_connection {
+      trace!("plain HTTP static sendfile fast path reached request limit");
+      return Ok(SendfilePreflight::Done);
+    }
+    if *shutdown.borrow() || *data_plane_drain.borrow() {
+      return Ok(SendfilePreflight::Done);
+    }
+
+    let request = match read_request(
+      &mut stream,
+      buffer,
+      snapshot.config.limits.max_total_header_bytes.max(8192),
+      snapshot.config.limits.max_headers,
+      Duration::from_millis(snapshot.config.limits.client_header_timeout_ms),
+      shutdown,
+      data_plane_drain,
+    )
+    .await?
+    {
+      ReadRequestOutcome::Closed => return Ok(SendfilePreflight::Done),
+      ReadRequestOutcome::Fallback { prefix, reason } => {
+        trace!(reason, "plain HTTP static sendfile parser fell back");
+        return Ok(SendfilePreflight::Continue {
+          io: PlainHttpIo::new(stream, prefix),
+          served_requests,
+        });
+      }
+      ReadRequestOutcome::Request(request) => request,
+    };
+    let next_buffer = request.remaining.clone();
+
+    let Some(plan) = eligible_static_plan(&request, snapshot.as_ref()).await else {
+      let mut prefix = request.raw;
+      prefix.extend_from_slice(&next_buffer);
+      trace!("plain HTTP static sendfile request fell back");
+      return Ok(SendfilePreflight::Continue {
+        io: PlainHttpIo::new(stream, prefix),
+        served_requests,
+      });
+    };
+    buffer = next_buffer;
+
+    let close_after_response = header_has_token(&request.headers, CONNECTION, "close");
+    let status = plan.status;
+    if let Err(error) = write_static_plan(&mut stream, plan, !close_after_response).await {
+      debug!(error = %error, peer = %peer_addr, "plain HTTP static sendfile response failed");
+      return Ok(SendfilePreflight::Done);
+    }
+    served_requests += 1;
+    snapshot.metrics.record_response(status);
+    if close_after_response {
+      return Ok(SendfilePreflight::Done);
+    }
+  }
+}
+
+fn sendfile_disabled_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
+  let config = &snapshot.config;
+  if config.listeners.http_mode != HttpListenerMode::Proxy {
+    return Some("plain listener is not proxy mode");
+  }
+  if config.proxy.static_files.sendfile != StaticFilesSendfileMode::Auto {
+    return Some("proxy.static_files.sendfile is not auto");
+  }
+  if config.waf.enabled {
+    return Some("WAF is enabled");
+  }
+  if !config.rate_limits.is_empty() {
+    return Some("rate limits are configured");
+  }
+  if config.dynamic_policy.enabled {
+    return Some("dynamic policy is enabled");
+  }
+  if config.compression.enabled {
+    return Some("compression is enabled");
+  }
+  if !security_headers_disabled(config) {
+    return Some("security response headers are configured");
+  }
+  if snapshot.system_access_log.enabled() {
+    return Some("system access log is enabled");
+  }
+  if config.limits.connection_limit_identity != ConnectionLimitIdentityMode::ProxyProtocol {
+    return Some("Real-IP connection limit identity requires general path");
+  }
+  None
+}
+
+fn security_headers_disabled(config: &Config) -> bool {
+  let headers = &config.security.headers;
+  !headers.hsts
+    && headers.x_content_type_options.is_none()
+    && headers.referrer_policy.is_none()
+    && headers.permissions_policy.is_none()
+}
+
+async fn eligible_static_plan(
+  request: &ParsedPlainRequest,
+  snapshot: &AppSnapshot,
+) -> Option<StaticResponsePlan> {
+  if request.version != 1
+    || (request.method != Method::GET && request.method != Method::HEAD)
+    || !request.target.starts_with('/')
+    || request.target.starts_with("//")
+    || request.target.contains("://")
+  {
+    return None;
+  }
+  if request.header_count(HOST) != 1
+    || request.header_count(CONTENT_LENGTH) != 0
+    || request.header_count(TRANSFER_ENCODING) != 0
+    || request.header_count(UPGRADE) != 0
+    || header_has_token(&request.headers, CONNECTION, "upgrade")
+  {
+    return None;
+  }
+  let host = request
+    .headers
+    .get(HOST)
+    .and_then(|value| value.to_str().ok())
+    .map(normalize_host)?;
+  let request_path = request
+    .target
+    .split_once('?')
+    .map_or(request.target.as_str(), |(path, _)| path);
+  let resolved = snapshot
+    .route_table
+    .resolve(&host, request_path, &snapshot.upstreams)?;
+  let static_root = resolved.route.static_root.as_deref()?;
+  if resolved
+    .route
+    .compression
+    .as_deref()
+    .is_some_and(|value| value != "off")
+  {
+    return None;
+  }
+  let plan = static_files::plan_response(
+    &request.method,
+    &request.headers,
+    request_path,
+    &resolved.route.name,
+    &resolved.route.path_prefix,
+    static_root,
+  )
+  .await;
+  if matches!(&plan.body, StaticBodyPlan::Empty | StaticBodyPlan::File(_)) {
+    Some(plan)
+  } else {
+    None
+  }
+}
+
+async fn write_static_plan(
+  stream: &mut TcpStream,
+  plan: StaticResponsePlan,
+  keep_alive: bool,
+) -> anyhow::Result<()> {
+  let StaticResponsePlan {
+    status,
+    headers,
+    body,
+  } = plan;
+  write_response_head(stream, status, &headers, keep_alive).await?;
+  match body {
+    StaticBodyPlan::Empty => {}
+    StaticBodyPlan::Text(_) => bail!("sendfile fast path cannot write text static body"),
+    StaticBodyPlan::File(file) => {
+      let input = static_files::open_verified_file(&file.root, &file.path).await?;
+      sendfile_all(stream, &input, file.offset, file.len).await?;
+      debug!(
+        path = %file.path.display(),
+        bytes = file.len,
+        "plain HTTP static sendfile response sent"
+      );
+    }
+  }
+  Ok(())
+}
+
+async fn write_response_head(
+  stream: &mut TcpStream,
+  status: StatusCode,
+  headers: &HeaderMap,
+  keep_alive: bool,
+) -> io::Result<()> {
+  let reason = status.canonical_reason().unwrap_or("");
+  let mut head = Vec::with_capacity(256 + headers.len() * 48);
+  head.extend_from_slice(format!("HTTP/1.1 {} {reason}\r\n", status.as_u16()).as_bytes());
+  for (name, value) in headers {
+    head.extend_from_slice(name.as_str().as_bytes());
+    head.extend_from_slice(b": ");
+    head.extend_from_slice(value.as_bytes());
+    head.extend_from_slice(b"\r\n");
+  }
+  if keep_alive {
+    head.extend_from_slice(b"Connection: keep-alive\r\n");
+  } else {
+    head.extend_from_slice(b"Connection: close\r\n");
+  }
+  head.extend_from_slice(b"\r\n");
+  stream.write_all(&head).await
+}
+
+async fn sendfile_all(
+  stream: &TcpStream,
+  file: &tokio::fs::File,
+  offset: u64,
+  len: u64,
+) -> anyhow::Result<()> {
+  let mut remaining = len;
+  let mut offset = libc::off64_t::try_from(offset).context("static file offset is too large")?;
+  while remaining > 0 {
+    stream
+      .writable()
+      .await
+      .context("static sendfile socket wait failed")?;
+    let count = remaining.min(usize::MAX as u64) as usize;
+    match nix::sys::sendfile::sendfile64(stream, file, Some(&mut offset), count) {
+      Ok(0) => bail!("static sendfile wrote zero bytes"),
+      Ok(sent) => remaining = remaining.saturating_sub(sent as u64),
+      Err(Errno::EAGAIN) => continue,
+      Err(error) => return Err(error).context("static sendfile syscall failed"),
+    }
+  }
+  Ok(())
+}
+
+enum ReadRequestOutcome {
+  Closed,
+  Fallback {
+    prefix: Vec<u8>,
+    reason: &'static str,
+  },
+  Request(ParsedPlainRequest),
+}
+
+struct ParsedPlainRequest {
+  method: Method,
+  target: String,
+  version: u8,
+  headers: HeaderMap,
+  raw: Vec<u8>,
+  remaining: Vec<u8>,
+}
+
+impl ParsedPlainRequest {
+  fn header_count(&self, name: HeaderName) -> usize {
+    self.headers.get_all(name).iter().count()
+  }
+}
+
+async fn read_request(
+  stream: &mut TcpStream,
+  mut buffer: Vec<u8>,
+  max_header_bytes: usize,
+  max_headers: usize,
+  header_timeout: Duration,
+  shutdown: &mut watch::Receiver<bool>,
+  data_plane_drain: &mut watch::Receiver<bool>,
+) -> anyhow::Result<ReadRequestOutcome> {
+  let started = tokio::time::Instant::now();
+  loop {
+    match parse_buffered_request(&buffer, max_headers) {
+      ParseResult::Complete {
+        header_len,
+        request,
+      } => {
+        let raw = buffer[..header_len].to_vec();
+        let remaining = buffer[header_len..].to_vec();
+        return Ok(ReadRequestOutcome::Request(ParsedPlainRequest {
+          method: request.method,
+          target: request.target,
+          version: request.version,
+          headers: request.headers,
+          raw,
+          remaining,
+        }));
+      }
+      ParseResult::Partial => {}
+      ParseResult::Fallback(reason) => {
+        return Ok(ReadRequestOutcome::Fallback {
+          prefix: buffer,
+          reason,
+        });
+      }
+    }
+    if buffer.len() >= max_header_bytes {
+      return Ok(ReadRequestOutcome::Fallback {
+        prefix: buffer,
+        reason: "header block exceeded configured limit",
+      });
+    }
+    let remaining_timeout = match header_timeout.checked_sub(started.elapsed()) {
+      Some(value) if !value.is_zero() => value,
+      _ => bail!("plain HTTP static sendfile header read timed out"),
+    };
+    let mut chunk = vec![0_u8; READ_CHUNK_BYTES.min(max_header_bytes - buffer.len())];
+    let read = tokio::select! {
+      biased;
+      changed = shutdown.changed() => {
+        if changed.is_ok() && *shutdown.borrow() {
+          return Ok(ReadRequestOutcome::Closed);
+        }
+        continue;
+      }
+      changed = data_plane_drain.changed() => {
+        if changed.is_ok() && *data_plane_drain.borrow() {
+          return Ok(ReadRequestOutcome::Closed);
+        }
+        continue;
+      }
+      result = tokio::time::timeout(remaining_timeout, stream.read(&mut chunk)) => {
+        result.context("plain HTTP static sendfile header read timed out")??
+      }
+    };
+    if read == 0 {
+      if buffer.is_empty() {
+        return Ok(ReadRequestOutcome::Closed);
+      }
+      return Ok(ReadRequestOutcome::Fallback {
+        prefix: buffer,
+        reason: "connection closed during header parse",
+      });
+    }
+    buffer.extend_from_slice(&chunk[..read]);
+  }
+}
+
+enum ParseResult {
+  Complete {
+    header_len: usize,
+    request: ParsedPlainRequestSeed,
+  },
+  Partial,
+  Fallback(&'static str),
+}
+
+struct ParsedPlainRequestSeed {
+  method: Method,
+  target: String,
+  version: u8,
+  headers: HeaderMap,
+}
+
+fn parse_buffered_request(buffer: &[u8], max_headers: usize) -> ParseResult {
+  let mut parsed_headers = vec![httparse::EMPTY_HEADER; max_headers];
+  let mut request = httparse::Request::new(&mut parsed_headers);
+  let header_len = match request.parse(buffer) {
+    Ok(Status::Complete(len)) => len,
+    Ok(Status::Partial) => return ParseResult::Partial,
+    Err(_) => return ParseResult::Fallback("HTTP/1.1 parser rejected request"),
+  };
+  let Some(method) = request.method else {
+    return ParseResult::Fallback("HTTP/1.1 request is missing method");
+  };
+  let method = match Method::from_bytes(method.as_bytes()) {
+    Ok(method) => method,
+    Err(_) => return ParseResult::Fallback("HTTP/1.1 request method is invalid"),
+  };
+  let Some(target) = request.path else {
+    return ParseResult::Fallback("HTTP/1.1 request is missing target");
+  };
+  let Some(version) = request.version else {
+    return ParseResult::Fallback("HTTP/1.1 request is missing version");
+  };
+  let mut headers = HeaderMap::new();
+  for header in request.headers {
+    let name = match HeaderName::from_bytes(header.name.as_bytes()) {
+      Ok(name) => name,
+      Err(_) => return ParseResult::Fallback("HTTP/1.1 header name is invalid"),
+    };
+    let value = match HeaderValue::from_bytes(header.value) {
+      Ok(value) => value,
+      Err(_) => return ParseResult::Fallback("HTTP/1.1 header value is invalid"),
+    };
+    headers.append(name, value);
+  }
+  ParseResult::Complete {
+    header_len,
+    request: ParsedPlainRequestSeed {
+      method,
+      target: target.to_string(),
+      version,
+      headers,
+    },
+  }
+}
+
+fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
+  headers.get_all(name).iter().any(|value| {
+    value.to_str().ok().is_some_and(|value| {
+      value
+        .split(',')
+        .map(str::trim)
+        .any(|candidate| candidate.eq_ignore_ascii_case(token))
+    })
+  })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  fn parsed(raw: &[u8]) -> ParsedPlainRequest {
+    match parse_buffered_request(raw, 16) {
+      ParseResult::Complete {
+        header_len,
+        request,
+      } => ParsedPlainRequest {
+        method: request.method,
+        target: request.target,
+        version: request.version,
+        headers: request.headers,
+        raw: raw[..header_len].to_vec(),
+        remaining: raw[header_len..].to_vec(),
+      },
+      _ => panic!("request should parse"),
+    }
+  }
+
+  #[test]
+  fn parser_preserves_pipelined_bytes_for_fallback() {
+    let request =
+      parsed(b"GET /static/app.txt HTTP/1.1\r\nHost: example.test\r\n\r\nGET /next HTTP/1.1\r\n");
+
+    assert_eq!(request.target, "/static/app.txt");
+    assert_eq!(request.remaining, b"GET /next HTTP/1.1\r\n");
+  }
+
+  #[test]
+  fn header_token_matching_is_case_insensitive() {
+    let request = parsed(
+      b"GET /static/app.txt HTTP/1.1\r\nHost: example.test\r\nConnection: keep-alive, Upgrade\r\n\r\n",
+    );
+
+    assert!(header_has_token(&request.headers, CONNECTION, "upgrade"));
+  }
+
+  #[tokio::test]
+  async fn eligible_plain_static_get_uses_pre_hyper_sendfile_path() {
+    let temp_dir = common::TempDir::new("plain-sendfile");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "plain-sendfile");
+    let root = temp_dir.path().join("public");
+    tokio::fs::create_dir_all(&root).await.unwrap();
+    tokio::fs::write(root.join("app.txt"), "hello sendfile")
+      .await
+      .unwrap();
+    let raw = format!(
+      "{}{}",
+      common::minimal_config_toml(&cert_path, &key_path)
+        .replace(
+          "[listeners]\n",
+          "[listeners]\nhttp_bind = \"127.0.0.1:8080\"\nhttp_mode = \"proxy\"\n",
+        )
+        .replace(
+          "[compression]\nenabled = true",
+          "[compression]\nenabled = false",
+        )
+        .replace(
+          "path_prefix = \"/\"\nupstream = \"app\"",
+          &format!(
+            "path_prefix = \"/static\"\nstatic_root = \"{}\"",
+            root.display()
+          ),
+        ),
+      r#"
+
+[proxy.static_files]
+sendfile = "auto"
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let snapshot = Arc::new(
+      AppSnapshot::new(config)
+        .await
+        .expect("snapshot should initialize"),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+      let (stream, peer_addr) = listener.accept().await.unwrap();
+      let (_shutdown_tx, mut shutdown) = watch::channel(false);
+      let (_drain_tx, mut drain) = watch::channel(false);
+      let result = try_sendfile_fast_path(stream, peer_addr, &snapshot, &mut shutdown, &mut drain)
+        .await
+        .unwrap();
+      assert!(matches!(result, SendfilePreflight::Done));
+    });
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+      .write_all(b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+      .await
+      .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    server.await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.ends_with("hello sendfile"));
+  }
+}

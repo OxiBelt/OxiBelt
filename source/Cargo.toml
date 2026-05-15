@@ -22,11 +22,13 @@ h3 = "0.0.8"
 h3-datagram = "0.0.2"
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
 h3-webtransport = "0.1.2"
+httparse = "1.10.1"
 hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "server", "service", "tokio"] }
 libc = "0.2"
 md-5 = "0.11"
+nix = { version = "0.30", default-features = false, features = ["zerocopy"] }
 regex = "1"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }

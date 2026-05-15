@@ -29,15 +29,17 @@ const MAX_ERROR_SAMPLES: usize = 8;
 
 #[derive(Clone, Copy)]
 enum Protocol {
-    H1,
-    H2,
-    H3,
+  H1,
+  H1c,
+  H2,
+  H3,
 }
 
 impl Protocol {
     fn parse(raw: &str) -> anyhow::Result<Self> {
         match raw {
             "h1" | "http1" | "http/1.1" => Ok(Self::H1),
+            "h1c" | "http1-cleartext" | "http/1.1-cleartext" => Ok(Self::H1c),
             "h2" | "http2" | "http/2" => Ok(Self::H2),
             "h3" | "http3" | "http/3" => Ok(Self::H3),
             _ => bail!("unsupported protocol: {raw}"),
@@ -47,6 +49,7 @@ impl Protocol {
     fn label(self) -> &'static str {
         match self {
             Self::H1 => "h1",
+            Self::H1c => "h1c",
             Self::H2 => "h2",
             Self::H3 => "h3",
         }
@@ -54,7 +57,7 @@ impl Protocol {
 
     fn alpn(self) -> &'static [u8] {
         match self {
-            Self::H1 => b"http/1.1",
+            Self::H1 | Self::H1c => b"http/1.1",
             Self::H2 => b"h2",
             Self::H3 => b"h3",
         }
@@ -240,7 +243,7 @@ fn usage() {
     eprintln!(
         "usage:
   perf-probe upstream --listen <addr:port> [--name <name>]
-  perf-probe load --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>]
+  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>]
   perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>]"
     );
@@ -569,6 +572,7 @@ async fn run_load_phase(
         tasks.push(tokio::spawn(async move {
             match args.protocol {
                 Protocol::H1 => h1_load_worker(args, deadline, stats, record).await,
+                Protocol::H1c => h1c_load_worker(args, deadline, stats, record).await,
                 Protocol::H2 => h2_load_worker(args, deadline, stats, record).await,
                 Protocol::H3 => h3_load_worker(args, deadline, stats, record).await,
             }
@@ -614,6 +618,54 @@ fn record_worker_error(
         eprintln!("{protocol} worker stopped after phase-boundary error: {message}");
         false
     }
+}
+
+async fn h1c_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, record: bool) {
+    while Instant::now() < deadline {
+        if let Err(error) = h1c_connection_loop(&args, deadline, &stats, record).await {
+            if record_worker_error("h1c", &error, deadline, &stats, record) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+async fn h1c_connection_loop(
+    args: &LoadArgs,
+    deadline: Instant,
+    stats: &SharedStats,
+    record: bool,
+) -> anyhow::Result<()> {
+    let stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .context("failed to connect cleartext HTTP/1.1 socket")?;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .context("failed to establish cleartext HTTP/1.1 client")?;
+    let connection_task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    while Instant::now() < deadline {
+        let started = Instant::now();
+        let response = sender
+            .send_request(request(args, Version::HTTP_11, Full::new(Bytes::new()))?)
+            .await
+            .context("failed to send cleartext HTTP/1.1 request")?;
+        let status = response.status().as_u16();
+        response
+            .into_body()
+            .collect()
+            .await
+            .context("failed to read cleartext HTTP/1.1 response body")?;
+        if record {
+            stats.record_response(status, started.elapsed(), args.expect_status);
+        }
+    }
+
+    drop(sender);
+    let _ = connection_task.await;
+    Ok(())
 }
 
 async fn h1_connection_loop(
@@ -821,6 +873,10 @@ async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
                     )
                     .await
                     .map(|_| ()),
+                    Protocol::H1c => TcpStream::connect((args.host.as_str(), args.port))
+                        .await
+                        .map(|_| ())
+                        .context("failed to connect cleartext HTTP/1.1 socket"),
                     Protocol::H3 => {
                         let connection = h3_connect(
                             &args.host,

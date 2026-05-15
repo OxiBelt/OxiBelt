@@ -10,7 +10,8 @@ use oxibelt::config::{
     EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode,
     HotReloadMode, OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
     QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, resolve_auto_worker_count,
+    StaticFilesSendfileMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -338,6 +339,65 @@ mode = "json"
     assert!(!config.proxy.http.grpc.respect_grpc_timeout);
     assert_eq!(config.proxy.http.grpc.retry, GrpcRetryMode::SafeUnary);
     assert_eq!(config.proxy.http.errors.mode, ErrorResponseMode::Json);
+}
+
+#[test]
+fn proxy_static_files_defaults_and_custom_values_parse() {
+    let temp_dir = common::TempDir::new("proxy-static-files");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-static-files");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let default_config: Config = toml::from_str(&base).expect("config should parse");
+    default_config.validate().expect("config should validate");
+    assert_eq!(
+        default_config.proxy.static_files.sendfile,
+        StaticFilesSendfileMode::Off
+    );
+    assert_eq!(
+        default_config.proxy.static_files.inline_max_bytes,
+        16 * 1024
+    );
+
+    let raw = format!(
+        r#"
+{base}
+
+[proxy.static_files]
+sendfile = "auto"
+inline_max_bytes = 0
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(
+        config.proxy.static_files.sendfile,
+        StaticFilesSendfileMode::Auto
+    );
+    assert_eq!(config.proxy.static_files.inline_max_bytes, 0);
+}
+
+#[test]
+fn proxy_static_files_rejects_invalid_sendfile_mode() {
+    let temp_dir = common::TempDir::new("proxy-static-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-static-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[proxy.static_files]
+sendfile = "always"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let error = toml::from_str::<Config>(&raw).expect_err("invalid sendfile mode should fail");
+
+    assert!(
+        error.to_string().contains("unknown variant") && error.to_string().contains("always"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

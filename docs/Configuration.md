@@ -419,6 +419,10 @@ max_memory_body_bytes = 1048576
 max_temp_file_bytes = 0
 # temp_dir = "/var/cache/oxibelt"
 
+[proxy.static_files]
+sendfile = "off" # off | auto
+inline_max_bytes = 16384
+
 [proxy.http]
 early_hints = "drop" # drop | pass
 trailers = "pass"    # pass | drop
@@ -440,6 +444,8 @@ mode = "legacy_plain" # legacy_plain | plain | json
 `generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
 
 `proxy.buffering` controls ordinary HTTP request and response body buffering. `streaming` keeps the previous streaming behavior. `memory` reads the full body into memory up to `max_memory_body_bytes`. `spool` keeps up to `max_memory_body_bytes` in memory and spills the remainder to `temp_dir`, capped by `max_temp_file_bytes` per body. `reject_if_too_large` is memory-only and rejects bodies that exceed `max_memory_body_bytes`. `spool` requires `max_temp_file_bytes > 0` and a writable `temp_dir`; OxiBelt removes `oxibelt-buffer-*` temp files when the buffered body is dropped, when spooled buffering fails before ownership is transferred, and when cleaning stale matching files on initial startup.
+
+`proxy.static_files` controls built-in static file transfer behavior. `inline_max_bytes` reads static response bodies at or below the configured size into a single response frame; `0` disables this small-file inline path. `sendfile = "auto"` enables a guarded Linux `sendfile(2)` fast path only for plaintext HTTP/1.1 `GET` and `HEAD` requests that can be proven equivalent to the normal static route path. HTTPS, HTTP/2, HTTP/3, WAF, dynamic policy, rate limits, compression, security response headers, system access logs, Real-IP connection-limit modes, request bodies, upgrades, CONNECT, ambiguous `Content-Length`, and `Transfer-Encoding` all use the general Hyper path instead.
 
 `proxy.http` controls HTTP compatibility details. `early_hints = "pass"` relays upstream `103 Early Hints` where the downstream transport supports interim responses; `drop` keeps the legacy behavior. `trailers = "drop"` removes body trailer frames for ordinary HTTP traffic while preserving native gRPC trailers. `expect_continue = "auto"` accepts `Expect: 100-continue` and rejects unsupported `Expect` values with `417`; `reject` rejects all `Expect` values. `priority = "ignore"` strips RFC 9218 `Priority` headers instead of forwarding them. `sse_auto_streaming = true` keeps `text/event-stream` responses streaming even when response buffering is enabled.
 
@@ -1157,7 +1163,7 @@ Fields:
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
 
-`static_root` enables the built-in static file server for the route. The value must resolve to an existing directory; absolute paths are accepted, and relative paths loaded through `Config::load` resolve under the configuration directory. OxiBelt strips the matched `path_prefix`, percent-decodes each remaining path segment, and serves only regular files whose canonical path stays under `static_root`. Directory listing is forbidden, and symlinks are allowed only when their canonical target remains inside the static root. Static routes accept `GET` and `HEAD`, emit `ETag`, `Last-Modified`, and `Accept-Ranges`, support a single `Range: bytes=...` request, and honor `If-None-Match` and `If-Modified-Since`. Request WAF, response WAF, rate limits, dynamic policy, security headers, compression, and Alt-Svc still apply. Static routes reject upstream-only options such as `replace_prefix_with`, `cache`, `upstream_http_version`, `generic_http_upgrade`, `connect_tunneling`, and `grpc_web`.
+`static_root` enables the built-in static file server for the route. The value must resolve to an existing directory; absolute paths are accepted, and relative paths loaded through `Config::load` resolve under the configuration directory. OxiBelt strips the matched `path_prefix`, percent-decodes each remaining path segment, and serves only regular files whose canonical path stays under `static_root`. Directory listing is forbidden, and symlinks are allowed only when their canonical target remains inside the static root. Opened file descriptors are rechecked through `/proc/self/fd` before bytes are served. Static routes accept `GET` and `HEAD`, emit `ETag`, `Last-Modified`, and `Accept-Ranges`, support a single `Range: bytes=...` request, and honor `If-None-Match` and `If-Modified-Since`. Request WAF, response WAF, rate limits, dynamic policy, security headers, compression, and Alt-Svc still apply on the general path. Static routes reject upstream-only options such as `replace_prefix_with`, `cache`, `upstream_http_version`, `generic_http_upgrade`, `connect_tunneling`, and `grpc_web`.
 
 ## TCP Stream Listeners
 

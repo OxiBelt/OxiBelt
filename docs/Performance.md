@@ -36,6 +36,8 @@ OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 
 The plain reverse-proxy fast path is allowed to stay active for low-cost response metadata work such as configured security response headers and request-wide system access logs. Routes with `compression = "off"` can also use the fast path even when global compression is enabled. Body-transforming compression, cache lookup/fill, WAF inspection, dynamic policy, rate limiting, upgrades, CONNECT, upstream pools, upstream HTTP/3, PROXY protocol egress, and buffering remain on the general proxy path so HTTP and security semantics stay unchanged.
 
+The baseline performance fixture also includes `/static/1k.bin`, `/static/16k.bin`, and `/static/1m.bin` static file scenarios. OxiBelt enables `proxy.static_files.sendfile = "auto"` for that fixture: plaintext HTTP/1.1 static rows are labeled `h1c` and can exercise the guarded Linux sendfile path, while TLS H1/H2/H3 static rows measure the optimized streaming fallback. nginx is configured with `sendfile on`, and Caddy uses `file_server`, so benchmark profile static rows compare the same static file sizes across all comparators.
+
 In GitHub Actions, `workflow_dispatch` also accepts `performance_iterations`, which defaults to `5`. Reduce it for long manual `benchmark` or `soak` runs when the default repeated sampling would exceed the job budget.
 
 ## Artifacts

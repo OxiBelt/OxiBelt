@@ -9,9 +9,17 @@
 
 :8443 {
   tls /etc/caddy/fullchain.pem /etc/caddy/privkey.pem
+  handle_path /static/* {
+    root * /srv/static
+    file_server
+  }
   reverse_proxy perf-upstream:18080
 }
 
 :8080 {
+  handle_path /static/* {
+    root * /srv/static
+    file_server
+  }
   reverse_proxy perf-upstream:18080
 }
