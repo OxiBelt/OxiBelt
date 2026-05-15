@@ -3,7 +3,7 @@ use http::header::HeaderMap;
 use http::{Method, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full};
 
-use crate::config::ErrorResponseMode;
+use crate::config::{ErrorResponseMode, SecurityHeadersConfig};
 use crate::state::AppSnapshot;
 use crate::waf::{
   HeaderMutation, WafBodyInput, WafRequestInput, WafResponseInput, WafTerminalResponse,
@@ -36,6 +36,44 @@ pub(crate) fn waf_terminal_response(
   apply_header_mutations(response.headers_mut(), &terminal.headers);
   apply_header_mutations(response.headers_mut(), mutations);
   response
+}
+
+pub(crate) fn apply_security_headers(
+  headers: &mut http::HeaderMap,
+  config: &SecurityHeadersConfig,
+) {
+  if !config.hsts
+    && config.x_content_type_options.is_none()
+    && config.referrer_policy.is_none()
+    && config.permissions_policy.is_none()
+  {
+    return;
+  }
+  if config.hsts {
+    let mut value = format!("max-age={}", config.hsts_max_age_seconds);
+    if config.hsts_include_subdomains {
+      value.push_str("; includeSubDomains");
+    }
+    if config.hsts_preload {
+      value.push_str("; preload");
+    }
+    insert_header(headers, "strict-transport-security", &value);
+  }
+  if let Some(value) = &config.x_content_type_options {
+    insert_header(headers, "x-content-type-options", value);
+  }
+  if let Some(value) = &config.referrer_policy {
+    insert_header(headers, "referrer-policy", value);
+  }
+  if let Some(value) = &config.permissions_policy {
+    insert_header(headers, "permissions-policy", value);
+  }
+}
+
+fn insert_header(headers: &mut http::HeaderMap, name: &'static str, value: &str) {
+  if let Ok(value) = http::HeaderValue::from_str(value) {
+    headers.insert(http::HeaderName::from_static(name), value);
+  }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -7,11 +7,12 @@ use http_body_util::BodyExt;
 use hyper::body::Body;
 use tracing::warn;
 
-use crate::config::{HttpVersion, ProxyProtocolEgressMode};
+use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
+use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, boxed_error};
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request};
-use crate::proxy::http::response::text_response;
+use crate::proxy::http::response::{apply_security_headers, text_response};
 use crate::proxy::http::semantics::{self, configured_error_response, filter_trailers};
 use crate::proxy::http::uri::rewrite_uri;
 use crate::proxy::http::version::select_upstream_http_version;
@@ -39,12 +40,33 @@ impl PlainProxyFastPath {
     B: Body,
   {
     resolved.execution_plan.can_plain_proxy_fast_path
+      && Self::supported_upstream(state, resolved).is_some()
       && !state
         .cache
         .policy_enabled(resolved.route.cache.as_deref(), method)
       && !semantics::is_native_grpc_request(request.headers(), &state.config)
       && !is_upgrade_request(request)
       && method != Method::CONNECT
+  }
+
+  fn supported_upstream<'a>(
+    state: &AppSnapshot,
+    resolved: &ResolvedRoute<'a>,
+  ) -> Option<(&'a UpstreamConfig, HttpVersion)> {
+    let upstream = resolved.upstream?;
+    let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
+      select_upstream_http_version(
+        state.config.proxy.auto_upgrade.enabled,
+        state.config.proxy.auto_upgrade.max_http_version,
+        upstream.max_http_version,
+      )
+    });
+    if upstream_version == HttpVersion::H3
+      || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
+    {
+      return None;
+    }
+    Some((upstream, upstream_version))
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -58,27 +80,17 @@ impl PlainProxyFastPath {
     downstream_scheme: &'static str,
     request_version: http::Version,
     transport_network: WafTransportNetwork,
+    access_log: &mut SystemAccessLogContext<'_>,
   ) -> Response<ProxyBody>
   where
     B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
     B::Error: Into<body::BoxError> + Send + Sync + 'static,
   {
-    let Some(upstream) = resolved.upstream else {
-      return text_response(StatusCode::BAD_GATEWAY, "upstream is not configured");
-    };
-    let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
-    let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
-      select_upstream_http_version(
-        state.config.proxy.auto_upgrade.enabled,
-        state.config.proxy.auto_upgrade.max_http_version,
-        upstream.max_http_version,
-      )
-    });
-    if upstream_version == HttpVersion::H3
-      || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
-    {
+    let Some((upstream, upstream_version)) = Self::supported_upstream(&state, resolved) else {
       return text_response(StatusCode::BAD_GATEWAY, "unsupported fast-path upstream");
-    }
+    };
+    access_log.set_upstream(&upstream.name, upstream.origin.scheme());
+    let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
 
     let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
       warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
@@ -153,6 +165,12 @@ impl PlainProxyFastPath {
         } else {
           "connect_error"
         };
+        let upstream_first_byte_time_ms = upstream_started_at
+          .elapsed()
+          .as_millis()
+          .min(u128::from(u64::MAX)) as u64;
+        access_log.upstream_first_byte_time_ms = Some(upstream_first_byte_time_ms);
+        access_log.record_upstream_error(code, &message);
         let status = if code == "read_timeout" {
           StatusCode::GATEWAY_TIMEOUT
         } else {
@@ -170,6 +188,7 @@ impl PlainProxyFastPath {
       .elapsed()
       .as_millis()
       .min(u128::from(u64::MAX)) as u64;
+    access_log.upstream_first_byte_time_ms = Some(upstream_first_byte_time_ms);
     let (mut parts, body) = upstream_response
       .map(|body| body.map_err(boxed_error).boxed())
       .into_parts();
@@ -183,6 +202,7 @@ impl PlainProxyFastPath {
       parts.headers.remove(http::header::TRAILER);
     }
     semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
+    apply_security_headers(&mut parts.headers, &state.config.security.headers);
     apply_alt_svc_header(
       &mut parts.headers,
       parts.status,
@@ -212,7 +232,7 @@ mod tests {
   use http_body_util::{BodyExt, Full};
 
   use super::*;
-  use crate::config::Config;
+  use crate::config::{Config, HttpVersion, ProxyProtocolEgressMode};
 
   mod common {
     include!(concat!(
@@ -277,7 +297,54 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn feature_flags_force_general_proxy_path() {
+  async fn soft_features_keep_plain_proxy_fast_path() {
+    let temp_dir = common::TempDir::new("plain-fast-path-soft-features");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-soft-features");
+    let base = common::minimal_config_toml(&cert_path, &key_path).replace(
+      "[compression]\nenabled = true",
+      "[compression]\nenabled = false",
+    );
+
+    for raw in [
+      format!(
+        "{base}{}",
+        r#"
+
+[logging.access_log]
+enabled = true
+"#
+      ),
+      format!(
+        "{base}{}",
+        r#"
+
+[security.headers]
+hsts = true
+hsts_max_age_seconds = 63072000
+hsts_preload = true
+x_content_type_options = "nosniff"
+referrer_policy = "no-referrer"
+permissions_policy = "geolocation=(), camera=()"
+"#
+      ),
+    ] {
+      let state = AppSnapshot::new(parse_config(&raw))
+        .await
+        .expect("snapshot should initialize");
+      let resolved = resolved_route(&state);
+      assert!(resolved.execution_plan.can_plain_proxy_fast_path);
+      assert!(PlainProxyFastPath::eligible(
+        &request(),
+        &state,
+        &resolved,
+        &Method::GET
+      ));
+    }
+  }
+
+  #[tokio::test]
+  async fn hard_global_features_force_general_proxy_path() {
     let temp_dir = common::TempDir::new("plain-fast-path-disabled");
     let (cert_path, key_path) =
       common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-disabled");
@@ -299,14 +366,6 @@ enabled = true
         "{base}{}",
         r#"
 
-[logging.access_log]
-enabled = true
-"#
-      ),
-      format!(
-        "{base}{}",
-        r#"
-
 [[rate_limits]]
 name = "ip"
 key = "client-ip"
@@ -314,19 +373,79 @@ rate = "1r/s"
 burst = 1
 "#
       ),
+      format!(
+        "{base}{}",
+        r#"
+
+[shared_state]
+enabled = true
+namespace = "test-dynamic"
+default_backend = "cluster"
+dynamic_policy_backend = "cluster"
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@postgres.invalid:5432/oxibelt"
+
+[dynamic_policy]
+enabled = true
+backend = "cluster"
+"#
+      ),
     ] {
-      let state = AppSnapshot::new(parse_config(&raw))
-        .await
-        .expect("snapshot should initialize");
-      let resolved = resolved_route(&state);
-      assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
-      assert!(!PlainProxyFastPath::eligible(
-        &request(),
-        &state,
-        &resolved,
-        &Method::GET
-      ));
+      let config = parse_config(&raw);
+      assert!(!plain_fast_path_plan(&config));
     }
+  }
+
+  #[tokio::test]
+  async fn route_compression_off_allows_fast_path_with_global_compression_enabled() {
+    let temp_dir = common::TempDir::new("plain-fast-path-compression-off");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-compression-off");
+    let raw = format!(
+      "{}{}",
+      common::minimal_config_toml(&cert_path, &key_path),
+      r#"
+compression = "off"
+"#
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
+
+    assert!(resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(PlainProxyFastPath::eligible(
+      &request(),
+      &state,
+      &resolved,
+      &Method::GET
+    ));
+  }
+
+  #[test]
+  fn enabled_compression_policies_force_general_proxy_plan() {
+    let temp_dir = common::TempDir::new("plain-fast-path-compression-enabled");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-compression-enabled");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let named = format!(
+      "{}{}",
+      base.replace(
+        "upstream = \"app\"\n",
+        "upstream = \"app\"\ncompression = \"json-only\"\n",
+      ),
+      r#"
+
+[[compression.policies]]
+name = "json-only"
+"#
+    );
+
+    assert!(!plain_fast_path_plan(&parse_config(&base)));
+    assert!(!plain_fast_path_plan(&parse_config(&named)));
   }
 
   #[tokio::test]
@@ -352,6 +471,10 @@ burst = 1
     config.routes[0].generic_http_upgrade = true;
     assert!(!plain_fast_path_plan(&config));
     config.routes[0].generic_http_upgrade = false;
+
+    config.routes[0].connect_tunneling = true;
+    assert!(!plain_fast_path_plan(&config));
+    config.routes[0].connect_tunneling = false;
 
     config.routes[0].buffering.request = Some(crate::config::BufferingMode::Memory);
     assert!(!plain_fast_path_plan(&config));
@@ -431,6 +554,56 @@ request = "memory"
       &upgrade,
       &state,
       &resolved,
+      &Method::GET
+    ));
+    assert!(!PlainProxyFastPath::eligible(
+      &request(),
+      &state,
+      &resolved,
+      &Method::CONNECT
+    ));
+  }
+
+  #[tokio::test]
+  async fn unsupported_upstream_modes_force_general_proxy_path_at_runtime() {
+    let temp_dir = common::TempDir::new("plain-fast-path-upstream-disabled");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-upstream-disabled");
+    let base = common::minimal_config_toml(&cert_path, &key_path).replace(
+      "[compression]\nenabled = true",
+      "[compression]\nenabled = false",
+    );
+
+    let mut h3_config = parse_config(&base);
+    h3_config.upstreams[0].max_http_version = HttpVersion::H3;
+    h3_config.routes[0].upstream_http_version = Some(HttpVersion::H3);
+    let h3_state = AppSnapshot::new(h3_config)
+      .await
+      .expect("snapshot should initialize");
+    let h3_resolved = resolved_route(&h3_state);
+    assert!(h3_resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(!PlainProxyFastPath::eligible(
+      &request(),
+      &h3_state,
+      &h3_resolved,
+      &Method::GET
+    ));
+
+    let mut proxy_protocol_config = parse_config(&base);
+    proxy_protocol_config.upstreams[0].proxy_protocol_egress = ProxyProtocolEgressMode::V1;
+    let proxy_protocol_state = AppSnapshot::new(proxy_protocol_config)
+      .await
+      .expect("snapshot should initialize");
+    let proxy_protocol_resolved = resolved_route(&proxy_protocol_state);
+    assert!(
+      proxy_protocol_resolved
+        .execution_plan
+        .can_plain_proxy_fast_path
+    );
+    assert!(!PlainProxyFastPath::eligible(
+      &request(),
+      &proxy_protocol_state,
+      &proxy_protocol_resolved,
       &Method::GET
     ));
   }

@@ -54,7 +54,9 @@ use self::headers::{
   add_forwarded_headers, extract_host, is_upgrade_request, strip_hop_by_hop_headers,
 };
 use self::request::{RebuildRequestOptions, rebuild_request};
-use self::response::{text_response, upstream_error_response, waf_terminal_response};
+use self::response::{
+  apply_security_headers, text_response, upstream_error_response, waf_terminal_response,
+};
 use self::semantics::{configured_error_response, filter_trailers};
 use self::uri::{rewrite_uri, validate_downstream_path};
 use self::version::select_upstream_http_version;
@@ -470,6 +472,7 @@ where
       downstream_scheme,
       request_version,
       transport_network,
+      access_log,
     )
     .await;
   }
@@ -2632,44 +2635,6 @@ fn validate_request_limits<B>(
     return Err((StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"));
   }
   Ok(())
-}
-
-fn apply_security_headers(
-  headers: &mut http::HeaderMap,
-  config: &crate::config::SecurityHeadersConfig,
-) {
-  if !config.hsts
-    && config.x_content_type_options.is_none()
-    && config.referrer_policy.is_none()
-    && config.permissions_policy.is_none()
-  {
-    return;
-  }
-  if config.hsts {
-    let mut value = format!("max-age={}", config.hsts_max_age_seconds);
-    if config.hsts_include_subdomains {
-      value.push_str("; includeSubDomains");
-    }
-    if config.hsts_preload {
-      value.push_str("; preload");
-    }
-    insert_header(headers, "strict-transport-security", &value);
-  }
-  if let Some(value) = &config.x_content_type_options {
-    insert_header(headers, "x-content-type-options", value);
-  }
-  if let Some(value) = &config.referrer_policy {
-    insert_header(headers, "referrer-policy", value);
-  }
-  if let Some(value) = &config.permissions_policy {
-    insert_header(headers, "permissions-policy", value);
-  }
-}
-
-fn insert_header(headers: &mut http::HeaderMap, name: &'static str, value: &str) {
-  if let Ok(value) = http::HeaderValue::from_str(value) {
-    headers.insert(http::HeaderName::from_static(name), value);
-  }
 }
 
 fn cached_entry_response(

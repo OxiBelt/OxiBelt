@@ -63,3 +63,4 @@ name = "main-route"
 hosts = ["example.test"]
 path_prefix = "/"
 upstream = "http-upstream"
+compression = "off"

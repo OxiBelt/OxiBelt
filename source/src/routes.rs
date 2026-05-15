@@ -1,6 +1,4 @@
-use crate::config::{
-  BufferingMode, Config, ErrorResponseMode, RouteConfig, SecurityHeadersConfig, UpstreamConfig,
-};
+use crate::config::{BufferingMode, Config, ErrorResponseMode, RouteConfig, UpstreamConfig};
 
 #[derive(Debug, Clone)]
 pub struct RouteTable {
@@ -107,10 +105,9 @@ impl RouteTable {
 
 fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
   !config.waf.enabled
-    && !config.logging.access_log.enabled
     && config.rate_limits.is_empty()
     && !config.dynamic_policy.enabled
-    && !config.compression.enabled
+    && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
     && route.upstream_pool.is_none()
     && !route.grpc_web
     && !route.generic_http_upgrade
@@ -120,14 +117,6 @@ fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
     && config.proxy.buffering.request == BufferingMode::Streaming
     && config.proxy.buffering.response == BufferingMode::Streaming
     && config.proxy.http.errors.mode != ErrorResponseMode::Json
-    && security_headers_disabled(&config.security.headers)
-}
-
-fn security_headers_disabled(config: &SecurityHeadersConfig) -> bool {
-  !config.hsts
-    && config.x_content_type_options.is_none()
-    && config.referrer_policy.is_none()
-    && config.permissions_policy.is_none()
 }
 
 pub fn normalize_host(raw: &str) -> String {
