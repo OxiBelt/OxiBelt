@@ -6,7 +6,7 @@ use crate::config::{BufferingMode, Config, ErrorResponseMode, RouteConfig, Upstr
 pub struct RouteTable {
   routes: Vec<RouteEntry>,
   exact_hosts: HashMap<String, Vec<usize>>,
-  wildcard_hosts: Vec<WildcardHostEntry>,
+  wildcard_hosts: WildcardHostTrie,
   catch_all_hosts: Vec<usize>,
 }
 
@@ -17,10 +17,51 @@ struct RouteEntry {
   upstream_index: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct WildcardHostEntry {
-  suffix: String,
+  suffix_len: usize,
   route_index: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WildcardHostTrie {
+  root: WildcardHostTrieNode,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WildcardHostTrieNode {
+  routes: Vec<WildcardHostEntry>,
+  children: HashMap<String, WildcardHostTrieNode>,
+}
+
+impl WildcardHostTrie {
+  fn insert(&mut self, suffix: &str, route_index: usize) {
+    let mut node = &mut self.root;
+    for label in suffix.rsplit('.') {
+      node = node.children.entry(label.to_string()).or_default();
+    }
+    node.routes.push(WildcardHostEntry {
+      suffix_len: suffix.len(),
+      route_index,
+    });
+  }
+
+  fn for_each_match(&self, host: &str, mut visit: impl FnMut(WildcardHostEntry)) {
+    let host_label_count = host.split('.').count();
+    let mut node = &self.root;
+    for (depth, label) in host.rsplit('.').enumerate() {
+      let Some(child) = node.children.get(label) else {
+        break;
+      };
+      node = child;
+
+      if depth + 1 < host_label_count {
+        for &route in &node.routes {
+          visit(route);
+        }
+      }
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -70,7 +111,7 @@ impl RouteTable {
     Self {
       routes: Vec::new(),
       exact_hosts: HashMap::new(),
-      wildcard_hosts: Vec::new(),
+      wildcard_hosts: WildcardHostTrie::default(),
       catch_all_hosts: Vec::new(),
     }
   }
@@ -87,10 +128,7 @@ impl RouteTable {
       if pattern == "*" {
         self.catch_all_hosts.push(route_index);
       } else if let Some(suffix) = pattern.strip_prefix("*.") {
-        self.wildcard_hosts.push(WildcardHostEntry {
-          suffix: suffix.to_string(),
-          route_index,
-        });
+        self.wildcard_hosts.insert(suffix, route_index);
       } else {
         self
           .exact_hosts
@@ -120,24 +158,38 @@ impl RouteTable {
       for &route_index in route_indices {
         self.consider_route(&mut best, route_index, host_score, path);
       }
+      if let Some(route_match) = best {
+        return Some(self.resolve_match(route_match, upstreams));
+      }
     }
 
-    for wildcard in &self.wildcard_hosts {
-      if wildcard_matches(&wildcard.suffix, &normalized_host) {
+    self
+      .wildcard_hosts
+      .for_each_match(&normalized_host, |wildcard| {
         self.consider_route(
           &mut best,
           wildcard.route_index,
-          1_000 + wildcard.suffix.len(),
+          1_000 + wildcard.suffix_len,
           path,
         );
-      }
+      });
+    if let Some(route_match) = best {
+      return Some(self.resolve_match(route_match, upstreams));
     }
 
     for &route_index in &self.catch_all_hosts {
       self.consider_route(&mut best, route_index, 1, path);
     }
 
-    let entry = &self.routes[best?.route_index];
+    Some(self.resolve_match(best?, upstreams))
+  }
+
+  fn resolve_match<'a>(
+    &'a self,
+    route_match: RouteMatch,
+    upstreams: &'a [UpstreamConfig],
+  ) -> ResolvedRoute<'a> {
+    let entry = &self.routes[route_match.route_index];
     let route = &entry.route;
     let upstream = match (entry.upstream_index, route.upstream.as_deref()) {
       (Some(index), Some(name)) => upstreams
@@ -148,11 +200,11 @@ impl RouteTable {
       (None, Some(name)) => upstreams.iter().find(|item| item.name == name),
       (None, None) => None,
     };
-    Some(ResolvedRoute {
+    ResolvedRoute {
       route,
       upstream,
       execution_plan: &entry.execution_plan,
-    })
+    }
   }
 
   fn consider_route(
@@ -234,12 +286,6 @@ pub fn normalize_host(raw: &str) -> String {
   }
 
   trimmed.to_ascii_lowercase()
-}
-
-fn wildcard_matches(suffix: &str, host: &str) -> bool {
-  host
-    .strip_suffix(suffix)
-    .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
 }
 
 pub fn path_prefix_matches(prefix: &str, path: &str) -> bool {
@@ -464,5 +510,90 @@ mod tests {
       .unwrap();
 
     assert_eq!(resolved.route.name, "first");
+  }
+
+  #[test]
+  fn many_wildcards_preserve_priority_rules() {
+    let mut routes = Vec::new();
+    for index in 0..512 {
+      let name = format!("noise-{index}");
+      let host = format!("*.tenant-{index}.noise.example.net");
+      routes.push(route(&name, &[host.as_str()], "/", &name));
+    }
+    routes.extend([
+      route("fallback", &["*"], "/", "fallback"),
+      route("broad", &["*.example.com"], "/", "broad"),
+      route("narrow", &["*.api.example.com"], "/", "narrow"),
+      route("path-root", &["*.path.example.com"], "/", "path-root"),
+      route("path-api", &["*.path.example.com"], "/api", "path-api"),
+      route("tie-first", &["*.tie.example.com"], "/api", "tie-first"),
+      route("tie-second", &["*.tie.example.com"], "/api", "tie-second"),
+      route(
+        "target-wild",
+        &["*.target.example.com"],
+        "/api",
+        "target-wild",
+      ),
+      route(
+        "target-exact",
+        &["exact.target.example.com"],
+        "/",
+        "target-exact",
+      ),
+    ]);
+    let upstreams = routes
+      .iter()
+      .map(|route| upstream(route.upstream.as_deref().unwrap()))
+      .collect::<Vec<_>>();
+    let table = RouteTable::from_routes_for_tests(routes);
+
+    assert_eq!(
+      table
+        .resolve("v1.api.example.com", "/", &upstreams)
+        .unwrap()
+        .route
+        .name,
+      "narrow"
+    );
+    assert_eq!(
+      table
+        .resolve("api.example.com", "/", &upstreams)
+        .unwrap()
+        .route
+        .name,
+      "broad"
+    );
+    assert_eq!(
+      table
+        .resolve("svc.path.example.com", "/api/users", &upstreams)
+        .unwrap()
+        .route
+        .name,
+      "path-api"
+    );
+    assert_eq!(
+      table
+        .resolve("svc.tie.example.com", "/api/users", &upstreams)
+        .unwrap()
+        .route
+        .name,
+      "tie-first"
+    );
+    assert_eq!(
+      table
+        .resolve("exact.target.example.com", "/api/users", &upstreams)
+        .unwrap()
+        .route
+        .name,
+      "target-exact"
+    );
+    assert_eq!(
+      table
+        .resolve("unmatched.example.org", "/anything", &upstreams)
+        .unwrap()
+        .route
+        .name,
+      "fallback"
+    );
   }
 }
