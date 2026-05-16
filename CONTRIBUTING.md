@@ -89,18 +89,24 @@ Use Conventional Commits for commit messages:
   `http3`, `static_files`, `tls`, `waf`, `config`, `workflows`, or `docs`.
 - `subject` is a short imperative summary. Use a present-tense verb. Do not use
   past tense or past-perfect wording.
+- In the commit title and detailed description, wrap code keywords, paths,
+  commands, configuration keys, header names, function names, variable names,
+  type names, module names, and literal values in Markdown inline code spans
+  with backticks.
 
 Valid examples:
 
 ```text
-feat(http3): add webtransport drain coverage
-fix(static_files): reject traversal attempts
-security(headers): block ambiguous transfer framing
+feat(http3): add `WebTransportSessionIndex` drain coverage
+fix(static_files): reject `..` traversal attempts
+security(headers): block ambiguous `Transfer-Encoding` framing
 ci(workflows): run docker integration matrix
 ```
 
 Avoid examples like `fixed route matching`, `added TLS tests`, or
-`has updated docs` because the subject is not imperative present tense.
+`has updated docs` because the subject is not imperative present tense. Also
+avoid leaving identifiers unformatted, such as `update validate_static_root`;
+write ``update `validate_static_root``` instead.
 
 ## Rust Module Organization
 
