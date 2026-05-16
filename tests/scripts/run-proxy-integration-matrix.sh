@@ -73,6 +73,26 @@ unique_docker_container_name() {
     "$(date +%s%N)"
 }
 
+container_stderr_log() {
+  local container_name="$1"
+  printf '%s/%s.stderr.log' "${logs_dir}" "${container_name}"
+}
+
+docker_start_stdout_only() {
+  local container_name="$1"
+  mkdir -p "${logs_dir}"
+  docker start -a "${container_name}" 2>"$(container_stderr_log "${container_name}")"
+}
+
+append_container_stderr() {
+  local container_name="$1"
+  local stderr_log
+  stderr_log="$(container_stderr_log "${container_name}")"
+  if [[ -s "${stderr_log}" ]]; then
+    cat "${stderr_log}" >&2
+  fi
+}
+
 cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
   materialize \
   --suite docker \
@@ -215,7 +235,7 @@ client_request_with_headers_to_target() {
       "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       if [[ "${expect_status}" == *,* ]]; then
         if response_status_matches "${output}" "${expect_status}"; then
@@ -230,6 +250,7 @@ client_request_with_headers_to_target() {
       continue
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     if [[ "${expect_status}" == *,* ]] && response_status_matches "${output}" "${expect_status}"; then
       printf '%s' "${output}"
@@ -282,12 +303,13 @@ client_request_with_headers_on_port() {
       "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -376,12 +398,13 @@ slow_body_client_request() {
     "${header_args[@]}" >/dev/null
   docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-  if output="$(docker start -a "${client_container}" 2>&1)"; then
+  if output="$(docker_start_stdout_only "${client_container}")"; then
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     printf '%s' "${output}"
     return 0
   fi
   status=$?
+  append_container_stderr "${client_container}"
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
   echo "slow body client request failed with status ${status}" >&2
   echo "${output}" >&2
@@ -429,12 +452,13 @@ split_body_client_request() {
     "${header_args[@]}" >/dev/null
   docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-  if output="$(docker start -a "${client_container}" 2>&1)"; then
+  if output="$(docker_start_stdout_only "${client_container}")"; then
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     printf '%s' "${output}"
     return 0
   fi
   status=$?
+  append_container_stderr "${client_container}"
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
   echo "split body client request failed with status ${status}" >&2
   echo "${output}" >&2
@@ -479,12 +503,13 @@ chunked_body_client_request() {
     "${header_args[@]}" >/dev/null
   docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-  if output="$(docker start -a "${client_container}" 2>&1)"; then
+  if output="$(docker_start_stdout_only "${client_container}")"; then
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     printf '%s' "${output}"
     return 0
   fi
   status=$?
+  append_container_stderr "${client_container}"
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
   echo "chunked body client request failed with status ${status}" >&2
   echo "${output}" >&2
@@ -543,12 +568,13 @@ plain_client_request_with_headers_on_port() {
       --expect-status "${expect_status}" \
       "${header_args[@]}" >/dev/null
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -598,12 +624,13 @@ plain_client_request_with_headers_to_target() {
       --expect-status "${expect_status}" \
       "${header_args[@]}" >/dev/null
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -643,12 +670,13 @@ proxy_protocol_client_request() {
       --expect-status "${expect_status}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -882,12 +910,13 @@ upgrade_client_request_with_headers() {
       "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -937,12 +966,13 @@ connect_tunnel_request_with_headers() {
       "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -983,12 +1013,13 @@ protocol_probe_client() {
       --expect-status "${expect_status}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -1036,12 +1067,13 @@ protocol_probe_client_with_headers() {
       "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -1085,12 +1117,13 @@ protocol_probe_generated_body_request() {
       "${extra_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -1133,12 +1166,13 @@ protocol_probe_zero_length_body_delay_request() {
       "${extra_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
@@ -1178,12 +1212,13 @@ protocol_probe_webtransport_multiplex() {
       "${extra_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
-    if output="$(docker start -a "${client_container}" 2>&1)"; then
+    if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
     fi
     status=$?
+    append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
   done
