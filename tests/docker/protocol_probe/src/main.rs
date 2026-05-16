@@ -7,6 +7,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -790,6 +791,7 @@ async fn serve_h3_upstream(args: H3UpstreamArgs) -> anyhow::Result<()> {
             .as_nanos()
             .to_string(),
     );
+    let next_connection_id = Arc::new(AtomicU64::new(1));
 
     loop {
         let Some(incoming) = endpoint.accept().await else {
@@ -798,10 +800,11 @@ async fn serve_h3_upstream(args: H3UpstreamArgs) -> anyhow::Result<()> {
         let upstream_name = upstream_name.clone();
         let scheme = scheme.clone();
         let instance_id = instance_id.clone();
+        let next_connection_id = next_connection_id.clone();
         tokio::spawn(async move {
             match incoming.await {
                 Ok(connection) => {
-                    let connection_id = connection.stable_id();
+                    let connection_id = next_connection_id.fetch_add(1, Ordering::Relaxed);
                     if let Err(error) = handle_h3_upstream_connection(
                         connection,
                         upstream_name,
@@ -874,7 +877,7 @@ async fn handle_h3_upstream_connection(
     upstream_name: Arc<str>,
     scheme: Arc<str>,
     instance_id: Arc<str>,
-    connection_id: usize,
+    connection_id: u64,
 ) -> anyhow::Result<()> {
     let quic_connection = h3_quinn::Connection::new(connection);
     let mut h3_connection = h3::server::builder()
@@ -932,7 +935,7 @@ async fn echo_h3_upstream_request(
     upstream_name: Arc<str>,
     scheme: Arc<str>,
     instance_id: Arc<str>,
-    connection_id: usize,
+    connection_id: u64,
 ) -> Response<Full<Bytes>> {
     let (parts, _) = request.into_parts();
     let status = status_from_path(parts.uri.path()).unwrap_or(StatusCode::OK);
