@@ -13,6 +13,8 @@ use http::header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_NONE_MA
 use http::{HeaderValue, Method, Request, StatusCode};
 use http_body_util::{BodyExt, Empty};
 use pretty_assertions::assert_eq;
+#[cfg(target_os = "linux")]
+use tokio::io::AsyncReadExt;
 
 use super::*;
 
@@ -54,6 +56,29 @@ async fn serves_regular_file_with_validator_headers() {
   assert_eq!(body, Bytes::from_static(b"hello static"));
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn linux_openat2_secure_open_reads_regular_file_without_procfs_verification() {
+  let temp_dir = common::TempDir::new("static-openat2");
+  let root = temp_dir.path().join("public");
+  let path = root.join("app.txt");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(&path, "openat2 static").await.unwrap();
+
+  let Some(mut opened) = open_verified_file_with_openat2_for_tests(&root, &path)
+    .await
+    .expect("openat2 helper should not fail when the syscall is available")
+  else {
+    return;
+  };
+  let mut body = String::new();
+  opened.file.read_to_string(&mut body).await.unwrap();
+
+  assert_eq!(opened.path, path);
+  assert_eq!(opened.metadata.len(), "openat2 static".len() as u64);
+  assert_eq!(body, "openat2 static");
+}
+
 #[tokio::test]
 async fn head_uses_file_headers_without_body() {
   let temp_dir = common::TempDir::new("static-head");
@@ -87,6 +112,17 @@ async fn rejects_directory_listing() {
   let response = serve_test(&request("/assets/nested"), "assets", "/assets", &root).await;
 
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn missing_file_returns_not_found() {
+  let temp_dir = common::TempDir::new("static-missing");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+
+  let response = serve_test(&request("/assets/missing.txt"), "assets", "/assets", &root).await;
+
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -255,10 +291,18 @@ fn resolver_rejects_encoded_separators_and_dot_segments() {
     resolve_request_path(root, "/assets", "/assets/%2e%2e/secret").unwrap_err(),
     StaticPathError::Forbidden
   );
-  assert_eq!(
-    resolve_request_path(root, "/assets", "/assets/%2fsecret").unwrap_err(),
-    StaticPathError::Invalid
-  );
+  for request_path in [
+    "/assets/%2fsecret",
+    "/assets/%2Fsecret",
+    "/assets/%5csecret",
+    "/assets/%5Csecret",
+  ] {
+    assert_eq!(
+      resolve_request_path(root, "/assets", request_path).unwrap_err(),
+      StaticPathError::Invalid,
+      "{request_path} should be rejected"
+    );
+  }
 }
 
 #[test]

@@ -36,6 +36,8 @@ use crate::waf::{
 
 mod open;
 mod path;
+#[cfg(all(test, target_os = "linux"))]
+use self::open::open_verified_file_with_openat2_for_tests;
 #[cfg(test)]
 use self::open::verify_opened_file;
 use self::open::{OpenedStaticFile, StaticOpenError, open_verified_file};
