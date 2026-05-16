@@ -2,8 +2,7 @@ use std::fmt;
 use std::future::{Future, poll_fn};
 use std::task::{Context, Poll};
 
-use ::http::header::CONTENT_LENGTH;
-use ::http::{HeaderMap, HeaderValue, Method, Request};
+use ::http::Request;
 use bytes::{Buf, Bytes};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Frame;
@@ -136,14 +135,6 @@ where
   S: H3RequestBodyStream,
   Spawner: BodyTaskSpawner,
 {
-  if has_explicit_empty_h3_body(&request) {
-    let (parts, _) = request.into_parts();
-    return (
-      Request::from_parts(parts, empty_body()),
-      RequestStreamCompletion::ready(stream),
-    );
-  }
-
   let first = poll_fn(|cx| match stream.poll_recv_data_bytes(cx) {
     Poll::Ready(result) => Poll::Ready(Some(result)),
     Poll::Pending => Poll::Ready(None),
@@ -233,28 +224,6 @@ where
   )
 }
 
-fn has_explicit_empty_h3_body(request: &Request<()>) -> bool {
-  matches!(request.method(), &Method::GET | &Method::HEAD)
-    && content_length_headers_are_all_zero(request.headers())
-}
-
-fn content_length_headers_are_all_zero(headers: &HeaderMap) -> bool {
-  let mut values = headers.get_all(CONTENT_LENGTH).iter();
-  let Some(first) = values.next() else {
-    return false;
-  };
-
-  content_length_value_is_zero(first) && values.all(content_length_value_is_zero)
-}
-
-fn content_length_value_is_zero(value: &HeaderValue) -> bool {
-  let Ok(value) = value.to_str() else {
-    return false;
-  };
-  let value = value.trim_matches(|character| matches!(character, ' ' | '\t'));
-  !value.is_empty() && value.bytes().all(|byte| byte == b'0')
-}
-
 fn downstream_h3_request_body_error(error: impl fmt::Display) -> BoxError {
   boxed_error(std::io::Error::other(format!(
     "failed to receive downstream HTTP/3 request data: {error}"
@@ -284,13 +253,13 @@ mod tests {
   use super::*;
 
   #[tokio::test]
-  async fn get_content_length_zero_uses_spawn_free_empty_body() {
-    assert_explicit_empty_fast_path(Method::GET).await;
+  async fn get_content_length_zero_data_is_streamed_into_proxy_body() {
+    assert_content_length_zero_data_is_streamed(Method::GET).await;
   }
 
   #[tokio::test]
-  async fn head_content_length_zero_uses_spawn_free_empty_body() {
-    assert_explicit_empty_fast_path(Method::HEAD).await;
+  async fn head_content_length_zero_data_is_streamed_into_proxy_body() {
+    assert_content_length_zero_data_is_streamed(Method::HEAD).await;
   }
 
   #[tokio::test]
@@ -318,6 +287,43 @@ mod tests {
       .into_stream()
       .await
       .expect("streaming task should return the stream");
+  }
+
+  #[tokio::test]
+  async fn content_length_zero_end_stream_returns_empty_body_after_polling_stream() {
+    let request = request_with_content_length(Method::GET, &["0"]);
+    let stream = FakeRequestStream::new([FakeStreamEvent::End]);
+    let poll_count = stream.poll_count();
+    let spawner = CountingSpawner::default();
+
+    let (request, completion) =
+      prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+
+    assert_eq!(spawner.spawned(), 0);
+    assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    assert!(completion.is_ready());
+    let body = request
+      .into_body()
+      .collect()
+      .await
+      .expect("ended H3 stream should collect")
+      .to_bytes();
+    assert!(body.is_empty());
+  }
+
+  #[tokio::test]
+  async fn get_content_length_zero_uses_streaming_path_when_body_might_arrive() {
+    let request = request_with_content_length(Method::GET, &["0"]);
+    let stream = FakeRequestStream::pending();
+    let poll_count = stream.poll_count();
+    let spawner = CountingSpawner::default();
+
+    let (_request, completion) =
+      prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+
+    assert_eq!(spawner.spawned(), 1);
+    assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    assert!(!completion.is_ready());
   }
 
   #[tokio::test]
@@ -359,63 +365,32 @@ mod tests {
       .expect("streaming task should return the stream after an error");
   }
 
-  #[test]
-  fn explicit_empty_body_requires_safe_method_and_valid_zero_content_length() {
-    assert!(has_explicit_empty_h3_body(&request_with_content_length(
-      Method::GET,
-      &["0"]
-    )));
-    assert!(has_explicit_empty_h3_body(&request_with_content_length(
-      Method::HEAD,
-      &["00"]
-    )));
-    assert!(has_explicit_empty_h3_body(&request_with_content_length(
-      Method::GET,
-      &["0", "00"]
-    )));
-
-    assert!(!has_explicit_empty_h3_body(&request(Method::GET)));
-    assert!(!has_explicit_empty_h3_body(&request_with_content_length(
-      Method::POST,
-      &["0"]
-    )));
-    assert!(!has_explicit_empty_h3_body(&request_with_content_length(
-      Method::GET,
-      &["1"]
-    )));
-    assert!(!has_explicit_empty_h3_body(&request_with_content_length(
-      Method::GET,
-      &["not-a-number"]
-    )));
-    assert!(!has_explicit_empty_h3_body(&request_with_content_length(
-      Method::GET,
-      &["0, 0"]
-    )));
-    assert!(!has_explicit_empty_h3_body(&request_with_content_length(
-      Method::GET,
-      &["0", "1"]
-    )));
-  }
-
-  async fn assert_explicit_empty_fast_path(method: Method) {
+  async fn assert_content_length_zero_data_is_streamed(method: Method) {
     let request = request_with_content_length(method, &["0"]);
-    let stream = FakeRequestStream::pending();
+    let stream = FakeRequestStream::new([
+      FakeStreamEvent::Data(Bytes::from_static(b"malicious-body")),
+      FakeStreamEvent::End,
+    ]);
     let poll_count = stream.poll_count();
     let spawner = CountingSpawner::default();
 
     let (request, completion) =
       prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
 
-    assert_eq!(spawner.spawned(), 0);
-    assert_eq!(poll_count.load(Ordering::SeqCst), 0);
-    assert!(completion.is_ready());
+    assert_eq!(spawner.spawned(), 1);
+    assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    assert!(!completion.is_ready());
     let body = request
       .into_body()
       .collect()
       .await
-      .expect("explicit empty body should collect")
+      .expect("Content-Length: 0 DATA should collect through ProxyBody")
       .to_bytes();
-    assert!(body.is_empty());
+    assert_eq!(body, Bytes::from_static(b"malicious-body"));
+    let _stream = completion
+      .into_stream()
+      .await
+      .expect("streaming task should return the stream");
   }
 
   fn request(method: Method) -> Request<()> {
