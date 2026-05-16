@@ -78,6 +78,7 @@ POST /admin/v1/lifecycle/undrain
 - [Configuration reference](docs/Configuration.md): TOML sections, includes, path rules, validation, and examples.
 - [OxiRule WAF reference](docs/OxiRule.md): rule shape, expression language, actions, object model, helpers, and examples.
 - [OxiRule examples](docs/example/OxiRule.md): cookbook-style request, response, routing, Person proof, and access-log rules.
+- [Contributing guide](CONTRIBUTING.md): contributor workflow, security requirements, PR checklist, and commit-message format.
 
 The default example configuration is [source/config/oxibelt.toml](source/config/oxibelt.toml).
 
