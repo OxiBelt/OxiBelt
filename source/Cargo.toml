@@ -60,6 +60,10 @@ pretty_assertions = "1"
 name = "oxibelt-docker-integration-matrix"
 path = "../tests/rust/oxibelt-docker-integration-matrix.rs"
 
+[[bin]]
+name = "oxibelt-performance-aggregate"
+path = "../tests/rust/oxibelt-performance-aggregate.rs"
+
 [[test]]
 name = "config_and_routes"
 path = "../tests/rust/config_and_routes.rs"
@@ -91,3 +95,7 @@ path = "../tests/rust/ci_workflow_integrity.rs"
 [[test]]
 name = "performance_gate_integrity"
 path = "../tests/rust/performance_gate_integrity.rs"
+
+[[test]]
+name = "performance_aggregate"
+path = "../tests/rust/performance_aggregate.rs"

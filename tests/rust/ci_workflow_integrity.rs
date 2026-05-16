@@ -217,6 +217,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "remote-signer-dos-docker",
         "browser-webdriver",
         "docker-performance",
+        "docker-performance-summary",
     ];
 
     assert_eq!(
@@ -321,5 +322,55 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     assert!(
         workflow.contains("--serving-type \"${PERFORMANCE_SERVING_TYPE}\""),
         "docker-performance should pass the serving-type matrix value into the performance script"
+    );
+}
+
+#[test]
+fn docker_performance_summary_aggregates_uploaded_artifacts() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let summary = jobs
+        .get("docker-performance-summary")
+        .expect("workflow should define docker-performance-summary");
+
+    assert_eq!(
+        summary.needs,
+        vec!["docker-performance".to_owned()],
+        "docker-performance-summary should run after the performance matrix"
+    );
+    assert!(
+        workflow.contains("name: Docker performance summary"),
+        "summary job should have a clear display name"
+    );
+    assert!(
+        workflow.contains("if: always()"),
+        "summary job should run even when performance matrix entries fail"
+    );
+    assert!(
+        workflow.contains("pattern: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-*"),
+        "summary job should download all profile-scoped performance artifacts"
+    );
+    assert!(
+        workflow.contains(
+            "cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate --"
+        ),
+        "summary job should run the Rust aggregate binary"
+    );
+    assert!(
+        workflow.contains("--input-dir \"${RUNNER_TEMP}/oxibelt-performance-artifacts\""),
+        "summary job should pass the downloaded artifact directory"
+    );
+    assert!(
+        workflow.contains("--output-dir \"${RUNNER_TEMP}/oxibelt-performance-comparison\""),
+        "summary job should pass the comparison output directory"
+    );
+    assert!(
+        workflow.contains("cat \"${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.md\" >> \"${GITHUB_STEP_SUMMARY}\""),
+        "summary job should append the markdown comparison to the run summary"
+    );
+    assert!(
+        workflow
+            .contains("name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-comparison"),
+        "summary job should upload a profile-scoped comparison artifact"
     );
 }
