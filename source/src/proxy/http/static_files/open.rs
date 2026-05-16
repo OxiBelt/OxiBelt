@@ -74,7 +74,10 @@ async fn open_verified_file_with_procfs_fallback(
   })
 }
 
-pub(crate) fn verify_opened_file(file: &File, root: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn verify_opened_file<F>(file: &F, root: &Path) -> anyhow::Result<PathBuf>
+where
+  F: AsRawFd + ?Sized,
+{
   let target = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
     .context("failed to resolve opened static file descriptor")?;
   if !target.starts_with(root) {
@@ -160,6 +163,9 @@ fn open_regular_file_beneath_root(
     Err(error) => return Err(static_open_error(path, error)),
   };
   let file = std::fs::File::from(file_fd);
+  let path = verify_opened_file(&file, root)
+    .with_context(|| format!("static file fd failed validation {}", path.display()))
+    .map_err(StaticOpenError::forbidden)?;
   let metadata = file
     .metadata()
     .with_context(|| format!("failed to inspect opened static file {}", path.display()))
@@ -172,7 +178,7 @@ fn open_regular_file_beneath_root(
 
   Ok(Some(OpenedStaticFile {
     file: File::from_std(file),
-    path: path.to_path_buf(),
+    path,
     metadata,
   }))
 }

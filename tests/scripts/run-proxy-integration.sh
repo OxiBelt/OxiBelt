@@ -25,7 +25,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${work_dir}/proxy-tls" "${work_dir}/upstream-tls"
+mkdir -p \
+  "${work_dir}/proxy-tls" \
+  "${work_dir}/static/attacker-controlled" \
+  "${work_dir}/static/public" \
+  "${work_dir}/upstream-tls"
+printf '%s' "INSIDE_VALIDATED_ROOT" >"${work_dir}/static/public/secret.txt"
+printf '%s' "OUTSIDE_VALIDATED_ROOT" >"${work_dir}/static/attacker-controlled/secret.txt"
 
 cat > "${work_dir}/upstream-ca.cnf" <<'EOF'
 [req]
@@ -201,6 +207,12 @@ hosts = ["secure.example.test"]
 path_prefix = "/secure"
 replace_prefix_with = "/edge"
 upstream = "https-upstream"
+
+[[routes]]
+name = "static-route"
+hosts = ["static.example.test"]
+path_prefix = "/assets"
+static_root = "/etc/oxibelt/static/public"
 EOF
 
 cp "${work_dir}/upstream-tls/ca.pem" "${work_dir}/proxy-tls/upstream-ca.pem"
@@ -260,6 +272,7 @@ docker create \
   "${proxy_image}" >/dev/null
 docker cp "${work_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
 docker cp "${work_dir}/proxy-tls/." "${proxy_container}:/etc/oxibelt/cert"
+docker cp "${work_dir}/static" "${proxy_container}:/etc/oxibelt/static"
 docker start "${proxy_container}" >/dev/null
 
 request_through_proxy() {
@@ -278,6 +291,37 @@ request_through_proxy() {
     --target "${target}" \
     --host "${host}" \
     --ca-file /tmp/proxy-ca.pem >/dev/null
+  docker cp "${work_dir}/proxy-tls/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+  if docker start -a "${client_container}"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  return "${status}"
+}
+
+request_path_through_proxy() {
+  local path="$1"
+  local host="$2"
+  local expect_status="$3"
+  local client_container="oxibelt-client-${run_id}-${RANDOM}"
+  local status=0
+
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
+    /opt/mock_upstream/client.py \
+    --path "${path}" \
+    --host "${host}" \
+    --ca-file /tmp/proxy-ca.pem \
+    --dump-response-json \
+    --expect-status "${expect_status}" >/dev/null
   docker cp "${work_dir}/proxy-tls/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
   if docker start -a "${client_container}"; then
@@ -355,6 +399,19 @@ echo "${https_response}" | grep -F '"upstream": "https-upstream"'
 echo "${https_response}" | grep -F '"path": "/backend/edge/v1/health?source=https"'
 echo "${https_response}" | grep -F '"host": "secure.example.test"'
 echo "${https_response}" | grep -F '"x-forwarded-host": "secure.example.test"'
+
+static_response="$(request_path_through_proxy "/assets/secret.txt" "static.example.test" 200)"
+echo "${static_response}" | grep -F '"body": "INSIDE_VALIDATED_ROOT"'
+
+docker exec -u 0 "${proxy_container}" sh -c \
+  'rm -rf /etc/oxibelt/static/public && ln -s /etc/oxibelt/static/attacker-controlled /etc/oxibelt/static/public'
+static_swap_response="$(request_path_through_proxy "/assets/secret.txt" "static.example.test" 403)"
+echo "${static_swap_response}" | grep -F '"status": 403'
+echo "${static_swap_response}" | grep -F '"body": "forbidden"'
+if echo "${static_swap_response}" | grep -F 'OUTSIDE_VALIDATED_ROOT' >/dev/null; then
+  echo "static_root swap exposed a file outside the validated static root" >&2
+  exit 1
+fi
 
 waf_blocked_response=""
 if waf_blocked_response="$(request_through_proxy "waf-blocked" "http.example.test" 2>/dev/null)"; then

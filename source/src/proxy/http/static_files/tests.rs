@@ -58,7 +58,7 @@ async fn serves_regular_file_with_validator_headers() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn linux_openat2_secure_open_reads_regular_file_without_procfs_verification() {
+async fn linux_openat2_secure_open_reads_regular_file_with_descriptor_verification() {
   let temp_dir = common::TempDir::new("static-openat2");
   let root = temp_dir.path().join("public");
   let path = root.join("app.txt");
@@ -77,6 +77,77 @@ async fn linux_openat2_secure_open_reads_regular_file_without_procfs_verificatio
   assert_eq!(opened.path, path);
   assert_eq!(opened.metadata.len(), "openat2 static".len() as u64);
   assert_eq!(body, "openat2 static");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn linux_openat2_rejects_static_root_swap_after_validation() {
+  let temp_dir = common::TempDir::new("static-openat2-root-swap");
+  let configured_root = temp_dir.path().join("public");
+  let attacker_root = temp_dir.path().join("attacker-controlled");
+  tokio::fs::create_dir_all(&configured_root).await.unwrap();
+  tokio::fs::create_dir_all(&attacker_root).await.unwrap();
+  tokio::fs::write(configured_root.join("secret.txt"), "INSIDE_VALIDATED_ROOT")
+    .await
+    .unwrap();
+  tokio::fs::write(attacker_root.join("secret.txt"), "OUTSIDE_VALIDATED_ROOT")
+    .await
+    .unwrap();
+  let validated_root = validate_static_root(&configured_root).unwrap();
+  tokio::fs::remove_dir_all(&configured_root).await.unwrap();
+  std::os::unix::fs::symlink(&attacker_root, &configured_root).unwrap();
+  let request_path = validated_root.join("secret.txt");
+
+  match open_verified_file_with_openat2_for_tests(&validated_root, &request_path).await {
+    Ok(None) => {}
+    Ok(Some(mut opened)) => {
+      let mut body = String::new();
+      opened.file.read_to_string(&mut body).await.unwrap();
+      panic!("openat2 served a swapped static_root file outside confinement: {body}");
+    }
+    Err(StaticOpenError::Forbidden(error)) => {
+      assert!(
+        error
+          .chain()
+          .any(|cause| cause.to_string().contains("escapes static_root")),
+        "unexpected error: {error}"
+      );
+    }
+    Err(StaticOpenError::NotFound) => {
+      panic!("swapped static_root should be rejected, not treated as missing");
+    }
+  }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn serve_rejects_static_root_swap_after_validation() {
+  let temp_dir = common::TempDir::new("static-serve-root-swap");
+  let configured_root = temp_dir.path().join("public");
+  let attacker_root = temp_dir.path().join("attacker-controlled");
+  tokio::fs::create_dir_all(&configured_root).await.unwrap();
+  tokio::fs::create_dir_all(&attacker_root).await.unwrap();
+  tokio::fs::write(configured_root.join("secret.txt"), "INSIDE_VALIDATED_ROOT")
+    .await
+    .unwrap();
+  tokio::fs::write(attacker_root.join("secret.txt"), "OUTSIDE_VALIDATED_ROOT")
+    .await
+    .unwrap();
+  let validated_root = validate_static_root(&configured_root).unwrap();
+  tokio::fs::remove_dir_all(&configured_root).await.unwrap();
+  std::os::unix::fs::symlink(&attacker_root, &configured_root).unwrap();
+
+  let response = serve_test(
+    &request("/assets/secret.txt"),
+    "assets",
+    "/assets",
+    &validated_root,
+  )
+  .await;
+
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+  let body = response.into_body().collect().await.unwrap().to_bytes();
+  assert_eq!(body, Bytes::from_static(b"forbidden"));
 }
 
 #[tokio::test]
