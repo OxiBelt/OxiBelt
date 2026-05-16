@@ -142,6 +142,10 @@ pub(crate) fn with_send_timeout(
   timeout: Duration,
   kind: BodyTimeoutKind,
 ) -> ProxyBody {
+  if body.is_end_stream() {
+    return body;
+  }
+
   let size_hint = body.size_hint();
 
   let terminal_error = Arc::new(Mutex::new(None));
@@ -656,6 +660,7 @@ mod tests {
       Duration::from_millis(5),
       BodyTimeoutKind::DownstreamResponseSend,
     );
+    assert!(send_body.is_end_stream());
     let send_bytes = send_body
       .collect()
       .await

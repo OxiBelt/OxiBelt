@@ -34,17 +34,7 @@ pub(crate) fn resolve_request_path(
     candidate.push(segment);
   }
 
-  let canonical = match candidate.canonicalize() {
-    Ok(path) => path,
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-      return Err(StaticPathError::NotFound);
-    }
-    Err(_) => return Err(StaticPathError::Forbidden),
-  };
-  if !canonical.starts_with(root) {
-    return Err(StaticPathError::Forbidden);
-  }
-  Ok(canonical)
+  Ok(candidate)
 }
 
 fn percent_decode_segment(segment: &str) -> Result<String, StaticPathError> {

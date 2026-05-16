@@ -123,14 +123,8 @@ pub(crate) async fn plan_response(
     return plan;
   }
 
-  let root = match validate_static_root(static_root) {
-    Ok(root) => root,
-    Err(error) => {
-      warn!(error = %error, route = %route_name, "static_root is not usable");
-      return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
-    }
-  };
-  let path = match resolve_request_path(&root, route_prefix, request_path) {
+  let root = static_root;
+  let path = match resolve_request_path(root, route_prefix, request_path) {
     Ok(path) => path,
     Err(StaticPathError::NotFound) => return text_plan(StatusCode::NOT_FOUND, "not found"),
     Err(StaticPathError::Forbidden) => return text_plan(StatusCode::FORBIDDEN, "forbidden"),
@@ -139,9 +133,13 @@ pub(crate) async fn plan_response(
     }
   };
 
-  let opened = match open_verified_file(&root, &path).await {
+  let opened = match open_verified_file(root, &path).await {
     Ok(opened) => opened,
     Err(StaticOpenError::NotFound) => {
+      if !root.is_dir() {
+        warn!(route = %route_name, root = %root.display(), "static_root is not usable");
+        return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
+      }
       return text_plan(StatusCode::NOT_FOUND, "not found");
     }
     Err(StaticOpenError::Forbidden(error)) => {
@@ -149,7 +147,11 @@ pub(crate) async fn plan_response(
       return text_plan(StatusCode::FORBIDDEN, "forbidden");
     }
   };
-  let OpenedStaticFile { file, metadata } = opened;
+  let OpenedStaticFile {
+    file,
+    path,
+    metadata,
+  } = opened;
 
   let len = metadata.len();
   let modified = metadata.modified().ok();

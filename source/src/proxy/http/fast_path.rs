@@ -2,8 +2,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use http::{Method, Request, Response, StatusCode};
-use http_body_util::BodyExt;
+use http::header::CONTENT_LENGTH;
+use http::{HeaderMap, Method, Request, Response, StatusCode};
+use http_body_util::{BodyExt, Limited};
 use hyper::body::Body;
 use tracing::warn;
 
@@ -91,6 +92,14 @@ impl PlainProxyFastPath {
     };
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
     let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
+    let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
+    let request = request.map(|body| {
+      body::with_read_timeout(
+        Limited::new(body, state.config.limits.max_request_body_bytes as usize).boxed(),
+        client_body_timeout,
+        BodyTimeoutKind::DownstreamRequestRead,
+      )
+    });
 
     let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
       warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
@@ -189,11 +198,13 @@ impl PlainProxyFastPath {
       .as_millis()
       .min(u128::from(u64::MAX)) as u64;
     access_log.upstream_first_byte_time_ms = Some(upstream_first_byte_time_ms);
-    let (mut parts, body) = upstream_response
+    let (mut parts, response_body) = upstream_response
       .map(|body| body.map_err(boxed_error).boxed())
       .into_parts();
-    let body = body::with_read_timeout(
-      body,
+    let known_small_response_body =
+      exact_known_small_content_length(&parts.headers, &response_body);
+    let response_body = body::with_read_timeout(
+      response_body,
       timeouts.upstream_read,
       BodyTimeoutKind::UpstreamResponseRead,
     );
@@ -217,13 +228,39 @@ impl PlainProxyFastPath {
       "fast-path proxy response received"
     );
 
-    let body = filter_trailers(body, state.config.proxy.http.trailers, false);
-    let response = Response::from_parts(parts, body);
+    let response_body = filter_trailers(response_body, state.config.proxy.http.trailers, false);
+    let mut response = Response::from_parts(parts, response_body);
+    if known_small_response_body {
+      response
+        .extensions_mut()
+        .insert(body::KnownSmallResponseBody);
+    }
     let response =
       with_downstream_response_timeout(response, timeouts.response_send, transport_network);
     state.metrics.record_response(response.status());
     response
   }
+}
+
+fn exact_known_small_content_length(headers: &HeaderMap, body: &ProxyBody) -> bool {
+  let mut values = headers.get_all(CONTENT_LENGTH).iter();
+  let Some(value) = values.next() else {
+    return false;
+  };
+  if values.next().is_some() {
+    return false;
+  }
+  let Ok(value) = value.to_str() else {
+    return false;
+  };
+  let Ok(length) = value.trim().parse::<usize>() else {
+    return false;
+  };
+  body
+    .size_hint()
+    .upper()
+    .is_some_and(|upper| upper == length as u64)
+    && body::is_known_small_response_body_len(length)
 }
 
 #[cfg(test)]
@@ -606,5 +643,28 @@ request = "memory"
       &proxy_protocol_resolved,
       &Method::GET
     ));
+  }
+
+  #[test]
+  fn exact_small_content_length_marks_fast_path_response_as_known_small() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("2"));
+    let body = Full::new(Bytes::from_static(b"ok"))
+      .map_err(|never| -> body::BoxError { match never {} })
+      .boxed();
+
+    assert!(exact_known_small_content_length(&headers, &body));
+  }
+
+  #[test]
+  fn duplicate_content_length_is_not_known_small_fast_path_response() {
+    let mut headers = http::HeaderMap::new();
+    headers.append(CONTENT_LENGTH, http::HeaderValue::from_static("2"));
+    headers.append(CONTENT_LENGTH, http::HeaderValue::from_static("2"));
+    let body = Full::new(Bytes::from_static(b"ok"))
+      .map_err(|never| -> body::BoxError { match never {} })
+      .boxed();
+
+    assert!(!exact_known_small_content_length(&headers, &body));
   }
 }

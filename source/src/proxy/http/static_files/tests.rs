@@ -260,3 +260,13 @@ fn resolver_rejects_encoded_separators_and_dot_segments() {
     StaticPathError::Invalid
   );
 }
+
+#[test]
+fn resolver_builds_lexical_path_without_requiring_existing_file() {
+  let root = Path::new("/tmp/oxibelt-static-root");
+
+  let resolved = resolve_request_path(root, "/assets", "/assets/missing/app.txt")
+    .expect("lexical path should resolve before file open");
+
+  assert_eq!(resolved, root.join("missing").join("app.txt"));
+}

@@ -8,6 +8,7 @@ use tokio::fs::File;
 #[derive(Debug)]
 pub(crate) struct OpenedStaticFile {
   pub(crate) file: File,
+  pub(crate) path: PathBuf,
   pub(crate) metadata: Metadata,
 }
 
@@ -39,7 +40,7 @@ pub(crate) async fn open_verified_file(
       )));
     }
   };
-  verify_opened_file(&file, root)
+  let path = verify_opened_file(&file, root)
     .with_context(|| format!("static file fd failed validation {}", path.display()))
     .map_err(StaticOpenError::forbidden)?;
   let metadata = file
@@ -52,7 +53,11 @@ pub(crate) async fn open_verified_file(
       "opened static file is not a regular file"
     )));
   }
-  Ok(OpenedStaticFile { file, metadata })
+  Ok(OpenedStaticFile {
+    file,
+    path,
+    metadata,
+  })
 }
 
 pub(crate) fn verify_opened_file(file: &File, root: &Path) -> anyhow::Result<PathBuf> {

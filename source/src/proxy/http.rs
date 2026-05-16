@@ -414,6 +414,23 @@ where
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.set_route_name(&resolved.route.name);
+
+  if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved, &request_method) {
+    return fast_path::PlainProxyFastPath::handle(
+      request,
+      state.clone(),
+      &resolved,
+      peer_addr,
+      client_addr,
+      &host,
+      downstream_scheme,
+      request_version,
+      transport_network,
+      access_log,
+    )
+    .await;
+  }
+
   let request_waf_enabled = state.waf.has_request_rules(&resolved.route.name);
   let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
   let request_body_need = state.waf.request_body_need(&resolved.route.name);
@@ -461,22 +478,6 @@ where
       BodyTimeoutKind::DownstreamRequestRead,
     )
   });
-
-  if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved, &request_method) {
-    return fast_path::PlainProxyFastPath::handle(
-      request,
-      state.clone(),
-      &resolved,
-      peer_addr,
-      client_addr,
-      &host,
-      downstream_scheme,
-      request_version,
-      transport_network,
-      access_log,
-    )
-    .await;
-  }
 
   let (request, captured_body) = if request_method != Method::CONNECT {
     match capture_request_body_for_waf(

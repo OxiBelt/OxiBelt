@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use h3::ext::Protocol;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Empty};
 use hyper::body::Frame;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
@@ -19,7 +21,7 @@ use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
-use crate::proxy::http::body::{ProxyBody, boxed_error, channel_body};
+use crate::proxy::http::body::{BoxError, ProxyBody, boxed_error, channel_body};
 use crate::proxy::http::response::text_response;
 use crate::server::downstream_quic_tls_metadata;
 use crate::state::AppSnapshot;
@@ -555,7 +557,7 @@ async fn handle_h3_request(
   stream: H3RequestStream,
   context: H3DownstreamRequestContext,
 ) -> anyhow::Result<StatusCode> {
-  let (request, stream_receiver) = stream_h3_request_body(request, stream);
+  let (request, stream_completion) = prepare_h3_request_body(request, stream).await;
   let response = http_proxy::handle_http3(
     request,
     context.peer_addr,
@@ -567,22 +569,109 @@ async fn handle_h3_request(
   )
   .await;
   let status = response.status();
-  let stream = stream_receiver
-    .await
-    .map_err(|_| anyhow::anyhow!("downstream HTTP/3 request body task did not return stream"))?;
+  let stream = stream_completion.into_stream().await?;
   respond_to_h3_request(stream, response).await?;
   Ok(status)
+}
+
+struct H3RequestStreamCompletion {
+  ready: Option<H3RequestStream>,
+  receiver: Option<oneshot::Receiver<H3RequestStream>>,
+}
+
+impl H3RequestStreamCompletion {
+  fn ready(stream: H3RequestStream) -> Self {
+    Self {
+      ready: Some(stream),
+      receiver: None,
+    }
+  }
+
+  fn receiver(receiver: oneshot::Receiver<H3RequestStream>) -> Self {
+    Self {
+      ready: None,
+      receiver: Some(receiver),
+    }
+  }
+
+  async fn into_stream(self) -> anyhow::Result<H3RequestStream> {
+    if let Some(stream) = self.ready {
+      return Ok(stream);
+    }
+    let Some(receiver) = self.receiver else {
+      return Err(anyhow::anyhow!(
+        "downstream HTTP/3 request body stream completion is missing"
+      ));
+    };
+    receiver
+      .await
+      .map_err(|_| anyhow::anyhow!("downstream HTTP/3 request body task did not return stream"))
+  }
+}
+
+async fn prepare_h3_request_body(
+  request: Request<()>,
+  mut stream: H3RequestStream,
+) -> (Request<ProxyBody>, H3RequestStreamCompletion) {
+  let first = poll_fn(|cx| match stream.poll_recv_data(cx) {
+    Poll::Ready(result) => Poll::Ready(Some(result)),
+    Poll::Pending => Poll::Ready(None),
+  })
+  .await;
+
+  match first {
+    Some(Ok(None)) => {
+      let (parts, _) = request.into_parts();
+      (
+        Request::from_parts(parts, empty_body()),
+        H3RequestStreamCompletion::ready(stream),
+      )
+    }
+    Some(Ok(Some(mut chunk))) => {
+      let len = chunk.remaining();
+      stream_h3_request_body_with_initial(
+        request,
+        stream,
+        Some(Ok(Frame::data(chunk.copy_to_bytes(len)))),
+      )
+    }
+    Some(Err(error)) => stream_h3_request_body_with_initial(
+      request,
+      stream,
+      Some(Err(downstream_h3_request_body_error(error))),
+    ),
+    None => stream_h3_request_body(request, stream),
+  }
 }
 
 fn stream_h3_request_body(
   request: Request<()>,
   stream: H3RequestStream,
-) -> (Request<ProxyBody>, oneshot::Receiver<H3RequestStream>) {
+) -> (Request<ProxyBody>, H3RequestStreamCompletion) {
+  stream_h3_request_body_with_initial(request, stream, None)
+}
+
+fn stream_h3_request_body_with_initial(
+  request: Request<()>,
+  stream: H3RequestStream,
+  initial_frame: Option<Result<Frame<Bytes>, BoxError>>,
+) -> (Request<ProxyBody>, H3RequestStreamCompletion) {
   let (parts, _) = request.into_parts();
   let (body_sender, body) = channel_body(H3_BODY_CHANNEL_CAPACITY);
   let (stream_sender, stream_receiver) = oneshot::channel();
   let mut stream = stream;
+  let initial_is_error = initial_frame.as_ref().is_some_and(Result::is_err);
   tokio::spawn(async move {
+    if let Some(frame) = initial_frame
+      && body_sender.send(frame).await.is_err()
+    {
+      let _ = stream_sender.send(stream);
+      return;
+    }
+    if initial_is_error {
+      let _ = stream_sender.send(stream);
+      return;
+    }
     loop {
       match stream.recv_data().await {
         Ok(Some(mut chunk)) => {
@@ -608,7 +697,22 @@ fn stream_h3_request_body(
     }
     let _ = stream_sender.send(stream);
   });
-  (Request::from_parts(parts, body), stream_receiver)
+  (
+    Request::from_parts(parts, body),
+    H3RequestStreamCompletion::receiver(stream_receiver),
+  )
+}
+
+fn downstream_h3_request_body_error(error: h3::error::StreamError) -> BoxError {
+  boxed_error(std::io::Error::other(format!(
+    "failed to receive downstream HTTP/3 request data: {error}"
+  )))
+}
+
+fn empty_body() -> ProxyBody {
+  Empty::<Bytes>::new()
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed()
 }
 
 async fn respond_to_h3_request(
