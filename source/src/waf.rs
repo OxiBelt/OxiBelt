@@ -1340,6 +1340,7 @@ impl WafEngine {
       pattern_sets: &self.pattern_sets,
       global_functions: &empty_functions,
       route_functions: None,
+      regex_cache: None,
       locals: &[],
       limits: &self.limits,
       duplicate_metadata_policy: self.duplicate_metadata_policy,
@@ -1391,6 +1392,7 @@ impl WafEngine {
           pattern_sets: &self.pattern_sets,
           global_functions: self.global_functions.as_ref(),
           route_functions: None,
+          regex_cache: None,
           locals: &[],
           limits: &self.limits,
           duplicate_metadata_policy: self.duplicate_metadata_policy,
@@ -1470,6 +1472,7 @@ impl WafEngine {
         pattern_sets: &self.pattern_sets,
         global_functions: self.global_functions.as_ref(),
         route_functions: None,
+        regex_cache: None,
         locals: &[],
         limits: &self.limits,
         duplicate_metadata_policy: self.duplicate_metadata_policy,
@@ -1524,6 +1527,7 @@ impl WafEngine {
         pattern_sets: &self.pattern_sets,
         global_functions: self.global_functions.as_ref(),
         route_functions: None,
+        regex_cache: None,
         locals: &[],
         limits: &self.limits,
         duplicate_metadata_policy: self.duplicate_metadata_policy,
@@ -1575,6 +1579,7 @@ impl WafEngine {
       rule_tags: &rule.tags,
       global_functions: rule.global_functions.as_ref(),
       route_functions: rule.route_functions.as_deref(),
+      regex_cache: Some(&rule.regex_cache),
       locals: &[],
       ..*ctx
     };
@@ -1665,6 +1670,11 @@ fn compile_rules(
         .request_body_need_with_functions(global_functions.as_ref(), route_functions.as_deref());
       let response_body_need = expression
         .response_body_need_with_functions(global_functions.as_ref(), route_functions.as_deref());
+      let regex_cache = CompiledRegexCache::from_rule_expression(
+        &expression,
+        global_functions.as_ref(),
+        route_functions.as_deref(),
+      );
       Ok(CompiledRule {
         name: rule.name.clone(),
         id: rule.id.clone().filter(|id| !id.is_empty()),
@@ -1679,6 +1689,7 @@ fn compile_rules(
         hit_counter,
         request_body_need,
         response_body_need,
+        regex_cache,
         expression,
         global_functions: global_functions.clone(),
         route_functions: route_functions.clone(),
@@ -1953,6 +1964,7 @@ struct CompiledRule {
   hit_counter: Arc<AtomicU64>,
   request_body_need: BodyNeed,
   response_body_need: BodyNeed,
+  regex_cache: CompiledRegexCache,
   expression: Expr,
   global_functions: Arc<FunctionMap>,
   route_functions: Option<Arc<FunctionMap>>,
@@ -2001,6 +2013,62 @@ struct CompiledAccessLogField {
 enum CompiledPatternSet {
   Contains(Vec<String>),
   Regex(Vec<Regex>),
+}
+
+#[derive(Clone, Default)]
+struct CompiledRegexCache {
+  default: HashMap<String, Regex>,
+  header_name: HashMap<String, Regex>,
+}
+
+impl CompiledRegexCache {
+  fn from_rule_expression(
+    expression: &Expr,
+    global_functions: &FunctionMap,
+    route_functions: Option<&FunctionMap>,
+  ) -> Self {
+    let mut cache = Self::default();
+    expression.collect_literal_regexes_with_functions(
+      &mut cache,
+      global_functions,
+      route_functions,
+      &mut HashSet::new(),
+    );
+    cache
+  }
+
+  fn insert(&mut self, flavor: RegexFlavor, pattern: &str) {
+    let target = match flavor {
+      RegexFlavor::Default => &mut self.default,
+      RegexFlavor::HeaderName => &mut self.header_name,
+    };
+    if target.contains_key(pattern) {
+      return;
+    }
+    if let Ok(regex) = compile_regex_flavor(flavor, pattern) {
+      target.insert(pattern.to_string(), regex);
+    }
+  }
+
+  fn get(&self, flavor: RegexFlavor, pattern: &str) -> Option<&Regex> {
+    match flavor {
+      RegexFlavor::Default => self.default.get(pattern),
+      RegexFlavor::HeaderName => self.header_name.get(pattern),
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+enum RegexFlavor {
+  Default,
+  HeaderName,
+}
+
+fn compile_regex_flavor(flavor: RegexFlavor, pattern: &str) -> anyhow::Result<Regex> {
+  match flavor {
+    RegexFlavor::Default => Ok(Regex::new(pattern)?),
+    RegexFlavor::HeaderName => header_name_regex(pattern),
+  }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3112,6 +3180,7 @@ struct EvalContext<'a> {
   pattern_sets: &'a HashMap<String, CompiledPatternSet>,
   global_functions: &'a FunctionMap,
   route_functions: Option<&'a FunctionMap>,
+  regex_cache: Option<&'a CompiledRegexCache>,
   locals: &'a [(&'a str, &'a Value)],
   limits: &'a WafLimits,
   duplicate_metadata_policy: WafDuplicateMetadataPolicy,
@@ -3283,6 +3352,57 @@ impl Expr {
     }
   }
 
+  fn collect_literal_regexes(&self, cache: &mut CompiledRegexCache) {
+    match self {
+      Self::Call(receiver, method, args) => {
+        receiver.collect_literal_regexes(cache);
+        for arg in args {
+          arg.collect_literal_regexes(cache);
+        }
+        collect_call_literal_regexes(method, args, cache);
+      }
+      Self::FunctionCall(_, args) => {
+        for arg in args {
+          arg.collect_literal_regexes(cache);
+        }
+      }
+      Self::Member(receiver, _) | Self::UnaryNot(receiver) => {
+        receiver.collect_literal_regexes(cache)
+      }
+      Self::Binary(left, _, right) => {
+        left.collect_literal_regexes(cache);
+        right.collect_literal_regexes(cache);
+      }
+      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => {}
+    }
+  }
+
+  fn collect_literal_regexes_with_functions(
+    &self,
+    cache: &mut CompiledRegexCache,
+    global_functions: &FunctionMap,
+    route_functions: Option<&FunctionMap>,
+    active: &mut HashSet<FunctionKey>,
+  ) {
+    self.collect_literal_regexes(cache);
+    for call in self.function_calls() {
+      let Some(function) = resolve_function(call.name, global_functions, route_functions) else {
+        continue;
+      };
+      let key = FunctionKey::from(function);
+      if active.insert(key.clone()) {
+        let body_route_functions = function_body_route_functions(function, route_functions);
+        function.expression.collect_literal_regexes_with_functions(
+          cache,
+          global_functions,
+          body_route_functions,
+          active,
+        );
+        active.remove(&key);
+      }
+    }
+  }
+
   fn eval(&self, ctx: &EvalContext<'_>, tx: &mut TransactionBudget) -> anyhow::Result<Value> {
     tx.step()?;
     match self {
@@ -3304,15 +3424,49 @@ impl Expr {
       }
       Self::Call(receiver, method, args) => {
         let value = receiver.eval(ctx, tx)?;
+        let regex_args = CachedRegexArgs::for_call(args, ctx.regex_cache);
         let values = args
           .iter()
           .map(|arg| arg.eval(ctx, tx))
           .collect::<anyhow::Result<Vec<_>>>()?;
-        eval_call(value, method, &values, ctx, tx)
+        eval_call(value, method, &values, ctx, tx, regex_args)
       }
       Self::UnaryNot(expr) => Ok(Value::Bool(!expr.eval(ctx, tx)?.as_bool()?)),
       Self::Binary(left, op, right) => eval_binary(left, *op, right, ctx, tx),
     }
+  }
+}
+
+fn collect_call_literal_regexes(method: &str, args: &[Expr], cache: &mut CompiledRegexCache) {
+  match method {
+    "matches" | "anyValueMatches" | "anyKeyMatches" | "anyMatches" => {
+      collect_literal_regex_arg(args, 0, RegexFlavor::Default, cache);
+    }
+    "anyNameMatches" => {
+      collect_literal_regex_arg(args, 0, RegexFlavor::Default, cache);
+      collect_literal_regex_arg(args, 0, RegexFlavor::HeaderName, cache);
+    }
+    "anyEntryMatches" => {
+      collect_literal_regex_arg(args, 0, RegexFlavor::Default, cache);
+      collect_literal_regex_arg(args, 0, RegexFlavor::HeaderName, cache);
+      collect_literal_regex_arg(args, 1, RegexFlavor::Default, cache);
+    }
+    "allEntriesMatch" => {
+      collect_literal_regex_arg(args, 0, RegexFlavor::HeaderName, cache);
+      collect_literal_regex_arg(args, 1, RegexFlavor::Default, cache);
+    }
+    _ => {}
+  }
+}
+
+fn collect_literal_regex_arg(
+  args: &[Expr],
+  index: usize,
+  flavor: RegexFlavor,
+  cache: &mut CompiledRegexCache,
+) {
+  if let Some(Expr::String(pattern)) = args.get(index) {
+    cache.insert(flavor, pattern);
   }
 }
 
@@ -3352,6 +3506,75 @@ impl Value {
   fn is_null(&self) -> bool {
     matches!(self, Self::Null)
   }
+}
+
+#[derive(Clone, Copy, Default)]
+struct CachedRegexArgs<'a> {
+  default: [Option<&'a Regex>; 2],
+  header_name: [Option<&'a Regex>; 2],
+}
+
+impl<'a> CachedRegexArgs<'a> {
+  fn for_call(args: &[Expr], cache: Option<&'a CompiledRegexCache>) -> Self {
+    let Some(cache) = cache else {
+      return Self::default();
+    };
+    let mut regex_args = Self::default();
+    for (index, arg) in args.iter().enumerate().take(regex_args.default.len()) {
+      if let Expr::String(pattern) = arg {
+        regex_args.default[index] = cache.get(RegexFlavor::Default, pattern);
+        regex_args.header_name[index] = cache.get(RegexFlavor::HeaderName, pattern);
+      }
+    }
+    regex_args
+  }
+
+  fn get(self, flavor: RegexFlavor, index: usize) -> Option<&'a Regex> {
+    match flavor {
+      RegexFlavor::Default => self.default.get(index).copied().flatten(),
+      RegexFlavor::HeaderName => self.header_name.get(index).copied().flatten(),
+    }
+  }
+}
+
+enum RegexSource<'a> {
+  Borrowed(&'a Regex),
+  Owned(Regex),
+}
+
+impl RegexSource<'_> {
+  fn is_match(&self, value: &str) -> bool {
+    match self {
+      Self::Borrowed(regex) => regex.is_match(value),
+      Self::Owned(regex) => regex.is_match(value),
+    }
+  }
+}
+
+fn regex_arg<'a>(
+  args: &[Value],
+  index: usize,
+  cached: Option<&'a Regex>,
+) -> anyhow::Result<RegexSource<'a>> {
+  if let Some(regex) = cached {
+    return Ok(RegexSource::Borrowed(regex));
+  }
+  Ok(RegexSource::Owned(Regex::new(expect_string_arg(
+    args, index,
+  )?)?))
+}
+
+fn header_name_regex_arg<'a>(
+  args: &[Value],
+  index: usize,
+  cached: Option<&'a Regex>,
+) -> anyhow::Result<RegexSource<'a>> {
+  if let Some(regex) = cached {
+    return Ok(RegexSource::Borrowed(regex));
+  }
+  Ok(RegexSource::Owned(header_name_regex(expect_string_arg(
+    args, index,
+  )?)?))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4116,50 +4339,69 @@ fn eval_call(
   args: &[Value],
   ctx: &EvalContext<'_>,
   tx: &mut TransactionBudget,
+  regex_args: CachedRegexArgs<'_>,
 ) -> anyhow::Result<Value> {
   match value {
-    Value::String(text) => eval_string_call(&text, method, args, ctx, tx),
+    Value::String(text) => eval_string_call(&text, method, args, ctx, tx, regex_args),
     Value::Bytes(bytes) => eval_bytes_call(&bytes, method, args),
     Value::StringList(list) => eval_string_list_call(&list, method, args, ctx),
-    Value::Object(ObjectRef::ContextRuleTags) => eval_rule_tag_call(ctx.rule_tags, method, args),
+    Value::Object(ObjectRef::ContextRuleTags) => {
+      eval_rule_tag_call(ctx.rule_tags, method, args, regex_args)
+    }
     Value::Object(ObjectRef::RequestHeaders) => {
-      eval_header_call(ctx.request.headers, method, args, ctx)
+      eval_header_call(ctx.request.headers, method, args, ctx, regex_args)
     }
     Value::Object(ObjectRef::RequestNormalizedHeaders) => eval_pair_map_call(
       &normalize_header_pairs(ctx.request.headers),
       method,
       args,
       ctx,
+      regex_args,
     ),
     Value::Object(ObjectRef::ResponseHeaders) => eval_header_call(
       ctx.response.context("missing response context")?.headers,
       method,
       args,
       ctx,
+      regex_args,
     ),
-    Value::Object(ObjectRef::RequestQueryParams) => eval_query_call(ctx, method, args),
-    Value::Object(ObjectRef::RequestNormalizedQueryParams) => {
-      eval_pair_map_call(&normalize_query_pairs(ctx.request.uri), method, args, ctx)
-    }
-    Value::Object(ObjectRef::RequestCookies) => eval_cookie_call(ctx, method, args),
+    Value::Object(ObjectRef::RequestQueryParams) => eval_query_call(ctx, method, args, regex_args),
+    Value::Object(ObjectRef::RequestNormalizedQueryParams) => eval_pair_map_call(
+      &normalize_query_pairs(ctx.request.uri),
+      method,
+      args,
+      ctx,
+      regex_args,
+    ),
+    Value::Object(ObjectRef::RequestCookies) => eval_cookie_call(ctx, method, args, regex_args),
     Value::Object(ObjectRef::RequestNormalizedCookies) => eval_pair_map_call(
       &normalize_cookie_pairs(ctx.request.headers),
       method,
       args,
       ctx,
+      regex_args,
     ),
-    Value::Object(ObjectRef::RequestTags) => eval_tag_call(ctx.request.tags, method, args, ctx),
+    Value::Object(ObjectRef::RequestTags) => {
+      eval_tag_call(ctx.request.tags, method, args, ctx, regex_args)
+    }
     Value::Object(ObjectRef::RequestTokenBindings) => eval_token_binding_call(ctx, method, args),
-    Value::Object(ObjectRef::RequestBody) => eval_body_call(ctx.request.body, method, args, ctx),
+    Value::Object(ObjectRef::RequestBody) => {
+      eval_body_call(ctx.request.body, method, args, ctx, regex_args)
+    }
     Value::Object(ObjectRef::ResponseBody) => eval_body_call(
       ctx.response.and_then(|response| response.body),
       method,
       args,
       ctx,
+      regex_args,
     ),
-    Value::Object(ObjectRef::StreamPayload) => {
-      eval_body_call(ctx.stream.map(|stream| stream.payload), method, args, ctx)
-    }
+    Value::Object(ObjectRef::StreamPayload) => eval_body_call(
+      ctx.stream.map(|stream| stream.payload),
+      method,
+      args,
+      ctx,
+      regex_args,
+    ),
     _ => bail!("method {method} is not available on {:?}", value),
   }
 }
@@ -4170,13 +4412,14 @@ fn eval_string_call(
   args: &[Value],
   ctx: &EvalContext<'_>,
   _tx: &mut TransactionBudget,
+  regex_args: CachedRegexArgs<'_>,
 ) -> anyhow::Result<Value> {
   match method {
     "contains" => Ok(Value::Bool(text.contains(expect_string_arg(args, 0)?))),
     "startsWith" => Ok(Value::Bool(text.starts_with(expect_string_arg(args, 0)?))),
     "endsWith" => Ok(Value::Bool(text.ends_with(expect_string_arg(args, 0)?))),
     "matches" => {
-      let regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
       Ok(Value::Bool(regex.is_match(text)))
     }
     "lowerAscii" => Ok(Value::String(text.to_ascii_lowercase())),
@@ -4213,6 +4456,7 @@ fn eval_header_call(
   method: &str,
   args: &[Value],
   ctx: &EvalContext<'_>,
+  regex_args: CachedRegexArgs<'_>,
 ) -> anyhow::Result<Value> {
   match method {
     "count" => Ok(Value::Int(headers.len() as i64)),
@@ -4235,7 +4479,7 @@ fn eval_header_call(
       ctx.limits,
     ))),
     "anyNameMatches" => {
-      let regex = header_name_regex(expect_string_arg(args, 0)?)?;
+      let regex = header_name_regex_arg(args, 0, regex_args.get(RegexFlavor::HeaderName, 0))?;
       Ok(Value::Bool(
         headers
           .keys()
@@ -4254,7 +4498,7 @@ fn eval_header_call(
       ))
     }
     "anyValueMatches" => {
-      let regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
       Ok(Value::Bool(
         headers
           .values()
@@ -4264,8 +4508,8 @@ fn eval_header_call(
       ))
     }
     "anyEntryMatches" => {
-      let name_regex = header_name_regex(expect_string_arg(args, 0)?)?;
-      let value_regex = Regex::new(expect_string_arg(args, 1)?)?;
+      let name_regex = header_name_regex_arg(args, 0, regex_args.get(RegexFlavor::HeaderName, 0))?;
+      let value_regex = regex_arg(args, 1, regex_args.get(RegexFlavor::Default, 1))?;
       Ok(Value::Bool(
         headers
           .iter()
@@ -4275,8 +4519,8 @@ fn eval_header_call(
       ))
     }
     "allEntriesMatch" => {
-      let name_regex = header_name_regex(expect_string_arg(args, 0)?)?;
-      let value_regex = Regex::new(expect_string_arg(args, 1)?)?;
+      let name_regex = header_name_regex_arg(args, 0, regex_args.get(RegexFlavor::HeaderName, 0))?;
+      let value_regex = regex_arg(args, 1, regex_args.get(RegexFlavor::Default, 1))?;
       Ok(Value::Bool(
         headers
           .iter()
@@ -4293,16 +4537,26 @@ fn header_name_regex(pattern: &str) -> anyhow::Result<Regex> {
   Ok(RegexBuilder::new(pattern).case_insensitive(true).build()?)
 }
 
-fn eval_query_call(ctx: &EvalContext<'_>, method: &str, args: &[Value]) -> anyhow::Result<Value> {
+fn eval_query_call(
+  ctx: &EvalContext<'_>,
+  method: &str,
+  args: &[Value],
+  regex_args: CachedRegexArgs<'_>,
+) -> anyhow::Result<Value> {
   let query = ctx.request.uri.query().unwrap_or_default();
   let pairs = url::form_urlencoded::parse(query.as_bytes())
     .take(ctx.limits.max_helper_items)
     .map(|(name, value)| (name.into_owned(), value.into_owned()))
     .collect::<Vec<_>>();
-  eval_pair_map_call(&pairs, method, args, ctx)
+  eval_pair_map_call(&pairs, method, args, ctx, regex_args)
 }
 
-fn eval_cookie_call(ctx: &EvalContext<'_>, method: &str, args: &[Value]) -> anyhow::Result<Value> {
+fn eval_cookie_call(
+  ctx: &EvalContext<'_>,
+  method: &str,
+  args: &[Value],
+  regex_args: CachedRegexArgs<'_>,
+) -> anyhow::Result<Value> {
   let pairs = ctx
     .request
     .headers
@@ -4314,7 +4568,7 @@ fn eval_cookie_call(ctx: &EvalContext<'_>, method: &str, args: &[Value]) -> anyh
     .take(ctx.limits.max_helper_items)
     .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
     .collect::<Vec<_>>();
-  eval_pair_map_call(&pairs, method, args, ctx)
+  eval_pair_map_call(&pairs, method, args, ctx, regex_args)
 }
 
 fn eval_tag_call(
@@ -4322,6 +4576,7 @@ fn eval_tag_call(
   method: &str,
   args: &[Value],
   _ctx: &EvalContext<'_>,
+  regex_args: CachedRegexArgs<'_>,
 ) -> anyhow::Result<Value> {
   match method {
     "count" => Ok(Value::Int(tags.len() as i64)),
@@ -4333,7 +4588,7 @@ fn eval_tag_call(
         .unwrap_or(Value::Null),
     ),
     "anyKeyMatches" => {
-      let regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
       Ok(Value::Bool(tags.keys().any(|key| regex.is_match(key))))
     }
     "anyValueContains" => {
@@ -4343,8 +4598,8 @@ fn eval_tag_call(
       ))
     }
     "anyEntryMatches" => {
-      let key_regex = Regex::new(expect_string_arg(args, 0)?)?;
-      let value_regex = Regex::new(expect_string_arg(args, 1)?)?;
+      let key_regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
+      let value_regex = regex_arg(args, 1, regex_args.get(RegexFlavor::Default, 1))?;
       Ok(Value::Bool(tags.iter().any(|(key, value)| {
         key_regex.is_match(key) && value_regex.is_match(value)
       })))
@@ -4353,7 +4608,12 @@ fn eval_tag_call(
   }
 }
 
-fn eval_rule_tag_call(tags: &[String], method: &str, args: &[Value]) -> anyhow::Result<Value> {
+fn eval_rule_tag_call(
+  tags: &[String],
+  method: &str,
+  args: &[Value],
+  regex_args: CachedRegexArgs<'_>,
+) -> anyhow::Result<Value> {
   match method {
     "count" => Ok(Value::Int(tags.len() as i64)),
     "has" => {
@@ -4361,7 +4621,7 @@ fn eval_rule_tag_call(tags: &[String], method: &str, args: &[Value]) -> anyhow::
       Ok(Value::Bool(tags.iter().any(|tag| tag == expected)))
     }
     "anyMatches" => {
-      let regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
       Ok(Value::Bool(tags.iter().any(|tag| regex.is_match(tag))))
     }
     _ => bail!("unknown RuleTagSet method {method}"),
@@ -4504,6 +4764,7 @@ fn eval_pair_map_call(
   method: &str,
   args: &[Value],
   ctx: &EvalContext<'_>,
+  regex_args: CachedRegexArgs<'_>,
 ) -> anyhow::Result<Value> {
   match method {
     "count" => Ok(Value::Int(pairs.len() as i64)),
@@ -4526,7 +4787,7 @@ fn eval_pair_map_call(
       )))
     }
     "anyNameMatches" => {
-      let regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
       Ok(Value::Bool(
         pairs.iter().any(|(key, _)| regex.is_match(key)),
       ))
@@ -4538,14 +4799,14 @@ fn eval_pair_map_call(
       ))
     }
     "anyValueMatches" => {
-      let regex = Regex::new(expect_string_arg(args, 0)?)?;
+      let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
       Ok(Value::Bool(
         pairs.iter().any(|(_, value)| regex.is_match(value)),
       ))
     }
     "anyEntryMatches" => {
-      let key_regex = Regex::new(expect_string_arg(args, 0)?)?;
-      let value_regex = Regex::new(expect_string_arg(args, 1)?)?;
+      let key_regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
+      let value_regex = regex_arg(args, 1, regex_args.get(RegexFlavor::Default, 1))?;
       Ok(Value::Bool(pairs.iter().any(|(key, value)| {
         key_regex.is_match(key) && value_regex.is_match(value)
       })))
@@ -4559,6 +4820,7 @@ fn eval_body_call(
   method: &str,
   args: &[Value],
   ctx: &EvalContext<'_>,
+  regex_args: CachedRegexArgs<'_>,
 ) -> anyhow::Result<Value> {
   match method {
     "isFormat" | "isBinaryFormat" | "matchesFormat" => {
@@ -4574,12 +4836,19 @@ fn eval_body_call(
     } else {
       false
     })),
-    "matches" => Ok(Value::Bool(
-      body
-        .map(|body| body_scan::matches(body.bytes, expect_string_arg(args, 0)?))
-        .transpose()?
-        .unwrap_or(false),
-    )),
+    "matches" => {
+      let Some(body) = body else {
+        return Ok(Value::Bool(false));
+      };
+      if let Some(regex) = regex_args.get(RegexFlavor::Default, 0) {
+        Ok(Value::Bool(body_scan::matches_regex(body.bytes, regex)))
+      } else {
+        Ok(Value::Bool(body_scan::matches(
+          body.bytes,
+          expect_string_arg(args, 0)?,
+        )?))
+      }
+    }
     "containsAny" | "matchesAny" => {
       let pattern_set_name = expect_string_arg(args, 0)?;
       let Some(body) = body else {

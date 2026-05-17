@@ -1,7 +1,7 @@
 use http::{HeaderMap, Uri, Version};
-use regex::Regex;
 
 use super::super::WafBodyInput;
+use super::variables::CrsSelector;
 
 pub(super) fn crs_phase_name(phase: u8) -> &'static str {
   match phase {
@@ -23,26 +23,19 @@ pub(super) fn version_string(version: Version) -> String {
   .to_string()
 }
 
-pub(super) fn header_values(headers: &HeaderMap, selector: Option<&str>) -> Vec<String> {
+pub(super) fn header_values(headers: &HeaderMap, selector: &CrsSelector) -> Vec<String> {
   match selector {
-    Some(selector)
-      if selector.starts_with('/') && selector.ends_with('/') && selector.len() > 2 =>
-    {
-      let Ok(regex) = Regex::new(&selector[1..selector.len() - 1]) else {
-        return Vec::new();
-      };
-      headers
-        .iter()
-        .filter(|(name, _)| regex.is_match(name.as_str()))
-        .filter_map(|(_, value)| value.to_str().ok().map(ToString::to_string))
-        .collect()
-    }
-    Some(selector) => headers
+    CrsSelector::Regex(regex) => headers
+      .iter()
+      .filter(|(name, _)| regex.is_match(name.as_str()))
+      .filter_map(|(_, value)| value.to_str().ok().map(ToString::to_string))
+      .collect(),
+    CrsSelector::Exact(selector) => headers
       .get_all(selector)
       .iter()
       .filter_map(|value| value.to_str().ok().map(ToString::to_string))
       .collect(),
-    None => headers
+    CrsSelector::Any => headers
       .values()
       .filter_map(|value| value.to_str().ok().map(ToString::to_string))
       .collect(),

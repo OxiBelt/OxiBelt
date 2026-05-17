@@ -148,6 +148,13 @@ impl CrsRule {
     if id.is_empty() {
       id = format!("generated-{}", crate::waf::new_access_log_id());
     }
+    let paranoia_level = tags
+      .iter()
+      .filter_map(|tag| tag.strip_prefix("paranoia-level/"))
+      .filter_map(|level| level.parse::<u8>().ok())
+      .next();
+    let requires_request_body = variables.iter().any(CrsVariable::requires_request_body);
+    let requires_response_body = variables.iter().any(CrsVariable::requires_response_body);
     Ok(Self {
       id,
       phase,
@@ -161,6 +168,9 @@ impl CrsRule {
       chain: Vec::new(),
       expects_chain: chain,
       hit_key: None,
+      paranoia_level,
+      requires_request_body,
+      requires_response_body,
     })
   }
 }

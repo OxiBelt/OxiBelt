@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use super::model::CrsTransaction;
@@ -77,10 +79,14 @@ pub(super) fn parse_setvar(raw: &str) -> anyhow::Result<Option<CrsAction>> {
 }
 
 pub(super) fn expand_macros(value: &str, tx: &CrsTransaction<'_>) -> String {
-  let Ok(regex) = Regex::new(r"%\{tx\.([A-Za-z0-9_.-]+)\}") else {
+  static TX_MACRO_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"%\{tx\.([A-Za-z0-9_.-]+)\}").expect("valid TX macro regex"));
+
+  if !value.contains("%{tx.") {
     return value.to_string();
-  };
-  regex
+  }
+
+  TX_MACRO_REGEX
     .replace_all(value, |captures: &regex::Captures<'_>| {
       tx.tx
         .get(&captures[1].to_ascii_lowercase())

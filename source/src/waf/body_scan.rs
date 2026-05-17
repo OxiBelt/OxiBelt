@@ -35,6 +35,10 @@ pub(crate) fn matches(bytes: &[u8], pattern: &str) -> anyhow::Result<bool> {
   Ok(Regex::new(pattern)?.is_match(&body_text(bytes)))
 }
 
+pub(crate) fn matches_regex(bytes: &[u8], regex: &Regex) -> bool {
+  regex.is_match(&body_text(bytes))
+}
+
 pub(crate) fn scan_pattern_set(
   bytes: &[u8],
   is_truncated: bool,

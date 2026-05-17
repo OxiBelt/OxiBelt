@@ -1,5 +1,6 @@
 use anyhow::bail;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use super::actions::expand_macros;
 use super::compatibility::SUPPORTED_OPERATORS;
@@ -11,7 +12,10 @@ use super::utils::{invalid_url_encoding, invalid_utf8_encoding};
 pub(super) enum CrsOperator {
   Regex(Regex),
   Contains(String),
-  ContainsWord(String),
+  ContainsWord {
+    needle: String,
+    literal_regex: Option<Regex>,
+  },
   BeginsWith(String),
   EndsWith(String),
   Streq(String),
@@ -46,7 +50,12 @@ impl CrsOperator {
       return match name {
         "rx" => Ok(Self::Regex(Regex::new(arg)?)),
         "contains" => Ok(Self::Contains(arg.to_string())),
-        "containsWord" => Ok(Self::ContainsWord(arg.to_string())),
+        "containsWord" => Ok(Self::ContainsWord {
+          needle: arg.to_string(),
+          literal_regex: (!contains_tx_macro(arg))
+            .then(|| contains_word_regex(arg))
+            .transpose()?,
+        }),
         "beginsWith" => Ok(Self::BeginsWith(arg.to_string())),
         "endsWith" => Ok(Self::EndsWith(arg.to_string())),
         "streq" => Ok(Self::Streq(arg.to_string())),
@@ -71,9 +80,16 @@ impl CrsOperator {
     let result = match self {
       Self::Regex(regex) => regex.is_match(value),
       Self::Contains(needle) => value.contains(&expand_macros(needle, tx)),
-      Self::ContainsWord(needle) => {
-        let needle = expand_macros(needle, tx);
-        Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&needle)))?.is_match(value)
+      Self::ContainsWord {
+        needle,
+        literal_regex,
+      } => {
+        if let Some(regex) = literal_regex {
+          regex.is_match(value)
+        } else {
+          let needle = expand_macros(needle, tx);
+          contains_word_regex(&needle)?.is_match(value)
+        }
       }
       Self::BeginsWith(needle) => value.starts_with(&expand_macros(needle, tx)),
       Self::EndsWith(needle) => value.ends_with(&expand_macros(needle, tx)),
@@ -87,13 +103,8 @@ impl CrsOperator {
       Self::Gt(expected) => value.parse::<i64>().unwrap_or(0) > *expected,
       Self::Le(expected) => value.parse::<i64>().unwrap_or(0) <= *expected,
       Self::Lt(expected) => value.parse::<i64>().unwrap_or(0) < *expected,
-      Self::DetectSqli => Regex::new(
-        "(?i)(union\\s+select|sleep\\s*\\(|information_schema|or\\s+1\\s*=\\s*1|drop\\s+table)",
-      )?
-      .is_match(value),
-      Self::DetectXss => {
-        Regex::new("(?i)(<\\s*script|javascript:|onerror\\s*=|onload\\s*=)")?.is_match(value)
-      }
+      Self::DetectSqli => DETECT_SQLI_REGEX.is_match(value),
+      Self::DetectXss => DETECT_XSS_REGEX.is_match(value),
       Self::UnconditionalMatch => true,
       Self::ValidateUrlEncoding => invalid_url_encoding(value),
       Self::ValidateUtf8Encoding => invalid_utf8_encoding(value),
@@ -101,4 +112,24 @@ impl CrsOperator {
     };
     Ok(result)
   }
+}
+
+static DETECT_SQLI_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+  Regex::new(
+    "(?i)(union\\s+select|sleep\\s*\\(|information_schema|or\\s+1\\s*=\\s*1|drop\\s+table)",
+  )
+  .expect("valid CRS SQLi compatibility regex")
+});
+
+static DETECT_XSS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+  Regex::new("(?i)(<\\s*script|javascript:|onerror\\s*=|onload\\s*=)")
+    .expect("valid CRS XSS compatibility regex")
+});
+
+fn contains_tx_macro(value: &str) -> bool {
+  value.contains("%{tx.")
+}
+
+fn contains_word_regex(needle: &str) -> anyhow::Result<Regex> {
+  Ok(Regex::new(&format!(r"(?i)\b{}\b", regex::escape(needle)))?)
 }

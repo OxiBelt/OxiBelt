@@ -3100,6 +3100,203 @@ SecRule ARGS "@validateUtf8Encoding" "id:920200,phase:2,msg:'Invalid UTF-8 encod
 }
 
 #[test]
+fn crs_phase_index_preserves_phase_order_and_skip_after() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule(
+        "waf-crs-phase-index",
+        "monitor",
+        r#"
+SecRule REQUEST_URI "@contains phase-index" "id:920310,phase:2,msg:'Skip to marker',skipAfter:END-PHASE-INDEX"
+SecRule REQUEST_URI "@contains phase-index" "id:920311,phase:2,msg:'Skipped rule',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+SecRule REQUEST_URI "@contains phase-index" "id:920312,phase:1,msg:'Phase one seeds tx',setvar:'tx.phase_index_seed=5'"
+SecMarker END-PHASE-INDEX
+SecRule TX:phase_index_seed "@eq 5" "id:920313,phase:2,msg:'Phase two sees phase one tx',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+"#,
+    );
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let decision = evaluate_simple_request(&engine, "/app/phase-index");
+
+    assert!(decision.terminal.is_none());
+    let snapshots = engine.rule_hit_snapshots();
+    for (id, expected_hits) in [("920310", 1), ("920311", 0), ("920312", 1), ("920313", 1)] {
+        let hit = snapshots
+            .iter()
+            .find(|hit| hit.id.as_deref() == Some(id))
+            .unwrap_or_else(|| panic!("missing CRS snapshot for {id}"));
+        assert_eq!(hit.hits, expected_hits, "unexpected hit count for {id}");
+    }
+}
+
+#[test]
+fn crs_header_only_rules_do_not_require_body_and_regex_selector_matches() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule(
+        "waf-crs-header-only",
+        "monitor",
+        r#"
+SecRule REQUEST_HEADERS:/^x-oxi-.*/ "@contains header-marker" "id:920320,phase:1,msg:'Header regex selector',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'"
+SecRule RESPONSE_HEADERS:/^x-oxi-.*/ "@contains response-marker" "id:920321,phase:3,msg:'Response header regex selector',setvar:'tx.outbound_anomaly_score=+%{tx.error_anomaly_score}'"
+"#,
+    );
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert!(!engine.requires_request_body_inspection("app-root"));
+    assert!(!engine.requires_response_body_inspection("app-root"));
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-oxi-proof", HeaderValue::from_static("header-marker"));
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/app/header-only".parse().expect("URI should parse");
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+
+    let request_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, peer_addr));
+    assert!(request_decision.terminal.is_none());
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        "x-oxi-response",
+        HeaderValue::from_static("response-marker"),
+    );
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request: request_input(&method, &uri, &headers, &tags, peer_addr),
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: None,
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+    assert!(response_decision.terminal.is_none());
+
+    let snapshots = engine.rule_hit_snapshots();
+    for id in ["920320", "920321"] {
+        let hit = snapshots
+            .iter()
+            .find(|hit| hit.id.as_deref() == Some(id))
+            .unwrap_or_else(|| panic!("missing CRS snapshot for {id}"));
+        assert_eq!(hit.hits, 1, "expected {id} to match once");
+    }
+}
+
+#[test]
+fn crs_precompiled_operators_and_tx_macros_preserve_matches() {
+    let (_temp_dir, config) = load_crs_fixture_config_with_rule(
+        "waf-crs-operator-cache",
+        "monitor",
+        r#"
+SecAction "id:920330,phase:1,msg:'Seed macro needle',setvar:'tx.dynamic_needle=macro-hit'"
+SecRule REQUEST_URI "@containsWord danger" "id:920331,phase:2,msg:'Contains word',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+SecRule REQUEST_URI "@detectSQLi" "id:920332,phase:2,t:urlDecodeUni,t:lowercase,msg:'Detect SQLi',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+SecRule REQUEST_URI "@detectXSS" "id:920333,phase:2,t:urlDecodeUni,t:lowercase,msg:'Detect XSS',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+SecRule REQUEST_URI "@contains %{tx.dynamic_needle}" "id:920334,phase:2,msg:'Macro contains',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+"#,
+    );
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let decision = evaluate_simple_request(
+        &engine,
+        "/app/Danger?q=union%20select&next=javascript:alert(1)&v=macro-hit",
+    );
+
+    assert!(decision.terminal.is_none());
+    let snapshots = engine.rule_hit_snapshots();
+    for id in ["920331", "920332", "920333", "920334"] {
+        let hit = snapshots
+            .iter()
+            .find(|hit| hit.id.as_deref() == Some(id))
+            .unwrap_or_else(|| panic!("missing CRS snapshot for {id}"));
+        assert_eq!(hit.hits, 1, "expected {id} to match once");
+    }
+}
+
+#[test]
+fn oxirule_literal_regex_cache_preserves_match_behavior() {
+    let engine = compile_waf_fragment(
+        "waf-literal-regex-cache",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "cached-literal-regex"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.matches('^/cached-[0-9]+$') || Request.Headers.anyEntryMatches('^x-cache-test$', '^hit$') || Request.Body.matches('cached-body')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "cached regex matched"
+"#,
+    );
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/cached-42".parse().expect("URI should parse");
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(only_rule_hit(&engine).hits, 1);
+}
+
+#[test]
+fn oxirule_dynamic_invalid_regex_still_uses_fail_policy() {
+    let engine = compile_waf_fragment(
+        "waf-dynamic-invalid-regex",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "open"
+
+[[waf.rules]]
+name = "dynamic-regex"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.matches(Request.QueryParams.get('pattern'))"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "dynamic regex matched"
+"#,
+    );
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/anything?pattern=%28".parse().expect("URI should parse");
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert!(decision.terminal.is_none());
+    assert_eq!(only_rule_hit(&engine).hits, 0);
+}
+
+#[test]
 fn config_rejects_crs_path_escaping() {
     let temp_dir = common::TempDir::new("waf-crs-path-escape");
     let layout = temp_dir.path();

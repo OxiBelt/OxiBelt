@@ -1,13 +1,31 @@
 use anyhow::bail;
 use regex::Regex;
 
-use super::super::{WafResponseInput, body_scan};
+use super::super::WafResponseInput;
 use super::compatibility::SUPPORTED_VARIABLES;
 use super::model::CrsTransaction;
 use super::syntax::unquote_selector;
-use super::utils::{
-  body_pairs, cookie_pairs, header_values, query_pairs, select_pairs, version_string,
-};
+use super::utils::{header_values, select_pairs};
+
+#[derive(Clone)]
+pub(super) enum CrsSelector {
+  Any,
+  Exact(String),
+  Regex(Regex),
+}
+
+impl CrsSelector {
+  fn parse(selector: Option<&str>) -> anyhow::Result<Self> {
+    let Some(selector) = selector else {
+      return Ok(Self::Any);
+    };
+    if selector.starts_with('/') && selector.ends_with('/') && selector.len() > 2 {
+      Ok(Self::Regex(Regex::new(&selector[1..selector.len() - 1])?))
+    } else {
+      Ok(Self::Exact(unquote_selector(selector)))
+    }
+  }
+}
 
 #[derive(Clone)]
 pub(super) enum CrsVariable {
@@ -17,7 +35,7 @@ pub(super) enum CrsVariable {
   RequestBasename,
   RequestMethod,
   RequestProtocol,
-  RequestHeaders(Option<String>),
+  RequestHeaders(CrsSelector),
   RequestHeadersNames,
   Args,
   ArgsGet,
@@ -25,7 +43,7 @@ pub(super) enum CrsVariable {
   RequestBody,
   ResponseStatus,
   ResponseProtocol,
-  ResponseHeaders(Option<String>),
+  ResponseHeaders(CrsSelector),
   ResponseHeadersNames,
   ResponseBody,
   Tx(String),
@@ -50,7 +68,7 @@ impl CrsVariable {
       "REQUEST_BASENAME" => Ok(Self::RequestBasename),
       "REQUEST_METHOD" => Ok(Self::RequestMethod),
       "REQUEST_PROTOCOL" => Ok(Self::RequestProtocol),
-      "REQUEST_HEADERS" => Ok(Self::RequestHeaders(selector.map(unquote_selector))),
+      "REQUEST_HEADERS" => Ok(Self::RequestHeaders(CrsSelector::parse(selector)?)),
       "REQUEST_HEADERS_NAMES" => Ok(Self::RequestHeadersNames),
       "ARGS" => Ok(Self::Args),
       "ARGS_GET" | "QUERY_STRING" => Ok(Self::ArgsGet),
@@ -58,7 +76,7 @@ impl CrsVariable {
       "REQUEST_BODY" => Ok(Self::RequestBody),
       "RESPONSE_STATUS" => Ok(Self::ResponseStatus),
       "RESPONSE_PROTOCOL" => Ok(Self::ResponseProtocol),
-      "RESPONSE_HEADERS" => Ok(Self::ResponseHeaders(selector.map(unquote_selector))),
+      "RESPONSE_HEADERS" => Ok(Self::ResponseHeaders(CrsSelector::parse(selector)?)),
       "RESPONSE_HEADERS_NAMES" => Ok(Self::ResponseHeadersNames),
       "RESPONSE_BODY" => Ok(Self::ResponseBody),
       "MATCHED_VAR" => Ok(Self::MatchedVar),
@@ -86,12 +104,12 @@ impl CrsVariable {
 
   pub(super) fn values(
     &self,
-    tx: &CrsTransaction<'_>,
+    tx: &mut CrsTransaction<'_>,
     response: Option<WafResponseInput<'_>>,
   ) -> anyhow::Result<Vec<String>> {
     match self {
-      Self::RequestUri | Self::RequestUriRaw => Ok(vec![tx.request.uri.to_string()]),
-      Self::RequestFilename => Ok(vec![tx.request.uri.path().to_string()]),
+      Self::RequestUri | Self::RequestUriRaw => Ok(vec![tx.request_uri()]),
+      Self::RequestFilename => Ok(vec![tx.request_path()]),
       Self::RequestBasename => Ok(
         tx.request
           .uri
@@ -102,36 +120,25 @@ impl CrsVariable {
           .unwrap_or_default(),
       ),
       Self::RequestMethod => Ok(vec![tx.request.method.as_str().to_string()]),
-      Self::RequestProtocol => Ok(vec![version_string(tx.request.version)]),
-      Self::RequestHeaders(selector) => Ok(header_values(tx.request.headers, selector.as_deref())),
-      Self::RequestHeadersNames => Ok(
-        tx.request
-          .headers
-          .keys()
-          .map(|name| name.as_str().to_string())
-          .collect(),
-      ),
+      Self::RequestProtocol => Ok(vec![tx.request_protocol()]),
+      Self::RequestHeaders(selector) => Ok(header_values(tx.request.headers, selector)),
+      Self::RequestHeadersNames => Ok(tx.request_header_names()),
       Self::Args => {
-        let mut pairs = query_pairs(tx.request.uri);
-        pairs.extend(body_pairs(tx.request.headers, tx.request.body));
+        let mut pairs = tx.query_pairs();
+        pairs.extend(tx.form_body_pairs());
         Ok(pairs.into_iter().map(|(_, value)| value).collect())
       }
       Self::ArgsGet => Ok(
-        query_pairs(tx.request.uri)
+        tx.query_pairs()
           .into_iter()
           .map(|(_, value)| value)
           .collect(),
       ),
       Self::RequestCookies(selector) => {
-        let pairs = cookie_pairs(tx.request.headers);
+        let pairs = tx.cookie_pairs();
         Ok(select_pairs(pairs, selector.as_deref()))
       }
-      Self::RequestBody => Ok(
-        tx.request
-          .body
-          .map(|body| vec![body_scan::body_text(body.bytes)])
-          .unwrap_or_default(),
-      ),
+      Self::RequestBody => Ok(tx.request_body_text().into_iter().collect()),
       Self::ResponseStatus => Ok(vec![
         response
           .map(|input| input.status.as_u16().to_string())
@@ -142,41 +149,19 @@ impl CrsVariable {
           })
           .unwrap_or_default(),
       ]),
-      Self::ResponseProtocol => Ok(vec![
-        tx.response
-          .as_ref()
-          .map(|view| version_string(view.version))
-          .unwrap_or_else(|| "HTTP/1.1".to_string()),
-      ]),
+      Self::ResponseProtocol => Ok(vec![tx.response_protocol()]),
       Self::ResponseHeaders(selector) => {
         let headers = response
           .map(|input| input.headers)
           .or_else(|| tx.response.as_ref().map(|view| view.headers));
         Ok(
           headers
-            .map(|headers| header_values(headers, selector.as_deref()))
+            .map(|headers| header_values(headers, selector))
             .unwrap_or_default(),
         )
       }
-      Self::ResponseHeadersNames => Ok(
-        tx.response
-          .as_ref()
-          .map(|view| {
-            view
-              .headers
-              .keys()
-              .map(|name| name.as_str().to_string())
-              .collect()
-          })
-          .unwrap_or_default(),
-      ),
-      Self::ResponseBody => Ok(
-        tx.response
-          .as_ref()
-          .and_then(|view| view.body)
-          .map(|body| vec![body_scan::body_text(body.bytes)])
-          .unwrap_or_default(),
-      ),
+      Self::ResponseHeadersNames => Ok(tx.response_header_names()),
+      Self::ResponseBody => Ok(tx.response_body_text().into_iter().collect()),
       Self::Tx(name) => Ok(tx.tx.get(name).cloned().into_iter().collect()),
       Self::TxRegex(regex) => Ok(
         tx.tx

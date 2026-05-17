@@ -15,7 +15,6 @@ use super::config::{
 use super::model::{CrsAuditRuleMatch, CrsEntry, CrsResponseView, CrsRule, CrsTransaction};
 use super::parser::CrsParser;
 use super::utils::crs_phase_name;
-use super::variables::CrsVariable;
 
 #[derive(Clone)]
 pub(crate) struct CrsEngine {
@@ -25,6 +24,9 @@ pub(crate) struct CrsEngine {
   pub(super) inbound_threshold: i64,
   pub(super) outbound_threshold: i64,
   rules: Vec<CrsEntry>,
+  phase_indices: Vec<CrsPhaseIndex>,
+  requires_request_body_inspection: bool,
+  requires_response_body_inspection: bool,
   counters: HashMap<CrsHitKey, Arc<AtomicU64>>,
   tuned_counters: HashMap<CrsHitKey, Arc<AtomicU64>>,
   rule_overrides: Vec<WafCrsRuleOverrideConfig>,
@@ -41,6 +43,9 @@ impl Default for CrsEngine {
       inbound_threshold: 5,
       outbound_threshold: 4,
       rules: Vec::new(),
+      phase_indices: default_phase_indices(),
+      requires_request_body_inspection: false,
+      requires_response_body_inspection: false,
       counters: HashMap::new(),
       tuned_counters: HashMap::new(),
       rule_overrides: Vec::new(),
@@ -84,6 +89,15 @@ impl CrsEngine {
         tuned_counters.insert(key, Arc::new(AtomicU64::new(0)));
       }
     }
+    let phase_indices = build_phase_indices(&rules);
+    let requires_request_body_inspection = rules.iter().any(|entry| match entry {
+      CrsEntry::Rule(rule) => matches!(rule.phase, 2) && rule.requires_request_body,
+      CrsEntry::Marker(_) => false,
+    });
+    let requires_response_body_inspection = rules.iter().any(|entry| match entry {
+      CrsEntry::Rule(rule) => matches!(rule.phase, 4) && rule.requires_response_body,
+      CrsEntry::Marker(_) => false,
+    });
     Ok(Self {
       enabled: true,
       mode: config.mode,
@@ -91,6 +105,9 @@ impl CrsEngine {
       inbound_threshold: config.inbound_anomaly_score_threshold,
       outbound_threshold: config.outbound_anomaly_score_threshold,
       rules,
+      phase_indices,
+      requires_request_body_inspection,
+      requires_response_body_inspection,
       counters,
       tuned_counters,
       rule_overrides: config.rule_overrides.clone(),
@@ -112,39 +129,20 @@ impl CrsEngine {
   }
 
   pub(crate) fn requires_request_body_inspection(&self) -> bool {
-    self.enabled
-      && self.rules.iter().any(|entry| match entry {
-        CrsEntry::Rule(rule) => {
-          matches!(rule.phase, 2)
-            && rule
-              .variables
-              .iter()
-              .any(CrsVariable::requires_request_body)
-        }
-        CrsEntry::Marker(_) => false,
-      })
+    self.enabled && self.requires_request_body_inspection
   }
 
   pub(crate) fn requires_response_body_inspection(&self) -> bool {
-    self.enabled
-      && self.rules.iter().any(|entry| match entry {
-        CrsEntry::Rule(rule) => {
-          matches!(rule.phase, 4)
-            && rule
-              .variables
-              .iter()
-              .any(CrsVariable::requires_response_body)
-        }
-        CrsEntry::Marker(_) => false,
-      })
+    self.enabled && self.requires_response_body_inspection
   }
 
   fn has_phase_rule(&self, phase: u8) -> bool {
     self.enabled
-      && self.rules.iter().any(|entry| match entry {
-        CrsEntry::Rule(rule) => rule.phase == phase,
-        CrsEntry::Marker(_) => false,
-      })
+      && self
+        .phase_indices
+        .get(usize::from(phase))
+        .map(|index| !index.rules.is_empty())
+        .unwrap_or(false)
   }
 
   pub(crate) fn rule_hit_snapshots(&self) -> Vec<WafRuleHitSnapshot> {
@@ -194,8 +192,8 @@ impl CrsEngine {
       return Ok(CrsDecision::default());
     }
     let mut tx = CrsTransaction::new(self, input);
-    self.evaluate_phase(&mut tx, 1, None)?;
-    self.evaluate_phase(&mut tx, 2, None)?;
+    self.evaluate_phase(&mut tx, 1)?;
+    self.evaluate_phase(&mut tx, 2)?;
     let score = tx.inbound_score();
     let blocking_score = tx.inbound_blocking_score();
     self.remember_scores(score, 0, blocking_score, 0);
@@ -220,8 +218,8 @@ impl CrsEngine {
     }
     let mut tx = CrsTransaction::new(self, input.request);
     tx.response = Some(CrsResponseView::from_input(input));
-    self.evaluate_phase(&mut tx, 3, Some(input))?;
-    self.evaluate_phase(&mut tx, 4, Some(input))?;
+    self.evaluate_phase(&mut tx, 3)?;
+    self.evaluate_phase(&mut tx, 4)?;
     let outbound = tx.outbound_score();
     let outbound_blocking = tx.outbound_blocking_score();
     self.remember_scores(0, outbound, 0, outbound_blocking);
@@ -262,23 +260,16 @@ impl CrsEngine {
     }
   }
 
-  fn evaluate_phase(
-    &self,
-    tx: &mut CrsTransaction<'_>,
-    phase: u8,
-    response: Option<WafResponseInput<'_>>,
-  ) -> anyhow::Result<()> {
+  fn evaluate_phase(&self, tx: &mut CrsTransaction<'_>, phase: u8) -> anyhow::Result<()> {
+    let Some(phase_index) = self.phase_indices.get(usize::from(phase)) else {
+      return Ok(());
+    };
     let mut index = 0usize;
-    while index < self.rules.len() {
-      match &self.rules[index] {
-        CrsEntry::Marker(_) => {
-          index += 1;
-        }
-        CrsEntry::Rule(rule) if rule.phase != phase => {
-          index += 1;
-        }
+    while index < phase_index.rules.len() {
+      let phase_rule = &phase_index.rules[index];
+      match &self.rules[phase_rule.entry_index] {
         CrsEntry::Rule(rule) => {
-          let matched = rule.matches(tx, response)?;
+          let matched = rule.matches(tx)?;
           if matched {
             self.record_hit(rule);
             let tuning = self.tuning_for_rule(rule, tx.request);
@@ -301,16 +292,14 @@ impl CrsEngine {
               }
               WafCrsRuleOverrideMode::Disabled => {}
             }
-            if let Some(marker) = &rule.skip_after {
-              index = self
-                .rules
-                .iter()
-                .position(|entry| matches!(entry, CrsEntry::Marker(name) if name == marker))
-                .map(|position| position + 1)
-                .unwrap_or(index + 1);
+            if let Some(skip_to) = phase_rule.skip_to {
+              index = skip_to;
               continue;
             }
           }
+          index += 1;
+        }
+        CrsEntry::Marker(_) => {
           index += 1;
         }
       }
@@ -376,6 +365,66 @@ impl CrsEngine {
       })
       .unwrap_or_default()
   }
+}
+
+#[derive(Clone, Default)]
+struct CrsPhaseIndex {
+  rules: Vec<CrsPhaseRule>,
+}
+
+#[derive(Clone)]
+struct CrsPhaseRule {
+  entry_index: usize,
+  skip_to: Option<usize>,
+}
+
+fn default_phase_indices() -> Vec<CrsPhaseIndex> {
+  vec![CrsPhaseIndex::default(); 5]
+}
+
+fn build_phase_indices(entries: &[CrsEntry]) -> Vec<CrsPhaseIndex> {
+  let mut markers = HashMap::new();
+  let mut phase_indices = default_phase_indices();
+  for (entry_index, entry) in entries.iter().enumerate() {
+    match entry {
+      CrsEntry::Marker(name) => {
+        markers.entry(name.clone()).or_insert(entry_index);
+      }
+      CrsEntry::Rule(rule) => {
+        if let Some(phase_index) = phase_indices.get_mut(usize::from(rule.phase)) {
+          phase_index.rules.push(CrsPhaseRule {
+            entry_index,
+            skip_to: None,
+          });
+        }
+      }
+    }
+  }
+
+  for phase_index in &mut phase_indices {
+    let rule_count = phase_index.rules.len();
+    for rule_index in 0..rule_count {
+      let entry_index = phase_index.rules[rule_index].entry_index;
+      let Some(CrsEntry::Rule(rule)) = entries.get(entry_index) else {
+        continue;
+      };
+      let Some(marker_index) = rule
+        .skip_after
+        .as_ref()
+        .and_then(|marker| markers.get(marker))
+      else {
+        continue;
+      };
+      let skip_to = phase_index
+        .rules
+        .partition_point(|phase_rule| phase_rule.entry_index <= *marker_index);
+      if skip_to > rule_index {
+        phase_index.rules[rule_index].skip_to = Some(skip_to);
+      }
+    }
+  }
+
+  phase_indices
 }
 
 #[derive(Debug, Default)]
