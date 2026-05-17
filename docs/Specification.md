@@ -105,7 +105,7 @@ Person proof challenges in OxiRule are anti-automation controls. They are not au
 
 ## Routing and Upstreams
 
-Routes match by host and path prefix. A route may rewrite the matched path prefix with `replace_prefix_with` before forwarding.
+Routes match by host and path prefix. Wildcard host routes such as `*.example.com` require at least one non-empty request-host label before the suffix. A route may rewrite the matched path prefix with `replace_prefix_with` before forwarding.
 
 Targets may be:
 

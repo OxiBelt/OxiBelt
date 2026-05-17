@@ -52,6 +52,10 @@ impl WildcardHostTrie {
   }
 
   fn for_each_match(&self, host: &str, mut visit: impl FnMut(WildcardHostEntry)) {
+    if host.split('.').any(str::is_empty) {
+      return;
+    }
+
     let host_label_count = host.split('.').count();
     let mut node = &self.root;
     for (depth, label) in host.rsplit('.').enumerate() {
@@ -477,6 +481,30 @@ mod tests {
 
     assert_eq!(resolved.route.name, "narrow");
     assert_eq!(resolved.upstream.unwrap().name, "narrow");
+  }
+
+  #[test]
+  fn wildcard_hosts_ignore_empty_request_labels() {
+    let routes = vec![
+      route("fallback", &["*"], "/", "fallback"),
+      route("wild", &["*.example.com"], "/", "wild"),
+    ];
+    let upstreams = vec![upstream("fallback"), upstream("wild")];
+    let table = RouteTable::from_routes_for_tests(routes);
+
+    for host in [".example.com", "api..example.com", "example.com"] {
+      let resolved = table.resolve(host, "/", &upstreams).unwrap();
+
+      assert_eq!(resolved.route.name, "fallback");
+      assert_eq!(resolved.upstream.unwrap().name, "fallback");
+    }
+
+    for host in ["api.example.com", "v1.api.example.com"] {
+      let resolved = table.resolve(host, "/", &upstreams).unwrap();
+
+      assert_eq!(resolved.route.name, "wild");
+      assert_eq!(resolved.upstream.unwrap().name, "wild");
+    }
   }
 
   #[test]

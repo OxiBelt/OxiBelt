@@ -1154,7 +1154,7 @@ Route buffering overrides are optional. Omitted values inherit from `[proxy.buff
 Fields:
 
 - `name`: unique route name.
-- `hosts`: host match list; defaults to `["*"]`.
+- `hosts`: host match list; defaults to `["*"]`. Wildcard hosts such as `*.example.com` match only request hosts with at least one non-empty label before the suffix.
 - `path_prefix`: path prefix match; defaults to `/`.
 - `replace_prefix_with`: optional upstream path prefix replacement.
 - `upstream`, `upstream_pool`, or `static_root`: exactly one target.
