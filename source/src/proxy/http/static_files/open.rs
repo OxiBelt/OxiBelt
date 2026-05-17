@@ -91,7 +91,12 @@ async fn open_verified_file_with_openat2(
   root: &Path,
   path: &Path,
 ) -> Result<Option<OpenedStaticFile>, StaticOpenError> {
-  open_verified_file_with_openat2_blocking(root, path)
+  let root = root.to_path_buf();
+  let path = path.to_path_buf();
+  tokio::task::spawn_blocking(move || open_verified_file_with_openat2_blocking(&root, &path))
+    .await
+    .context("static file openat2 worker failed")
+    .map_err(StaticOpenError::forbidden)?
 }
 
 #[cfg(target_os = "linux")]

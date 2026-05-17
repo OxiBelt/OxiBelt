@@ -1,0 +1,69 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = 1
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = false
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = false
+max_http_version = "h1"
+
+[proxy.static_files]
+sendfile = "off"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[routes]]
+name = "static-route"
+hosts = ["static-blocking.example.test"]
+path_prefix = "/static"
+static_root = "public"
+
+[[routes]]
+name = "app-route"
+hosts = ["app-blocking.example.test"]
+path_prefix = "/app"
+upstream = "http-upstream"

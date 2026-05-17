@@ -35,6 +35,15 @@ async fn serve_test(
   serve(request, route_name, route_prefix, static_root, 16 * 1024).await
 }
 
+#[cfg(target_os = "linux")]
+fn make_fifo(path: &Path) {
+  nix::unistd::mkfifo(
+    path,
+    nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+  )
+  .expect("failed to create FIFO");
+}
+
 #[tokio::test]
 async fn serves_regular_file_with_validator_headers() {
   let temp_dir = common::TempDir::new("static-ok");
@@ -77,6 +86,66 @@ async fn linux_openat2_secure_open_reads_regular_file_with_descriptor_verificati
   assert_eq!(opened.path, path);
   assert_eq!(opened.metadata.len(), "openat2 static".len() as u64);
   assert_eq!(body, "openat2 static");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn linux_openat2_fifo_open_does_not_block_runtime_worker() {
+  use std::os::unix::fs::OpenOptionsExt;
+  use std::time::{Duration, Instant};
+
+  let temp_dir = common::TempDir::new("static-openat2-fifo");
+  let root = temp_dir.path().join("public");
+  let probe = root.join("probe.txt");
+  let fifo = root.join("blocked.fifo");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(&probe, "openat2 probe").await.unwrap();
+
+  let Some(_) = open_verified_file_with_openat2_for_tests(&root, &probe)
+    .await
+    .expect("openat2 helper should not fail when the syscall is available")
+  else {
+    return;
+  };
+
+  make_fifo(&fifo);
+  let writer_fifo = fifo.clone();
+  let writer = std::thread::spawn(move || {
+    std::thread::sleep(Duration::from_millis(500));
+    std::fs::OpenOptions::new()
+      .write(true)
+      .custom_flags(libc::O_NONBLOCK)
+      .open(&writer_fifo)
+      .expect("FIFO writer should open after the reader is waiting");
+  });
+  let open_task = tokio::spawn({
+    let root = root.clone();
+    let fifo = fifo.clone();
+    async move { open_verified_file_with_openat2_for_tests(&root, &fifo).await }
+  });
+
+  let started = Instant::now();
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  let elapsed = started.elapsed();
+  assert!(
+    elapsed < Duration::from_millis(350),
+    "blocking FIFO open delayed the single Tokio worker for {elapsed:?}"
+  );
+
+  let result = tokio::time::timeout(Duration::from_secs(2), open_task)
+    .await
+    .expect("openat2 FIFO task should finish after the writer opens")
+    .expect("openat2 FIFO task should not panic");
+  writer.join().expect("FIFO writer thread should not panic");
+  match result {
+    Err(StaticOpenError::Forbidden(error)) => assert!(
+      error.to_string().contains("regular file"),
+      "unexpected FIFO open error: {error}"
+    ),
+    Ok(Some(_)) => panic!("FIFO should not be accepted as a static file"),
+    Ok(None) => panic!("openat2 availability was already probed"),
+    Err(StaticOpenError::NotFound) => panic!("FIFO should exist beneath static_root"),
+  }
 }
 
 #[cfg(target_os = "linux")]
