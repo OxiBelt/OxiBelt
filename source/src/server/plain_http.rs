@@ -2,10 +2,8 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ::http::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING, UPGRADE};
@@ -21,7 +19,7 @@ use nix::errno::Errno;
 use tokio::io::AsyncSeekExt;
 #[cfg(not(target_env = "musl"))]
 use tokio::io::Interest;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, trace};
@@ -40,6 +38,9 @@ use crate::state::AppSnapshot;
 use crate::tcp_hop;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
+mod plain_io;
+use self::plain_io::PlainHttpIo;
+
 const READ_CHUNK_BYTES: usize = 4096;
 const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
 
@@ -48,7 +49,7 @@ struct TimedStaticResponsePlan {
   response_send_timeout: Duration,
 }
 
-pub(super) enum SendfilePreflight {
+enum SendfilePreflight {
   Done,
   Continue {
     io: PlainHttpIo,
@@ -57,7 +58,7 @@ pub(super) enum SendfilePreflight {
 }
 
 impl SendfilePreflight {
-  pub(super) fn into_continue(self) -> Option<(PlainHttpIo, usize)> {
+  fn into_continue(self) -> Option<(PlainHttpIo, usize)> {
     match self {
       Self::Done => None,
       Self::Continue {
@@ -65,61 +66,6 @@ impl SendfilePreflight {
         served_requests,
       } => Some((io, served_requests)),
     }
-  }
-}
-
-pub(super) struct PlainHttpIo {
-  stream: TcpStream,
-  prefix: Vec<u8>,
-  prefix_offset: usize,
-}
-
-impl PlainHttpIo {
-  fn new(stream: TcpStream, prefix: Vec<u8>) -> Self {
-    Self {
-      stream,
-      prefix,
-      prefix_offset: 0,
-    }
-  }
-}
-
-impl AsyncRead for PlainHttpIo {
-  fn poll_read(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &mut ReadBuf<'_>,
-  ) -> Poll<io::Result<()>> {
-    if self.prefix_offset < self.prefix.len() {
-      let remaining = &self.prefix[self.prefix_offset..];
-      let to_copy = remaining.len().min(buf.remaining());
-      buf.put_slice(&remaining[..to_copy]);
-      self.prefix_offset += to_copy;
-      if self.prefix_offset == self.prefix.len() {
-        self.prefix.clear();
-        self.prefix_offset = 0;
-      }
-      return Poll::Ready(Ok(()));
-    }
-    Pin::new(&mut self.stream).poll_read(cx, buf)
-  }
-}
-
-impl AsyncWrite for PlainHttpIo {
-  fn poll_write(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &[u8],
-  ) -> Poll<io::Result<usize>> {
-    Pin::new(&mut self.stream).poll_write(cx, buf)
-  }
-
-  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    Pin::new(&mut self.stream).poll_flush(cx)
-  }
-
-  fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    Pin::new(&mut self.stream).poll_shutdown(cx)
   }
 }
 
@@ -225,7 +171,7 @@ pub(super) async fn handle_connection(
   Ok(())
 }
 
-pub(super) async fn try_sendfile_fast_path(
+async fn try_sendfile_fast_path(
   mut stream: TcpStream,
   peer_addr: SocketAddr,
   snapshot: &Arc<AppSnapshot>,

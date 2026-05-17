@@ -85,18 +85,20 @@ fn append_csv_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
 }
 
 pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
-  let connection_tokens = headers
-    .get_all(CONNECTION)
-    .iter()
-    .filter_map(|value| value.to_str().ok())
-    .flat_map(|value| value.split(','))
-    .map(str::trim)
-    .filter(|value| !value.is_empty())
-    .filter_map(|value| HeaderName::from_str(value).ok())
-    .collect::<Vec<_>>();
+  if headers.contains_key(CONNECTION) {
+    let connection_tokens = headers
+      .get_all(CONNECTION)
+      .iter()
+      .filter_map(|value| value.to_str().ok())
+      .flat_map(|value| value.split(','))
+      .map(str::trim)
+      .filter(|value| !value.is_empty())
+      .filter_map(|value| HeaderName::from_str(value).ok())
+      .collect::<Vec<_>>();
 
-  for token in connection_tokens {
-    headers.remove(token);
+    for token in connection_tokens {
+      headers.remove(token);
+    }
   }
 
   headers.remove(CONNECTION);
@@ -200,5 +202,36 @@ mod tests {
     assert_eq!(headers["x-forwarded-host"], "example.test");
     assert_eq!(headers["x-forwarded-proto"], "https");
     assert_eq!(headers["x-forwarded-port"], "5443");
+  }
+
+  #[test]
+  fn hop_by_hop_stripping_removes_connection_tokens_and_fixed_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, x-hop"));
+    headers.insert("x-hop", HeaderValue::from_static("remove"));
+    headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+    headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+    headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+
+    strip_hop_by_hop_headers(&mut headers);
+
+    assert!(!headers.contains_key(CONNECTION));
+    assert!(!headers.contains_key("x-hop"));
+    assert!(!headers.contains_key("keep-alive"));
+    assert!(!headers.contains_key(TRANSFER_ENCODING));
+    assert!(!headers.contains_key(UPGRADE));
+  }
+
+  #[test]
+  fn hop_by_hop_stripping_preserves_only_te_trailers() {
+    let mut trailers = HeaderMap::new();
+    trailers.insert(TE, HeaderValue::from_static("trailers"));
+    strip_hop_by_hop_headers(&mut trailers);
+    assert_eq!(trailers.get(TE).unwrap(), "trailers");
+
+    let mut gzip = HeaderMap::new();
+    gzip.insert(TE, HeaderValue::from_static("gzip"));
+    strip_hop_by_hop_headers(&mut gzip);
+    assert!(!gzip.contains_key(TE));
   }
 }

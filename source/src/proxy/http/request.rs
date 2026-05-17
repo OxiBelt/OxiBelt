@@ -1,5 +1,5 @@
 use http::header::{ACCEPT_ENCODING, HOST};
-use http::{Request, Uri};
+use http::{Request, Uri, request};
 use http_body_util::BodyExt;
 use hyper::body::Body;
 
@@ -31,6 +31,14 @@ where
   B::Error: Into<BoxError> + Send + Sync + 'static,
 {
   let (mut parts, body) = request.into_parts();
+  rebuild_request_parts(&mut parts, options);
+  Request::from_parts(parts, proxy_body(body))
+}
+
+pub(crate) fn rebuild_request_parts(
+  parts: &mut request::Parts,
+  options: RebuildRequestOptions<'_>,
+) {
   parts.uri = options.target_uri;
   parts.version = upstream_request_version(options.upstream_version);
   strip_hop_by_hop_headers(&mut parts.headers);
@@ -52,8 +60,14 @@ where
   }
 
   apply_header_mutations(&mut parts.headers, options.waf_mutations);
+}
 
-  Request::from_parts(parts, body.map_err(Into::into).boxed())
+pub(crate) fn proxy_body<B>(body: B) -> ProxyBody
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
+  B::Error: Into<BoxError> + Send + Sync + 'static,
+{
+  body.map_err(Into::into).boxed()
 }
 
 #[cfg(test)]

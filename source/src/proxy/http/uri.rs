@@ -1,24 +1,32 @@
+use std::str::FromStr;
+
 use http::Uri;
+use http::uri::{Authority, PathAndQuery, Scheme};
 use url::{Position, Url};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct UpstreamUriParts {
-  scheme: String,
-  authority: String,
+  scheme: Scheme,
+  authority: Authority,
   base_path: String,
+  base_path_is_root: bool,
 }
 
 impl UpstreamUriParts {
   pub(crate) fn from_url(origin: &Url) -> anyhow::Result<Self> {
-    let authority = origin[Position::BeforeUsername..Position::AfterPort].to_string();
+    let authority = &origin[Position::BeforeUsername..Position::AfterPort];
     if authority.is_empty() {
       anyhow::bail!("upstream origin is missing an authority: {origin}");
     }
+    let base_path = origin.path().to_string();
 
     Ok(Self {
-      scheme: origin.scheme().to_string(),
-      authority,
-      base_path: origin.path().to_string(),
+      scheme: Scheme::from_str(origin.scheme())
+        .map_err(|error| anyhow::anyhow!("upstream origin has invalid scheme: {error}"))?,
+      authority: Authority::from_str(authority)
+        .map_err(|error| anyhow::anyhow!("upstream origin has invalid authority: {error}"))?,
+      base_path_is_root: base_path.is_empty() || base_path == "/",
+      base_path,
     })
   }
 }
@@ -51,6 +59,14 @@ pub(crate) fn rewrite_uri(
   replace_prefix_with: Option<&str>,
   downstream_uri: &Uri,
 ) -> anyhow::Result<Uri> {
+  if replace_prefix_with.is_none() && origin.base_path_is_root {
+    let path_and_query = downstream_uri
+      .path_and_query()
+      .cloned()
+      .unwrap_or_else(|| PathAndQuery::from_static("/"));
+    return build_uri(origin, path_and_query);
+  }
+
   let incoming_path = downstream_uri.path();
   let rewritten_path = if let Some(replacement) = replace_prefix_with {
     let suffix = if route_prefix == "/" {
@@ -77,12 +93,17 @@ pub(crate) fn rewrite_uri(
     None => upstream_path,
   };
 
-  Uri::builder()
-    .scheme(origin.scheme.as_str())
-    .authority(origin.authority.as_str())
-    .path_and_query(path_and_query.as_str())
-    .build()
-    .map_err(|error| anyhow::anyhow!("failed to build rewritten URI: {error}"))
+  let path_and_query = PathAndQuery::from_str(path_and_query.as_str())
+    .map_err(|error| anyhow::anyhow!("failed to build rewritten URI: {error}"))?;
+  build_uri(origin, path_and_query)
+}
+
+fn build_uri(origin: &UpstreamUriParts, path_and_query: PathAndQuery) -> anyhow::Result<Uri> {
+  let mut parts = http::uri::Parts::default();
+  parts.scheme = Some(origin.scheme.clone());
+  parts.authority = Some(origin.authority.clone());
+  parts.path_and_query = Some(path_and_query);
+  Uri::from_parts(parts).map_err(|error| anyhow::anyhow!("failed to build rewritten URI: {error}"))
 }
 
 fn join_paths(base: &str, suffix: &str) -> String {
@@ -146,6 +167,32 @@ mod tests {
     assert_eq!(
       rewritten.to_string(),
       "http://backend.internal/base/v2/search?q=rust&sort=desc"
+    );
+  }
+
+  #[test]
+  fn rewrite_uri_uses_root_origin_fast_path_without_rewrite() {
+    let origin =
+      UpstreamUriParts::from_url(&Url::parse("http://backend.internal/").unwrap()).unwrap();
+    let uri = "/perf/h1?body=ok".parse().unwrap();
+
+    let rewritten = rewrite_uri(&origin, "/", None, &uri).unwrap();
+    assert_eq!(
+      rewritten.to_string(),
+      "http://backend.internal/perf/h1?body=ok"
+    );
+  }
+
+  #[test]
+  fn rewrite_uri_root_fast_path_handles_absolute_form_request_targets() {
+    let origin =
+      UpstreamUriParts::from_url(&Url::parse("https://backend.internal/").unwrap()).unwrap();
+    let uri = "http://public.example.com/perf/h1?body=ok".parse().unwrap();
+
+    let rewritten = rewrite_uri(&origin, "/", None, &uri).unwrap();
+    assert_eq!(
+      rewritten.to_string(),
+      "https://backend.internal/perf/h1?body=ok"
     );
   }
 

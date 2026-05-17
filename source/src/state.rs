@@ -78,10 +78,23 @@ impl UpstreamClientRef<'_> {
 
 #[derive(Clone)]
 pub struct UpstreamClientPools {
-  by_upstream: HashMap<String, ClientPool>,
+  by_upstream: HashMap<String, usize>,
+  pools: Vec<ClientPool>,
 }
 
 impl UpstreamClientPools {
+  pub(crate) fn for_upstream_index(
+    &self,
+    upstream_index: usize,
+    origin_scheme: &str,
+    version: HttpVersion,
+  ) -> Option<UpstreamClientRef<'_>> {
+    self
+      .pools
+      .get(upstream_index)
+      .and_then(|pool| pool.for_version(origin_scheme, version))
+  }
+
   pub(crate) fn for_upstream_version(
     &self,
     upstream_name: &str,
@@ -91,7 +104,7 @@ impl UpstreamClientPools {
     self
       .by_upstream
       .get(upstream_name)
-      .and_then(|pool| pool.for_version(origin_scheme, version))
+      .and_then(|&index| self.for_upstream_index(index, origin_scheme, version))
   }
 }
 
@@ -365,14 +378,17 @@ fn build_clients(
   extra_root_certs: &[std::path::PathBuf],
 ) -> anyhow::Result<UpstreamClientPools> {
   let mut by_upstream = HashMap::new();
+  let mut pools = Vec::with_capacity(upstreams.len());
 
   for upstream in upstreams {
+    let index = pools.len();
     let pool = build_client_pool(upstream, extra_root_certs)
       .with_context(|| format!("failed to build clients for upstream {}", upstream.name))?;
-    by_upstream.insert(upstream.name.clone(), pool);
+    by_upstream.insert(upstream.name.clone(), index);
+    pools.push(pool);
   }
 
-  Ok(UpstreamClientPools { by_upstream })
+  Ok(UpstreamClientPools { by_upstream, pools })
 }
 
 fn build_client_pool(

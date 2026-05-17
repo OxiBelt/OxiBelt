@@ -73,6 +73,7 @@ pub struct RouteExecutionPlan {
 pub struct ResolvedRoute<'a> {
   pub route: &'a RouteConfig,
   pub upstream: Option<&'a UpstreamConfig>,
+  pub upstream_index: Option<usize>,
   pub execution_plan: &'a RouteExecutionPlan,
 }
 
@@ -191,18 +192,32 @@ impl RouteTable {
   ) -> ResolvedRoute<'a> {
     let entry = &self.routes[route_match.route_index];
     let route = &entry.route;
-    let upstream = match (entry.upstream_index, route.upstream.as_deref()) {
-      (Some(index), Some(name)) => upstreams
+    let (upstream_index, upstream) = match (entry.upstream_index, route.upstream.as_deref()) {
+      (Some(index), Some(name)) => match upstreams
         .get(index)
         .filter(|upstream| upstream.name == name)
-        .or_else(|| upstreams.iter().find(|item| item.name == name)),
-      (Some(index), None) => upstreams.get(index),
-      (None, Some(name)) => upstreams.iter().find(|item| item.name == name),
-      (None, None) => None,
+      {
+        Some(upstream) => (Some(index), Some(upstream)),
+        None => upstreams
+          .iter()
+          .enumerate()
+          .find(|(_, item)| item.name == name)
+          .map(|(index, upstream)| (Some(index), Some(upstream)))
+          .unwrap_or((None, None)),
+      },
+      (Some(index), None) => (upstreams.get(index).map(|_| index), upstreams.get(index)),
+      (None, Some(name)) => upstreams
+        .iter()
+        .enumerate()
+        .find(|(_, item)| item.name == name)
+        .map(|(index, upstream)| (Some(index), Some(upstream)))
+        .unwrap_or((None, None)),
+      (None, None) => (None, None),
     };
     ResolvedRoute {
       route,
       upstream,
+      upstream_index,
       execution_plan: &entry.execution_plan,
     }
   }

@@ -11,7 +11,7 @@ use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, boxed_error};
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
-use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request};
+use crate::proxy::http::request::{RebuildRequestOptions, proxy_body, rebuild_request_parts};
 use crate::proxy::http::response::{apply_security_headers, text_response};
 use crate::proxy::http::semantics::{self, configured_error_response, filter_trailers};
 use crate::proxy::http::uri::rewrite_uri;
@@ -37,7 +37,6 @@ impl PlainProxyFastPath {
     request: &Request<B>,
     state: &AppSnapshot,
     resolved: &ResolvedRoute<'_>,
-    method: &Method,
   ) -> bool
   where
     B: Body,
@@ -46,17 +45,18 @@ impl PlainProxyFastPath {
       && Self::supported_upstream(state, resolved).is_some()
       && !state
         .cache
-        .policy_enabled(resolved.route.cache.as_deref(), method)
+        .policy_enabled(resolved.route.cache.as_deref(), request.method())
       && !semantics::is_native_grpc_request(request.headers(), &state.config)
       && !is_upgrade_request(request)
-      && method != Method::CONNECT
+      && request.method() != Method::CONNECT
   }
 
   fn supported_upstream<'a>(
     state: &AppSnapshot,
     resolved: &ResolvedRoute<'a>,
-  ) -> Option<(&'a UpstreamConfig, HttpVersion)> {
+  ) -> Option<(&'a UpstreamConfig, usize, HttpVersion)> {
     let upstream = resolved.upstream?;
+    let upstream_index = resolved.upstream_index?;
     let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
       select_upstream_http_version(
         state.config.proxy.auto_upgrade.enabled,
@@ -69,7 +69,7 @@ impl PlainProxyFastPath {
     {
       return None;
     }
-    Some((upstream, upstream_version))
+    Some((upstream, upstream_index, upstream_version))
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -89,30 +89,26 @@ impl PlainProxyFastPath {
     B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
     B::Error: Into<body::BoxError> + Send + Sync + 'static,
   {
-    let Some((upstream, upstream_version)) = Self::supported_upstream(&state, resolved) else {
+    let Some((upstream, upstream_index, upstream_version)) =
+      Self::supported_upstream(&state, resolved)
+    else {
       return text_response(StatusCode::BAD_GATEWAY, "unsupported fast-path upstream");
     };
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
     let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-    let request = request.map(|body| {
-      body::with_read_timeout(
-        Limited::new(body, state.config.limits.max_request_body_bytes as usize).boxed(),
-        client_body_timeout,
-        BodyTimeoutKind::DownstreamRequestRead,
-      )
-    });
+    let retry_enabled = state.config.proxy.retry.enabled && is_idempotent(request.method());
+    let (mut parts, body) = request.into_parts();
 
     let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
       warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
       return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
     };
-    let request_method = request.method().clone();
     let target_uri = match rewrite_uri(
       upstream_uri,
       resolved.route.path_prefix.as_str(),
       resolved.route.replace_prefix_with.as_deref(),
-      request.uri(),
+      &parts.uri,
     ) {
       Ok(uri) => uri,
       Err(error) => {
@@ -132,11 +128,16 @@ impl PlainProxyFastPath {
       upstream_version,
       waf_mutations: EMPTY_MUTATIONS,
     };
-    let mut outbound = rebuild_request(request, rebuild);
-    semantics::strip_accepted_expect(outbound.headers_mut());
-    semantics::apply_priority_policy(outbound.headers_mut(), state.config.proxy.http.priority);
-    let outbound =
-      outbound.map(|body| filter_trailers(body, state.config.proxy.http.trailers, false));
+    rebuild_request_parts(&mut parts, rebuild);
+    semantics::strip_accepted_expect(&mut parts.headers);
+    semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
+    let body = fast_path_request_body(
+      body,
+      state.config.limits.max_request_body_bytes as usize,
+      client_body_timeout,
+    );
+    let outbound = Request::from_parts(parts, body)
+      .map(|body| filter_trailers(body, state.config.proxy.http.trailers, false));
     let outbound = outbound.map(|body| {
       body::with_send_timeout(
         body,
@@ -145,54 +146,47 @@ impl PlainProxyFastPath {
       )
     });
 
-    let Some(client) = state.clients.for_upstream_version(
-      &upstream.name,
-      upstream.origin.scheme(),
-      upstream_version,
-    ) else {
+    let Some(client) =
+      state
+        .clients
+        .for_upstream_index(upstream_index, upstream.origin.scheme(), upstream_version)
+    else {
       warn!(upstream = %upstream.name, "missing upstream client pool");
       return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
     };
     let upstream_started_at = Instant::now();
-    let upstream_response = match send_with_retry(
-      client,
-      outbound,
-      timeouts,
-      &state,
-      state.config.proxy.retry.enabled && is_idempotent(&request_method),
-    )
-    .await
-    {
-      Ok(response) => response,
-      Err(error) => {
-        if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
-          return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
+    let upstream_response =
+      match send_with_retry(client, outbound, timeouts, &state, retry_enabled).await {
+        Ok(response) => response,
+        Err(error) => {
+          if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
+            return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
+          }
+          state.pools.report_failure(&upstream.name);
+          warn!(error = %error, upstream = %upstream.name, "upstream fast-path request failed");
+          let message = error.to_string();
+          let code = if message.contains("timed out") {
+            "read_timeout"
+          } else {
+            "connect_error"
+          };
+          let upstream_first_byte_time_ms = upstream_started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+          access_log.upstream_first_byte_time_ms = Some(upstream_first_byte_time_ms);
+          access_log.record_upstream_error(code, &message);
+          let status = if code == "read_timeout" {
+            StatusCode::GATEWAY_TIMEOUT
+          } else {
+            StatusCode::BAD_GATEWAY
+          };
+          let response =
+            configured_error_response(&state.config, "", status, "upstream request failed", code);
+          state.metrics.record_response(response.status());
+          return response;
         }
-        state.pools.report_failure(&upstream.name);
-        warn!(error = %error, upstream = %upstream.name, "upstream fast-path request failed");
-        let message = error.to_string();
-        let code = if message.contains("timed out") {
-          "read_timeout"
-        } else {
-          "connect_error"
-        };
-        let upstream_first_byte_time_ms = upstream_started_at
-          .elapsed()
-          .as_millis()
-          .min(u128::from(u64::MAX)) as u64;
-        access_log.upstream_first_byte_time_ms = Some(upstream_first_byte_time_ms);
-        access_log.record_upstream_error(code, &message);
-        let status = if code == "read_timeout" {
-          StatusCode::GATEWAY_TIMEOUT
-        } else {
-          StatusCode::BAD_GATEWAY
-        };
-        let response =
-          configured_error_response(&state.config, "", status, "upstream request failed", code);
-        state.metrics.record_response(response.status());
-        return response;
-      }
-    };
+      };
     state.pools.report_success(&upstream.name);
 
     let upstream_first_byte_time_ms = upstream_started_at
@@ -265,6 +259,26 @@ impl PlainProxyFastPath {
   }
 }
 
+fn fast_path_request_body<B>(
+  body: B,
+  max_body_bytes: usize,
+  timeout: std::time::Duration,
+) -> ProxyBody
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+{
+  if body.is_end_stream() {
+    return proxy_body(body);
+  }
+
+  body::with_read_timeout(
+    Limited::new(body, max_body_bytes),
+    timeout,
+    BodyTimeoutKind::DownstreamRequestRead,
+  )
+}
+
 #[cfg(test)]
 mod tests {
   use bytes::Bytes;
@@ -327,12 +341,7 @@ mod tests {
     let resolved = resolved_route(&state);
 
     assert!(resolved.execution_plan.can_plain_proxy_fast_path);
-    assert!(PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &resolved,
-      &Method::GET
-    ));
+    assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
   }
 
   #[tokio::test]
@@ -373,12 +382,7 @@ permissions_policy = "geolocation=(), camera=()"
         .expect("snapshot should initialize");
       let resolved = resolved_route(&state);
       assert!(resolved.execution_plan.can_plain_proxy_fast_path);
-      assert!(PlainProxyFastPath::eligible(
-        &request(),
-        &state,
-        &resolved,
-        &Method::GET
-      ));
+      assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
     }
   }
 
@@ -456,12 +460,7 @@ compression = "off"
     let resolved = resolved_route(&state);
 
     assert!(resolved.execution_plan.can_plain_proxy_fast_path);
-    assert!(PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &resolved,
-      &Method::GET
-    ));
+    assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
   }
 
   #[test]
@@ -559,12 +558,7 @@ cache_methods = ["GET"]
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
     assert!(resolved.execution_plan.can_plain_proxy_fast_path);
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &resolved,
-      &Method::GET
-    ));
+    assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
 
     let buffered = format!(
       "{base}{}",
@@ -579,12 +573,7 @@ request = "memory"
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
     assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &resolved,
-      &Method::GET
-    ));
+    assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
 
     let response_buffered = format!(
       "{base}{}",
@@ -599,12 +588,7 @@ response = "memory"
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
     assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &resolved,
-      &Method::GET
-    ));
+    assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
 
     let json_errors = format!(
       "{base}{}",
@@ -619,12 +603,7 @@ mode = "json"
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
     assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &resolved,
-      &Method::GET
-    ));
+    assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
 
     let state = AppSnapshot::new(parse_config(&base))
       .await
@@ -641,18 +620,17 @@ mode = "json"
           .boxed(),
       )
       .expect("request should build");
-    assert!(!PlainProxyFastPath::eligible(
-      &upgrade,
-      &state,
-      &resolved,
-      &Method::GET
-    ));
-    assert!(!PlainProxyFastPath::eligible(
-      &request(),
-      &state,
-      &resolved,
-      &Method::CONNECT
-    ));
+    assert!(!PlainProxyFastPath::eligible(&upgrade, &state, &resolved));
+    let connect = Request::builder()
+      .method(Method::CONNECT)
+      .uri("https://example.com/")
+      .body(
+        Full::new(Bytes::new())
+          .map_err(|never| -> body::BoxError { match never {} })
+          .boxed(),
+      )
+      .expect("request should build");
+    assert!(!PlainProxyFastPath::eligible(&connect, &state, &resolved));
   }
 
   #[tokio::test]
@@ -676,8 +654,7 @@ mode = "json"
     assert!(!PlainProxyFastPath::eligible(
       &request(),
       &h3_state,
-      &h3_resolved,
-      &Method::GET
+      &h3_resolved
     ));
 
     let mut proxy_protocol_config = parse_config(&base);
@@ -694,8 +671,7 @@ mode = "json"
     assert!(!PlainProxyFastPath::eligible(
       &request(),
       &proxy_protocol_state,
-      &proxy_protocol_resolved,
-      &Method::GET
+      &proxy_protocol_resolved
     ));
   }
 }

@@ -1,7 +1,8 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
-use http::Request;
+use http::{HeaderMap, Request};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 use pretty_assertions::assert_eq;
@@ -28,6 +29,28 @@ impl Body for PanicBody {
 
 fn panic_body() -> ProxyBody {
   PanicBody.boxed()
+}
+
+#[test]
+fn http2_content_length_zero_is_not_definitive_until_end_stream() {
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    http::header::CONTENT_LENGTH,
+    http::HeaderValue::from_static("0"),
+  );
+
+  assert!(request_body_is_definitely_empty(
+    http::Version::HTTP_11,
+    &headers
+  ));
+  assert!(!request_body_is_definitely_empty(
+    http::Version::HTTP_2,
+    &headers
+  ));
+  assert!(!response_body_is_definitely_empty(
+    http::Version::HTTP_2,
+    &headers
+  ));
 }
 
 #[tokio::test]
@@ -117,4 +140,22 @@ async fn size_only_exact_empty_request_body_uses_empty_capture_without_polling()
 
   assert!(captured.bytes.is_empty());
   assert!(!captured.is_truncated);
+}
+
+#[tokio::test]
+async fn h2_and_h3_content_length_zero_data_is_rejected() {
+  for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
+    let request = Request::builder()
+      .version(version)
+      .header(http::header::CONTENT_LENGTH, "0")
+      .body(full_body(bytes::Bytes::from_static(b"x")))
+      .expect("request should build");
+
+    let result = reject_content_length_zero_data(request, Duration::from_secs(1), version).await;
+    let response = match result {
+      Ok(_) => panic!("Content-Length: 0 DATA should be rejected for {version:?}"),
+      Err(response) => response,
+    };
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+  }
 }

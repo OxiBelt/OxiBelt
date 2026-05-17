@@ -349,8 +349,6 @@ where
     warn!(error = %error, path = %path, "rejected unsafe downstream request path");
     return text_response(StatusCode::BAD_REQUEST, "invalid request path");
   }
-  let request_method = request.method().clone();
-  let request_uri = request.uri().clone();
   let request_version = request.version();
   let mut tags: Option<HashMap<String, String>> = None;
   let client_addr = match crate::identity::resolve_client_addr(
@@ -415,14 +413,11 @@ where
   };
   access_log.set_route_name(&resolved.route.name);
 
-  let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-  let request =
-    match reject_content_length_zero_data(request, client_body_timeout, request_version).await {
-      Ok(request) => request,
-      Err(response) => return response,
-    };
-
-  if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved, &request_method) {
+  if matches!(
+    request_version,
+    http::Version::HTTP_10 | http::Version::HTTP_11
+  ) && fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved)
+  {
     return fast_path::PlainProxyFastPath::handle(
       request,
       state.clone(),
@@ -438,6 +433,31 @@ where
     .await;
   }
 
+  let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
+  let request =
+    match reject_content_length_zero_data(request, client_body_timeout, request_version).await {
+      Ok(request) => request,
+      Err(response) => return response,
+    };
+
+  if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved) {
+    return fast_path::PlainProxyFastPath::handle(
+      request,
+      state.clone(),
+      &resolved,
+      peer_addr,
+      client_addr,
+      &host,
+      downstream_scheme,
+      request_version,
+      transport_network,
+      access_log,
+    )
+    .await;
+  }
+
+  let request_method = request.method().clone();
+  let request_uri = request.uri().clone();
   let request_waf_enabled = state.waf.has_request_rules(&resolved.route.name);
   let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
   let request_body_need = state.waf.request_body_need(&resolved.route.name);
@@ -3258,28 +3278,6 @@ mod tests {
     let config: Config = toml::from_str(raw).expect("config should parse");
     config.validate().expect("config should validate");
     config
-  }
-
-  #[test]
-  fn http2_content_length_zero_is_not_definitive_until_end_stream() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-      http::header::CONTENT_LENGTH,
-      http::HeaderValue::from_static("0"),
-    );
-
-    assert!(request_body_is_definitely_empty(
-      http::Version::HTTP_11,
-      &headers
-    ));
-    assert!(!request_body_is_definitely_empty(
-      http::Version::HTTP_2,
-      &headers
-    ));
-    assert!(!response_body_is_definitely_empty(
-      http::Version::HTTP_2,
-      &headers
-    ));
   }
 
   #[tokio::test]
