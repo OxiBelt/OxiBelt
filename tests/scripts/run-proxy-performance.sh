@@ -20,6 +20,8 @@ Environment:
                                       OxiBelt H1/H2 baseline p50 latency ceiling
   OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS
                                       OxiBelt H1/H2 baseline p99 latency ceiling
+  OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO
+                                      minimum OxiBelt/Caddy RPS ratio for static 16KiB H1C (default: 0.85)
   OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO
                                       test-only OxiBelt baseline fixture override
   OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, probe logs, configs, and stats here
@@ -125,10 +127,15 @@ max_p99_ms="${OXIBELT_PERF_MAX_P99_MS:-10000}"
 max_load_errors_per_million="${OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION:-100}"
 tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-20}"
 tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-35}"
+static_16k_h1c_min_caddy_ratio="${OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO:-0.85}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
+  exit 2
+fi
+if [[ ! "${static_16k_h1c_min_caddy_ratio}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO must be a non-negative number; got '${static_16k_h1c_min_caddy_ratio}'" >&2
   exit 2
 fi
 
@@ -375,6 +382,25 @@ assert_oxibelt_tcp_baseline() {
       fail_with_diagnostics "OxiBelt TCP baseline p99 exceeded latency-floor gate (${p99}ms > ${tcp_baseline_max_p99_ms}ms): ${label}"
     fi
   done
+}
+
+assert_static_16k_h1c_caddy_ratio() {
+  local oxibelt_json caddy_json oxibelt_rps caddy_rps ratio
+  oxibelt_json="$(jq -c 'select(.label == "oxibelt-static-16k-h1c" and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+  caddy_json="$(jq -c 'select(.label == "caddy-static-16k-h1c" and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+  if [[ -z "${oxibelt_json}" || -z "${caddy_json}" ]]; then
+    return
+  fi
+
+  oxibelt_rps="$(jq -r '.rps // 0' <<<"${oxibelt_json}")"
+  caddy_rps="$(jq -r '.rps // 0' <<<"${caddy_json}")"
+  if jq -n -e --argjson caddy "${caddy_rps}" '$caddy <= 0' >/dev/null; then
+    fail_with_diagnostics "Caddy static-16k-h1c RPS is not positive; cannot evaluate static regression gate"
+  fi
+  ratio="$(jq -n -r --argjson oxibelt "${oxibelt_rps}" --argjson caddy "${caddy_rps}" '$oxibelt / $caddy')"
+  if jq -n -e --argjson ratio "${ratio}" --argjson min "${static_16k_h1c_min_caddy_ratio}" '$ratio < $min' >/dev/null; then
+    fail_with_diagnostics "OxiBelt static-16k-h1c regression gate failed: ratio ${ratio} < ${static_16k_h1c_min_caddy_ratio} vs Caddy (${oxibelt_rps} RPS vs ${caddy_rps} RPS)"
+  fi
 }
 
 record_skip() {
@@ -782,6 +808,8 @@ run_static_files_group() {
     start_caddy
     run_static_loads caddy caddy required
   fi
+
+  assert_static_16k_h1c_caddy_ratio
 }
 
 run_oxibelt_features_group() {
@@ -833,6 +861,8 @@ run_all_serving_types() {
     run_common_loads caddy caddy required
     run_static_loads caddy caddy required
   fi
+
+  assert_static_16k_h1c_caddy_ratio
 
   if has_comparator oxibelt && [[ "${profile}" == "benchmark" || "${profile}" == "soak" ]]; then
     run_oxibelt_specific_benchmarks

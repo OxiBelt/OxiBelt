@@ -12,13 +12,7 @@ use anyhow::{Context as AnyhowContext, bail};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
-#[cfg(not(target_env = "musl"))]
-use nix::errno::Errno;
-use tokio::io::AsyncWriteExt;
-#[cfg(not(target_env = "musl"))]
-use tokio::io::Interest;
-#[cfg(target_env = "musl")]
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncWriteExt, Interest};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, trace, warn};
@@ -39,6 +33,7 @@ use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod parse;
 mod plain_io;
+mod sendfile;
 mod static_waf;
 use self::parse::{ParsedPlainRequest, ReadRequestOutcome, header_has_token, read_request};
 use self::plain_io::PlainHttpIo;
@@ -174,14 +169,35 @@ pub(super) async fn handle_connection(
 }
 
 async fn try_sendfile_fast_path(
-  mut stream: TcpStream,
+  stream: TcpStream,
   peer_addr: SocketAddr,
   snapshot: &Arc<AppSnapshot>,
   transport_metadata: WafTransportMetadataInput<'_>,
   shutdown: &mut watch::Receiver<bool>,
   data_plane_drain: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<SendfilePreflight> {
-  if let Some(reason) = sendfile_disabled_reason(snapshot.as_ref()) {
+  try_sendfile_fast_path_inner(
+    stream,
+    peer_addr,
+    snapshot,
+    transport_metadata,
+    shutdown,
+    data_plane_drain,
+    sendfile::kernel_sendfile_available(),
+  )
+  .await
+}
+
+async fn try_sendfile_fast_path_inner(
+  mut stream: TcpStream,
+  peer_addr: SocketAddr,
+  snapshot: &Arc<AppSnapshot>,
+  transport_metadata: WafTransportMetadataInput<'_>,
+  shutdown: &mut watch::Receiver<bool>,
+  data_plane_drain: &mut watch::Receiver<bool>,
+  kernel_sendfile_available: bool,
+) -> anyhow::Result<SendfilePreflight> {
+  if let Some(reason) = sendfile_disabled_reason(snapshot.as_ref(), kernel_sendfile_available) {
     trace!(reason, "plain HTTP static sendfile fast path skipped");
     return Ok(SendfilePreflight::Continue {
       io: PlainHttpIo::new(stream, Vec::new()),
@@ -250,13 +266,19 @@ async fn try_sendfile_fast_path(
   }
 }
 
-fn sendfile_disabled_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
+fn sendfile_disabled_reason(
+  snapshot: &AppSnapshot,
+  kernel_sendfile_available: bool,
+) -> Option<&'static str> {
   let config = &snapshot.config;
   if config.listeners.http_mode != HttpListenerMode::Proxy {
     return Some("plain listener is not proxy mode");
   }
   if config.proxy.static_files.sendfile != StaticFilesSendfileMode::Auto {
     return Some("proxy.static_files.sendfile is not auto");
+  }
+  if !kernel_sendfile_available {
+    return Some("Linux kernel sendfile is not available");
   }
   if !config.rate_limits.is_empty() {
     return Some("rate limits are configured");
@@ -362,6 +384,14 @@ async fn eligible_static_plan(
   .await;
   if !matches!(&plan.body, StaticBodyPlan::Empty | StaticBodyPlan::File(_)) {
     return None;
+  }
+  if !snapshot.waf.has_request_rules(&resolved.route.name)
+    && !snapshot.waf.has_response_rules(&resolved.route.name)
+  {
+    return Some(TimedStaticResponsePlan {
+      response: plan,
+      response_send_timeout,
+    });
   }
   let request_uri: Uri = request.target.parse().ok()?;
   Some(
@@ -478,46 +508,7 @@ async fn write_response_head(
   .await
 }
 
-#[cfg(target_env = "musl")]
-async fn sendfile_all(
-  stream: &mut TcpStream,
-  file: &tokio::fs::File,
-  offset: u64,
-  len: u64,
-  response_send_timeout: Duration,
-) -> anyhow::Result<()> {
-  let mut file = file
-    .try_clone()
-    .await
-    .context("failed to clone static file for fast-path response")?;
-  file
-    .seek(std::io::SeekFrom::Start(offset))
-    .await
-    .context("failed to seek static file for fast-path response")?;
-  let mut remaining = len;
-  let mut buffer = vec![0_u8; SENDFILE_CHUNK_BYTES.min(64 * 1024)];
-  while remaining > 0 {
-    let to_read = remaining.min(buffer.len() as u64) as usize;
-    let read = file
-      .read(&mut buffer[..to_read])
-      .await
-      .context("failed to read static file for fast-path response")?;
-    if read == 0 {
-      bail!("static fast-path file ended before expected length");
-    }
-    write_all_tcp(
-      stream,
-      &buffer[..read],
-      response_send_timeout,
-      "static fast-path response body write failed",
-    )
-    .await?;
-    remaining = remaining.saturating_sub(read as u64);
-  }
-  Ok(())
-}
-
-#[cfg(not(target_env = "musl"))]
+#[cfg(target_os = "linux")]
 async fn sendfile_all(
   stream: &mut TcpStream,
   file: &tokio::fs::File,
@@ -528,30 +519,43 @@ async fn sendfile_all(
   let mut remaining = len;
   let mut offset = libc::off64_t::try_from(offset).context("static file offset is too large")?;
   while remaining > 0 {
-    downstream_send_timeout(
-      response_send_timeout,
-      stream.writable(),
-      "static sendfile socket wait failed",
-    )
-    .await?;
     let count = remaining.min(SENDFILE_CHUNK_BYTES as u64) as usize;
     let stream_ref: &TcpStream = &*stream;
-    match stream_ref.try_io(Interest::WRITABLE, || {
-      nix::sys::sendfile::sendfile64(stream_ref, file, Some(&mut offset), count).map_err(|error| {
-        if error == Errno::EAGAIN {
-          io::Error::from(io::ErrorKind::WouldBlock)
-        } else {
-          io::Error::from_raw_os_error(error as i32)
-        }
-      })
-    }) {
+    match sendfile::sendfile_once(stream_ref, file, &mut offset, count) {
       Ok(0) => bail!("static sendfile wrote zero bytes"),
       Ok(sent) => remaining = remaining.saturating_sub(sent as u64),
-      Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+        downstream_send_timeout(
+          response_send_timeout,
+          stream.writable(),
+          "static sendfile socket wait failed",
+        )
+        .await?;
+        let stream_ref: &TcpStream = &*stream;
+        match stream_ref.try_io(Interest::WRITABLE, || {
+          sendfile::sendfile_once(stream_ref, file, &mut offset, count)
+        }) {
+          Ok(0) => bail!("static sendfile wrote zero bytes"),
+          Ok(sent) => remaining = remaining.saturating_sub(sent as u64),
+          Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+          Err(error) => return Err(error).context("static sendfile syscall failed"),
+        }
+      }
       Err(error) => return Err(error).context("static sendfile syscall failed"),
     }
   }
   Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn sendfile_all(
+  _stream: &mut TcpStream,
+  _file: &tokio::fs::File,
+  _offset: u64,
+  _len: u64,
+  _response_send_timeout: Duration,
+) -> anyhow::Result<()> {
+  bail!("kernel sendfile is not available on this platform")
 }
 
 async fn write_all_tcp(
@@ -561,11 +565,12 @@ async fn write_all_tcp(
   context: &'static str,
 ) -> anyhow::Result<()> {
   while !bytes.is_empty() {
-    downstream_send_timeout(response_send_timeout, stream.writable(), context).await?;
     match stream.try_write(bytes) {
       Ok(0) => bail!("{context}"),
       Ok(written) => bytes = &bytes[written..],
-      Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+        downstream_send_timeout(response_send_timeout, stream.writable(), context).await?;
+      }
       Err(error) => return Err(error).context(context),
     }
   }

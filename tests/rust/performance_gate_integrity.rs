@@ -147,6 +147,40 @@ fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) ->
     HarnessRun { output, events }
 }
 
+fn static_16k_ratio_harness(rows: &[&str], min_ratio: &str) -> HarnessRun {
+    let function = extract_bash_function(
+        &performance_script_text(),
+        "assert_static_16k_h1c_caddy_ratio",
+    );
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-static-ratio-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    let results_path = temp_dir.join("results.jsonl");
+    fs::write(&results_path, format!("{}\n", rows.join("\n")))
+        .expect("results fixture should be writable");
+    write_static_16k_ratio_harness(&harness_path, &function);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("RESULTS_JSONL", &results_path)
+        .env("MIN_RATIO", min_ratio)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
 fn write_harness(path: &Path, run_common_loads: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
@@ -217,6 +251,29 @@ h3_probe_succeeds() {{
 {functions}
 
 run_static_loads "${{COMPARATOR:?}}" "${{COMPARATOR:?}}" "${{H3_MODE:?}}"
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_static_16k_ratio_harness(path: &Path, function: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+results_jsonl="${{RESULTS_JSONL:?}}"
+static_16k_h1c_min_caddy_ratio="${{MIN_RATIO:?}}"
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{function}
+
+assert_static_16k_h1c_caddy_ratio
 "#
     );
     fs::write(path, harness).expect("Bash harness should be writable");
@@ -354,6 +411,66 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
             "performance script should recognize serving type {serving_type}"
         );
     }
+}
+
+#[test]
+fn static_16k_h1c_ratio_gate_passes_when_oxibelt_is_close_to_caddy() {
+    let run = static_16k_ratio_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-static-16k-h1c","requests":1000,"rps":900,"p99_ms":3}"#,
+            r#"{"type":"load","label":"caddy-static-16k-h1c","requests":1000,"rps":1000,"p99_ms":3}"#,
+        ],
+        "0.85",
+    );
+
+    assert!(
+        run.output.status.success(),
+        "OxiBelt at 0.90x Caddy should pass the static regression gate"
+    );
+    assert!(
+        !run.events.contains("FAIL"),
+        "passing static ratio should not trip diagnostics"
+    );
+}
+
+#[test]
+fn static_16k_h1c_ratio_gate_fails_below_threshold() {
+    let run = static_16k_ratio_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-static-16k-h1c","requests":1000,"rps":800,"p99_ms":3}"#,
+            r#"{"type":"load","label":"caddy-static-16k-h1c","requests":1000,"rps":1000,"p99_ms":3}"#,
+        ],
+        "0.85",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "OxiBelt below 0.85x Caddy should fail the static regression gate"
+    );
+    assert!(
+        run.events
+            .contains("FAIL OxiBelt static-16k-h1c regression gate failed"),
+        "failure should identify the static 16KiB H1C gate"
+    );
+}
+
+#[test]
+fn static_16k_h1c_ratio_gate_ignores_missing_comparator_data() {
+    let run = static_16k_ratio_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-static-16k-h1c","requests":1000,"rps":800,"p99_ms":3}"#,
+        ],
+        "0.85",
+    );
+
+    assert!(
+        run.output.status.success(),
+        "the static ratio gate should wait for Caddy data before comparing"
+    );
+    assert!(
+        !run.events.contains("FAIL"),
+        "missing comparator data should not trip diagnostics"
+    );
 }
 
 #[test]
@@ -556,6 +673,10 @@ fn mandatory_and_optional_call_sites_are_explicit() {
     assert!(
         script.contains("nginx_h3_mode=optional"),
         "nginx HTTP/3 should only be optional after image support is detected"
+    );
+    assert!(
+        script.contains("OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO"),
+        "static 16KiB H1C regression threshold should be configurable"
     );
     assert!(
         script.contains("run_common_loads nginx nginx \"${nginx_h3_mode}\""),

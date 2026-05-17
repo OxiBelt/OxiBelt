@@ -12,6 +12,14 @@ mod common {
   ));
 }
 
+fn kernel_sendfile_available_or_skip() -> bool {
+  let available = sendfile::kernel_sendfile_available();
+  if !available {
+    eprintln!("skipping plain HTTP sendfile fast-path test because kernel sendfile is unavailable");
+  }
+  available
+}
+
 fn parsed(raw: &[u8]) -> ParsedPlainRequest {
   match parse_buffered_request(raw, 16) {
     ParseResult::Complete {
@@ -117,6 +125,10 @@ fn header_token_matching_is_case_insensitive() {
 
 #[tokio::test]
 async fn eligible_plain_static_get_uses_pre_hyper_sendfile_path() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   let temp_dir = common::TempDir::new("plain-sendfile");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "plain-sendfile");
   let root = temp_dir.path().join("public");
@@ -166,7 +178,58 @@ async fn eligible_plain_static_get_uses_pre_hyper_sendfile_path() {
 }
 
 #[tokio::test]
+async fn kernel_sendfile_unavailable_skips_pre_hyper_path_before_request_read() {
+  let temp_dir = common::TempDir::new("plain-sendfile-unavailable");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-unavailable");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "hello sendfile")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(&cert_path, &key_path, &root, "");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = Arc::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let (_drain_tx, mut drain) = watch::channel(false);
+    match try_sendfile_fast_path_inner(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+      false,
+    )
+    .await
+    .unwrap()
+    {
+      SendfilePreflight::Continue {
+        served_requests, ..
+      } => assert_eq!(served_requests, 0),
+      SendfilePreflight::Done => panic!("unavailable kernel sendfile should fall back to Hyper"),
+    }
+  });
+
+  let _client = TcpStream::connect(addr).await.unwrap();
+  server.await.unwrap();
+}
+
+#[tokio::test]
 async fn header_only_waf_keeps_plain_static_sendfile_path() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   let temp_dir = common::TempDir::new("plain-sendfile-waf-header");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-header");
@@ -237,6 +300,10 @@ status = 451
 
 #[tokio::test]
 async fn request_waf_can_reject_plain_static_sendfile_request() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   let temp_dir = common::TempDir::new("plain-sendfile-waf-request-reject");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-request-reject");
@@ -311,6 +378,10 @@ body = "blocked by waf"
 
 #[tokio::test]
 async fn request_waf_uses_resolved_real_ip_on_plain_static_sendfile() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   let temp_dir = common::TempDir::new("plain-sendfile-real-ip-request-waf");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-real-ip-request-waf");
@@ -361,6 +432,10 @@ body = "real ip blocked"
 
 #[tokio::test]
 async fn response_waf_can_reject_plain_static_sendfile_before_file_body() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   let temp_dir = common::TempDir::new("plain-sendfile-waf-response-reject");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-response-reject");
@@ -433,6 +508,10 @@ body = "response blocked"
 
 #[tokio::test]
 async fn response_waf_uses_resolved_real_ip_on_plain_static_sendfile() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   let temp_dir = common::TempDir::new("plain-sendfile-real-ip-response-waf");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-real-ip-response-waf");
@@ -483,6 +562,10 @@ body = "response real ip blocked"
 
 #[tokio::test]
 async fn untrusted_real_ip_metadata_rejected_on_plain_static_sendfile() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   let temp_dir = common::TempDir::new("plain-sendfile-real-ip-untrusted");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-real-ip-untrusted");
@@ -519,6 +602,10 @@ fail_on_untrusted_forwarded_headers = true
 
 #[tokio::test]
 async fn response_waf_header_mutation_applies_to_plain_static_sendfile() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   let temp_dir = common::TempDir::new("plain-sendfile-waf-response-header");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-response-header");
@@ -660,6 +747,10 @@ status = 403
 
 #[tokio::test]
 async fn sendfile_fast_path_times_out_stalled_downstream_response() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
   const LARGE_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
   let temp_dir = common::TempDir::new("plain-sendfile-timeout");
