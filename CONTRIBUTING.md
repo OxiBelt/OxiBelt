@@ -84,7 +84,7 @@ Use Conventional Commits for commit messages:
 ```
 
 - `type` must be one of `feat`, `fix`, `chore`, `docs`, `ci`, `refactor`,
-  `security`, or `perf`.
+  `security`, `tests`, or `perf`.
 - `scope` is the field, area, or responsibility touched by the code, such as
   `http3`, `static_files`, `tls`, `waf`, `config`, `workflows`, or `docs`.
 - `subject` is a short imperative summary. Use a present-tense verb. Do not use
