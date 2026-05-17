@@ -24,8 +24,8 @@ pub(super) fn eval_body_call(
       ))
     }
     "contains" => Ok(Value::Bool(if let Some(body) = body {
-      body_scan::contains_text(
-        ctx.body_text_caches.text(text_slot, body),
+      body_scan::contains_text_maybe_offloaded(
+        ctx.body_text_caches.text_arc(text_slot, body),
         expect_string_arg(args, 0)?,
       )
     } else {
@@ -35,11 +35,13 @@ pub(super) fn eval_body_call(
       let Some(body) = body else {
         return Ok(Value::Bool(false));
       };
-      let text = ctx.body_text_caches.text(text_slot, body);
+      let text = ctx.body_text_caches.text_arc(text_slot, body);
       if let Some(regex) = regex_args.get(RegexFlavor::Default, 0) {
-        Ok(Value::Bool(body_scan::matches_regex_text(text, regex)))
+        Ok(Value::Bool(body_scan::matches_regex_text_maybe_offloaded(
+          text, regex,
+        )))
       } else {
-        Ok(Value::Bool(body_scan::matches_text(
+        Ok(Value::Bool(body_scan::matches_text_maybe_offloaded(
           text,
           expect_string_arg(args, 0)?,
         )?))

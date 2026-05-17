@@ -1,14 +1,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use super::{CompiledPatternSet, WafBodyInput, body_scan};
 
 #[derive(Default)]
 pub(super) struct BodyTextCaches {
-  request: OnceLock<String>,
-  response: OnceLock<String>,
-  stream: OnceLock<String>,
+  request: OnceLock<Arc<str>>,
+  response: OnceLock<Arc<str>>,
+  stream: OnceLock<Arc<str>>,
   scan_results: RefCell<HashMap<(BodyTextSlot, String), body_scan::BodyScanResult>>,
 }
 
@@ -23,11 +23,18 @@ impl BodyTextCaches {
   pub(super) fn text(&self, slot: BodyTextSlot, body: WafBodyInput<'_>) -> &str {
     self
       .cell(slot)
-      .get_or_init(|| body_scan::body_text(body.bytes))
-      .as_str()
+      .get_or_init(|| Arc::from(body_scan::body_text(body.bytes)))
+      .as_ref()
   }
 
-  fn cell(&self, slot: BodyTextSlot) -> &OnceLock<String> {
+  pub(super) fn text_arc(&self, slot: BodyTextSlot, body: WafBodyInput<'_>) -> Arc<str> {
+    self
+      .cell(slot)
+      .get_or_init(|| Arc::from(body_scan::body_text(body.bytes)))
+      .clone()
+  }
+
+  fn cell(&self, slot: BodyTextSlot) -> &OnceLock<Arc<str>> {
     match slot {
       BodyTextSlot::Request => &self.request,
       BodyTextSlot::Response => &self.response,
@@ -47,8 +54,11 @@ impl BodyTextCaches {
       return result;
     }
 
-    let result =
-      body_scan::scan_pattern_set_text(self.text(slot, body), body.is_truncated, pattern_set);
+    let result = body_scan::scan_pattern_set_text_maybe_offloaded(
+      self.text_arc(slot, body),
+      body.is_truncated,
+      pattern_set,
+    );
     self.scan_results.borrow_mut().insert(key, result.clone());
     result
   }

@@ -2354,6 +2354,100 @@ body = "response body"
 }
 
 #[test]
+fn contains_pattern_set_scan_preserves_config_order_with_automaton() {
+    let engine = compile_waf_fragment(
+        "waf-contains-pattern-order",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.pattern_sets]]
+name = "request-secrets"
+kind = "contains"
+patterns = ["needle", "boundary needle"]
+
+[[waf.rules]]
+name = "request-body-scan-order"
+phase = "request"
+priority = 10
+when = "Request.Body.scan('request-secrets').Matched && Request.Body.scan('request-secrets').Match == 'needle' && Request.Body.scan('request-secrets').Offset == 9"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 409
+"#,
+    );
+
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let decision = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+        b"boundary needle",
+        false,
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::CONFLICT)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_request_body_helpers_match_inside_tokio_runtime() {
+    let engine = compile_waf_fragment(
+        "waf-large-body-scan-offload",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.pattern_sets]]
+name = "large-secrets"
+kind = "contains"
+patterns = ["large-secret"]
+
+[[waf.rules]]
+name = "large-body-scan"
+phase = "request"
+priority = 10
+when = "Request.Body.contains('large-secret') && Request.Body.matches('large.secret') && Request.Body.scan('large-secrets').Matched"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+    );
+
+    let mut body = vec![b'a'; 70 * 1024];
+    body.extend_from_slice(b"large-secret");
+    let method = Method::POST;
+    let uri: Uri = "/upload".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let decision = engine.evaluate_request(request_input_with_body(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+        &body,
+        false,
+    ));
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn stream_phase_close_stream_enforces_in_priority_order() {
     let temp_dir = common::TempDir::new("waf-stream-priority");
     let (cert_path, key_path) =

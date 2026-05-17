@@ -31,6 +31,7 @@ mod expression;
 mod functions;
 mod metadata;
 pub(crate) mod normalization;
+mod pattern_set;
 mod person_proof;
 mod plan;
 mod runtime_helpers;
@@ -52,6 +53,8 @@ use normalization::{
   normalize_cookie_pairs, normalize_header_pairs, normalize_query_pairs, normalized_http_path,
   normalized_http_query, normalized_http_uri,
 };
+pub(crate) use pattern_set::CompiledPatternSet;
+use pattern_set::{compile_pattern_sets, validate_pattern_sets};
 use person_proof::{
   PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
 };
@@ -670,41 +673,6 @@ fn validate_rule_metadata(rule: &WafRuleConfig) -> anyhow::Result<()> {
     }
   }
 
-  Ok(())
-}
-
-fn validate_pattern_sets(
-  pattern_sets: &[WafPatternSetConfig],
-  limits: &WafLimits,
-) -> anyhow::Result<()> {
-  let mut names = HashSet::new();
-  for set in pattern_sets {
-    if set.name.trim().is_empty() {
-      bail!("WAF pattern set name must not be empty");
-    }
-    if !names.insert(set.name.as_str()) {
-      bail!("duplicate WAF pattern set name {}", set.name);
-    }
-    if set.patterns.len() > limits.max_helper_pattern_count {
-      bail!(
-        "WAF pattern set {} exceeds max_helper_pattern_count",
-        set.name
-      );
-    }
-    for pattern in &set.patterns {
-      if pattern.len() > limits.max_string_bytes {
-        bail!("WAF pattern set {} contains an oversized pattern", set.name);
-      }
-      if set.kind == WafPatternSetKind::Regex {
-        Regex::new(pattern).with_context(|| {
-          format!(
-            "WAF pattern set {} contains an invalid regex pattern",
-            set.name
-          )
-        })?;
-      }
-    }
-  }
   Ok(())
 }
 
@@ -1624,30 +1592,6 @@ impl WafEngine {
   }
 }
 
-fn compile_pattern_sets(
-  configs: &[WafPatternSetConfig],
-  limits: &WafLimits,
-) -> anyhow::Result<HashMap<String, CompiledPatternSet>> {
-  validate_pattern_sets(configs, limits)?;
-  let mut sets = HashMap::new();
-  for config in configs {
-    let compiled = match config.kind {
-      WafPatternSetKind::Contains => CompiledPatternSet::Contains(config.patterns.clone()),
-      WafPatternSetKind::Regex => {
-        let patterns = config
-          .patterns
-          .iter()
-          .map(|pattern| Regex::new(pattern))
-          .collect::<Result<Vec<_>, _>>()
-          .with_context(|| format!("failed to compile WAF pattern set {}", config.name))?;
-        CompiledPatternSet::Regex(patterns)
-      }
-    };
-    sets.insert(config.name.clone(), compiled);
-  }
-  Ok(sets)
-}
-
 fn compile_rules(
   configs: &[WafRuleConfig],
   scope: WafRuleScope,
@@ -2022,12 +1966,6 @@ enum CompiledAction {
 struct CompiledAccessLogField {
   name: String,
   expression: Expr,
-}
-
-#[derive(Clone)]
-enum CompiledPatternSet {
-  Contains(Vec<String>),
-  Regex(Vec<Regex>),
 }
 
 #[derive(Clone, Default)]
