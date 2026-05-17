@@ -503,6 +503,14 @@ name = "json-only"
     assert!(!plain_fast_path_plan(&config));
     config.routes[0].upstream_pool = None;
 
+    let static_root = temp_dir.path().join("public");
+    std::fs::create_dir_all(&static_root).expect("static root should be created");
+    config.routes[0].upstream = None;
+    config.routes[0].static_root = Some(static_root);
+    assert!(!plain_fast_path_plan(&config));
+    config.routes[0].static_root = None;
+    config.routes[0].upstream = Some("app".to_string());
+
     config.routes[0].grpc_web = true;
     assert!(!plain_fast_path_plan(&config));
     config.routes[0].grpc_web = false;
@@ -517,10 +525,14 @@ name = "json-only"
 
     config.routes[0].buffering.request = Some(crate::config::BufferingMode::Memory);
     assert!(!plain_fast_path_plan(&config));
+    config.routes[0].buffering.request = None;
+
+    config.routes[0].buffering.response = Some(crate::config::BufferingMode::Memory);
+    assert!(!plain_fast_path_plan(&config));
   }
 
   #[tokio::test]
-  async fn cache_buffering_and_upgrade_requests_force_general_proxy_path() {
+  async fn cache_buffering_errors_and_upgrade_requests_force_general_proxy_path() {
     let temp_dir = common::TempDir::new("plain-fast-path-cache-disabled");
     let (cert_path, key_path) =
       common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-cache-disabled");
@@ -563,6 +575,46 @@ request = "memory"
 "#
     );
     let state = AppSnapshot::new(parse_config(&buffered))
+      .await
+      .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
+    assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(!PlainProxyFastPath::eligible(
+      &request(),
+      &state,
+      &resolved,
+      &Method::GET
+    ));
+
+    let response_buffered = format!(
+      "{base}{}",
+      r#"
+
+[proxy.buffering]
+response = "memory"
+"#
+    );
+    let state = AppSnapshot::new(parse_config(&response_buffered))
+      .await
+      .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
+    assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(!PlainProxyFastPath::eligible(
+      &request(),
+      &state,
+      &resolved,
+      &Method::GET
+    ));
+
+    let json_errors = format!(
+      "{base}{}",
+      r#"
+
+[proxy.http.errors]
+mode = "json"
+"#
+    );
+    let state = AppSnapshot::new(parse_config(&json_errors))
       .await
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);

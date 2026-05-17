@@ -1133,6 +1133,65 @@ protocol_probe_generated_body_request() {
   fail_with_diagnostics "protocol probe generated-body request failed"
 }
 
+protocol_probe_generated_body_request_expect_error() {
+  local protocol="$1"
+  local authority="$2"
+  local path="$3"
+  local method="$4"
+  local body_bytes="$5"
+  local body_chunk_size="$6"
+  local expected_error="$7"
+  shift 7
+  local extra_args=("$@")
+  local output=""
+  local status=0
+  local client_container=""
+  local stderr_log=""
+  local stderr_output=""
+
+  for attempt in $(seq 1 5); do
+    client_container="$(unique_docker_container_name "oxibelt-protocol-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      downstream \
+      --protocol "${protocol}" \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --method "${method}" \
+      --body-bytes "${body_bytes}" \
+      --body-chunk-size "${body_chunk_size}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      "${extra_args[@]}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      echo "${output}" >&2
+      fail_with_diagnostics "protocol probe generated-body request unexpectedly succeeded"
+    fi
+
+    status=$?
+    stderr_log="$(container_stderr_log "${client_container}")"
+    stderr_output="$(cat "${stderr_log}" 2>/dev/null || true)"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+
+    if grep -F "${expected_error}" <<<"${stderr_output}" >/dev/null; then
+      return 0
+    fi
+    echo "${stderr_output}" >&2
+    sleep 1
+  done
+
+  echo "protocol probe generated-body client failed after retries with status ${status}" >&2
+  fail_with_diagnostics "protocol probe generated-body request did not fail with expected error: ${expected_error}"
+}
+
 protocol_probe_zero_length_body_delay_request() {
   local authority="$1"
   local path="$2"

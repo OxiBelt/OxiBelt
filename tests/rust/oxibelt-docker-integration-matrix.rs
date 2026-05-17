@@ -1221,6 +1221,128 @@ run_case_checks() {
         ),
         docker_case(
             "security",
+            "fast-general-proxy-equivalence",
+            "plain proxy fast path and forced general path preserve security semantics",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+assert_security_headers() {
+  local response="$1"
+  assert_response_jq "${response}" '.headers["strict-transport-security"] == "max-age=63072000; includeSubDomains; preload"'
+  assert_response_jq "${response}" '.headers["x-content-type-options"] == "nosniff"'
+  assert_response_jq "${response}" '.headers["referrer-policy"] == "no-referrer"'
+  assert_response_jq "${response}" '.headers["permissions-policy"] == "geolocation=(), camera=()"'
+}
+
+assert_same_body_projection() {
+  local left="$1"
+  local right="$2"
+  local filter="$3"
+  local left_value right_value
+  left_value="$(jq -c ".body | fromjson | ${filter}" <<<"${left}")"
+  right_value="$(jq -c ".body | fromjson | ${filter}" <<<"${right}")"
+  if [[ "${left_value}" != "${right_value}" ]]; then
+    echo "fast projection: ${left_value}" >&2
+    echo "general projection: ${right_value}" >&2
+    fail_with_diagnostics "fast/general upstream observations diverged"
+  fi
+}
+
+run_case_checks() {
+  local fast general fast_bad general_bad
+
+  fast="$(client_request "example.test" "/fast/echo?case=get" 200)"
+  general="$(client_request "example.test" "/general/echo?case=get" 200)"
+  assert_security_headers "${fast}"
+  assert_security_headers "${general}"
+  assert_same_body_projection "${fast}" "${general}" '{method, path, body, headers: {
+    host: .headers.host,
+    "x-forwarded-host": .headers["x-forwarded-host"],
+    "x-forwarded-proto": .headers["x-forwarded-proto"]
+  }}'
+
+  fast="$(client_request_with_headers "example.test" "/fast/post?case=body" 200 "POST" "posted body" "Content-Type: text/plain")"
+  general="$(client_request_with_headers "example.test" "/general/post?case=body" 200 "POST" "posted body" "Content-Type: text/plain")"
+  assert_same_body_projection "${fast}" "${general}" '{method, path, body, headers: {
+    "content-type": .headers["content-type"],
+    "content-length": .headers["content-length"]
+  }}'
+
+  fast="$(client_request_with_headers "example.test" "/fast/hop" 200 "GET" "" \
+    "Connection: X-Remove-Hop, keep-alive" \
+    "X-Remove-Hop: remove-me" \
+    "Proxy-Authorization: Basic remove-me" \
+    "Proxy-Authenticate: remove-me" \
+    "Keep-Alive: timeout=5")"
+  general="$(client_request_with_headers "example.test" "/general/hop" 200 "GET" "" \
+    "Connection: X-Remove-Hop, keep-alive" \
+    "X-Remove-Hop: remove-me" \
+    "Proxy-Authorization: Basic remove-me" \
+    "Proxy-Authenticate: remove-me" \
+    "Keep-Alive: timeout=5")"
+  assert_same_body_projection "${fast}" "${general}" '{path, headers: {
+    connection: .headers.connection,
+    "x-remove-hop": .headers["x-remove-hop"],
+    "proxy-authorization": .headers["proxy-authorization"],
+    "proxy-authenticate": .headers["proxy-authenticate"],
+    "keep-alive": .headers["keep-alive"]
+  }}'
+  assert_body_jq "${fast}" '.headers.connection == null
+    and .headers["x-remove-hop"] == null
+    and .headers["proxy-authorization"] == null
+    and .headers["proxy-authenticate"] == null
+    and .headers["keep-alive"] == null'
+
+  fast="$(client_request_with_headers "example.test" "/fast/forwarded" 200 "GET" "" \
+    "Forwarded: for=198.51.100.1;proto=http;host=evil.test" \
+    "X-Forwarded-For: 198.51.100.1" \
+    "X-Forwarded-Host: evil.test" \
+    "X-Forwarded-Proto: http" \
+    "X-Forwarded-Port: 80")"
+  general="$(client_request_with_headers "example.test" "/general/forwarded" 200 "GET" "" \
+    "Forwarded: for=198.51.100.1;proto=http;host=evil.test" \
+    "X-Forwarded-For: 198.51.100.1" \
+    "X-Forwarded-Host: evil.test" \
+    "X-Forwarded-Proto: http" \
+    "X-Forwarded-Port: 80")"
+  assert_same_body_projection "${fast}" "${general}" '{path, headers: {
+    host: .headers.host,
+    forwarded: .headers.forwarded,
+    "x-forwarded-host": .headers["x-forwarded-host"],
+    "x-forwarded-proto": .headers["x-forwarded-proto"]
+  }}'
+  assert_body_jq "${fast}" '.headers.forwarded == null
+    and (.headers["x-forwarded-for"] | contains("198.51.100.1") | not)
+    and .headers["x-forwarded-host"] == "example.test"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-port"] != "80"
+    and (.headers.host | startswith("mock-http:18080"))'
+  assert_body_jq "${general}" '.headers.forwarded == null
+    and (.headers["x-forwarded-for"] | contains("198.51.100.1") | not)
+    and .headers["x-forwarded-port"] != "80"'
+
+  fast_bad="$(chunked_body_client_request "example.test" "/fast/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
+  general_bad="$(chunked_body_client_request "example.test" "/general/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
+  assert_response_jq "${fast_bad}" '.status == 400'
+  assert_response_jq "${general_bad}" '.status == 400'
+
+  protocol_probe_generated_body_request_expect_error "h2" "example.test" "/fast/h2-cl0-data" "POST" 8 4 "stream error received: unspecific protocol error detected" --omit-content-length --header "Content-Length: 0"
+  protocol_probe_generated_body_request_expect_error "h2" "example.test" "/general/h2-cl0-data" "POST" 8 4 "stream error received: unspecific protocol error detected" --omit-content-length --header "Content-Length: 0"
+
+  fast_bad="$(protocol_probe_generated_body_request "h3" "example.test" "/fast/h3-cl0-data" "POST" 8 4 --omit-content-length --header "Content-Length: 0" --expect-status 413)"
+  general_bad="$(protocol_probe_generated_body_request "h3" "example.test" "/general/h3-cl0-data" "POST" 8 4 --omit-content-length --header "Content-Length: 0" --expect-status 413)"
+  assert_response_jq "${fast_bad}" '.body == "request body is too large"'
+  assert_response_jq "${general_bad}" '.body == "request body is too large"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "security",
             "static-file-symlink-race",
             "static file serving does not leak out-of-root files during symlink swaps",
             ExpectStart::Success,
@@ -1284,6 +1406,81 @@ run_case_checks() {
   if [[ "${failed}" != "0" ]]; then
     fail_with_diagnostics "static symlink race leaked or served unexpected content"
   fi
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "security",
+            "static-sendfile-general-equivalence",
+            "plaintext static sendfile fast path matches HTTPS static general path",
+            ExpectStart::Success,
+            Needs::default(),
+            r#"
+assert_same_static_response() {
+  local left="$1"
+  local right="$2"
+  local filter="$3"
+  local left_value right_value
+  left_value="$(jq -c "${filter}" <<<"${left}")"
+  right_value="$(jq -c "${filter}" <<<"${right}")"
+  if [[ "${left_value}" != "${right_value}" ]]; then
+    echo "plain static: ${left_value}" >&2
+    echo "https static: ${right_value}" >&2
+    fail_with_diagnostics "static sendfile/general responses diverged"
+  fi
+}
+
+run_case_checks() {
+  local plain https etag
+
+  plain="$(plain_client_request "static-equivalence.example.test" "/static/ok.txt" 200)"
+  https="$(client_request "static-equivalence.example.test" "/static/ok.txt" 200)"
+  assert_same_static_response "${plain}" "${https}" '{status, body_base64, headers: {
+    "content-length": .headers["content-length"],
+    "content-type": .headers["content-type"],
+    "accept-ranges": .headers["accept-ranges"]
+  }}'
+  assert_response_jq "${plain}" '.body == "static ok\n"'
+
+  plain="$(plain_client_request_with_headers_on_port 8080 "static-equivalence.example.test" "/static/ok.txt" 200 "HEAD" "")"
+  https="$(client_request_with_headers "static-equivalence.example.test" "/static/ok.txt" 200 "HEAD" "")"
+  assert_same_static_response "${plain}" "${https}" '{status, body_base64, headers: {
+    "content-length": .headers["content-length"],
+    "content-type": .headers["content-type"]
+  }}'
+  assert_response_jq "${plain}" '.body == ""'
+
+  plain="$(plain_client_request_with_headers_on_port 8080 "static-equivalence.example.test" "/static/range.txt" 206 "GET" "" "Range: bytes=0-5")"
+  https="$(client_request_with_headers "static-equivalence.example.test" "/static/range.txt" 206 "GET" "" "Range: bytes=0-5")"
+  assert_same_static_response "${plain}" "${https}" '{status, body_base64, headers: {
+    "content-length": .headers["content-length"],
+    "content-range": .headers["content-range"],
+    "accept-ranges": .headers["accept-ranges"]
+  }}'
+  assert_response_jq "${plain}" '.body == "012345"'
+
+  etag="$(jq -r '.headers.etag' <<<"${https}")"
+  plain="$(plain_client_request_with_headers_on_port 8080 "static-equivalence.example.test" "/static/range.txt" 304 "GET" "" "If-None-Match: ${etag}")"
+  https="$(client_request_with_headers "static-equivalence.example.test" "/static/range.txt" 304 "GET" "" "If-None-Match: ${etag}")"
+  assert_same_static_response "${plain}" "${https}" '{status, body_base64, headers: {
+    etag: .headers.etag,
+    "accept-ranges": .headers["accept-ranges"]
+  }}'
+
+  docker exec --user 0 "${proxy_container}" /bin/sh -ceu '
+    rm -f /etc/oxibelt/config/public/link.txt
+    ln -s /etc/oxibelt/config/outside-secret.txt /etc/oxibelt/config/public/link.txt
+  '
+  plain="$(plain_client_request "static-equivalence.example.test" "/static/link.txt" 403)"
+  https="$(client_request "static-equivalence.example.test" "/static/link.txt" 403)"
+  assert_same_static_response "${plain}" "${https}" '{status, body}'
+  assert_response_jq "${plain}" '.body == "forbidden"'
+
+  plain="$(plain_client_request "static-equivalence.example.test" "/static/%2e%2e/outside-secret.txt" 400)"
+  https="$(client_request "static-equivalence.example.test" "/static/%2e%2e/outside-secret.txt" 400)"
+  assert_same_static_response "${plain}" "${https}" '{status, body}'
+  assert_response_jq "${plain}" '.body == "invalid request path"'
 }
 "#,
             None,

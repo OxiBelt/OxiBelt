@@ -415,6 +415,13 @@ where
   };
   access_log.set_route_name(&resolved.route.name);
 
+  let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
+  let request =
+    match reject_content_length_zero_data(request, client_body_timeout, request_version).await {
+      Ok(request) => request,
+      Err(response) => return response,
+    };
+
   if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved, &request_method) {
     return fast_path::PlainProxyFastPath::handle(
       request,
@@ -470,7 +477,6 @@ where
     return text_response(terminal.status, &terminal.body);
   }
 
-  let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
   let request = request.map(|body| {
     body::with_read_timeout(
       Limited::new(body, state.config.limits.max_request_body_bytes as usize).boxed(),
@@ -2673,6 +2679,22 @@ fn validate_request_limits<B>(
       "headers are too large",
     ));
   }
+  if request.headers().contains_key(http::header::CONTENT_LENGTH)
+    && request
+      .headers()
+      .contains_key(http::header::TRANSFER_ENCODING)
+  {
+    return Err((StatusCode::BAD_REQUEST, "ambiguous request body framing"));
+  }
+  if request
+    .headers()
+    .get_all(http::header::CONTENT_LENGTH)
+    .iter()
+    .count()
+    > 1
+  {
+    return Err((StatusCode::BAD_REQUEST, "ambiguous request body framing"));
+  }
   if let Some(length) = request
     .headers()
     .get(http::header::CONTENT_LENGTH)
@@ -2683,6 +2705,52 @@ fn validate_request_limits<B>(
     return Err((StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"));
   }
   Ok(())
+}
+
+async fn reject_content_length_zero_data<B>(
+  request: Request<B>,
+  timeout: Duration,
+  version: http::Version,
+) -> Result<Request<ProxyBody>, Response<ProxyBody>>
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
+  B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
+{
+  let should_guard = matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3)
+    && content_length_is_exact_zero(request.headers());
+  let request = request.map(|body| body.map_err(Into::into).boxed());
+  if !should_guard {
+    return Ok(request);
+  }
+
+  let (parts, body) = request.into_parts();
+  let mut body = body::with_read_timeout(body, timeout, BodyTimeoutKind::DownstreamRequestRead);
+  while let Some(frame) = body.frame().await {
+    let frame = match frame {
+      Ok(frame) => frame,
+      Err(error) => {
+        if error_is_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
+          return Err(text_response(
+            StatusCode::REQUEST_TIMEOUT,
+            "request body timed out",
+          ));
+        }
+        warn!(error = %error, "failed to read Content-Length: 0 request body");
+        return Err(text_response(
+          StatusCode::BAD_REQUEST,
+          "failed to read request body",
+        ));
+      }
+    };
+    if frame.data_ref().is_some_and(|data| !data.is_empty()) {
+      return Err(text_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "request body is too large",
+      ));
+    }
+  }
+
+  Ok(Request::from_parts(parts, full_body(bytes::Bytes::new())))
 }
 
 fn cached_entry_response(

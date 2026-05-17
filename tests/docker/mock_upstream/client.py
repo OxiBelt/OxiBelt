@@ -164,7 +164,7 @@ def send_http_request(
     if body_split_delay_ms > 0:
       time.sleep(body_split_delay_ms / 1000.0)
     sock.sendall(body[split_at:])
-  return read_http_response(sock, hold_after_headers_ms)
+  return read_http_response(sock, method, hold_after_headers_ms)
 
 
 def send_chunked_body(sock, body, body_split_at=None, body_split_delay_ms=0):
@@ -224,8 +224,8 @@ def request_with_proxy_protocol(args, target_path, host_header, headers, body):
   finally:
     sock.close()
 
-def read_http_response(sock, hold_after_headers_ms=0):
-  response = http.client.HTTPResponse(sock)
+def read_http_response(sock, method="GET", hold_after_headers_ms=0):
+  response = http.client.HTTPResponse(sock, method=method)
   response.begin()
   if hold_after_headers_ms > 0:
     time.sleep(hold_after_headers_ms / 1000.0)
