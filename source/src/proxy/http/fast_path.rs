@@ -3,8 +3,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
-use http_body_util::{BodyExt, Limited};
+use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Body;
 use tracing::warn;
 
@@ -98,7 +99,7 @@ impl PlainProxyFastPath {
     transport_network: WafTransportNetwork,
     transport_metadata: WafTransportMetadataInput<'_>,
     request_waf: RequestWafDecision,
-    request_headers: HeaderMap,
+    request_headers: Option<HeaderMap>,
     tags: Option<HashMap<String, String>>,
     access_log: &mut SystemAccessLogContext<'_>,
   ) -> Response<ProxyBody>
@@ -115,8 +116,11 @@ impl PlainProxyFastPath {
     let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
     let retry_enabled = state.config.proxy.retry.enabled && is_idempotent(request.method());
-    let request_method = request.method().clone();
-    let request_uri = request.uri().clone();
+    let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
+    let request_context =
+      response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
+    let request_body_definitely_empty =
+      fast_path_request_body_is_definitely_empty(request.version(), request.headers());
     let (mut parts, body) = request.into_parts();
 
     let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
@@ -154,6 +158,7 @@ impl PlainProxyFastPath {
       body,
       state.config.limits.max_request_body_bytes as usize,
       client_body_timeout,
+      request_body_definitely_empty,
     );
     let outbound = Request::from_parts(parts, body)
       .map(|body| filter_trailers(body, state.config.proxy.http.trailers, false));
@@ -247,17 +252,23 @@ impl PlainProxyFastPath {
     semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
     apply_security_headers(&mut parts.headers, &state.config.security.headers);
     apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
-    if state.waf.has_response_rules(&resolved.route.name) {
+    if response_waf_enabled {
+      let (request_method, request_uri) = request_context
+        .as_ref()
+        .expect("response WAF context should be captured when response WAF is enabled");
+      let request_headers = request_headers
+        .as_ref()
+        .expect("request headers should be captured when response WAF is enabled");
       access_log.ensure_response_ids();
       access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
       let request_input = WafRequestInput {
         request_id: access_log.request_id(),
         transaction_id: access_log.transaction_id(),
         received_at_unix_ms: access_log.request_received_at_unix_ms,
-        method: &request_method,
-        uri: &request_uri,
+        method: request_method,
+        uri: request_uri,
         version: request_version,
-        headers: &request_headers,
+        headers: request_headers,
         body: None,
         peer_addr: client_addr,
         downstream_host: host,
@@ -347,11 +358,16 @@ fn fast_path_request_body<B>(
   body: B,
   max_body_bytes: usize,
   timeout: std::time::Duration,
+  definitely_empty: bool,
 ) -> ProxyBody
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
 {
+  if definitely_empty {
+    return empty_body();
+  }
+
   if body.is_end_stream() {
     return proxy_body(body);
   }
@@ -361,6 +377,30 @@ where
     timeout,
     BodyTimeoutKind::DownstreamRequestRead,
   )
+}
+
+fn fast_path_request_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
+  if !matches!(version, http::Version::HTTP_10 | http::Version::HTTP_11)
+    || headers.contains_key(TRANSFER_ENCODING)
+  {
+    return false;
+  }
+
+  let mut content_lengths = headers.get_all(CONTENT_LENGTH).iter();
+  let Some(content_length) = content_lengths.next() else {
+    return true;
+  };
+  content_lengths.next().is_none()
+    && content_length
+      .to_str()
+      .ok()
+      .is_some_and(|value| value.trim() == "0")
+}
+
+fn empty_body() -> ProxyBody {
+  Empty::<bytes::Bytes>::new()
+    .map_err(|never| -> body::BoxError { match never {} })
+    .boxed()
 }
 
 #[cfg(test)]

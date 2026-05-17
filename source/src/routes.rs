@@ -168,9 +168,18 @@ impl RouteTable {
     upstreams: &'a [UpstreamConfig],
   ) -> Option<ResolvedRoute<'a>> {
     let normalized_host = normalize_host(host);
+    self.resolve_normalized_host(&normalized_host, path, upstreams)
+  }
+
+  pub(crate) fn resolve_normalized_host<'a>(
+    &'a self,
+    normalized_host: &str,
+    path: &str,
+    upstreams: &'a [UpstreamConfig],
+  ) -> Option<ResolvedRoute<'a>> {
     let mut best = None;
 
-    if let Some(route_indices) = self.exact_hosts.get(&normalized_host) {
+    if let Some(route_indices) = self.exact_hosts.get(normalized_host) {
       let host_score = 10_000 + normalized_host.len();
       for &route_index in route_indices {
         self.consider_route(&mut best, route_index, host_score, path);
@@ -182,7 +191,7 @@ impl RouteTable {
 
     self
       .wildcard_hosts
-      .for_each_match(&normalized_host, |wildcard| {
+      .for_each_match(normalized_host, |wildcard| {
         self.consider_route(
           &mut best,
           wildcard.route_index,
@@ -409,6 +418,30 @@ mod tests {
 
     let resolved = table.resolve("api.example.com", "/v1", &upstreams).unwrap();
     assert_eq!(resolved.route.name, "exact");
+  }
+
+  #[test]
+  fn normalized_host_resolve_matches_raw_resolve() {
+    let routes = vec![
+      route("fallback", &["*"], "/", "fallback"),
+      route("exact", &["api.example.com"], "/v1", "exact"),
+    ];
+    let upstreams = vec![upstream("fallback"), upstream("exact")];
+    let table = RouteTable::from_routes_for_tests(routes);
+
+    let raw = table
+      .resolve("API.example.com:8443", "/v1/users", &upstreams)
+      .unwrap();
+    let normalized = table
+      .resolve_normalized_host("api.example.com", "/v1/users", &upstreams)
+      .unwrap();
+
+    assert_eq!(raw.route.name, normalized.route.name);
+    assert_eq!(normalized.route.name, "exact");
+    assert_eq!(
+      raw.upstream.unwrap().name,
+      normalized.upstream.unwrap().name
+    );
   }
 
   #[test]

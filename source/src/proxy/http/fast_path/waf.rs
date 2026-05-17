@@ -22,7 +22,7 @@ fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> 
 #[derive(Debug)]
 pub(crate) struct PlainFastPathWaf {
   pub(crate) request: RequestWafDecision,
-  pub(crate) request_headers: HeaderMap,
+  pub(crate) request_headers: Option<HeaderMap>,
   pub(crate) tags: Option<HashMap<String, String>>,
 }
 
@@ -43,9 +43,9 @@ pub(crate) fn prepare_plain_fast_path_waf<B>(
 ) -> Result<PlainFastPathWaf, Box<Response<ProxyBody>>> {
   let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
   let request_headers = if response_waf_enabled {
-    request.headers().clone()
+    Some(request.headers().clone())
   } else {
-    HeaderMap::new()
+    None
   };
   let mut tags = None;
   let mut request_waf = if state.waf.has_request_rules(&resolved.route.name) {
@@ -231,6 +231,10 @@ value = "yes"
       &mut access_log,
     )
     .expect("header mutation should stay on the fast path");
+    assert!(
+      prepared.request_headers.is_none(),
+      "request headers should not be cloned without response WAF rules"
+    );
     assert!(
       prepared
         .request

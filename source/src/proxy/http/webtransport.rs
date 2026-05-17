@@ -67,7 +67,10 @@ pub(crate) fn prepare_webtransport(
       )));
     }
   };
-  let Some(resolved) = state.route_table.resolve(&host, &path, &state.upstreams) else {
+  let Some(resolved) = state
+    .route_table
+    .resolve_normalized_host(&host, &path, &state.upstreams)
+  else {
     return Err(Box::new(text_response(
       StatusCode::NOT_FOUND,
       "no matching route",

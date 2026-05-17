@@ -340,9 +340,10 @@ async fn eligible_static_plan(
     .target
     .split_once('?')
     .map_or(request.target.as_str(), |(path, _)| path);
-  let resolved = snapshot
-    .route_table
-    .resolve(&host, request_path, &snapshot.upstreams)?;
+  let resolved =
+    snapshot
+      .route_table
+      .resolve_normalized_host(&host, request_path, &snapshot.upstreams)?;
   if !resolved.execution_plan.fast_path.static_sendfile_like {
     return None;
   }

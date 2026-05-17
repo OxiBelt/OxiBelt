@@ -408,7 +408,10 @@ where
     return text_response(status, "rate limit exceeded");
   }
 
-  let Some(resolved) = state.route_table.resolve(&host, path, &state.upstreams) else {
+  let Some(resolved) = state
+    .route_table
+    .resolve_normalized_host(&host, path, &state.upstreams)
+  else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.set_route_name(&resolved.route.name);

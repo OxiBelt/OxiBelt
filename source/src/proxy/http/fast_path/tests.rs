@@ -118,6 +118,35 @@ async fn h2_request_without_content_length_zero_keeps_fast_path_without_guard_dr
 }
 
 #[tokio::test]
+async fn h1_definitely_empty_request_body_shortcut_does_not_poll_body() {
+  for request in [
+    Request::builder()
+      .version(http::Version::HTTP_11)
+      .uri("http://example.com/perf/h1")
+      .body(PanicBody)
+      .expect("request should build"),
+    Request::builder()
+      .version(http::Version::HTTP_11)
+      .uri("http://example.com/perf/h1")
+      .header(http::header::CONTENT_LENGTH, "0")
+      .body(PanicBody)
+      .expect("request should build"),
+  ] {
+    assert!(fast_path_request_body_is_definitely_empty(
+      request.version(),
+      request.headers()
+    ));
+    let body = fast_path_request_body(request.into_body(), 1024, Duration::from_millis(100), true);
+    let bytes = body
+      .collect()
+      .await
+      .expect("empty fast-path body should collect")
+      .to_bytes();
+    assert!(bytes.is_empty());
+  }
+}
+
+#[tokio::test]
 async fn soft_features_keep_plain_proxy_fast_path() {
   let temp_dir = common::TempDir::new("plain-fast-path-soft-features");
   let (cert_path, key_path) =

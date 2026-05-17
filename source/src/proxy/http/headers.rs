@@ -86,18 +86,35 @@ fn append_csv_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
 
 pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
   if headers.contains_key(CONNECTION) {
-    let connection_tokens = headers
+    let mut dynamic_tokens: Option<Vec<HeaderName>> = None;
+    let mut remove_close_header = false;
+    let mut remove_te_header = false;
+    for token in headers
       .get_all(CONNECTION)
       .iter()
       .filter_map(|value| value.to_str().ok())
       .flat_map(|value| value.split(','))
       .map(str::trim)
       .filter(|value| !value.is_empty())
-      .filter_map(|value| HeaderName::from_str(value).ok())
-      .collect::<Vec<_>>();
+    {
+      if fixed_connection_token(token, &mut remove_close_header, &mut remove_te_header) {
+        continue;
+      }
+      if let Ok(name) = HeaderName::from_str(token) {
+        dynamic_tokens.get_or_insert_with(Vec::new).push(name);
+      }
+    }
 
-    for token in connection_tokens {
-      headers.remove(token);
+    if let Some(dynamic_tokens) = dynamic_tokens {
+      for token in dynamic_tokens {
+        headers.remove(token);
+      }
+    }
+    if remove_close_header {
+      headers.remove(HeaderName::from_static("close"));
+    }
+    if remove_te_header {
+      headers.remove(TE);
     }
   }
 
@@ -117,6 +134,32 @@ pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
   if remove_te {
     headers.remove(TE);
   }
+}
+
+fn fixed_connection_token(
+  token: &str,
+  remove_close_header: &mut bool,
+  remove_te_header: &mut bool,
+) -> bool {
+  if token.eq_ignore_ascii_case("close") {
+    *remove_close_header = true;
+    return true;
+  }
+  if token.eq_ignore_ascii_case("te") {
+    *remove_te_header = true;
+    return true;
+  }
+  if token.eq_ignore_ascii_case("connection")
+    || token.eq_ignore_ascii_case("keep-alive")
+    || token.eq_ignore_ascii_case("proxy-authenticate")
+    || token.eq_ignore_ascii_case("proxy-authorization")
+    || token.eq_ignore_ascii_case("trailer")
+    || token.eq_ignore_ascii_case("transfer-encoding")
+    || token.eq_ignore_ascii_case("upgrade")
+  {
+    return true;
+  }
+  false
 }
 
 pub(crate) fn is_upgrade_request<B>(request: &Request<B>) -> bool {
@@ -223,6 +266,27 @@ mod tests {
   }
 
   #[test]
+  fn hop_by_hop_stripping_handles_common_fixed_connection_tokens() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      CONNECTION,
+      HeaderValue::from_static("keep-alive, close, upgrade"),
+    );
+    headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+    headers.insert("close", HeaderValue::from_static("remove"));
+    headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+    headers.insert("x-hop", HeaderValue::from_static("preserve"));
+
+    strip_hop_by_hop_headers(&mut headers);
+
+    assert!(!headers.contains_key(CONNECTION));
+    assert!(!headers.contains_key("keep-alive"));
+    assert!(!headers.contains_key("close"));
+    assert!(!headers.contains_key(UPGRADE));
+    assert_eq!(headers["x-hop"], "preserve");
+  }
+
+  #[test]
   fn hop_by_hop_stripping_preserves_only_te_trailers() {
     let mut trailers = HeaderMap::new();
     trailers.insert(TE, HeaderValue::from_static("trailers"));
@@ -233,5 +297,17 @@ mod tests {
     gzip.insert(TE, HeaderValue::from_static("gzip"));
     strip_hop_by_hop_headers(&mut gzip);
     assert!(!gzip.contains_key(TE));
+  }
+
+  #[test]
+  fn hop_by_hop_stripping_removes_te_when_connection_lists_te() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONNECTION, HeaderValue::from_static("te"));
+    headers.insert(TE, HeaderValue::from_static("trailers"));
+
+    strip_hop_by_hop_headers(&mut headers);
+
+    assert!(!headers.contains_key(CONNECTION));
+    assert!(!headers.contains_key(TE));
   }
 }
