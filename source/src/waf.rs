@@ -1216,6 +1216,14 @@ impl WafEngine {
     self.route_plan(route_name).response().body_need()
   }
 
+  pub fn plain_proxy_fast_path_safe(&self, route_name: &str) -> bool {
+    self.route_plan(route_name).plain_proxy_fast_path_safe()
+  }
+
+  pub fn static_sendfile_fast_path_safe(&self, route_name: &str) -> bool {
+    self.route_plan(route_name).static_sendfile_fast_path_safe()
+  }
+
   pub fn requires_stream_inspection(&self, route_name: &str) -> bool {
     self.route_plan(route_name).stream().enabled()
   }

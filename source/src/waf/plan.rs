@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use super::functions::CompiledFunction;
 use super::{
-  CompiledRule, Expr, FunctionKey, FunctionMap, WafPhase, body_content_method,
-  bytes_content_method, function_body_route_functions, resolve_function,
+  CompiledAction, CompiledRule, Expr, FunctionKey, FunctionMap, WafActionConfig, WafPhase,
+  body_content_method, bytes_content_method, function_body_route_functions, resolve_function,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -94,6 +94,19 @@ impl WafRoutePlan {
     self.request_body_need
   }
 
+  pub(crate) fn plain_proxy_fast_path_safe(&self) -> bool {
+    self.request_body_need == BodyNeed::None
+      && self.response.body_need() == BodyNeed::None
+      && !self.stream.enabled()
+      && !self.request_has_upstream_selection_actions()
+  }
+
+  pub(crate) fn static_sendfile_fast_path_safe(&self) -> bool {
+    self.request_body_need <= BodyNeed::SizeOnly
+      && self.response.body_need() <= BodyNeed::SizeOnly
+      && !self.stream.enabled()
+  }
+
   pub(super) fn disabled() -> Self {
     Self::new(
       WafPhasePlan::new(false, BodyNeed::None, Arc::from([])),
@@ -101,6 +114,25 @@ impl WafRoutePlan {
       WafPhasePlan::new(false, BodyNeed::None, Arc::from([])),
     )
   }
+
+  fn request_has_upstream_selection_actions(&self) -> bool {
+    self
+      .request
+      .rules()
+      .iter()
+      .any(|rule| rule.actions.iter().any(action_selects_upstream))
+  }
+}
+
+fn action_selects_upstream(action: &CompiledAction) -> bool {
+  matches!(
+    action,
+    CompiledAction::Config(
+      WafActionConfig::RouteToPool { .. }
+        | WafActionConfig::RouteToUpstream { .. }
+        | WafActionConfig::SetLoadBalancingPolicy { .. }
+    )
+  )
 }
 
 pub(super) fn phase_plan(

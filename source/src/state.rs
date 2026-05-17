@@ -201,7 +201,6 @@ impl AppSnapshot {
     config: Config,
     previous: Option<&AppSnapshot>,
   ) -> anyhow::Result<Self> {
-    let route_table = RouteTable::new(&config);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
@@ -261,6 +260,7 @@ impl AppSnapshot {
       Some(limits.clone()),
     )
     .context("failed to build WAF engine")?;
+    let route_table = RouteTable::new_with_waf(&config, &waf);
     let access_logs = AccessLogSinks::new(&config.database.access_log)
       .await
       .context("failed to build access log sinks")?;
@@ -300,9 +300,9 @@ impl AppSnapshot {
     config: Config,
     previous: &AppSnapshot,
   ) -> anyhow::Result<Self> {
-    let route_table = RouteTable::new(&config);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
+    let route_table = RouteTable::new_with_waf(&config, &previous.waf);
     let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
     let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs)
       .context("failed to build upstream HTTP clients")?;

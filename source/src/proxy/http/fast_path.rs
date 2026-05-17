@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use http::{Method, Request, Response, StatusCode};
+use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use hyper::body::Body;
 use tracing::warn;
@@ -12,13 +13,16 @@ use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, boxed_error};
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
 use crate::proxy::http::request::{RebuildRequestOptions, proxy_body, rebuild_request_parts};
-use crate::proxy::http::response::{apply_security_headers, text_response};
+use crate::proxy::http::response::{apply_security_headers, text_response, waf_terminal_response};
 use crate::proxy::http::semantics::{self, configured_error_response, filter_trailers};
 use crate::proxy::http::uri::rewrite_uri;
 use crate::proxy::http::version::select_upstream_http_version;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
-use crate::waf::{HeaderMutation, WafTransportNetwork};
+use crate::waf::{
+  RequestWafDecision, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
+  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
+};
 
 use super::{
   EffectiveTimeouts, apply_alt_svc_header, error_indicates_body_timeout, is_idempotent,
@@ -28,7 +32,11 @@ use super::{
 mod small_response;
 use self::small_response::{SmallResponseDisposition, try_inline_response_body};
 
-const EMPTY_MUTATIONS: &[HeaderMutation] = &[];
+static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
+
+fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> {
+  tags.as_ref().unwrap_or(&EMPTY_TAGS)
+}
 
 pub(crate) struct PlainProxyFastPath;
 
@@ -41,7 +49,7 @@ impl PlainProxyFastPath {
   where
     B: Body,
   {
-    resolved.execution_plan.can_plain_proxy_fast_path
+    plain_proxy_fast_path_enabled_for_version(request, resolved)
       && Self::supported_upstream(state, resolved).is_some()
       && !state
         .cache
@@ -78,11 +86,18 @@ impl PlainProxyFastPath {
     state: Arc<AppSnapshot>,
     resolved: &ResolvedRoute<'_>,
     peer_addr: SocketAddr,
-    _client_addr: SocketAddr,
+    client_addr: SocketAddr,
     host: &str,
+    tcp_max_hop: Option<u8>,
+    tls: &WafTlsMetadata,
+    protocol: WafProtocol,
     downstream_scheme: &'static str,
     request_version: http::Version,
     transport_network: WafTransportNetwork,
+    transport_metadata: WafTransportMetadataInput<'_>,
+    request_waf: RequestWafDecision,
+    request_headers: HeaderMap,
+    tags: Option<HashMap<String, String>>,
     access_log: &mut SystemAccessLogContext<'_>,
   ) -> Response<ProxyBody>
   where
@@ -98,6 +113,8 @@ impl PlainProxyFastPath {
     let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
     let retry_enabled = state.config.proxy.retry.enabled && is_idempotent(request.method());
+    let request_method = request.method().clone();
+    let request_uri = request.uri().clone();
     let (mut parts, body) = request.into_parts();
 
     let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
@@ -126,7 +143,7 @@ impl PlainProxyFastPath {
       forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
       preserve_host: upstream.preserve_host,
       upstream_version,
-      waf_mutations: EMPTY_MUTATIONS,
+      waf_mutations: &request_waf.request_header_mutations,
     };
     rebuild_request_parts(&mut parts, rebuild);
     semantics::strip_accepted_expect(&mut parts.headers);
@@ -227,6 +244,58 @@ impl PlainProxyFastPath {
     }
     semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
     apply_security_headers(&mut parts.headers, &state.config.security.headers);
+    apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
+    if state.waf.has_response_rules(&resolved.route.name) {
+      access_log.ensure_response_ids();
+      access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
+      let request_input = WafRequestInput {
+        request_id: access_log.request_id(),
+        transaction_id: access_log.transaction_id(),
+        received_at_unix_ms: access_log.request_received_at_unix_ms,
+        method: &request_method,
+        uri: &request_uri,
+        version: request_version,
+        headers: &request_headers,
+        body: None,
+        peer_addr: client_addr,
+        downstream_host: host,
+        downstream_scheme,
+        route_name: &resolved.route.name,
+        tcp_max_hop,
+        tls,
+        protocol,
+        transport_network,
+        transport_metadata,
+        tags: tags_ref(&tags),
+        dynamic_policy: &access_log.dynamic_policy,
+      };
+      let response_waf = state.waf.evaluate_response(WafResponseInput {
+        request: request_input,
+        response_id: access_log.response_id(),
+        received_at_unix_ms: access_log.response_received_at_unix_ms,
+        version: parts.version,
+        status: parts.status,
+        headers: &parts.headers,
+        body: None,
+        upstream_name: &upstream.name,
+        upstream_pool: None,
+        upstream_scheme: upstream.origin.scheme(),
+        upstream_connect_time_ms: access_log.upstream_connect_time_ms,
+        upstream_first_byte_time_ms: access_log.upstream_first_byte_time_ms,
+        upstream_error: None,
+      });
+      for access_log in &response_waf.access_logs {
+        state.access_logs.emit(access_log);
+      }
+      if let Some(terminal) = response_waf.terminal {
+        let mut mutations = request_waf.response_header_mutations.clone();
+        mutations.extend(response_waf.response_header_mutations);
+        let response = waf_terminal_response(terminal, &mutations);
+        state.metrics.record_response(response.status());
+        return response;
+      }
+      apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
+    }
     apply_alt_svc_header(
       &mut parts.headers,
       parts.status,
@@ -256,6 +325,19 @@ impl PlainProxyFastPath {
       with_downstream_response_timeout(response, timeouts.response_send, transport_network);
     state.metrics.record_response(response.status());
     response
+  }
+}
+
+fn plain_proxy_fast_path_enabled_for_version<B>(
+  request: &Request<B>,
+  resolved: &ResolvedRoute<'_>,
+) -> bool {
+  match request.version() {
+    http::Version::HTTP_10 | http::Version::HTTP_11 => {
+      resolved.execution_plan.fast_path.plain_proxy_h1
+    }
+    http::Version::HTTP_2 => resolved.execution_plan.fast_path.plain_proxy_h2,
+    _ => false,
   }
 }
 
@@ -319,12 +401,14 @@ mod tests {
   }
 
   fn plain_fast_path_plan(config: &Config) -> bool {
-    let table = crate::routes::RouteTable::new(config);
+    let waf = crate::waf::WafEngine::new(config).expect("WAF engine should build");
+    let table = crate::routes::RouteTable::new_with_waf(config, &waf);
     table
       .resolve("example.com", "/", &config.upstreams)
       .expect("route should resolve")
       .execution_plan
-      .can_plain_proxy_fast_path
+      .fast_path
+      .plain_proxy_h1
   }
 
   #[tokio::test]
@@ -340,7 +424,7 @@ mod tests {
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
 
-    assert!(resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
     assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
   }
 
@@ -381,7 +465,7 @@ permissions_policy = "geolocation=(), camera=()"
         .await
         .expect("snapshot should initialize");
       let resolved = resolved_route(&state);
-      assert!(resolved.execution_plan.can_plain_proxy_fast_path);
+      assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
       assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
     }
   }
@@ -397,14 +481,6 @@ permissions_policy = "geolocation=(), camera=()"
     );
     for raw in [
       common::minimal_config_toml(&cert_path, &key_path),
-      format!(
-        "{base}{}",
-        r#"
-
-[waf]
-enabled = true
-"#
-      ),
       format!(
         "{base}{}",
         r#"
@@ -459,7 +535,47 @@ compression = "off"
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
 
-    assert!(resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
+    assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
+  }
+
+  #[tokio::test]
+  async fn header_only_waf_keeps_plain_proxy_fast_path_eligible() {
+    let temp_dir = common::TempDir::new("plain-fast-path-header-waf");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-header-waf");
+    let raw = format!(
+      "{}{}",
+      common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      ),
+      r#"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "header-only"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/blocked'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
+
+    assert_eq!(
+      resolved.execution_plan.waf.request,
+      crate::routes::WafExecutionPlan::HeaderOnly
+    );
+    assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
     assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
   }
 
@@ -557,7 +673,7 @@ cache_methods = ["GET"]
       .await
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
-    assert!(resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
     assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
 
     let buffered = format!(
@@ -572,7 +688,7 @@ request = "memory"
       .await
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
-    assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(!resolved.execution_plan.fast_path.plain_proxy_h1);
     assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
 
     let response_buffered = format!(
@@ -587,7 +703,7 @@ response = "memory"
       .await
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
-    assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(!resolved.execution_plan.fast_path.plain_proxy_h1);
     assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
 
     let json_errors = format!(
@@ -602,14 +718,14 @@ mode = "json"
       .await
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
-    assert!(!resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(!resolved.execution_plan.fast_path.plain_proxy_h1);
     assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
 
     let state = AppSnapshot::new(parse_config(&base))
       .await
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
-    assert!(resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
     let upgrade = Request::builder()
       .uri("https://example.com/")
       .header(http::header::CONNECTION, "upgrade")
@@ -650,7 +766,7 @@ mode = "json"
       .await
       .expect("snapshot should initialize");
     let h3_resolved = resolved_route(&h3_state);
-    assert!(h3_resolved.execution_plan.can_plain_proxy_fast_path);
+    assert!(h3_resolved.execution_plan.fast_path.plain_proxy_h1);
     assert!(!PlainProxyFastPath::eligible(
       &request(),
       &h3_state,
@@ -666,7 +782,8 @@ mode = "json"
     assert!(
       proxy_protocol_resolved
         .execution_plan
-        .can_plain_proxy_fast_path
+        .fast_path
+        .plain_proxy_h1
     );
     assert!(!PlainProxyFastPath::eligible(
       &request(),

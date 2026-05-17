@@ -102,9 +102,16 @@ async fn eligible_plain_static_get_uses_pre_hyper_sendfile_path() {
     let (stream, peer_addr) = listener.accept().await.unwrap();
     let (_shutdown_tx, mut shutdown) = watch::channel(false);
     let (_drain_tx, mut drain) = watch::channel(false);
-    let result = try_sendfile_fast_path(stream, peer_addr, &snapshot, &mut shutdown, &mut drain)
-      .await
-      .unwrap();
+    let result = try_sendfile_fast_path(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+    )
+    .await
+    .unwrap();
     assert!(matches!(result, SendfilePreflight::Done));
   });
 
@@ -120,6 +127,363 @@ async fn eligible_plain_static_get_uses_pre_hyper_sendfile_path() {
 
   assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
   assert!(response.ends_with("hello sendfile"));
+}
+
+#[tokio::test]
+async fn header_only_waf_keeps_plain_static_sendfile_path() {
+  let temp_dir = common::TempDir::new("plain-sendfile-waf-header");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-header");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "hello waf sendfile")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "block-other"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/static/blocked.txt'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = Arc::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let (_drain_tx, mut drain) = watch::channel(false);
+    let result = try_sendfile_fast_path(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, SendfilePreflight::Done));
+  });
+
+  let mut client = TcpStream::connect(addr).await.unwrap();
+  client
+    .write_all(b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+    .await
+    .unwrap();
+  let mut response = Vec::new();
+  client.read_to_end(&mut response).await.unwrap();
+  server.await.unwrap();
+  let response = String::from_utf8(response).unwrap();
+
+  assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+  assert!(response.ends_with("hello waf sendfile"));
+}
+
+#[tokio::test]
+async fn request_waf_can_reject_plain_static_sendfile_request() {
+  let temp_dir = common::TempDir::new("plain-sendfile-waf-request-reject");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-request-reject");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("blocked.txt"), "should not be sent")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "block-static"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/static/blocked.txt'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "blocked by waf"
+"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = Arc::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let (_drain_tx, mut drain) = watch::channel(false);
+    let result = try_sendfile_fast_path(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, SendfilePreflight::Done));
+  });
+
+  let mut client = TcpStream::connect(addr).await.unwrap();
+  client
+    .write_all(
+      b"GET /static/blocked.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+  let mut response = Vec::new();
+  client.read_to_end(&mut response).await.unwrap();
+  server.await.unwrap();
+  let response = String::from_utf8(response).unwrap();
+
+  assert!(response.starts_with("HTTP/1.1 451 "));
+  assert!(response.ends_with("blocked by waf"));
+  assert!(!response.contains("should not be sent"));
+}
+
+#[tokio::test]
+async fn response_waf_can_reject_plain_static_sendfile_before_file_body() {
+  let temp_dir = common::TempDir::new("plain-sendfile-waf-response-reject");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-response-reject");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "large enough static body")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "large-response"
+phase = "response"
+priority = 10
+when = "Response.Body.Size > 8"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 502
+body = "response blocked"
+"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = Arc::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let (_drain_tx, mut drain) = watch::channel(false);
+    let result = try_sendfile_fast_path(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, SendfilePreflight::Done));
+  });
+
+  let mut client = TcpStream::connect(addr).await.unwrap();
+  client
+    .write_all(b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+    .await
+    .unwrap();
+  let mut response = Vec::new();
+  client.read_to_end(&mut response).await.unwrap();
+  server.await.unwrap();
+  let response = String::from_utf8(response).unwrap();
+
+  assert!(response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+  assert!(response.ends_with("response blocked"));
+  assert!(!response.contains("large enough static body"));
+}
+
+#[tokio::test]
+async fn response_waf_header_mutation_applies_to_plain_static_sendfile() {
+  let temp_dir = common::TempDir::new("plain-sendfile-waf-response-header");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-response-header");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "header mutation body")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "mark-response"
+phase = "response"
+priority = 10
+when = "Response.Http.Status == 200"
+
+[[waf.rules.actions]]
+type = "set_response_header"
+name = "x-static-waf"
+value = "yes"
+"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = Arc::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let (_drain_tx, mut drain) = watch::channel(false);
+    let result = try_sendfile_fast_path(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, SendfilePreflight::Done));
+  });
+
+  let mut client = TcpStream::connect(addr).await.unwrap();
+  client
+    .write_all(b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+    .await
+    .unwrap();
+  let mut response = Vec::new();
+  client.read_to_end(&mut response).await.unwrap();
+  server.await.unwrap();
+  let response = String::from_utf8(response).unwrap();
+
+  assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+  assert!(response.contains("x-static-waf: yes\r\n"));
+  assert!(response.ends_with("header mutation body"));
+}
+
+#[tokio::test]
+async fn prefix_body_waf_static_route_falls_back_to_hyper_path() {
+  let temp_dir = common::TempDir::new("plain-sendfile-waf-prefix-fallback");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-waf-prefix-fallback");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "fallback body")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "prefix"
+phase = "request"
+priority = 10
+when = "Request.Body.contains('secret')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = Arc::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let (_drain_tx, mut drain) = watch::channel(false);
+    match try_sendfile_fast_path(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+    )
+    .await
+    .unwrap()
+    {
+      SendfilePreflight::Continue {
+        served_requests, ..
+      } => assert_eq!(served_requests, 0),
+      SendfilePreflight::Done => panic!("prefix-body WAF should fall back to Hyper"),
+    }
+  });
+
+  let mut client = TcpStream::connect(addr).await.unwrap();
+  client
+    .write_all(b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+    .await
+    .unwrap();
+  server.await.unwrap();
 }
 
 #[tokio::test]
@@ -162,9 +526,16 @@ response_send_timeout_ms = 100
       .unwrap();
     let (_shutdown_tx, mut shutdown) = watch::channel(false);
     let (_drain_tx, mut drain) = watch::channel(false);
-    try_sendfile_fast_path(stream, peer_addr, &snapshot, &mut shutdown, &mut drain)
-      .await
-      .unwrap()
+    try_sendfile_fast_path(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+    )
+    .await
+    .unwrap()
   });
 
   let mut client = TcpStream::connect(addr).await.unwrap();

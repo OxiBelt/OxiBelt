@@ -55,7 +55,7 @@ pub(crate) struct StaticResponsePlan {
 #[derive(Debug)]
 pub(crate) enum StaticBodyPlan {
   Empty,
-  Text(&'static str),
+  Text(String),
   File(StaticFileBodyPlan),
 }
 
@@ -348,7 +348,7 @@ pub(crate) async fn response_from_plan(
   } = plan;
   let mut response = match body {
     StaticBodyPlan::Empty => Response::new(empty_body()),
-    StaticBodyPlan::Text(message) => text_response(status, message),
+    StaticBodyPlan::Text(message) => text_response(status, &message),
     StaticBodyPlan::File(file) => {
       let path = file.path.clone();
       match file_body(
@@ -550,10 +550,19 @@ fn range_not_satisfiable_plan(len: u64) -> StaticResponsePlan {
   }
 }
 
-fn text_plan(status: StatusCode, message: &'static str) -> StaticResponsePlan {
+pub(crate) fn text_plan(status: StatusCode, message: impl Into<String>) -> StaticResponsePlan {
+  let message = message.into();
+  let mut headers = HeaderMap::new();
+  if let Ok(value) = HeaderValue::from_str(&message.len().to_string()) {
+    headers.insert(CONTENT_LENGTH, value);
+  }
+  headers.insert(
+    CONTENT_TYPE,
+    HeaderValue::from_static("text/plain; charset=utf-8"),
+  );
   StaticResponsePlan {
     status,
-    headers: HeaderMap::new(),
+    headers,
     body: StaticBodyPlan::Text(message),
   }
 }

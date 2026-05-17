@@ -1,13 +1,14 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use ::http::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING, UPGRADE};
-use ::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use ::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version};
 use anyhow::{Context as AnyhowContext, bail};
 use httparse::Status;
 use hyper::body::Incoming;
@@ -27,6 +28,7 @@ use tracing::{debug, trace};
 use crate::config::{
   Config, ConnectionLimitIdentityMode, HttpListenerMode, StaticFilesSendfileMode,
 };
+use crate::dynamic_policy::DynamicPolicyContext;
 use crate::lifecycle::{ConnectionDrain, wait_for_listener_or_data_plane_drain};
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http;
@@ -36,13 +38,18 @@ use crate::proxy::http::static_files::{self, StaticBodyPlan, StaticResponsePlan}
 use crate::routes::normalize_host;
 use crate::state::AppSnapshot;
 use crate::tcp_hop;
-use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
+use crate::waf::{
+  HeaderMutation, RequestWafDecision, WafProtocol, WafRequestInput, WafResponseInput,
+  WafTerminalResponse, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
+  apply_header_mutations,
+};
 
 mod plain_io;
 use self::plain_io::PlainHttpIo;
 
 const READ_CHUNK_BYTES: usize = 4096;
 const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
+static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
 
 struct TimedStaticResponsePlan {
   response: StaticResponsePlan,
@@ -99,6 +106,7 @@ pub(super) async fn handle_connection(
     stream,
     peer_addr,
     &snapshot,
+    transport_metadata,
     &mut shutdown,
     &mut data_plane_drain,
   )
@@ -175,6 +183,7 @@ async fn try_sendfile_fast_path(
   mut stream: TcpStream,
   peer_addr: SocketAddr,
   snapshot: &Arc<AppSnapshot>,
+  transport_metadata: WafTransportMetadataInput<'_>,
   shutdown: &mut watch::Receiver<bool>,
   data_plane_drain: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<SendfilePreflight> {
@@ -220,7 +229,9 @@ async fn try_sendfile_fast_path(
     };
     let next_buffer = request.remaining.clone();
 
-    let Some(plan) = eligible_static_plan(&request, snapshot.as_ref()).await else {
+    let Some(plan) =
+      eligible_static_plan(&request, snapshot.as_ref(), peer_addr, transport_metadata).await
+    else {
       let mut prefix = request.raw;
       prefix.extend_from_slice(&next_buffer);
       trace!("plain HTTP static sendfile request fell back");
@@ -252,9 +263,6 @@ fn sendfile_disabled_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
   }
   if config.proxy.static_files.sendfile != StaticFilesSendfileMode::Auto {
     return Some("proxy.static_files.sendfile is not auto");
-  }
-  if config.waf.enabled {
-    return Some("WAF is enabled");
   }
   if !config.rate_limits.is_empty() {
     return Some("rate limits are configured");
@@ -288,6 +296,8 @@ fn security_headers_disabled(config: &Config) -> bool {
 async fn eligible_static_plan(
   request: &ParsedPlainRequest,
   snapshot: &AppSnapshot,
+  peer_addr: SocketAddr,
+  transport_metadata: WafTransportMetadataInput<'_>,
 ) -> Option<TimedStaticResponsePlan> {
   if request.version != 1
     || (request.method != Method::GET && request.method != Method::HEAD)
@@ -317,6 +327,9 @@ async fn eligible_static_plan(
   let resolved = snapshot
     .route_table
     .resolve(&host, request_path, &snapshot.upstreams)?;
+  if !resolved.execution_plan.fast_path.static_sendfile_like {
+    return None;
+  }
   let static_root = resolved.route.static_root.as_deref()?;
   if resolved
     .route
@@ -326,7 +339,8 @@ async fn eligible_static_plan(
   {
     return None;
   }
-  let plan = static_files::plan_response(
+  let response_send_timeout = static_files::static_response_send_timeout(snapshot, resolved.route);
+  let mut plan = static_files::plan_response(
     &request.method,
     &request.headers,
     request_path,
@@ -335,14 +349,134 @@ async fn eligible_static_plan(
     static_root,
   )
   .await;
-  if matches!(&plan.body, StaticBodyPlan::Empty | StaticBodyPlan::File(_)) {
-    Some(TimedStaticResponsePlan {
-      response: plan,
-      response_send_timeout: static_files::static_response_send_timeout(snapshot, resolved.route),
+  if !matches!(&plan.body, StaticBodyPlan::Empty | StaticBodyPlan::File(_)) {
+    return None;
+  }
+  let request_uri: Uri = request.target.parse().ok()?;
+  let tls = WafTlsMetadata::default();
+  let dynamic_policy = DynamicPolicyContext::default();
+  let request_waf_enabled = snapshot.waf.has_request_rules(&resolved.route.name);
+  let response_waf_enabled = snapshot.waf.has_response_rules(&resolved.route.name);
+  let mut tags = None;
+  let request_id =
+    (request_waf_enabled || response_waf_enabled).then(crate::waf::new_access_log_id);
+  let transaction_id =
+    (request_waf_enabled || response_waf_enabled).then(crate::waf::new_access_log_id);
+  let request_received_at_unix_ms =
+    (request_waf_enabled || response_waf_enabled).then(crate::waf::current_unix_ms);
+  let mut request_waf = if request_waf_enabled {
+    snapshot.waf.evaluate_request(WafRequestInput {
+      request_id: request_id.as_deref().unwrap_or_default(),
+      transaction_id: transaction_id.as_deref().unwrap_or_default(),
+      received_at_unix_ms: request_received_at_unix_ms.unwrap_or_default(),
+      method: &request.method,
+      uri: &request_uri,
+      version: Version::HTTP_11,
+      headers: &request.headers,
+      body: None,
+      peer_addr,
+      downstream_host: &host,
+      downstream_scheme: "http",
+      route_name: &resolved.route.name,
+      tcp_max_hop: None,
+      tls: &tls,
+      protocol: WafProtocol::Http,
+      transport_network: WafTransportNetwork::Tcp,
+      transport_metadata,
+      tags: &*EMPTY_TAGS,
+      dynamic_policy: &dynamic_policy,
     })
   } else {
-    None
+    RequestWafDecision::default()
+  };
+  if !request_waf.tags.is_empty() {
+    let active_tags = tags.get_or_insert_with(HashMap::new);
+    for (key, value) in &request_waf.tags {
+      active_tags.insert(key.clone(), value.clone());
+    }
   }
+  if let Some(terminal) = request_waf.terminal.take() {
+    return Some(TimedStaticResponsePlan {
+      response: static_waf_terminal_plan(terminal, &request_waf.response_header_mutations),
+      response_send_timeout,
+    });
+  }
+  if request_waf.upstream_override.is_some() || request_waf.upstream_pool_override.is_some() {
+    return Some(TimedStaticResponsePlan {
+      response: static_files::text_plan(
+        StatusCode::BAD_GATEWAY,
+        "WAF selected an upstream target for a static route",
+      ),
+      response_send_timeout,
+    });
+  }
+
+  apply_header_mutations(&mut plan.headers, &request_waf.response_header_mutations);
+  if response_waf_enabled {
+    let response_id = crate::waf::new_access_log_id();
+    let request_input = WafRequestInput {
+      request_id: request_id.as_deref().unwrap_or_default(),
+      transaction_id: transaction_id.as_deref().unwrap_or_default(),
+      received_at_unix_ms: request_received_at_unix_ms.unwrap_or_default(),
+      method: &request.method,
+      uri: &request_uri,
+      version: Version::HTTP_11,
+      headers: &request.headers,
+      body: None,
+      peer_addr,
+      downstream_host: &host,
+      downstream_scheme: "http",
+      route_name: &resolved.route.name,
+      tcp_max_hop: None,
+      tls: &tls,
+      protocol: WafProtocol::Http,
+      transport_network: WafTransportNetwork::Tcp,
+      transport_metadata,
+      tags: tags.as_ref().unwrap_or(&*EMPTY_TAGS),
+      dynamic_policy: &dynamic_policy,
+    };
+    let response_waf = snapshot.waf.evaluate_response(WafResponseInput {
+      request: request_input,
+      response_id: &response_id,
+      received_at_unix_ms: crate::waf::current_unix_ms(),
+      version: Version::HTTP_11,
+      status: plan.status,
+      headers: &plan.headers,
+      body: None,
+      upstream_name: "static",
+      upstream_pool: None,
+      upstream_scheme: "file",
+      upstream_connect_time_ms: None,
+      upstream_first_byte_time_ms: None,
+      upstream_error: None,
+    });
+    for access_log in &response_waf.access_logs {
+      snapshot.access_logs.emit(access_log);
+    }
+    if let Some(terminal) = response_waf.terminal {
+      let mut mutations = request_waf.response_header_mutations.clone();
+      mutations.extend(response_waf.response_header_mutations);
+      return Some(TimedStaticResponsePlan {
+        response: static_waf_terminal_plan(terminal, &mutations),
+        response_send_timeout,
+      });
+    }
+    apply_header_mutations(&mut plan.headers, &response_waf.response_header_mutations);
+  }
+  Some(TimedStaticResponsePlan {
+    response: plan,
+    response_send_timeout,
+  })
+}
+
+fn static_waf_terminal_plan(
+  terminal: WafTerminalResponse,
+  mutations: &[HeaderMutation],
+) -> StaticResponsePlan {
+  let mut plan = static_files::text_plan(terminal.status, terminal.body);
+  apply_header_mutations(&mut plan.headers, &terminal.headers);
+  apply_header_mutations(&mut plan.headers, mutations);
+  plan
 }
 
 fn static_fast_path_request_has_body(headers: &HeaderMap) -> bool {
@@ -376,7 +510,15 @@ async fn write_static_plan(
   write_response_head(stream, status, &headers, keep_alive, response_send_timeout).await?;
   match body {
     StaticBodyPlan::Empty => {}
-    StaticBodyPlan::Text(_) => bail!("sendfile fast path cannot write text static body"),
+    StaticBodyPlan::Text(message) => {
+      write_all_tcp(
+        stream,
+        message.as_bytes(),
+        response_send_timeout,
+        "static fast-path text response body write failed",
+      )
+      .await?;
+    }
     StaticBodyPlan::File(file) => {
       sendfile_all(
         stream,

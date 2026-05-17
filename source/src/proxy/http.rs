@@ -24,8 +24,9 @@ use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
 use crate::state::{AppSnapshot, UpstreamClientRef};
 use crate::waf::{
-  BodyNeed, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
-  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations, request_protocol,
+  BodyNeed, RequestWafDecision, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput,
+  WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
+  request_protocol,
 };
 
 pub(crate) mod access_log;
@@ -67,6 +68,84 @@ static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::ne
 
 fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> {
   tags.as_ref().unwrap_or(&EMPTY_TAGS)
+}
+
+#[derive(Debug)]
+struct PlainFastPathWaf {
+  request: RequestWafDecision,
+  request_headers: HeaderMap,
+  tags: Option<HashMap<String, String>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_plain_fast_path_waf<B>(
+  request: &Request<B>,
+  state: &AppSnapshot,
+  resolved: &crate::routes::ResolvedRoute<'_>,
+  client_addr: std::net::SocketAddr,
+  host: &str,
+  tcp_max_hop: Option<u8>,
+  tls: &WafTlsMetadata,
+  protocol: WafProtocol,
+  transport_network: WafTransportNetwork,
+  transport_metadata: WafTransportMetadataInput<'_>,
+  downstream_scheme: &'static str,
+  access_log: &mut SystemAccessLogContext<'_>,
+) -> Result<PlainFastPathWaf, Response<ProxyBody>> {
+  let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
+  let request_headers = if response_waf_enabled {
+    request.headers().clone()
+  } else {
+    HeaderMap::new()
+  };
+  let mut tags = None;
+  let mut request_waf = if state.waf.has_request_rules(&resolved.route.name) {
+    access_log.ensure_request_ids();
+    state.waf.evaluate_request(WafRequestInput {
+      request_id: access_log.request_id(),
+      transaction_id: access_log.transaction_id(),
+      received_at_unix_ms: access_log.request_received_at_unix_ms,
+      method: request.method(),
+      uri: request.uri(),
+      version: request.version(),
+      headers: request.headers(),
+      body: None,
+      peer_addr: client_addr,
+      downstream_host: host,
+      downstream_scheme,
+      route_name: &resolved.route.name,
+      tcp_max_hop,
+      tls,
+      protocol,
+      transport_network,
+      transport_metadata,
+      tags: tags_ref(&tags),
+      dynamic_policy: &access_log.dynamic_policy,
+    })
+  } else {
+    RequestWafDecision::default()
+  };
+
+  if !request_waf.tags.is_empty() {
+    let active_tags = tags.get_or_insert_with(HashMap::new);
+    for (key, value) in &request_waf.tags {
+      active_tags.insert(key.clone(), value.clone());
+    }
+  }
+  access_log.set_tags(tags.clone());
+
+  if let Some(terminal) = request_waf.terminal.take() {
+    return Err(waf_terminal_response(
+      terminal,
+      &request_waf.response_header_mutations,
+    ));
+  }
+
+  Ok(PlainFastPathWaf {
+    request: request_waf,
+    request_headers,
+    tags,
+  })
 }
 
 fn emit_system_access_log(
@@ -418,6 +497,23 @@ where
     http::Version::HTTP_10 | http::Version::HTTP_11
   ) && fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved)
   {
+    let fast_path_waf = match prepare_plain_fast_path_waf(
+      &request,
+      state.as_ref(),
+      &resolved,
+      client_addr,
+      &host,
+      tcp_max_hop,
+      tls.as_ref(),
+      protocol,
+      transport_network,
+      transport_metadata,
+      downstream_scheme,
+      access_log,
+    ) {
+      Ok(waf) => waf,
+      Err(response) => return response,
+    };
     return fast_path::PlainProxyFastPath::handle(
       request,
       state.clone(),
@@ -425,9 +521,16 @@ where
       peer_addr,
       client_addr,
       &host,
+      tcp_max_hop,
+      tls.as_ref(),
+      protocol,
       downstream_scheme,
       request_version,
       transport_network,
+      transport_metadata,
+      fast_path_waf.request,
+      fast_path_waf.request_headers,
+      fast_path_waf.tags,
       access_log,
     )
     .await;
@@ -441,6 +544,23 @@ where
     };
 
   if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved) {
+    let fast_path_waf = match prepare_plain_fast_path_waf(
+      &request,
+      state.as_ref(),
+      &resolved,
+      client_addr,
+      &host,
+      tcp_max_hop,
+      tls.as_ref(),
+      protocol,
+      transport_network,
+      transport_metadata,
+      downstream_scheme,
+      access_log,
+    ) {
+      Ok(waf) => waf,
+      Err(response) => return response,
+    };
     return fast_path::PlainProxyFastPath::handle(
       request,
       state.clone(),
@@ -448,9 +568,16 @@ where
       peer_addr,
       client_addr,
       &host,
+      tcp_max_hop,
+      tls.as_ref(),
+      protocol,
       downstream_scheme,
       request_version,
       transport_network,
+      transport_metadata,
+      fast_path_waf.request,
+      fast_path_waf.request_headers,
+      fast_path_waf.tags,
       access_log,
     )
     .await;
@@ -3262,6 +3389,8 @@ mod body_capture_tests;
 
 #[cfg(test)]
 mod tests {
+  use std::sync::Arc;
+
   mod common {
     include!(concat!(
       env!("CARGO_MANIFEST_DIR"),
@@ -3296,6 +3425,130 @@ mod tests {
     assert_eq!(
       state.alt_svc_header_value.as_ref().unwrap(),
       "h3=\":8443\"; ma=60; persist=1"
+    );
+  }
+
+  #[tokio::test]
+  async fn plain_fast_path_waf_prepare_handles_terminal_and_request_mutations() {
+    let temp_dir = common::TempDir::new("plain-fast-path-waf-prepare");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-waf-prepare");
+    let raw = format!(
+      "{}{}",
+      common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      ),
+      r#"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "block"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/blocked'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "blocked by fast path waf"
+
+[[waf.rules]]
+name = "mark"
+phase = "request"
+priority = 20
+when = "Request.Http.Path == '/ok'"
+
+[[waf.rules.actions]]
+type = "set_request_header"
+name = "x-fast-path-waf"
+value = "yes"
+"#
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
+    let resolved = state
+      .route_table
+      .resolve("example.com", "/", &state.upstreams)
+      .expect("route should resolve");
+    let peer_addr = "127.0.0.1:12345".parse().unwrap();
+    let tls = Arc::new(WafTlsMetadata::default());
+
+    let blocked = Request::builder()
+      .uri("https://example.com/blocked")
+      .body(())
+      .expect("request should build");
+    let mut access_log = SystemAccessLogContext::new(
+      &blocked,
+      peer_addr,
+      None,
+      Some(tls.clone()),
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      true,
+    );
+    let response = prepare_plain_fast_path_waf(
+      &blocked,
+      &state,
+      &resolved,
+      peer_addr,
+      "example.com",
+      None,
+      tls.as_ref(),
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      &mut access_log,
+    )
+    .expect_err("terminal WAF decision should return a response");
+    assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+
+    let marked = Request::builder()
+      .uri("https://example.com/ok")
+      .body(())
+      .expect("request should build");
+    let mut access_log = SystemAccessLogContext::new(
+      &marked,
+      peer_addr,
+      None,
+      Some(tls.clone()),
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      true,
+    );
+    let prepared = prepare_plain_fast_path_waf(
+      &marked,
+      &state,
+      &resolved,
+      peer_addr,
+      "example.com",
+      None,
+      tls.as_ref(),
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      &mut access_log,
+    )
+    .expect("header mutation should stay on the fast path");
+    assert!(
+      prepared
+        .request
+        .request_header_mutations
+        .iter()
+        .any(|mutation| matches!(
+          mutation,
+          crate::waf::HeaderMutation::Set { name, value }
+            if name.as_str() == "x-fast-path-waf" && value == "yes"
+        ))
     );
   }
 
