@@ -981,7 +981,7 @@ path_prefixes = ["/editor/"]
 reason = "editor intentionally submits HTML"
 ```
 
-`max_body_inspection_bytes` also bounds WebSocket stream-WAF frame buffering: an individual WebSocket frame payload larger than this value is closed fail-closed instead of being buffered for prefix inspection.
+`max_body_inspection_bytes` controls the request body, response body, and native stream payload prefix captured for OxiRule and CRS body inspection. The default is `1048576` bytes. Bytes after this prefix are forwarded or replayed without inspection and are reflected through `Body.IsTruncated` or `Stream.Payload.IsTruncated`. The same value also bounds WebSocket stream-WAF frame buffering: an individual WebSocket frame payload larger than this value is closed fail-closed instead of being buffered for prefix inspection.
 
 Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. External rule entries use `path` and resolve under the oxirule directory. A rule entry must specify exactly one of `when` or `path`.
 

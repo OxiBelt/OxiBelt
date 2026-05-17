@@ -27,24 +27,23 @@ pub(crate) fn body_text(bytes: &[u8]) -> String {
   String::from_utf8_lossy(bytes).into_owned()
 }
 
-pub(crate) fn contains(bytes: &[u8], needle: &str) -> bool {
-  body_text(bytes).contains(needle)
+pub(crate) fn contains_text(text: &str, needle: &str) -> bool {
+  text.contains(needle)
 }
 
-pub(crate) fn matches(bytes: &[u8], pattern: &str) -> anyhow::Result<bool> {
-  Ok(Regex::new(pattern)?.is_match(&body_text(bytes)))
+pub(crate) fn matches_text(text: &str, pattern: &str) -> anyhow::Result<bool> {
+  Ok(Regex::new(pattern)?.is_match(text))
 }
 
-pub(crate) fn matches_regex(bytes: &[u8], regex: &Regex) -> bool {
-  regex.is_match(&body_text(bytes))
+pub(crate) fn matches_regex_text(text: &str, regex: &Regex) -> bool {
+  regex.is_match(text)
 }
 
-pub(crate) fn scan_pattern_set(
-  bytes: &[u8],
+pub(crate) fn scan_pattern_set_text(
+  text: &str,
   is_truncated: bool,
   pattern_set: &CompiledPatternSet,
 ) -> BodyScanResult {
-  let text = body_text(bytes);
   match pattern_set {
     CompiledPatternSet::Contains(patterns) => {
       for pattern in patterns {

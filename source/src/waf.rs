@@ -1,9 +1,10 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -1330,6 +1331,7 @@ impl WafEngine {
     let mut tx = TransactionBudget::new(&self.limits);
     let person_proof = self.person_proof.evaluate_request(input.request);
     let empty_functions = FunctionMap::new();
+    let body_text_caches = BodyTextCaches::default();
     let ctx = EvalContext {
       phase: WafPhase::Response,
       mode: self.mode,
@@ -1347,6 +1349,7 @@ impl WafEngine {
       locals: &[],
       limits: &self.limits,
       duplicate_metadata_policy: self.duplicate_metadata_policy,
+      body_text_caches: &body_text_caches,
     };
     AccessLogRecord::from_fields(&fields.fields, &ctx, &mut tx, "system")
   }
@@ -1374,6 +1377,7 @@ impl WafEngine {
     }
 
     let mut tx = TransactionBudget::new(&self.limits);
+    let body_text_caches = BodyTextCaches::default();
     for rule in self.route_plan(input.route_name).request().rules() {
       tx.check_total()?;
       let rule_person_proof = self.person_proof_status_for_rule(&person_proof, rule);
@@ -1399,6 +1403,7 @@ impl WafEngine {
           locals: &[],
           limits: &self.limits,
           duplicate_metadata_policy: self.duplicate_metadata_policy,
+          body_text_caches: &body_text_caches,
         };
         self.evaluate_rule(rule, &ctx, &mut tx)?
       };
@@ -1459,6 +1464,7 @@ impl WafEngine {
     let mut decision = ResponseWafDecision::default();
     let person_proof = self.person_proof.evaluate_request(input.request);
     let mut tx = TransactionBudget::new(&self.limits);
+    let body_text_caches = BodyTextCaches::default();
 
     for rule in self.route_plan(input.request.route_name).response().rules() {
       tx.check_total()?;
@@ -1479,6 +1485,7 @@ impl WafEngine {
         locals: &[],
         limits: &self.limits,
         duplicate_metadata_policy: self.duplicate_metadata_policy,
+        body_text_caches: &body_text_caches,
       };
       let matched = self.evaluate_rule(rule, &ctx, &mut tx)?;
       if !matched {
@@ -1514,6 +1521,7 @@ impl WafEngine {
     let mut decision = WafStreamDecision::default();
     let person_proof = self.person_proof.evaluate_request(input.request);
     let mut tx = TransactionBudget::new(&self.limits);
+    let body_text_caches = BodyTextCaches::default();
 
     for rule in self.route_plan(input.request.route_name).stream().rules() {
       tx.check_total()?;
@@ -1534,6 +1542,7 @@ impl WafEngine {
         locals: &[],
         limits: &self.limits,
         duplicate_metadata_policy: self.duplicate_metadata_policy,
+        body_text_caches: &body_text_caches,
       };
       let matched = self.evaluate_rule(rule, &ctx, &mut tx)?;
       if !matched {
@@ -3187,6 +3196,57 @@ struct EvalContext<'a> {
   locals: &'a [(&'a str, &'a Value)],
   limits: &'a WafLimits,
   duplicate_metadata_policy: WafDuplicateMetadataPolicy,
+  body_text_caches: &'a BodyTextCaches,
+}
+
+#[derive(Default)]
+struct BodyTextCaches {
+  request: OnceLock<String>,
+  response: OnceLock<String>,
+  stream: OnceLock<String>,
+  scan_results: RefCell<HashMap<(BodyTextSlot, String), body_scan::BodyScanResult>>,
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum BodyTextSlot {
+  Request,
+  Response,
+  Stream,
+}
+
+impl BodyTextCaches {
+  fn text(&self, slot: BodyTextSlot, body: WafBodyInput<'_>) -> &str {
+    self
+      .cell(slot)
+      .get_or_init(|| body_scan::body_text(body.bytes))
+      .as_str()
+  }
+
+  fn cell(&self, slot: BodyTextSlot) -> &OnceLock<String> {
+    match slot {
+      BodyTextSlot::Request => &self.request,
+      BodyTextSlot::Response => &self.response,
+      BodyTextSlot::Stream => &self.stream,
+    }
+  }
+
+  fn scan_pattern_set(
+    &self,
+    slot: BodyTextSlot,
+    body: WafBodyInput<'_>,
+    pattern_set_name: &str,
+    pattern_set: &CompiledPatternSet,
+  ) -> body_scan::BodyScanResult {
+    let key = (slot, pattern_set_name.to_string());
+    if let Some(result) = self.scan_results.borrow().get(&key).cloned() {
+      return result;
+    }
+
+    let result =
+      body_scan::scan_pattern_set_text(self.text(slot, body), body.is_truncated, pattern_set);
+    self.scan_results.borrow_mut().insert(key, result.clone());
+    result
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -3789,9 +3849,15 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         .bytes
         .to_vec(),
     )),
-    (ObjectRef::StreamPayload, "Text") => Ok(Value::String(body_scan::body_text(
-      ctx.stream.context("missing stream context")?.payload.bytes,
-    ))),
+    (ObjectRef::StreamPayload, "Text") => {
+      let body = ctx.stream.context("missing stream context")?.payload;
+      Ok(Value::String(
+        ctx
+          .body_text_caches
+          .text(BodyTextSlot::Stream, body)
+          .to_string(),
+      ))
+    }
     (ObjectRef::StreamWebSocket, "Opcode") => Ok(Value::String(
       ctx
         .stream
@@ -4077,7 +4143,14 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
       ctx
         .request
         .body
-        .map(|body| Value::String(body_scan::body_text(body.bytes)))
+        .map(|body| {
+          Value::String(
+            ctx
+              .body_text_caches
+              .text(BodyTextSlot::Request, body)
+              .to_string(),
+          )
+        })
         .unwrap_or(Value::Null),
     ),
     (ObjectRef::RequestTls, "Enabled") => Ok(Value::Bool(ctx.request.tls.enabled)),
@@ -4224,7 +4297,14 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
       ctx
         .response
         .and_then(|response| response.body)
-        .map(|body| Value::String(body_scan::body_text(body.bytes)))
+        .map(|body| {
+          Value::String(
+            ctx
+              .body_text_caches
+              .text(BodyTextSlot::Response, body)
+              .to_string(),
+          )
+        })
         .unwrap_or(Value::Null),
     ),
     (ObjectRef::ResponseBody, "Bytes") => Ok(
@@ -4388,11 +4468,17 @@ fn eval_call(
       eval_tag_call(ctx.request.tags, method, args, ctx, regex_args)
     }
     Value::Object(ObjectRef::RequestTokenBindings) => eval_token_binding_call(ctx, method, args),
-    Value::Object(ObjectRef::RequestBody) => {
-      eval_body_call(ctx.request.body, method, args, ctx, regex_args)
-    }
+    Value::Object(ObjectRef::RequestBody) => eval_body_call(
+      ctx.request.body,
+      BodyTextSlot::Request,
+      method,
+      args,
+      ctx,
+      regex_args,
+    ),
     Value::Object(ObjectRef::ResponseBody) => eval_body_call(
       ctx.response.and_then(|response| response.body),
+      BodyTextSlot::Response,
       method,
       args,
       ctx,
@@ -4400,6 +4486,7 @@ fn eval_call(
     ),
     Value::Object(ObjectRef::StreamPayload) => eval_body_call(
       ctx.stream.map(|stream| stream.payload),
+      BodyTextSlot::Stream,
       method,
       args,
       ctx,
@@ -4820,6 +4907,7 @@ fn eval_pair_map_call(
 
 fn eval_body_call(
   body: Option<WafBodyInput<'_>>,
+  text_slot: BodyTextSlot,
   method: &str,
   args: &[Value],
   ctx: &EvalContext<'_>,
@@ -4835,7 +4923,10 @@ fn eval_body_call(
       ))
     }
     "contains" => Ok(Value::Bool(if let Some(body) = body {
-      body_scan::contains(body.bytes, expect_string_arg(args, 0)?)
+      body_scan::contains_text(
+        ctx.body_text_caches.text(text_slot, body),
+        expect_string_arg(args, 0)?,
+      )
     } else {
       false
     })),
@@ -4843,11 +4934,12 @@ fn eval_body_call(
       let Some(body) = body else {
         return Ok(Value::Bool(false));
       };
+      let text = ctx.body_text_caches.text(text_slot, body);
       if let Some(regex) = regex_args.get(RegexFlavor::Default, 0) {
-        Ok(Value::Bool(body_scan::matches_regex(body.bytes, regex)))
+        Ok(Value::Bool(body_scan::matches_regex_text(text, regex)))
       } else {
-        Ok(Value::Bool(body_scan::matches(
-          body.bytes,
+        Ok(Value::Bool(body_scan::matches_text(
+          text,
           expect_string_arg(args, 0)?,
         )?))
       }
@@ -4862,7 +4954,10 @@ fn eval_body_call(
         .get(pattern_set_name)
         .ok_or_else(|| anyhow!("unknown WAF pattern set {pattern_set_name}"))?;
       Ok(Value::Bool(
-        body_scan::scan_pattern_set(body.bytes, body.is_truncated, pattern_set).matched,
+        ctx
+          .body_text_caches
+          .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set)
+          .matched,
       ))
     }
     "scan" => {
@@ -4876,11 +4971,11 @@ fn eval_body_call(
         .pattern_sets
         .get(pattern_set_name)
         .ok_or_else(|| anyhow!("unknown WAF pattern set {pattern_set_name}"))?;
-      Ok(Value::BodyScanResult(body_scan::scan_pattern_set(
-        body.bytes,
-        body.is_truncated,
-        pattern_set,
-      )))
+      Ok(Value::BodyScanResult(
+        ctx
+          .body_text_caches
+          .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set),
+      ))
     }
     _ => bail!("unknown BodyView method {method}"),
   }
