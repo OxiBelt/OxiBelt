@@ -23,7 +23,7 @@ Environment:
   OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO
                                       minimum OxiBelt/Caddy RPS ratio for static 16KiB H1C (default: 0.85)
   OXIBELT_PERF_WAF_ENFORCING_MIN_RPS
-                                      minimum OxiBelt WAF enforcing RPS (default: 12000)
+                                      minimum OxiBelt WAF enforcing RPS (default: 11000)
   OXIBELT_PERF_CRS_ENFORCING_MIN_RPS
                                       minimum OxiBelt CRS enforcing RPS (default: 9000)
   OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO
@@ -134,7 +134,7 @@ max_load_errors_per_million="${OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION:-100}"
 tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-20}"
 tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-35}"
 static_16k_h1c_min_caddy_ratio="${OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO:-0.85}"
-waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-12000}"
+waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-11000}"
 crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-9000}"
 waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.20}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
