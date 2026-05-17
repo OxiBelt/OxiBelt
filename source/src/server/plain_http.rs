@@ -7,19 +7,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ::http::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING, UPGRADE};
-use ::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use ::http::{HeaderMap, Method, StatusCode, Uri};
 use anyhow::{Context as AnyhowContext, bail};
-use httparse::Status;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
 #[cfg(not(target_env = "musl"))]
 use nix::errno::Errno;
-#[cfg(target_env = "musl")]
-use tokio::io::AsyncSeekExt;
+use tokio::io::AsyncWriteExt;
 #[cfg(not(target_env = "musl"))]
 use tokio::io::Interest;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(target_env = "musl")]
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, trace, warn};
@@ -38,11 +37,12 @@ use crate::state::AppSnapshot;
 use crate::tcp_hop;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
+mod parse;
 mod plain_io;
 mod static_waf;
+use self::parse::{ParsedPlainRequest, ReadRequestOutcome, header_has_token, read_request};
 use self::plain_io::PlainHttpIo;
 
-const READ_CHUNK_BYTES: usize = 4096;
 const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
 
 struct TimedStaticResponsePlan {
@@ -581,178 +581,6 @@ async fn downstream_send_timeout<T>(
     Ok(result) => result.context(context),
     Err(_) => Err(BodyTimeoutError::new(BodyTimeoutKind::DownstreamResponseSend).into()),
   }
-}
-
-enum ReadRequestOutcome {
-  Closed,
-  Fallback {
-    prefix: Vec<u8>,
-    reason: &'static str,
-  },
-  Request(ParsedPlainRequest),
-}
-
-struct ParsedPlainRequest {
-  method: Method,
-  target: String,
-  version: u8,
-  headers: HeaderMap,
-  raw: Vec<u8>,
-  remaining: Vec<u8>,
-}
-
-impl ParsedPlainRequest {
-  fn header_count(&self, name: HeaderName) -> usize {
-    self.headers.get_all(name).iter().count()
-  }
-}
-
-async fn read_request(
-  stream: &mut TcpStream,
-  mut buffer: Vec<u8>,
-  max_header_bytes: usize,
-  max_headers: usize,
-  header_timeout: Duration,
-  shutdown: &mut watch::Receiver<bool>,
-  data_plane_drain: &mut watch::Receiver<bool>,
-) -> anyhow::Result<ReadRequestOutcome> {
-  let started = tokio::time::Instant::now();
-  loop {
-    match parse_buffered_request(&buffer, max_headers) {
-      ParseResult::Complete {
-        header_len,
-        request,
-      } => {
-        let raw = buffer[..header_len].to_vec();
-        let remaining = buffer[header_len..].to_vec();
-        return Ok(ReadRequestOutcome::Request(ParsedPlainRequest {
-          method: request.method,
-          target: request.target,
-          version: request.version,
-          headers: request.headers,
-          raw,
-          remaining,
-        }));
-      }
-      ParseResult::Partial => {}
-      ParseResult::Fallback(reason) => {
-        return Ok(ReadRequestOutcome::Fallback {
-          prefix: buffer,
-          reason,
-        });
-      }
-    }
-    if buffer.len() >= max_header_bytes {
-      return Ok(ReadRequestOutcome::Fallback {
-        prefix: buffer,
-        reason: "header block exceeded configured limit",
-      });
-    }
-    let remaining_timeout = match header_timeout.checked_sub(started.elapsed()) {
-      Some(value) if !value.is_zero() => value,
-      _ => bail!("plain HTTP static sendfile header read timed out"),
-    };
-    let mut chunk = vec![0_u8; READ_CHUNK_BYTES.min(max_header_bytes - buffer.len())];
-    let read = tokio::select! {
-      biased;
-      changed = shutdown.changed() => {
-        if changed.is_ok() && *shutdown.borrow() {
-          return Ok(ReadRequestOutcome::Closed);
-        }
-        continue;
-      }
-      changed = data_plane_drain.changed() => {
-        if changed.is_ok() && *data_plane_drain.borrow() {
-          return Ok(ReadRequestOutcome::Closed);
-        }
-        continue;
-      }
-      result = tokio::time::timeout(remaining_timeout, stream.read(&mut chunk)) => {
-        result.context("plain HTTP static sendfile header read timed out")??
-      }
-    };
-    if read == 0 {
-      if buffer.is_empty() {
-        return Ok(ReadRequestOutcome::Closed);
-      }
-      return Ok(ReadRequestOutcome::Fallback {
-        prefix: buffer,
-        reason: "connection closed during header parse",
-      });
-    }
-    buffer.extend_from_slice(&chunk[..read]);
-  }
-}
-
-enum ParseResult {
-  Complete {
-    header_len: usize,
-    request: ParsedPlainRequestSeed,
-  },
-  Partial,
-  Fallback(&'static str),
-}
-
-struct ParsedPlainRequestSeed {
-  method: Method,
-  target: String,
-  version: u8,
-  headers: HeaderMap,
-}
-
-fn parse_buffered_request(buffer: &[u8], max_headers: usize) -> ParseResult {
-  let mut parsed_headers = vec![httparse::EMPTY_HEADER; max_headers];
-  let mut request = httparse::Request::new(&mut parsed_headers);
-  let header_len = match request.parse(buffer) {
-    Ok(Status::Complete(len)) => len,
-    Ok(Status::Partial) => return ParseResult::Partial,
-    Err(_) => return ParseResult::Fallback("HTTP/1.1 parser rejected request"),
-  };
-  let Some(method) = request.method else {
-    return ParseResult::Fallback("HTTP/1.1 request is missing method");
-  };
-  let method = match Method::from_bytes(method.as_bytes()) {
-    Ok(method) => method,
-    Err(_) => return ParseResult::Fallback("HTTP/1.1 request method is invalid"),
-  };
-  let Some(target) = request.path else {
-    return ParseResult::Fallback("HTTP/1.1 request is missing target");
-  };
-  let Some(version) = request.version else {
-    return ParseResult::Fallback("HTTP/1.1 request is missing version");
-  };
-  let mut headers = HeaderMap::new();
-  for header in request.headers {
-    let name = match HeaderName::from_bytes(header.name.as_bytes()) {
-      Ok(name) => name,
-      Err(_) => return ParseResult::Fallback("HTTP/1.1 header name is invalid"),
-    };
-    let value = match HeaderValue::from_bytes(header.value) {
-      Ok(value) => value,
-      Err(_) => return ParseResult::Fallback("HTTP/1.1 header value is invalid"),
-    };
-    headers.append(name, value);
-  }
-  ParseResult::Complete {
-    header_len,
-    request: ParsedPlainRequestSeed {
-      method,
-      target: target.to_string(),
-      version,
-      headers,
-    },
-  }
-}
-
-fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
-  headers.get_all(name).iter().any(|value| {
-    value.to_str().ok().is_some_and(|value| {
-      value
-        .split(',')
-        .map(str::trim)
-        .any(|candidate| candidate.eq_ignore_ascii_case(token))
-    })
-  })
 }
 
 #[cfg(test)]

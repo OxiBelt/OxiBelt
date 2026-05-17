@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use ::http::{StatusCode, Uri, Version};
 
-use super::{ParsedPlainRequest, TimedStaticResponsePlan};
+use super::{TimedStaticResponsePlan, parse::ParsedPlainRequest};
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::proxy::http::static_files::{self, StaticResponsePlan};
 use crate::state::AppSnapshot;

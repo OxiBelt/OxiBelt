@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "tests_core.rs"]
 mod core;
@@ -120,15 +121,19 @@ struct TestTempDir {
   path: PathBuf,
 }
 
+static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
 impl TestTempDir {
   fn new() -> Self {
+    let id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
     let path = Path::new("/tmp").join(format!(
-      "oxibelt-cache-test-{}-{}",
+      "oxibelt-cache-test-{}-{}-{}",
       std::process::id(),
       SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos(),
+      id
     ));
     std::fs::create_dir_all(&path).unwrap();
     Self { path }
