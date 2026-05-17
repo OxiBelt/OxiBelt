@@ -1,5 +1,10 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
+use hyper::body::{Body, Frame, SizeHint};
 
 use super::*;
 use crate::config::{Config, HttpVersion, ProxyProtocolEgressMode};
@@ -26,6 +31,24 @@ fn request() -> Request<ProxyBody> {
         .boxed(),
     )
     .expect("request should build")
+}
+
+struct PanicBody;
+
+impl Body for PanicBody {
+  type Data = Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    self: Pin<&mut Self>,
+    _cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    panic!("body should not be polled");
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::new()
+  }
 }
 
 fn resolved_route(state: &AppSnapshot) -> ResolvedRoute<'_> {
@@ -61,6 +84,37 @@ async fn plain_route_is_eligible_when_optional_features_are_off() {
 
   assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
   assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
+}
+
+#[tokio::test]
+async fn h2_request_without_content_length_zero_keeps_fast_path_without_guard_drain() {
+  let temp_dir = common::TempDir::new("plain-fast-path-h2-no-cl0");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-h2-no-cl0");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[compression]\nenabled = true",
+    "[compression]\nenabled = false",
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  let resolved = resolved_route(&state);
+  let request = Request::builder()
+    .version(http::Version::HTTP_2)
+    .uri("https://example.com/perf/h2?body=ok")
+    .body(PanicBody)
+    .expect("request should build");
+
+  let guarded = super::super::reject_content_length_zero_data(
+    request,
+    Duration::from_secs(1),
+    http::Version::HTTP_2,
+  )
+  .await
+  .expect("non-CL0 H2 request should pass guard");
+
+  assert!(resolved.execution_plan.fast_path.plain_proxy_h2);
+  assert!(PlainProxyFastPath::eligible(&guarded, &state, &resolved));
 }
 
 #[tokio::test]

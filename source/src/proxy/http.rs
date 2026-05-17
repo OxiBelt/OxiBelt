@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Either, Full, Limited};
 use hyper::body::{Body, Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -2650,10 +2650,12 @@ where
         .context("one-shot HTTP/1.1 upstream request failed")
     }
     TcpUpstreamHttpVersion::H2 => {
-      let (mut sender, connection) =
-        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(io))
-          .await
-          .context("failed to establish one-shot HTTP/2 upstream connection")?;
+      let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
+      crate::h2_tuning::apply_client_conn_defaults(&mut builder);
+      let (mut sender, connection) = builder
+        .handshake(TokioIo::new(io))
+        .await
+        .context("failed to establish one-shot HTTP/2 upstream connection")?;
       tokio::spawn(async move {
         if let Err(error) = connection.await {
           warn!(error = %error, "one-shot HTTP/2 upstream connection failed");
@@ -2779,18 +2781,17 @@ async fn reject_content_length_zero_data<B>(
   request: Request<B>,
   timeout: Duration,
   version: http::Version,
-) -> Result<Request<ProxyBody>, Response<ProxyBody>>
+) -> Result<Request<Either<B, ProxyBody>>, Response<ProxyBody>>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
-  let should_guard = matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3)
-    && content_length_is_exact_zero(request.headers());
-  let request = request.map(|body| body.map_err(Into::into).boxed());
-  if !should_guard {
-    return Ok(request);
+  if !content_length_zero_guard_required(request.headers(), version) {
+    let (parts, body) = request.into_parts();
+    return Ok(Request::from_parts(parts, Either::Left(body)));
   }
 
+  let request = request.map(|body| body.map_err(Into::into).boxed());
   let (parts, body) = request.into_parts();
   let mut body = body::with_read_timeout(body, timeout, BodyTimeoutKind::DownstreamRequestRead);
   while let Some(frame) = body.frame().await {
@@ -2818,7 +2819,10 @@ where
     }
   }
 
-  Ok(Request::from_parts(parts, full_body(bytes::Bytes::new())))
+  Ok(Request::from_parts(
+    parts,
+    Either::Right(full_body(bytes::Bytes::new())),
+  ))
 }
 
 fn cached_entry_response(
@@ -3314,6 +3318,11 @@ fn http1_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -
   matches!(version, http::Version::HTTP_10 | http::Version::HTTP_11)
     && content_length_is_exact_zero(headers)
     && !headers.contains_key(http::header::TRANSFER_ENCODING)
+}
+
+fn content_length_zero_guard_required(headers: &HeaderMap, version: http::Version) -> bool {
+  matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3)
+    && content_length_is_exact_zero(headers)
 }
 
 fn content_length_is_exact_zero(headers: &HeaderMap) -> bool {

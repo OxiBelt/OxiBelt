@@ -14,6 +14,7 @@ pub mod access_log;
 pub mod cache;
 pub mod config;
 pub mod dynamic_policy;
+mod h2_tuning;
 pub mod identity;
 pub mod lifecycle;
 pub mod limits;

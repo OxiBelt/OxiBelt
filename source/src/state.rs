@@ -425,11 +425,13 @@ fn build_client_pool(
     .enable_http2()
     .wrap_connector(negotiated_http);
   let mut negotiated_builder = Client::builder(TokioExecutor::new());
+  crate::h2_tuning::apply_legacy_client_defaults(&mut negotiated_builder);
   negotiated_builder.pool_idle_timeout(Duration::from_millis(upstream.idle_timeout_ms));
   let negotiated = negotiated_builder.build(negotiated_connector);
 
   let mut h2c_builder = Client::builder(TokioExecutor::new());
   h2c_builder.http2_only(true);
+  crate::h2_tuning::apply_legacy_client_defaults(&mut h2c_builder);
   h2c_builder.pool_idle_timeout(Duration::from_millis(upstream.idle_timeout_ms));
   let mut h2c_http = HttpConnector::new();
   h2c_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));

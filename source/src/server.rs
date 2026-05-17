@@ -2076,6 +2076,7 @@ async fn handle_connection(
   if negotiated == b"h2" {
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     builder.timer(TokioTimer::new());
+    crate::h2_tuning::apply_server_defaults(&mut builder);
     builder.max_header_list_size(handshake_state.config.limits.max_total_header_bytes as u32);
     builder.keep_alive_timeout(Duration::from_millis(
       handshake_state.config.limits.client_idle_timeout_ms,
