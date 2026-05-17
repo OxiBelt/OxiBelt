@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "tests_core.rs"]
 mod core;
+#[path = "tests_index.rs"]
+mod index;
 #[path = "tests_shared.rs"]
 mod shared;
 

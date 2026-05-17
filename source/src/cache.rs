@@ -22,6 +22,7 @@ use crate::config::{
 };
 use crate::shared_state::{SharedCacheEntry, SharedCacheLock, SharedState, SharedVaryMatcher};
 
+mod index;
 pub mod signing;
 
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
@@ -127,6 +128,13 @@ pub enum CacheInsertOutcome {
   StoreFailed,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CacheResponseHeadDecision {
+  Cacheable,
+  NotCacheable,
+  Rejected,
+}
+
 #[derive(Debug, Clone)]
 pub struct CacheInsertContext<'a> {
   pub policy_name: Option<&'a str>,
@@ -216,6 +224,7 @@ struct VaryMatcher {
 #[derive(Debug, Default)]
 struct CacheInner {
   entries: HashMap<String, StoredEntry>,
+  index: index::CacheIndex,
   inflight: HashMap<String, Arc<Notify>>,
   order: VecDeque<String>,
   purge_nonces: HashMap<String, SystemTime>,
@@ -398,21 +407,25 @@ impl ResponseCache {
       ctx.uri,
       ctx.request_headers,
     );
+    let uri = ctx.uri.to_string();
+    let lookup_key = index::LookupKey::new(
+      &policy.name,
+      &partition,
+      ctx.scheme,
+      ctx.host,
+      &uri,
+      &base_key,
+    );
     let mut inner = self.inner.lock().expect("cache lock poisoned");
     let now = SystemTime::now();
-    let key = inner
-      .entries
-      .iter()
-      .find(|(_, entry)| {
-        entry.policy == policy.name
-          && entry.base_key == base_key
-          && entry.partition == partition
-          && entry.scheme == ctx.scheme
-          && entry.host == ctx.host
-          && entry.uri == ctx.uri.to_string()
-          && vary_matches(&entry.vary, ctx.request_headers)
+    let key = inner.index.candidates(&lookup_key).and_then(|candidates| {
+      candidates.into_iter().find(|key| {
+        inner
+          .entries
+          .get(key)
+          .is_some_and(|entry| vary_matches(&entry.vary, ctx.request_headers))
       })
-      .map(|(key, _)| key.clone());
+    });
     let Some(key) = key else {
       drop(inner);
       return self.lookup_shared(
@@ -590,7 +603,13 @@ impl ResponseCache {
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
       return CacheInsertOutcome::NotCacheable;
     }
-    let Some(metadata) = cache_metadata(&self.config, &policy, ctx.request_headers, &entry) else {
+    let Some(metadata) = cache_metadata(
+      &self.config,
+      &policy,
+      ctx.request_headers,
+      entry.status,
+      &entry.headers,
+    ) else {
       return CacheInsertOutcome::NotCacheable;
     };
     let base_key = expanded_cache_key(
@@ -668,6 +687,7 @@ impl ResponseCache {
     }
     add_size(&mut inner, &stored);
     inner.order.push_back(variant_key.clone());
+    index_entry(&mut inner, &stored);
     inner.entries.insert(variant_key, stored);
     self.evict_if_needed(&mut inner, &policy);
     CacheInsertOutcome::Stored
@@ -696,6 +716,47 @@ impl ResponseCache {
         body: cached_entry.body.clone(),
       },
     );
+  }
+
+  pub fn response_head_decision(
+    &self,
+    ctx: CacheInsertContext<'_>,
+    status: StatusCode,
+    response_headers: &HeaderMap,
+    content_length: Option<usize>,
+  ) -> CacheResponseHeadDecision {
+    if !self.policy_enabled(ctx.policy_name, ctx.method) {
+      return CacheResponseHeadDecision::NotCacheable;
+    }
+    let Some(policy) = self.policy(ctx.policy_name) else {
+      return CacheResponseHeadDecision::NotCacheable;
+    };
+    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
+      return CacheResponseHeadDecision::NotCacheable;
+    }
+    if cache_metadata(
+      &self.config,
+      policy,
+      ctx.request_headers,
+      status,
+      response_headers,
+    )
+    .is_none()
+    {
+      return CacheResponseHeadDecision::NotCacheable;
+    }
+    let stored_headers = stored_response_headers(response_headers, &self.config);
+    if content_length.is_some_and(|body_len| {
+      body_len
+        .checked_add(header_size(&stored_headers))
+        .is_none_or(|size| size > self.config.max_size_bytes)
+    }) {
+      return CacheResponseHeadDecision::Rejected;
+    }
+    if !admit_response_head(policy, status, response_headers, content_length) {
+      return CacheResponseHeadDecision::Rejected;
+    }
+    CacheResponseHeadDecision::Cacheable
   }
 
   pub fn purge_exact(&self, policy: &str, scheme: &str, host: &str, uri: &str) -> usize {
@@ -1108,11 +1169,7 @@ impl ResponseCache {
       let Some(oldest) = inner.order.pop_front() else {
         break;
       };
-      if let Some(removed) = inner.entries.remove(&oldest) {
-        subtract_size(inner, &removed);
-        remove_metadata(&removed);
-        removed.remove_body();
-      }
+      remove_entry(inner, &oldest);
     }
   }
 
@@ -1188,6 +1245,7 @@ impl ResponseCache {
           referenced_bodies.insert(body_path.clone());
           add_size(&mut inner, &stored);
           inner.order.push_back(stored.variant_key.clone());
+          index_entry(&mut inner, &stored);
           inner.entries.insert(stored.variant_key.clone(), stored);
           inner.disk_recovered_entries_total += 1;
         }
@@ -1223,6 +1281,7 @@ impl Drop for ResponseCache {
       }
     }
     inner.order.clear();
+    inner.index.clear();
     inner.memory_size = 0;
     inner.disk_size = 0;
     inner.tmpfs_size = 0;
@@ -1293,26 +1352,27 @@ fn cache_metadata(
   config: &CacheConfig,
   policy: &CachePolicyRuntime,
   request_headers: &HeaderMap,
-  entry: &CacheEntry,
+  status: StatusCode,
+  response_headers: &HeaderMap,
 ) -> Option<ResponseMetadata> {
-  if entry.status == StatusCode::PARTIAL_CONTENT {
+  if status == StatusCode::PARTIAL_CONTENT {
     return None;
   }
-  if !cacheable_status(policy, entry.status) {
+  if !cacheable_status(policy, status) {
     return None;
   }
-  if response_has_set_cookie(&entry.headers) {
+  if response_has_set_cookie(response_headers) {
     return None;
   }
   let request_directives = cache_control_directives(request_headers);
   if request_directives.has("no-store") {
     return None;
   }
-  let directives = cache_control_directives(&entry.headers);
+  let directives = cache_control_directives(response_headers);
   let surrogate = config
     .surrogate
     .enabled
-    .then(|| surrogate_control_directives(&entry.headers))
+    .then(|| surrogate_control_directives(response_headers))
     .flatten();
   if surrogate
     .as_ref()
@@ -1327,7 +1387,7 @@ fn cache_metadata(
     return None;
   }
   let vary = vary_matchers(
-    &entry.headers,
+    response_headers,
     request_headers,
     policy.max_vary_fields,
     MAX_VARY_VALUE_BYTES,
@@ -1341,13 +1401,13 @@ fn cache_metadata(
         directives
           .seconds("s-maxage")
           .or_else(|| directives.seconds("max-age"))
-          .or_else(|| expires_ttl(&entry.headers, now))
+          .or_else(|| expires_ttl(response_headers, now))
           .unwrap_or(policy.default_ttl_seconds)
       } else {
         policy.default_ttl_seconds
       }
     });
-  if policy.negative_statuses.contains(&entry.status) {
+  if policy.negative_statuses.contains(&status) {
     ttl = policy.negative_ttl_seconds;
   }
   if ttl == 0 {
@@ -1784,22 +1844,8 @@ fn admit_entry(
   variant_key: &str,
   entry: &CacheEntry,
 ) -> bool {
-  if !policy.admission.statuses.contains(&entry.status) {
+  if !admit_response_head(policy, entry.status, &entry.headers, Some(entry.body.len())) {
     return false;
-  }
-  if policy.admission.max_body_bytes > 0 && entry.body.len() > policy.admission.max_body_bytes {
-    return false;
-  }
-  if !policy.admission.content_types.is_empty() {
-    let content_type = normalized_content_type(&entry.headers);
-    if !policy
-      .admission
-      .content_types
-      .iter()
-      .any(|pattern| mime_matches(pattern, &content_type))
-    {
-      return false;
-    }
   }
   if policy.admission.min_hits <= 1 {
     return true;
@@ -1823,6 +1869,34 @@ fn admit_entry(
     inner.admission_counts.remove(&oldest);
   }
   count >= policy.admission.min_hits as u32
+}
+
+fn admit_response_head(
+  policy: &CachePolicyRuntime,
+  status: StatusCode,
+  headers: &HeaderMap,
+  content_length: Option<usize>,
+) -> bool {
+  if !policy.admission.statuses.contains(&status) {
+    return false;
+  }
+  if policy.admission.max_body_bytes > 0
+    && content_length.is_some_and(|length| length > policy.admission.max_body_bytes)
+  {
+    return false;
+  }
+  if !policy.admission.content_types.is_empty() {
+    let content_type = normalized_content_type(headers);
+    if !policy
+      .admission
+      .content_types
+      .iter()
+      .any(|pattern| mime_matches(pattern, &content_type))
+    {
+      return false;
+    }
+  }
+  true
 }
 
 fn normalized_content_type(headers: &HeaderMap) -> String {
@@ -2054,10 +2128,34 @@ fn validate_writable_dir(field_name: &str, path: &Path) -> anyhow::Result<()> {
 
 fn remove_entry(inner: &mut CacheInner, key: &str) {
   if let Some(existing) = inner.entries.remove(key) {
+    unindex_entry(inner, &existing);
     subtract_size(inner, &existing);
     remove_metadata(&existing);
     existing.remove_body();
   }
+}
+
+fn index_entry(inner: &mut CacheInner, entry: &StoredEntry) {
+  inner
+    .index
+    .insert(entry_lookup_key(entry), &entry.variant_key);
+}
+
+fn unindex_entry(inner: &mut CacheInner, entry: &StoredEntry) {
+  inner
+    .index
+    .remove(&entry_lookup_key(entry), &entry.variant_key);
+}
+
+fn entry_lookup_key(entry: &StoredEntry) -> index::LookupKey {
+  index::LookupKey::new(
+    &entry.policy,
+    &entry.partition,
+    &entry.scheme,
+    &entry.host,
+    &entry.uri,
+    &entry.base_key,
+  )
 }
 
 fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {

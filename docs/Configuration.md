@@ -875,9 +875,12 @@ Admin purge endpoints:
 POST /cache/purge?policy=default&scheme=https&host=example.test&uri=/path
 POST /cache/purge-prefix?policy=default&scheme=https&host=example.test&path_prefix=/assets/
 POST /cache/purge-tag?policy=default&tag=release-2026-05-09
+POST /admin/v1/cache/purge
 ```
 
-Purge requests also accept optional `partition`. When `[admin.cache_purge_signing]` is enabled, purge requests may authenticate with `X-OxiBelt-Cache-Timestamp`, `X-OxiBelt-Cache-Nonce`, and `X-OxiBelt-Cache-Signature` instead of a bearer token. The signature is base64 HMAC-SHA256 over `OXIBELT-CACHE-PURGE-V1\n{method}\n{path_and_query}\n{sha256(body)}\n{timestamp}\n{nonce}`; signed purge requests must use an empty body.
+The `/admin/v1/cache/purge` endpoint accepts JSON with `"type": "exact"`, `"prefix"`, or `"tag"`, plus the same selectors used by the query endpoints. Exact purge uses `policy`, `scheme`, `host`, `uri`, and optional `partition`; prefix purge uses `path_prefix`; tag purge uses `tag` plus optional `scheme`, `host`, and `partition`. It returns `{"purged": number}` and requires a bearer token with `cache_operator` or `admin`.
+
+Query-string purge requests also accept optional `partition`. When `[admin.cache_purge_signing]` is enabled, the `/cache/purge*` query endpoints may authenticate with `X-OxiBelt-Cache-Timestamp`, `X-OxiBelt-Cache-Nonce`, and `X-OxiBelt-Cache-Signature` instead of a bearer token. The signature is base64 HMAC-SHA256 over `OXIBELT-CACHE-PURGE-V1\n{method}\n{path_and_query}\n{sha256(body)}\n{timestamp}\n{nonce}`; signed purge requests must use an empty body. The JSON v1 purge endpoint is bearer-token only.
 
 Admin cache diagnostics and warming endpoints:
 

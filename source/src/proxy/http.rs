@@ -3056,6 +3056,35 @@ async fn maybe_cache_response(
     return response;
   }
   let (mut parts, body) = response.into_parts();
+  let content_length = exact_response_content_length(&parts.headers);
+  match state.cache.response_head_decision(
+    crate::cache::CacheInsertContext {
+      policy_name: route_cache,
+      scheme,
+      host,
+      method,
+      uri,
+      request_headers,
+    },
+    parts.status,
+    &parts.headers,
+    content_length,
+  ) {
+    crate::cache::CacheResponseHeadDecision::Cacheable => {}
+    crate::cache::CacheResponseHeadDecision::Rejected => {
+      state.metrics.record_cache_admission_rejection();
+      if state.cache.strip_surrogate_control(route_cache) {
+        parts.headers.remove("surrogate-control");
+      }
+      return Response::from_parts(parts, body);
+    }
+    crate::cache::CacheResponseHeadDecision::NotCacheable => {
+      if state.cache.strip_surrogate_control(route_cache) {
+        parts.headers.remove("surrogate-control");
+      }
+      return Response::from_parts(parts, body);
+    }
+  }
   let collect_limit = cache_response_collect_limit(&state.config);
   if body
     .size_hint()
@@ -3121,6 +3150,15 @@ async fn maybe_cache_response(
       )
     }
   }
+}
+
+fn exact_response_content_length(headers: &HeaderMap) -> Option<usize> {
+  let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
+  let value = values.next()?;
+  if values.next().is_some() {
+    return None;
+  }
+  value.to_str().ok()?.trim().parse().ok()
 }
 
 fn cache_response_collect_limit(config: &Config) -> usize {

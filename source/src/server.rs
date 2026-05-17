@@ -464,6 +464,18 @@ async fn admin_response(
     return admin::cache_warm_response(request, state.clone(), &actor, &method, peer_addr).await;
   }
 
+  if path == "/admin/v1/cache/purge" {
+    return admin::cache_purge_json_response(
+      request,
+      snapshot.as_ref(),
+      &actor,
+      &method,
+      scheme,
+      peer_addr,
+    )
+    .await;
+  }
+
   if let Some(response) = admin_waf_response(snapshot.as_ref(), &actor, &method, &path) {
     return response;
   }
@@ -2375,6 +2387,9 @@ fn unique_nonempty(values: impl IntoIterator<Item = String>) -> Vec<String> {
   }
   unique
 }
+
+#[cfg(test)]
+mod admin_json_tests;
 
 #[cfg(test)]
 mod tests {
