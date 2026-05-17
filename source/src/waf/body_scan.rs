@@ -61,7 +61,7 @@ pub(crate) fn scan_pattern_set_text(
     }
     CompiledPatternSet::Regex(patterns) => {
       for pattern in patterns {
-        if let Some(found) = pattern.find(&text) {
+        if let Some(found) = pattern.find(text) {
           return BodyScanResult {
             matched: true,
             pattern: Some(pattern.as_str().to_string()),

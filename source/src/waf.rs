@@ -1,10 +1,9 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -23,6 +22,8 @@ use crate::limits::{LimitState, RateLimitCheck, RateLimitContext};
 use crate::shared_state::SharedState;
 
 mod binary_format;
+mod body_cache;
+mod body_eval;
 mod body_scan;
 mod crs;
 mod defaults;
@@ -35,6 +36,8 @@ mod plan;
 mod runtime_helpers;
 
 use binary_format::bytes_match_format;
+use body_cache::{BodyTextCaches, BodyTextSlot};
+use body_eval::{body_content_method, eval_body_call};
 pub use crs::{CrsCompatibilityMatrix, compatibility_matrix as crs_compatibility_matrix};
 use crs::{CrsDecision, CrsEngine, WafCrsConfig, validate_crs_config};
 use defaults::*;
@@ -3199,56 +3202,6 @@ struct EvalContext<'a> {
   body_text_caches: &'a BodyTextCaches,
 }
 
-#[derive(Default)]
-struct BodyTextCaches {
-  request: OnceLock<String>,
-  response: OnceLock<String>,
-  stream: OnceLock<String>,
-  scan_results: RefCell<HashMap<(BodyTextSlot, String), body_scan::BodyScanResult>>,
-}
-
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-enum BodyTextSlot {
-  Request,
-  Response,
-  Stream,
-}
-
-impl BodyTextCaches {
-  fn text(&self, slot: BodyTextSlot, body: WafBodyInput<'_>) -> &str {
-    self
-      .cell(slot)
-      .get_or_init(|| body_scan::body_text(body.bytes))
-      .as_str()
-  }
-
-  fn cell(&self, slot: BodyTextSlot) -> &OnceLock<String> {
-    match slot {
-      BodyTextSlot::Request => &self.request,
-      BodyTextSlot::Response => &self.response,
-      BodyTextSlot::Stream => &self.stream,
-    }
-  }
-
-  fn scan_pattern_set(
-    &self,
-    slot: BodyTextSlot,
-    body: WafBodyInput<'_>,
-    pattern_set_name: &str,
-    pattern_set: &CompiledPatternSet,
-  ) -> body_scan::BodyScanResult {
-    let key = (slot, pattern_set_name.to_string());
-    if let Some(result) = self.scan_results.borrow().get(&key).cloned() {
-      return result;
-    }
-
-    let result =
-      body_scan::scan_pattern_set_text(self.text(slot, body), body.is_truncated, pattern_set);
-    self.scan_results.borrow_mut().insert(key, result.clone());
-    result
-  }
-}
-
 #[derive(Debug, Clone)]
 enum Expr {
   Bool(bool),
@@ -4903,96 +4856,6 @@ fn eval_pair_map_call(
     }
     _ => bail!("unknown bounded map method {method}"),
   }
-}
-
-fn eval_body_call(
-  body: Option<WafBodyInput<'_>>,
-  text_slot: BodyTextSlot,
-  method: &str,
-  args: &[Value],
-  ctx: &EvalContext<'_>,
-  regex_args: CachedRegexArgs<'_>,
-) -> anyhow::Result<Value> {
-  match method {
-    "isFormat" | "isBinaryFormat" | "matchesFormat" => {
-      let format = expect_string_arg(args, 0)?;
-      Ok(Value::Bool(
-        body
-          .map(|body| bytes_match_format(body.bytes, format))
-          .unwrap_or(false),
-      ))
-    }
-    "contains" => Ok(Value::Bool(if let Some(body) = body {
-      body_scan::contains_text(
-        ctx.body_text_caches.text(text_slot, body),
-        expect_string_arg(args, 0)?,
-      )
-    } else {
-      false
-    })),
-    "matches" => {
-      let Some(body) = body else {
-        return Ok(Value::Bool(false));
-      };
-      let text = ctx.body_text_caches.text(text_slot, body);
-      if let Some(regex) = regex_args.get(RegexFlavor::Default, 0) {
-        Ok(Value::Bool(body_scan::matches_regex_text(text, regex)))
-      } else {
-        Ok(Value::Bool(body_scan::matches_text(
-          text,
-          expect_string_arg(args, 0)?,
-        )?))
-      }
-    }
-    "containsAny" | "matchesAny" => {
-      let pattern_set_name = expect_string_arg(args, 0)?;
-      let Some(body) = body else {
-        return Ok(Value::Bool(false));
-      };
-      let pattern_set = ctx
-        .pattern_sets
-        .get(pattern_set_name)
-        .ok_or_else(|| anyhow!("unknown WAF pattern set {pattern_set_name}"))?;
-      Ok(Value::Bool(
-        ctx
-          .body_text_caches
-          .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set)
-          .matched,
-      ))
-    }
-    "scan" => {
-      let pattern_set_name = expect_string_arg(args, 0)?;
-      let Some(body) = body else {
-        return Ok(Value::BodyScanResult(body_scan::BodyScanResult::no_match(
-          false,
-        )));
-      };
-      let pattern_set = ctx
-        .pattern_sets
-        .get(pattern_set_name)
-        .ok_or_else(|| anyhow!("unknown WAF pattern set {pattern_set_name}"))?;
-      Ok(Value::BodyScanResult(
-        ctx
-          .body_text_caches
-          .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set),
-      ))
-    }
-    _ => bail!("unknown BodyView method {method}"),
-  }
-}
-
-fn body_content_method(method: &str) -> bool {
-  matches!(
-    method,
-    "isFormat"
-      | "isBinaryFormat"
-      | "matchesFormat"
-      | "contains"
-      | "matches"
-      | "containsAny"
-      | "matchesAny"
-      | "scan"
-  )
 }
 
 fn bytes_content_method(method: &str) -> bool {
