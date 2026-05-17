@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
-use crate::config::{
-  BufferingMode, Config, ErrorResponseMode, RouteConfig, StaticFilesSendfileMode, UpstreamConfig,
-};
-use crate::waf::{BodyNeed, WafEngine};
+use crate::config::{Config, RouteConfig, UpstreamConfig};
+use crate::waf::WafEngine;
+
+mod plan;
+use self::plan::route_execution_plan;
+pub use self::plan::{FastPathPlan, RouteExecutionPlan, RouteWafExecutionPlan, WafExecutionPlan};
 
 #[derive(Debug, Clone)]
 pub struct RouteTable {
@@ -65,62 +67,6 @@ impl WildcardHostTrie {
       }
     }
   }
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub struct RouteExecutionPlan {
-  pub fast_path: FastPathPlan,
-  pub waf: RouteWafExecutionPlan,
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub struct FastPathPlan {
-  pub plain_proxy_h1: bool,
-  pub plain_proxy_h2: bool,
-  pub static_small_object: bool,
-  pub static_sendfile_like: bool,
-  pub cache_hit: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub struct RouteWafExecutionPlan {
-  pub request: WafExecutionPlan,
-  pub response: WafExecutionPlan,
-  pub stream_enabled: bool,
-  pub plain_proxy_fast_path_safe: bool,
-  pub static_sendfile_fast_path_safe: bool,
-}
-
-impl RouteWafExecutionPlan {
-  fn disabled() -> Self {
-    Self {
-      plain_proxy_fast_path_safe: true,
-      static_sendfile_fast_path_safe: true,
-      ..Self::default()
-    }
-  }
-
-  fn from_waf(route_name: &str, waf: &WafEngine) -> Self {
-    let request_body_need = waf.request_body_need(route_name);
-    let response_body_need = waf.response_body_need(route_name);
-    Self {
-      request: waf_execution_plan(waf.has_request_rules(route_name), request_body_need),
-      response: waf_execution_plan(waf.has_response_rules(route_name), response_body_need),
-      stream_enabled: waf.requires_stream_inspection(route_name),
-      plain_proxy_fast_path_safe: waf.plain_proxy_fast_path_safe(route_name),
-      static_sendfile_fast_path_safe: waf.static_sendfile_fast_path_safe(route_name),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub enum WafExecutionPlan {
-  #[default]
-  None,
-  HeaderOnly,
-  SizeOnly,
-  PrefixBody,
-  FullBody,
 }
 
 #[derive(Debug, Clone)]
@@ -333,69 +279,6 @@ impl RouteMatch {
   }
 }
 
-fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
-  config.rate_limits.is_empty()
-    && !config.dynamic_policy.enabled
-    && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
-    && route.static_root.is_none()
-    && route.upstream_pool.is_none()
-    && !route.grpc_web
-    && !route.generic_http_upgrade
-    && !route.connect_tunneling
-    && route.buffering.request.is_none()
-    && route.buffering.response.is_none()
-    && config.proxy.buffering.request == BufferingMode::Streaming
-    && config.proxy.buffering.response == BufferingMode::Streaming
-    && config.proxy.http.errors.mode != ErrorResponseMode::Json
-}
-
-fn route_execution_plan(
-  config: &Config,
-  route: &RouteConfig,
-  waf: RouteWafExecutionPlan,
-) -> RouteExecutionPlan {
-  let can_plain_proxy = can_plain_proxy_fast_path(config, route) && waf.plain_proxy_fast_path_safe;
-  let can_static_sendfile =
-    can_static_sendfile_fast_path(config, route) && waf.static_sendfile_fast_path_safe;
-  let can_static_small_object = route.static_root.is_some()
-    && route
-      .compression
-      .as_deref()
-      .is_none_or(|value| value == "off")
-    && waf.static_sendfile_fast_path_safe;
-  RouteExecutionPlan {
-    fast_path: FastPathPlan {
-      plain_proxy_h1: can_plain_proxy,
-      plain_proxy_h2: can_plain_proxy,
-      static_small_object: can_static_small_object,
-      static_sendfile_like: can_static_sendfile,
-      cache_hit: route.cache.is_some(),
-    },
-    waf,
-  }
-}
-
-fn can_static_sendfile_fast_path(config: &Config, route: &RouteConfig) -> bool {
-  config.proxy.static_files.sendfile == StaticFilesSendfileMode::Auto
-    && config.rate_limits.is_empty()
-    && !config.dynamic_policy.enabled
-    && !config.compression.enabled
-    && route.static_root.is_some()
-    && route
-      .compression
-      .as_deref()
-      .is_none_or(|value| value == "off")
-}
-
-fn waf_execution_plan(enabled: bool, body_need: BodyNeed) -> WafExecutionPlan {
-  match (enabled, body_need) {
-    (false, BodyNeed::None) => WafExecutionPlan::None,
-    (_, BodyNeed::None) => WafExecutionPlan::HeaderOnly,
-    (_, BodyNeed::SizeOnly) => WafExecutionPlan::SizeOnly,
-    (_, BodyNeed::PrefixBytes) => WafExecutionPlan::PrefixBody,
-  }
-}
-
 pub fn normalize_host(raw: &str) -> String {
   let trimmed = raw.trim().trim_end_matches('.');
   if trimmed.starts_with('[')
@@ -435,14 +318,6 @@ mod tests {
 
   use super::*;
   use crate::config::{HttpVersion, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig};
-  use crate::waf::WafEngine;
-
-  mod common {
-    include!(concat!(
-      env!("CARGO_MANIFEST_DIR"),
-      "/../tests/rust/common/mod.rs"
-    ));
-  }
 
   fn upstream(name: &str) -> UpstreamConfig {
     UpstreamConfig {
@@ -483,189 +358,6 @@ mod tests {
       timeouts: Default::default(),
       waf: Default::default(),
     }
-  }
-
-  fn parse_config(raw: &str) -> Config {
-    let config: Config = toml::from_str(raw).expect("config should parse");
-    config.validate().expect("config should validate");
-    config
-  }
-
-  fn minimal_proxy_config(extra: &str) -> Config {
-    let temp_dir = common::TempDir::new("route-plan-proxy");
-    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "route-plan");
-    let raw = format!(
-      "{}{}",
-      common::minimal_config_toml(&cert_path, &key_path).replace(
-        "[compression]\nenabled = true",
-        "[compression]\nenabled = false",
-      ),
-      extra
-    );
-    parse_config(&raw)
-  }
-
-  fn minimal_static_config(extra: &str) -> Config {
-    let temp_dir = common::TempDir::new("route-plan-static");
-    let (cert_path, key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "route-plan-static");
-    let root = temp_dir.path().join("public");
-    std::fs::create_dir_all(&root).expect("static root should be created");
-    std::fs::write(root.join("app.txt"), "hello static").expect("static file should be created");
-    let raw = format!(
-      "{}{}{}",
-      common::minimal_config_toml(&cert_path, &key_path)
-        .replace(
-          "[compression]\nenabled = true",
-          "[compression]\nenabled = false",
-        )
-        .replace(
-          "path_prefix = \"/\"\nupstream = \"app\"",
-          &format!("path_prefix = \"/\"\nstatic_root = \"{}\"", root.display()),
-        ),
-      r#"
-
-[proxy.static_files]
-sendfile = "auto"
-"#,
-      extra
-    );
-    parse_config(&raw)
-  }
-
-  fn execution_plan(config: &Config) -> RouteExecutionPlan {
-    let waf = WafEngine::new(config).expect("WAF engine should build");
-    let table = RouteTable::new_with_waf(config, &waf);
-    *table
-      .resolve("example.com", "/", &config.upstreams)
-      .expect("route should resolve")
-      .execution_plan
-  }
-
-  #[test]
-  fn no_waf_plain_proxy_has_h1_and_h2_fast_path_plan() {
-    let plan = execution_plan(&minimal_proxy_config(""));
-
-    assert!(plan.fast_path.plain_proxy_h1);
-    assert!(plan.fast_path.plain_proxy_h2);
-    assert_eq!(plan.waf.request, WafExecutionPlan::None);
-    assert_eq!(plan.waf.response, WafExecutionPlan::None);
-  }
-
-  #[test]
-  fn header_only_waf_keeps_plain_proxy_and_static_sendfile_fast_paths() {
-    let waf = r#"
-
-[waf]
-enabled = true
-
-[[waf.rules]]
-name = "header-only"
-phase = "request"
-priority = 10
-when = "Request.Http.Path == '/blocked'"
-
-[[waf.rules.actions]]
-type = "reject"
-status = 403
-"#;
-    let proxy = execution_plan(&minimal_proxy_config(waf));
-    let static_plan = execution_plan(&minimal_static_config(waf));
-
-    assert_eq!(proxy.waf.request, WafExecutionPlan::HeaderOnly);
-    assert!(proxy.fast_path.plain_proxy_h1);
-    assert!(proxy.fast_path.plain_proxy_h2);
-    assert_eq!(static_plan.waf.request, WafExecutionPlan::HeaderOnly);
-    assert!(static_plan.fast_path.static_sendfile_like);
-  }
-
-  #[test]
-  fn size_only_waf_keeps_static_sendfile_but_disables_plain_proxy_fast_path() {
-    let waf = r#"
-
-[waf]
-enabled = true
-
-[[waf.rules]]
-name = "size-only"
-phase = "request"
-priority = 10
-when = "Request.Body.Size > 8"
-
-[[waf.rules.actions]]
-type = "reject"
-status = 413
-"#;
-    let proxy = execution_plan(&minimal_proxy_config(waf));
-    let static_plan = execution_plan(&minimal_static_config(waf));
-
-    assert_eq!(proxy.waf.request, WafExecutionPlan::SizeOnly);
-    assert!(!proxy.fast_path.plain_proxy_h1);
-    assert_eq!(static_plan.waf.request, WafExecutionPlan::SizeOnly);
-    assert!(static_plan.fast_path.static_sendfile_like);
-  }
-
-  #[test]
-  fn prefix_body_and_stream_waf_disable_fast_paths() {
-    let prefix_waf = r#"
-
-[waf]
-enabled = true
-
-[[waf.rules]]
-name = "prefix"
-phase = "request"
-priority = 10
-when = "Request.Body.contains('secret')"
-
-[[waf.rules.actions]]
-type = "reject"
-status = 403
-"#;
-    let prefix = execution_plan(&minimal_static_config(prefix_waf));
-    assert_eq!(prefix.waf.request, WafExecutionPlan::PrefixBody);
-    assert!(!prefix.fast_path.static_sendfile_like);
-
-    let stream_waf = r#"
-
-[waf]
-enabled = true
-
-[[waf.rules]]
-name = "stream"
-phase = "stream"
-priority = 10
-when = "Stream.Payload.Size > 8"
-
-[[waf.rules.actions]]
-type = "close_stream"
-"#;
-    let stream = execution_plan(&minimal_proxy_config(stream_waf));
-    assert!(stream.waf.stream_enabled);
-    assert!(!stream.fast_path.plain_proxy_h1);
-  }
-
-  #[test]
-  fn waf_upstream_selection_action_disables_plain_proxy_fast_path() {
-    let waf = r#"
-
-[waf]
-enabled = true
-
-[[waf.rules]]
-name = "route"
-phase = "request"
-priority = 10
-when = "Request.Http.Path == '/'"
-
-[[waf.rules.actions]]
-type = "route_to_upstream"
-upstream = "app"
-"#;
-    let plan = execution_plan(&minimal_proxy_config(waf));
-
-    assert_eq!(plan.waf.request, WafExecutionPlan::HeaderOnly);
-    assert!(!plan.fast_path.plain_proxy_h1);
   }
 
   #[test]

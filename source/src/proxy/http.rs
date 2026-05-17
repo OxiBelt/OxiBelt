@@ -24,9 +24,8 @@ use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
 use crate::state::{AppSnapshot, UpstreamClientRef};
 use crate::waf::{
-  BodyNeed, RequestWafDecision, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput,
-  WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
-  request_protocol,
+  BodyNeed, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
+  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations, request_protocol,
 };
 
 pub(crate) mod access_log;
@@ -68,84 +67,6 @@ static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::ne
 
 fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> {
   tags.as_ref().unwrap_or(&EMPTY_TAGS)
-}
-
-#[derive(Debug)]
-struct PlainFastPathWaf {
-  request: RequestWafDecision,
-  request_headers: HeaderMap,
-  tags: Option<HashMap<String, String>>,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_plain_fast_path_waf<B>(
-  request: &Request<B>,
-  state: &AppSnapshot,
-  resolved: &crate::routes::ResolvedRoute<'_>,
-  client_addr: std::net::SocketAddr,
-  host: &str,
-  tcp_max_hop: Option<u8>,
-  tls: &WafTlsMetadata,
-  protocol: WafProtocol,
-  transport_network: WafTransportNetwork,
-  transport_metadata: WafTransportMetadataInput<'_>,
-  downstream_scheme: &'static str,
-  access_log: &mut SystemAccessLogContext<'_>,
-) -> Result<PlainFastPathWaf, Response<ProxyBody>> {
-  let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
-  let request_headers = if response_waf_enabled {
-    request.headers().clone()
-  } else {
-    HeaderMap::new()
-  };
-  let mut tags = None;
-  let mut request_waf = if state.waf.has_request_rules(&resolved.route.name) {
-    access_log.ensure_request_ids();
-    state.waf.evaluate_request(WafRequestInput {
-      request_id: access_log.request_id(),
-      transaction_id: access_log.transaction_id(),
-      received_at_unix_ms: access_log.request_received_at_unix_ms,
-      method: request.method(),
-      uri: request.uri(),
-      version: request.version(),
-      headers: request.headers(),
-      body: None,
-      peer_addr: client_addr,
-      downstream_host: host,
-      downstream_scheme,
-      route_name: &resolved.route.name,
-      tcp_max_hop,
-      tls,
-      protocol,
-      transport_network,
-      transport_metadata,
-      tags: tags_ref(&tags),
-      dynamic_policy: &access_log.dynamic_policy,
-    })
-  } else {
-    RequestWafDecision::default()
-  };
-
-  if !request_waf.tags.is_empty() {
-    let active_tags = tags.get_or_insert_with(HashMap::new);
-    for (key, value) in &request_waf.tags {
-      active_tags.insert(key.clone(), value.clone());
-    }
-  }
-  access_log.set_tags(tags.clone());
-
-  if let Some(terminal) = request_waf.terminal.take() {
-    return Err(waf_terminal_response(
-      terminal,
-      &request_waf.response_header_mutations,
-    ));
-  }
-
-  Ok(PlainFastPathWaf {
-    request: request_waf,
-    request_headers,
-    tags,
-  })
 }
 
 fn emit_system_access_log(
@@ -497,7 +418,7 @@ where
     http::Version::HTTP_10 | http::Version::HTTP_11
   ) && fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved)
   {
-    let fast_path_waf = match prepare_plain_fast_path_waf(
+    let fast_path_waf = match fast_path::prepare_plain_fast_path_waf(
       &request,
       state.as_ref(),
       &resolved,
@@ -512,7 +433,7 @@ where
       access_log,
     ) {
       Ok(waf) => waf,
-      Err(response) => return response,
+      Err(response) => return *response,
     };
     return fast_path::PlainProxyFastPath::handle(
       request,
@@ -544,7 +465,7 @@ where
     };
 
   if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved) {
-    let fast_path_waf = match prepare_plain_fast_path_waf(
+    let fast_path_waf = match fast_path::prepare_plain_fast_path_waf(
       &request,
       state.as_ref(),
       &resolved,
@@ -559,7 +480,7 @@ where
       access_log,
     ) {
       Ok(waf) => waf,
-      Err(response) => return response,
+      Err(response) => return *response,
     };
     return fast_path::PlainProxyFastPath::handle(
       request,
@@ -3388,380 +3309,4 @@ mod webtransport_tests;
 mod body_capture_tests;
 
 #[cfg(test)]
-mod tests {
-  use std::sync::Arc;
-
-  mod common {
-    include!(concat!(
-      env!("CARGO_MANIFEST_DIR"),
-      "/../tests/rust/common/mod.rs"
-    ));
-  }
-
-  use pretty_assertions::assert_eq;
-
-  use super::*;
-  use crate::config::Config;
-
-  fn parse_config(raw: &str) -> Config {
-    let config: Config = toml::from_str(raw).expect("config should parse");
-    config.validate().expect("config should validate");
-    config
-  }
-
-  #[tokio::test]
-  async fn app_snapshot_precomputes_alt_svc_header_value() {
-    let temp_dir = common::TempDir::new("alt-svc-precompute");
-    let (cert_path, key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "alt-svc-precompute");
-    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
-      "http3 = false",
-      "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 60\npersist = true\n\n[quic.socket]\nworkers = \"auto\"\nreuse_port = true",
-    );
-    let state = AppSnapshot::new(parse_config(&raw))
-      .await
-      .expect("snapshot should initialize");
-
-    assert_eq!(
-      state.alt_svc_header_value.as_ref().unwrap(),
-      "h3=\":8443\"; ma=60; persist=1"
-    );
-  }
-
-  #[tokio::test]
-  async fn plain_fast_path_waf_prepare_handles_terminal_and_request_mutations() {
-    let temp_dir = common::TempDir::new("plain-fast-path-waf-prepare");
-    let (cert_path, key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-waf-prepare");
-    let raw = format!(
-      "{}{}",
-      common::minimal_config_toml(&cert_path, &key_path).replace(
-        "[compression]\nenabled = true",
-        "[compression]\nenabled = false",
-      ),
-      r#"
-
-[waf]
-enabled = true
-
-[[waf.rules]]
-name = "block"
-phase = "request"
-priority = 10
-when = "Request.Http.Path == '/blocked'"
-
-[[waf.rules.actions]]
-type = "reject"
-status = 451
-body = "blocked by fast path waf"
-
-[[waf.rules]]
-name = "mark"
-phase = "request"
-priority = 20
-when = "Request.Http.Path == '/ok'"
-
-[[waf.rules.actions]]
-type = "set_request_header"
-name = "x-fast-path-waf"
-value = "yes"
-"#
-    );
-    let state = AppSnapshot::new(parse_config(&raw))
-      .await
-      .expect("snapshot should initialize");
-    let resolved = state
-      .route_table
-      .resolve("example.com", "/", &state.upstreams)
-      .expect("route should resolve");
-    let peer_addr = "127.0.0.1:12345".parse().unwrap();
-    let tls = Arc::new(WafTlsMetadata::default());
-
-    let blocked = Request::builder()
-      .uri("https://example.com/blocked")
-      .body(())
-      .expect("request should build");
-    let mut access_log = SystemAccessLogContext::new(
-      &blocked,
-      peer_addr,
-      None,
-      Some(tls.clone()),
-      WafProtocol::Http,
-      WafTransportNetwork::Tcp,
-      WafTransportMetadataInput::default(),
-      "https",
-      true,
-    );
-    let response = prepare_plain_fast_path_waf(
-      &blocked,
-      &state,
-      &resolved,
-      peer_addr,
-      "example.com",
-      None,
-      tls.as_ref(),
-      WafProtocol::Http,
-      WafTransportNetwork::Tcp,
-      WafTransportMetadataInput::default(),
-      "https",
-      &mut access_log,
-    )
-    .expect_err("terminal WAF decision should return a response");
-    assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
-
-    let marked = Request::builder()
-      .uri("https://example.com/ok")
-      .body(())
-      .expect("request should build");
-    let mut access_log = SystemAccessLogContext::new(
-      &marked,
-      peer_addr,
-      None,
-      Some(tls.clone()),
-      WafProtocol::Http,
-      WafTransportNetwork::Tcp,
-      WafTransportMetadataInput::default(),
-      "https",
-      true,
-    );
-    let prepared = prepare_plain_fast_path_waf(
-      &marked,
-      &state,
-      &resolved,
-      peer_addr,
-      "example.com",
-      None,
-      tls.as_ref(),
-      WafProtocol::Http,
-      WafTransportNetwork::Tcp,
-      WafTransportMetadataInput::default(),
-      "https",
-      &mut access_log,
-    )
-    .expect("header mutation should stay on the fast path");
-    assert!(
-      prepared
-        .request
-        .request_header_mutations
-        .iter()
-        .any(|mutation| matches!(
-          mutation,
-          crate::waf::HeaderMutation::Set { name, value }
-            if name.as_str() == "x-fast-path-waf" && value == "yes"
-        ))
-    );
-  }
-
-  #[test]
-  fn tunnel_connection_limit_hold_keeps_request_permit_until_drop() {
-    let limits = crate::config::LimitsConfig {
-      max_connections: 10,
-      max_connections_per_ip: 1,
-      ..crate::config::LimitsConfig::default()
-    };
-    let limit_state = crate::limits::LimitState::new(None);
-    let ip = "203.0.113.10".parse().unwrap();
-    let mut request_permit = Some(
-      limit_state
-        .acquire_ip_connection(ip, &limits, &[])
-        .expect("initial request permit should be acquired"),
-    );
-
-    let hold = TunnelConnectionLimitHold::capture(&mut request_permit, None);
-
-    assert!(request_permit.is_none());
-    assert_eq!(
-      limit_state.acquire_ip_connection(ip, &limits, &[]).err(),
-      Some(StatusCode::TOO_MANY_REQUESTS)
-    );
-    drop(hold);
-    assert!(limit_state.acquire_ip_connection(ip, &limits, &[]).is_ok());
-  }
-
-  #[test]
-  fn tunnel_connection_limit_hold_keeps_first_request_context_until_drop() {
-    let limits = crate::config::LimitsConfig {
-      max_connections: 10,
-      max_connections_per_ip: 1,
-      ..crate::config::LimitsConfig::default()
-    };
-    let limit_state = crate::limits::LimitState::new(None);
-    let ip = "203.0.113.11".parse().unwrap();
-    let context = ConnectionLimitContext::default();
-    context
-      .bind_first_request(ip, |ip| limit_state.acquire_ip_connection(ip, &limits, &[]))
-      .expect("first request context should bind");
-    let mut request_permit = None;
-
-    let hold = TunnelConnectionLimitHold::capture(&mut request_permit, Some(&context));
-    drop(context);
-
-    assert_eq!(
-      limit_state.acquire_ip_connection(ip, &limits, &[]).err(),
-      Some(StatusCode::TOO_MANY_REQUESTS)
-    );
-    drop(hold);
-    assert!(limit_state.acquire_ip_connection(ip, &limits, &[]).is_ok());
-  }
-
-  #[test]
-  fn effective_timeouts_prefer_route_overrides() {
-    let temp_dir = common::TempDir::new("effective-timeouts");
-    let (cert_path, key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "effective-timeouts");
-    let raw = format!(
-      r#"
-{}
-
-[limits]
-client_body_timeout_ms = 31000
-response_send_timeout_ms = 61000
-websocket_idle_timeout_ms = 71000
-webtransport_idle_timeout_ms = 81000
-
-[[routes]]
-name = "timeout-route"
-hosts = ["timeouts.example.com"]
-path_prefix = "/timeouts"
-upstream = "app"
-
-[routes.timeouts]
-client_body_timeout_ms = 15000
-response_send_timeout_ms = 30000
-websocket_idle_timeout_ms = 60000
-webtransport_idle_timeout_ms = 65000
-upstream_connect_timeout_ms = 1000
-upstream_request_timeout_ms = 15000
-upstream_first_byte_timeout_ms = 2000
-upstream_read_timeout_ms = 10000
-upstream_send_timeout_ms = 11000
-"#,
-      common::minimal_config_toml(&cert_path, &key_path)
-    );
-    let config = parse_config(&raw);
-    let route = config
-      .routes
-      .iter()
-      .find(|route| route.name == "timeout-route")
-      .expect("route should exist");
-    let upstream = &config.upstreams[0];
-
-    let timeouts = EffectiveTimeouts::new(&config, route, upstream);
-
-    assert_eq!(timeouts.response_send, Duration::from_millis(30_000));
-    assert_eq!(timeouts.websocket_idle, Duration::from_millis(60_000));
-    assert_eq!(timeouts.webtransport_idle, Duration::from_millis(65_000));
-    assert_eq!(timeouts.upstream_connect, Duration::from_millis(1_000));
-    assert_eq!(timeouts.upstream_first_byte, Duration::from_millis(2_000));
-    assert_eq!(timeouts.upstream_read, Duration::from_millis(10_000));
-    assert_eq!(timeouts.upstream_send, Duration::from_millis(11_000));
-  }
-
-  #[test]
-  fn effective_first_byte_timeout_is_capped_by_request_timeout() {
-    let temp_dir = common::TempDir::new("first-byte-cap");
-    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "first-byte-cap");
-    let raw = format!(
-      r#"
-{}
-
-[routes.timeouts]
-upstream_request_timeout_ms = 1000
-upstream_first_byte_timeout_ms = 5000
-"#,
-      common::minimal_config_toml(&cert_path, &key_path)
-    );
-    let config = parse_config(&raw);
-    let timeouts = EffectiveTimeouts::new(&config, &config.routes[0], &config.upstreams[0]);
-
-    assert_eq!(timeouts.upstream_first_byte, Duration::from_millis(1_000));
-  }
-
-  #[test]
-  fn client_grpc_deadline_first_byte_timeout_is_not_pool_health_failure() {
-    let caps = semantics::GrpcTimeoutCaps {
-      upstream_first_byte: true,
-    };
-
-    assert!(!should_report_upstream_request_failure(true, caps));
-  }
-
-  #[test]
-  fn configured_first_byte_timeout_still_reports_pool_health_failure() {
-    assert!(should_report_upstream_request_failure(
-      true,
-      semantics::GrpcTimeoutCaps::default()
-    ));
-  }
-
-  #[test]
-  fn non_timeout_upstream_error_still_reports_pool_health_failure() {
-    let caps = semantics::GrpcTimeoutCaps {
-      upstream_first_byte: true,
-    };
-
-    assert!(should_report_upstream_request_failure(false, caps));
-  }
-
-  #[test]
-  fn known_small_response_bypasses_downstream_send_timeout_wrapper() {
-    let response = text_response(StatusCode::OK, "ok");
-    assert!(
-      response
-        .extensions()
-        .get::<body::KnownSmallResponseBody>()
-        .is_some()
-    );
-
-    let response = with_downstream_response_timeout(
-      response,
-      Duration::from_millis(1),
-      WafTransportNetwork::Tcp,
-    );
-
-    assert!(
-      response
-        .extensions()
-        .get::<body::KnownSmallResponseBody>()
-        .is_some()
-    );
-  }
-
-  #[tokio::test]
-  async fn alt_svc_applies_only_to_https_h1_h2_non_switching_responses() {
-    let temp_dir = common::TempDir::new("alt-svc-helper");
-    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "alt-svc-helper");
-    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
-      "http3 = false",
-      "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 120\npersist = false\n\n[quic.socket]\nworkers = \"auto\"\nreuse_port = true",
-    );
-    let state = AppSnapshot::new(parse_config(&raw))
-      .await
-      .expect("snapshot should initialize");
-
-    assert!(should_add_alt_svc(
-      StatusCode::OK,
-      &state,
-      "https",
-      http::Version::HTTP_2
-    ));
-    assert!(!should_add_alt_svc(
-      StatusCode::OK,
-      &state,
-      "https",
-      http::Version::HTTP_3
-    ));
-    assert!(!should_add_alt_svc(
-      StatusCode::OK,
-      &state,
-      "http",
-      http::Version::HTTP_2
-    ));
-    assert!(!should_add_alt_svc(
-      StatusCode::SWITCHING_PROTOCOLS,
-      &state,
-      "https",
-      http::Version::HTTP_11
-    ));
-  }
-}
+mod tests;
