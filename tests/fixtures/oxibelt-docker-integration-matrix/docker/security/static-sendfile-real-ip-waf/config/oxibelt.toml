@@ -1,0 +1,71 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http_bind = "0.0.0.0:8080"
+http_mode = "proxy"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["0.0.0.0/0", "::/0"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = true
+
+[proxy.auto_upgrade]
+enabled = false
+
+[proxy.static_files]
+sendfile = "auto"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "block-real-ip"
+phase = "request"
+priority = 10
+when = "Request.Client.Ip.inCidr('203.0.113.0/24')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "real ip blocked"
+
+[[routes]]
+name = "static-real-ip"
+hosts = ["static-real-ip.example.test"]
+path_prefix = "/static"
+static_root = "public"

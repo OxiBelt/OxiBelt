@@ -22,7 +22,7 @@ use tokio::io::Interest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::config::{
   Config, ConnectionLimitIdentityMode, HttpListenerMode, StaticFilesSendfileMode,
@@ -334,6 +334,23 @@ async fn eligible_static_plan(
     return None;
   }
   let response_send_timeout = static_files::static_response_send_timeout(snapshot, resolved.route);
+  let client_addr = match crate::identity::resolve_client_addr(
+    &request.headers,
+    peer_addr,
+    &snapshot.config.proxy.real_ip,
+  ) {
+    Ok(addr) => addr,
+    Err(error) => {
+      warn!(error = %error, peer = %peer_addr, "rejected untrusted real IP metadata");
+      return Some(TimedStaticResponsePlan {
+        response: static_files::text_plan(
+          StatusCode::BAD_REQUEST,
+          "untrusted forwarded client IP metadata",
+        ),
+        response_send_timeout,
+      });
+    }
+  };
   let plan = static_files::plan_response(
     &request.method,
     &request.headers,
@@ -352,7 +369,7 @@ async fn eligible_static_plan(
       request,
       &request_uri,
       snapshot,
-      peer_addr,
+      client_addr,
       transport_metadata,
       &host,
       &resolved.route.name,

@@ -61,6 +61,41 @@ sendfile = "auto"
   )
 }
 
+async fn run_static_sendfile_request(raw_config: &str, request: &[u8]) -> String {
+  let config: Config = toml::from_str(raw_config).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = Arc::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let (_drain_tx, mut drain) = watch::channel(false);
+    let result = try_sendfile_fast_path(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, SendfilePreflight::Done));
+  });
+
+  let mut client = TcpStream::connect(addr).await.unwrap();
+  client.write_all(request).await.unwrap();
+  let mut response = Vec::new();
+  client.read_to_end(&mut response).await.unwrap();
+  server.await.unwrap();
+  String::from_utf8(response).unwrap()
+}
+
 #[test]
 fn parser_preserves_pipelined_bytes_for_fallback() {
   let request =
@@ -274,6 +309,56 @@ body = "blocked by waf"
 }
 
 #[tokio::test]
+async fn request_waf_uses_resolved_real_ip_on_plain_static_sendfile() {
+  let temp_dir = common::TempDir::new("plain-sendfile-real-ip-request-waf");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-real-ip-request-waf");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "should not be sent")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["127.0.0.1/32"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = true
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "block-real-ip"
+phase = "request"
+priority = 10
+when = "Request.Client.Ip.inCidr('203.0.113.0/24')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "real ip blocked"
+"#,
+  );
+
+  let response = run_static_sendfile_request(
+    &raw,
+    b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-For: 203.0.113.10\r\nConnection: close\r\n\r\n",
+  )
+  .await;
+
+  assert!(response.starts_with("HTTP/1.1 451 "));
+  assert!(response.ends_with("real ip blocked"));
+  assert!(!response.contains("should not be sent"));
+}
+
+#[tokio::test]
 async fn response_waf_can_reject_plain_static_sendfile_before_file_body() {
   let temp_dir = common::TempDir::new("plain-sendfile-waf-response-reject");
   let (cert_path, key_path) =
@@ -343,6 +428,92 @@ body = "response blocked"
   assert!(response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
   assert!(response.ends_with("response blocked"));
   assert!(!response.contains("large enough static body"));
+}
+
+#[tokio::test]
+async fn response_waf_uses_resolved_real_ip_on_plain_static_sendfile() {
+  let temp_dir = common::TempDir::new("plain-sendfile-real-ip-response-waf");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-real-ip-response-waf");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "should not be sent")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["127.0.0.1/32"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = true
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "block-real-ip-response"
+phase = "response"
+priority = 10
+when = "Request.Client.Ip.inCidr('203.0.113.0/24')"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 502
+body = "response real ip blocked"
+"#,
+  );
+
+  let response = run_static_sendfile_request(
+    &raw,
+    b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-For: 203.0.113.10\r\nConnection: close\r\n\r\n",
+  )
+  .await;
+
+  assert!(response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+  assert!(response.ends_with("response real ip blocked"));
+  assert!(!response.contains("should not be sent"));
+}
+
+#[tokio::test]
+async fn untrusted_real_ip_metadata_rejected_on_plain_static_sendfile() {
+  let temp_dir = common::TempDir::new("plain-sendfile-real-ip-untrusted");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-real-ip-untrusted");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "should not be sent")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["10.0.0.0/8"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = true
+"#,
+  );
+
+  let response = run_static_sendfile_request(
+    &raw,
+    b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-For: 203.0.113.10\r\nConnection: close\r\n\r\n",
+  )
+  .await;
+
+  assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+  assert!(response.ends_with("untrusted forwarded client IP metadata"));
+  assert!(!response.contains("should not be sent"));
 }
 
 #[tokio::test]
