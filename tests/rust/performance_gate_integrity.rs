@@ -181,6 +181,47 @@ fn static_16k_ratio_harness(rows: &[&str], min_ratio: &str) -> HarnessRun {
     HarnessRun { output, events }
 }
 
+fn waf_crs_gate_harness(
+    rows: &[&str],
+    waf_min_rps: &str,
+    crs_min_rps: &str,
+    max_p99_ratio: &str,
+) -> HarnessRun {
+    let function = extract_bash_function(
+        &performance_script_text(),
+        "assert_waf_crs_regression_gates",
+    );
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-waf-crs-gate-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    let results_path = temp_dir.join("results.jsonl");
+    fs::write(&results_path, format!("{}\n", rows.join("\n")))
+        .expect("results fixture should be writable");
+    write_waf_crs_gate_harness(&harness_path, &function);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("RESULTS_JSONL", &results_path)
+        .env("WAF_MIN_RPS", waf_min_rps)
+        .env("CRS_MIN_RPS", crs_min_rps)
+        .env("MAX_P99_RATIO", max_p99_ratio)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
 fn write_harness(path: &Path, run_common_loads: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
@@ -274,6 +315,31 @@ fail_with_diagnostics() {{
 {function}
 
 assert_static_16k_h1c_caddy_ratio
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_waf_crs_gate_harness(path: &Path, function: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+results_jsonl="${{RESULTS_JSONL:?}}"
+waf_enforcing_min_rps="${{WAF_MIN_RPS:?}}"
+crs_enforcing_min_rps="${{CRS_MIN_RPS:?}}"
+waf_crs_max_enforce_p99_ratio="${{MAX_P99_RATIO:?}}"
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{function}
+
+assert_waf_crs_regression_gates
 "#
     );
     fs::write(path, harness).expect("Bash harness should be writable");
@@ -470,6 +536,154 @@ fn static_16k_h1c_ratio_gate_ignores_missing_comparator_data() {
     assert!(
         !run.events.contains("FAIL"),
         "missing comparator data should not trip diagnostics"
+    );
+}
+
+#[test]
+fn waf_crs_regression_gate_passes_when_rps_and_p99_are_within_limits() {
+    let run = waf_crs_gate_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-waf-monitor","requests":1000,"rps":13000,"p99_ms":10}"#,
+            r#"{"type":"load","label":"oxibelt-waf-enforcing","requests":1000,"rps":12000,"p99_ms":12}"#,
+            r#"{"type":"load","label":"oxibelt-crs-monitor","requests":1000,"rps":10500,"p99_ms":20}"#,
+            r#"{"type":"load","label":"oxibelt-crs-enforcing","requests":1000,"rps":9000,"p99_ms":24}"#,
+        ],
+        "12000",
+        "9000",
+        "1.20",
+    );
+
+    assert!(
+        run.output.status.success(),
+        "WAF/CRS rows at the configured RPS floors and p99 ratio ceiling should pass"
+    );
+    assert!(
+        !run.events.contains("FAIL"),
+        "passing WAF/CRS rows should not trip diagnostics"
+    );
+}
+
+#[test]
+fn waf_crs_regression_gate_fails_below_waf_enforcing_rps_floor() {
+    let run = waf_crs_gate_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-waf-monitor","requests":1000,"rps":13000,"p99_ms":10}"#,
+            r#"{"type":"load","label":"oxibelt-waf-enforcing","requests":1000,"rps":11999,"p99_ms":12}"#,
+            r#"{"type":"load","label":"oxibelt-crs-monitor","requests":1000,"rps":10500,"p99_ms":20}"#,
+            r#"{"type":"load","label":"oxibelt-crs-enforcing","requests":1000,"rps":9000,"p99_ms":24}"#,
+        ],
+        "12000",
+        "9000",
+        "1.20",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "WAF enforcing below the configured RPS floor should fail"
+    );
+    assert!(
+        run.events
+            .contains("FAIL OxiBelt WAF enforcing regression gate failed"),
+        "failure should identify the WAF enforcing RPS gate"
+    );
+}
+
+#[test]
+fn waf_crs_regression_gate_fails_below_crs_enforcing_rps_floor() {
+    let run = waf_crs_gate_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-waf-monitor","requests":1000,"rps":13000,"p99_ms":10}"#,
+            r#"{"type":"load","label":"oxibelt-waf-enforcing","requests":1000,"rps":12000,"p99_ms":12}"#,
+            r#"{"type":"load","label":"oxibelt-crs-monitor","requests":1000,"rps":10500,"p99_ms":20}"#,
+            r#"{"type":"load","label":"oxibelt-crs-enforcing","requests":1000,"rps":8999,"p99_ms":24}"#,
+        ],
+        "12000",
+        "9000",
+        "1.20",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "CRS enforcing below the configured RPS floor should fail"
+    );
+    assert!(
+        run.events
+            .contains("FAIL OxiBelt CRS enforcing regression gate failed"),
+        "failure should identify the CRS enforcing RPS gate"
+    );
+}
+
+#[test]
+fn waf_crs_regression_gate_fails_when_waf_enforcing_p99_regresses() {
+    let run = waf_crs_gate_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-waf-monitor","requests":1000,"rps":13000,"p99_ms":10}"#,
+            r#"{"type":"load","label":"oxibelt-waf-enforcing","requests":1000,"rps":12000,"p99_ms":12.1}"#,
+            r#"{"type":"load","label":"oxibelt-crs-monitor","requests":1000,"rps":10500,"p99_ms":20}"#,
+            r#"{"type":"load","label":"oxibelt-crs-enforcing","requests":1000,"rps":9000,"p99_ms":24}"#,
+        ],
+        "12000",
+        "9000",
+        "1.20",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "WAF enforcing p99 above the monitor ratio ceiling should fail"
+    );
+    assert!(
+        run.events
+            .contains("FAIL OxiBelt WAF p99 regression gate failed"),
+        "failure should identify the WAF p99 ratio gate"
+    );
+}
+
+#[test]
+fn waf_crs_regression_gate_fails_when_crs_enforcing_p99_regresses() {
+    let run = waf_crs_gate_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-waf-monitor","requests":1000,"rps":13000,"p99_ms":10}"#,
+            r#"{"type":"load","label":"oxibelt-waf-enforcing","requests":1000,"rps":12000,"p99_ms":12}"#,
+            r#"{"type":"load","label":"oxibelt-crs-monitor","requests":1000,"rps":10500,"p99_ms":20}"#,
+            r#"{"type":"load","label":"oxibelt-crs-enforcing","requests":1000,"rps":9000,"p99_ms":24.1}"#,
+        ],
+        "12000",
+        "9000",
+        "1.20",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "CRS enforcing p99 above the monitor ratio ceiling should fail"
+    );
+    assert!(
+        run.events
+            .contains("FAIL OxiBelt CRS p99 regression gate failed"),
+        "failure should identify the CRS p99 ratio gate"
+    );
+}
+
+#[test]
+fn waf_crs_regression_gate_fails_when_required_rows_are_missing() {
+    let run = waf_crs_gate_harness(
+        &[
+            r#"{"type":"load","label":"oxibelt-waf-monitor","requests":1000,"rps":13000,"p99_ms":10}"#,
+            r#"{"type":"load","label":"oxibelt-waf-enforcing","requests":1000,"rps":12000,"p99_ms":12}"#,
+            r#"{"type":"load","label":"oxibelt-crs-enforcing","requests":1000,"rps":9000,"p99_ms":24}"#,
+        ],
+        "12000",
+        "9000",
+        "1.20",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "missing required WAF/CRS rows should fail closed"
+    );
+    assert!(
+        run.events
+            .contains("FAIL missing OxiBelt WAF/CRS performance result: oxibelt-crs-monitor"),
+        "failure should identify the missing WAF/CRS row"
     );
 }
 

@@ -22,6 +22,12 @@ Environment:
                                       OxiBelt H1/H2 baseline p99 latency ceiling
   OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO
                                       minimum OxiBelt/Caddy RPS ratio for static 16KiB H1C (default: 0.85)
+  OXIBELT_PERF_WAF_ENFORCING_MIN_RPS
+                                      minimum OxiBelt WAF enforcing RPS (default: 12000)
+  OXIBELT_PERF_CRS_ENFORCING_MIN_RPS
+                                      minimum OxiBelt CRS enforcing RPS (default: 9000)
+  OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO
+                                      maximum enforcing/monitor p99 ratio for WAF and CRS rows (default: 1.20)
   OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO
                                       test-only OxiBelt baseline fixture override
   OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, probe logs, configs, and stats here
@@ -128,6 +134,9 @@ max_load_errors_per_million="${OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION:-100}"
 tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-20}"
 tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-35}"
 static_16k_h1c_min_caddy_ratio="${OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO:-0.85}"
+waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-12000}"
+crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-9000}"
+waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.20}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
@@ -136,6 +145,18 @@ if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; th
 fi
 if [[ ! "${static_16k_h1c_min_caddy_ratio}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO must be a non-negative number; got '${static_16k_h1c_min_caddy_ratio}'" >&2
+  exit 2
+fi
+if [[ ! "${waf_enforcing_min_rps}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_PERF_WAF_ENFORCING_MIN_RPS must be a non-negative number; got '${waf_enforcing_min_rps}'" >&2
+  exit 2
+fi
+if [[ ! "${crs_enforcing_min_rps}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_PERF_CRS_ENFORCING_MIN_RPS must be a non-negative number; got '${crs_enforcing_min_rps}'" >&2
+  exit 2
+fi
+if [[ ! "${waf_crs_max_enforce_p99_ratio}" =~ ^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)$ ]]; then
+  echo "OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO must be a positive number; got '${waf_crs_max_enforce_p99_ratio}'" >&2
   exit 2
 fi
 
@@ -400,6 +421,66 @@ assert_static_16k_h1c_caddy_ratio() {
   ratio="$(jq -n -r --argjson oxibelt "${oxibelt_rps}" --argjson caddy "${caddy_rps}" '$oxibelt / $caddy')"
   if jq -n -e --argjson ratio "${ratio}" --argjson min "${static_16k_h1c_min_caddy_ratio}" '$ratio < $min' >/dev/null; then
     fail_with_diagnostics "OxiBelt static-16k-h1c regression gate failed: ratio ${ratio} < ${static_16k_h1c_min_caddy_ratio} vs Caddy (${oxibelt_rps} RPS vs ${caddy_rps} RPS)"
+  fi
+}
+
+assert_waf_crs_regression_gates() {
+  local waf_monitor_json waf_enforcing_json crs_monitor_json crs_enforcing_json
+  local waf_enforcing_rps crs_enforcing_rps
+  local waf_monitor_p99 waf_enforcing_p99 crs_monitor_p99 crs_enforcing_p99
+  local waf_p99_ratio crs_p99_ratio
+
+  waf_monitor_json="$(jq -c 'select(.label == "oxibelt-waf-monitor" and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+  waf_enforcing_json="$(jq -c 'select(.label == "oxibelt-waf-enforcing" and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+  crs_monitor_json="$(jq -c 'select(.label == "oxibelt-crs-monitor" and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+  crs_enforcing_json="$(jq -c 'select(.label == "oxibelt-crs-enforcing" and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+
+  if [[ -z "${waf_monitor_json}" ]]; then
+    fail_with_diagnostics "missing OxiBelt WAF/CRS performance result: oxibelt-waf-monitor"
+  fi
+  if [[ -z "${waf_enforcing_json}" ]]; then
+    fail_with_diagnostics "missing OxiBelt WAF/CRS performance result: oxibelt-waf-enforcing"
+  fi
+  if [[ -z "${crs_monitor_json}" ]]; then
+    fail_with_diagnostics "missing OxiBelt WAF/CRS performance result: oxibelt-crs-monitor"
+  fi
+  if [[ -z "${crs_enforcing_json}" ]]; then
+    fail_with_diagnostics "missing OxiBelt WAF/CRS performance result: oxibelt-crs-enforcing"
+  fi
+
+  waf_enforcing_rps="$(jq -r '.rps // 0' <<<"${waf_enforcing_json}")"
+  crs_enforcing_rps="$(jq -r '.rps // 0' <<<"${crs_enforcing_json}")"
+  if jq -n -e --argjson rps "${waf_enforcing_rps}" --argjson min "${waf_enforcing_min_rps}" '$rps < $min' >/dev/null; then
+    fail_with_diagnostics "OxiBelt WAF enforcing regression gate failed: RPS ${waf_enforcing_rps} < ${waf_enforcing_min_rps}"
+  fi
+  if jq -n -e --argjson rps "${crs_enforcing_rps}" --argjson min "${crs_enforcing_min_rps}" '$rps < $min' >/dev/null; then
+    fail_with_diagnostics "OxiBelt CRS enforcing regression gate failed: RPS ${crs_enforcing_rps} < ${crs_enforcing_min_rps}"
+  fi
+
+  waf_monitor_p99="$(jq -r '.p99_ms // 0' <<<"${waf_monitor_json}")"
+  waf_enforcing_p99="$(jq -r '.p99_ms // 0' <<<"${waf_enforcing_json}")"
+  crs_monitor_p99="$(jq -r '.p99_ms // 0' <<<"${crs_monitor_json}")"
+  crs_enforcing_p99="$(jq -r '.p99_ms // 0' <<<"${crs_enforcing_json}")"
+  if jq -n -e --argjson p99 "${waf_monitor_p99}" '$p99 <= 0' >/dev/null; then
+    fail_with_diagnostics "OxiBelt WAF monitor p99 is not positive; cannot evaluate WAF/CRS p99 regression gate"
+  fi
+  if jq -n -e --argjson p99 "${waf_enforcing_p99}" '$p99 <= 0' >/dev/null; then
+    fail_with_diagnostics "OxiBelt WAF enforcing p99 is not positive; cannot evaluate WAF/CRS p99 regression gate"
+  fi
+  if jq -n -e --argjson p99 "${crs_monitor_p99}" '$p99 <= 0' >/dev/null; then
+    fail_with_diagnostics "OxiBelt CRS monitor p99 is not positive; cannot evaluate WAF/CRS p99 regression gate"
+  fi
+  if jq -n -e --argjson p99 "${crs_enforcing_p99}" '$p99 <= 0' >/dev/null; then
+    fail_with_diagnostics "OxiBelt CRS enforcing p99 is not positive; cannot evaluate WAF/CRS p99 regression gate"
+  fi
+
+  waf_p99_ratio="$(jq -n -r --argjson enforcing "${waf_enforcing_p99}" --argjson monitor "${waf_monitor_p99}" '$enforcing / $monitor')"
+  crs_p99_ratio="$(jq -n -r --argjson enforcing "${crs_enforcing_p99}" --argjson monitor "${crs_monitor_p99}" '$enforcing / $monitor')"
+  if jq -n -e --argjson ratio "${waf_p99_ratio}" --argjson max "${waf_crs_max_enforce_p99_ratio}" '$ratio > $max' >/dev/null; then
+    fail_with_diagnostics "OxiBelt WAF p99 regression gate failed: enforcing/monitor ratio ${waf_p99_ratio} > ${waf_crs_max_enforce_p99_ratio} (${waf_enforcing_p99}ms vs ${waf_monitor_p99}ms)"
+  fi
+  if jq -n -e --argjson ratio "${crs_p99_ratio}" --argjson max "${waf_crs_max_enforce_p99_ratio}" '$ratio > $max' >/dev/null; then
+    fail_with_diagnostics "OxiBelt CRS p99 regression gate failed: enforcing/monitor ratio ${crs_p99_ratio} > ${waf_crs_max_enforce_p99_ratio} (${crs_enforcing_p99}ms vs ${crs_monitor_p99}ms)"
   fi
 }
 
@@ -727,6 +808,8 @@ run_oxibelt_specific_benchmarks() {
 
   start_oxibelt crs-enforcing oxibelt
   run_load "oxibelt-crs-enforcing" h2 oxibelt "/perf/crs?body=ok" "${duration_seconds}" "${concurrency}"
+
+  assert_waf_crs_regression_gates
 
   start_oxibelt cache oxibelt
   run_load "oxibelt-cache-miss" h2 oxibelt "/perf/cache-miss?body_repeat=4096&cache_control=no-store" "${duration_seconds}" "${concurrency}"

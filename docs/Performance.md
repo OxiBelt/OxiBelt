@@ -37,6 +37,10 @@ OXIBELT_PERF_SOAK_SECONDS=300
 OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION=100
 OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS=20
 OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS=35
+OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO=0.85
+OXIBELT_PERF_WAF_ENFORCING_MIN_RPS=12000
+OXIBELT_PERF_CRS_ENFORCING_MIN_RPS=9000
+OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO=1.20
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
 
@@ -81,6 +85,8 @@ cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate -- \
 ## Interpreting Results
 
 CI thresholds are sanity gates, not competitive claims. The job fails when the probe produces no traffic, sees handshake request errors, crosses the configured p99 latency ceiling, or sees load request errors above `OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION`. The default load budget is `100`, which permits at most 100 load transport errors per million completed requests so noisy shared runners do not fail a long smoke soak after millions of successful responses. Set it to `0` to restore strict no-error load gating. `results.json` includes a bounded `error_samples` list for request, handshake, and stress errors, while `probe-logs/` keeps the surrounding probe stdout and stderr. OxiBelt and Caddy HTTP/3 are mandatory gates: if their functional QUIC readiness probe fails, the job fails instead of recording a skipped row. It also applies a narrower OxiBelt H1/H2 baseline latency-floor gate after the baseline HTTP/1.1, HTTP/2, and HTTP/3 rows are collected; override `OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS` and `OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS` when intentionally running on slower or noisier hosts. Noisy shared runners can move RPS and tail latency substantially, so compare trends across repeated runs and shards and inspect `docker-stats.jsonl` before treating a single result as a regression.
+
+Targeted regression gates pin known-sensitive paths. The static file group fails when `oxibelt-static-16k-h1c` falls below `OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO` of the matching Caddy row. The `oxibelt-features` group fails when WAF enforcing RPS is below `OXIBELT_PERF_WAF_ENFORCING_MIN_RPS`, CRS enforcing RPS is below `OXIBELT_PERF_CRS_ENFORCING_MIN_RPS`, or either WAF/CRS enforcing p99 exceeds its monitor p99 by more than `OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO`.
 
 The comparison report is a median-based reference over the repeated shard and iteration samples, not a standalone performance claim. It normalizes labels by comparator prefix, so `oxibelt-h1-keepalive`, `nginx-h1-keepalive`, and `caddy-h1-keepalive` are compared as the same `h1-keepalive` scenario. Ratios use median RPS:
 
