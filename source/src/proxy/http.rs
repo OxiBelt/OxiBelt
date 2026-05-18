@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::config::{
-  Config, ConnectionLimitIdentityMode, ErrorResponseMode, HttpVersion, ProxyProtocolEgressMode,
-  RouteConfig, UpstreamConfig,
+  Config, ConnectionLimitIdentityMode, ErrorResponseMode, HttpVersion, ProxyHttp2Config,
+  ProxyProtocolEgressMode, RouteConfig, UpstreamConfig,
 };
 use crate::dynamic_policy::DynamicPolicyRequest;
 use crate::lifecycle::ConnectionDrain;
@@ -2559,14 +2559,14 @@ async fn send_one_shot_with_proxy_protocol(
     .context("upstream TLS handshake failed")?;
     tokio::time::timeout(
       timeouts.upstream_first_byte,
-      send_one_shot_over_tcp_io(tls, request, upstream_version),
+      send_one_shot_over_tcp_io(tls, request, upstream_version, &state.config.proxy.http2),
     )
     .await
     .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
   } else {
     tokio::time::timeout(
       timeouts.upstream_first_byte,
-      send_one_shot_over_tcp_io(stream, request, upstream_version),
+      send_one_shot_over_tcp_io(stream, request, upstream_version, &state.config.proxy.http2),
     )
     .await
     .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
@@ -2636,6 +2636,7 @@ async fn send_one_shot_over_tcp_io<I>(
   io: I,
   request: Request<ProxyBody>,
   upstream_version: TcpUpstreamHttpVersion,
+  http2_config: &ProxyHttp2Config,
 ) -> anyhow::Result<Response<Incoming>>
 where
   I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2657,7 +2658,7 @@ where
     }
     TcpUpstreamHttpVersion::H2 => {
       let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
-      crate::h2_tuning::apply_client_conn_defaults(&mut builder);
+      crate::h2_tuning::apply_client_conn_defaults(&mut builder, http2_config);
       let (mut sender, connection) = builder
         .handshake(TokioIo::new(io))
         .await

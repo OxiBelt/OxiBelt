@@ -436,6 +436,14 @@ expect_continue = "auto" # auto | reject
 priority = "pass"    # pass | ignore
 sse_auto_streaming = true
 
+[proxy.http2]
+adaptive_window = true
+max_concurrent_streams = 1024
+max_send_buf_size = 1048576
+keep_alive_interval_ms = 0
+keep_alive_timeout_ms = 20000
+keep_alive_while_idle = false
+
 [proxy.http.grpc]
 enabled = true
 respect_grpc_timeout = true
@@ -454,6 +462,8 @@ mode = "legacy_plain" # legacy_plain | plain | json
 `proxy.static_files` controls built-in static file transfer behavior. `inline_max_bytes` reads static response bodies at or below the configured size into a single response frame; `0` disables this small-file inline path. `sendfile = "auto"` enables a guarded Linux `sendfile(2)` fast path only for plaintext HTTP/1.1 `GET` and `HEAD` requests that can be proven equivalent to the normal static route path. OxiBelt probes the real kernel `sendfile(2)` path once at runtime; when the probe fails or the platform is not Linux, static routes fall back to the general path, including the small-file inline path. Sendfile responses honor the route or global `response_send_timeout_ms` while waiting on downstream write backpressure. Configured security response headers and request-wide system access logs are preserved on the sendfile path. Header-only and size-only WAF rules may run on the sendfile fast path and use the same resolved Real-IP client identity as the general path. HTTPS, HTTP/2, HTTP/3, WAF rules that require request or response body bytes, dynamic policy, rate limits, compression, Real-IP connection-limit modes, request bodies, upgrades, CONNECT, ambiguous `Content-Length`, and `Transfer-Encoding` all use the general Hyper path instead.
 
 `proxy.http` controls HTTP compatibility details. `early_hints = "pass"` relays upstream `103 Early Hints` where the downstream transport supports interim responses; `drop` keeps the legacy behavior. `trailers = "drop"` removes body trailer frames for ordinary HTTP traffic while preserving native gRPC trailers. `expect_continue = "auto"` accepts `Expect: 100-continue` and rejects unsupported `Expect` values with `417`; `reject` rejects all `Expect` values. `priority = "ignore"` strips RFC 9218 `Priority` headers instead of forwarding them. `sse_auto_streaming = true` keeps `text/event-stream` responses streaming even when response buffering is enabled.
+
+`proxy.http2` applies to downstream HTTP/2 connections and upstream HTTP/2 clients. `adaptive_window = true` lets Hyper tune flow-control windows dynamically and overrides explicit initial window sizes. `max_concurrent_streams` is the advertised remote-initiated stream cap for downstream H2 and the initial locally initiated stream cap for upstream H2. `max_send_buf_size` caps the per-stream HTTP/2 send buffer. `keep_alive_interval_ms = 0` disables HTTP/2 ping keep-alives; when set, `keep_alive_timeout_ms` is the ping acknowledgement timeout and `keep_alive_while_idle` also allows upstream clients to ping idle pooled H2 connections.
 
 `proxy.http.grpc` enables native gRPC HTTP semantics. When enabled, OxiBelt preserves gRPC trailers, honors `grpc-timeout` by capping upstream first-byte and read timeouts, maps generated upstream failures to gRPC status trailers, and only retries gRPC requests when `retry = "safe_unary"`. If a client `grpc-timeout` deadline is the reason an upstream first-byte wait expires, OxiBelt returns the gRPC deadline response without counting that event as a passive upstream-pool health failure.
 
@@ -1040,6 +1050,7 @@ first_byte_timeout_ms = 30000
 read_timeout_ms = 30000
 send_timeout_ms = 30000
 idle_timeout_ms = 75000
+pool_max_idle_per_host = 128
 preserve_host = false
 websocket = true
 webrtc = true
@@ -1059,6 +1070,8 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. Upstream TLS resumption controls OxiBelt's client-side cache only; the upstream server still chooses whether its own tickets are stateful or stateless. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection.
 
 `request_timeout_ms` is the compatibility upper bound for sending a request and receiving response headers. `first_byte_timeout_ms` separately controls the response-header/first-byte wait and is capped by `request_timeout_ms` when both are configured. `read_timeout_ms` is an upstream response body idle timeout. `send_timeout_ms` controls upstream request body send backpressure.
+
+`idle_timeout_ms` is also the idle connection timeout for the upstream Hyper client pool. `pool_max_idle_per_host` caps idle HTTP/1.1 and HTTP/2 TCP upstream connections retained per origin; `0` disables keeping idle connections for that upstream. For `[[upstream_pools]]`, each synthetic upstream server uses `[upstream_pools.keepalive].max_idle` as this cap.
 
 ```toml
 [[upstream_pools]]

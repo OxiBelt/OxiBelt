@@ -43,6 +43,14 @@ trusted_ca_certs = []
 enabled = true
 max_http_version = "h2"
 
+[proxy.http2]
+adaptive_window = true
+max_concurrent_streams = 1024
+max_send_buf_size = 1048576
+keep_alive_interval_ms = 0
+keep_alive_timeout_ms = 20000
+keep_alive_while_idle = false
+
 [proxy.static_files]
 sendfile = "auto"
 inline_max_bytes = 16384
@@ -61,6 +69,7 @@ origin = "http://perf-upstream:18080"
 max_http_version = "h1"
 connect_timeout_ms = 3000
 request_timeout_ms = 30000
+pool_max_idle_per_host = 128
 preserve_host = false
 websocket = false
 webrtc = false

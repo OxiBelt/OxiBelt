@@ -9,13 +9,13 @@ use hyper::body::Incoming;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::cache::ResponseCache;
-use crate::config::{Config, HttpVersion, UpstreamConfig};
+use crate::config::{Config, HttpVersion, ProxyHttp2Config, UpstreamConfig};
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::lifecycle::LifecycleState;
 use crate::limits::LimitState;
@@ -208,8 +208,13 @@ impl AppSnapshot {
     let tls_resumption = previous
       .map(|snapshot| snapshot.tls_resumption.clone())
       .unwrap_or_default();
-    let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs, &tls_resumption)
-      .context("failed to build upstream HTTP clients")?;
+    let clients = build_clients(
+      &upstreams,
+      &config.proxy.trusted_ca_certs,
+      &tls_resumption,
+      &config.proxy.http2,
+    )
+    .context("failed to build upstream HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(&upstreams, &config, &tls_resumption)
       .context("failed to build upstream HTTP/3 pools")?;
     let shared_state = SharedState::new(&config)
@@ -318,6 +323,7 @@ impl AppSnapshot {
       &upstreams,
       &config.proxy.trusted_ca_certs,
       &previous.tls_resumption,
+      &config.proxy.http2,
     )
     .context("failed to build upstream HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(&upstreams, &config, &previous.tls_resumption)
@@ -392,13 +398,14 @@ fn build_clients(
   upstreams: &[UpstreamConfig],
   extra_root_certs: &[std::path::PathBuf],
   tls_resumption: &tls::TlsResumptionState,
+  http2_config: &ProxyHttp2Config,
 ) -> anyhow::Result<UpstreamClientPools> {
   let mut by_upstream = HashMap::new();
   let mut pools = Vec::with_capacity(upstreams.len());
 
   for upstream in upstreams {
     let index = pools.len();
-    let pool = build_client_pool(upstream, extra_root_certs, tls_resumption)
+    let pool = build_client_pool(upstream, extra_root_certs, tls_resumption, http2_config)
       .with_context(|| format!("failed to build clients for upstream {}", upstream.name))?;
     by_upstream.insert(upstream.name.clone(), index);
     pools.push(pool);
@@ -411,6 +418,7 @@ fn build_client_pool(
   upstream: &UpstreamConfig,
   extra_root_certs: &[std::path::PathBuf],
   tls_resumption: &tls::TlsResumptionState,
+  http2_config: &ProxyHttp2Config,
 ) -> anyhow::Result<ClientPool> {
   let h1_tls_config = tls::build_upstream_client_config_with_resumption(
     extra_root_certs,
@@ -439,7 +447,7 @@ fn build_client_pool(
     .enable_http1()
     .wrap_connector(h1_http);
   let mut h1_builder = Client::builder(TokioExecutor::new());
-  h1_builder.pool_idle_timeout(Duration::from_millis(upstream.idle_timeout_ms));
+  apply_client_pool_defaults(&mut h1_builder, upstream);
   let h1_only = h1_builder.build(h1_connector);
 
   let mut negotiated_http = HttpConnector::new();
@@ -453,14 +461,14 @@ fn build_client_pool(
     .enable_http2()
     .wrap_connector(negotiated_http);
   let mut negotiated_builder = Client::builder(TokioExecutor::new());
-  crate::h2_tuning::apply_legacy_client_defaults(&mut negotiated_builder);
-  negotiated_builder.pool_idle_timeout(Duration::from_millis(upstream.idle_timeout_ms));
+  crate::h2_tuning::apply_legacy_client_defaults(&mut negotiated_builder, http2_config);
+  apply_client_pool_defaults(&mut negotiated_builder, upstream);
   let negotiated = negotiated_builder.build(negotiated_connector);
 
   let mut h2c_builder = Client::builder(TokioExecutor::new());
   h2c_builder.http2_only(true);
-  crate::h2_tuning::apply_legacy_client_defaults(&mut h2c_builder);
-  h2c_builder.pool_idle_timeout(Duration::from_millis(upstream.idle_timeout_ms));
+  crate::h2_tuning::apply_legacy_client_defaults(&mut h2c_builder, http2_config);
+  apply_client_pool_defaults(&mut h2c_builder, upstream);
   let mut h2c_http = HttpConnector::new();
   h2c_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
   h2c_http.set_nodelay(true);
@@ -471,6 +479,15 @@ fn build_client_pool(
     negotiated,
     h2c,
   })
+}
+
+fn apply_client_pool_defaults(
+  builder: &mut hyper_util::client::legacy::Builder,
+  upstream: &UpstreamConfig,
+) {
+  builder.pool_timer(TokioTimer::new());
+  builder.pool_idle_timeout(Duration::from_millis(upstream.idle_timeout_ms));
+  builder.pool_max_idle_per_host(upstream.pool_max_idle_per_host);
 }
 
 #[cfg(test)]

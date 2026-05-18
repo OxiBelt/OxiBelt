@@ -44,7 +44,7 @@ OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO=1.20
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
 
-`OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO` is reserved for test fixtures that intentionally replace the baseline OxiBelt config. Normal local and CI performance runs should leave it unset. The default baseline follows the release-oriented auto-worker profile: runtime, TCP accept, and HTTP/3 socket workers resolve from Rust `available_parallelism()` with `1.0` multipliers, TCP/UDP `SO_REUSEPORT` enabled, backlog `8192`, and explicit QUIC socket buffers.
+`OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO` is reserved for test fixtures that intentionally replace the baseline OxiBelt config. Normal local and CI performance runs should leave it unset. The default baseline follows the release-oriented auto-worker profile: runtime, TCP accept, and HTTP/3 socket workers resolve from Rust `available_parallelism()` with `1.0` multipliers, TCP/UDP `SO_REUSEPORT` enabled, backlog `8192`, explicit upstream idle pool caps, HTTP/2 builder tuning, and explicit QUIC socket buffers.
 
 The plain reverse-proxy fast path and plaintext static sendfile path are allowed to stay active for low-cost response metadata work such as configured security response headers and request-wide system access logs. Routes with `compression = "off"` can also use the plain reverse-proxy fast path even when global compression is enabled. Body-transforming compression, cache lookup/fill, WAF inspection that needs body bytes, dynamic policy, rate limiting, upgrades, CONNECT, upstream pools, upstream HTTP/3, PROXY protocol egress, and buffering remain on the general proxy path so HTTP and security semantics stay unchanged.
 

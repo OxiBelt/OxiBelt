@@ -11,12 +11,14 @@ use url::Url;
 use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 
 mod dynamic_policy;
+mod http2;
 mod limits;
 mod stream;
 mod tls;
 mod turn;
 mod workers;
 pub use dynamic_policy::*;
+pub use http2::*;
 use limits::{
   default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
   default_max_webtransport_sessions_per_connection,
@@ -694,6 +696,12 @@ impl Config {
           pool.name
         );
       }
+      if pool.keepalive.idle_timeout_ms == 0 || pool.keepalive.max_lifetime_ms == 0 {
+        bail!(
+          "upstream pool {} keepalive timeout values must be greater than 0",
+          pool.name
+        );
+      }
       let mut server_ids = HashSet::new();
       for (index, server) in pool.servers.iter().enumerate() {
         let server_id = upstream_pool_server_id(index, server);
@@ -1105,6 +1113,14 @@ impl Config {
     }
     if self.proxy.retry.timeout_ms == 0 {
       bail!("proxy.retry.timeout_ms must be greater than 0");
+    }
+    if self.proxy.http2.max_concurrent_streams == 0
+      || self.proxy.http2.max_send_buf_size == 0
+      || self.proxy.http2.keep_alive_timeout_ms == 0
+    {
+      bail!(
+        "proxy.http2 numeric values must be greater than 0, except keep_alive_interval_ms = 0 disables keep-alive pings"
+      );
     }
     self.validate_buffering()?;
     for cidr in &self.proxy.real_ip.trusted_proxies {
@@ -2138,6 +2154,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "forwarded_headers",
       "grpc_web",
       "http",
+      "http2",
       "real_ip",
       "retry",
       "static_files",
@@ -2177,6 +2194,14 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "sse_auto_streaming",
       "grpc",
       "errors",
+    ][..],
+    "proxy.http2" => &[
+      "adaptive_window",
+      "keep_alive_interval_ms",
+      "keep_alive_timeout_ms",
+      "keep_alive_while_idle",
+      "max_concurrent_streams",
+      "max_send_buf_size",
     ][..],
     "proxy.http.grpc" => &["enabled", "respect_grpc_timeout", "retry"][..],
     "proxy.http.errors" => &["mode"][..],
@@ -2428,6 +2453,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_http_version",
       "name",
       "origin",
+      "pool_max_idle_per_host",
       "preserve_host",
       "proxy_protocol_egress",
       "read_timeout_ms",
@@ -3394,6 +3420,8 @@ pub struct ProxyConfig {
   pub buffering: ProxyBufferingConfig,
   #[serde(default)]
   pub http: ProxyHttpConfig,
+  #[serde(default)]
+  pub http2: ProxyHttp2Config,
   #[serde(default)]
   pub static_files: ProxyStaticFilesConfig,
   #[serde(default)]
@@ -4836,6 +4864,8 @@ pub struct UpstreamConfig {
   pub send_timeout_ms: u64,
   #[serde(default = "default_client_idle_timeout_ms")]
   pub idle_timeout_ms: u64,
+  #[serde(default = "default_upstream_pool_max_idle_per_host")]
+  pub pool_max_idle_per_host: usize,
   #[serde(default)]
   pub preserve_host: bool,
   #[serde(default = "default_true")]
@@ -5669,6 +5699,10 @@ fn default_hsts_max_age_seconds() -> u64 {
 
 fn default_pool_keepalive_max_idle() -> usize {
   32
+}
+
+fn default_upstream_pool_max_idle_per_host() -> usize {
+  128
 }
 
 fn default_pool_keepalive_max_lifetime_ms() -> u64 {

@@ -343,6 +343,79 @@ mode = "json"
 }
 
 #[test]
+fn proxy_http2_tuning_defaults_and_custom_values_parse() {
+    let temp_dir = common::TempDir::new("proxy-http2");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "proxy-http2");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let default_config: Config = toml::from_str(&base).expect("config should parse");
+    default_config.validate().expect("config should validate");
+    assert!(default_config.proxy.http2.adaptive_window);
+    assert_eq!(default_config.proxy.http2.max_concurrent_streams, 1024);
+    assert_eq!(default_config.proxy.http2.max_send_buf_size, 1024 * 1024);
+    assert_eq!(default_config.proxy.http2.keep_alive_interval_ms, 0);
+    assert_eq!(default_config.proxy.http2.keep_alive_timeout_ms, 20_000);
+    assert!(!default_config.proxy.http2.keep_alive_while_idle);
+    assert_eq!(default_config.upstreams[0].pool_max_idle_per_host, 128);
+
+    let raw = format!(
+        r#"
+{}
+
+[proxy.http2]
+adaptive_window = false
+max_concurrent_streams = 64
+max_send_buf_size = 262144
+keep_alive_interval_ms = 10000
+keep_alive_timeout_ms = 3000
+keep_alive_while_idle = true
+"#,
+        base.replace(
+            "request_timeout_ms = 30000",
+            "request_timeout_ms = 30000\npool_max_idle_per_host = 7",
+        )
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert!(!config.proxy.http2.adaptive_window);
+    assert_eq!(config.proxy.http2.max_concurrent_streams, 64);
+    assert_eq!(config.proxy.http2.max_send_buf_size, 262_144);
+    assert_eq!(config.proxy.http2.keep_alive_interval_ms, 10_000);
+    assert_eq!(config.proxy.http2.keep_alive_timeout_ms, 3_000);
+    assert!(config.proxy.http2.keep_alive_while_idle);
+    assert_eq!(config.upstreams[0].pool_max_idle_per_host, 7);
+}
+
+#[test]
+fn proxy_http2_rejects_invalid_numeric_values() {
+    let temp_dir = common::TempDir::new("proxy-http2-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-http2-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for setting in [
+        "max_concurrent_streams = 0",
+        "max_send_buf_size = 0",
+        "keep_alive_timeout_ms = 0",
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[proxy.http2]
+{setting}
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        assert!(
+            error.to_string().contains("proxy.http2 numeric values"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn proxy_static_files_defaults_and_custom_values_parse() {
     let temp_dir = common::TempDir::new("proxy-static-files");
     let (cert_path, key_path) =

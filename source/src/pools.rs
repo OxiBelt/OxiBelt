@@ -144,6 +144,7 @@ impl PoolState {
             read_timeout_ms: 30_000,
             send_timeout_ms: 30_000,
             idle_timeout_ms: pool.keepalive.idle_timeout_ms,
+            pool_max_idle_per_host: pool.keepalive.max_idle,
             preserve_host: false,
             websocket: true,
             webrtc: true,
@@ -488,6 +489,21 @@ mod tests {
       ],
       discovery: Vec::new(),
       health_check: UpstreamPoolHealthCheckConfig::default(),
+    }
+  }
+
+  #[test]
+  fn synthetic_upstreams_preserve_keepalive_pool_cap() {
+    let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
+    pool.keepalive.max_idle = 7;
+    pool.keepalive.idle_timeout_ms = 12_345;
+
+    let upstreams = PoolState::synthetic_upstreams(&[pool]);
+
+    assert_eq!(upstreams.len(), 2);
+    for upstream in upstreams {
+      assert_eq!(upstream.pool_max_idle_per_host, 7);
+      assert_eq!(upstream.idle_timeout_ms, 12_345);
     }
   }
 
