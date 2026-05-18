@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use super::parse::{ParseResult, ParsedPlainRequest, header_has_token, parse_buffered_request};
 use super::*;
+use crate::config::Config;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod common {
@@ -177,6 +178,90 @@ async fn eligible_plain_static_get_uses_pre_hyper_sendfile_path() {
 
   assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
   assert!(response.ends_with("hello sendfile"));
+}
+
+#[tokio::test]
+async fn security_headers_are_preserved_on_plain_static_sendfile_path() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
+  let temp_dir = common::TempDir::new("plain-sendfile-security-headers");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-security-headers");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "secure sendfile")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[security.headers]
+hsts = true
+hsts_max_age_seconds = 63072000
+hsts_include_subdomains = true
+hsts_preload = true
+x_content_type_options = "nosniff"
+referrer_policy = "no-referrer"
+permissions_policy = "geolocation=(), camera=()"
+"#,
+  );
+
+  let response = run_static_sendfile_request(
+    &raw,
+    b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+  )
+  .await;
+
+  assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+  assert!(
+    response
+      .contains("strict-transport-security: max-age=63072000; includeSubDomains; preload\r\n")
+  );
+  assert!(response.contains("x-content-type-options: nosniff\r\n"));
+  assert!(response.contains("referrer-policy: no-referrer\r\n"));
+  assert!(response.contains("permissions-policy: geolocation=(), camera=()\r\n"));
+  assert!(response.ends_with("secure sendfile"));
+}
+
+#[tokio::test]
+async fn system_access_log_keeps_plain_static_sendfile_path() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
+  let temp_dir = common::TempDir::new("plain-sendfile-system-access-log");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-system-access-log");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "logged sendfile")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[logging.access_log]
+enabled = true
+stdout = false
+"#,
+  );
+
+  let response = run_static_sendfile_request(
+    &raw,
+    b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+  )
+  .await;
+
+  assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+  assert!(response.ends_with("logged sendfile"));
 }
 
 #[tokio::test]

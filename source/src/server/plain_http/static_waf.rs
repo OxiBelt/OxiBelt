@@ -1,11 +1,11 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::LazyLock;
 use std::time::Duration;
 
-use ::http::{StatusCode, Uri, Version};
+use ::http::{StatusCode, Version};
 
-use super::{TimedStaticResponsePlan, parse::ParsedPlainRequest};
+use super::{
+  TimedStaticResponsePlan, parse::ParsedPlainRequest, static_access_log::StaticFastPathContext,
+};
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::proxy::http::static_files::{self, StaticResponsePlan};
 use crate::state::AppSnapshot;
@@ -15,66 +15,52 @@ use crate::waf::{
   apply_header_mutations,
 };
 
-static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_static_waf(
   request: &ParsedPlainRequest,
-  request_uri: &Uri,
   snapshot: &AppSnapshot,
   client_addr: SocketAddr,
   transport_metadata: WafTransportMetadataInput<'_>,
-  host: &str,
-  route_name: &str,
+  mut access_log: StaticFastPathContext,
   response_send_timeout: Duration,
   mut plan: StaticResponsePlan,
 ) -> TimedStaticResponsePlan {
   let tls = WafTlsMetadata::default();
   let dynamic_policy = DynamicPolicyContext::default();
-  let request_waf_enabled = snapshot.waf.has_request_rules(route_name);
-  let response_waf_enabled = snapshot.waf.has_response_rules(route_name);
-  let mut tags = None;
-  let request_id =
-    (request_waf_enabled || response_waf_enabled).then(crate::waf::new_access_log_id);
-  let transaction_id =
-    (request_waf_enabled || response_waf_enabled).then(crate::waf::new_access_log_id);
-  let request_received_at_unix_ms =
-    (request_waf_enabled || response_waf_enabled).then(crate::waf::current_unix_ms);
+  let request_waf_enabled = snapshot.waf.has_request_rules(&access_log.route_name);
+  let response_waf_enabled = snapshot.waf.has_response_rules(&access_log.route_name);
   let mut request_waf = if request_waf_enabled {
+    access_log.ensure_request_ids();
     snapshot.waf.evaluate_request(WafRequestInput {
-      request_id: request_id.as_deref().unwrap_or_default(),
-      transaction_id: transaction_id.as_deref().unwrap_or_default(),
-      received_at_unix_ms: request_received_at_unix_ms.unwrap_or_default(),
+      request_id: access_log.request_id(),
+      transaction_id: access_log.transaction_id(),
+      received_at_unix_ms: access_log.request_received_at_unix_ms,
       method: &request.method,
-      uri: request_uri,
+      uri: &access_log.request_uri,
       version: Version::HTTP_11,
       headers: &request.headers,
       body: None,
       peer_addr: client_addr,
-      downstream_host: host,
+      downstream_host: &access_log.downstream_host,
       downstream_scheme: "http",
-      route_name,
+      route_name: &access_log.route_name,
       tcp_max_hop: None,
       tls: &tls,
       protocol: WafProtocol::Http,
       transport_network: WafTransportNetwork::Tcp,
       transport_metadata,
-      tags: &EMPTY_TAGS,
+      tags: access_log.tags(),
       dynamic_policy: &dynamic_policy,
     })
   } else {
     RequestWafDecision::default()
   };
-  if !request_waf.tags.is_empty() {
-    let active_tags = tags.get_or_insert_with(HashMap::new);
-    for (key, value) in &request_waf.tags {
-      active_tags.insert(key.clone(), value.clone());
-    }
-  }
+  access_log.add_tags(&request_waf.tags);
   if let Some(terminal) = request_waf.terminal.take() {
     return TimedStaticResponsePlan {
       response: static_waf_terminal_plan(terminal, &request_waf.response_header_mutations),
       response_send_timeout,
+      access_log: Some(access_log),
     };
   }
   if request_waf.upstream_override.is_some() || request_waf.upstream_pool_override.is_some() {
@@ -84,37 +70,38 @@ pub(super) async fn apply_static_waf(
         "WAF selected an upstream target for a static route",
       ),
       response_send_timeout,
+      access_log: Some(access_log),
     };
   }
 
   apply_header_mutations(&mut plan.headers, &request_waf.response_header_mutations);
   if response_waf_enabled {
-    let response_id = crate::waf::new_access_log_id();
+    access_log.ensure_response_ids();
     let request_input = WafRequestInput {
-      request_id: request_id.as_deref().unwrap_or_default(),
-      transaction_id: transaction_id.as_deref().unwrap_or_default(),
-      received_at_unix_ms: request_received_at_unix_ms.unwrap_or_default(),
+      request_id: access_log.request_id(),
+      transaction_id: access_log.transaction_id(),
+      received_at_unix_ms: access_log.request_received_at_unix_ms,
       method: &request.method,
-      uri: request_uri,
+      uri: &access_log.request_uri,
       version: Version::HTTP_11,
       headers: &request.headers,
       body: None,
       peer_addr: client_addr,
-      downstream_host: host,
+      downstream_host: &access_log.downstream_host,
       downstream_scheme: "http",
-      route_name,
+      route_name: &access_log.route_name,
       tcp_max_hop: None,
       tls: &tls,
       protocol: WafProtocol::Http,
       transport_network: WafTransportNetwork::Tcp,
       transport_metadata,
-      tags: tags.as_ref().unwrap_or(&EMPTY_TAGS),
+      tags: access_log.tags(),
       dynamic_policy: &dynamic_policy,
     };
     let response_waf = snapshot.waf.evaluate_response(WafResponseInput {
       request: request_input,
-      response_id: &response_id,
-      received_at_unix_ms: crate::waf::current_unix_ms(),
+      response_id: access_log.response_id(),
+      received_at_unix_ms: access_log.response_received_at_unix_ms,
       version: Version::HTTP_11,
       status: plan.status,
       headers: &plan.headers,
@@ -135,6 +122,7 @@ pub(super) async fn apply_static_waf(
       return TimedStaticResponsePlan {
         response: static_waf_terminal_plan(terminal, &mutations),
         response_send_timeout,
+        access_log: Some(access_log),
       };
     }
     apply_header_mutations(&mut plan.headers, &response_waf.response_header_mutations);
@@ -143,6 +131,7 @@ pub(super) async fn apply_static_waf(
   TimedStaticResponsePlan {
     response: plan,
     response_send_timeout,
+    access_log: Some(access_log),
   }
 }
 

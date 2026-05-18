@@ -17,14 +17,12 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, trace, warn};
 
-use crate::config::{
-  Config, ConnectionLimitIdentityMode, HttpListenerMode, StaticFilesSendfileMode,
-};
+use crate::config::{ConnectionLimitIdentityMode, HttpListenerMode, StaticFilesSendfileMode};
 use crate::lifecycle::{ConnectionDrain, wait_for_listener_or_data_plane_drain};
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http;
 use crate::proxy::http::body::{BodyTimeoutError, BodyTimeoutKind};
-use crate::proxy::http::response::text_response;
+use crate::proxy::http::response::{apply_security_headers, text_response};
 use crate::proxy::http::static_files::{self, StaticBodyPlan, StaticResponsePlan};
 use crate::routes::normalize_host;
 use crate::state::AppSnapshot;
@@ -34,15 +32,18 @@ use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 mod parse;
 mod plain_io;
 mod sendfile;
+mod static_access_log;
 mod static_waf;
 use self::parse::{ParsedPlainRequest, ReadRequestOutcome, header_has_token, read_request};
 use self::plain_io::PlainHttpIo;
+use self::static_access_log::{StaticFastPathContext, emit_system_access_log};
 
 const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
 
 struct TimedStaticResponsePlan {
   response: StaticResponsePlan,
   response_send_timeout: Duration,
+  access_log: Option<StaticFastPathContext>,
 }
 
 enum SendfilePreflight {
@@ -239,7 +240,7 @@ async fn try_sendfile_fast_path_inner(
     };
     let next_buffer = request.remaining.clone();
 
-    let Some(plan) =
+    let Some(mut plan) =
       eligible_static_plan(&request, snapshot.as_ref(), peer_addr, transport_metadata).await
     else {
       let mut prefix = request.raw;
@@ -253,8 +254,9 @@ async fn try_sendfile_fast_path_inner(
     buffer = next_buffer;
 
     let close_after_response = header_has_token(&request.headers, CONNECTION, "close");
+    emit_system_access_log(&request, snapshot.as_ref(), transport_metadata, &mut plan);
     let status = plan.response.status;
-    if let Err(error) = write_static_plan(&mut stream, plan, !close_after_response).await {
+    if let Err(error) = write_static_plan(&mut stream, &plan, !close_after_response).await {
       debug!(error = %error, peer = %peer_addr, "plain HTTP static sendfile response failed");
       return Ok(SendfilePreflight::Done);
     }
@@ -289,24 +291,10 @@ fn sendfile_disabled_reason(
   if config.compression.enabled {
     return Some("compression is enabled");
   }
-  if !security_headers_disabled(config) {
-    return Some("security response headers are configured");
-  }
-  if snapshot.system_access_log.enabled() {
-    return Some("system access log is enabled");
-  }
   if config.limits.connection_limit_identity != ConnectionLimitIdentityMode::ProxyProtocol {
     return Some("Real-IP connection limit identity requires general path");
   }
   None
-}
-
-fn security_headers_disabled(config: &Config) -> bool {
-  let headers = &config.security.headers;
-  !headers.hsts
-    && headers.x_content_type_options.is_none()
-    && headers.referrer_policy.is_none()
-    && headers.permissions_policy.is_none()
 }
 
 async fn eligible_static_plan(
@@ -344,6 +332,7 @@ async fn eligible_static_plan(
     snapshot
       .route_table
       .resolve_normalized_host(&host, request_path, &snapshot.upstreams)?;
+  let request_uri: Uri = request.target.parse().ok()?;
   if !resolved.execution_plan.fast_path.static_sendfile_like {
     return None;
   }
@@ -357,6 +346,17 @@ async fn eligible_static_plan(
     return None;
   }
   let response_send_timeout = static_files::static_response_send_timeout(snapshot, resolved.route);
+  let access_log_needed = snapshot.system_access_log.enabled()
+    || snapshot.waf.has_request_rules(&resolved.route.name)
+    || snapshot.waf.has_response_rules(&resolved.route.name);
+  let mut access_log = access_log_needed.then(|| {
+    StaticFastPathContext::new(
+      request_uri,
+      peer_addr,
+      host.clone(),
+      resolved.route.name.clone(),
+    )
+  });
   let client_addr = match crate::identity::resolve_client_addr(
     &request.headers,
     peer_addr,
@@ -371,10 +371,14 @@ async fn eligible_static_plan(
           "untrusted forwarded client IP metadata",
         ),
         response_send_timeout,
+        access_log,
       });
     }
   };
-  let plan = static_files::plan_response(
+  if let Some(access_log) = access_log.as_mut() {
+    access_log.client_addr = client_addr;
+  }
+  let mut plan = static_files::plan_response(
     &request.method,
     &request.headers,
     request_path,
@@ -386,24 +390,23 @@ async fn eligible_static_plan(
   if !matches!(&plan.body, StaticBodyPlan::Empty | StaticBodyPlan::File(_)) {
     return None;
   }
+  apply_security_headers(&mut plan.headers, &snapshot.config.security.headers);
   if !snapshot.waf.has_request_rules(&resolved.route.name)
     && !snapshot.waf.has_response_rules(&resolved.route.name)
   {
     return Some(TimedStaticResponsePlan {
       response: plan,
       response_send_timeout,
+      access_log,
     });
   }
-  let request_uri: Uri = request.target.parse().ok()?;
   Some(
     static_waf::apply_static_waf(
       request,
-      &request_uri,
       snapshot,
       client_addr,
       transport_metadata,
-      &host,
-      &resolved.route.name,
+      access_log.expect("static WAF should create fast-path access-log context"),
       response_send_timeout,
       plan,
     )
@@ -427,19 +430,21 @@ fn static_fast_path_request_has_body(headers: &HeaderMap) -> bool {
 
 async fn write_static_plan(
   stream: &mut TcpStream,
-  plan: TimedStaticResponsePlan,
+  plan: &TimedStaticResponsePlan,
   keep_alive: bool,
 ) -> anyhow::Result<()> {
   let TimedStaticResponsePlan {
     response,
     response_send_timeout,
+    ..
   } = plan;
   let StaticResponsePlan {
     status,
     headers,
     body,
   } = response;
-  write_response_head(stream, status, &headers, keep_alive, response_send_timeout).await?;
+  let response_send_timeout = *response_send_timeout;
+  write_response_head(stream, *status, headers, keep_alive, response_send_timeout).await?;
   match body {
     StaticBodyPlan::Empty => {}
     StaticBodyPlan::Text(message) => {

@@ -1,6 +1,10 @@
 [logging]
 level = "info"
 
+[logging.access_log]
+enabled = true
+stdout = true
+
 [runtime]
 linux_only = true
 read_only_rootfs_compatible = true
