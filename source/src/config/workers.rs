@@ -4,9 +4,9 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use super::{
-  HotReloadConfig, QuicAltSvcConfig, QuicTransportConfig, QuicUpstreamPoolConfig, QuicZeroRttMode,
-  RuntimeDrainConfig, default_accept_error_backoff_ms, default_runtime_accept_backlog,
-  default_true,
+  HotReloadConfig, QuicAltSvcConfig, QuicEndpointConfig, QuicTransportConfig,
+  QuicUpstreamPoolConfig, QuicZeroRttMode, RawQuicTransportConfig, RuntimeDrainConfig,
+  default_accept_error_backoff_ms, default_runtime_accept_backlog, default_true,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -343,6 +343,10 @@ pub(super) struct RawQuicConfig {
   #[serde(default)]
   transport: QuicTransportConfig,
   #[serde(default)]
+  downstream: RawQuicEndpointConfig,
+  #[serde(default)]
+  upstream: RawQuicEndpointConfig,
+  #[serde(default)]
   socket: RawQuicSocketConfig,
   #[serde(default)]
   upstream_pool: QuicUpstreamPoolConfig,
@@ -356,6 +360,8 @@ impl Default for RawQuicConfig {
       host_key_file: None,
       alt_svc: QuicAltSvcConfig::default(),
       transport: QuicTransportConfig::default(),
+      downstream: RawQuicEndpointConfig::default(),
+      upstream: RawQuicEndpointConfig::default(),
       socket: RawQuicSocketConfig::default(),
       upstream_pool: QuicUpstreamPoolConfig::default(),
     }
@@ -369,6 +375,8 @@ pub struct QuicConfig {
   pub host_key_file: Option<PathBuf>,
   pub alt_svc: QuicAltSvcConfig,
   pub transport: QuicTransportConfig,
+  pub downstream: QuicEndpointConfig,
+  pub upstream: QuicEndpointConfig,
   pub socket: QuicSocketConfig,
   pub upstream_pool: QuicUpstreamPoolConfig,
 }
@@ -381,6 +389,8 @@ impl Default for QuicConfig {
       host_key_file: None,
       alt_svc: QuicAltSvcConfig::default(),
       transport: QuicTransportConfig::default(),
+      downstream: QuicEndpointConfig::default(),
+      upstream: QuicEndpointConfig::default(),
       socket: QuicSocketConfig::default(),
       upstream_pool: QuicUpstreamPoolConfig::default(),
     }
@@ -393,12 +403,17 @@ impl QuicConfig {
     multipliers: WorkerMultipliersConfig,
     parallelism: WorkerParallelism,
   ) -> anyhow::Result<Self> {
+    let transport = raw.transport;
+    let downstream = raw.downstream.resolve(&transport);
+    let upstream = raw.upstream.resolve(&transport);
     Ok(Self {
       retry: raw.retry,
       zero_rtt: raw.zero_rtt,
       host_key_file: raw.host_key_file,
       alt_svc: raw.alt_svc,
-      transport: raw.transport,
+      transport,
+      downstream,
+      upstream,
       socket: QuicSocketConfig::resolve(
         raw.socket,
         multipliers.quic_socket,
@@ -412,17 +427,15 @@ impl QuicConfig {
     if self.alt_svc.max_age_seconds == 0 {
       bail!("quic.alt_svc.max_age_seconds must be greater than 0");
     }
-    if self.transport.max_concurrent_bidi_streams == 0
-      || self.transport.max_concurrent_uni_streams == 0
-      || self.transport.idle_timeout_ms == 0
-      || self.transport.datagram_receive_buffer_bytes == 0
-      || self.transport.datagram_send_buffer_bytes == 0
-    {
-      bail!("quic.transport numeric values must be greater than 0");
-    }
-    if !(1200..=65_527).contains(&self.transport.max_udp_payload_size) {
-      bail!("quic.transport.max_udp_payload_size must be between 1200 and 65527");
-    }
+    self.transport.validate("quic.transport")?;
+    self
+      .downstream
+      .transport
+      .validate("quic.downstream.transport")?;
+    self
+      .upstream
+      .transport
+      .validate("quic.upstream.transport")?;
     if self.upstream_pool.max_connections_per_upstream == 0 {
       bail!("quic.upstream_pool.max_connections_per_upstream must be greater than 0");
     }
@@ -431,6 +444,20 @@ impl QuicConfig {
     }
     self.socket.validate(http3_enabled)?;
     Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+struct RawQuicEndpointConfig {
+  #[serde(default)]
+  transport: RawQuicTransportConfig,
+}
+
+impl RawQuicEndpointConfig {
+  fn resolve(&self, base_transport: &QuicTransportConfig) -> QuicEndpointConfig {
+    QuicEndpointConfig {
+      transport: self.transport.resolve(base_transport),
+    }
   }
 }
 

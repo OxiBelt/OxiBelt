@@ -13,6 +13,7 @@ use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 mod dynamic_policy;
 mod http2;
 mod limits;
+mod quic;
 mod stream;
 mod tls;
 mod turn;
@@ -23,6 +24,8 @@ use limits::{
   default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
   default_max_webtransport_sessions_per_connection,
 };
+pub(crate) use quic::RawQuicTransportConfig;
+pub use quic::*;
 pub use stream::*;
 pub use tls::*;
 pub use turn::*;
@@ -2124,10 +2127,12 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
     "quic" => &[
       "alt_svc",
+      "downstream",
       "host_key_file",
       "retry",
       "socket",
       "transport",
+      "upstream",
       "upstream_pool",
       "zero_rtt",
     ][..],
@@ -2137,9 +2142,74 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "datagram_send_buffer_bytes",
       "gso",
       "idle_timeout_ms",
+      "initial_mtu",
+      "keep_alive_interval_ms",
       "max_concurrent_bidi_streams",
       "max_concurrent_uni_streams",
       "max_udp_payload_size",
+      "min_mtu",
+      "mtu_discovery",
+      "receive_window_bytes",
+      "send_fairness",
+      "send_window_bytes",
+      "stream_receive_window_bytes",
+    ][..],
+    "quic.transport.mtu_discovery" => &[
+      "black_hole_cooldown_ms",
+      "enabled",
+      "interval_ms",
+      "minimum_change",
+      "upper_bound",
+    ][..],
+    "quic.downstream" => &["transport"][..],
+    "quic.downstream.transport" => &[
+      "datagram_receive_buffer_bytes",
+      "datagram_send_buffer_bytes",
+      "gso",
+      "idle_timeout_ms",
+      "initial_mtu",
+      "keep_alive_interval_ms",
+      "max_concurrent_bidi_streams",
+      "max_concurrent_uni_streams",
+      "max_udp_payload_size",
+      "min_mtu",
+      "mtu_discovery",
+      "receive_window_bytes",
+      "send_fairness",
+      "send_window_bytes",
+      "stream_receive_window_bytes",
+    ][..],
+    "quic.downstream.transport.mtu_discovery" => &[
+      "black_hole_cooldown_ms",
+      "enabled",
+      "interval_ms",
+      "minimum_change",
+      "upper_bound",
+    ][..],
+    "quic.upstream" => &["transport"][..],
+    "quic.upstream.transport" => &[
+      "datagram_receive_buffer_bytes",
+      "datagram_send_buffer_bytes",
+      "gso",
+      "idle_timeout_ms",
+      "initial_mtu",
+      "keep_alive_interval_ms",
+      "max_concurrent_bidi_streams",
+      "max_concurrent_uni_streams",
+      "max_udp_payload_size",
+      "min_mtu",
+      "mtu_discovery",
+      "receive_window_bytes",
+      "send_fairness",
+      "send_window_bytes",
+      "stream_receive_window_bytes",
+    ][..],
+    "quic.upstream.transport.mtu_discovery" => &[
+      "black_hole_cooldown_ms",
+      "enabled",
+      "interval_ms",
+      "minimum_change",
+      "upper_bound",
     ][..],
     "quic.socket" => &[
       "receive_buffer_bytes",
@@ -3320,86 +3390,6 @@ pub enum ProxyProtocolVersion {
   V2,
   #[default]
   Any,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum QuicZeroRttMode {
-  #[default]
-  Off,
-  SafeMethods,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct QuicAltSvcConfig {
-  #[serde(default = "default_true")]
-  pub enabled: bool,
-  #[serde(default = "default_quic_alt_svc_max_age_seconds")]
-  pub max_age_seconds: u64,
-  #[serde(default)]
-  pub persist: bool,
-}
-
-impl Default for QuicAltSvcConfig {
-  fn default() -> Self {
-    Self {
-      enabled: true,
-      max_age_seconds: default_quic_alt_svc_max_age_seconds(),
-      persist: false,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct QuicTransportConfig {
-  #[serde(default = "default_quic_max_concurrent_streams")]
-  pub max_concurrent_bidi_streams: u64,
-  #[serde(default = "default_quic_max_concurrent_streams")]
-  pub max_concurrent_uni_streams: u64,
-  #[serde(default = "default_quic_idle_timeout_ms")]
-  pub idle_timeout_ms: u64,
-  #[serde(default = "default_quic_datagram_buffer_bytes")]
-  pub datagram_receive_buffer_bytes: usize,
-  #[serde(default = "default_quic_datagram_buffer_bytes")]
-  pub datagram_send_buffer_bytes: usize,
-  #[serde(default = "default_quic_max_udp_payload_size")]
-  pub max_udp_payload_size: u16,
-  #[serde(default = "default_true")]
-  pub gso: bool,
-}
-
-impl Default for QuicTransportConfig {
-  fn default() -> Self {
-    Self {
-      max_concurrent_bidi_streams: default_quic_max_concurrent_streams(),
-      max_concurrent_uni_streams: default_quic_max_concurrent_streams(),
-      idle_timeout_ms: default_quic_idle_timeout_ms(),
-      datagram_receive_buffer_bytes: default_quic_datagram_buffer_bytes(),
-      datagram_send_buffer_bytes: default_quic_datagram_buffer_bytes(),
-      max_udp_payload_size: default_quic_max_udp_payload_size(),
-      gso: true,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct QuicUpstreamPoolConfig {
-  #[serde(default = "default_true")]
-  pub enabled: bool,
-  #[serde(default = "default_quic_upstream_pool_max_connections")]
-  pub max_connections_per_upstream: usize,
-  #[serde(default = "default_quic_upstream_pool_max_lifetime_ms")]
-  pub max_lifetime_ms: u64,
-}
-
-impl Default for QuicUpstreamPoolConfig {
-  fn default() -> Self {
-    Self {
-      enabled: true,
-      max_connections_per_upstream: default_quic_upstream_pool_max_connections(),
-      max_lifetime_ms: default_quic_upstream_pool_max_lifetime_ms(),
-    }
-  }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -5444,34 +5434,6 @@ fn default_request_timeout_ms() -> u64 {
 
 fn default_proxy_max_http_version() -> HttpVersion {
   HttpVersion::H2
-}
-
-fn default_quic_alt_svc_max_age_seconds() -> u64 {
-  86_400
-}
-
-fn default_quic_max_concurrent_streams() -> u64 {
-  100
-}
-
-fn default_quic_idle_timeout_ms() -> u64 {
-  30_000
-}
-
-fn default_quic_datagram_buffer_bytes() -> usize {
-  1024 * 1024
-}
-
-fn default_quic_max_udp_payload_size() -> u16 {
-  1472
-}
-
-fn default_quic_upstream_pool_max_connections() -> usize {
-  1
-}
-
-fn default_quic_upstream_pool_max_lifetime_ms() -> u64 {
-  600_000
 }
 
 fn default_compression_min_size_bytes() -> u64 {

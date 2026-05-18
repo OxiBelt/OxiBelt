@@ -97,10 +97,35 @@ persist = false
 max_concurrent_bidi_streams = 512
 max_concurrent_uni_streams = 512
 idle_timeout_ms = 30000
+keep_alive_interval_ms = 0
+stream_receive_window_bytes = 1250000
+receive_window_bytes = 4611686018427387903
+send_window_bytes = 10000000
+send_fairness = true
 datagram_receive_buffer_bytes = 1048576
 datagram_send_buffer_bytes = 1048576
 max_udp_payload_size = 1472
 gso = true
+initial_mtu = 1200
+min_mtu = 1200
+
+[quic.transport.mtu_discovery]
+enabled = true
+upper_bound = 1452
+interval_ms = 600000
+black_hole_cooldown_ms = 60000
+minimum_change = 20
+
+# Endpoint-specific overrides inherit from [quic.transport].
+#[quic.downstream.transport]
+#keep_alive_interval_ms = 10000
+#receive_window_bytes = 8388608
+#
+#[quic.upstream.transport]
+#stream_receive_window_bytes = 2097152
+#
+#[quic.upstream.transport.mtu_discovery]
+#upper_bound = 1472
 
 [quic.socket]
 receive_buffer_bytes = 16777216

@@ -1148,6 +1148,7 @@ enum TcpListenerKind {
 struct Http3ListenerTask {
   bind: SocketAddr,
   socket: crate::config::QuicSocketConfig,
+  transport: crate::config::QuicTransportConfig,
   endpoints: Vec<h3_quinn::quinn::Endpoint>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
@@ -1158,6 +1159,7 @@ struct Http3ListenerTask {
 struct BoundHttp3Listener {
   bind: SocketAddr,
   socket: crate::config::QuicSocketConfig,
+  transport: crate::config::QuicTransportConfig,
   endpoints: Vec<h3_quinn::quinn::Endpoint>,
 }
 
@@ -1275,11 +1277,11 @@ impl ListenerSupervisor {
 
     let (http3, refresh_http3_config) = if snapshot.config.listeners.http3 {
       let bind = snapshot.config.listeners.https_bind;
-      if self
-        .http3
-        .as_ref()
-        .is_some_and(|task| task.bind == bind && task.socket == snapshot.config.quic.socket)
-      {
+      if self.http3.as_ref().is_some_and(|task| {
+        task.bind == bind
+          && task.socket == snapshot.config.quic.socket
+          && task.transport == snapshot.config.quic.downstream.transport
+      }) {
         (None, true)
       } else {
         (Some(Some(bind_http3_listener(bind, snapshot)?)), false)
@@ -1662,6 +1664,7 @@ impl BoundHttp3Listener {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
     let socket = self.socket;
+    let transport = self.transport;
     let connections = TaskRegistry::default();
     let tasks = self
       .endpoints
@@ -1692,6 +1695,7 @@ impl BoundHttp3Listener {
     Http3ListenerTask {
       bind,
       socket,
+      transport,
       endpoints: self.endpoints,
       shutdown,
       connections,
@@ -1863,6 +1867,7 @@ fn bind_http3_listener(
   Ok(BoundHttp3Listener {
     bind,
     socket: snapshot.config.quic.socket.clone(),
+    transport: snapshot.config.quic.downstream.transport.clone(),
     endpoints,
   })
 }

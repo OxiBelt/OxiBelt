@@ -489,7 +489,10 @@ pub fn build_upstream_quic_client_config_with_resumption(
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC client TLS config")?;
   let mut quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
-  quic_config.transport_config(crate::quic::transport_config(quic)?);
+  quic_config.transport_config(crate::quic::transport_config(
+    &quic.upstream.transport,
+    "quic.upstream.transport",
+  )?);
   Ok(quic_config)
 }
 

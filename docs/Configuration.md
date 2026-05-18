@@ -356,10 +356,35 @@ persist = false
 max_concurrent_bidi_streams = 512
 max_concurrent_uni_streams = 512
 idle_timeout_ms = 30000
+keep_alive_interval_ms = 0
+stream_receive_window_bytes = 1250000
+receive_window_bytes = 4611686018427387903
+send_window_bytes = 10000000
+send_fairness = true
 datagram_receive_buffer_bytes = 1048576
 datagram_send_buffer_bytes = 1048576
 max_udp_payload_size = 1472
 gso = true
+initial_mtu = 1200
+min_mtu = 1200
+
+[quic.transport.mtu_discovery]
+enabled = true
+upper_bound = 1452
+interval_ms = 600000
+black_hole_cooldown_ms = 60000
+minimum_change = 20
+
+[quic.downstream.transport]
+# inherits from [quic.transport]
+keep_alive_interval_ms = 10000
+
+[quic.upstream.transport]
+# inherits from [quic.transport]
+stream_receive_window_bytes = 2097152
+
+[quic.upstream.transport.mtu_discovery]
+upper_bound = 1472
 
 [quic.socket]
 receive_buffer_bytes = 16777216
@@ -379,7 +404,13 @@ max_lifetime_ms = 600000
 
 When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/1.1 and HTTP/2 responses advertise `Alt-Svc: h3=":<https port>"; ma=<max_age_seconds>`. `persist = true` appends `; persist=1`. OxiBelt does not add `Alt-Svc` to downstream HTTP/3 responses, plain HTTP responses, or `101 Switching Protocols`.
 
-`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets, and startup fails if the OS rejects an explicitly configured buffer size. `quic.socket.workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].quic_socket`. When HTTP/3 is enabled, set `reuse_port = true` whenever the resolved worker count can be greater than one, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. Other QUIC transport, socket, and pool numeric values must be greater than zero; `max_udp_payload_size` must be in the QUIC-valid range `1200..=65527`.
+`[quic.transport]` is the shared QUIC transport baseline for both downstream HTTP/3 clients and upstream HTTP/3 forwarding. `[quic.downstream.transport]` and `[quic.upstream.transport]` are partial endpoint-specific overrides; unset values inherit from `[quic.transport]`, including nested `mtu_discovery` values. Existing configurations that only use `[quic.transport]` keep the same behavior for both endpoints.
+
+`keep_alive_interval_ms = 0` disables QUIC keep-alive packets. Nonzero keep-alive intervals must be lower than `idle_timeout_ms`. `stream_receive_window_bytes`, `receive_window_bytes`, and `send_window_bytes` tune QUIC flow-control and send buffering. Larger windows can improve high-bandwidth or high-RTT HTTP/3 throughput, but they also raise worst-case per-connection memory exposure when many peers consume the full window.
+
+`initial_mtu`, `min_mtu`, `max_udp_payload_size`, and `mtu_discovery.upper_bound` must be in the QUIC UDP payload range `1200..=65527`; `min_mtu` must not exceed `initial_mtu`, and enabled MTU discovery requires `upper_bound >= initial_mtu`. Keep `min_mtu = 1200` for public internet deployments unless the network path is fully controlled. MTU discovery is enabled by default and periodically probes up to `upper_bound`; disabling it keeps the configured initial/minimum MTU behavior.
+
+`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets, and startup fails if the OS rejects an explicitly configured buffer size. `quic.socket.workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].quic_socket`. When HTTP/3 is enabled, set `reuse_port = true` whenever the resolved worker count can be greater than one, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. Other QUIC transport, socket, and pool numeric values must be greater than zero, except `keep_alive_interval_ms = 0`.
 
 The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary HTTP/3 upstream requests use one-shot QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
 

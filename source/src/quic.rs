@@ -7,12 +7,15 @@ use anyhow::{Context, bail};
 use base64::Engine;
 use h3_quinn::quinn::crypto::{AeadKey, CryptoError, HandshakeTokenKey, HmacKey};
 use h3_quinn::quinn::{
-  Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt,
+  Endpoint, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig, TokioRuntime,
+  TransportConfig, VarInt,
 };
 use ring::{aead, hkdf, hmac};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use crate::config::{QuicConfig, QuicSocketConfig, canonicalize_existing_file};
+use crate::config::{
+  QuicConfig, QuicSocketConfig, QuicTransportConfig, canonicalize_existing_file,
+};
 
 pub(crate) mod h3;
 
@@ -20,28 +23,61 @@ const QUIC_HOST_KEY_BYTES: usize = 64;
 const QUIC_HOST_KEY_RESET_LABEL: &[u8] = b"oxibelt quic stateless reset v1";
 const QUIC_HOST_KEY_TOKEN_LABEL: &[u8] = b"oxibelt quic retry token v1";
 
-pub fn transport_config(config: &QuicConfig) -> anyhow::Result<Arc<TransportConfig>> {
+pub fn transport_config(
+  config: &QuicTransportConfig,
+  path: &'static str,
+) -> anyhow::Result<Arc<TransportConfig>> {
   let mut transport = TransportConfig::default();
   transport.max_concurrent_bidi_streams(
-    VarInt::try_from(config.transport.max_concurrent_bidi_streams)
-      .context("quic.transport.max_concurrent_bidi_streams is too large")?,
+    VarInt::try_from(config.max_concurrent_bidi_streams)
+      .with_context(|| format!("{path}.max_concurrent_bidi_streams is too large"))?,
   );
   transport.max_concurrent_uni_streams(
-    VarInt::try_from(config.transport.max_concurrent_uni_streams)
-      .context("quic.transport.max_concurrent_uni_streams is too large")?,
+    VarInt::try_from(config.max_concurrent_uni_streams)
+      .with_context(|| format!("{path}.max_concurrent_uni_streams is too large"))?,
   );
-  let idle_timeout: IdleTimeout = Duration::from_millis(config.transport.idle_timeout_ms)
+  let idle_timeout: IdleTimeout = Duration::from_millis(config.idle_timeout_ms)
     .try_into()
-    .context("quic.transport.idle_timeout_ms is too large")?;
+    .with_context(|| format!("{path}.idle_timeout_ms is too large"))?;
   transport.max_idle_timeout(Some(idle_timeout));
-  transport.datagram_receive_buffer_size(Some(config.transport.datagram_receive_buffer_bytes));
-  transport.datagram_send_buffer_size(config.transport.datagram_send_buffer_bytes);
-  transport.enable_segmentation_offload(config.transport.gso);
+  let keep_alive_interval = (config.keep_alive_interval_ms > 0)
+    .then(|| Duration::from_millis(config.keep_alive_interval_ms));
+  transport.keep_alive_interval(keep_alive_interval);
+  transport.stream_receive_window(
+    VarInt::try_from(config.stream_receive_window_bytes)
+      .with_context(|| format!("{path}.stream_receive_window_bytes is too large"))?,
+  );
+  transport.receive_window(
+    VarInt::try_from(config.receive_window_bytes)
+      .with_context(|| format!("{path}.receive_window_bytes is too large"))?,
+  );
+  transport.send_window(config.send_window_bytes);
+  transport.send_fairness(config.send_fairness);
+  transport.datagram_receive_buffer_size(Some(config.datagram_receive_buffer_bytes));
+  transport.datagram_send_buffer_size(config.datagram_send_buffer_bytes);
+  transport.enable_segmentation_offload(config.gso);
+  transport.initial_mtu(config.initial_mtu);
+  transport.min_mtu(config.min_mtu);
+  let mtu_discovery_config = if config.mtu_discovery.enabled {
+    let mut mtu = MtuDiscoveryConfig::default();
+    mtu.upper_bound(config.mtu_discovery.upper_bound);
+    mtu.interval(Duration::from_millis(config.mtu_discovery.interval_ms));
+    mtu.black_hole_cooldown(Duration::from_millis(
+      config.mtu_discovery.black_hole_cooldown_ms,
+    ));
+    mtu.minimum_change(config.mtu_discovery.minimum_change);
+    Some(mtu)
+  } else {
+    None
+  };
+  transport.mtu_discovery_config(mtu_discovery_config);
   Ok(Arc::new(transport))
 }
 
 pub fn endpoint_config(
   config: &QuicConfig,
+  transport_config: &QuicTransportConfig,
+  transport_path: &'static str,
   host_key_base_dir: Option<&Path>,
 ) -> anyhow::Result<EndpointConfig> {
   let reset_key = quic_host_key(config, host_key_base_dir)?
@@ -51,8 +87,8 @@ pub fn endpoint_config(
     None => EndpointConfig::default(),
   };
   endpoint
-    .max_udp_payload_size(config.transport.max_udp_payload_size)
-    .context("invalid quic.transport.max_udp_payload_size")?;
+    .max_udp_payload_size(transport_config.max_udp_payload_size)
+    .with_context(|| format!("invalid {transport_path}.max_udp_payload_size"))?;
   Ok(endpoint)
 }
 
@@ -64,7 +100,10 @@ pub fn apply_server_config(
   if let Some(key) = quic_host_key(config, host_key_base_dir)? {
     server_config.token_key(Arc::new(RetryTokenKey::new(key.token_key)));
   }
-  server_config.transport_config(transport_config(config)?);
+  server_config.transport_config(transport_config(
+    &config.downstream.transport,
+    "quic.downstream.transport",
+  )?);
   Ok(())
 }
 
@@ -76,7 +115,12 @@ pub fn bind_server_endpoint(
 ) -> anyhow::Result<Endpoint> {
   let socket = bind_udp_socket(bind, &config.socket)?;
   Endpoint::new(
-    endpoint_config(config, host_key_base_dir)?,
+    endpoint_config(
+      config,
+      &config.downstream.transport,
+      "quic.downstream.transport",
+      host_key_base_dir,
+    )?,
     Some(server_config),
     socket,
     Arc::new(TokioRuntime),
@@ -120,7 +164,12 @@ pub fn bind_client_endpoint(
 ) -> anyhow::Result<Endpoint> {
   let socket = bind_udp_socket(client_bind_addr(remote_addr), &config.socket)?;
   Endpoint::new(
-    endpoint_config(config, host_key_base_dir)?,
+    endpoint_config(
+      config,
+      &config.upstream.transport,
+      "quic.upstream.transport",
+      host_key_base_dir,
+    )?,
     None,
     socket,
     Arc::new(TokioRuntime),
@@ -310,5 +359,107 @@ impl AeadKey for RetryAeadKey {
       .0
       .open_in_place(nonce, aead::Aad::from(additional_data), data)
       .map_err(|_| CryptoError)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::config::{QuicMtuDiscoveryConfig, QuicTransportConfig};
+
+  #[test]
+  fn transport_config_maps_keep_alive_and_window_settings() {
+    let config = QuicTransportConfig {
+      keep_alive_interval_ms: 25,
+      stream_receive_window_bytes: 2048,
+      receive_window_bytes: 4096,
+      send_window_bytes: 8192,
+      send_fairness: false,
+      ..QuicTransportConfig::default()
+    };
+
+    let transport = transport_config(&config, "test.transport").expect("transport config");
+    let debug = format!("{transport:?}");
+
+    assert!(
+      debug.contains("stream_receive_window: 2048"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
+      debug.contains("receive_window: 4096"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
+      debug.contains("send_window: 8192"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
+      debug.contains("send_fairness: false"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
+      debug.contains("keep_alive_interval: Some(25ms)"),
+      "unexpected debug output: {debug}"
+    );
+  }
+
+  #[test]
+  fn transport_config_disables_keep_alive_and_mtu_discovery_when_configured() {
+    let config = QuicTransportConfig {
+      keep_alive_interval_ms: 0,
+      mtu_discovery: QuicMtuDiscoveryConfig {
+        enabled: false,
+        ..QuicMtuDiscoveryConfig::default()
+      },
+      ..QuicTransportConfig::default()
+    };
+
+    let transport = transport_config(&config, "test.transport").expect("transport config");
+    let debug = format!("{transport:?}");
+
+    assert!(
+      debug.contains("keep_alive_interval: None"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
+      debug.contains("mtu_discovery_config: None"),
+      "unexpected debug output: {debug}"
+    );
+  }
+
+  #[test]
+  fn transport_config_maps_mtu_discovery_settings() {
+    let config = QuicTransportConfig {
+      initial_mtu: 1300,
+      min_mtu: 1200,
+      mtu_discovery: QuicMtuDiscoveryConfig {
+        enabled: true,
+        upper_bound: 1500,
+        interval_ms: 700_000,
+        black_hole_cooldown_ms: 80_000,
+        minimum_change: 40,
+      },
+      ..QuicTransportConfig::default()
+    };
+
+    let transport = transport_config(&config, "test.transport").expect("transport config");
+    let debug = format!("{transport:?}");
+
+    assert!(
+      debug.contains("initial_mtu: 1300"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
+      debug.contains("min_mtu: 1200"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
+      debug.contains("upper_bound: 1500"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
+      debug.contains("minimum_change: 40"),
+      "unexpected debug output: {debug}"
+    );
   }
 }

@@ -2395,11 +2395,31 @@ fn quic_defaults_are_parsed() {
     assert!(config.quic.alt_svc.enabled);
     assert_eq!(config.quic.alt_svc.max_age_seconds, 86_400);
     assert_eq!(config.quic.transport.max_concurrent_bidi_streams, 100);
+    assert_eq!(config.quic.transport.keep_alive_interval_ms, 0);
+    assert_eq!(config.quic.transport.stream_receive_window_bytes, 1_250_000);
+    assert_eq!(
+        config.quic.transport.receive_window_bytes,
+        4_611_686_018_427_387_903
+    );
+    assert_eq!(config.quic.transport.send_window_bytes, 10_000_000);
+    assert!(config.quic.transport.send_fairness);
     assert_eq!(
         config.quic.transport.datagram_receive_buffer_bytes,
         1024 * 1024
     );
     assert_eq!(config.quic.transport.max_udp_payload_size, 1472);
+    assert_eq!(config.quic.transport.initial_mtu, 1200);
+    assert_eq!(config.quic.transport.min_mtu, 1200);
+    assert!(config.quic.transport.mtu_discovery.enabled);
+    assert_eq!(config.quic.transport.mtu_discovery.upper_bound, 1452);
+    assert_eq!(config.quic.transport.mtu_discovery.interval_ms, 600_000);
+    assert_eq!(
+        config.quic.transport.mtu_discovery.black_hole_cooldown_ms,
+        60_000
+    );
+    assert_eq!(config.quic.transport.mtu_discovery.minimum_change, 20);
+    assert_eq!(config.quic.downstream.transport, config.quic.transport);
+    assert_eq!(config.quic.upstream.transport, config.quic.transport);
     assert_eq!(config.quic.socket.receive_buffer_bytes, 0);
     assert!(config.quic.upstream_pool.enabled);
 }
@@ -2425,10 +2445,24 @@ persist = true
 max_concurrent_bidi_streams = 8
 max_concurrent_uni_streams = 9
 idle_timeout_ms = 1234
+keep_alive_interval_ms = 123
+stream_receive_window_bytes = 8192
+receive_window_bytes = 16384
+send_window_bytes = 32768
+send_fairness = false
 datagram_receive_buffer_bytes = 2048
 datagram_send_buffer_bytes = 4096
 max_udp_payload_size = 1300
 gso = false
+initial_mtu = 1200
+min_mtu = 1200
+
+[quic.transport.mtu_discovery]
+enabled = false
+upper_bound = 1500
+interval_ms = 111000
+black_hole_cooldown_ms = 222000
+minimum_change = 30
 
 [quic.socket]
 receive_buffer_bytes = 8192
@@ -2453,8 +2487,115 @@ max_lifetime_ms = 7777
     assert_eq!(config.quic.transport.max_concurrent_bidi_streams, 8);
     assert_eq!(config.quic.transport.max_concurrent_uni_streams, 9);
     assert_eq!(config.quic.transport.idle_timeout_ms, 1234);
+    assert_eq!(config.quic.transport.keep_alive_interval_ms, 123);
+    assert_eq!(config.quic.transport.stream_receive_window_bytes, 8192);
+    assert_eq!(config.quic.transport.receive_window_bytes, 16384);
+    assert_eq!(config.quic.transport.send_window_bytes, 32768);
+    assert!(!config.quic.transport.send_fairness);
+    assert!(!config.quic.transport.mtu_discovery.enabled);
+    assert_eq!(config.quic.transport.mtu_discovery.upper_bound, 1500);
+    assert_eq!(config.quic.transport.mtu_discovery.interval_ms, 111_000);
+    assert_eq!(
+        config.quic.transport.mtu_discovery.black_hole_cooldown_ms,
+        222_000
+    );
+    assert_eq!(config.quic.transport.mtu_discovery.minimum_change, 30);
+    assert_eq!(config.quic.downstream.transport, config.quic.transport);
+    assert_eq!(config.quic.upstream.transport, config.quic.transport);
     assert_eq!(config.quic.socket.receive_buffer_bytes, 8192);
     assert!(!config.quic.upstream_pool.enabled);
+}
+
+#[test]
+fn quic_endpoint_transport_overrides_inherit_base_transport() {
+    let temp_dir = common::TempDir::new("quic-endpoint-overrides");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "quic-endpoint-overrides");
+    let raw = format!(
+        r#"
+{}
+
+[quic.transport]
+max_concurrent_bidi_streams = 300
+idle_timeout_ms = 45000
+keep_alive_interval_ms = 0
+stream_receive_window_bytes = 2000000
+send_window_bytes = 12000000
+
+[quic.transport.mtu_discovery]
+enabled = true
+upper_bound = 1500
+interval_ms = 700000
+
+[quic.downstream.transport]
+keep_alive_interval_ms = 5000
+max_udp_payload_size = 1400
+send_fairness = false
+
+[quic.downstream.transport.mtu_discovery]
+enabled = false
+
+[quic.upstream.transport]
+stream_receive_window_bytes = 3000000
+receive_window_bytes = 4000000
+
+[quic.upstream.transport.mtu_discovery]
+upper_bound = 1600
+black_hole_cooldown_ms = 90000
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(config.quic.transport.max_concurrent_bidi_streams, 300);
+    assert_eq!(config.quic.transport.keep_alive_interval_ms, 0);
+    assert_eq!(config.quic.transport.mtu_discovery.upper_bound, 1500);
+    assert_eq!(config.quic.transport.mtu_discovery.interval_ms, 700_000);
+
+    assert_eq!(
+        config.quic.downstream.transport.max_concurrent_bidi_streams,
+        300
+    );
+    assert_eq!(
+        config.quic.downstream.transport.keep_alive_interval_ms,
+        5000
+    );
+    assert_eq!(config.quic.downstream.transport.max_udp_payload_size, 1400);
+    assert!(!config.quic.downstream.transport.send_fairness);
+    assert!(!config.quic.downstream.transport.mtu_discovery.enabled);
+    assert_eq!(
+        config.quic.downstream.transport.mtu_discovery.upper_bound,
+        1500
+    );
+
+    assert_eq!(
+        config.quic.upstream.transport.max_concurrent_bidi_streams,
+        300
+    );
+    assert_eq!(config.quic.upstream.transport.keep_alive_interval_ms, 0);
+    assert_eq!(
+        config.quic.upstream.transport.stream_receive_window_bytes,
+        3_000_000
+    );
+    assert_eq!(
+        config.quic.upstream.transport.receive_window_bytes,
+        4_000_000
+    );
+    assert_eq!(
+        config.quic.upstream.transport.mtu_discovery.upper_bound,
+        1600
+    );
+    assert_eq!(
+        config
+            .quic
+            .upstream
+            .transport
+            .mtu_discovery
+            .black_hole_cooldown_ms,
+        90_000
+    );
 }
 
 #[test]
@@ -2483,6 +2624,68 @@ idle_timeout_ms = 0
             .contains("quic.transport numeric values must be greater than 0"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn quic_invalid_endpoint_transport_values_are_rejected() {
+    let temp_dir = common::TempDir::new("quic-invalid-endpoint-transport");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "quic-invalid-endpoint-transport");
+    let cases = [
+        (
+            "keepalive",
+            r#"
+[quic.downstream.transport]
+keep_alive_interval_ms = 30000
+"#,
+            "quic.downstream.transport.keep_alive_interval_ms must be 0 or less than quic.downstream.transport.idle_timeout_ms",
+        ),
+        (
+            "window",
+            r#"
+[quic.upstream.transport]
+receive_window_bytes = 4611686018427387904
+"#,
+            "quic.upstream.transport.receive_window_bytes must be at most 4611686018427387903",
+        ),
+        (
+            "mtu",
+            r#"
+[quic.downstream.transport]
+initial_mtu = 1400
+min_mtu = 1450
+"#,
+            "quic.downstream.transport.min_mtu must be less than or equal to quic.downstream.transport.initial_mtu",
+        ),
+        (
+            "mtu_discovery",
+            r#"
+[quic.upstream.transport]
+initial_mtu = 1500
+
+[quic.upstream.transport.mtu_discovery]
+upper_bound = 1400
+"#,
+            "quic.upstream.transport.mtu_discovery.upper_bound must be greater than or equal to the transport initial_mtu",
+        ),
+    ];
+
+    for (name, quic_toml, expected) in cases {
+        let raw = format!(
+            "{}\n{}",
+            common::minimal_config_toml(&cert_path, &key_path),
+            quic_toml
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = match config.validate() {
+            Ok(()) => panic!("{name} should fail validation"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "{name} produced unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -3015,6 +3218,57 @@ fn config_load_rejects_unknown_fields_by_default() {
 
     assert!(
         error.to_string().contains("proxy.unknown_proxy_key"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn config_load_accepts_quic_endpoint_transport_sections() {
+    let temp_dir = common::TempDir::new("strict-quic-endpoint-transport");
+    let config_path = write_loadable_config(&temp_dir, "strict-quic-endpoint-transport", |raw| {
+        format!(
+            r#"{}
+
+[quic.downstream.transport]
+keep_alive_interval_ms = 5000
+send_fairness = false
+
+[quic.downstream.transport.mtu_discovery]
+enabled = false
+
+[quic.upstream.transport]
+stream_receive_window_bytes = 3000000
+
+[quic.upstream.transport.mtu_discovery]
+upper_bound = 1500
+"#,
+            raw
+        )
+    });
+
+    Config::load(&config_path).expect("new QUIC endpoint transport sections should load");
+}
+
+#[test]
+fn config_load_rejects_unknown_quic_endpoint_transport_fields() {
+    let temp_dir = common::TempDir::new("strict-quic-endpoint-unknown");
+    let config_path = write_loadable_config(&temp_dir, "strict-quic-endpoint-unknown", |raw| {
+        format!(
+            r#"{}
+
+[quic.downstream.transport]
+recieve_window_bytes = 3000000
+"#,
+            raw
+        )
+    });
+
+    let error = Config::load(&config_path).expect_err("misspelled QUIC field should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("quic.downstream.transport.recieve_window_bytes"),
         "unexpected error: {error:#}"
     );
 }
