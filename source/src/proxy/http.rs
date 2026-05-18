@@ -2534,9 +2534,12 @@ async fn send_one_shot_with_proxy_protocol(
   .context("failed to write upstream PROXY protocol egress header")?;
 
   if upstream.origin.scheme() == "https" {
-    let mut tls_config = crate::tls::build_upstream_client_config(
+    let mut tls_config = crate::tls::build_upstream_client_config_with_resumption(
       &state.config.proxy.trusted_ca_certs,
       &upstream.tls.ech,
+      &upstream.tls.resumption,
+      Some(&state.tls_resumption),
+      &upstream.name,
     )
     .context("failed to build one-shot upstream TLS config")?;
     tls_config.alpn_protocols = vec![upstream_version.as_alpn().to_vec()];

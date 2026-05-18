@@ -19,6 +19,7 @@ use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::state::AppHandle;
 use crate::tls;
+use crate::tls::TlsResumptionState;
 
 use super::auth::{self, AuthDecision};
 use super::edge::EdgeState;
@@ -53,6 +54,7 @@ impl BoundTurnListener {
     tcp_options: TcpListenOptions,
     accept_error_backoff: Duration,
     default_tls: &crate::config::TlsConfig,
+    tls_resumption: &TlsResumptionState,
   ) -> anyhow::Result<Self> {
     let udp = config
       .bind_udp
@@ -78,7 +80,11 @@ impl BoundTurnListener {
       None => Vec::new(),
     };
     let tls_config = if config.bind_tls.is_some() {
-      Some(tls::build_turn_server_config(&config.tls, default_tls)?)
+      Some(tls::build_turn_server_config_with_resumption(
+        &config.tls,
+        default_tls,
+        Some(tls_resumption),
+      )?)
     } else {
       None
     };

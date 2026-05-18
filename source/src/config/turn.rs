@@ -7,11 +7,12 @@ use serde::Deserialize;
 use url::Url;
 
 use super::{
-  Config, LoadBalancingAlgorithm, UpstreamPoolServerState, default_client_idle_timeout_ms,
-  default_health_check_healthy_threshold, default_health_check_interval_ms,
-  default_health_check_timeout_ms, default_health_check_unhealthy_threshold,
-  default_pool_server_weight, default_true, resolve_existing_local_config_file_path_with_logical,
-  turn_upstream_pool_server_id, validate_runtime_identifier,
+  Config, LoadBalancingAlgorithm, TlsServerResumptionConfig, UpstreamPoolServerState,
+  default_client_idle_timeout_ms, default_health_check_healthy_threshold,
+  default_health_check_interval_ms, default_health_check_timeout_ms,
+  default_health_check_unhealthy_threshold, default_pool_server_weight, default_true,
+  resolve_existing_local_config_file_path_with_logical, turn_upstream_pool_server_id,
+  validate_runtime_identifier,
 };
 
 impl Config {
@@ -391,11 +392,16 @@ pub struct TurnListenerTlsConfig {
   pub private_key: Option<PathBuf>,
   #[serde(default)]
   pub remote_signer_key_id: Option<String>,
+  #[serde(default)]
+  pub resumption: Option<TlsServerResumptionConfig>,
 }
 
 impl TurnListenerTlsConfig {
   pub fn has_override(&self) -> bool {
-    self.cert_chain.is_some() || self.private_key.is_some() || self.remote_signer_key_id.is_some()
+    self.cert_chain.is_some()
+      || self.private_key.is_some()
+      || self.remote_signer_key_id.is_some()
+      || self.resumption.is_some()
   }
 
   fn validate(&self, listener_name: &str) -> anyhow::Result<()> {

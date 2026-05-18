@@ -1548,6 +1548,18 @@ impl Config {
     if self.tls.min_version > self.tls.max_version {
       bail!("tls.min_version must be less than or equal to tls.max_version");
     }
+    if self.tls.session_ticket_rotation_seconds == 0 {
+      bail!("tls.session_ticket_rotation_seconds must be greater than 0");
+    }
+    validate_tls_server_resumption("tls.resumption", &self.tls.resumption)?;
+    if self.listeners.http3
+      && self.quic.zero_rtt == QuicZeroRttMode::SafeMethods
+      && self.tls.resumption.mode == TlsServerResumptionMode::Stateless
+    {
+      bail!(
+        "tls.resumption.mode = \"stateless\" cannot be used with quic.zero_rtt = \"safe_methods\""
+      );
+    }
     if self.tls.remote_signer.enabled {
       if self.tls.private_key.is_some() {
         bail!("tls.private_key must not be set when tls.remote_signer.enabled = true");
@@ -1562,9 +1574,6 @@ impl Config {
       }
     } else if self.tls.private_key.is_none() {
       bail!("tls.private_key is required unless tls.remote_signer.enabled = true");
-    }
-    if self.tls.session_ticket_rotation_seconds == 0 {
-      bail!("tls.session_ticket_rotation_seconds must be greater than 0");
     }
     if self.listeners.http3 && self.tls.min_version != TlsVersion::Tls13 {
       bail!("HTTP/3 requires tls.min_version = \"tls1.3\"");
@@ -1581,9 +1590,31 @@ impl Config {
           listener.name
         );
       }
+      if let Some(resumption) = &listener.tls.resumption {
+        validate_tls_server_resumption(
+          &format!("webrtc_turn_listeners.{}.tls.resumption", listener.name),
+          resumption,
+        )?;
+      }
     }
     Ok(())
   }
+}
+
+fn validate_tls_server_resumption(
+  prefix: &str,
+  resumption: &TlsServerResumptionConfig,
+) -> anyhow::Result<()> {
+  if resumption.session_cache_size == 0 {
+    bail!("{prefix}.session_cache_size must be greater than 0");
+  }
+  if resumption.tls13_ticket_count == 0 {
+    bail!("{prefix}.tls13_ticket_count must be greater than 0");
+  }
+  if resumption.rotation_seconds == 0 {
+    bail!("{prefix}.rotation_seconds must be greater than 0");
+  }
+  Ok(())
 }
 
 fn validate_route_path_value(
@@ -2054,8 +2085,15 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "ocsp",
       "private_key",
       "remote_signer",
+      "resumption",
       "session_ticket_rotation_seconds",
       "session_tickets",
+    ][..],
+    "tls.resumption" => &[
+      "mode",
+      "rotation_seconds",
+      "session_cache_size",
+      "tls13_ticket_count",
     ][..],
     "tls.remote_signer" => &[
       "allow_tls12_unstructured_signing",
@@ -2300,7 +2338,15 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "min_version",
       "reject_unknown_sni",
       "require_sni",
+      "resumption",
+      "session_ticket_rotation_seconds",
       "session_tickets",
+    ][..],
+    "admin.tls.resumption" => &[
+      "mode",
+      "rotation_seconds",
+      "session_cache_size",
+      "tls13_ticket_count",
     ][..],
     "admin.tls.certificates" => &["cert_chain", "default", "private_key", "server_names"][..],
     "admin.tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
@@ -2392,8 +2438,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "websocket",
       "webtransport",
     ][..],
-    "upstreams.tls" => &["ech"][..],
+    "upstreams.tls" => &["ech", "resumption"][..],
     "upstreams.tls.ech" => &["config_list_file", "mode"][..],
+    "upstreams.tls.resumption" => &["mode", "session_cache_size", "tls12"][..],
     "upstream_pools" => &[
       "algorithm",
       "discovery",
@@ -2510,7 +2557,18 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       &["password", "password_env", "username"][..]
     }
     "webrtc_turn_listeners.relay_port_range" => &["end", "start"][..],
-    "webrtc_turn_listeners.tls" => &["cert_chain", "private_key", "remote_signer_key_id"][..],
+    "webrtc_turn_listeners.tls" => &[
+      "cert_chain",
+      "private_key",
+      "remote_signer_key_id",
+      "resumption",
+    ][..],
+    "webrtc_turn_listeners.tls.resumption" => &[
+      "mode",
+      "rotation_seconds",
+      "session_cache_size",
+      "tls13_ticket_count",
+    ][..],
     "rate_limits" => &[
       "burst",
       "key",
@@ -4244,128 +4302,6 @@ pub enum AdminTransportMode {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct AdminTlsConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default = "default_tls_min_version")]
-  pub min_version: TlsVersion,
-  #[serde(default = "default_tls_max_version")]
-  pub max_version: TlsVersion,
-  #[serde(default)]
-  pub session_tickets: bool,
-  #[serde(default = "default_true")]
-  pub require_sni: bool,
-  #[serde(default = "default_true")]
-  pub reject_unknown_sni: bool,
-  #[serde(default)]
-  pub certificates: Vec<AdminTlsCertificateConfig>,
-  #[serde(default)]
-  pub client_auth: TlsClientAuthConfig,
-}
-
-impl Default for AdminTlsConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      min_version: TlsVersion::Tls13,
-      max_version: TlsVersion::Tls13,
-      session_tickets: false,
-      require_sni: true,
-      reject_unknown_sni: true,
-      certificates: Vec::new(),
-      client_auth: TlsClientAuthConfig::default(),
-    }
-  }
-}
-
-impl AdminTlsConfig {
-  fn resolve_relative_paths(&mut self, cert_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut resolved_paths = Vec::new();
-    for certificate in &mut self.certificates {
-      let (cert_chain, cert_logical) = resolve_existing_local_config_file_path_with_logical(
-        "admin.tls.certificates.cert_chain",
-        cert_dir,
-        &certificate.cert_chain,
-      )?;
-      certificate.cert_chain = cert_chain;
-      resolved_paths.push(cert_logical);
-      let (private_key, key_logical) = resolve_existing_local_config_file_path_with_logical(
-        "admin.tls.certificates.private_key",
-        cert_dir,
-        &certificate.private_key,
-      )?;
-      certificate.private_key = private_key;
-      resolved_paths.push(key_logical);
-    }
-    self.client_auth.ca_certs = self
-      .client_auth
-      .ca_certs
-      .iter()
-      .map(|path| {
-        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
-          "admin.tls.client_auth.ca_certs",
-          cert_dir,
-          path,
-        )?;
-        resolved_paths.push(logical);
-        Ok::<PathBuf, anyhow::Error>(resolved)
-      })
-      .collect::<anyhow::Result<_>>()?;
-    Ok(resolved_paths)
-  }
-
-  fn validate(&self) -> anyhow::Result<()> {
-    if self.min_version > self.max_version {
-      bail!("admin.tls.min_version must be less than or equal to admin.tls.max_version");
-    }
-    if self.client_auth.mode != TlsClientAuthMode::Off && self.client_auth.ca_certs.is_empty() {
-      bail!("admin.tls.client_auth.ca_certs is required when client_auth mode is not off");
-    }
-    if !self.enabled {
-      return Ok(());
-    }
-    if self.certificates.is_empty() {
-      bail!(
-        "admin.tls.certificates must include at least one certificate when admin TLS is enabled"
-      );
-    }
-    let defaults = self
-      .certificates
-      .iter()
-      .filter(|certificate| certificate.default)
-      .count();
-    if self.certificates.len() > 1 && defaults != 1 {
-      bail!(
-        "exactly one admin.tls.certificates entry must set default = true when multiple certificates are configured"
-      );
-    }
-    let mut names = HashSet::new();
-    for certificate in &self.certificates {
-      if certificate.server_names.is_empty() {
-        bail!("admin.tls.certificates server_names must not be empty");
-      }
-      for name in &certificate.server_names {
-        validate_admin_server_name(name)?;
-        if !names.insert(name.to_ascii_lowercase()) {
-          bail!("duplicate admin.tls certificate server_name {name}");
-        }
-      }
-    }
-    Ok(())
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct AdminTlsCertificateConfig {
-  #[serde(default)]
-  pub server_names: Vec<String>,
-  pub cert_chain: PathBuf,
-  pub private_key: PathBuf,
-  #[serde(default)]
-  pub default: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct MetricsConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -5185,6 +5121,8 @@ pub enum HealthCheckMode {
 pub struct UpstreamTlsConfig {
   #[serde(default)]
   pub ech: UpstreamEchConfig,
+  #[serde(default)]
+  pub resumption: UpstreamTlsResumptionConfig,
 }
 
 impl UpstreamTlsConfig {
@@ -5208,6 +5146,14 @@ impl UpstreamTlsConfig {
   }
 
   fn validate(&self, upstream_name: &str) -> anyhow::Result<()> {
+    if self.resumption.mode == UpstreamTlsResumptionMode::Enabled
+      && self.resumption.session_cache_size == 0
+    {
+      bail!(
+        "upstream {} tls.resumption.session_cache_size must be greater than 0 when resumption is enabled",
+        upstream_name
+      );
+    }
     match self.ech.mode {
       UpstreamEchMode::Disabled | UpstreamEchMode::Grease => {
         if self.ech.config_list_file.is_some() {

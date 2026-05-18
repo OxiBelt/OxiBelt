@@ -10,8 +10,8 @@ use base64::Engine;
 use h3_quinn::quinn::Endpoint;
 use oxibelt::config::{
     ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, TlsClientAuthConfig,
-    TlsClientAuthMode, TlsConfig, TlsRemoteSignerConfig, TlsVersion, TurnListenerTlsConfig,
-    UpstreamEchConfig, UpstreamEchMode,
+    TlsClientAuthMode, TlsConfig, TlsRemoteSignerConfig, TlsServerResumptionMode, TlsVersion,
+    TurnListenerTlsConfig, UpstreamEchConfig, UpstreamEchMode,
 };
 use oxibelt::remote_signer::{
     self, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
@@ -101,6 +101,55 @@ fn server_config_sets_alpn_from_listener_flags() {
     let server_config =
         tls::build_server_config(&tls_config, &listeners).expect("server config should build");
     assert_eq!(server_config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+}
+
+#[test]
+fn server_config_applies_resumption_modes() {
+    let temp_dir = common::TempDir::new("server-resumption-modes");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "downstream");
+    let listeners = ListenerConfig {
+        https_bind: "127.0.0.1:8443".parse().unwrap(),
+        http_bind: None,
+        http_mode: Default::default(),
+        http1: true,
+        http2: true,
+        http3: false,
+        proxy_protocol: ProxyProtocolConfig::default(),
+    };
+
+    let mut stateful = downstream_tls_config(
+        cert_path.clone(),
+        key_path.clone(),
+        TlsClientAuthConfig::default(),
+    );
+    stateful.resumption.mode = TlsServerResumptionMode::Stateful;
+    stateful.resumption.session_cache_size = 16;
+    stateful.resumption.tls13_ticket_count = 3;
+    let stateful_config =
+        tls::build_server_config(&stateful, &listeners).expect("stateful config should build");
+    assert_eq!(stateful_config.send_tls13_tickets, 3);
+    assert!(stateful_config.session_storage.can_cache());
+    assert!(!stateful_config.ticketer.enabled());
+
+    let mut stateless = downstream_tls_config(
+        cert_path.clone(),
+        key_path.clone(),
+        TlsClientAuthConfig::default(),
+    );
+    stateless.resumption.mode = TlsServerResumptionMode::Stateless;
+    stateless.resumption.tls13_ticket_count = 4;
+    let stateless_config =
+        tls::build_server_config(&stateless, &listeners).expect("stateless config should build");
+    assert_eq!(stateless_config.send_tls13_tickets, 4);
+    assert!(!stateless_config.session_storage.can_cache());
+    assert!(stateless_config.ticketer.enabled());
+
+    let mut off = downstream_tls_config(cert_path, key_path, TlsClientAuthConfig::default());
+    off.resumption.mode = TlsServerResumptionMode::Off;
+    let off_config = tls::build_server_config(&off, &listeners).expect("off config should build");
+    assert_eq!(off_config.send_tls13_tickets, 0);
+    assert!(!off_config.session_storage.can_cache());
+    assert!(!off_config.ticketer.enabled());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -364,6 +413,7 @@ async fn turn_server_config_builds_with_remote_signer_override() {
         cert_chain: Some(cert_path),
         private_key: None,
         remote_signer_key_id: Some("turn-key".to_string()),
+        resumption: None,
     };
     tls::build_turn_server_config(&listener_tls, &default_tls)
         .expect("TURN TLS config should build with remote signer override");
@@ -447,6 +497,7 @@ fn downstream_tls_config(
         max_version: TlsVersion::Tls13,
         session_tickets: true,
         session_ticket_rotation_seconds: 86_400,
+        resumption: Default::default(),
         client_auth,
         ocsp: OcspConfig::default(),
     }
@@ -475,6 +526,7 @@ fn remote_tls_config(
         max_version: TlsVersion::Tls13,
         session_tickets: true,
         session_ticket_rotation_seconds: 86_400,
+        resumption: Default::default(),
         client_auth: TlsClientAuthConfig::default(),
         ocsp: OcspConfig::default(),
     }

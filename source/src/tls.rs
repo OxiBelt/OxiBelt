@@ -12,7 +12,15 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 use crate::config::{
   AdminTlsConfig, ListenerConfig, OcspMode, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
   TlsClientAuthMode, TlsConfig, TlsVersion, TurnListenerTlsConfig, UpstreamEchConfig,
-  UpstreamEchMode, canonicalize_existing_file,
+  UpstreamEchMode, UpstreamTlsResumptionConfig, canonicalize_existing_file,
+};
+
+mod resumption;
+
+pub use resumption::TlsResumptionState;
+use resumption::{
+  TlsServerResumptionKey, certificate_identity, client_auth_identity, configure_server_resumption,
+  upstream_client_config_key, upstream_client_resumption,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
@@ -25,9 +33,18 @@ pub fn build_server_config(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
 ) -> anyhow::Result<Arc<ServerConfig>> {
+  build_server_config_with_resumption(tls, listeners, None)
+}
+
+pub fn build_server_config_with_resumption(
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let mut certified_key = load_downstream_certified_key(tls, &provider)
     .context("failed to create rustls certified key")?;
+  let server_identity = certificate_identity(&certified_key.cert);
   certified_key.ocsp = load_ocsp_response(tls)?;
 
   let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
@@ -40,10 +57,18 @@ pub fn build_server_config(
     None => builder.with_no_client_auth(),
   }
   .with_cert_resolver(Arc::new(cert_resolver));
-  if !tls.session_tickets {
-    server_config.send_tls13_tickets = 0;
-    server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
-  }
+  configure_server_resumption(
+    &mut server_config,
+    &tls.resumption,
+    TlsServerResumptionKey {
+      scope: "downstream-tcp",
+      mode: tls.resumption.mode,
+      server_identity,
+      client_auth_identity: client_auth_identity(&tls.client_auth)?,
+      alpn_family: "http1-http2",
+    },
+    resumption_state,
+  )?;
 
   let mut alpn = Vec::new();
   if listeners.http2 {
@@ -62,9 +87,19 @@ pub fn build_quic_server_config(
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<QuinnServerConfig> {
+  build_quic_server_config_with_resumption(tls, quic, quic_host_key_base_dir, None)
+}
+
+pub fn build_quic_server_config_with_resumption(
+  tls: &TlsConfig,
+  quic: &QuicConfig,
+  quic_host_key_base_dir: Option<&std::path::Path>,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<QuinnServerConfig> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let mut certified_key = load_downstream_certified_key(tls, &provider)
     .context("failed to create rustls certified key")?;
+  let server_identity = certificate_identity(&certified_key.cert);
   certified_key.ocsp = load_ocsp_response(tls)?;
 
   let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
@@ -79,6 +114,18 @@ pub fn build_quic_server_config(
   if quic.zero_rtt == QuicZeroRttMode::SafeMethods {
     server_config.max_early_data_size = u32::MAX;
   }
+  configure_server_resumption(
+    &mut server_config,
+    &tls.resumption,
+    TlsServerResumptionKey {
+      scope: "downstream-quic",
+      mode: tls.resumption.mode,
+      server_identity,
+      client_auth_identity: client_auth_identity(&tls.client_auth)?,
+      alpn_family: "h3",
+    },
+    resumption_state,
+  )?;
   server_config.alpn_protocols = vec![b"h3".to_vec()];
 
   let quic_crypto =
@@ -89,11 +136,20 @@ pub fn build_quic_server_config(
 }
 
 pub fn build_admin_server_config(tls: &AdminTlsConfig) -> anyhow::Result<Arc<ServerConfig>> {
+  build_admin_server_config_with_resumption(tls, None)
+}
+
+pub fn build_admin_server_config_with_resumption(
+  tls: &AdminTlsConfig,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let mut certificates = Vec::new();
   let mut default = None;
+  let mut identity_certs = Vec::new();
   for (index, certificate) in tls.certificates.iter().enumerate() {
     let certs = load_certs(&certificate.cert_chain)?;
+    identity_certs.extend(certs.iter().cloned());
     let key = load_private_key(&certificate.private_key)?;
     let certified_key = CertifiedKey::from_der(certs, key, &provider)
       .context("failed to create admin rustls certified key")?;
@@ -126,10 +182,18 @@ pub fn build_admin_server_config(tls: &AdminTlsConfig) -> anyhow::Result<Arc<Ser
     None => builder.with_no_client_auth(),
   }
   .with_cert_resolver(Arc::new(resolver));
-  if !tls.session_tickets {
-    server_config.send_tls13_tickets = 0;
-    server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
-  }
+  configure_server_resumption(
+    &mut server_config,
+    &tls.resumption,
+    TlsServerResumptionKey {
+      scope: "admin-tcp",
+      mode: tls.resumption.mode,
+      server_identity: certificate_identity(&identity_certs),
+      client_auth_identity: client_auth_identity(&tls.client_auth)?,
+      alpn_family: "admin-http1",
+    },
+    resumption_state,
+  )?;
   server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
   Ok(Arc::new(server_config))
 }
@@ -137,6 +201,14 @@ pub fn build_admin_server_config(tls: &AdminTlsConfig) -> anyhow::Result<Arc<Ser
 pub fn build_turn_server_config(
   listener_tls: &TurnListenerTlsConfig,
   default_tls: &TlsConfig,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  build_turn_server_config_with_resumption(listener_tls, default_tls, None)
+}
+
+pub fn build_turn_server_config_with_resumption(
+  listener_tls: &TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+  resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let cert_chain = listener_tls
@@ -152,6 +224,7 @@ pub fn build_turn_server_config(
     &provider,
   )
   .context("failed to create TURN rustls certified key")?;
+  let server_identity = certificate_identity(&certified_key.cert);
   let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
   let versions = tls_protocol_versions(default_tls.min_version, default_tls.max_version);
   let builder = ServerConfig::builder_with_provider(provider)
@@ -160,6 +233,22 @@ pub fn build_turn_server_config(
   let mut server_config = builder
     .with_no_client_auth()
     .with_cert_resolver(Arc::new(cert_resolver));
+  let resumption = listener_tls
+    .resumption
+    .as_ref()
+    .unwrap_or(&default_tls.resumption);
+  configure_server_resumption(
+    &mut server_config,
+    resumption,
+    TlsServerResumptionKey {
+      scope: "turn-tls",
+      mode: resumption.mode,
+      server_identity,
+      client_auth_identity: "client-auth:off".to_string(),
+      alpn_family: "turn",
+    },
+    resumption_state,
+  )?;
   server_config.alpn_protocols = Vec::new();
   Ok(Arc::new(server_config))
 }
@@ -299,6 +388,43 @@ pub fn build_upstream_client_config(
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,
 ) -> anyhow::Result<ClientConfig> {
+  build_upstream_client_config_with_resumption(
+    extra_root_certificates,
+    ech,
+    &UpstreamTlsResumptionConfig::default(),
+    None,
+    "default",
+  )
+}
+
+pub fn build_upstream_client_config_with_resumption(
+  extra_root_certificates: &[std::path::PathBuf],
+  ech: &UpstreamEchConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+) -> anyhow::Result<ClientConfig> {
+  let key = upstream_client_config_key(
+    "tcp",
+    upstream_name,
+    extra_root_certificates,
+    ech,
+    resumption,
+  )?;
+  if let Some(state) = state {
+    return state.upstream_client_config(key, || {
+      build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, false)
+    });
+  }
+  build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, false)
+}
+
+fn build_uncached_upstream_client_config(
+  extra_root_certificates: &[std::path::PathBuf],
+  ech: &UpstreamEchConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  quic_only: bool,
+) -> anyhow::Result<ClientConfig> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let roots = load_upstream_root_store(extra_root_certificates)?;
 
@@ -307,12 +433,16 @@ pub fn build_upstream_client_config(
     Some(mode) => builder
       .with_ech(mode)
       .context("failed to configure upstream TLS 1.3 ECH")?,
+    None if quic_only => builder
+      .with_protocol_versions(&[&rustls::version::TLS13])
+      .context("failed to configure upstream QUIC TLS versions")?,
     None => builder
       .with_safe_default_protocol_versions()
       .context("failed to configure upstream TLS versions")?,
   };
 
-  let client_config = builder.with_root_certificates(roots).with_no_client_auth();
+  let mut client_config = builder.with_root_certificates(roots).with_no_client_auth();
+  client_config.resumption = upstream_client_resumption(resumption);
 
   Ok(client_config)
 }
@@ -322,20 +452,38 @@ pub fn build_upstream_quic_client_config(
   ech: &UpstreamEchConfig,
   quic: &QuicConfig,
 ) -> anyhow::Result<QuinnClientConfig> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-  let roots = load_upstream_root_store(extra_root_certificates)?;
+  build_upstream_quic_client_config_with_resumption(
+    extra_root_certificates,
+    ech,
+    quic,
+    &UpstreamTlsResumptionConfig::default(),
+    None,
+    "default",
+  )
+}
 
-  let builder = ClientConfig::builder_with_provider(provider);
-  let builder = match upstream_ech_mode(ech)? {
-    Some(mode) => builder
-      .with_ech(mode)
-      .context("failed to configure upstream QUIC TLS 1.3 ECH")?,
-    None => builder
-      .with_protocol_versions(&[&rustls::version::TLS13])
-      .context("failed to configure upstream QUIC TLS versions")?,
+pub fn build_upstream_quic_client_config_with_resumption(
+  extra_root_certificates: &[std::path::PathBuf],
+  ech: &UpstreamEchConfig,
+  quic: &QuicConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+) -> anyhow::Result<QuinnClientConfig> {
+  let key = upstream_client_config_key(
+    "quic",
+    upstream_name,
+    extra_root_certificates,
+    ech,
+    resumption,
+  )?;
+  let mut client_config = if let Some(state) = state {
+    state.upstream_client_config(key, || {
+      build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, true)
+    })?
+  } else {
+    build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, true)?
   };
-
-  let mut client_config = builder.with_root_certificates(roots).with_no_client_auth();
   client_config.alpn_protocols = vec![b"h3".to_vec()];
 
   let quic_crypto =
@@ -345,7 +493,7 @@ pub fn build_upstream_quic_client_config(
   Ok(quic_config)
 }
 
-fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
+pub(super) fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
   let bytes = read_existing_file("certificate file", path)?;
   let mut cursor = bytes.as_slice();
   rustls_pemfile::certs(&mut cursor)
@@ -416,7 +564,10 @@ fn default_ech_hpke_suites() -> &'static [&'static dyn Hpke] {
   rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES
 }
 
-fn read_existing_file(field_name: &str, path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+pub(super) fn read_existing_file(
+  field_name: &str,
+  path: &std::path::Path,
+) -> anyhow::Result<Vec<u8>> {
   let canonical_path = canonicalize_existing_file(field_name, path)?;
   let canonical_parent = path
     .parent()

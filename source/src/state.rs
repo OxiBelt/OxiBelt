@@ -186,6 +186,7 @@ pub struct AppSnapshot {
   pub tls_server_config: Arc<rustls::ServerConfig>,
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
+  pub(crate) tls_resumption: tls::TlsResumptionState,
   pub waf: WafEngine,
   pub access_logs: AccessLogSinks,
   pub system_access_log: SystemAccessLog,
@@ -204,10 +205,13 @@ impl AppSnapshot {
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
-    let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs)
+    let tls_resumption = previous
+      .map(|snapshot| snapshot.tls_resumption.clone())
+      .unwrap_or_default();
+    let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs, &tls_resumption)
       .context("failed to build upstream HTTP clients")?;
-    let h3_clients =
-      UpstreamH3Pools::new(&upstreams, &config).context("failed to build upstream HTTP/3 pools")?;
+    let h3_clients = UpstreamH3Pools::new(&upstreams, &config, &tls_resumption)
+      .context("failed to build upstream HTTP/3 pools")?;
     let shared_state = SharedState::new(&config)
       .await
       .context("failed to build shared state")?;
@@ -231,11 +235,15 @@ impl AppSnapshot {
     let lifecycle = previous
       .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
-    let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
-      .context("failed to build downstream TLS config")?;
+    let tls_server_config = tls::build_server_config_with_resumption(
+      &config.tls,
+      &config.listeners,
+      Some(&tls_resumption),
+    )
+    .context("failed to build downstream TLS config")?;
     let admin_tls_server_config = if config.admin.enabled && config.admin.tls.enabled {
       Some(
-        tls::build_admin_server_config(&config.admin.tls)
+        tls::build_admin_server_config_with_resumption(&config.admin.tls, Some(&tls_resumption))
           .context("failed to build admin TLS config")?,
       )
     } else {
@@ -243,10 +251,11 @@ impl AppSnapshot {
     };
     let quic_server_config = if config.listeners.http3 {
       Some(
-        tls::build_quic_server_config(
+        tls::build_quic_server_config_with_resumption(
           &config.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),
+          Some(&tls_resumption),
         )
         .context("failed to build QUIC TLS config")?,
       )
@@ -289,6 +298,7 @@ impl AppSnapshot {
       tls_server_config,
       admin_tls_server_config,
       quic_server_config,
+      tls_resumption,
       waf,
       access_logs,
       system_access_log,
@@ -304,10 +314,14 @@ impl AppSnapshot {
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let route_table = RouteTable::new_with_waf(&config, &previous.waf);
     let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
-    let clients = build_clients(&upstreams, &config.proxy.trusted_ca_certs)
-      .context("failed to build upstream HTTP clients")?;
-    let h3_clients =
-      UpstreamH3Pools::new(&upstreams, &config).context("failed to build upstream HTTP/3 pools")?;
+    let clients = build_clients(
+      &upstreams,
+      &config.proxy.trusted_ca_certs,
+      &previous.tls_resumption,
+    )
+    .context("failed to build upstream HTTP clients")?;
+    let h3_clients = UpstreamH3Pools::new(&upstreams, &config, &previous.tls_resumption)
+      .context("failed to build upstream HTTP/3 pools")?;
     let pools = PoolState::new(&config.upstream_pools, previous.shared_state.clone());
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let alt_svc_header_value = build_alt_svc_header_value(&config)
@@ -332,6 +346,7 @@ impl AppSnapshot {
       tls_server_config: previous.tls_server_config.clone(),
       admin_tls_server_config: previous.admin_tls_server_config.clone(),
       quic_server_config: previous.quic_server_config.clone(),
+      tls_resumption: previous.tls_resumption.clone(),
       waf: previous.waf.clone(),
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
@@ -376,13 +391,14 @@ fn build_alt_svc_header_value(config: &Config) -> anyhow::Result<Option<HeaderVa
 fn build_clients(
   upstreams: &[UpstreamConfig],
   extra_root_certs: &[std::path::PathBuf],
+  tls_resumption: &tls::TlsResumptionState,
 ) -> anyhow::Result<UpstreamClientPools> {
   let mut by_upstream = HashMap::new();
   let mut pools = Vec::with_capacity(upstreams.len());
 
   for upstream in upstreams {
     let index = pools.len();
-    let pool = build_client_pool(upstream, extra_root_certs)
+    let pool = build_client_pool(upstream, extra_root_certs, tls_resumption)
       .with_context(|| format!("failed to build clients for upstream {}", upstream.name))?;
     by_upstream.insert(upstream.name.clone(), index);
     pools.push(pool);
@@ -394,12 +410,24 @@ fn build_clients(
 fn build_client_pool(
   upstream: &UpstreamConfig,
   extra_root_certs: &[std::path::PathBuf],
+  tls_resumption: &tls::TlsResumptionState,
 ) -> anyhow::Result<ClientPool> {
-  let h1_tls_config = tls::build_upstream_client_config(extra_root_certs, &upstream.tls.ech)
-    .context("failed to build HTTP/1.1 upstream TLS client")?;
-  let negotiated_tls_config =
-    tls::build_upstream_client_config(extra_root_certs, &upstream.tls.ech)
-      .context("failed to build negotiated upstream TLS client")?;
+  let h1_tls_config = tls::build_upstream_client_config_with_resumption(
+    extra_root_certs,
+    &upstream.tls.ech,
+    &upstream.tls.resumption,
+    Some(tls_resumption),
+    &upstream.name,
+  )
+  .context("failed to build HTTP/1.1 upstream TLS client")?;
+  let negotiated_tls_config = tls::build_upstream_client_config_with_resumption(
+    extra_root_certs,
+    &upstream.tls.ech,
+    &upstream.tls.resumption,
+    Some(tls_resumption),
+    &upstream.name,
+  )
+  .context("failed to build negotiated upstream TLS client")?;
 
   let mut h1_http = HttpConnector::new();
   h1_http.enforce_http(false);

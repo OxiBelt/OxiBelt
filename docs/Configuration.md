@@ -289,6 +289,12 @@ max_version = "tls1.3"
 session_tickets = true
 session_ticket_rotation_seconds = 86400
 
+[tls.resumption]
+mode = "stateful" # off | stateful | stateless
+session_cache_size = 4096
+tls13_ticket_count = 2
+rotation_seconds = 86400
+
 [tls.remote_signer]
 enabled = false
 # socket_path = "/run/oxibelt-keysigner/sign.sock"
@@ -327,7 +333,7 @@ The signer enforces its own IPC availability controls before token validation: `
 
 Remote signing is compatible with read-only root filesystems, but the socket directory itself must be writable. The signer creates the Unix socket file at `socket_path`, so a container started with `--read-only` should provide a tmpfs or shared volume for the parent directory, for example `--tmpfs /run/oxibelt-keysigner:rw,noexec,nosuid,nodev,mode=0770`. In a sidecar deployment, mount that same socket directory into both containers. Mount private keys read-only into the signer container only; OxiBelt should receive certificate chains and the signer socket, not private key files. If the signer cannot create the socket, OxiBelt cannot describe the remote key: startup fails for initial config load, and hot reload rejects the new TLS config while preserving the active one.
 
-`tls.client_auth.ca_certs` is required when client authentication mode is not `off`. `tls.ocsp.mode = "static_file"` requires `response_file`; `live_fetch` is reserved and rejected. HTTP/3 requires `tls.min_version = "tls1.3"`.
+`tls.resumption.mode = "stateful"` uses a bounded in-memory server session cache and preserves QUIC 0-RTT compatibility. `stateless` uses the rustls/aws-lc-rs ticket producer with provider-managed key rotation; it cannot be combined with `quic.zero_rtt = "safe_methods"`. `off` disables server-side resumption. `session_tickets` and `session_ticket_rotation_seconds` are legacy aliases for the nested resumption table and must not conflict with it. `tls.client_auth.ca_certs` is required when client authentication mode is not `off`. `tls.ocsp.mode = "static_file"` requires `response_file`; `live_fetch` is reserved and rejected. HTTP/3 requires `tls.min_version = "tls1.3"`.
 
 OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, or certificate renewal itself. Provision and renew TLS files with external automation such as Certbot or the `certbot/certbot` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
 
@@ -766,6 +772,12 @@ session_tickets = false
 require_sni = true
 reject_unknown_sni = true
 
+[admin.tls.resumption]
+mode = "off" # off | stateful | stateless
+session_cache_size = 1024
+tls13_ticket_count = 2
+rotation_seconds = 86400
+
 [[admin.tls.certificates]]
 server_names = ["admin.example.com", "*.ops.example.com"]
 cert_chain = "admin-fullchain.pem"
@@ -1037,9 +1049,14 @@ proxy_protocol_egress = "off" # off | v1 | v2
 [upstreams.tls.ech]
 mode = "disabled" # disabled | grease | config_list
 # config_list_file = "app.echconfiglist"
+
+[upstreams.tls.resumption]
+mode = "enabled" # enabled | disabled
+session_cache_size = 1024
+tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tickets
 ```
 
-Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection.
+Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. Upstream TLS resumption controls OxiBelt's client-side cache only; the upstream server still chooses whether its own tickets are stateful or stateless. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection.
 
 `request_timeout_ms` is the compatibility upper bound for sending a request and receiving response headers. `first_byte_timeout_ms` separately controls the response-header/first-byte wait and is capped by `request_timeout_ms` when both are configured. `read_timeout_ms` is an upstream response body idle timeout. `send_timeout_ms` controls upstream request body send backpressure.
 

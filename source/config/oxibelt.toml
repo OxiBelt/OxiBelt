@@ -57,6 +57,12 @@ max_version = "tls1.3"
 session_tickets = true
 session_ticket_rotation_seconds = 86400
 
+[tls.resumption]
+mode = "stateful" # off | stateful | stateless
+session_cache_size = 4096
+tls13_ticket_count = 2
+rotation_seconds = 86400
+
 # [tls.remote_signer]
 # enabled = true
 # socket_path = "/run/oxibelt-keysigner/sign.sock"
@@ -300,6 +306,12 @@ session_tickets = false
 require_sni = true
 reject_unknown_sni = true
 
+[admin.tls.resumption]
+mode = "off" # off | stateful | stateless
+session_cache_size = 1024
+tls13_ticket_count = 2
+rotation_seconds = 86400
+
 [admin.tls.client_auth]
 mode = "off"
 ca_certs = []
@@ -467,6 +479,11 @@ proxy_protocol_egress = "off"
 
 [upstreams.tls.ech]
 mode = "disabled"
+
+[upstreams.tls.resumption]
+mode = "enabled" # enabled | disabled
+session_cache_size = 1024
+tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tickets
 
 #[[upstream_pools]]
 # name = "app-pool"

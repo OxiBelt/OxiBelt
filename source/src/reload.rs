@@ -124,6 +124,7 @@ impl ReloadManager {
       tls_server_config: active.tls_server_config.clone(),
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config: active.quic_server_config.clone(),
+      tls_resumption: active.tls_resumption.clone(),
       waf,
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
@@ -176,14 +177,19 @@ impl ReloadManager {
 
     let mut config = active.config.clone();
     reload_downstream_tls_paths(&mut config)?;
-    let tls_server_config = tls::build_server_config(&config.tls, &config.listeners)
-      .context("failed to rebuild downstream TLS config")?;
+    let tls_server_config = tls::build_server_config_with_resumption(
+      &config.tls,
+      &config.listeners,
+      Some(&active.tls_resumption),
+    )
+    .context("failed to rebuild downstream TLS config")?;
     let quic_server_config = if config.listeners.http3 {
       Some(
-        tls::build_quic_server_config(
+        tls::build_quic_server_config_with_resumption(
           &config.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),
+          Some(&active.tls_resumption),
         )
         .context("failed to rebuild QUIC TLS config")?,
       )
@@ -209,6 +215,7 @@ impl ReloadManager {
       tls_server_config,
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config,
+      tls_resumption: active.tls_resumption.clone(),
       waf: active.waf.clone(),
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
@@ -286,6 +293,7 @@ fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
     max_version: old_tls.max_version,
     session_tickets: old_tls.session_tickets,
     session_ticket_rotation_seconds: old_tls.session_ticket_rotation_seconds,
+    resumption: old_tls.resumption,
     client_auth: old_tls.client_auth,
     ocsp: crate::config::OcspConfig {
       mode: old_tls.ocsp.mode,

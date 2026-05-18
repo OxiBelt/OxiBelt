@@ -1,29 +1,413 @@
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
-use super::{default_true, validate_base64_32_byte_env, validate_optional_non_empty};
+use super::{
+  default_true, resolve_existing_local_config_file_path_with_logical, validate_admin_server_name,
+  validate_base64_32_byte_env, validate_optional_non_empty, validate_tls_server_resumption,
+};
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TlsConfig {
   pub cert_chain: PathBuf,
-  #[serde(default)]
   pub private_key: Option<PathBuf>,
-  #[serde(default)]
   pub remote_signer: TlsRemoteSignerConfig,
-  #[serde(default = "default_tls_min_version")]
   pub min_version: TlsVersion,
-  #[serde(default = "default_tls_max_version")]
   pub max_version: TlsVersion,
-  #[serde(default = "default_true")]
   pub session_tickets: bool,
-  #[serde(default = "default_session_ticket_rotation_seconds")]
   pub session_ticket_rotation_seconds: u64,
-  #[serde(default)]
+  pub resumption: TlsServerResumptionConfig,
   pub client_auth: TlsClientAuthConfig,
-  #[serde(default)]
   pub ocsp: OcspConfig,
+}
+
+impl<'de> Deserialize<'de> for TlsConfig {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    #[derive(Deserialize)]
+    struct RawTlsConfig {
+      cert_chain: PathBuf,
+      #[serde(default)]
+      private_key: Option<PathBuf>,
+      #[serde(default)]
+      remote_signer: TlsRemoteSignerConfig,
+      #[serde(default = "default_tls_min_version")]
+      min_version: TlsVersion,
+      #[serde(default = "default_tls_max_version")]
+      max_version: TlsVersion,
+      #[serde(default)]
+      session_tickets: Option<bool>,
+      #[serde(default)]
+      session_ticket_rotation_seconds: Option<u64>,
+      #[serde(default)]
+      resumption: Option<RawTlsServerResumptionConfig>,
+      #[serde(default)]
+      client_auth: TlsClientAuthConfig,
+      #[serde(default)]
+      ocsp: OcspConfig,
+    }
+
+    let raw = RawTlsConfig::deserialize(deserializer)?;
+    let (resumption, session_tickets, session_ticket_rotation_seconds) =
+      normalize_server_resumption(
+        TlsServerResumptionConfig::default(),
+        raw.resumption,
+        raw.session_tickets,
+        raw.session_ticket_rotation_seconds,
+      )
+      .map_err(serde::de::Error::custom)?;
+    Ok(Self {
+      cert_chain: raw.cert_chain,
+      private_key: raw.private_key,
+      remote_signer: raw.remote_signer,
+      min_version: raw.min_version,
+      max_version: raw.max_version,
+      session_tickets,
+      session_ticket_rotation_seconds,
+      resumption,
+      client_auth: raw.client_auth,
+      ocsp: raw.ocsp,
+    })
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct TlsServerResumptionConfig {
+  #[serde(default)]
+  pub mode: TlsServerResumptionMode,
+  #[serde(default = "default_server_session_cache_size")]
+  pub session_cache_size: usize,
+  #[serde(default = "default_tls13_ticket_count")]
+  pub tls13_ticket_count: usize,
+  #[serde(default = "default_session_ticket_rotation_seconds")]
+  pub rotation_seconds: u64,
+}
+
+impl Default for TlsServerResumptionConfig {
+  fn default() -> Self {
+    Self {
+      mode: TlsServerResumptionMode::Stateful,
+      session_cache_size: default_server_session_cache_size(),
+      tls13_ticket_count: default_tls13_ticket_count(),
+      rotation_seconds: default_session_ticket_rotation_seconds(),
+    }
+  }
+}
+
+impl TlsServerResumptionConfig {
+  pub fn off() -> Self {
+    Self {
+      mode: TlsServerResumptionMode::Off,
+      ..Self::default()
+    }
+  }
+
+  pub fn enabled(&self) -> bool {
+    self.mode != TlsServerResumptionMode::Off
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsServerResumptionMode {
+  Off,
+  #[default]
+  Stateful,
+  Stateless,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RawTlsServerResumptionConfig {
+  #[serde(default)]
+  pub mode: Option<TlsServerResumptionMode>,
+  #[serde(default)]
+  pub session_cache_size: Option<usize>,
+  #[serde(default)]
+  pub tls13_ticket_count: Option<usize>,
+  #[serde(default)]
+  pub rotation_seconds: Option<u64>,
+}
+
+pub fn normalize_server_resumption(
+  mut base: TlsServerResumptionConfig,
+  raw_resumption: Option<RawTlsServerResumptionConfig>,
+  legacy_session_tickets: Option<bool>,
+  legacy_rotation_seconds: Option<u64>,
+) -> anyhow::Result<(TlsServerResumptionConfig, bool, u64)> {
+  let raw_resumption = raw_resumption.unwrap_or_default();
+  if let Some(mode) = raw_resumption.mode {
+    base.mode = mode;
+  }
+  if let Some(session_cache_size) = raw_resumption.session_cache_size {
+    base.session_cache_size = session_cache_size;
+  }
+  if let Some(tls13_ticket_count) = raw_resumption.tls13_ticket_count {
+    base.tls13_ticket_count = tls13_ticket_count;
+  }
+  if let Some(rotation_seconds) = raw_resumption.rotation_seconds {
+    base.rotation_seconds = rotation_seconds;
+  }
+
+  if let Some(session_tickets) = legacy_session_tickets {
+    if !session_tickets
+      && raw_resumption
+        .mode
+        .is_some_and(|mode| mode != TlsServerResumptionMode::Off)
+    {
+      bail!("session_tickets = false conflicts with resumption.mode");
+    }
+    if session_tickets && raw_resumption.mode == Some(TlsServerResumptionMode::Off) {
+      bail!("session_tickets = true conflicts with resumption.mode = \"off\"");
+    }
+    if raw_resumption.mode.is_none() {
+      base.mode = if session_tickets {
+        TlsServerResumptionMode::Stateful
+      } else {
+        TlsServerResumptionMode::Off
+      };
+    }
+  }
+
+  if let Some(rotation_seconds) = legacy_rotation_seconds {
+    if raw_resumption
+      .rotation_seconds
+      .is_some_and(|configured| configured != rotation_seconds)
+    {
+      bail!("session_ticket_rotation_seconds conflicts with resumption.rotation_seconds");
+    }
+    base.rotation_seconds = rotation_seconds;
+  }
+
+  let session_ticket_rotation_seconds = legacy_rotation_seconds.unwrap_or_else(|| {
+    if base.rotation_seconds == 0 {
+      default_session_ticket_rotation_seconds()
+    } else {
+      base.rotation_seconds
+    }
+  });
+
+  Ok((
+    base.clone(),
+    base.enabled(),
+    session_ticket_rotation_seconds,
+  ))
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamTlsResumptionConfig {
+  #[serde(default)]
+  pub mode: UpstreamTlsResumptionMode,
+  #[serde(default = "default_upstream_session_cache_size")]
+  pub session_cache_size: usize,
+  #[serde(default)]
+  pub tls12: UpstreamTls12ResumptionMode,
+}
+
+impl Default for UpstreamTlsResumptionConfig {
+  fn default() -> Self {
+    Self {
+      mode: UpstreamTlsResumptionMode::Enabled,
+      session_cache_size: default_upstream_session_cache_size(),
+      tls12: UpstreamTls12ResumptionMode::SessionIdOrTickets,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamTlsResumptionMode {
+  #[default]
+  Enabled,
+  Disabled,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamTls12ResumptionMode {
+  Disabled,
+  SessionIdOnly,
+  #[default]
+  SessionIdOrTickets,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdminTlsConfig {
+  pub enabled: bool,
+  pub min_version: TlsVersion,
+  pub max_version: TlsVersion,
+  pub session_tickets: bool,
+  pub session_ticket_rotation_seconds: u64,
+  pub resumption: TlsServerResumptionConfig,
+  pub require_sni: bool,
+  pub reject_unknown_sni: bool,
+  pub certificates: Vec<AdminTlsCertificateConfig>,
+  pub client_auth: TlsClientAuthConfig,
+}
+
+impl Default for AdminTlsConfig {
+  fn default() -> Self {
+    let resumption = TlsServerResumptionConfig::off();
+    Self {
+      enabled: false,
+      min_version: TlsVersion::Tls13,
+      max_version: TlsVersion::Tls13,
+      session_tickets: false,
+      session_ticket_rotation_seconds: resumption.rotation_seconds,
+      resumption,
+      require_sni: true,
+      reject_unknown_sni: true,
+      certificates: Vec::new(),
+      client_auth: TlsClientAuthConfig::default(),
+    }
+  }
+}
+
+impl<'de> Deserialize<'de> for AdminTlsConfig {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    #[derive(Deserialize)]
+    struct RawAdminTlsConfig {
+      #[serde(default)]
+      enabled: bool,
+      #[serde(default = "default_tls_min_version")]
+      min_version: TlsVersion,
+      #[serde(default = "default_tls_max_version")]
+      max_version: TlsVersion,
+      #[serde(default)]
+      session_tickets: Option<bool>,
+      #[serde(default)]
+      session_ticket_rotation_seconds: Option<u64>,
+      #[serde(default)]
+      resumption: Option<RawTlsServerResumptionConfig>,
+      #[serde(default = "default_true")]
+      require_sni: bool,
+      #[serde(default = "default_true")]
+      reject_unknown_sni: bool,
+      #[serde(default)]
+      certificates: Vec<AdminTlsCertificateConfig>,
+      #[serde(default)]
+      client_auth: TlsClientAuthConfig,
+    }
+
+    let raw = RawAdminTlsConfig::deserialize(deserializer)?;
+    let (resumption, session_tickets, session_ticket_rotation_seconds) =
+      normalize_server_resumption(
+        TlsServerResumptionConfig::off(),
+        raw.resumption,
+        raw.session_tickets,
+        raw.session_ticket_rotation_seconds,
+      )
+      .map_err(serde::de::Error::custom)?;
+    Ok(Self {
+      enabled: raw.enabled,
+      min_version: raw.min_version,
+      max_version: raw.max_version,
+      session_tickets,
+      session_ticket_rotation_seconds,
+      resumption,
+      require_sni: raw.require_sni,
+      reject_unknown_sni: raw.reject_unknown_sni,
+      certificates: raw.certificates,
+      client_auth: raw.client_auth,
+    })
+  }
+}
+
+impl AdminTlsConfig {
+  pub(super) fn resolve_relative_paths(&mut self, cert_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut resolved_paths = Vec::new();
+    for certificate in &mut self.certificates {
+      let (cert_chain, cert_logical) = resolve_existing_local_config_file_path_with_logical(
+        "admin.tls.certificates.cert_chain",
+        cert_dir,
+        &certificate.cert_chain,
+      )?;
+      certificate.cert_chain = cert_chain;
+      resolved_paths.push(cert_logical);
+      let (private_key, key_logical) = resolve_existing_local_config_file_path_with_logical(
+        "admin.tls.certificates.private_key",
+        cert_dir,
+        &certificate.private_key,
+      )?;
+      certificate.private_key = private_key;
+      resolved_paths.push(key_logical);
+    }
+    self.client_auth.ca_certs = self
+      .client_auth
+      .ca_certs
+      .iter()
+      .map(|path| {
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          "admin.tls.client_auth.ca_certs",
+          cert_dir,
+          path,
+        )?;
+        resolved_paths.push(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
+      })
+      .collect::<anyhow::Result<_>>()?;
+    Ok(resolved_paths)
+  }
+
+  pub(super) fn validate(&self) -> anyhow::Result<()> {
+    if self.min_version > self.max_version {
+      bail!("admin.tls.min_version must be less than or equal to admin.tls.max_version");
+    }
+    if self.session_ticket_rotation_seconds == 0 {
+      bail!("admin.tls.session_ticket_rotation_seconds must be greater than 0");
+    }
+    validate_tls_server_resumption("admin.tls.resumption", &self.resumption)?;
+    if self.client_auth.mode != TlsClientAuthMode::Off && self.client_auth.ca_certs.is_empty() {
+      bail!("admin.tls.client_auth.ca_certs is required when client_auth mode is not off");
+    }
+    if !self.enabled {
+      return Ok(());
+    }
+    if self.certificates.is_empty() {
+      bail!(
+        "admin.tls.certificates must include at least one certificate when admin TLS is enabled"
+      );
+    }
+    let defaults = self
+      .certificates
+      .iter()
+      .filter(|certificate| certificate.default)
+      .count();
+    if self.certificates.len() > 1 && defaults != 1 {
+      bail!(
+        "exactly one admin.tls.certificates entry must set default = true when multiple certificates are configured"
+      );
+    }
+    let mut names = HashSet::new();
+    for certificate in &self.certificates {
+      if certificate.server_names.is_empty() {
+        bail!("admin.tls.certificates server_names must not be empty");
+      }
+      for name in &certificate.server_names {
+        validate_admin_server_name(name)?;
+        if !names.insert(name.to_ascii_lowercase()) {
+          bail!("duplicate admin.tls certificate server_name {name}");
+        }
+      }
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AdminTlsCertificateConfig {
+  #[serde(default)]
+  pub server_names: Vec<String>,
+  pub cert_chain: PathBuf,
+  pub private_key: PathBuf,
+  #[serde(default)]
+  pub default: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -138,6 +522,18 @@ pub(super) fn default_tls_max_version() -> TlsVersion {
 
 fn default_session_ticket_rotation_seconds() -> u64 {
   86_400
+}
+
+fn default_server_session_cache_size() -> usize {
+  4_096
+}
+
+fn default_upstream_session_cache_size() -> usize {
+  1_024
+}
+
+fn default_tls13_ticket_count() -> usize {
+  2
 }
 
 fn default_tls_client_auth_verify_depth() -> u8 {

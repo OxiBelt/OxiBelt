@@ -10,8 +10,9 @@ use oxibelt::config::{
     EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode,
     HotReloadMode, OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
     QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-    StaticFilesSendfileMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
-    resolve_auto_worker_count,
+    StaticFilesSendfileMode, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
+    UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -638,6 +639,137 @@ max_version = "tls1.2"
         error
             .to_string()
             .contains("tls.session_ticket_rotation_seconds must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn tls_resumption_nested_config_parses_and_legacy_conflicts_are_rejected() {
+    let temp_dir = common::TempDir::new("tls-resumption-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "tls-resumption-config");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let raw = base.replace(
+        "[tls.ocsp]",
+        r#"[tls.resumption]
+mode = "stateless"
+session_cache_size = 8192
+tls13_ticket_count = 4
+rotation_seconds = 600
+
+[tls.ocsp]"#,
+    );
+    let raw = raw.replace(
+        "webtransport = true",
+        r#"webtransport = true
+
+[upstreams.tls.resumption]
+mode = "disabled"
+session_cache_size = 2048
+tls12 = "session_id_only""#,
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(
+        config.tls.resumption.mode,
+        TlsServerResumptionMode::Stateless
+    );
+    assert_eq!(config.tls.resumption.session_cache_size, 8192);
+    assert_eq!(config.tls.resumption.tls13_ticket_count, 4);
+    assert_eq!(config.tls.resumption.rotation_seconds, 600);
+    assert!(config.tls.session_tickets);
+    assert_eq!(
+        config.upstreams[0].tls.resumption.mode,
+        UpstreamTlsResumptionMode::Disabled
+    );
+    assert_eq!(
+        config.upstreams[0].tls.resumption.tls12,
+        UpstreamTls12ResumptionMode::SessionIdOnly
+    );
+
+    let raw = base.replace(
+        "[tls.ocsp]",
+        r#"session_tickets = false
+
+[tls.resumption]
+mode = "stateful"
+
+[tls.ocsp]"#,
+    );
+    let error = toml::from_str::<Config>(&raw).expect_err("conflicting legacy alias should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("session_tickets = false conflicts"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn tls_resumption_validation_rejects_invalid_values_and_zero_rtt_conflict() {
+    let temp_dir = common::TempDir::new("tls-resumption-validation");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "tls-resumption-validation");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (setting, expected) in [
+        (
+            "session_cache_size = 0",
+            "tls.resumption.session_cache_size must be greater than 0",
+        ),
+        (
+            "tls13_ticket_count = 0",
+            "tls.resumption.tls13_ticket_count must be greater than 0",
+        ),
+        (
+            "rotation_seconds = 0",
+            "tls.resumption.rotation_seconds must be greater than 0",
+        ),
+    ] {
+        let raw = base.replace(
+            "[tls.ocsp]",
+            &format!(
+                r#"[tls.resumption]
+{setting}
+
+[tls.ocsp]"#
+            ),
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid resumption value should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+
+    let raw = base
+        .replace("http3 = false", "http3 = true")
+        .replace(
+            "[tls.ocsp]",
+            r#"[tls.resumption]
+mode = "stateless"
+
+[tls.ocsp]"#,
+        )
+        .replace(
+            "[proxy]",
+            r#"[quic]
+zero_rtt = "safe_methods"
+
+[proxy]"#,
+        );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("stateless tickets must reject QUIC 0-RTT");
+    assert!(
+        error
+            .to_string()
+            .contains("tls.resumption.mode = \"stateless\" cannot be used"),
         "unexpected error: {error}"
     );
 }

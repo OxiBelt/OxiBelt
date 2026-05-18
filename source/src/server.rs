@@ -1368,6 +1368,7 @@ impl ListenerSupervisor {
           tcp_options,
           Duration::from_millis(snapshot.config.runtime.accept.accept_error_backoff_ms),
           &snapshot.config.tls,
+          &snapshot.tls_resumption,
         )?);
       }
       Some(bound)
