@@ -2461,10 +2461,7 @@ fn quic_defaults_are_parsed() {
     assert_eq!(config.quic.transport.max_concurrent_bidi_streams, 100);
     assert_eq!(config.quic.transport.keep_alive_interval_ms, 0);
     assert_eq!(config.quic.transport.stream_receive_window_bytes, 1_250_000);
-    assert_eq!(
-        config.quic.transport.receive_window_bytes,
-        4_611_686_018_427_387_903
-    );
+    assert_eq!(config.quic.transport.receive_window_bytes, 8_388_608);
     assert_eq!(config.quic.transport.send_window_bytes, 10_000_000);
     assert!(config.quic.transport.send_fairness);
     assert_eq!(
@@ -2711,6 +2708,17 @@ keep_alive_interval_ms = 30000
 receive_window_bytes = 4611686018427387904
 "#,
             "quic.upstream.transport.receive_window_bytes must be at most 4611686018427387903",
+        ),
+        (
+            "window_dynamic_cap",
+            r#"
+[quic.downstream.transport]
+max_concurrent_bidi_streams = 2
+max_concurrent_uni_streams = 3
+stream_receive_window_bytes = 1024
+receive_window_bytes = 4096
+"#,
+            "quic.downstream.transport.receive_window_bytes must be at most 3072 based on quic.downstream.transport.stream_receive_window_bytes and the larger concurrent stream limit",
         ),
         (
             "mtu",

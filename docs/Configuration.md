@@ -358,7 +358,7 @@ max_concurrent_uni_streams = 512
 idle_timeout_ms = 30000
 keep_alive_interval_ms = 0
 stream_receive_window_bytes = 1250000
-receive_window_bytes = 4611686018427387903
+receive_window_bytes = 8388608
 send_window_bytes = 10000000
 send_fairness = true
 datagram_receive_buffer_bytes = 1048576
@@ -406,7 +406,7 @@ When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/
 
 `[quic.transport]` is the shared QUIC transport baseline for both downstream HTTP/3 clients and upstream HTTP/3 forwarding. `[quic.downstream.transport]` and `[quic.upstream.transport]` are partial endpoint-specific overrides; unset values inherit from `[quic.transport]`, including nested `mtu_discovery` values. Existing configurations that only use `[quic.transport]` keep the same behavior for both endpoints.
 
-`keep_alive_interval_ms = 0` disables QUIC keep-alive packets. Nonzero keep-alive intervals must be lower than `idle_timeout_ms`. `stream_receive_window_bytes`, `receive_window_bytes`, and `send_window_bytes` tune QUIC flow-control and send buffering. Larger windows can improve high-bandwidth or high-RTT HTTP/3 throughput, but they also raise worst-case per-connection memory exposure when many peers consume the full window.
+`keep_alive_interval_ms = 0` disables QUIC keep-alive packets. Nonzero keep-alive intervals must be lower than `idle_timeout_ms`. `stream_receive_window_bytes`, `receive_window_bytes`, and `send_window_bytes` tune QUIC flow-control and send buffering. Larger windows can improve high-bandwidth or high-RTT HTTP/3 throughput, but they also raise worst-case per-connection memory exposure when many peers consume the full window. `receive_window_bytes` must be no larger than `stream_receive_window_bytes * max(max_concurrent_bidi_streams, max_concurrent_uni_streams)` so one connection cannot advertise more aggregate receive credit than its configured stream concurrency can justify.
 
 `initial_mtu`, `min_mtu`, `max_udp_payload_size`, and `mtu_discovery.upper_bound` must be in the QUIC UDP payload range `1200..=65527`; `min_mtu` must not exceed `initial_mtu`, and enabled MTU discovery requires `upper_bound >= initial_mtu`. Keep `min_mtu = 1200` for public internet deployments unless the network path is fully controlled. MTU discovery is enabled by default and periodically probes up to `upper_bound`; disabling it keeps the configured initial/minimum MTU behavior.
 

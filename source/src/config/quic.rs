@@ -115,6 +115,15 @@ impl QuicTransportConfig {
     if self.receive_window_bytes > QUIC_VARINT_MAX {
       bail!("{path}.receive_window_bytes must be at most {QUIC_VARINT_MAX}");
     }
+    let max_streams = self
+      .max_concurrent_bidi_streams
+      .max(self.max_concurrent_uni_streams);
+    let max_receive_window_bytes = self.stream_receive_window_bytes.saturating_mul(max_streams);
+    if self.receive_window_bytes > max_receive_window_bytes {
+      bail!(
+        "{path}.receive_window_bytes must be at most {max_receive_window_bytes} based on {path}.stream_receive_window_bytes and the larger concurrent stream limit"
+      );
+    }
     validate_quic_mtu_value(path, "max_udp_payload_size", self.max_udp_payload_size)?;
     validate_quic_mtu_value(path, "initial_mtu", self.initial_mtu)?;
     validate_quic_mtu_value(path, "min_mtu", self.min_mtu)?;
@@ -344,7 +353,7 @@ fn default_quic_stream_receive_window_bytes() -> u64 {
 }
 
 fn default_quic_receive_window_bytes() -> u64 {
-  QUIC_VARINT_MAX
+  8 * 1024 * 1024
 }
 
 fn default_quic_send_window_bytes() -> u64 {

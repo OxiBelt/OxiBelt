@@ -4223,6 +4223,17 @@ run_case_checks() {
         ),
         docker_case(
             "config-invalid",
+            "quic-receive-window-above-dynamic-cap",
+            "QUIC receive window rejects values above the stream concurrency cap",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some(
+                "quic.transport.receive_window_bytes must be at most 3072 based on quic.transport.stream_receive_window_bytes",
+            ),
+        ),
+        docker_case(
+            "config-invalid",
             "ech-config-list-missing-file",
             "ECH config-list mode requires a file",
             ExpectStart::Failure,
@@ -5301,6 +5312,30 @@ run_case_checks() {
     and .path == "/origin/app/downstream-h3-upstream-h1"
     and .headers["x-forwarded-proto"] == "https"
     and .headers["x-forwarded-host"] == "example.test"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "downstream-h3-bounded-receive-window",
+            "downstream HTTP/3 forwards a request body with a bounded QUIC receive window",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_generated_body_request "h3" "example.test" "/app/bounded-window" "POST" 65536 8192 --expect-status 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h3"'
+  assert_body_jq "${response}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .method == "POST"
+    and .path == "/origin/app/bounded-window"
+    and (.body | length) == 65536'
 }
 "#,
             None,

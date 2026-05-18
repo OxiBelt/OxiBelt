@@ -418,6 +418,10 @@ mod tests {
     let debug = format!("{transport:?}");
 
     assert!(
+      debug.contains("receive_window: 8388608"),
+      "unexpected debug output: {debug}"
+    );
+    assert!(
       debug.contains("keep_alive_interval: None"),
       "unexpected debug output: {debug}"
     );
