@@ -1029,6 +1029,49 @@ protocol_probe_client() {
   fail_with_diagnostics "protocol probe did not reach expected status ${expect_status}"
 }
 
+protocol_probe_tls_resumption_load() {
+  local authority="$1"
+  local path="$2"
+  local connections="$3"
+  local expect_resumed_min="$4"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-tls-resumption-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      tls-resumption-load \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --connections "${connections}" \
+      --expect-resumed-min "${expect_resumed_min}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "TLS resumption probe failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "TLS resumption probe did not observe enough resumed handshakes"
+}
+
 protocol_probe_client_with_headers() {
   local protocol="$1"
   local authority="$2"

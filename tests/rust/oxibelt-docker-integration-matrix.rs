@@ -1862,6 +1862,40 @@ print(f"completed {count} short-lived connections with {workers} workers")
         ),
         docker_case(
             "security",
+            "tls-stateful-resumption-cache-bounded",
+            "stateful downstream TLS resumption cache stays bounded under repeated resumes",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local connections min_resumed first second final
+  connections="${OXIBELT_TLS_RESUMPTION_LOAD_CONNECTIONS:-64}"
+  min_resumed="${OXIBELT_TLS_RESUMPTION_MIN_RESUMED:-32}"
+
+  first="$(protocol_probe_tls_resumption_load "example.test" "/app/tls-resumption?body=first" "${connections}" "${min_resumed}")"
+  assert_response_jq "${first}" ".connections == ${connections}
+    and .resumed >= ${min_resumed}
+    and .full >= 1
+    and .tickets_received >= ${min_resumed}"
+
+  second="$(protocol_probe_tls_resumption_load "example.test" "/app/tls-resumption?body=second" "${connections}" "${min_resumed}")"
+  assert_response_jq "${second}" ".connections == ${connections}
+    and .resumed >= ${min_resumed}
+    and .full >= 1
+    and .tickets_received >= ${min_resumed}"
+
+  final="$(client_request "example.test" "/app/tls-resumption-final?body=alive" 200)"
+  assert_response_jq "${final}" '.body == "alive"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "security",
             "webtransport-session-limit",
             "multiplexed WebTransport sessions are limited per client on one HTTP/3 connection",
             ExpectStart::Success,

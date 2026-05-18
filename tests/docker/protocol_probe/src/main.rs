@@ -25,8 +25,9 @@ use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::{ClientConfig, HandshakeKind, RootCertStore, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -104,6 +105,17 @@ struct DownstreamArgs {
     expect_status: Option<u16>,
 }
 
+struct TlsResumptionLoadArgs {
+    host: String,
+    port: u16,
+    server_name: String,
+    authority: String,
+    path: String,
+    ca_cert: String,
+    connections: usize,
+    expect_resumed_min: usize,
+}
+
 struct WebTransportMultiplexArgs {
     host: String,
     port: u16,
@@ -157,6 +169,9 @@ async fn main() -> anyhow::Result<()> {
             serve_webtransport_upstream(parse_webtransport_upstream_args(args)?).await
         }
         "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
+        "tls-resumption-load" => {
+            run_tls_resumption_load(parse_tls_resumption_load_args(args)?).await
+        }
         "webtransport-multiplex" => {
             run_webtransport_multiplex_client(parse_webtransport_multiplex_args(args)?).await
         }
@@ -172,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]"
+    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]"
   );
 }
 
@@ -496,6 +511,61 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         headers,
         ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
         expect_status,
+    })
+}
+
+fn parse_tls_resumption_load_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<TlsResumptionLoadArgs> {
+    let mut host = None;
+    let mut port = None;
+    let mut server_name = None;
+    let mut authority = None;
+    let mut path = None;
+    let mut ca_cert = None;
+    let mut connections = None;
+    let mut expect_resumed_min = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--host" => host = Some(value),
+            "--port" => port = Some(value.parse().context("invalid --port value")?),
+            "--server-name" => server_name = Some(value),
+            "--authority" => authority = Some(value),
+            "--path" => path = Some(validate_origin_form_path(&value)?),
+            "--ca-cert" => ca_cert = Some(value),
+            "--connections" => {
+                let parsed = value.parse().context("invalid --connections value")?;
+                if parsed == 0 {
+                    bail!("--connections must be greater than zero");
+                }
+                connections = Some(parsed);
+            }
+            "--expect-resumed-min" => {
+                expect_resumed_min = Some(
+                    value
+                        .parse()
+                        .context("invalid --expect-resumed-min value")?,
+                );
+            }
+            _ => bail!("unknown tls-resumption-load flag: {flag}"),
+        }
+    }
+
+    let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+    Ok(TlsResumptionLoadArgs {
+        host: host.ok_or_else(|| anyhow!("--host is required"))?,
+        port: port.ok_or_else(|| anyhow!("--port is required"))?,
+        authority: authority.unwrap_or_else(|| server_name.clone()),
+        server_name,
+        path: path.ok_or_else(|| anyhow!("--path is required"))?,
+        ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+        connections: connections.ok_or_else(|| anyhow!("--connections is required"))?,
+        expect_resumed_min: expect_resumed_min
+            .ok_or_else(|| anyhow!("--expect-resumed-min is required"))?,
     })
 }
 
@@ -1068,6 +1138,48 @@ async fn run_downstream_client(args: DownstreamArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_tls_resumption_load(args: TlsResumptionLoadArgs) -> anyhow::Result<()> {
+    let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1")?;
+    client_config.resumption = Resumption::in_memory_sessions(args.connections.max(8));
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let mut full = 0usize;
+    let mut resumed = 0usize;
+    let mut unknown = 0usize;
+    let mut tickets_received = 0u32;
+
+    for index in 0..args.connections {
+        let (kind, status, tickets) =
+            tls_resumption_http1_request(&connector, &args, index).await?;
+        tickets_received = tickets_received.saturating_add(tickets);
+        match kind {
+            Some(HandshakeKind::Full | HandshakeKind::FullWithHelloRetryRequest) => full += 1,
+            Some(HandshakeKind::Resumed) => resumed += 1,
+            None => unknown += 1,
+        }
+        if status != 200 {
+            bail!("TLS resumption probe request {index} returned status {status}");
+        }
+    }
+
+    let output = serde_json::json!({
+      "connections": args.connections,
+      "full": full,
+      "resumed": resumed,
+      "unknown": unknown,
+      "tickets_received": tickets_received,
+    });
+    if resumed < args.expect_resumed_min {
+        eprintln!("{}", serde_json::to_string(&output)?);
+        bail!(
+            "expected at least {} resumed TLS handshakes, got {resumed}",
+            args.expect_resumed_min
+        );
+    }
+
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
 async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> anyhow::Result<()> {
     let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3")?;
     let quic_crypto =
@@ -1266,6 +1378,76 @@ async fn run_webtransport_reload_gated_client(
         })
     );
     Ok(())
+}
+
+async fn tls_resumption_http1_request(
+    connector: &TlsConnector,
+    args: &TlsResumptionLoadArgs,
+    index: usize,
+) -> anyhow::Result<(Option<HandshakeKind>, u16, u32)> {
+    let stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .with_context(|| format!("failed to connect to {}:{}", args.host, args.port))?;
+    let server_name = ServerName::try_from(args.server_name.clone())
+        .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
+    let mut tls_stream = connector
+        .connect(server_name, stream)
+        .await
+        .context("failed to establish downstream TLS")?;
+    let kind = tls_stream.get_ref().1.handshake_kind();
+    let path = append_query_param(&args.path, "resumption_probe", index);
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        args.authority
+    );
+    tls_stream
+        .write_all(request.as_bytes())
+        .await
+        .context("failed to write TLS resumption probe request")?;
+    tls_stream
+        .flush()
+        .await
+        .context("failed to flush TLS resumption probe request")?;
+
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tls_stream.read_to_end(&mut response),
+    )
+    .await
+    .context("timed out reading TLS resumption probe response")?
+    .context("failed to read TLS resumption probe response")?;
+    let status = parse_http1_status(&response)?;
+    let tickets = tls_stream.get_ref().1.tls13_tickets_received();
+    Ok((kind, status, tickets))
+}
+
+fn append_query_param(path: &str, name: &str, value: usize) -> String {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{separator}{name}={value}")
+}
+
+fn parse_http1_status(response: &[u8]) -> anyhow::Result<u16> {
+    let status_line = response
+        .split(|byte| *byte == b'\n')
+        .next()
+        .ok_or_else(|| anyhow!("HTTP/1 response was empty"))?;
+    let status_line = std::str::from_utf8(status_line)
+        .context("HTTP/1 status line was not UTF-8")?
+        .trim_end_matches('\r');
+    let mut parts = status_line.split_whitespace();
+    let version = parts
+        .next()
+        .ok_or_else(|| anyhow!("HTTP/1 response status line missing version"))?;
+    if !version.starts_with("HTTP/1.") {
+        bail!("unexpected HTTP response version in status line: {status_line}");
+    }
+    let status = parts
+        .next()
+        .ok_or_else(|| anyhow!("HTTP/1 response status line missing status"))?
+        .parse()
+        .context("invalid HTTP/1 response status")?;
+    Ok(status)
 }
 
 fn webtransport_connect_request(

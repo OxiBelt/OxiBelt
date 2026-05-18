@@ -72,11 +72,17 @@ impl TtlServerSessionCache {
     }
   }
 
+  fn retain_live_order_entries(inner: &mut TtlServerSessionCacheInner) {
+    let entries = &inner.entries;
+    inner.order.retain(|key| entries.contains_key(key));
+  }
+
   fn remove_expired(&self, inner: &mut TtlServerSessionCacheInner) {
     let now = Instant::now();
     inner
       .entries
       .retain(|_, stored| now.duration_since(stored.inserted_at) <= self.ttl);
+    Self::retain_live_order_entries(inner);
     while inner.entries.len() > self.capacity {
       let Some(key) = inner.order.pop_front() else {
         break;
@@ -116,7 +122,11 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
   fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
     let mut inner = self.inner.lock().expect("TLS session cache lock poisoned");
     self.remove_expired(&mut inner);
-    inner.entries.remove(key).map(|stored| stored.value)
+    let value = inner.entries.remove(key).map(|stored| stored.value);
+    if value.is_some() {
+      inner.order.retain(|queued| queued.as_slice() != key);
+    }
+    value
   }
 
   fn can_cache(&self) -> bool {
@@ -303,4 +313,80 @@ fn hex_encode(bytes: &[u8]) -> String {
     out.push(HEX[(byte & 0x0f) as usize] as char);
   }
   out
+}
+
+#[cfg(test)]
+mod tests {
+  use super::TtlServerSessionCache;
+  use rustls::server::StoresServerSessions;
+  use std::time::Duration;
+
+  #[test]
+  fn stateful_cache_take_removes_consumed_keys_from_order() {
+    let cache = TtlServerSessionCache::new(2, Duration::from_secs(60));
+
+    for index in 0..16u8 {
+      let key = vec![index];
+      assert!(cache.put(key.clone(), vec![1, 2, 3]));
+      assert_eq!(cache.take(&key), Some(vec![1, 2, 3]));
+    }
+
+    assert_cache_lengths(&cache, 0, 0);
+  }
+
+  #[test]
+  fn stateful_cache_expiry_removes_stale_order_entries() {
+    let cache = TtlServerSessionCache::new(4, Duration::from_millis(1));
+    assert!(cache.put(b"expired".to_vec(), b"old".to_vec()));
+    std::thread::sleep(Duration::from_millis(5));
+
+    assert_eq!(cache.get(b"expired"), None);
+    assert_cache_lengths(&cache, 0, 0);
+  }
+
+  #[test]
+  fn stateful_cache_capacity_bounds_entries_and_order() {
+    let cache = TtlServerSessionCache::new(2, Duration::from_secs(60));
+
+    assert!(cache.put(b"first".to_vec(), b"1".to_vec()));
+    assert!(cache.put(b"second".to_vec(), b"2".to_vec()));
+    assert!(cache.put(b"third".to_vec(), b"3".to_vec()));
+
+    assert_eq!(cache.get(b"first"), None);
+    assert_eq!(cache.get(b"second"), Some(b"2".to_vec()));
+    assert_eq!(cache.get(b"third"), Some(b"3".to_vec()));
+    assert_cache_lengths(&cache, 2, 2);
+  }
+
+  #[test]
+  fn stateful_cache_capacity_skips_consumed_order_entries() {
+    let cache = TtlServerSessionCache::new(2, Duration::from_secs(60));
+
+    assert!(cache.put(b"consumed".to_vec(), b"gone".to_vec()));
+    assert_eq!(cache.take(b"consumed"), Some(b"gone".to_vec()));
+    assert!(cache.put(b"first".to_vec(), b"1".to_vec()));
+    assert!(cache.put(b"second".to_vec(), b"2".to_vec()));
+    assert!(cache.put(b"third".to_vec(), b"3".to_vec()));
+
+    assert_eq!(cache.get(b"first"), None);
+    assert_eq!(cache.get(b"second"), Some(b"2".to_vec()));
+    assert_eq!(cache.get(b"third"), Some(b"3".to_vec()));
+    assert_cache_lengths(&cache, 2, 2);
+  }
+
+  fn assert_cache_lengths(cache: &TtlServerSessionCache, entries: usize, order: usize) {
+    let inner = cache.inner.lock().expect("TLS session cache lock poisoned");
+    assert_eq!(inner.entries.len(), entries);
+    assert_eq!(inner.order.len(), order);
+    assert!(
+      inner.order.len() <= cache.capacity,
+      "order length must stay bounded by capacity"
+    );
+    for key in &inner.order {
+      assert!(
+        inner.entries.contains_key(key),
+        "order must only contain live entry keys"
+      );
+    }
+  }
 }
