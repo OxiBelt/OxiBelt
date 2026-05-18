@@ -855,10 +855,9 @@ rule_ids = ["941320"]
 methods = ["POST"]
 routes = ["app-root"]
 path_prefixes = ["/editor/"]
-header_equals = { "x-app-context" = "trusted-editor" }
 reason = "trusted editor route intentionally accepts HTML fragments"
 ```
 
-Switch `mode` to `enforcing` after reviewing `/admin/v1/waf/rule-hits` for rule hits, `tuned_hits`, observed anomaly scores, and blocking scores. Use `/admin/v1/waf/crs/compatibility` to inspect the CRS compatibility matrix exposed by the running binary. OxiBelt targets the CRS current release and `v4.25.x` LTS line as of 2026-05-10; see the official CRS [LTS announcement](https://coreruleset.org/20260321/announcing-crs-v4-25-lts/), [false-positive tuning guide](https://coreruleset.org/docs/2-how-crs-works/2-3-false-positives-and-tuning/), and [installation guide](https://coreruleset.org/docs/1-getting-started/1-1-crs-installation/).
+Switch `mode` to `enforcing` after reviewing `/admin/v1/waf/rule-hits` for rule hits, `tuned_hits`, observed anomaly scores, and blocking scores. Scope allowlists with `methods`, `routes`, or `path_prefixes`; `header_equals` is rejected because inbound request headers are client-controlled before proxy forwarding. Use `/admin/v1/waf/crs/compatibility` to inspect the CRS compatibility matrix exposed by the running binary. OxiBelt targets the CRS current release and `v4.25.x` LTS line as of 2026-05-10; see the official CRS [LTS announcement](https://coreruleset.org/20260321/announcing-crs-v4-25-lts/), [false-positive tuning guide](https://coreruleset.org/docs/2-how-crs-works/2-3-false-positives-and-tuning/), and [installation guide](https://coreruleset.org/docs/1-getting-started/1-1-crs-installation/).
 
 Response body CRS inspection uses bounded prefix scanning and should be enabled only for routes that need response leak detection. WebTransport frame/datagram payload inspection is not supported by the CRS layer.

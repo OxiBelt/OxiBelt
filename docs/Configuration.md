@@ -108,7 +108,7 @@ include = ["conf.d/*.toml"]
 
 Required routing inputs:
 
-- At least one `[[routes]]`; upstreams and upstream pools are optional when every route serves local static files.
+- At least one `[[routes]]`, `[[stream_listeners]]`, or `[[webrtc_turn_listeners]]`.
 - Each route must set exactly one of `upstream`, `upstream_pool`, or `static_root`.
 
 ## Includes
@@ -411,7 +411,7 @@ When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/
 
 `initial_mtu`, `min_mtu`, `max_udp_payload_size`, and `mtu_discovery.upper_bound` must be in the QUIC UDP payload range `1200..=65527`; `min_mtu` must not exceed `initial_mtu`, and enabled MTU discovery requires `upper_bound >= initial_mtu`. Keep `min_mtu = 1200` for public internet deployments unless the network path is fully controlled. MTU discovery is enabled by default and periodically probes up to `upper_bound`; disabling it keeps the configured initial/minimum MTU behavior.
 
-`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets, and startup fails if the OS rejects an explicitly configured buffer size. `quic.socket.workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].quic_socket`. When HTTP/3 is enabled, set `reuse_port = true` whenever the resolved worker count can be greater than one, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. Other QUIC transport, socket, and pool numeric values must be greater than zero, except `keep_alive_interval_ms = 0`.
+`quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets, and startup fails if the OS rejects an explicitly configured buffer size. `quic.socket.workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].quic_socket`. When HTTP/3 is enabled, set `reuse_port = true` whenever the resolved worker count can be greater than one, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. QUIC transport and pool numeric values must be greater than zero, except `keep_alive_interval_ms = 0`; socket receive/send buffer `0` is the explicit OS-default sentinel.
 
 The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary HTTP/3 upstream requests use one-shot QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
 
@@ -1364,8 +1364,8 @@ Configuration validation rejects:
 - Privileged listener ports when `runtime.unprivileged_mode = true`.
 - Non-Linux runtime when `runtime.linux_only = true`.
 - Invalid hot reload mode, zero worker counts, non-positive worker multipliers, zero `poll_interval_ms`, zero accept backlog/backoff values, accept worker counts greater than one without `runtime.accept.reuse_port = true`, or HTTP/3 QUIC socket worker counts greater than one without `quic.socket.reuse_port = true`.
-- No upstreams/pools, no routes, duplicate names, empty route hosts, or unknown route targets.
-- Routes that set both `upstream` and `upstream_pool`, or neither.
+- Missing all `[[routes]]`, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
+- Routes that set zero or more than one of `upstream`, `upstream_pool`, or `static_root`.
 - Unsafe route paths.
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
