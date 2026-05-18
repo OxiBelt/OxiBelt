@@ -461,6 +461,7 @@ jobs:
           - static-files
           - oxibelt-features
           - oxibelt-soak-stress
+          - accept-multipliers
     env:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
       PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}

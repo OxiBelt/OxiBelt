@@ -23,6 +23,7 @@ Serving type filters:
 - `static-files`: static file rows for `/static/1k.bin`, `/static/16k.bin`, and `/static/1m.bin` according to the selected profile.
 - `oxibelt-features`: OxiBelt-only WAF, CRS, and cache rows.
 - `oxibelt-soak-stress`: OxiBelt smoke soak, benchmark stress, or soak concurrency rows according to the selected profile.
+- `accept-multipliers`: OxiBelt-only comparison of `runtime.worker_multipliers.accept = 0.5` and `1.0` across `h1-keepalive`, `h2`, `h3`, `static-16k-h1c`, `tls-handshake-h2`, `waf-enforcing`, and `crs-enforcing`.
 
 Useful environment overrides:
 
@@ -41,10 +42,11 @@ OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO=0.85
 OXIBELT_PERF_WAF_ENFORCING_MIN_RPS=11000
 OXIBELT_PERF_CRS_ENFORCING_MIN_RPS=9000
 OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO=1.20
+OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO=baseline-accept-1
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
 
-`OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO` is reserved for test fixtures that intentionally replace the baseline OxiBelt config. Normal local and CI performance runs should leave it unset. The default baseline follows the release-oriented auto-worker profile: runtime and HTTP/3 socket workers resolve from Rust `available_parallelism()` with `1.0` multipliers, TCP accept workers resolve with the conservative `0.5` multiplier, TCP/UDP `SO_REUSEPORT` is enabled, backlog is `8192`, and explicit upstream idle pool caps, HTTP/2 builder tuning, and QUIC socket buffers are configured. Configs that explicitly set `runtime.worker_multipliers.accept = 1.0` keep the previous CPU-count accept-worker profile.
+`OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO` is reserved for test fixtures that intentionally replace the baseline OxiBelt config. Normal local and CI performance runs should leave it unset. The default baseline follows the release-oriented auto-worker profile: runtime and HTTP/3 socket workers resolve from Rust `available_parallelism()` with `1.0` multipliers, TCP accept workers resolve with the conservative `0.5` multiplier, TCP/UDP `SO_REUSEPORT` is enabled, backlog is `8192`, and explicit upstream idle pool caps, HTTP/2 builder tuning, and QUIC socket buffers are configured. Configs that explicitly set `runtime.worker_multipliers.accept = 1.0` keep the previous CPU-count accept-worker profile. `OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO` defaults to `baseline-accept-1` so the OxiBelt `tls-handshake-h2` row uses a handshake-heavy fixture without changing the steady-state baseline.
 
 The plain reverse-proxy fast path and plaintext static sendfile path are allowed to stay active for low-cost response metadata work such as configured security response headers and request-wide system access logs. Routes with `compression = "off"` can also use the plain reverse-proxy fast path even when global compression is enabled. Body-transforming compression, cache lookup/fill, WAF inspection that needs body bytes, dynamic policy, rate limiting, upgrades, CONNECT, upstream pools, upstream HTTP/3, PROXY protocol egress, and buffering remain on the general proxy path so HTTP and security semantics stay unchanged.
 
@@ -67,7 +69,7 @@ The runner writes:
 
 The runner generates one-run TLS material and a one-run 64-byte QUIC host key under `configs/*/cert/`. The performance baseline enables `quic.host_key_file` only against that generated key so Retry/stateless reset token behavior is stable within the run without baking shared key material into fixtures or images.
 
-CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards for each serving type. Push and pull-request smoke runs intentionally collect all serving-type groups so reverse-proxy, static-file, OxiBelt feature, and soak/stress evidence land in separate artifacts. Each shard uploads one artifact named `oxibelt-docker-performance-<profile>-<serving_type>-shard-<n>` and stores repeated samples under `run-1/` through `run-5/` by default. The workflow keeps running later iterations in the same shard after one iteration fails, then fails the job at the end with the failed iteration list so artifacts stay complete. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
+CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards for each serving type. Push and pull-request smoke runs intentionally collect all serving-type groups so reverse-proxy, static-file, OxiBelt feature, soak/stress, and accept multiplier evidence land in separate artifacts. Each shard uploads one artifact named `oxibelt-docker-performance-<profile>-<serving_type>-shard-<n>` and stores repeated samples under `run-1/` through `run-5/` by default. The workflow keeps running later iterations in the same shard after one iteration fails, then fails the job at the end with the failed iteration list so artifacts stay complete. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
 
 After the sharded jobs finish, CI runs a `Docker performance summary` job that downloads all `oxibelt-docker-performance-<profile>-*` artifacts from the same workflow run and writes an aggregate artifact named `oxibelt-docker-performance-<profile>-comparison`. That artifact contains:
 
@@ -98,6 +100,8 @@ oxibelt_vs_caddy = median_rps(oxibelt scenario) / median_rps(caddy same scenario
 ```
 
 The report displays both percent and multiplier forms, such as `95.0% of nginx` and `0.95x nginx`. If a comparator row is skipped, missing, or has zero median RPS, the ratio is omitted and the reason is listed under skipped or missing comparator rows.
+
+The accept multiplier comparison report keeps `oxibelt-accept-0_5-*` and `oxibelt-accept-1_0-*` rows out of the nginx/Caddy tables and compares them as OxiBelt-only pairs. A lower accept multiplier can improve steady-state rows by reducing accept-loop and `SO_REUSEPORT` contention, while `accept = 1.0` can recover throughput for handshake-heavy workloads that create new TCP/TLS connections continuously. Treat this as a profile tradeoff: use the default `0.5` baseline for steady-state comparisons, and use the `baseline-accept-1` fixture or `OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO` for handshake-heavy investigations.
 
 nginx and Caddy are measured as common reverse-proxy and static-file baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, TLS handshake rows without matching comparator rows, and stress scenarios is measured separately. These OxiBelt-only scenarios are not mixed into nginx/Caddy ratios because they do not measure the same behavior. nginx HTTP/3 is included only when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped. If nginx reports HTTP/3 support but the functional QUIC probe cannot complete, that comparator row is also skipped because nginx HTTP/3 availability is image-dependent. Caddy is configured with its documented `h1 h2 h3` server protocol support and is treated as a mandatory HTTP/3 comparator.
 

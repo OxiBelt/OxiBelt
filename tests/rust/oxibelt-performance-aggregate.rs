@@ -9,11 +9,12 @@ use serde_json::Value;
 
 const MAX_RESULTS_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_WARNINGS: usize = 200;
-const SERVING_TYPES: [&str; 4] = [
+const SERVING_TYPES: [&str; 5] = [
     "reverse-proxy",
     "static-files",
     "oxibelt-features",
     "oxibelt-soak-stress",
+    "accept-multipliers",
 ];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -52,6 +53,7 @@ impl Comparator {
 enum ScenarioGroup {
     ReverseProxy,
     StaticFiles,
+    AcceptMultipliers,
     OxibeltOnly,
     #[default]
     Unclassified,
@@ -62,6 +64,7 @@ impl ScenarioGroup {
         match self {
             Self::ReverseProxy => "reverse-proxy",
             Self::StaticFiles => "static-files",
+            Self::AcceptMultipliers => "accept-multipliers",
             Self::OxibeltOnly => "oxibelt-only",
             Self::Unclassified => "unclassified",
         }
@@ -189,6 +192,23 @@ struct ComparisonGroups {
 }
 
 #[derive(Serialize)]
+struct AcceptMultiplierRatio {
+    status: String,
+    ratio: Option<f64>,
+    percent_of_accept_0_5: Option<f64>,
+    text: String,
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AcceptMultiplierComparison {
+    scenario: String,
+    accept_0_5: Option<AggregateStats>,
+    accept_1_0: Option<AggregateStats>,
+    accept_1_0_vs_0_5: AcceptMultiplierRatio,
+}
+
+#[derive(Serialize)]
 struct RatioSummary {
     scenario_count: usize,
     valid_comparisons: usize,
@@ -207,7 +227,16 @@ struct GroupSummary {
 struct ReportSummary {
     reverse_proxy: GroupSummary,
     static_files: GroupSummary,
+    accept_multipliers: AcceptMultiplierSummary,
     oxibelt_only_row_count: usize,
+}
+
+#[derive(Serialize)]
+struct AcceptMultiplierSummary {
+    scenario_count: usize,
+    valid_comparisons: usize,
+    median_ratio: Option<f64>,
+    median_percent_of_accept_0_5: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -227,6 +256,7 @@ struct Report {
     artifact_discovery: ArtifactDiscovery,
     summary: ReportSummary,
     comparisons: ComparisonGroups,
+    accept_multiplier_comparisons: Vec<AcceptMultiplierComparison>,
     oxibelt_only_results: Vec<AggregateStats>,
     skipped_or_missing_comparator_rows: Vec<MissingComparatorRow>,
     aggregates: Vec<AggregateStats>,
@@ -355,6 +385,7 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
 
     let reverse_proxy = build_group_comparisons(ScenarioGroup::ReverseProxy, &aggregate_map);
     let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
+    let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
     let oxibelt_only_results = aggregate_map
         .iter()
         .filter(|((comparator, _), aggregate)| {
@@ -368,12 +399,13 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
     let summary = ReportSummary {
         reverse_proxy: summarize_group(&reverse_proxy),
         static_files: summarize_group(&static_files),
+        accept_multipliers: summarize_accept_multiplier_comparisons(&accept_multiplier_comparisons),
         oxibelt_only_row_count: oxibelt_only_results.len(),
     };
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 1,
+        schema_version: 2,
         profile,
         expected_runs,
         artifact_discovery,
@@ -382,6 +414,7 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
             reverse_proxy,
             static_files,
         },
+        accept_multiplier_comparisons,
         oxibelt_only_results,
         skipped_or_missing_comparator_rows,
         aggregates,
@@ -689,6 +722,8 @@ fn normalize_label(label: &str) -> Option<(Comparator, &str)> {
 fn classify_scenario(comparator: Comparator, scenario: &str) -> ScenarioGroup {
     if scenario.starts_with("static-") {
         ScenarioGroup::StaticFiles
+    } else if accept_multiplier_base_scenario(scenario).is_some() {
+        ScenarioGroup::AcceptMultipliers
     } else if matches!(scenario, "h1-keepalive" | "h2" | "h3") {
         ScenarioGroup::ReverseProxy
     } else if comparator == Comparator::Oxibelt {
@@ -696,6 +731,12 @@ fn classify_scenario(comparator: Comparator, scenario: &str) -> ScenarioGroup {
     } else {
         ScenarioGroup::Unclassified
     }
+}
+
+fn accept_multiplier_base_scenario(scenario: &str) -> Option<&str> {
+    scenario
+        .strip_prefix("accept-0_5-")
+        .or_else(|| scenario.strip_prefix("accept-1_0-"))
 }
 
 fn string_field(value: Option<&Value>) -> Option<&str> {
@@ -805,6 +846,41 @@ fn build_group_comparisons(
         .collect()
 }
 
+fn build_accept_multiplier_comparisons(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+) -> Vec<AcceptMultiplierComparison> {
+    let mut scenarios = BTreeSet::new();
+    for ((comparator, scenario), aggregate) in aggregates {
+        if *comparator == Comparator::Oxibelt
+            && aggregate.group == ScenarioGroup::AcceptMultipliers.as_str()
+            && let Some(base) = accept_multiplier_base_scenario(scenario)
+        {
+            scenarios.insert(base.to_owned());
+        }
+    }
+
+    scenarios
+        .into_iter()
+        .map(|scenario| {
+            let accept_0_5 = aggregates
+                .get(&(Comparator::Oxibelt, format!("accept-0_5-{scenario}")))
+                .cloned();
+            let accept_1_0 = aggregates
+                .get(&(Comparator::Oxibelt, format!("accept-1_0-{scenario}")))
+                .cloned();
+            let accept_1_0_vs_0_5 =
+                accept_multiplier_ratio(accept_1_0.as_ref(), accept_0_5.as_ref());
+
+            AcceptMultiplierComparison {
+                scenario,
+                accept_0_5,
+                accept_1_0,
+                accept_1_0_vs_0_5,
+            }
+        })
+        .collect()
+}
+
 fn ratio_result(
     oxibelt: Option<&AggregateStats>,
     comparator: Option<&AggregateStats>,
@@ -867,6 +943,69 @@ fn ratio_result(
     }
 }
 
+fn accept_multiplier_ratio(
+    accept_1_0: Option<&AggregateStats>,
+    accept_0_5: Option<&AggregateStats>,
+) -> AcceptMultiplierRatio {
+    let Some(accept_1_0) = accept_1_0 else {
+        return accept_multiplier_status("missing_1_0", None, "missing accept = 1.0 row");
+    };
+    let Some(accept_1_0_rps) = accept_1_0.median_rps else {
+        return accept_multiplier_status(
+            "no_samples_1_0",
+            None,
+            "accept = 1.0 row has no non-skipped RPS samples",
+        );
+    };
+    let Some(accept_0_5) = accept_0_5 else {
+        return accept_multiplier_status("missing_0_5", None, "missing accept = 0.5 row");
+    };
+    let Some(accept_0_5_rps) = accept_0_5.median_rps else {
+        let reason = if accept_0_5.skipped_count > 0 {
+            accept_0_5
+                .skip_reasons
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "accept = 0.5 row was skipped".to_owned())
+        } else {
+            "accept = 0.5 row has no non-skipped RPS samples".to_owned()
+        };
+        let status = if accept_0_5.skipped_count > 0 {
+            "skipped_0_5"
+        } else {
+            "no_samples_0_5"
+        };
+        return accept_multiplier_status(status, None, reason);
+    };
+    if accept_0_5_rps == 0.0 {
+        return accept_multiplier_status("zero_rps_0_5", None, "accept = 0.5 median RPS is zero");
+    }
+
+    let ratio = accept_1_0_rps / accept_0_5_rps;
+    AcceptMultiplierRatio {
+        status: "ok".to_owned(),
+        ratio: Some(ratio),
+        percent_of_accept_0_5: Some(ratio * 100.0),
+        text: format!("{:.1}% of accept = 0.5 ({:.2}x)", ratio * 100.0, ratio),
+        reason: None,
+    }
+}
+
+fn accept_multiplier_status(
+    status: &str,
+    ratio: Option<f64>,
+    reason: impl Into<String>,
+) -> AcceptMultiplierRatio {
+    let reason = reason.into();
+    AcceptMultiplierRatio {
+        status: status.to_owned(),
+        ratio,
+        percent_of_accept_0_5: ratio.map(|value| value * 100.0),
+        text: format!("{status}: {reason}"),
+        reason: Some(reason),
+    }
+}
+
 fn ratio_status(status: &str, ratio: Option<f64>, reason: impl Into<String>) -> RatioResult {
     let reason = reason.into();
     RatioResult {
@@ -893,6 +1032,22 @@ fn summarize_group(comparisons: &[ScenarioComparison]) -> GroupSummary {
                 .filter_map(|comparison| comparison.oxibelt_vs_caddy.ratio),
             comparisons.len(),
         ),
+    }
+}
+
+fn summarize_accept_multiplier_comparisons(
+    comparisons: &[AcceptMultiplierComparison],
+) -> AcceptMultiplierSummary {
+    let mut values = comparisons
+        .iter()
+        .filter_map(|comparison| comparison.accept_1_0_vs_0_5.ratio)
+        .collect::<Vec<_>>();
+    let median_ratio = percentile(&mut values, 50.0);
+    AcceptMultiplierSummary {
+        scenario_count: comparisons.len(),
+        valid_comparisons: values.len(),
+        median_ratio,
+        median_percent_of_accept_0_5: median_ratio.map(|ratio| ratio * 100.0),
     }
 }
 
@@ -983,6 +1138,12 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- Accept = 1.0 vs accept = 0.5: {}",
+        format_accept_multiplier_summary(&report.summary.accept_multipliers)
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- OxiBelt-only rows: `{}`\n",
         report.summary.oxibelt_only_row_count
     )
@@ -998,6 +1159,7 @@ fn render_markdown(report: &Report) -> String {
         "Static file comparison",
         &report.comparisons.static_files,
     );
+    write_accept_multiplier_table(&mut markdown, &report.accept_multiplier_comparisons);
     write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
     write_missing_table(&mut markdown, &report.skipped_or_missing_comparator_rows);
     write_warnings(&mut markdown, report);
@@ -1008,6 +1170,19 @@ fn format_ratio_summary(summary: &RatioSummary, comparator: &str) -> String {
     match summary.median_ratio {
         Some(ratio) => format!(
             "{:.1}% of {comparator} ({:.2}x {comparator}, {}/{}) scenarios",
+            ratio * 100.0,
+            ratio,
+            summary.valid_comparisons,
+            summary.scenario_count
+        ),
+        None => format!("n/a (0/{}) scenarios", summary.scenario_count),
+    }
+}
+
+fn format_accept_multiplier_summary(summary: &AcceptMultiplierSummary) -> String {
+    match summary.median_ratio {
+        Some(ratio) => format!(
+            "{:.1}% of accept = 0.5 ({:.2}x, {}/{}) scenarios",
             ratio * 100.0,
             ratio,
             summary.valid_comparisons,
@@ -1042,6 +1217,40 @@ fn write_comparison_table(markdown: &mut String, title: &str, comparisons: &[Sce
             format_number(comparison.caddy.as_ref().and_then(|stats| stats.median_rps)),
             comparison.oxibelt_vs_caddy.text,
             format_number(oxibelt.and_then(|stats| stats.median_p99_ms)),
+        )
+        .unwrap();
+    }
+    writeln!(markdown).unwrap();
+}
+
+fn write_accept_multiplier_table(
+    markdown: &mut String,
+    comparisons: &[AcceptMultiplierComparison],
+) {
+    writeln!(markdown, "## Accept multiplier comparison\n").unwrap();
+    if comparisons.is_empty() {
+        writeln!(markdown, "No accept multiplier rows were found.\n").unwrap();
+        return;
+    }
+
+    writeln!(
+        markdown,
+        "| Scenario | accept = 0.5 median RPS | accept = 1.0 median RPS | 1.0 / 0.5 | accept = 0.5 median p99 ms | accept = 1.0 median p99 ms |"
+    )
+    .unwrap();
+    writeln!(markdown, "| --- | ---: | ---: | --- | ---: | ---: |").unwrap();
+    for comparison in comparisons {
+        let accept_0_5 = comparison.accept_0_5.as_ref();
+        let accept_1_0 = comparison.accept_1_0.as_ref();
+        writeln!(
+            markdown,
+            "| `{}` | {} | {} | {} | {} | {} |",
+            comparison.scenario,
+            format_number(accept_0_5.and_then(|stats| stats.median_rps)),
+            format_number(accept_1_0.and_then(|stats| stats.median_rps)),
+            comparison.accept_1_0_vs_0_5.text,
+            format_number(accept_0_5.and_then(|stats| stats.median_p99_ms)),
+            format_number(accept_1_0.and_then(|stats| stats.median_p99_ms)),
         )
         .unwrap();
     }

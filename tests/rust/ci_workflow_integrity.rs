@@ -270,6 +270,7 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "static-files",
         "oxibelt-features",
         "oxibelt-soak-stress",
+        "accept-multipliers",
     ] {
         assert!(
             workflow.contains(&format!("          - {serving_type}")),

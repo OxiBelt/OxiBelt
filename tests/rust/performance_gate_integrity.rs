@@ -119,6 +119,40 @@ fn run_static_loads_harness_for(
     HarnessRun { output, events }
 }
 
+fn accept_multiplier_profile_harness(probe_result: &str) -> HarnessRun {
+    let functions = format!(
+        "{}\n\n{}",
+        extract_bash_function(
+            &performance_script_text(),
+            "run_accept_multiplier_common_loads"
+        ),
+        extract_bash_function(&performance_script_text(), "run_accept_multiplier_profile")
+    );
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-accept-multipliers-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    write_accept_multiplier_harness(&harness_path, &functions);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("PROBE_RESULT", probe_result)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
 fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) -> HarnessRun {
     let functions = format!(
         "{}\n\n{}",
@@ -301,6 +335,47 @@ run_static_loads "${{COMPARATOR:?}}" "${{COMPARATOR:?}}" "${{H3_MODE:?}}"
     fs::write(path, harness).expect("Bash harness should be writable");
 }
 
+fn write_accept_multiplier_harness(path: &Path, functions: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+duration_seconds=1
+concurrency=1
+events="${{EVENTS_FILE:?}}"
+probe_result="${{PROBE_RESULT:?}}"
+
+start_oxibelt() {{
+  printf 'START %s %s\n' "$1" "$2" >>"${{events}}"
+}}
+
+run_load() {{
+  printf 'LOAD %s %s %s %s %s %s\n' "$@" >>"${{events}}"
+}}
+
+run_handshake() {{
+  printf 'HANDSHAKE %s %s %s\n' "$@" >>"${{events}}"
+}}
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+h3_probe_succeeds() {{
+  printf 'PROBE %s\n' "$1" >>"${{events}}"
+  [[ "${{probe_result}}" == "success" ]]
+}}
+
+{functions}
+
+run_accept_multiplier_profile accept-0_5 baseline waf-enforcing crs-enforcing
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
 fn write_static_16k_ratio_harness(path: &Path, function: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
@@ -465,7 +540,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     );
     assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers"
         ),
         "usage should document every supported serving type"
     );
@@ -475,6 +550,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
         "static-files",
         "oxibelt-features",
         "oxibelt-soak-stress",
+        "accept-multipliers",
     ] {
         assert!(
             script.contains(serving_type),
@@ -484,15 +560,66 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
 }
 
 #[test]
+fn accept_multiplier_profile_runs_required_rows() {
+    let run = accept_multiplier_profile_harness("success");
+
+    assert!(
+        run.output.status.success(),
+        "accept multiplier profile should run when HTTP/3 is ready"
+    );
+    for expected in [
+        "START baseline oxibelt",
+        "LOAD oxibelt-accept-0_5-h1-keepalive h1 oxibelt /perf/h1?body=ok",
+        "LOAD oxibelt-accept-0_5-h2 h2 oxibelt /perf/h2?body=ok",
+        "LOAD oxibelt-accept-0_5-h3 h3 oxibelt /perf/h3?body=ok",
+        "LOAD oxibelt-accept-0_5-static-16k-h1c h1c oxibelt /static/16k.bin",
+        "HANDSHAKE oxibelt-accept-0_5-tls-handshake-h2 h2 oxibelt",
+        "START waf-enforcing oxibelt",
+        "LOAD oxibelt-accept-0_5-waf-enforcing h2 oxibelt /perf/waf?body=ok",
+        "START crs-enforcing oxibelt",
+        "LOAD oxibelt-accept-0_5-crs-enforcing h2 oxibelt /perf/crs?body=ok",
+    ] {
+        assert!(
+            run.events.contains(expected),
+            "missing accept multiplier event {expected:?}; events:\n{}",
+            run.events
+        );
+    }
+}
+
+#[test]
+fn accept_multiplier_required_h3_probe_failure_fails_closed() {
+    let run = accept_multiplier_profile_harness("failure");
+
+    assert!(
+        !run.output.status.success(),
+        "accept multiplier HTTP/3 probe failure should fail closed"
+    );
+    assert!(
+        run.events
+            .contains("FAIL mandatory HTTP/3 probe failed for oxibelt-accept-0_5"),
+        "failure should identify the accept multiplier HTTP/3 row"
+    );
+    assert!(
+        !run.events
+            .contains("HANDSHAKE oxibelt-accept-0_5-tls-handshake-h2"),
+        "failed readiness probe should stop the profile before later rows"
+    );
+}
+
+#[test]
 fn oxibelt_performance_fixtures_pin_worker_profile() {
-    for scenario in [
-        "baseline",
-        "baseline-no-http3",
-        "cache",
-        "crs-enforcing",
-        "crs-monitor",
-        "waf-enforcing",
-        "waf-monitor",
+    for (scenario, expected_accept) in [
+        ("baseline", 0.5),
+        ("baseline-no-http3", 0.5),
+        ("cache", 0.5),
+        ("crs-enforcing", 0.5),
+        ("crs-monitor", 0.5),
+        ("waf-enforcing", 0.5),
+        ("waf-monitor", 0.5),
+        ("baseline-accept-1", 1.0),
+        ("crs-enforcing-accept-1", 1.0),
+        ("waf-enforcing-accept-1", 1.0),
     ] {
         let path = oxibelt_performance_fixture_root()
             .join(scenario)
@@ -525,7 +652,7 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
             worker_multipliers
                 .get("accept")
                 .and_then(toml::Value::as_float),
-            Some(0.5),
+            Some(expected_accept),
             "{} should pin accept worker multiplier",
             path.display()
         );
@@ -952,6 +1079,15 @@ fn mandatory_and_optional_call_sites_are_explicit() {
     assert!(
         script.contains("OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO"),
         "static 16KiB H1C regression threshold should be configurable"
+    );
+    assert!(
+        script.contains("OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO"),
+        "TLS handshake rows should be able to use an explicit fixture override"
+    );
+    assert!(
+        script.contains("run_accept_multiplier_profile accept-0_5 baseline waf-enforcing crs-enforcing")
+            && script.contains("run_accept_multiplier_profile accept-1_0 baseline-accept-1 waf-enforcing-accept-1 crs-enforcing-accept-1"),
+        "accept multiplier comparison should run both fixture profiles"
     );
     assert!(
         script.contains("run_common_loads nginx nginx \"${nginx_h3_mode}\""),

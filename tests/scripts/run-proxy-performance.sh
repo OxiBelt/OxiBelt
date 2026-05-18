@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress] [--comparators oxibelt,nginx,caddy]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers] [--comparators oxibelt,nginx,caddy]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -30,6 +30,8 @@ Environment:
                                       maximum enforcing/monitor p99 ratio for WAF and CRS rows (default: 1.20)
   OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO
                                       test-only OxiBelt baseline fixture override
+  OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO
+                                      test-only OxiBelt TLS handshake fixture override
   OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, probe logs, configs, and stats here
   KEEP_TEST_ARTIFACTS=1            keep tests/.tmp performance work directory
 EOF
@@ -73,7 +75,7 @@ case "${profile}" in
 esac
 
 case "${serving_type}" in
-  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress) ;;
+  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers) ;;
   *)
     usage
     exit 2
@@ -138,6 +140,7 @@ waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-11000}"
 crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-9000}"
 waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.20}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
+oxibelt_handshake_scenario="${OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO:-baseline-accept-1}"
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
@@ -796,6 +799,36 @@ run_common_loads() {
   esac
 }
 
+run_accept_multiplier_common_loads() {
+  local label_prefix="$1"
+  run_load "${label_prefix}-h1-keepalive" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
+  run_load "${label_prefix}-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+  if h3_probe_succeeds oxibelt; then
+    run_load "${label_prefix}-h3" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+  else
+    fail_with_diagnostics "mandatory HTTP/3 probe failed for ${label_prefix}: functional QUIC probe did not complete"
+  fi
+}
+
+run_accept_multiplier_profile() {
+  local suffix="$1"
+  local baseline_scenario="$2"
+  local waf_scenario="$3"
+  local crs_scenario="$4"
+  local label_prefix="oxibelt-${suffix}"
+
+  start_oxibelt "${baseline_scenario}" oxibelt
+  run_accept_multiplier_common_loads "${label_prefix}"
+  run_load "${label_prefix}-static-16k-h1c" h1c oxibelt "/static/16k.bin" "${duration_seconds}" "${concurrency}"
+  run_handshake "${label_prefix}-tls-handshake-h2" h2 oxibelt
+
+  start_oxibelt "${waf_scenario}" oxibelt
+  run_load "${label_prefix}-waf-enforcing" h2 oxibelt "/perf/waf?body=ok" "${duration_seconds}" "${concurrency}"
+
+  start_oxibelt "${crs_scenario}" oxibelt
+  run_load "${label_prefix}-crs-enforcing" h2 oxibelt "/perf/crs?body=ok" "${duration_seconds}" "${concurrency}"
+}
+
 run_oxibelt_specific_benchmarks() {
   start_oxibelt waf-monitor oxibelt
   run_load "oxibelt-waf-monitor" h2 oxibelt "/perf/waf?body=ok" "${duration_seconds}" "${concurrency}"
@@ -854,6 +887,7 @@ run_reverse_proxy_group() {
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_common_loads oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
+    start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
     run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
   fi
 
@@ -917,12 +951,22 @@ run_oxibelt_soak_stress_group() {
   fi
 }
 
+run_accept_multipliers_group() {
+  if ! has_comparator oxibelt; then
+    return
+  fi
+
+  run_accept_multiplier_profile accept-0_5 baseline waf-enforcing crs-enforcing
+  run_accept_multiplier_profile accept-1_0 baseline-accept-1 waf-enforcing-accept-1 crs-enforcing-accept-1
+}
+
 run_all_serving_types() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_common_loads oxibelt oxibelt required
     run_static_loads oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
+    start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
     run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
     if [[ "${profile}" == "smoke" ]]; then
       run_load "oxibelt-smoke-soak" h1 oxibelt "/perf/smoke-soak?body=ok" "${soak_seconds}" "${concurrency}"
@@ -986,6 +1030,8 @@ cat >"${summary_md}" <<EOF
 - Run id: \`${run_id}\`
 - Serving type: \`${serving_type}\`
 - Comparators: \`${comparators}\`
+- OxiBelt baseline fixture: \`${oxibelt_baseline_scenario}\`
+- OxiBelt handshake fixture: \`${oxibelt_handshake_scenario}\`
 - Duration: \`${duration_seconds}s\`
 - Warmup: \`${warmup_seconds}s\`
 - Concurrency: \`${concurrency}\`
@@ -1040,6 +1086,9 @@ case "${serving_type}" in
     ;;
   oxibelt-soak-stress)
     run_oxibelt_soak_stress_group
+    ;;
+  accept-multipliers)
+    run_accept_multipliers_group
     ;;
 esac
 
