@@ -178,6 +178,107 @@ body = "slow down"
 }
 
 #[test]
+fn rate_limit_action_global_and_route_keys_share_buckets_across_clients() {
+    let temp_dir = common::TempDir::new("waf-global-route-rate-limit-action");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-global-route-rate-limit-action");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[routes.waf.rules]]
+name = "global-rate-limit"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/global'"
+
+[[routes.waf.rules.actions]]
+type = "rate_limit"
+name = "global-limit"
+key = "global"
+rate = "1r/h"
+burst = 1
+status = 429
+body = "global slow down"
+
+[[routes.waf.rules]]
+name = "route-rate-limit"
+phase = "request"
+priority = 20
+when = "Request.Http.Path == '/route'"
+
+[[routes.waf.rules.actions]]
+type = "rate_limit"
+name = "route-limit"
+key = "route"
+rate = "1r/h"
+burst = 1
+status = 429
+body = "route slow down"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let global_uri: Uri = "/global".parse().expect("URI should parse");
+    let route_uri: Uri = "/route".parse().expect("URI should parse");
+
+    let first_global = engine.evaluate_request(request_input(
+        &method,
+        &global_uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let second_global = engine.evaluate_request(request_input(
+        &method,
+        &global_uri,
+        &headers,
+        &tags,
+        "203.0.113.11:49152".parse().unwrap(),
+    ));
+    let first_route = engine.evaluate_request(request_input(
+        &method,
+        &route_uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let second_route = engine.evaluate_request(request_input(
+        &method,
+        &route_uri,
+        &headers,
+        &tags,
+        "203.0.113.11:49152".parse().unwrap(),
+    ));
+
+    assert!(first_global.terminal.is_none());
+    assert_eq!(
+        second_global
+            .terminal
+            .as_ref()
+            .map(|terminal| (terminal.status, terminal.body.as_str())),
+        Some((StatusCode::TOO_MANY_REQUESTS, "global slow down"))
+    );
+    assert!(first_route.terminal.is_none());
+    assert_eq!(
+        second_route
+            .terminal
+            .as_ref()
+            .map(|terminal| (terminal.status, terminal.body.as_str())),
+        Some((StatusCode::TOO_MANY_REQUESTS, "route slow down"))
+    );
+}
+
+#[test]
 fn user_defined_functions_can_reuse_bounded_request_predicates() {
     let temp_dir = common::TempDir::new("waf-udf-request");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-udf");

@@ -1751,6 +1751,70 @@ status = 429
 }
 
 #[test]
+fn rate_limit_config_parses_global_and_route_keys() {
+    let temp_dir = common::TempDir::new("rate-limit-global-route-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "rate-limit-global-route-config");
+    let raw = format!(
+        r#"
+{}
+
+[[rate_limits]]
+name = "global-flood"
+key = "global"
+rate = "100r/s"
+burst = 200
+
+[[rate_limits]]
+name = "route-flood"
+key = "route"
+routes = ["app-root"]
+rate = "20r/s"
+burst = 40
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.rate_limits[0].key, RateLimitKey::Global);
+    assert_eq!(config.rate_limits[1].key, RateLimitKey::Route);
+    assert_eq!(config.rate_limits[1].routes, ["app-root"]);
+}
+
+#[test]
+fn rate_limit_config_rejects_token_header_for_global_and_route_keys() {
+    for key in ["global", "route"] {
+        let temp_dir = common::TempDir::new(&format!("rate-limit-token-header-{key}"));
+        let (cert_path, key_path) =
+            common::create_self_signed_cert(temp_dir.path(), &format!("rate-limit-{key}"));
+        let raw = format!(
+            r#"
+{}
+
+[[rate_limits]]
+name = "{key}-with-token-header"
+key = "{key}"
+token_header = "X-Api-Token"
+rate = "10r/m"
+"#,
+            common::minimal_config_toml(&cert_path, &key_path)
+        );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("token_header should require access_token key");
+        assert!(
+            error
+                .to_string()
+                .contains("token_header requires an access_token key"),
+            "unexpected error for {key}: {error}"
+        );
+    }
+}
+
+#[test]
 fn rate_limit_config_rejects_unknown_route_filter() {
     let temp_dir = common::TempDir::new("rate-limit-unknown-route");
     let (cert_path, key_path) =

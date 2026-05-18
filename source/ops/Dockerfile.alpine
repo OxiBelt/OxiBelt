@@ -97,6 +97,7 @@ RUN chmod 0755 /usr/local/bin/oxibelt && \
 
 USER 10001:10001
 EXPOSE 8443/tcp
+EXPOSE 8443/udp
 STOPSIGNAL SIGINT
 
 ENTRYPOINT ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"]

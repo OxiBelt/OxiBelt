@@ -3922,6 +3922,8 @@ pub struct RateLimitConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitKey {
+  Global,
+  Route,
   #[default]
   #[serde(alias = "client-ip")]
   ClientIp,
