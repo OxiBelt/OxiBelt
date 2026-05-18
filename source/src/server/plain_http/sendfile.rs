@@ -36,22 +36,8 @@ fn probe_kernel_sendfile() -> bool {
 fn probe_kernel_sendfile_inner() -> std::io::Result<()> {
   use std::io::{Read, Write};
   use std::os::unix::net::UnixStream;
-  use std::time::{SystemTime, UNIX_EPOCH};
 
-  let nanos = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .map(|duration| duration.as_nanos())
-    .unwrap_or_default();
-  let path = std::env::temp_dir().join(format!(
-    "oxibelt-sendfile-probe-{}-{nanos}",
-    std::process::id()
-  ));
-  let mut file = std::fs::OpenOptions::new()
-    .read(true)
-    .write(true)
-    .create_new(true)
-    .open(&path)?;
-  let cleanup = SendfileProbeCleanup { path };
+  let mut file = open_sendfile_probe_file()?;
 
   file.write_all(&[0x5a])?;
   file.flush()?;
@@ -74,8 +60,17 @@ fn probe_kernel_sendfile_inner() -> std::io::Result<()> {
     ));
   }
 
-  drop(cleanup);
   Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn open_sendfile_probe_file() -> std::io::Result<std::fs::File> {
+  let fd = nix::sys::memfd::memfd_create(
+    "oxibelt-sendfile-probe",
+    nix::sys::memfd::MFdFlags::MFD_CLOEXEC,
+  )
+  .map_err(errno_to_io_error)?;
+  Ok(std::fs::File::from(fd))
 }
 
 #[cfg(target_os = "linux")]
@@ -87,14 +82,31 @@ fn errno_to_io_error(error: nix::errno::Errno) -> std::io::Error {
   }
 }
 
-#[cfg(target_os = "linux")]
-struct SendfileProbeCleanup {
-  path: std::path::PathBuf,
-}
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+  use std::io::{Read, Seek, Write};
+  use std::os::fd::AsRawFd;
 
-#[cfg(target_os = "linux")]
-impl Drop for SendfileProbeCleanup {
-  fn drop(&mut self) {
-    let _ = std::fs::remove_file(&self.path);
+  use super::open_sendfile_probe_file;
+
+  #[test]
+  fn probe_file_is_anonymous_memfd() {
+    let mut file = open_sendfile_probe_file().expect("probe file should open");
+    file.write_all(b"probe").expect("probe file should write");
+    file.rewind().expect("probe file should seek back to start");
+
+    let mut contents = String::new();
+    file
+      .read_to_string(&mut contents)
+      .expect("probe file should read back");
+    assert_eq!(contents, "probe");
+
+    let fd_target = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+      .expect("Linux proc fd link should be readable");
+    let fd_target = fd_target.to_string_lossy();
+    assert!(
+      fd_target.starts_with("/memfd:oxibelt-sendfile-probe"),
+      "probe file should not be backed by a filesystem path: {fd_target}"
+    );
   }
 }
