@@ -54,6 +54,7 @@ cert_chain = "fullchain.pem"
 private_key = "privkey.pem"
 min_version = "tls1.3"
 max_version = "tls1.3"
+key_exchange_groups = ["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]
 session_tickets = true
 session_ticket_rotation_seconds = 86400
 

@@ -10,14 +10,15 @@ use base64::Engine;
 use h3_quinn::quinn::Endpoint;
 use oxibelt::config::{
     ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, TlsClientAuthConfig,
-    TlsClientAuthMode, TlsConfig, TlsRemoteSignerConfig, TlsServerResumptionMode, TlsVersion,
-    TurnListenerTlsConfig, UpstreamEchConfig, UpstreamEchMode,
+    TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig,
+    TlsServerResumptionMode, TlsVersion, TurnListenerTlsConfig, UpstreamEchConfig, UpstreamEchMode,
 };
 use oxibelt::remote_signer::{
     self, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
     SignerServerConfig,
 };
 use oxibelt::tls;
+use rustls::NamedGroup;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
@@ -101,6 +102,68 @@ fn server_config_sets_alpn_from_listener_flags() {
     let server_config =
         tls::build_server_config(&tls_config, &listeners).expect("server config should build");
     assert_eq!(server_config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_config_uses_configured_key_exchange_groups() {
+    let temp_dir = common::TempDir::new("server-config-key-exchange-groups");
+    let (ca_cert_path, ca_key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "key-exchange-ca");
+    let (cert_path, key_path) = common::create_ca_signed_server_cert(
+        temp_dir.path(),
+        "classical-downstream",
+        &ca_cert_path,
+        &ca_key_path,
+    );
+    let mut tls_config = downstream_tls_config(cert_path, key_path, TlsClientAuthConfig::default());
+    tls_config.key_exchange_groups = vec![
+        TlsKeyExchangeGroup::X25519,
+        TlsKeyExchangeGroup::Secp256r1,
+        TlsKeyExchangeGroup::Secp384r1,
+    ];
+    let listeners = ListenerConfig {
+        https_bind: "127.0.0.1:8443".parse().unwrap(),
+        http_bind: None,
+        http_mode: Default::default(),
+        http1: true,
+        http2: true,
+        http3: false,
+        proxy_protocol: ProxyProtocolConfig::default(),
+    };
+    let server_config =
+        tls::build_server_config(&tls_config, &listeners).expect("server config should build");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("server listener should bind");
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("server should accept");
+        let tls_stream = TlsAcceptor::from(server_config)
+            .accept(stream)
+            .await
+            .expect("server TLS handshake should complete");
+        tls_stream
+            .get_ref()
+            .1
+            .negotiated_key_exchange_group()
+            .expect("TLS handshake should negotiate a key exchange group")
+            .name()
+    });
+
+    let client_config =
+        tls::build_upstream_client_config(&[ca_cert_path], &UpstreamEchConfig::default())
+            .expect("client config should build");
+    let stream = TcpStream::connect(addr)
+        .await
+        .expect("client should connect to server");
+    TlsConnector::from(Arc::new(client_config))
+        .connect("classical-downstream".try_into().unwrap(), stream)
+        .await
+        .expect("client TLS handshake should complete");
+
+    let group = server.await.expect("server task should finish");
+    assert_eq!(group, NamedGroup::X25519);
 }
 
 #[test]
@@ -495,6 +558,7 @@ fn downstream_tls_config(
         remote_signer: TlsRemoteSignerConfig::default(),
         min_version: TlsVersion::Tls13,
         max_version: TlsVersion::Tls13,
+        key_exchange_groups: default_tls_key_exchange_groups(),
         session_tickets: true,
         session_ticket_rotation_seconds: 86_400,
         resumption: Default::default(),
@@ -524,12 +588,22 @@ fn remote_tls_config(
         },
         min_version: TlsVersion::Tls13,
         max_version: TlsVersion::Tls13,
+        key_exchange_groups: default_tls_key_exchange_groups(),
         session_tickets: true,
         session_ticket_rotation_seconds: 86_400,
         resumption: Default::default(),
         client_auth: TlsClientAuthConfig::default(),
         ocsp: OcspConfig::default(),
     }
+}
+
+fn default_tls_key_exchange_groups() -> Vec<TlsKeyExchangeGroup> {
+    vec![
+        TlsKeyExchangeGroup::X25519MlKem768,
+        TlsKeyExchangeGroup::X25519,
+        TlsKeyExchangeGroup::Secp256r1,
+        TlsKeyExchangeGroup::Secp384r1,
+    ]
 }
 
 struct RemoteSignerTestServer {

@@ -11,8 +11,8 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
 
 use crate::config::{
   AdminTlsConfig, ListenerConfig, OcspMode, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
-  TlsClientAuthMode, TlsConfig, TlsVersion, TurnListenerTlsConfig, UpstreamEchConfig,
-  UpstreamEchMode, UpstreamTlsResumptionConfig, canonicalize_existing_file,
+  TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsVersion, TurnListenerTlsConfig,
+  UpstreamEchConfig, UpstreamEchMode, UpstreamTlsResumptionConfig, canonicalize_existing_file,
 };
 
 mod resumption;
@@ -29,6 +29,28 @@ pub fn install_default_provider() -> anyhow::Result<()> {
   Ok(())
 }
 
+fn downstream_crypto_provider(tls: &TlsConfig) -> rustls::crypto::CryptoProvider {
+  let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+  provider.kx_groups = tls
+    .key_exchange_groups
+    .iter()
+    .copied()
+    .map(supported_key_exchange_group)
+    .collect();
+  provider
+}
+
+fn supported_key_exchange_group(
+  group: TlsKeyExchangeGroup,
+) -> &'static dyn rustls::crypto::SupportedKxGroup {
+  match group {
+    TlsKeyExchangeGroup::X25519MlKem768 => rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
+    TlsKeyExchangeGroup::X25519 => rustls::crypto::aws_lc_rs::kx_group::X25519,
+    TlsKeyExchangeGroup::Secp256r1 => rustls::crypto::aws_lc_rs::kx_group::SECP256R1,
+    TlsKeyExchangeGroup::Secp384r1 => rustls::crypto::aws_lc_rs::kx_group::SECP384R1,
+  }
+}
+
 pub fn build_server_config(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
@@ -41,7 +63,7 @@ pub fn build_server_config_with_resumption(
   listeners: &ListenerConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let provider = Arc::new(downstream_crypto_provider(tls));
   let mut certified_key = load_downstream_certified_key(tls, &provider)
     .context("failed to create rustls certified key")?;
   let server_identity = certificate_identity(&certified_key.cert);
@@ -96,7 +118,7 @@ pub fn build_quic_server_config_with_resumption(
   quic_host_key_base_dir: Option<&std::path::Path>,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let provider = Arc::new(downstream_crypto_provider(tls));
   let mut certified_key = load_downstream_certified_key(tls, &provider)
     .context("failed to create rustls certified key")?;
   let server_identity = certificate_identity(&certified_key.cert);
@@ -210,7 +232,7 @@ pub fn build_turn_server_config_with_resumption(
   default_tls: &TlsConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let provider = Arc::new(downstream_crypto_provider(default_tls));
   let cert_chain = listener_tls
     .cert_chain
     .as_ref()

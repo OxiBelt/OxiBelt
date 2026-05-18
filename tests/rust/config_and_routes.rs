@@ -10,7 +10,7 @@ use oxibelt::config::{
     EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode,
     HotReloadMode, OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
     QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-    StaticFilesSendfileMode, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
     UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
     UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
@@ -776,6 +776,56 @@ mode = "stateful"
         error
             .to_string()
             .contains("session_tickets = false conflicts"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn tls_key_exchange_groups_parse_and_validate() {
+    let temp_dir = common::TempDir::new("tls-key-exchange-groups");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "tls-key-exchange-groups");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let raw = base.replace(
+        "private_key =",
+        "key_exchange_groups = [\"x25519\", \"secp256r1\", \"secp384r1\"]\nprivate_key =",
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(
+        config.tls.key_exchange_groups,
+        vec![
+            TlsKeyExchangeGroup::X25519,
+            TlsKeyExchangeGroup::Secp256r1,
+            TlsKeyExchangeGroup::Secp384r1,
+        ]
+    );
+
+    let raw = base.replace("private_key =", "key_exchange_groups = []\nprivate_key =");
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("empty key exchange group list should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("tls.key_exchange_groups must include at least one group"),
+        "unexpected error: {error}"
+    );
+
+    let raw = base.replace(
+        "private_key =",
+        "key_exchange_groups = [\"x25519\", \"x25519\"]\nprivate_key =",
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("duplicate key exchange group should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("tls.key_exchange_groups contains duplicate x25519"),
         "unexpected error: {error}"
     );
 }

@@ -618,6 +618,7 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
         ("waf-enforcing", 0.5),
         ("waf-monitor", 0.5),
         ("baseline-accept-1", 1.0),
+        ("baseline-classical-kx", 1.0),
         ("crs-enforcing-accept-1", 1.0),
         ("waf-enforcing-accept-1", 1.0),
     ] {

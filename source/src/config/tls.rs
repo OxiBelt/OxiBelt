@@ -16,6 +16,7 @@ pub struct TlsConfig {
   pub remote_signer: TlsRemoteSignerConfig,
   pub min_version: TlsVersion,
   pub max_version: TlsVersion,
+  pub key_exchange_groups: Vec<TlsKeyExchangeGroup>,
   pub session_tickets: bool,
   pub session_ticket_rotation_seconds: u64,
   pub resumption: TlsServerResumptionConfig,
@@ -39,6 +40,8 @@ impl<'de> Deserialize<'de> for TlsConfig {
       min_version: TlsVersion,
       #[serde(default = "default_tls_max_version")]
       max_version: TlsVersion,
+      #[serde(default = "default_tls_key_exchange_groups")]
+      key_exchange_groups: Vec<TlsKeyExchangeGroup>,
       #[serde(default)]
       session_tickets: Option<bool>,
       #[serde(default)]
@@ -66,12 +69,33 @@ impl<'de> Deserialize<'de> for TlsConfig {
       remote_signer: raw.remote_signer,
       min_version: raw.min_version,
       max_version: raw.max_version,
+      key_exchange_groups: raw.key_exchange_groups,
       session_tickets,
       session_ticket_rotation_seconds,
       resumption,
       client_auth: raw.client_auth,
       ocsp: raw.ocsp,
     })
+  }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsKeyExchangeGroup {
+  X25519MlKem768,
+  X25519,
+  Secp256r1,
+  Secp384r1,
+}
+
+impl TlsKeyExchangeGroup {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::X25519MlKem768 => "x25519mlkem768",
+      Self::X25519 => "x25519",
+      Self::Secp256r1 => "secp256r1",
+      Self::Secp384r1 => "secp384r1",
+    }
   }
 }
 
@@ -518,6 +542,15 @@ pub(super) fn default_tls_min_version() -> TlsVersion {
 
 pub(super) fn default_tls_max_version() -> TlsVersion {
   TlsVersion::Tls13
+}
+
+fn default_tls_key_exchange_groups() -> Vec<TlsKeyExchangeGroup> {
+  vec![
+    TlsKeyExchangeGroup::X25519MlKem768,
+    TlsKeyExchangeGroup::X25519,
+    TlsKeyExchangeGroup::Secp256r1,
+    TlsKeyExchangeGroup::Secp384r1,
+  ]
 }
 
 fn default_session_ticket_rotation_seconds() -> u64 {

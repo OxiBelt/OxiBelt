@@ -291,6 +291,7 @@ fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
     remote_signer: old_tls.remote_signer,
     min_version: old_tls.min_version,
     max_version: old_tls.max_version,
+    key_exchange_groups: old_tls.key_exchange_groups,
     session_tickets: old_tls.session_tickets,
     session_ticket_rotation_seconds: old_tls.session_ticket_rotation_seconds,
     resumption: old_tls.resumption,

@@ -1570,6 +1570,7 @@ impl Config {
     if self.tls.session_ticket_rotation_seconds == 0 {
       bail!("tls.session_ticket_rotation_seconds must be greater than 0");
     }
+    validate_tls_key_exchange_groups(&self.tls.key_exchange_groups)?;
     validate_tls_server_resumption("tls.resumption", &self.tls.resumption)?;
     if self.listeners.http3
       && self.quic.zero_rtt == QuicZeroRttMode::SafeMethods
@@ -1618,6 +1619,22 @@ impl Config {
     }
     Ok(())
   }
+}
+
+fn validate_tls_key_exchange_groups(groups: &[TlsKeyExchangeGroup]) -> anyhow::Result<()> {
+  if groups.is_empty() {
+    bail!("tls.key_exchange_groups must include at least one group");
+  }
+  let mut seen = HashSet::new();
+  for group in groups {
+    if !seen.insert(*group) {
+      bail!(
+        "tls.key_exchange_groups contains duplicate {}",
+        group.as_str()
+      );
+    }
+  }
+  Ok(())
 }
 
 fn validate_tls_server_resumption(
@@ -2099,6 +2116,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "tls" => &[
       "cert_chain",
       "client_auth",
+      "key_exchange_groups",
       "max_version",
       "min_version",
       "ocsp",
