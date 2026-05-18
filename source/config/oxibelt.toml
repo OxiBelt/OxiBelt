@@ -18,7 +18,7 @@ worker_threads = "auto"
 
 [runtime.worker_multipliers]
 runtime = 1.0
-accept = 1.0
+accept = 0.5
 quic_socket = 1.0
 
 [runtime.accept]

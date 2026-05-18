@@ -72,16 +72,17 @@ fn accept_scaling_defaults_are_auto_workers() {
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
 
-    let expected = available_parallelism();
-    assert_eq!(config.runtime.worker_threads, expected);
-    assert_eq!(config.runtime.accept.workers, expected);
+    let expected_runtime = available_parallelism();
+    let expected_accept = resolve_auto_worker_count(expected_runtime, 0.5).unwrap();
+    assert_eq!(config.runtime.worker_threads, expected_runtime);
+    assert_eq!(config.runtime.accept.workers, expected_accept);
     assert!(config.runtime.accept.reuse_port);
     assert_eq!(config.runtime.accept.backlog, 8192);
     assert_eq!(config.runtime.accept.accept_error_backoff_ms, 10);
-    assert_eq!(config.quic.socket.workers, expected);
+    assert_eq!(config.quic.socket.workers, expected_runtime);
     assert!(!config.quic.socket.reuse_port);
     assert_eq!(config.runtime.worker_multipliers.runtime, 1.0);
-    assert_eq!(config.runtime.worker_multipliers.accept, 1.0);
+    assert_eq!(config.runtime.worker_multipliers.accept, 0.5);
     assert_eq!(config.runtime.worker_multipliers.quic_socket, 1.0);
 }
 
@@ -1875,15 +1876,38 @@ fn effective_config_dump_resolves_auto_worker_counts() {
     let rendered =
         toml::to_string_pretty(&Config::load_effective_toml_redacted(&config_path).unwrap())
             .expect("effective TOML should serialize");
-    let expected = available_parallelism();
+    let expected_runtime = available_parallelism();
+    let expected_accept = resolve_auto_worker_count(expected_runtime, 0.5).unwrap();
+    let rendered_value: toml::Value =
+        toml::from_str(&rendered).expect("effective TOML should parse");
+    let runtime = rendered_value
+        .get("runtime")
+        .and_then(toml::Value::as_table)
+        .expect("effective TOML should contain runtime table");
+    let worker_multipliers = runtime
+        .get("worker_multipliers")
+        .and_then(toml::Value::as_table)
+        .expect("effective TOML should contain runtime.worker_multipliers table");
+    let accept = runtime
+        .get("accept")
+        .and_then(toml::Value::as_table)
+        .expect("effective TOML should contain runtime.accept table");
 
-    assert!(
-        rendered.contains(&format!("worker_threads = {expected}")),
-        "effective config should contain resolved runtime worker count: {rendered}"
+    assert_eq!(
+        runtime
+            .get("worker_threads")
+            .and_then(toml::Value::as_integer),
+        Some(i64::try_from(expected_runtime).unwrap())
     );
-    assert!(
-        rendered.contains(&format!("workers = {expected}")),
-        "effective config should contain resolved accept worker count: {rendered}"
+    assert_eq!(
+        worker_multipliers
+            .get("accept")
+            .and_then(toml::Value::as_float),
+        Some(0.5)
+    );
+    assert_eq!(
+        accept.get("workers").and_then(toml::Value::as_integer),
+        Some(i64::try_from(expected_accept).unwrap())
     );
     assert!(
         !rendered.contains("\"auto\""),

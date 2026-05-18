@@ -8,6 +8,10 @@ memory_only_state = true
 unprivileged_mode = true
 worker_threads = "auto"
 
+[runtime.worker_multipliers]
+runtime = 1.0
+accept = 0.5
+quic_socket = 1.0
 
 [runtime.accept]
 workers = "auto"

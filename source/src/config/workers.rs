@@ -87,20 +87,20 @@ impl<'de> Deserialize<'de> for WorkerCountSetting {
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 pub struct WorkerMultipliersConfig {
-  #[serde(default = "default_worker_multiplier")]
+  #[serde(default = "default_runtime_worker_multiplier")]
   pub runtime: f64,
-  #[serde(default = "default_worker_multiplier")]
+  #[serde(default = "default_accept_worker_multiplier")]
   pub accept: f64,
-  #[serde(default = "default_worker_multiplier")]
+  #[serde(default = "default_quic_socket_worker_multiplier")]
   pub quic_socket: f64,
 }
 
 impl Default for WorkerMultipliersConfig {
   fn default() -> Self {
     Self {
-      runtime: default_worker_multiplier(),
-      accept: default_worker_multiplier(),
-      quic_socket: default_worker_multiplier(),
+      runtime: default_runtime_worker_multiplier(),
+      accept: default_accept_worker_multiplier(),
+      quic_socket: default_quic_socket_worker_multiplier(),
     }
   }
 }
@@ -127,9 +127,9 @@ impl Default for WorkerResolutionConfig {
     Self {
       available_parallelism: 1,
       fallback_error: None,
-      runtime_multiplier: default_worker_multiplier(),
-      accept_multiplier: default_worker_multiplier(),
-      quic_socket_multiplier: default_worker_multiplier(),
+      runtime_multiplier: default_runtime_worker_multiplier(),
+      accept_multiplier: default_accept_worker_multiplier(),
+      quic_socket_multiplier: default_quic_socket_worker_multiplier(),
     }
   }
 }
@@ -506,7 +506,15 @@ impl QuicSocketConfig {
   }
 }
 
-fn default_worker_multiplier() -> f64 {
+fn default_runtime_worker_multiplier() -> f64 {
+  1.0
+}
+
+fn default_accept_worker_multiplier() -> f64 {
+  0.5
+}
+
+fn default_quic_socket_worker_multiplier() -> f64 {
   1.0
 }
 

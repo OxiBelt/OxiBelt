@@ -18,6 +18,10 @@ fn performance_script_text() -> String {
     fs::read_to_string(performance_script_path()).expect("performance script should be readable")
 }
 
+fn oxibelt_performance_fixture_root() -> PathBuf {
+    repo_root().join("tests/fixtures/oxibelt-docker-performance/oxibelt")
+}
+
 fn extract_bash_function(script: &str, function_name: &str) -> String {
     let signature = format!("{function_name}() {{");
     let mut collecting = false;
@@ -475,6 +479,63 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
         assert!(
             script.contains(serving_type),
             "performance script should recognize serving type {serving_type}"
+        );
+    }
+}
+
+#[test]
+fn oxibelt_performance_fixtures_pin_worker_profile() {
+    for scenario in [
+        "baseline",
+        "baseline-no-http3",
+        "cache",
+        "crs-enforcing",
+        "crs-monitor",
+        "waf-enforcing",
+        "waf-monitor",
+    ] {
+        let path = oxibelt_performance_fixture_root()
+            .join(scenario)
+            .join("config/oxibelt.toml");
+        let config_text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let value: toml::Value = toml::from_str(&config_text)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+        let worker_multipliers = value
+            .get("runtime")
+            .and_then(toml::Value::as_table)
+            .and_then(|runtime| runtime.get("worker_multipliers"))
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} should contain runtime.worker_multipliers",
+                    path.display()
+                )
+            });
+
+        assert_eq!(
+            worker_multipliers
+                .get("runtime")
+                .and_then(toml::Value::as_float),
+            Some(1.0),
+            "{} should pin runtime worker multiplier",
+            path.display()
+        );
+        assert_eq!(
+            worker_multipliers
+                .get("accept")
+                .and_then(toml::Value::as_float),
+            Some(0.5),
+            "{} should pin accept worker multiplier",
+            path.display()
+        );
+        assert_eq!(
+            worker_multipliers
+                .get("quic_socket")
+                .and_then(toml::Value::as_float),
+            Some(1.0),
+            "{} should pin QUIC socket worker multiplier",
+            path.display()
         );
     }
 }

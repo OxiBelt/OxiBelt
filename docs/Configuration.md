@@ -223,7 +223,7 @@ worker_threads = "auto"
 
 [runtime.worker_multipliers]
 runtime = 1.0
-accept = 1.0
+accept = 0.5
 quic_socket = 1.0
 
 [runtime.accept]
@@ -242,7 +242,7 @@ mode = "off" # off | oxirule | downstream_tls | full
 poll_interval_ms = 2000
 ```
 
-`unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` accepts a positive integer or `"auto"`; omitted values default to `"auto"`. Auto worker sizing uses Rust `std::thread::available_parallelism()`, falls back to `1` when detection fails, multiplies by `[runtime.worker_multipliers].runtime`, and rounds up. Full hot reload rejects changes to the resolved `runtime.worker_threads` value because the Tokio runtime cannot be resized in-process.
+`unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` accepts a positive integer or `"auto"`; omitted values default to `"auto"`. Auto worker sizing uses Rust `std::thread::available_parallelism()`, falls back to `1` when detection fails, multiplies by `[runtime.worker_multipliers].runtime`, and rounds up. `[runtime.worker_multipliers]` defaults to `runtime = 1.0`, `accept = 0.5`, and `quic_socket = 1.0`; the lower accept default keeps TCP accept loops more conservative while runtime and HTTP/3 socket worker counts continue to track available parallelism. Existing configurations that set `runtime.worker_multipliers.accept = 1.0` keep the previous CPU-count accept-worker behavior. Full hot reload rejects changes to the resolved `runtime.worker_threads` value because the Tokio runtime cannot be resized in-process.
 
 `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].accept`. Set `reuse_port = true` whenever the resolved worker count can be greater than one; OxiBelt fails startup instead of silently enabling `SO_REUSEPORT`. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
 
