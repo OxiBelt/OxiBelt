@@ -19,20 +19,21 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{ClientConfig, HandshakeKind, RootCertStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::time::Instant;
+use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 
 const MAX_ERROR_SAMPLES: usize = 8;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Protocol {
-  H1,
-  H1c,
-  H2,
-  H3,
+    H1,
+    H1c,
+    H2,
+    H3,
 }
 
 impl Protocol {
@@ -64,6 +65,29 @@ impl Protocol {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientResumptionMode {
+    Fresh,
+    Worker,
+}
+
+impl ClientResumptionMode {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "fresh" => Ok(Self::Fresh),
+            "worker" => Ok(Self::Worker),
+            _ => bail!("unsupported client resumption mode: {raw}"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Worker => "worker",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct LoadArgs {
     label: String,
@@ -90,6 +114,8 @@ struct HandshakeArgs {
     ca_cert: String,
     duration: Duration,
     concurrency: usize,
+    client_resumption: ClientResumptionMode,
+    post_handshake_observe: Duration,
 }
 
 #[derive(Clone)]
@@ -114,6 +140,34 @@ struct H3ClientConnection {
     connection: h3_quinn::quinn::Connection,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct HandshakeKindCounts {
+    full: u64,
+    full_with_hello_retry_request: u64,
+    resumed: u64,
+    unknown: u64,
+}
+
+impl HandshakeKindCounts {
+    fn record(&mut self, kind: Option<HandshakeKind>) {
+        match kind {
+            Some(HandshakeKind::Full) => self.full += 1,
+            Some(HandshakeKind::FullWithHelloRetryRequest) => {
+                self.full_with_hello_retry_request += 1;
+            }
+            Some(HandshakeKind::Resumed) => self.resumed += 1,
+            None => self.unknown += 1,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct HandshakeObservation {
+    kind: Option<HandshakeKind>,
+    tls13_tickets_received: u32,
+    negotiated_key_exchange_group: Option<String>,
+}
+
 #[derive(Clone)]
 struct SharedStats {
     inner: Arc<Mutex<StatsInner>>,
@@ -125,6 +179,9 @@ struct StatsInner {
     statuses: BTreeMap<u16, u64>,
     latency: Histogram<u64>,
     error_samples: Vec<String>,
+    handshake_kinds: HandshakeKindCounts,
+    tls13_tickets_received: u64,
+    negotiated_key_exchange_groups: BTreeMap<String, u64>,
 }
 
 impl SharedStats {
@@ -136,6 +193,9 @@ impl SharedStats {
                 statuses: BTreeMap::new(),
                 latency: Histogram::new(3).context("failed to create latency histogram")?,
                 error_samples: Vec::new(),
+                handshake_kinds: HandshakeKindCounts::default(),
+                tls13_tickets_received: 0,
+                negotiated_key_exchange_groups: BTreeMap::new(),
             })),
         })
     }
@@ -153,6 +213,24 @@ impl SharedStats {
                 &mut inner,
                 format!("unexpected status {status}, expected {expect_status}"),
             );
+        }
+        let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        let _ = inner.latency.record(micros.max(1));
+    }
+
+    fn record_handshake_success(&self, elapsed: Duration, observation: HandshakeObservation) {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("stats mutex should not be poisoned");
+        inner.requests += 1;
+        inner.handshake_kinds.record(observation.kind);
+        inner.tls13_tickets_received += u64::from(observation.tls13_tickets_received);
+        if let Some(group) = observation.negotiated_key_exchange_group {
+            *inner
+                .negotiated_key_exchange_groups
+                .entry(group)
+                .or_insert(0) += 1;
         }
         let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
         let _ = inner.latency.record(micros.max(1));
@@ -199,6 +277,9 @@ impl SharedStats {
             p95_ms: percentile_ms(&inner.latency, 95.0),
             p99_ms: percentile_ms(&inner.latency, 99.0),
             error_samples: inner.error_samples.clone(),
+            handshake_kinds: inner.handshake_kinds,
+            tls13_tickets_received: inner.tls13_tickets_received,
+            negotiated_key_exchange_groups: inner.negotiated_key_exchange_groups.clone(),
         }
     }
 }
@@ -217,6 +298,9 @@ struct StatsSnapshot {
     p95_ms: f64,
     p99_ms: f64,
     error_samples: Vec<String>,
+    handshake_kinds: HandshakeKindCounts,
+    tls13_tickets_received: u64,
+    negotiated_key_exchange_groups: BTreeMap<String, u64>,
 }
 
 #[tokio::main]
@@ -244,7 +328,7 @@ fn usage() {
         "usage:
   perf-probe upstream --listen <addr:port> [--name <name>]
   perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>]
-  perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>]
+  perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
   perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>]"
     );
 }
@@ -297,6 +381,25 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
 fn parse_handshake_args(args: impl Iterator<Item = String>) -> anyhow::Result<HandshakeArgs> {
     let values = flag_map(args)?;
     let protocol = Protocol::parse(required(&values, "--protocol")?)?;
+    let client_resumption = values
+        .get("--client-resumption")
+        .map(|value| ClientResumptionMode::parse(value))
+        .transpose()?
+        .unwrap_or(ClientResumptionMode::Fresh);
+    let post_handshake_observe = values
+        .get("--post-handshake-observe-ms")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .context("invalid --post-handshake-observe-ms value")
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if client_resumption == ClientResumptionMode::Worker
+        && !matches!(protocol, Protocol::H1 | Protocol::H2)
+    {
+        bail!("--client-resumption worker is only supported for h1 and h2 handshake probes");
+    }
     Ok(HandshakeArgs {
         label: values
             .get("--label")
@@ -309,6 +412,8 @@ fn parse_handshake_args(args: impl Iterator<Item = String>) -> anyhow::Result<Ha
         ca_cert: required(&values, "--ca-cert")?.to_owned(),
         duration: Duration::from_secs(parse_u64(&values, "--duration-seconds")?),
         concurrency: parse_usize(&values, "--concurrency")?,
+        client_resumption,
+        post_handshake_observe: Duration::from_millis(post_handshake_observe),
     })
 }
 
@@ -861,41 +966,22 @@ async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
         let args = args.clone();
         let stats = stats.clone();
         tasks.push(tokio::spawn(async move {
+            let worker_tls_config = match worker_tls_config(&args) {
+                Ok(config) => config,
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    stats.record_error_sample(message.clone());
+                    eprintln!("handshake worker failed to initialize: {message}");
+                    return;
+                }
+            };
             while Instant::now() < deadline {
                 let started = Instant::now();
-                let result = match args.protocol {
-                    Protocol::H1 | Protocol::H2 => tls_connect(
-                        &args.host,
-                        args.port,
-                        &args.server_name,
-                        &args.ca_cert,
-                        args.protocol.alpn(),
-                    )
-                    .await
-                    .map(|_| ()),
-                    Protocol::H1c => TcpStream::connect((args.host.as_str(), args.port))
-                        .await
-                        .map(|_| ())
-                        .context("failed to connect cleartext HTTP/1.1 socket"),
-                    Protocol::H3 => {
-                        let connection = h3_connect(
-                            &args.host,
-                            args.port,
-                            &args.server_name,
-                            &args.ca_cert,
-                            args.protocol.alpn(),
-                        )
-                        .await;
-                        if let Ok(connection) = &connection {
-                            connection
-                                .connection
-                                .close(0u32.into(), b"handshake complete");
-                        }
-                        connection.map(|_| ())
-                    }
-                };
+                let result = run_single_handshake(&args, worker_tls_config.clone()).await;
                 match result {
-                    Ok(()) => stats.record_success(started.elapsed()),
+                    Ok(observation) => {
+                        stats.record_handshake_success(started.elapsed(), observation)
+                    }
                     Err(error) => {
                         let message = format!("{error:#}");
                         stats.record_error_sample(message.clone());
@@ -919,16 +1005,94 @@ async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
             "protocol": args.protocol.label(),
             "duration_seconds": args.duration.as_secs(),
             "concurrency": args.concurrency,
+            "client_resumption": args.client_resumption.label(),
+            "post_handshake_observe_ms": args.post_handshake_observe.as_millis() as u64,
             "handshakes": snapshot.requests,
             "errors": snapshot.errors,
             "handshake_per_sec": rate(snapshot.requests, args.duration.as_secs_f64()),
             "p50_ms": snapshot.p50_ms,
             "p95_ms": snapshot.p95_ms,
             "p99_ms": snapshot.p99_ms,
+            "handshake_kinds": handshake_kind_json(snapshot.handshake_kinds),
+            "tls13_tickets_received": snapshot.tls13_tickets_received,
+            "negotiated_key_exchange_groups": count_json(snapshot.negotiated_key_exchange_groups),
             "error_samples": snapshot.error_samples,
         })
     );
     Ok(())
+}
+
+fn worker_tls_config(args: &HandshakeArgs) -> anyhow::Result<Option<Arc<ClientConfig>>> {
+    if matches!(args.protocol, Protocol::H1 | Protocol::H2)
+        && args.client_resumption == ClientResumptionMode::Worker
+    {
+        return Ok(Some(tcp_tls_config(&args.ca_cert, args.protocol.alpn())?));
+    }
+    Ok(None)
+}
+
+async fn run_single_handshake(
+    args: &HandshakeArgs,
+    worker_tls_config: Option<Arc<ClientConfig>>,
+) -> anyhow::Result<HandshakeObservation> {
+    match args.protocol {
+        Protocol::H1 | Protocol::H2 => tcp_handshake(args, worker_tls_config).await,
+        Protocol::H1c => {
+            TcpStream::connect((args.host.as_str(), args.port))
+                .await
+                .context("failed to connect cleartext HTTP/1.1 socket")?;
+            Ok(HandshakeObservation::default())
+        }
+        Protocol::H3 => {
+            let connection = h3_connect(
+                &args.host,
+                args.port,
+                &args.server_name,
+                &args.ca_cert,
+                args.protocol.alpn(),
+            )
+            .await;
+            if let Ok(connection) = &connection {
+                connection
+                    .connection
+                    .close(0u32.into(), b"handshake complete");
+            }
+            connection.map(|_| HandshakeObservation::default())
+        }
+    }
+}
+
+async fn tcp_handshake(
+    args: &HandshakeArgs,
+    worker_tls_config: Option<Arc<ClientConfig>>,
+) -> anyhow::Result<HandshakeObservation> {
+    let config = match worker_tls_config {
+        Some(config) => config,
+        None => tcp_tls_config(&args.ca_cert, args.protocol.alpn())?,
+    };
+    let mut stream =
+        tls_connect_with_config(&args.host, args.port, &args.server_name, config).await?;
+    observe_post_handshake(&mut stream, args.post_handshake_observe).await;
+    Ok(tcp_handshake_observation(&stream))
+}
+
+async fn observe_post_handshake(stream: &mut TlsStream<TcpStream>, duration: Duration) {
+    if duration == Duration::ZERO {
+        return;
+    }
+    let mut buffer = [0u8; 1];
+    let _ = tokio::time::timeout(duration, stream.read(&mut buffer)).await;
+}
+
+fn tcp_handshake_observation(stream: &TlsStream<TcpStream>) -> HandshakeObservation {
+    let (_, connection) = stream.get_ref();
+    HandshakeObservation {
+        kind: connection.handshake_kind(),
+        tls13_tickets_received: connection.tls13_tickets_received(),
+        negotiated_key_exchange_group: connection
+            .negotiated_key_exchange_group()
+            .map(|group| format!("{:?}", group.name()).to_ascii_lowercase()),
+    }
 }
 
 async fn run_stress(args: StressArgs) -> anyhow::Result<()> {
@@ -1101,10 +1265,24 @@ async fn tls_connect(
     server_name: &str,
     ca_cert: &str,
     alpn: &[u8],
-) -> anyhow::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+) -> anyhow::Result<TlsStream<TcpStream>> {
+    let config = tcp_tls_config(ca_cert, alpn)?;
+    tls_connect_with_config(host, port, server_name, config).await
+}
+
+fn tcp_tls_config(ca_cert: &str, alpn: &[u8]) -> anyhow::Result<Arc<ClientConfig>> {
     let mut config = tls_config(Path::new(ca_cert), alpn)?;
     config.enable_sni = true;
-    let connector = TlsConnector::from(Arc::new(config));
+    Ok(Arc::new(config))
+}
+
+async fn tls_connect_with_config(
+    host: &str,
+    port: u16,
+    server_name: &str,
+    config: Arc<ClientConfig>,
+) -> anyhow::Result<TlsStream<TcpStream>> {
+    let connector = TlsConnector::from(config);
     let stream = TcpStream::connect((host, port))
         .await
         .with_context(|| format!("failed to connect to {host}:{port}"))?;
@@ -1221,6 +1399,24 @@ fn status_json(statuses: BTreeMap<u16, u64>) -> serde_json::Value {
     )
 }
 
+fn count_json(counts: BTreeMap<String, u64>) -> serde_json::Value {
+    serde_json::Value::Object(
+        counts
+            .into_iter()
+            .map(|(name, count)| (name, serde_json::json!(count)))
+            .collect(),
+    )
+}
+
+fn handshake_kind_json(counts: HandshakeKindCounts) -> serde_json::Value {
+    serde_json::json!({
+        "full": counts.full,
+        "full_with_hello_retry_request": counts.full_with_hello_retry_request,
+        "resumed": counts.resumed,
+        "unknown": counts.unknown,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,6 +1452,104 @@ mod tests {
         assert_eq!(
             snapshot.error_samples,
             vec!["unexpected status 503, expected 200"]
+        );
+    }
+
+    #[test]
+    fn handshake_args_parse_resumption_observation_options() {
+        let args = parse_handshake_args(
+            [
+                "--label",
+                "diagnostic",
+                "--protocol",
+                "h2",
+                "--host",
+                "proxy",
+                "--port",
+                "8443",
+                "--server-name",
+                "proxy",
+                "--ca-cert",
+                "/tls/proxy-ca.pem",
+                "--duration-seconds",
+                "5",
+                "--concurrency",
+                "2",
+                "--client-resumption",
+                "worker",
+                "--post-handshake-observe-ms",
+                "25",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("handshake args should parse");
+
+        assert_eq!(args.label, "diagnostic");
+        assert_eq!(args.protocol, Protocol::H2);
+        assert_eq!(args.client_resumption, ClientResumptionMode::Worker);
+        assert_eq!(args.post_handshake_observe, Duration::from_millis(25));
+    }
+
+    #[test]
+    fn handshake_args_default_to_fresh_without_post_handshake_observation() {
+        let args = parse_handshake_args(
+            [
+                "--protocol",
+                "h1",
+                "--host",
+                "proxy",
+                "--port",
+                "8443",
+                "--server-name",
+                "proxy",
+                "--ca-cert",
+                "/tls/proxy-ca.pem",
+                "--duration-seconds",
+                "5",
+                "--concurrency",
+                "2",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("handshake args should parse");
+
+        assert_eq!(args.client_resumption, ClientResumptionMode::Fresh);
+        assert_eq!(args.post_handshake_observe, Duration::ZERO);
+    }
+
+    #[test]
+    fn handshake_observations_are_aggregated() {
+        let stats = SharedStats::new().expect("stats should initialize");
+
+        stats.record_handshake_success(
+            Duration::from_millis(1),
+            HandshakeObservation {
+                kind: Some(HandshakeKind::Full),
+                tls13_tickets_received: 2,
+                negotiated_key_exchange_group: Some("x25519".to_owned()),
+            },
+        );
+        stats.record_handshake_success(
+            Duration::from_millis(1),
+            HandshakeObservation {
+                kind: Some(HandshakeKind::Resumed),
+                tls13_tickets_received: 1,
+                negotiated_key_exchange_group: Some("x25519".to_owned()),
+            },
+        );
+        stats.record_handshake_success(Duration::from_millis(1), HandshakeObservation::default());
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.requests, 3);
+        assert_eq!(snapshot.handshake_kinds.full, 1);
+        assert_eq!(snapshot.handshake_kinds.resumed, 1);
+        assert_eq!(snapshot.handshake_kinds.unknown, 1);
+        assert_eq!(snapshot.tls13_tickets_received, 3);
+        assert_eq!(
+            snapshot.negotiated_key_exchange_groups.get("x25519"),
+            Some(&2)
         );
     }
 

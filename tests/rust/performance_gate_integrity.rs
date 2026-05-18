@@ -1062,6 +1062,36 @@ fn handshake_errors_are_not_covered_by_load_error_budget() {
 }
 
 #[test]
+fn handshake_resumption_diagnostic_runs_without_replacing_cold_row() {
+    let script = performance_script_text();
+    let cold_call = r#"run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt"#;
+    let diagnostic_call = r#"run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt"#;
+
+    assert_eq!(
+        script.matches(cold_call).count(),
+        2,
+        "reverse-proxy and all serving types should keep the cold handshake row"
+    );
+    assert_eq!(
+        script.matches(diagnostic_call).count(),
+        2,
+        "reverse-proxy and all serving types should add the resumption diagnostic row"
+    );
+    assert!(
+        script.contains("run_handshake_with_options \"$1\" \"$2\" \"$3\" fresh 0 strict"),
+        "default handshake wrapper should preserve fresh cold-handshake behavior"
+    );
+    assert!(
+        script.contains("run_handshake_with_options \"$1\" \"$2\" \"$3\" worker 25 diagnostic"),
+        "diagnostic handshake wrapper should reuse worker TLS state and observe tickets without replacing the strict cold row"
+    );
+    assert!(
+        script.contains("assert_diagnostic_result"),
+        "diagnostic rows should require useful output without turning client-side port pressure into a hard gate"
+    );
+}
+
+#[test]
 fn mandatory_and_optional_call_sites_are_explicit() {
     let script = performance_script_text();
 

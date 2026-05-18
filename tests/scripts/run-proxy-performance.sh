@@ -380,6 +380,15 @@ assert_result() {
   fi
 }
 
+assert_diagnostic_result() {
+  local json="$1"
+  local requests
+  requests="$(jq -r '.requests // .handshakes // 0' <<<"${json}")"
+  if [[ "${requests}" == "0" ]]; then
+    fail_with_diagnostics "diagnostic performance probe produced zero requests: $(jq -r '.label' <<<"${json}")"
+  fi
+}
+
 load_errors_within_budget() {
   local errors="$1"
   local requests="$2"
@@ -584,9 +593,20 @@ run_static_loads() {
 }
 
 run_handshake() {
+  run_handshake_with_options "$1" "$2" "$3" fresh 0 strict
+}
+
+run_handshake_resumption_diagnostic() {
+  run_handshake_with_options "$1" "$2" "$3" worker 25 diagnostic
+}
+
+run_handshake_with_options() {
   local label="$1"
   local protocol="$2"
   local host="$3"
+  local client_resumption="$4"
+  local post_handshake_observe_ms="$5"
+  local result_mode="$6"
   local json
   json="$(run_probe_json handshake \
     --label "${label}" \
@@ -596,9 +616,15 @@ run_handshake() {
     --server-name proxy \
     --ca-cert /tls/proxy-ca.pem \
     --duration-seconds "${duration_seconds}" \
-    --concurrency "${concurrency}")"
+    --concurrency "${concurrency}" \
+    --client-resumption "${client_resumption}" \
+    --post-handshake-observe-ms "${post_handshake_observe_ms}")"
   append_result "${json}"
-  assert_result "${json}"
+  if [[ "${result_mode}" == "strict" ]]; then
+    assert_result "${json}"
+  else
+    assert_diagnostic_result "${json}"
+  fi
   sample_stats "${label}"
 }
 
@@ -889,6 +915,7 @@ run_reverse_proxy_group() {
     assert_oxibelt_tcp_baseline
     start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
     run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
+    run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt
   fi
 
   if has_comparator nginx; then
@@ -968,6 +995,7 @@ run_all_serving_types() {
     assert_oxibelt_tcp_baseline
     start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
     run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
+    run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt
     if [[ "${profile}" == "smoke" ]]; then
       run_load "oxibelt-smoke-soak" h1 oxibelt "/perf/smoke-soak?body=ok" "${soak_seconds}" "${concurrency}"
     fi
