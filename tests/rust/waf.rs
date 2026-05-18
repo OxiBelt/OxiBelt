@@ -4502,6 +4502,221 @@ body = "tagged"
 }
 
 #[test]
+fn rule_groups_merge_conditions_in_reference_order() {
+    let engine = compile_waf_fragment(
+        "waf-rule-groups-merge",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rule_groups]]
+name = "admin-path"
+when = "Request.Http.Path.startsWith('/admin')"
+merge_condition_as = "and"
+
+[[waf.rule_groups]]
+name = "post-method"
+when = "Request.Http.Method == 'POST'"
+merge_condition_as = "or"
+
+[[waf.rules]]
+name = "merged-rule"
+phase = "request"
+priority = 10
+groups = ["admin-path", "post-method"]
+when = "Request.Headers.get('x-guard') == 'yes'"
+merge_condition_as = "and"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-guard", HeaderValue::from_static("yes"));
+    let tags = HashMap::new();
+    let get = Method::GET;
+    let post = Method::POST;
+    let admin: Uri = "/admin".parse().expect("URI should parse");
+    let public: Uri = "/public".parse().expect("URI should parse");
+
+    let admin_decision = engine.evaluate_request(request_input(
+        &get,
+        &admin,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let post_decision = engine.evaluate_request(request_input(
+        &post,
+        &public,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let allowed_decision = engine.evaluate_request(request_input(
+        &get,
+        &public,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert_eq!(
+        admin_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        post_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert!(allowed_decision.terminal.is_none());
+}
+
+#[test]
+fn rule_group_override_condition_replaces_other_conditions() {
+    let engine = compile_waf_fragment(
+        "waf-rule-group-override",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rule_groups]]
+name = "impossible"
+when = "Request.Http.Path == '/never'"
+merge_condition_as = "and"
+
+[[waf.rules]]
+name = "override-rule"
+phase = "request"
+priority = 10
+groups = ["impossible"]
+when = "Request.Http.Path == '/override'"
+merge_condition_as = "override"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+    );
+
+    let rejected = evaluate_simple_request(&engine, "/override");
+    let allowed = evaluate_simple_request(&engine, "/other");
+
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert!(allowed.terminal.is_none());
+}
+
+#[test]
+fn rule_group_actions_are_sorted_by_priority_and_stop_after_terminal_action() {
+    let engine = compile_waf_fragment(
+        "waf-rule-group-action-priority",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rule_groups]]
+name = "ordered-actions"
+when = "true"
+
+[[waf.rule_groups.actions]]
+type = "set_tag"
+key = "group-default"
+value = "first"
+
+[[waf.rule_groups.actions]]
+priority = 20
+type = "set_tag"
+key = "after-terminal"
+value = "skipped"
+
+[[waf.rules]]
+name = "priority-rule"
+phase = "request"
+priority = 10
+groups = ["ordered-actions"]
+
+[[waf.rules.actions]]
+type = "set_tag"
+key = "rule-default"
+value = "second"
+
+[[waf.rules.actions]]
+priority = 10
+type = "reject"
+status = 403
+body = "terminal"
+"#,
+    );
+
+    let decision = evaluate_simple_request(&engine, "/priority");
+
+    assert_eq!(
+        decision.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        decision.tags,
+        vec![
+            ("group-default".to_string(), "first".to_string()),
+            ("rule-default".to_string(), "second".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn route_rule_groups_override_global_groups_with_same_name() {
+    let engine = compile_waf_fragment(
+        "waf-route-rule-group-lookup",
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rule_groups]]
+name = "shared-defense"
+when = "false"
+
+[[routes.waf.rule_groups]]
+name = "shared-defense"
+when = "Request.Http.Path == '/route-group'"
+
+[[routes.waf.rules]]
+name = "route-group-rule"
+phase = "request"
+priority = 10
+groups = ["shared-defense"]
+
+[[routes.waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+    );
+
+    let rejected = evaluate_simple_request(&engine, "/route-group");
+    let allowed = evaluate_simple_request(&engine, "/other");
+
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert!(allowed.terminal.is_none());
+}
+
+#[test]
 fn person_proof_challenge_allows_solved_pow() {
     let temp_dir = common::TempDir::new("waf-person-proof");
     let (cert_path, key_path) =
@@ -5624,6 +5839,241 @@ path = "rules/global-request.oxirule.toml"
 }
 
 #[test]
+fn external_rule_file_local_groups_shadow_global_groups() {
+    let temp_dir = common::TempDir::new("waf-external-rule-groups");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rules_dir = temp_dir.path().join("oxirule").join("rules");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rules_dir).expect("failed to create rules directory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "waf-external-rule-groups");
+    std::fs::write(
+        rules_dir.join("grouped.oxirule.toml"),
+        r#"
+groups = ["shared-defense"]
+
+[[actions]]
+type = "reject"
+status = 403
+body = "external local"
+
+[[rule_groups]]
+name = "shared-defense"
+when = "Request.Http.Path == '/external-local'"
+"#,
+    )
+    .expect("failed to write grouped WAF rule");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rule_groups]]
+name = "shared-defense"
+when = "false"
+
+[[waf.rules]]
+name = "external-grouped"
+phase = "request"
+priority = 10
+path = "rules/grouped.oxirule.toml"
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load external grouped rule");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let rejected = evaluate_simple_request(&engine, "/external-local");
+    let allowed = evaluate_simple_request(&engine, "/other");
+
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert!(allowed.terminal.is_none());
+}
+
+#[test]
+fn external_rule_file_groups_are_not_exported() {
+    let temp_dir = common::TempDir::new("waf-external-rule-group-local-only");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rules_dir = temp_dir.path().join("oxirule").join("rules");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rules_dir).expect("failed to create rules directory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "waf-external-rule-group-local-only");
+    std::fs::write(
+        rules_dir.join("local.oxirule.toml"),
+        r#"
+groups = ["external-only"]
+
+[[actions]]
+type = "set_tag"
+key = "ExternalOnly"
+value = "true"
+
+[[rule_groups]]
+name = "external-only"
+when = "true"
+"#,
+    )
+    .expect("failed to write external WAF rule");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "external"
+phase = "request"
+priority = 10
+path = "rules/local.oxirule.toml"
+
+[[waf.rules]]
+name = "inline"
+phase = "request"
+priority = 20
+groups = ["external-only"]
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load");
+    let error = config
+        .validate()
+        .expect_err("external group should stay file-local");
+    assert!(
+        format!("{error:#}").contains("references unknown rule group external-only"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn external_rule_path_rejects_inline_groups_and_actions() {
+    let temp_dir = common::TempDir::new("waf-external-inline-groups");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rules_dir = temp_dir.path().join("oxirule").join("rules");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rules_dir).expect("failed to create rules directory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "waf-external-inline-groups");
+    std::fs::write(
+        rules_dir.join("external.oxirule.toml"),
+        r#"
+when = "true"
+
+[[actions]]
+type = "reject"
+status = 403
+"#,
+    )
+    .expect("failed to write external WAF rule");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+
+[[waf.rule_groups]]
+name = "inline-group"
+when = "true"
+
+[[waf.rules]]
+name = "bad-external"
+phase = "request"
+priority = 10
+path = "rules/external.oxirule.toml"
+groups = ["inline-group"]
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let error = Config::load(&config_path).expect_err("inline path data should be rejected");
+    assert!(
+        format!("{error:#}").contains("external path cannot be combined"),
+        "unexpected error: {error:#}"
+    );
+
+    let merge_config_path = config_dir.join("oxibelt-merge.toml");
+    std::fs::write(
+        &merge_config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "bad-external-merge"
+phase = "request"
+priority = 10
+path = "rules/external.oxirule.toml"
+merge_condition_as = "or"
+"#
+        ),
+    )
+    .expect("failed to write merge config");
+
+    let error =
+        Config::load(&merge_config_path).expect_err("inline merge_condition_as should be rejected");
+    assert!(
+        format!("{error:#}").contains("external path cannot be combined"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
 fn external_rule_paths_must_stay_in_oxirule_directory() {
     let temp_dir = common::TempDir::new("waf-path-escape");
     let config_dir = temp_dir.path().join("config");
@@ -5889,6 +6339,194 @@ when = "{when}"
         assert!(
             error.to_string().contains(expected),
             "unexpected error for {name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn validation_rejects_invalid_rule_group_configurations() {
+    for (name, fragment, expected) in [
+        (
+            "unknown-group",
+            r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "unknown-group"
+phase = "request"
+priority = 1
+groups = ["missing"]
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+            "references unknown rule group missing",
+        ),
+        (
+            "duplicate-group-reference",
+            r#"
+[waf]
+enabled = true
+
+[[waf.rule_groups]]
+name = "known"
+when = "true"
+
+[[waf.rules]]
+name = "duplicate-group-reference"
+phase = "request"
+priority = 1
+groups = ["known", "known"]
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+            "references duplicate rule group known",
+        ),
+        (
+            "duplicate-group-definition",
+            r#"
+[waf]
+enabled = true
+
+[[waf.rule_groups]]
+name = "duplicate"
+when = "true"
+
+[[waf.rule_groups]]
+name = "duplicate"
+when = "true"
+
+[[waf.rules]]
+name = "duplicate-group-definition"
+phase = "request"
+priority = 1
+groups = ["duplicate"]
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+            "contains duplicate WAF rule group duplicate",
+        ),
+        (
+            "multiple-overrides",
+            r#"
+[waf]
+enabled = true
+
+[[waf.rule_groups]]
+name = "override-group"
+when = "true"
+merge_condition_as = "override"
+
+[[waf.rules]]
+name = "multiple-overrides"
+phase = "request"
+priority = 1
+groups = ["override-group"]
+when = "true"
+merge_condition_as = "override"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+            "multiple OxiRule condition overrides are not allowed",
+        ),
+        (
+            "missing-effective-condition",
+            r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "missing-effective-condition"
+phase = "request"
+priority = 1
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+            "must define an effective condition",
+        ),
+        (
+            "missing-effective-actions",
+            r#"
+[waf]
+enabled = true
+
+[[waf.rule_groups]]
+name = "condition-only"
+when = "true"
+
+[[waf.rules]]
+name = "missing-effective-actions"
+phase = "request"
+priority = 1
+groups = ["condition-only"]
+"#,
+            "must define at least one action",
+        ),
+        (
+            "negative-action-priority",
+            r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "negative-action-priority"
+phase = "request"
+priority = 1
+when = "true"
+
+[[waf.rules.actions]]
+priority = -1
+type = "reject"
+status = 403
+"#,
+            "action priority must not be negative",
+        ),
+        (
+            "grouped-action-wrong-phase",
+            r#"
+[waf]
+enabled = true
+
+[[waf.rule_groups]]
+name = "response-action"
+when = "true"
+
+[[waf.rule_groups.actions]]
+type = "reject_response"
+status = 403
+
+[[waf.rules]]
+name = "grouped-action-wrong-phase"
+phase = "request"
+priority = 1
+groups = ["response-action"]
+"#,
+            "response terminal action is not valid in Request phase",
+        ),
+    ] {
+        let temp_dir = common::TempDir::new(name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let raw = format!(
+            "{}\n{}",
+            common::minimal_config_toml(&cert_path, &key_path),
+            fragment
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains(expected),
+            "unexpected error for {name}: {error_chain}"
         );
     }
 }

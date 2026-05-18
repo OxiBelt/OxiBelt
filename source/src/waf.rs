@@ -34,6 +34,7 @@ pub(crate) mod normalization;
 mod pattern_set;
 mod person_proof;
 mod plan;
+mod rule_groups;
 mod runtime_helpers;
 
 use binary_format::bytes_match_format;
@@ -60,6 +61,8 @@ use person_proof::{
 };
 pub use plan::BodyNeed;
 use plan::{WafRoutePlan, phase_plan};
+use rule_groups::{RuleGroupScope, resolve_rule, validate_rule_group_scope};
+pub use rule_groups::{WafConditionMerge, WafRuleGroupConfig};
 use runtime_helpers::{
   body_size, ip_in_cidr, pattern_set_matches, request_metadata_has_duplicates, version_string,
 };
@@ -82,6 +85,8 @@ pub struct WafConfig {
   #[serde(default)]
   pub functions: Vec<WafFunctionConfig>,
   #[serde(default)]
+  pub rule_groups: Vec<WafRuleGroupConfig>,
+  #[serde(default)]
   pub rules: Vec<WafRuleConfig>,
   #[serde(default)]
   pub pattern_sets: Vec<WafPatternSetConfig>,
@@ -97,6 +102,7 @@ impl Default for WafConfig {
       limits: WafLimits::default(),
       crs: WafCrsConfig::default(),
       functions: Vec::new(),
+      rule_groups: Vec::new(),
       rules: Vec::new(),
       pattern_sets: Vec::new(),
     }
@@ -107,6 +113,8 @@ impl Default for WafConfig {
 pub struct RouteWafConfig {
   #[serde(default)]
   pub functions: Vec<WafFunctionConfig>,
+  #[serde(default)]
+  pub rule_groups: Vec<WafRuleGroupConfig>,
   #[serde(default)]
   pub rules: Vec<WafRuleConfig>,
 }
@@ -212,9 +220,15 @@ pub struct WafRuleConfig {
   #[serde(default)]
   pub when: Option<String>,
   #[serde(default)]
+  pub merge_condition_as: WafConditionMerge,
+  #[serde(default)]
   pub path: Option<PathBuf>,
   #[serde(default)]
+  pub groups: Vec<String>,
+  #[serde(default)]
   pub actions: Vec<WafActionConfig>,
+  #[serde(skip)]
+  pub local_rule_groups: Vec<WafRuleGroupConfig>,
   #[serde(skip)]
   pub loaded_from_path: Option<PathBuf>,
   #[serde(skip)]
@@ -243,53 +257,82 @@ impl WafPhase {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WafActionConfig {
   Reject {
+    #[serde(default)]
+    priority: i64,
     status: u16,
     #[serde(default)]
     body: Option<String>,
   },
-  ContinueResponse,
+  ContinueResponse {
+    #[serde(default)]
+    priority: i64,
+  },
   ReplaceResponse {
+    #[serde(default)]
+    priority: i64,
     status: u16,
     #[serde(default)]
     body: Option<String>,
   },
   RejectResponse {
+    #[serde(default)]
+    priority: i64,
     status: u16,
     #[serde(default)]
     body: Option<String>,
   },
   EmitAccessLog {
+    #[serde(default)]
+    priority: i64,
     #[serde(default = "default_access_log_field_configs")]
     fields: Vec<AccessLogFieldConfig>,
   },
   RouteToPool {
+    #[serde(default)]
+    priority: i64,
     pool: String,
   },
   RouteToUpstream {
+    #[serde(default)]
+    priority: i64,
     upstream: String,
   },
   SetLoadBalancingPolicy {
+    #[serde(default)]
+    priority: i64,
     policy: String,
   },
   SetRequestHeader {
+    #[serde(default)]
+    priority: i64,
     name: String,
     value: String,
   },
   RemoveRequestHeader {
+    #[serde(default)]
+    priority: i64,
     name: String,
   },
   SetResponseHeader {
+    #[serde(default)]
+    priority: i64,
     name: String,
     value: String,
   },
   RemoveResponseHeader {
+    #[serde(default)]
+    priority: i64,
     name: String,
   },
   SetTag {
+    #[serde(default)]
+    priority: i64,
     key: String,
     value: String,
   },
   RateLimit {
+    #[serde(default)]
+    priority: i64,
     name: String,
     #[serde(default)]
     key: RateLimitKey,
@@ -306,6 +349,8 @@ pub enum WafActionConfig {
     body: Option<String>,
   },
   RequirePersonProof {
+    #[serde(default)]
+    priority: i64,
     #[serde(default)]
     algorithm: PersonProofAlgorithm,
     #[serde(default = "default_person_proof_difficulty")]
@@ -335,6 +380,8 @@ pub enum WafActionConfig {
     status: u16,
   },
   CloseStream {
+    #[serde(default)]
+    priority: i64,
     #[serde(default = "default_websocket_close_code")]
     websocket_code: u16,
     #[serde(default = "default_webtransport_close_code")]
@@ -342,6 +389,29 @@ pub enum WafActionConfig {
     #[serde(default = "default_stream_close_reason")]
     reason: String,
   },
+}
+
+impl WafActionConfig {
+  pub(super) fn priority(&self) -> i64 {
+    match self {
+      Self::Reject { priority, .. }
+      | Self::ContinueResponse { priority }
+      | Self::ReplaceResponse { priority, .. }
+      | Self::RejectResponse { priority, .. }
+      | Self::EmitAccessLog { priority, .. }
+      | Self::RouteToPool { priority, .. }
+      | Self::RouteToUpstream { priority, .. }
+      | Self::SetLoadBalancingPolicy { priority, .. }
+      | Self::SetRequestHeader { priority, .. }
+      | Self::RemoveRequestHeader { priority, .. }
+      | Self::SetResponseHeader { priority, .. }
+      | Self::RemoveResponseHeader { priority, .. }
+      | Self::SetTag { priority, .. }
+      | Self::RateLimit { priority, .. }
+      | Self::RequirePersonProof { priority, .. }
+      | Self::CloseStream { priority, .. } => *priority,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
@@ -406,7 +476,14 @@ pub enum WafPatternSetKind {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExternalRuleFile {
-  pub when: String,
+  #[serde(default)]
+  pub when: Option<String>,
+  #[serde(default)]
+  pub merge_condition_as: WafConditionMerge,
+  #[serde(default)]
+  pub groups: Vec<String>,
+  #[serde(default)]
+  pub rule_groups: Vec<WafRuleGroupConfig>,
   #[serde(default)]
   pub actions: Vec<WafActionConfig>,
 }
@@ -491,9 +568,13 @@ fn load_external_rule(rule: &mut WafRuleConfig) -> anyhow::Result<()> {
     return Ok(());
   };
 
-  if rule.when.is_some() {
+  if rule.when.is_some()
+    || rule.merge_condition_as != WafConditionMerge::And
+    || !rule.groups.is_empty()
+    || !rule.actions.is_empty()
+  {
     bail!(
-      "WAF rule {} must specify exactly one of when or path",
+      "WAF rule {} external path cannot be combined with inline when, merge_condition_as, groups, or actions",
       rule.name
     );
   }
@@ -503,7 +584,10 @@ fn load_external_rule(rule: &mut WafRuleConfig) -> anyhow::Result<()> {
   let external: ExternalRuleFile = toml::from_str(&raw)
     .with_context(|| format!("failed to parse WAF rule file {}", path.display()))?;
 
-  rule.when = Some(external.when);
+  rule.when = external.when;
+  rule.merge_condition_as = external.merge_condition_as;
+  rule.groups = external.groups;
+  rule.local_rule_groups = external.rule_groups;
   rule.actions = external.actions;
   rule.loaded_from_path = Some(path);
   Ok(())
@@ -528,8 +612,11 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
     .map(|pool| pool.name.as_str())
     .collect::<HashSet<_>>();
   let global_functions = compile_global_functions(&config.waf.functions)?;
+  validate_rule_group_scope("global WAF", &config.waf.rule_groups)?;
   let global_validation = WafValidationContext {
     pattern_sets: &config.waf.pattern_sets,
+    global_rule_groups: &config.waf.rule_groups,
+    route_rule_groups: None,
     global_functions: &global_functions,
     route_functions: None,
     limits: &config.waf.limits,
@@ -544,8 +631,11 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
       &route.waf.functions,
       &global_functions,
     )?;
+    validate_rule_group_scope(&format!("route {} WAF", route.name), &route.waf.rule_groups)?;
     let route_validation = WafValidationContext {
       pattern_sets: &config.waf.pattern_sets,
+      global_rule_groups: &config.waf.rule_groups,
+      route_rule_groups: Some(&route.waf.rule_groups),
       global_functions: &global_functions,
       route_functions: Some(&route_functions),
       limits: &config.waf.limits,
@@ -593,6 +683,8 @@ fn remember_rule_id(
 
 struct WafValidationContext<'a> {
   pattern_sets: &'a [WafPatternSetConfig],
+  global_rule_groups: &'a [WafRuleGroupConfig],
+  route_rule_groups: Option<&'a [WafRuleGroupConfig]>,
   global_functions: &'a FunctionMap,
   route_functions: Option<&'a FunctionMap>,
   limits: &'a WafLimits,
@@ -625,17 +717,24 @@ fn validate_scope(
         rule.name
       );
     }
-    if rule.when.is_none() {
-      bail!(
-        "WAF rule {} must specify exactly one of when or path",
-        rule.name
-      );
+    validate_rule_group_scope(
+      &format!("{scope} rule {} external file", rule.name),
+      &rule.local_rule_groups,
+    )?;
+    if let Some(expression) = rule.when.as_deref() {
+      Parser::new(expression)
+        .parse()
+        .with_context(|| format!("failed to parse WAF rule {} expression", rule.name))?;
     }
-    if rule.actions.is_empty() {
-      bail!("WAF rule {} must define at least one action", rule.name);
-    }
-
-    let expression = rule.when.as_deref().unwrap_or_default();
+    let resolved = resolve_rule(
+      scope,
+      rule,
+      RuleGroupScope {
+        global: ctx.global_rule_groups,
+        route: ctx.route_rule_groups,
+      },
+    )?;
+    let expression = resolved.when.as_str();
     let ast = Parser::new(expression)
       .parse()
       .with_context(|| format!("failed to parse WAF rule {} expression", rule.name))?;
@@ -645,6 +744,7 @@ fn validate_scope(
 
     validate_actions(
       rule,
+      &resolved.actions,
       ctx.upstream_names,
       ctx.pool_names,
       ctx.limits,
@@ -678,6 +778,7 @@ fn validate_rule_metadata(rule: &WafRuleConfig) -> anyhow::Result<()> {
 
 fn validate_actions(
   rule: &WafRuleConfig,
+  actions: &[WafActionConfig],
   upstream_names: &HashSet<&str>,
   pool_names: &HashSet<&str>,
   limits: &WafLimits,
@@ -685,13 +786,19 @@ fn validate_actions(
   route_functions: Option<&FunctionMap>,
 ) -> anyhow::Result<()> {
   let mut mutations = 0usize;
-  for action in &rule.actions {
+  for action in actions {
+    if action.priority() < 0 {
+      bail!(
+        "WAF rule {} action priority must not be negative",
+        rule.name
+      );
+    }
     match action {
       WafActionConfig::Reject { status, .. } => {
         require_phase(rule, WafPhase::Request, "reject")?;
         validate_status(*status, &rule.name)?;
       }
-      WafActionConfig::ContinueResponse => {
+      WafActionConfig::ContinueResponse { .. } => {
         require_phase(rule, WafPhase::Response, "continue_response")?;
       }
       WafActionConfig::ReplaceResponse { status, .. }
@@ -699,7 +806,7 @@ fn validate_actions(
         require_phase(rule, WafPhase::Response, "response terminal action")?;
         validate_status(*status, &rule.name)?;
       }
-      WafActionConfig::EmitAccessLog { fields } => {
+      WafActionConfig::EmitAccessLog { fields, .. } => {
         require_phase(rule, WafPhase::Response, "emit_access_log")?;
         validate_access_log_field_configs_with_functions(
           &format!("WAF rule {} emit_access_log", rule.name),
@@ -708,7 +815,7 @@ fn validate_actions(
           route_functions,
         )?;
       }
-      WafActionConfig::RouteToUpstream { upstream } => {
+      WafActionConfig::RouteToUpstream { upstream, .. } => {
         require_phase(rule, WafPhase::Request, "route_to_upstream")?;
         if !upstream_names.contains(upstream.as_str()) {
           bail!(
@@ -719,7 +826,7 @@ fn validate_actions(
         }
         mutations += 1;
       }
-      WafActionConfig::RouteToPool { pool } => {
+      WafActionConfig::RouteToPool { pool, .. } => {
         require_phase(rule, WafPhase::Request, "route_to_pool")?;
         if !pool_names.contains(pool.as_str()) {
           bail!(
@@ -730,7 +837,7 @@ fn validate_actions(
         }
         mutations += 1;
       }
-      WafActionConfig::SetLoadBalancingPolicy { policy } => {
+      WafActionConfig::SetLoadBalancingPolicy { policy, .. } => {
         require_phase(rule, WafPhase::Request, "set_load_balancing_policy")?;
         if !matches!(
           policy.as_str(),
@@ -744,27 +851,27 @@ fn validate_actions(
         }
         mutations += 1;
       }
-      WafActionConfig::SetRequestHeader { name, value } => {
+      WafActionConfig::SetRequestHeader { name, value, .. } => {
         require_phase(rule, WafPhase::Request, "set_request_header")?;
         validate_header(name, value)?;
         mutations += 1;
       }
-      WafActionConfig::RemoveRequestHeader { name } => {
+      WafActionConfig::RemoveRequestHeader { name, .. } => {
         require_phase(rule, WafPhase::Request, "remove_request_header")?;
         validate_header_name(name)?;
         mutations += 1;
       }
-      WafActionConfig::SetResponseHeader { name, value } => {
+      WafActionConfig::SetResponseHeader { name, value, .. } => {
         require_phase(rule, WafPhase::Response, "set_response_header")?;
         validate_header(name, value)?;
         mutations += 1;
       }
-      WafActionConfig::RemoveResponseHeader { name } => {
+      WafActionConfig::RemoveResponseHeader { name, .. } => {
         require_phase(rule, WafPhase::Response, "remove_response_header")?;
         validate_header_name(name)?;
         mutations += 1;
       }
-      WafActionConfig::SetTag { key, value } => {
+      WafActionConfig::SetTag { key, value, .. } => {
         require_phase(rule, WafPhase::Request, "set_tag")?;
         if key.is_empty() || !is_valid_rule_label(key) || value.len() > 1024 {
           bail!("WAF rule {} set_tag exceeds tag size limits", rule.name);
@@ -813,6 +920,7 @@ fn validate_actions(
         websocket_code,
         webtransport_code: _,
         reason,
+        ..
       } => {
         require_phase(rule, WafPhase::Stream, "close_stream")?;
         validate_websocket_close_code(*websocket_code, &rule.name)?;
@@ -1057,6 +1165,10 @@ impl WafEngine {
     let crs = CrsEngine::compile(&config.waf.crs, &previous_crs_counters)?;
     let global_rules = compile_rules(
       &config.waf.rules,
+      RuleGroupScope {
+        global: &config.waf.rule_groups,
+        route: None,
+      },
       WafRuleScope::global(),
       config.waf.mode,
       &previous_counters,
@@ -1074,6 +1186,10 @@ impl WafEngine {
         route.name.clone(),
         compile_rules(
           &route.waf.rules,
+          RuleGroupScope {
+            global: &config.waf.rule_groups,
+            route: Some(&route.waf.rule_groups),
+          },
           WafRuleScope::route(&route.name),
           config.waf.mode,
           &previous_counters,
@@ -1594,6 +1710,7 @@ impl WafEngine {
 
 fn compile_rules(
   configs: &[WafRuleConfig],
+  groups: RuleGroupScope<'_>,
   scope: WafRuleScope,
   default_mode: WafMode,
   previous_counters: &HashMap<WafRuleHitKey, Arc<AtomicU64>>,
@@ -1603,10 +1720,12 @@ fn compile_rules(
   configs
     .iter()
     .map(|rule| {
-      let expression = Parser::new(rule.when.as_deref().unwrap_or_default())
+      let resolved = resolve_rule(scope.label, rule, groups)
+        .with_context(|| format!("failed to resolve WAF rule {} groups", rule.name))?;
+      let expression = Parser::new(&resolved.when)
         .parse()
         .with_context(|| format!("failed to compile WAF rule {}", rule.name))?;
-      let actions = compile_actions(rule, scope.person_proof_scope())
+      let actions = compile_actions(rule, &resolved.actions, scope.person_proof_scope())
         .with_context(|| format!("failed to compile WAF rule {} actions", rule.name))?;
       let person_proof_policies = actions
         .iter()
@@ -1745,13 +1864,16 @@ impl WafRuleScope {
   }
 }
 
-fn compile_actions(rule: &WafRuleConfig, scope: &str) -> anyhow::Result<Vec<CompiledAction>> {
-  rule
-    .actions
+fn compile_actions(
+  rule: &WafRuleConfig,
+  actions: &[WafActionConfig],
+  scope: &str,
+) -> anyhow::Result<Vec<CompiledAction>> {
+  actions
     .iter()
     .enumerate()
     .map(|(action_index, action)| match action {
-      WafActionConfig::EmitAccessLog { fields } => Ok(CompiledAction::EmitAccessLog {
+      WafActionConfig::EmitAccessLog { fields, .. } => Ok(CompiledAction::EmitAccessLog {
         fields: fields
           .iter()
           .map(|field| {
@@ -1803,6 +1925,7 @@ fn person_proof_policy_from_action(
   action: &WafActionConfig,
 ) -> PersonProofPolicy {
   let WafActionConfig::RequirePersonProof {
+    priority: _,
     algorithm,
     difficulty,
     ttl_seconds,
@@ -2282,36 +2405,36 @@ fn apply_request_actions(
   for action in &rule.actions {
     tx.count_mutation()?;
     match action {
-      CompiledAction::Config(WafActionConfig::Reject { status, body }) => {
+      CompiledAction::Config(WafActionConfig::Reject { status, body, .. }) => {
         decision.terminal = Some(WafTerminalResponse::new(
           StatusCode::from_u16(*status)?,
           body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
         ));
         return Ok(());
       }
-      CompiledAction::Config(WafActionConfig::SetRequestHeader { name, value }) => {
+      CompiledAction::Config(WafActionConfig::SetRequestHeader { name, value, .. }) => {
         decision.request_header_mutations.push(HeaderMutation::Set {
           name: HeaderName::from_bytes(name.as_bytes())?,
           value: HeaderValue::from_str(value)?,
         });
       }
-      CompiledAction::Config(WafActionConfig::RemoveRequestHeader { name }) => {
+      CompiledAction::Config(WafActionConfig::RemoveRequestHeader { name, .. }) => {
         decision
           .request_header_mutations
           .push(HeaderMutation::Remove {
             name: HeaderName::from_bytes(name.as_bytes())?,
           });
       }
-      CompiledAction::Config(WafActionConfig::SetTag { key, value }) => {
+      CompiledAction::Config(WafActionConfig::SetTag { key, value, .. }) => {
         decision.tags.push((key.clone(), value.clone()));
       }
-      CompiledAction::Config(WafActionConfig::RouteToUpstream { upstream }) => {
+      CompiledAction::Config(WafActionConfig::RouteToUpstream { upstream, .. }) => {
         decision.upstream_override = Some(upstream.clone());
       }
-      CompiledAction::Config(WafActionConfig::RouteToPool { pool }) => {
+      CompiledAction::Config(WafActionConfig::RouteToPool { pool, .. }) => {
         decision.upstream_pool_override = Some(pool.clone());
       }
-      CompiledAction::Config(WafActionConfig::SetLoadBalancingPolicy { policy }) => {
+      CompiledAction::Config(WafActionConfig::SetLoadBalancingPolicy { policy, .. }) => {
         decision.load_balancing_policy = Some(policy.clone());
       }
       CompiledAction::Config(WafActionConfig::RateLimit {
@@ -2323,6 +2446,7 @@ fn apply_request_actions(
         max_buckets,
         status,
         body,
+        ..
       }) => {
         let context = RateLimitContext::route(
           input.peer_addr.ip(),
@@ -2354,7 +2478,7 @@ fn apply_request_actions(
         decision.terminal = Some(person_proof.issue_challenge(input, policy.clone())?);
         return Ok(());
       }
-      CompiledAction::Config(WafActionConfig::ContinueResponse)
+      CompiledAction::Config(WafActionConfig::ContinueResponse { .. })
       | CompiledAction::Config(WafActionConfig::ReplaceResponse { .. })
       | CompiledAction::Config(WafActionConfig::RejectResponse { .. })
       | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. })
@@ -2380,16 +2504,16 @@ fn apply_response_actions(
   for action in &rule.actions {
     tx.count_mutation()?;
     match action {
-      CompiledAction::Config(WafActionConfig::ContinueResponse) => return Ok(()),
-      CompiledAction::Config(WafActionConfig::ReplaceResponse { status, body })
-      | CompiledAction::Config(WafActionConfig::RejectResponse { status, body }) => {
+      CompiledAction::Config(WafActionConfig::ContinueResponse { .. }) => return Ok(()),
+      CompiledAction::Config(WafActionConfig::ReplaceResponse { status, body, .. })
+      | CompiledAction::Config(WafActionConfig::RejectResponse { status, body, .. }) => {
         decision.terminal = Some(WafTerminalResponse::new(
           StatusCode::from_u16(*status)?,
           body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
         ));
         return Ok(());
       }
-      CompiledAction::Config(WafActionConfig::SetResponseHeader { name, value }) => {
+      CompiledAction::Config(WafActionConfig::SetResponseHeader { name, value, .. }) => {
         decision
           .response_header_mutations
           .push(HeaderMutation::Set {
@@ -2397,7 +2521,7 @@ fn apply_response_actions(
             value: HeaderValue::from_str(value)?,
           });
       }
-      CompiledAction::Config(WafActionConfig::RemoveResponseHeader { name }) => {
+      CompiledAction::Config(WafActionConfig::RemoveResponseHeader { name, .. }) => {
         decision
           .response_header_mutations
           .push(HeaderMutation::Remove {
@@ -2456,6 +2580,7 @@ fn apply_stream_actions(
       websocket_code,
       webtransport_code,
       reason,
+      ..
     }) => {
       decision.close = Some(WafStreamClose {
         websocket_code: *websocket_code,
@@ -2464,7 +2589,7 @@ fn apply_stream_actions(
       });
     }
     CompiledAction::Config(WafActionConfig::Reject { .. })
-    | CompiledAction::Config(WafActionConfig::ContinueResponse)
+    | CompiledAction::Config(WafActionConfig::ContinueResponse { .. })
     | CompiledAction::Config(WafActionConfig::ReplaceResponse { .. })
     | CompiledAction::Config(WafActionConfig::RejectResponse { .. })
     | CompiledAction::Config(WafActionConfig::EmitAccessLog { .. })

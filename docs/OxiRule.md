@@ -10,7 +10,7 @@ OxiRule is OxiBelt's CEL-like, declarative WAF rule model. For proxy behavior an
 An OxiRule rule has:
 
 - Metadata: `name`, optional `id`, optional `tags`, optional `mode`, `phase`, and `priority`.
-- A side-effect-free boolean condition in `when`, or an external rule `path`.
+- A side-effect-free boolean condition in `when`, reusable `groups`, or an external rule `path`.
 - One or more declarative `actions`.
 
 Basic inline rule:
@@ -34,7 +34,7 @@ status = 403
 body = "Forbidden"
 ```
 
-`when` must evaluate to `Bool`. If it evaluates to `false`, the rule is skipped and no action from that rule executes.
+The effective condition must evaluate to `Bool`. If it evaluates to `false`, the rule is skipped and no action from that rule executes.
 
 Public rule `id` values are optional but must be unique when non-empty. `id` and entries in `tags` must match `[A-Za-z0-9-]{0,32}`. OxiBelt also assigns each compiled rule an internal runtime UUID for diagnostics; that UUID is not configured and is not stable across restarts.
 
@@ -69,7 +69,7 @@ status = 413
 body = "Payload Too Large"
 ```
 
-A rule entry must specify exactly one of `when` or `path`.
+A rule entry may specify `when`, `groups`, or both. External rule entries use `path`, and `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry.
 
 External rule files resolve under the configured OxiRule directory. Absolute paths and paths containing `.` or `..` components are rejected. An external `.oxirule.toml` file contains only the rule body:
 
@@ -80,6 +80,20 @@ when = "Request.Headers.anyValueContains('sqlmap')"
 type = "reject"
 status = 403
 body = "Blocked by WAF"
+```
+
+External rule files may also define file-local rule groups. Because TOML keys after an array table belong to that table, place root-level `groups`, `when`, `merge_condition_as`, and `[[actions]]` before `[[rule_groups]]` definitions:
+
+```toml
+groups = ["scanner"]
+
+[[actions]]
+type = "reject"
+status = 403
+
+[[rule_groups]]
+name = "scanner"
+when = "Request.Headers.anyValueMatches('(?i)(sqlmap|nikto)')"
 ```
 
 Pattern sets are configured globally and referenced by helper functions:
@@ -110,6 +124,42 @@ expression = "path.startsWith('/admin')"
 Functions are expression-valued helpers evaluated inside the same OxiRule sandbox and budgets as the calling rule. Function names and parameters must be valid OxiRule identifiers, cannot use reserved keywords or top-level objects such as `Request`, `Response`, `Stream`, `Context`, or `DynamicPolicy`, and cannot repeat parameter names. Function bodies may return any existing OxiRule value; rule `when` expressions still must evaluate to `Bool`.
 
 Functions may call other functions when the call graph is acyclic. Global rules can call only global functions. Route rules can call global functions plus functions declared under that route; route functions override same-named global functions for that route. Global function bodies always resolve nested calls against global functions only, while route function bodies resolve against the route override set plus globals. Function bodies are phase-validated at call sites: a function that reads `Response` is valid only from response-phase expressions, and a function that reads `Stream` is valid only from stream-phase expressions. Rules that pass `Request.Body` or `Response.Body` into a function still trigger bounded body inspection when the callee, including nested callees, reads body content. Function definitions are allowed in TOML configuration only; external `.oxirule.toml` rule files remain rule-body-only.
+
+## Rule Groups
+
+Rule groups bundle reusable condition fragments and actions. Define global groups under `[[waf.rule_groups]]`, route-local groups under `[[routes.waf.rule_groups]]`, and external file-local groups under `[[rule_groups]]` inside an external `.oxirule.toml` file.
+
+```toml
+[[waf.rule_groups]]
+name = "bot-defense"
+when = "Request.Headers.anyValueMatches('(?i)(sqlmap|nikto)')"
+merge_condition_as = "and"
+
+[[waf.rule_groups.actions]]
+priority = 10
+type = "set_tag"
+key = "BotDefense"
+value = "matched"
+
+[[waf.rules]]
+name = "block-bot-defense"
+phase = "request"
+priority = 100
+groups = ["bot-defense"]
+when = "!Request.Client.Ip.inCidr('10.0.0.0/8')"
+merge_condition_as = "and"
+
+[[waf.rules.actions]]
+priority = 20
+type = "reject"
+status = 403
+```
+
+Group lookup order is external file-local, then route-local, then global. External groups are visible only inside the external rule file that defines them. Rule execution order is still controlled by the referencing rule's `priority`.
+
+Condition fragments are processed in `groups` array order, followed by the rule's own `when`. `merge_condition_as` accepts `and`, `or`, or `override` and defaults to `and`; each fragment's value controls how that fragment joins the previous accumulated condition. If `override` appears, it may appear only once across the referenced groups plus rule, and the effective condition is exactly that fragment's `when`.
+
+Actions from referenced groups and the rule are collected, sorted by action `priority` with lower values first, and executed in stable declaration order for equal priorities. Action `priority` defaults to `0`. Terminal actions still stop later actions after sorting.
 
 ## CRS Compatibility
 
@@ -270,7 +320,7 @@ Request.Transport.Tcp.Sni == 'blocked.example.com'
 
 ## Actions
 
-Actions run in order only when `when` evaluates to `true`.
+Actions run only when the effective rule condition evaluates to `true`. Ungrouped actions run in declaration order because their default `priority` is `0`; grouped and rule-local actions are sorted together by action `priority`.
 
 Request-phase terminal actions:
 
@@ -795,12 +845,14 @@ Supported binary format checks include common image, audio, video, document, arc
 
 OxiRule validation rejects:
 
-- Rules with both `when` and `path`, or neither.
+- External `path` entries combined with inline `when`, `groups`, or `actions`, or rules without an effective condition.
 - Duplicate rule names in the same scope.
 - Duplicate non-empty public rule IDs.
+- Duplicate rule group names in one scope, duplicate group references from one rule, or references to unknown rule groups.
 - Invalid rule IDs, rule tags, transaction tag keys, or Person proof `success_tag` values.
+- Multiple `merge_condition_as = "override"` condition fragments in one rule expansion.
 - Invalid function names or parameters, duplicate function names in one scope, duplicate parameters, unknown function calls, arity mismatches, or recursive function call graphs.
-- Unsupported phases, negative priorities, unsupported operators, unknown properties, or unknown built-in functions.
+- Unsupported phases, negative rule or action priorities, unsupported operators, unknown properties, or unknown built-in functions.
 - Forbidden imperative constructs, callbacks, imports, or external I/O.
 - Request-phase access to `Response`.
 - Stream-phase access to `Response` or `Request.Body`.

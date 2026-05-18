@@ -1054,7 +1054,7 @@ reason = "editor intentionally submits HTML"
 
 `max_body_inspection_bytes` controls the request body, response body, and native stream payload prefix captured for OxiRule and CRS body inspection. The default is `1048576` bytes. Bytes after this prefix are forwarded or replayed without inspection and are reflected through `Body.IsTruncated` or `Stream.Payload.IsTruncated`. The same value also bounds WebSocket stream-WAF frame buffering: an individual WebSocket frame payload larger than this value is closed fail-closed instead of being buffered for prefix inspection.
 
-Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. External rule entries use `path` and resolve under the oxirule directory. A rule entry must specify exactly one of `when` or `path`.
+Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. Reusable rule groups are configured under `[[waf.rule_groups]]` or `[[routes.waf.rule_groups]]` and are referenced from rules with `groups = ["name"]`. External rule entries use `path` and resolve under the oxirule directory. A rule entry may use inline `when`, `groups`, or both; `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry.
 
 ```toml
 [[waf.rules]]
@@ -1071,6 +1071,8 @@ type = "reject"
 status = 403
 body = "Forbidden"
 ```
+
+`merge_condition_as = "and" | "or" | "override"` controls how a rule or group `when` joins earlier referenced group conditions and defaults to `and`. Action-level `priority` defaults to `0`; grouped and rule-local actions are sorted together by lower priority first, with declaration order preserved for ties.
 
 `[waf].mode` sets the default mode for all rules. A rule-level `mode` overrides that default in both directions: `monitor` counts matches without applying actions, while `enforcing` applies actions normally.
 

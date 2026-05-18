@@ -306,6 +306,40 @@ key = "BodyInspectionTruncated"
 value = "true"
 ```
 
+### Reuse Conditions and Actions with Rule Groups
+
+```toml
+[[waf.rule_groups]]
+name = "scanner-signals"
+when = "Request.Headers.anyValueMatches('(?i)(sqlmap|nikto)')"
+merge_condition_as = "and"
+
+[[waf.rule_groups.actions]]
+type = "set_tag"
+key = "ScannerSignal"
+value = "true"
+
+[[waf.rule_groups.actions]]
+priority = 10
+type = "set_request_header"
+name = "X-OxiBelt-Scanner-Signal"
+value = "true"
+
+[[waf.rules]]
+name = "block-public-scanner-signals"
+phase = "request"
+priority = 235
+groups = ["scanner-signals"]
+when = "!Request.Client.Ip.inCidr('10.0.0.0/8')"
+merge_condition_as = "and"
+
+[[waf.rules.actions]]
+priority = 20
+type = "reject"
+status = 403
+body = "Blocked by WAF"
+```
+
 ### Scan Request and Response Body Prefixes
 
 ```toml
@@ -774,19 +808,24 @@ priority = 100
 path = "rules/global-scanner-policy.oxirule.toml"
 ```
 
-The external file contains only the rule body:
+The external file contains only the rule body. File-local groups may be defined after the root-level rule fields:
 
 ```toml
 # /etc/oxibelt/oxirule/rules/global-scanner-policy.oxirule.toml
+groups = ["scanner-signals"]
+
+[[actions]]
+priority = 10
+type = "reject"
+status = 403
+body = "Blocked by WAF"
+
+[[rule_groups]]
+name = "scanner-signals"
 when = """
 Request.Headers.anyValueMatches('(?i)(sqlmap|nikto)') ||
 Request.QueryParams.anyValueMatches('(?i)(union\\s+select|sleep\\s*\\()')
 """
-
-[[actions]]
-type = "reject"
-status = 403
-body = "Blocked by WAF"
 ```
 
 ## CRS Compatibility Example
