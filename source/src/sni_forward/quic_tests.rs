@@ -1,4 +1,6 @@
 use super::*;
+use crate::config::LimitsConfig;
+use crate::limits::LimitState;
 
 #[test]
 fn short_header_cid_lookup_uses_byte_after_flags() {
@@ -107,6 +109,33 @@ fn pre_classification_limit_bounds_cid_maps_to_session_limit() {
   assert!(state.local_cids.values().all(|mapped| *mapped == local));
 }
 
+#[test]
+fn forwarded_quic_session_holds_connection_permit_until_removed() {
+  let limits = LimitsConfig {
+    max_connections: 1,
+    max_connections_per_ip: 1,
+    ..LimitsConfig::default()
+  };
+  let state = LimitState::new(None);
+  let client: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+  let permit = state
+    .acquire_connection(client.ip(), &limits, &[])
+    .expect("first permit should succeed");
+  let mut sessions = QuicForwardState::default();
+  sessions.forward_by_client.insert(
+    client,
+    QuicForwardSession {
+      _connection_permit: Some(permit),
+      ..test_session("127.0.0.1:443".parse().unwrap())
+    },
+  );
+
+  assert!(state.acquire_connection(client.ip(), &limits, &[]).is_err());
+
+  drop(sessions.remove_forward_client(client));
+  assert!(state.acquire_connection(client.ip(), &limits, &[]).is_ok());
+}
+
 #[tokio::test]
 async fn local_datagram_queue_drops_when_capacity_is_full() {
   let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -141,5 +170,6 @@ fn test_session_with_last_seen(target: SocketAddr, last_seen: Instant) -> QuicFo
     idle_timeout: Duration::from_secs(1),
     client_to_target: 0,
     target_to_client: 0,
+    _connection_permit: None,
   }
 }

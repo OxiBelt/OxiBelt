@@ -17,8 +17,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::limits::ConnectionPermit;
 use crate::sni_forward::SniForwardDecision;
 use crate::sni_forward::client_hello::raw_client_hello_sni;
+use crate::sni_forward::connection_limits::acquire_quic_forward_connection_permit;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::resolve_target_addr;
 
@@ -260,6 +262,24 @@ impl QuicDemuxSocket {
           .record_sni_forward_decision("quic", "reject", "no_match", "none");
       }
       SniForwardDecision::Forward(rule) => {
+        let connection_permit =
+          match acquire_quic_forward_connection_permit(snapshot.as_ref(), peer) {
+            Ok(permit) => permit,
+            Err(status) => {
+              snapshot.metrics.record_sni_forward_decision(
+                "quic",
+                "reject",
+                "connection_limit",
+                "none",
+              );
+              warn!(
+                peer = %peer,
+                status = %status,
+                "QUIC SNI forwarding rejected by connection limit"
+              );
+              return Ok(());
+            }
+          };
         snapshot
           .metrics
           .record_sni_forward_decision("quic", "forward", &rule.name, &rule.target);
@@ -273,6 +293,7 @@ impl QuicDemuxSocket {
           sni.as_deref(),
           &rule,
           snapshot.as_ref(),
+          connection_permit,
         );
         self.socket.send_to(datagram, target).await?;
         snapshot
@@ -325,6 +346,7 @@ impl QuicDemuxSocket {
     sni: Option<&str>,
     rule: &crate::sni_forward::SniForwardRule,
     snapshot: &AppSnapshot,
+    connection_permit: ConnectionPermit,
   ) {
     let mut sessions = lock_sessions(&self.sessions);
     let inserted = sessions.forward_by_client.insert(
@@ -339,6 +361,7 @@ impl QuicDemuxSocket {
         idle_timeout: rule.idle_timeout,
         client_to_target: 0,
         target_to_client: 0,
+        _connection_permit: Some(connection_permit),
       },
     );
     if inserted.is_none() {
@@ -671,6 +694,7 @@ struct QuicForwardSession {
   idle_timeout: Duration,
   client_to_target: u64,
   target_to_client: u64,
+  _connection_permit: Option<ConnectionPermit>,
 }
 
 fn extract_initial_sni(datagram: &[u8]) -> anyhow::Result<(Option<String>, Vec<u8>)> {

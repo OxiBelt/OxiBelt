@@ -2,6 +2,8 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use oxibelt::config::{Config, RuntimeOverrides};
@@ -9,6 +11,7 @@ use oxibelt::server;
 use oxibelt::state::{AppHandle, AppSnapshot};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 #[tokio::test]
@@ -73,6 +76,95 @@ idle_timeout_ms = 5000
     server_task.abort();
 }
 
+#[tokio::test]
+async fn tcp_sni_forward_honors_real_ip_connection_limits() {
+    let temp_dir = common::TempDir::new("sni-forward-tcp-limits");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "sni-forward-tcp-limits");
+    let https_port = unused_loopback_port().await;
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{https_port}")
+        .parse()
+        .expect("proxy address should parse");
+
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("raw upstream should bind");
+    let upstream_addr = upstream_listener
+        .local_addr()
+        .expect("raw upstream address should be available");
+    let upstream_accepts = Arc::new(AtomicUsize::new(0));
+    let upstream_notify = Arc::new(Notify::new());
+    let upstream_task = hold_upstream_connections(
+        upstream_listener,
+        upstream_accepts.clone(),
+        upstream_notify.clone(),
+    );
+
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "https_bind = \"127.0.0.1:8443\"",
+        &format!("https_bind = \"127.0.0.1:{https_port}\""),
+    ) + &format!(
+        r#"
+
+[limits]
+max_connections = 64
+max_connections_per_ip = 1
+connection_limit_identity = "first_request_real_ip"
+
+[sni_forward]
+enabled = true
+client_hello_max_bytes = 4096
+idle_timeout_ms = 5000
+
+[[sni_forward.rules]]
+name = "raw-upstream"
+server_names = ["limit.example.com"]
+target = "{upstream_addr}"
+protocols = ["tcp_tls"]
+connect_timeout_ms = 1000
+idle_timeout_ms = 5000
+"#
+    );
+
+    let config = parse_config(&raw);
+    let snapshot = AppSnapshot::new(config)
+        .await
+        .expect("application snapshot should initialize");
+    let state = AppHandle::new(snapshot);
+    let server_task = tokio::spawn(server::serve(state, None, RuntimeOverrides::default()));
+    let client_hello = tls_client_hello_record("limit.example.com");
+
+    let mut first = connect_with_retry(proxy_addr, &server_task).await;
+    first
+        .write_all(&client_hello)
+        .await
+        .expect("first ClientHello should write");
+    wait_for_accept_count(&upstream_accepts, &upstream_notify, 1).await;
+
+    let mut second = TcpStream::connect(proxy_addr)
+        .await
+        .expect("second client should connect");
+    second
+        .write_all(&client_hello)
+        .await
+        .expect("second ClientHello should write before limit rejection");
+    let mut read_buffer = [0u8; 1];
+    match tokio::time::timeout(Duration::from_secs(2), second.read(&mut read_buffer)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        Ok(Ok(read)) => panic!("limited SNI forward should close, read {read} bytes instead"),
+        Err(_) => panic!("limited SNI forward stayed open"),
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        upstream_accepts.load(Ordering::SeqCst),
+        1,
+        "rejected forwarded SNI session must not reach upstream"
+    );
+    server_task.abort();
+    upstream_task.abort();
+}
+
 fn parse_config(raw: &str) -> Config {
     let config: Config = toml::from_str(raw).expect("config should parse");
     config.validate().expect("config should validate");
@@ -120,6 +212,37 @@ async fn read_one_tls_record(listener: TcpListener) -> std::io::Result<Vec<u8>> 
     stream.read_exact(&mut body).await?;
     record.extend_from_slice(&body);
     Ok(record)
+}
+
+fn hold_upstream_connections(
+    listener: TcpListener,
+    accepts: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Ok((mut stream, _peer_addr)) = listener.accept().await {
+            accepts.fetch_add(1, Ordering::SeqCst);
+            notify.notify_waiters();
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer).await;
+                std::future::pending::<()>().await;
+            });
+        }
+    })
+}
+
+async fn wait_for_accept_count(accepts: &AtomicUsize, notify: &Notify, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if accepts.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            notify.notified().await;
+        }
+    })
+    .await
+    .expect("upstream should accept expected forwarded sessions");
 }
 
 fn tls_client_hello_record(host: &str) -> Vec<u8> {

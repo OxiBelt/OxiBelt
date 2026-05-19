@@ -12,6 +12,7 @@ use crate::config::parse_stream_target;
 use crate::lifecycle::ConnectionDrain;
 use crate::proxy_protocol_egress;
 use crate::sni_forward::client_hello::{ClientHelloSni, tls_record_client_hello_sni};
+use crate::sni_forward::connection_limits::acquire_tcp_forward_connection_permit;
 use crate::sni_forward::{SniForwardDecision, SniForwardRule};
 use crate::state::AppSnapshot;
 use crate::stream::resolve_target_addr;
@@ -77,6 +78,19 @@ pub(crate) async fn classify_and_maybe_forward(
       bail!("TLS ClientHello SNI is not configured for local routing or SNI forwarding")
     }
     SniForwardDecision::Forward(rule) => {
+      let _connection_permit =
+        match acquire_tcp_forward_connection_permit(snapshot.as_ref(), peer_addr) {
+          Ok(permit) => permit,
+          Err(status) => {
+            snapshot.metrics.record_sni_forward_decision(
+              "tcp_tls",
+              "reject",
+              "connection_limit",
+              "none",
+            );
+            bail!("SNI forwarding TCP connection rejected with status {status}");
+          }
+        };
       snapshot
         .metrics
         .record_sni_forward_decision("tcp_tls", "forward", &rule.name, &rule.target);
