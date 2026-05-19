@@ -55,7 +55,8 @@ use self::body::{
   error_is_timeout,
 };
 use self::headers::{
-  add_forwarded_headers, extract_host, is_upgrade_request, strip_hop_by_hop_headers,
+  add_forwarded_headers, extract_host, is_upgrade_request, set_effective_host_header,
+  strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
 use self::observability::{record_request_observability, record_websocket_session_end};
 use self::request::{RebuildRequestOptions, rebuild_request};
@@ -352,6 +353,11 @@ where
       rejection.message(),
       "expect_rejected",
     );
+  }
+
+  if validate_authority_host_consistency(&request).is_err() {
+    warn!("rejected ambiguous downstream host metadata");
+    return text_response(StatusCode::BAD_REQUEST, "ambiguous host header");
   }
 
   let host = extract_host(&request).unwrap_or_default();
@@ -2465,7 +2471,9 @@ async fn handle_upgrade_request(
   let (mut parts, body) = request.into_parts();
   parts.uri = target_uri;
   parts.version = http::Version::HTTP_11;
-  if !upstream.preserve_host {
+  if upstream.preserve_host {
+    set_effective_host_header(&mut parts.headers, downstream_host);
+  } else {
     parts.headers.remove(http::header::HOST);
   }
   add_forwarded_headers(

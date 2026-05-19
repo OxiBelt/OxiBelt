@@ -17,7 +17,10 @@ use crate::waf::{
 };
 
 use super::body::ProxyBody;
-use super::headers::{add_forwarded_headers, extract_host, strip_hop_by_hop_headers};
+use super::headers::{
+  add_forwarded_headers, extract_host, set_effective_host_header, strip_hop_by_hop_headers,
+  validate_authority_host_consistency,
+};
 use super::response::{text_response, waf_terminal_response};
 use super::uri::{rewrite_uri, validate_downstream_path};
 use super::version::select_upstream_http_version;
@@ -43,6 +46,14 @@ pub(crate) async fn prepare_webtransport(
   tls: &WafTlsMetadata,
   state: &AppSnapshot,
 ) -> Result<PreparedWebTransport, Box<Response<ProxyBody>>> {
+  if validate_authority_host_consistency(request).is_err() {
+    warn!("rejected ambiguous downstream WebTransport host metadata");
+    return Err(Box::new(text_response(
+      StatusCode::BAD_REQUEST,
+      "ambiguous host header",
+    )));
+  }
+
   let host = extract_host(request).unwrap_or_default();
   let path = request.uri().path().to_string();
   if let Err(error) = validate_downstream_path(&path) {
@@ -308,7 +319,9 @@ pub(crate) async fn prepare_webtransport(
 
   let mut headers = request_headers;
   strip_hop_by_hop_headers(&mut headers);
-  if !upstream.preserve_host {
+  if upstream.preserve_host {
+    set_effective_host_header(&mut headers, &host);
+  } else {
     headers.remove(http::header::HOST);
   }
   add_forwarded_headers(

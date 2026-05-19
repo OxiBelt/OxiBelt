@@ -312,6 +312,8 @@ allow_tls12_unstructured_signing = false
 [tls.client_auth]
 mode = "off" # off | optional | require
 ca_certs = []
+# Maximum presented client certificate chain length: leaf + intermediates,
+# excluding the configured trust anchor.
 verify_depth = 4
 
 [tls.ocsp]
@@ -338,7 +340,7 @@ The signer enforces its own IPC availability controls before token validation: `
 
 Remote signing is compatible with read-only root filesystems, but the socket directory itself must be writable. The signer creates the Unix socket file at `socket_path`, so a container started with `--read-only` should provide a tmpfs or shared volume for the parent directory, for example `--tmpfs /run/oxibelt-keysigner:rw,noexec,nosuid,nodev,mode=0770`. In a sidecar deployment, mount that same socket directory into both containers. Mount private keys read-only into the signer container only; OxiBelt should receive certificate chains and the signer socket, not private key files. If the signer cannot create the socket, OxiBelt cannot describe the remote key: startup fails for initial config load, and hot reload rejects the new TLS config while preserving the active one.
 
-`tls.resumption.mode = "stateful"` uses a bounded in-memory server session cache and preserves QUIC 0-RTT compatibility. `stateless` uses the rustls/aws-lc-rs ticket producer with provider-managed key rotation; it cannot be combined with `quic.zero_rtt = "safe_methods"`. `off` disables server-side resumption. `session_tickets` and `session_ticket_rotation_seconds` are legacy aliases for the nested resumption table and must not conflict with it. `tls.client_auth.ca_certs` is required when client authentication mode is not `off`. `tls.ocsp.mode = "static_file"` requires `response_file`; `live_fetch` is reserved and rejected. HTTP/3 requires `tls.min_version = "tls1.3"`.
+`tls.resumption.mode = "stateful"` uses a bounded in-memory server session cache and preserves QUIC 0-RTT compatibility. `stateless` uses the rustls/aws-lc-rs ticket producer with provider-managed key rotation; it cannot be combined with `quic.zero_rtt = "safe_methods"`. `off` disables server-side resumption. `session_tickets` and `session_ticket_rotation_seconds` are legacy aliases for the nested resumption table and must not conflict with it. `tls.client_auth.ca_certs` is required when client authentication mode is not `off`, and `tls.client_auth.verify_depth` must be greater than `0` when enabled. `verify_depth` limits the presented client certificate chain length, counting the leaf certificate and any intermediates while excluding the configured trust anchor. `tls.ocsp.mode = "static_file"` requires `response_file`; `live_fetch` is reserved and rejected. HTTP/3 requires `tls.min_version = "tls1.3"`.
 
 OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, or certificate renewal itself. Provision and renew TLS files with external automation such as Certbot or the `certbot/certbot` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
 
@@ -894,6 +896,7 @@ default = true
 [admin.tls.client_auth]
 mode = "off"
 ca_certs = []
+verify_depth = 4
 
 [metrics]
 enabled = false

@@ -207,8 +207,9 @@ pub(super) async fn admin_config_response(
       if let Some(response) = admin_control::validate_config_payload(&payload) {
         return response;
       }
+      let actor_is_admin = admin_actor_has_role(actor, AdminRole::Admin);
       admin_control
-        .load_config(actor.name.clone(), if_match, payload.config)
+        .load_config(actor.name.clone(), actor_is_admin, if_match, payload.config)
         .await
         .into_http()
     }
@@ -308,10 +309,48 @@ pub(super) async fn admin_files_response(
       return permission_denied(actor, "files.sync", AdminPermission::FilesDelete);
     }
   }
+  if let Err(permission) = check_file_sync_apply_permission(actor, payload.apply) {
+    return permission_denied(actor, "files.sync.apply", permission);
+  }
   admin_control
     .sync_files(actor.name.clone(), if_match, payload)
     .await
     .into_http()
+}
+
+fn check_file_sync_apply_permission(
+  actor: &AdminActor,
+  apply: admin_control::AdminApplyMode,
+) -> Result<(), AdminPermission> {
+  match apply {
+    admin_control::AdminApplyMode::None => Ok(()),
+    admin_control::AdminApplyMode::Full => {
+      require_admin_permission(actor, AdminPermission::ConfigLoad)
+    }
+    admin_control::AdminApplyMode::DownstreamTls => {
+      require_admin_permission(actor, AdminPermission::TlsDownstreamReload)
+    }
+    admin_control::AdminApplyMode::OxiRule => {
+      if admin_actor_has_permission(actor, AdminPermission::FilesSyncOxiRule)
+        || admin_actor_has_permission(actor, AdminPermission::FilesSyncOxiRuleGroup)
+      {
+        Ok(())
+      } else {
+        Err(AdminPermission::FilesSyncOxiRule)
+      }
+    }
+  }
+}
+
+fn require_admin_permission(
+  actor: &AdminActor,
+  permission: AdminPermission,
+) -> Result<(), AdminPermission> {
+  if admin_actor_has_permission(actor, permission) {
+    Ok(())
+  } else {
+    Err(permission)
+  }
 }
 
 fn permission_denied(
@@ -376,5 +415,72 @@ fn diff_toml_values(
     (Some(_), None) => changes.push(json!({ "path": path, "op": "remove" })),
     (Some(_), Some(_)) => changes.push(json!({ "path": path, "op": "change" })),
     (None, None) => {}
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn actor(permissions: Vec<AdminPermission>) -> AdminActor {
+    AdminActor {
+      name: "test-actor".to_string(),
+      roles: Vec::new(),
+      permissions,
+      deny_permissions: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn file_sync_apply_full_requires_config_load() {
+    let file_sync_only = actor(vec![AdminPermission::FilesSyncConfig]);
+    assert_eq!(
+      check_file_sync_apply_permission(&file_sync_only, admin_control::AdminApplyMode::Full),
+      Err(AdminPermission::ConfigLoad)
+    );
+
+    let can_load = actor(vec![
+      AdminPermission::FilesSyncConfig,
+      AdminPermission::ConfigLoad,
+    ]);
+    assert!(
+      check_file_sync_apply_permission(&can_load, admin_control::AdminApplyMode::Full).is_ok()
+    );
+  }
+
+  #[test]
+  fn file_sync_apply_downstream_tls_requires_tls_reload() {
+    let file_sync_only = actor(vec![AdminPermission::FilesSyncConfig]);
+    assert_eq!(
+      check_file_sync_apply_permission(
+        &file_sync_only,
+        admin_control::AdminApplyMode::DownstreamTls
+      ),
+      Err(AdminPermission::TlsDownstreamReload)
+    );
+
+    let can_reload_tls = actor(vec![AdminPermission::TlsDownstreamReload]);
+    assert!(
+      check_file_sync_apply_permission(
+        &can_reload_tls,
+        admin_control::AdminApplyMode::DownstreamTls
+      )
+      .is_ok()
+    );
+  }
+
+  #[test]
+  fn file_sync_apply_oxirule_requires_oxirule_sync_permission() {
+    let config_only = actor(vec![AdminPermission::FilesSyncConfig]);
+    assert_eq!(
+      check_file_sync_apply_permission(&config_only, admin_control::AdminApplyMode::OxiRule),
+      Err(AdminPermission::FilesSyncOxiRule)
+    );
+
+    let oxirule_group = actor(vec![AdminPermission::FilesSyncOxiRuleGroup]);
+    assert!(
+      check_file_sync_apply_permission(&oxirule_group, admin_control::AdminApplyMode::OxiRule)
+        .is_ok()
+    );
   }
 }

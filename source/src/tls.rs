@@ -15,6 +15,7 @@ use crate::config::{
   UpstreamEchConfig, UpstreamEchMode, UpstreamTlsResumptionConfig, canonicalize_existing_file,
 };
 
+mod client_auth;
 mod resumption;
 
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
@@ -663,7 +664,12 @@ fn downstream_client_cert_verifier(
       verifier
         .build()
         .context("failed to build downstream client certificate verifier")
-        .map(Some)
+        .map(|verifier| {
+          Some(self::client_auth::enforce_verify_depth(
+            verifier,
+            client_auth.verify_depth,
+          ))
+        })
     }
   }
 }

@@ -7,7 +7,7 @@ use crate::config::{CompressionConfig, ForwardedHeaderMode, HttpVersion};
 use crate::waf::{HeaderMutation, apply_header_mutations};
 
 use super::body::{BoxError, ProxyBody};
-use super::headers::{add_forwarded_headers, strip_hop_by_hop_headers};
+use super::headers::{add_forwarded_headers, set_effective_host_header, strip_hop_by_hop_headers};
 use super::version::upstream_request_version;
 
 pub(crate) struct RebuildRequestOptions<'a> {
@@ -43,7 +43,9 @@ pub(crate) fn rebuild_request_parts(
   parts.version = upstream_request_version(options.upstream_version);
   strip_hop_by_hop_headers(&mut parts.headers);
 
-  if !options.preserve_host {
+  if options.preserve_host {
+    set_effective_host_header(&mut parts.headers, options.downstream_host);
+  } else {
     parts.headers.remove(HOST);
   }
 
@@ -131,7 +133,7 @@ mod tests {
   }
 
   #[test]
-  fn rebuild_request_preserves_host_only_when_configured() {
+  fn rebuild_request_preserves_effective_host_when_configured() {
     let request = Request::builder()
       .uri("http://absolute.example/app?q=1")
       .header(HOST, "header.example")
@@ -149,7 +151,7 @@ mod tests {
       ),
     );
 
-    assert_eq!(rebuilt.headers()[HOST], "header.example");
+    assert_eq!(rebuilt.headers()[HOST], "absolute.example");
     assert_eq!(rebuilt.headers()["x-forwarded-host"], "absolute.example");
   }
 }

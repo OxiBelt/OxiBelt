@@ -407,6 +407,7 @@ pub(super) fn certificate_identity(certs: &[CertificateDer<'static>]) -> String 
 pub(super) fn client_auth_identity(client_auth: &TlsClientAuthConfig) -> anyhow::Result<String> {
   let mut context = ring::digest::Context::new(&ring::digest::SHA256);
   context.update(format!("mode:{:?}", client_auth.mode).as_bytes());
+  context.update(format!("verify_depth:{}", client_auth.verify_depth).as_bytes());
   for path in &client_auth.ca_certs {
     for cert in super::load_certs(path)? {
       context.update(&(cert.as_ref().len() as u64).to_be_bytes());
@@ -453,10 +454,29 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-  use super::TtlServerSessionCache;
+  use super::{TlsClientAuthConfig, TtlServerSessionCache, client_auth_identity};
+  use crate::config::TlsClientAuthMode;
   use rustls::server::StoresServerSessions;
   use std::sync::Arc;
   use std::time::Duration;
+
+  #[test]
+  fn client_auth_identity_includes_verify_depth() {
+    let shallow = TlsClientAuthConfig {
+      mode: TlsClientAuthMode::Require,
+      ca_certs: Vec::new(),
+      verify_depth: 1,
+    };
+    let deep = TlsClientAuthConfig {
+      verify_depth: 2,
+      ..shallow.clone()
+    };
+
+    assert_ne!(
+      client_auth_identity(&shallow).expect("identity should hash"),
+      client_auth_identity(&deep).expect("identity should hash")
+    );
+  }
 
   #[test]
   fn stateful_cache_take_removes_consumed_keys_from_order() {

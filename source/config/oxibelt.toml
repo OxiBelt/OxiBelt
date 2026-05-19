@@ -392,6 +392,7 @@ rotation_seconds = 86400
 [admin.tls.client_auth]
 mode = "off"
 ca_certs = []
+verify_depth = 4
 
 [metrics]
 enabled = false

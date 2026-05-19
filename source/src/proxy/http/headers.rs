@@ -21,6 +21,41 @@ pub(crate) fn extract_host<B>(request: &Request<B>) -> Option<String> {
     .map(normalize_host)
 }
 
+pub(crate) fn validate_authority_host_consistency<B>(
+  request: &Request<B>,
+) -> Result<(), HostConsistencyError> {
+  let Some(authority) = request.uri().authority() else {
+    return Ok(());
+  };
+  let Some(host) = request.headers().get(HOST) else {
+    return Ok(());
+  };
+  let host = host.to_str().map_err(|_| HostConsistencyError)?;
+  if normalize_host(authority.as_str()) == normalize_host(host) {
+    Ok(())
+  } else {
+    Err(HostConsistencyError)
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct HostConsistencyError;
+
+pub(crate) fn set_effective_host_header(headers: &mut HeaderMap, host: &str) {
+  if host.is_empty() {
+    headers.remove(HOST);
+    return;
+  }
+  match HeaderValue::from_str(host) {
+    Ok(value) => {
+      headers.insert(HOST, value);
+    }
+    Err(_) => {
+      headers.remove(HOST);
+    }
+  }
+}
+
 pub(crate) fn add_forwarded_headers(
   headers: &mut HeaderMap,
   peer_addr: std::net::SocketAddr,
@@ -191,6 +226,31 @@ mod tests {
       .expect("request should build");
 
     assert_eq!(extract_host(&request).as_deref(), Some("absolute.example"));
+  }
+
+  #[test]
+  fn authority_host_consistency_rejects_absolute_form_mismatch() {
+    let request = Request::builder()
+      .uri("http://absolute.example/path")
+      .header(HOST, "header.example")
+      .body(())
+      .expect("request should build");
+
+    assert_eq!(
+      validate_authority_host_consistency(&request),
+      Err(HostConsistencyError)
+    );
+  }
+
+  #[test]
+  fn authority_host_consistency_accepts_matching_normalized_hosts() {
+    let request = Request::builder()
+      .uri("http://example.test:8443/path")
+      .header(HOST, "Example.Test")
+      .body(())
+      .expect("request should build");
+
+    assert!(validate_authority_host_consistency(&request).is_ok());
   }
 
   #[test]

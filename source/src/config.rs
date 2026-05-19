@@ -1760,11 +1760,7 @@ impl Config {
     if self.listeners.http3 && self.tls.min_version != TlsVersion::Tls13 {
       bail!("HTTP/3 requires tls.min_version = \"tls1.3\"");
     }
-    if self.tls.client_auth.mode != TlsClientAuthMode::Off
-      && self.tls.client_auth.ca_certs.is_empty()
-    {
-      bail!("tls.client_auth.ca_certs is required when client_auth mode is not off");
-    }
+    self.tls.client_auth.validate("tls.client_auth")?;
     for listener in &self.webrtc_turn_listeners {
       if listener.tls.remote_signer_key_id.is_some() && !self.tls.remote_signer.enabled {
         bail!(

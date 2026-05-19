@@ -1584,6 +1584,59 @@ mode = "require"
             .contains("admin.tls.client_auth.ca_certs is required"),
         "unexpected error: {error}"
     );
+
+    let raw = format!(
+        r#"
+{base}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[admin.tls.client_auth]
+mode = "require"
+ca_certs = ["client-ca.pem"]
+verify_depth = 0
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("admin TLS client auth verify_depth zero should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.tls.client_auth.verify_depth must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn tls_client_auth_validation_rejects_zero_verify_depth() {
+    let temp_dir = common::TempDir::new("tls-client-auth-depth-validation");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "tls-client-auth-depth-validation");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let raw = format!(
+        r#"
+{base}
+
+[tls.client_auth]
+mode = "require"
+ca_certs = ["client-ca.pem"]
+verify_depth = 0
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("TLS client auth verify_depth zero should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("tls.client_auth.verify_depth must be greater than 0"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

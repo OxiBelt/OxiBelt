@@ -18,6 +18,11 @@ use crate::waf::WafEngine;
 use super::{ListenerSupervisor, admin::json_response};
 
 mod file_sync;
+mod load_scope;
+#[cfg(test)]
+mod tests;
+
+use load_scope::validate_admin_config_load_scope;
 
 pub(super) const ADMIN_CONFIG_BODY_LIMIT: usize = 1024 * 1024;
 
@@ -52,6 +57,7 @@ pub(super) struct RollbackSnapshot {
 pub(super) enum AdminControlCommand {
   LoadConfig {
     actor: String,
+    actor_is_admin: bool,
     if_match: Option<String>,
     raw: String,
     respond: oneshot::Sender<AdminControlResponse>,
@@ -180,12 +186,14 @@ impl AdminControlHandle {
   pub(super) async fn load_config(
     &self,
     actor: String,
+    actor_is_admin: bool,
     if_match: Option<String>,
     raw: String,
   ) -> AdminControlResponse {
     self
       .request(|respond| AdminControlCommand::LoadConfig {
         actor,
+        actor_is_admin,
         if_match,
         raw,
         respond,
@@ -288,12 +296,14 @@ pub(super) async fn handle_admin_control_command(
   match command {
     AdminControlCommand::LoadConfig {
       actor,
+      actor_is_admin,
       if_match,
       raw,
       respond,
     } => {
       let response = apply_config_load(
         &actor,
+        actor_is_admin,
         if_match,
         raw,
         state,
@@ -348,6 +358,7 @@ pub(super) async fn handle_admin_control_command(
 #[allow(clippy::too_many_arguments)]
 async fn apply_config_load(
   actor: &str,
+  actor_is_admin: bool,
   if_match: Option<String>,
   raw: String,
   state: &AppHandle,
@@ -367,6 +378,16 @@ async fn apply_config_load(
       return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
     }
   };
+  if let Err(response) = validate_admin_config_load_scope(actor_is_admin, &active.config, &config) {
+    record_operation(
+      control,
+      "config_load",
+      "rejected",
+      Some("admin configuration changes require admin role".to_string()),
+    )
+    .await;
+    return response;
+  }
   for warning in config.apply_runtime_overrides(runtime_overrides) {
     warn!("{warning}");
   }

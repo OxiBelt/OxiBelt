@@ -387,9 +387,7 @@ impl AdminTlsConfig {
       bail!("admin.tls.session_ticket_rotation_seconds must be greater than 0");
     }
     validate_tls_server_resumption("admin.tls.resumption", &self.resumption)?;
-    if self.client_auth.mode != TlsClientAuthMode::Off && self.client_auth.ca_certs.is_empty() {
-      bail!("admin.tls.client_auth.ca_certs is required when client_auth mode is not off");
-    }
+    self.client_auth.validate("admin.tls.client_auth")?;
     if !self.enabled {
       return Ok(());
     }
@@ -498,6 +496,21 @@ impl Default for TlsClientAuthConfig {
       ca_certs: Vec::new(),
       verify_depth: default_tls_client_auth_verify_depth(),
     }
+  }
+}
+
+impl TlsClientAuthConfig {
+  pub(super) fn validate(&self, prefix: &str) -> anyhow::Result<()> {
+    if self.mode == TlsClientAuthMode::Off {
+      return Ok(());
+    }
+    if self.ca_certs.is_empty() {
+      bail!("{prefix}.ca_certs is required when client_auth mode is not off");
+    }
+    if self.verify_depth == 0 {
+      bail!("{prefix}.verify_depth must be greater than 0 when client_auth mode is not off");
+    }
+    Ok(())
   }
 }
 

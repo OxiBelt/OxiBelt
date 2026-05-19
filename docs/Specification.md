@@ -125,7 +125,9 @@ Dynamic upstream discovery is supported for upstream pools. File discovery polls
 Host forwarding is controlled by each upstream's `preserve_host` setting:
 
 - `false`: use the upstream origin host.
-- `true`: preserve the downstream request host.
+- `true`: forward the effective downstream request host selected for routing and WAF evaluation.
+
+Absolute-form request targets are accepted only when their URI authority matches the `Host` header after host normalization. Mismatches are rejected with `400 Bad Request` so routing, WAF policy, forwarded headers, and upstream `Host` forwarding cannot observe different downstream hosts.
 
 OxiBelt also manages `Forwarded` and `X-Forwarded-*` headers according to `proxy.forwarded_headers.mode`.
 
