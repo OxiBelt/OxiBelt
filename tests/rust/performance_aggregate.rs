@@ -40,13 +40,20 @@ fn aggregate_binary() -> &'static str {
 }
 
 fn run_aggregate(input_dir: &Path, output_dir: &Path) -> Value {
-    let output = Command::new(aggregate_binary())
+    run_aggregate_with_args(input_dir, output_dir, &[])
+}
+
+fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[String]) -> Value {
+    let mut command = Command::new(aggregate_binary());
+    command
         .arg("--input-dir")
         .arg(input_dir)
         .arg("--output-dir")
-        .arg(output_dir)
-        .output()
-        .expect("aggregate binary should run");
+        .arg(output_dir);
+    for arg in extra_args {
+        command.arg(arg);
+    }
+    let output = command.output().expect("aggregate binary should run");
     assert!(
         output.status.success(),
         "aggregate binary failed\nstdout:\n{}\nstderr:\n{}",
@@ -129,6 +136,31 @@ fn skipped_row(label: &str, protocol: &str, reason: &str) -> Value {
     })
 }
 
+fn aggregate_row(comparator: &str, scenario: &str, group: &str, rps: f64, p99_ms: f64) -> Value {
+    json!({
+        "label": format!("{comparator}-{scenario}"),
+        "comparator": comparator,
+        "scenario": scenario,
+        "group": group,
+        "result_type": "load",
+        "protocol_or_mode": "h1",
+        "sample_count": 1,
+        "median_rps": rps,
+        "min_rps": rps,
+        "max_rps": rps,
+        "p25_rps": rps,
+        "p75_rps": rps,
+        "median_p50_ms": 1.0,
+        "median_p90_ms": 2.0,
+        "median_p95_ms": 3.0,
+        "median_p99_ms": p99_ms,
+        "total_errors": 0,
+        "skipped_count": 0,
+        "skip_reasons": [],
+        "source_files": ["baseline/results.json"]
+    })
+}
+
 fn find_aggregate<'a>(report: &'a Value, comparator: &str, scenario: &str) -> &'a Value {
     report["aggregates"]
         .as_array()
@@ -138,6 +170,17 @@ fn find_aggregate<'a>(report: &'a Value, comparator: &str, scenario: &str) -> &'
             aggregate["comparator"] == comparator && aggregate["scenario"] == scenario
         })
         .unwrap_or_else(|| panic!("missing aggregate for {comparator}/{scenario}"))
+}
+
+fn find_delta<'a>(report: &'a Value, group: &str, scenario: &str, comparator: &str) -> &'a Value {
+    report["rows"]
+        .as_array()
+        .expect("delta rows should be an array")
+        .iter()
+        .find(|row| {
+            row["group"] == group && row["scenario"] == scenario && row["comparator"] == comparator
+        })
+        .unwrap_or_else(|| panic!("missing delta for {group}/{scenario}/{comparator}"))
 }
 
 fn find_comparison<'a>(report: &'a Value, group: &str, scenario: &str) -> &'a Value {
@@ -402,4 +445,86 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
             .any(|warning| warning.contains("missing rps or handshake_per_sec")),
         "missing throughput fields should produce a warning: {warnings:?}"
     );
+}
+
+#[test]
+fn baseline_delta_classifies_comparator_shift_and_oxibelt_regression() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-static-16k-h1c", "h1c", 105.0, 1.0, 4.0),
+            load_row("nginx-static-16k-h1c", "h1c", 125.0, 2.0, 5.0),
+        ],
+    );
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-h1-keepalive", "h1", 90.0, 1.0, 6.0),
+            load_row("nginx-h1-keepalive", "h1", 100.0, 2.0, 5.0),
+        ],
+    );
+    fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&json!({
+            "aggregates": [
+                aggregate_row("oxibelt", "static-16k-h1c", "static-files", 100.0, 4.0),
+                aggregate_row("nginx", "static-16k-h1c", "static-files", 100.0, 5.0),
+                aggregate_row("oxibelt", "h1-keepalive", "reverse-proxy", 100.0, 4.0),
+                aggregate_row("nginx", "h1-keepalive", "reverse-proxy", 100.0, 5.0)
+            ]
+        }))
+        .expect("baseline should serialize"),
+    )
+    .expect("baseline should be written");
+
+    let baseline_arg = baseline_path.display().to_string();
+    let _report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &["--baseline-report".to_owned(), baseline_arg],
+    );
+    let delta_path = output_dir.join("performance-delta.json");
+    let raw = fs::read_to_string(&delta_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", delta_path.display()));
+    let delta: Value = serde_json::from_str(&raw).expect("delta JSON should parse");
+
+    let static_nginx = find_delta(&delta, "static-files", "static-16k-h1c", "nginx");
+    assert_eq!(static_nginx["classification"], "comparator_shift");
+    assert!(
+        static_nginx["reason"]
+            .as_str()
+            .expect("reason should be present")
+            .contains("comparator rose")
+    );
+    assert_close(
+        static_nginx["oxibelt_rps_delta_percent"]
+            .as_f64()
+            .expect("OxiBelt delta should exist"),
+        5.0,
+    );
+    assert_close(
+        static_nginx["comparator_rps_delta_percent"]
+            .as_f64()
+            .expect("comparator delta should exist"),
+        25.0,
+    );
+
+    let h1_nginx = find_delta(&delta, "reverse-proxy", "h1-keepalive", "nginx");
+    assert_eq!(h1_nginx["classification"], "oxibelt_regression");
+    assert_close(
+        h1_nginx["oxibelt_rps_delta_percent"]
+            .as_f64()
+            .expect("OxiBelt delta should exist"),
+        -10.0,
+    );
+
+    let markdown = fs::read_to_string(output_dir.join("performance-delta.md"))
+        .expect("delta markdown should be written");
+    assert!(markdown.contains("## Scenario deltas"));
+    assert!(markdown.contains("`comparator_shift`"));
 }

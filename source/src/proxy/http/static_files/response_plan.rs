@@ -101,19 +101,7 @@ pub(super) fn cached_object_plan(
   };
   match range {
     RangeSelection::NotSatisfiable => range_not_satisfiable_plan(len),
-    RangeSelection::Full => bytes_plan(
-      method,
-      StatusCode::OK,
-      cached.path,
-      cached.body,
-      FileContentPlan {
-        offset: 0,
-        body_len: len,
-        content_range: None,
-      },
-      &cached.etag,
-      cached.modified,
-    ),
+    RangeSelection::Full => cached_full_bytes_plan(method, cached),
     RangeSelection::Partial { start, end } => bytes_plan(
       method,
       StatusCode::PARTIAL_CONTENT,
@@ -127,6 +115,21 @@ pub(super) fn cached_object_plan(
       &cached.etag,
       cached.modified,
     ),
+  }
+}
+
+fn cached_full_bytes_plan(method: &Method, cached: CachedStaticObject) -> StaticResponsePlan {
+  let mut headers = HeaderMap::new();
+  set_cached_common_headers(&mut headers, &cached, cached.body.len() as u64);
+  let body = if method == Method::HEAD || cached.body.is_empty() {
+    StaticBodyPlan::Empty
+  } else {
+    StaticBodyPlan::Bytes(cached.body)
+  };
+  StaticResponsePlan {
+    status: StatusCode::OK,
+    headers,
+    body,
   }
 }
 
@@ -321,6 +324,26 @@ fn set_common_headers(
   );
 }
 
+fn set_cached_common_headers(headers: &mut HeaderMap, cached: &CachedStaticObject, body_len: u64) {
+  headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+  if body_len == cached.body.len() as u64 {
+    if let Some(value) = cached.full_content_length_header.clone() {
+      headers.insert(CONTENT_LENGTH, value);
+    } else if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
+      headers.insert(CONTENT_LENGTH, value);
+    }
+  } else if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
+    headers.insert(CONTENT_LENGTH, value);
+  }
+  if let Some(value) = cached.etag_header.clone() {
+    headers.insert(ETAG, value);
+  }
+  if let Some(value) = cached.last_modified_header.clone() {
+    headers.insert(LAST_MODIFIED, value);
+  }
+  headers.insert(CONTENT_TYPE, cached.content_type_header.clone());
+}
+
 pub(super) fn not_modified_plan(etag: &str, modified: Option<SystemTime>) -> StaticResponsePlan {
   let mut headers = HeaderMap::new();
   headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
@@ -475,7 +498,7 @@ pub(super) fn etag_for_metadata(metadata: &std::fs::Metadata) -> String {
   format!("W/\"{:x}-{modified:x}\"", metadata.len())
 }
 
-fn content_type_for_path(path: &Path) -> &'static str {
+pub(crate) fn content_type_for_path(path: &Path) -> &'static str {
   match path.extension().and_then(OsStr::to_str).unwrap_or_default() {
     "avif" => "image/avif",
     "br" => "application/octet-stream",

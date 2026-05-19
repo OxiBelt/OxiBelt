@@ -347,8 +347,8 @@ async fn eligible_static_plan(
   }
   let response_send_timeout = static_files::static_response_send_timeout(snapshot, resolved.route);
   let access_log_needed = snapshot.system_access_log.enabled()
-    || snapshot.waf.has_request_rules(&resolved.route.name)
-    || snapshot.waf.has_response_rules(&resolved.route.name);
+    || resolved.execution_plan.waf.request.enabled()
+    || resolved.execution_plan.waf.response.enabled();
   let mut access_log = access_log_needed.then(|| {
     StaticFastPathContext::new(
       request_uri,
@@ -395,8 +395,8 @@ async fn eligible_static_plan(
     return None;
   }
   apply_security_headers(&mut plan.headers, &snapshot.config.security.headers);
-  if !snapshot.waf.has_request_rules(&resolved.route.name)
-    && !snapshot.waf.has_response_rules(&resolved.route.name)
+  if !resolved.execution_plan.waf.request.enabled()
+    && !resolved.execution_plan.waf.response.enabled()
   {
     return Some(TimedStaticResponsePlan {
       response: plan,

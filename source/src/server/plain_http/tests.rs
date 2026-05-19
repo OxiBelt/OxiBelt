@@ -118,6 +118,27 @@ fn parser_preserves_pipelined_bytes_for_fallback() {
 }
 
 #[test]
+fn parser_accepts_stack_sized_header_blocks() {
+  let mut raw = b"GET /static/app.txt HTTP/1.1\r\n".to_vec();
+  for index in 0..128 {
+    raw.extend_from_slice(format!("X-Test-{index}: value\r\n").as_bytes());
+  }
+  raw.extend_from_slice(b"\r\n");
+
+  match parse_buffered_request(&raw, 128) {
+    ParseResult::Complete {
+      header_len,
+      request,
+    } => {
+      assert_eq!(request.target, "/static/app.txt");
+      assert_eq!(header_len, raw.len());
+      assert_eq!(request.headers.len(), 128);
+    }
+    _ => panic!("stack-sized header block should parse"),
+  }
+}
+
+#[test]
 fn header_token_matching_is_case_insensitive() {
   let request = parsed(
     b"GET /static/app.txt HTTP/1.1\r\nHost: example.test\r\nConnection: keep-alive, Upgrade\r\n\r\n",

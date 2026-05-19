@@ -52,6 +52,20 @@ fn runtime_for_root(root: &Path, config: ProxyStaticFilesConfig) -> StaticFilesR
     .expect("static files runtime should initialize")
 }
 
+fn hot_object_cache_config(
+  max_entries: usize,
+  ttl_ms: u64,
+  max_bytes: usize,
+) -> ProxyStaticFilesConfig {
+  ProxyStaticFilesConfig {
+    open_file_cache_max_entries: max_entries,
+    open_file_cache_ttl_ms: ttl_ms,
+    hot_object_cache_max_bytes: max_bytes,
+    hot_object_cache_max_file_bytes: max_bytes,
+    ..ProxyStaticFilesConfig::default()
+  }
+}
+
 #[cfg(target_os = "linux")]
 fn make_fifo(path: &Path) {
   nix::unistd::mkfifo(
@@ -383,6 +397,82 @@ async fn conditional_etag_returns_not_modified() {
   assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
   let body = response.into_body().collect().await.unwrap().to_bytes();
   assert!(body.is_empty());
+}
+
+#[test]
+fn hot_object_cache_hits_by_resolved_path() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache-hit");
+  let root = temp_dir.path().join("public");
+  std::fs::create_dir_all(&root).unwrap();
+  let path = root.join("app.txt");
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 10_000, 1024));
+
+  runtime.store_object(
+    &root,
+    path.clone(),
+    "W/\"cache-hit\"".to_owned(),
+    None,
+    Bytes::from_static(b"cached body"),
+  );
+  let cached = runtime
+    .cached_object(&root.join("unused-root-key"), &path)
+    .expect("object should be cached by resolved path");
+
+  assert_eq!(cached.path, path);
+  assert_eq!(cached.body, Bytes::from_static(b"cached body"));
+  assert_eq!(cached.full_content_length_header.unwrap(), "11");
+  assert_eq!(cached.content_type_header, "text/plain; charset=utf-8");
+}
+
+#[test]
+fn hot_object_cache_expires_entries() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache-expiry");
+  let root = temp_dir.path().join("public");
+  std::fs::create_dir_all(&root).unwrap();
+  let path = root.join("app.txt");
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 1, 1024));
+
+  runtime.store_object(
+    &root,
+    path.clone(),
+    "W/\"cache-expiry\"".to_owned(),
+    None,
+    Bytes::from_static(b"cached body"),
+  );
+  std::thread::sleep(Duration::from_millis(10));
+
+  assert!(runtime.cached_object(&root, &path).is_none());
+}
+
+#[test]
+fn hot_object_cache_evicts_oldest_entry_when_full() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache-eviction");
+  let root = temp_dir.path().join("public");
+  std::fs::create_dir_all(&root).unwrap();
+  let first = root.join("first.txt");
+  let second = root.join("second.txt");
+  let runtime = runtime_for_root(&root, hot_object_cache_config(1, 10_000, 1024));
+
+  runtime.store_object(
+    &root,
+    first.clone(),
+    "W/\"first\"".to_owned(),
+    None,
+    Bytes::from_static(b"first"),
+  );
+  runtime.store_object(
+    &root,
+    second.clone(),
+    "W/\"second\"".to_owned(),
+    None,
+    Bytes::from_static(b"second"),
+  );
+
+  assert!(runtime.cached_object(&root, &first).is_none());
+  assert_eq!(
+    runtime.cached_object(&root, &second).unwrap().body,
+    Bytes::from_static(b"second")
+  );
 }
 
 #[tokio::test]

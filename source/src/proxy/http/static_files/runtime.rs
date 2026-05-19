@@ -2,13 +2,16 @@ use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use bytes::Bytes;
+use http::HeaderValue;
 
 use crate::config::{Config, ProxyStaticFilesConfig};
+
+use super::response_plan::content_type_for_path;
 
 #[derive(Clone)]
 pub(crate) struct StaticFilesRuntime {
@@ -129,6 +132,10 @@ pub(crate) struct CachedStaticObject {
   pub(crate) path: PathBuf,
   pub(crate) etag: String,
   pub(crate) modified: Option<SystemTime>,
+  pub(crate) etag_header: Option<HeaderValue>,
+  pub(crate) last_modified_header: Option<HeaderValue>,
+  pub(crate) content_type_header: HeaderValue,
+  pub(crate) full_content_length_header: Option<HeaderValue>,
   pub(crate) body: Bytes,
 }
 
@@ -138,7 +145,7 @@ struct StaticHotObjectCache {
   max_entries: usize,
   max_bytes: usize,
   max_file_bytes: usize,
-  inner: Mutex<StaticHotObjectCacheInner>,
+  inner: RwLock<StaticHotObjectCacheInner>,
 }
 
 #[derive(Debug, Default)]
@@ -150,7 +157,6 @@ struct StaticHotObjectCacheInner {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StaticObjectCacheKey {
-  root: PathBuf,
   path: PathBuf,
 }
 
@@ -167,7 +173,7 @@ impl StaticHotObjectCache {
       max_entries: config.open_file_cache_max_entries,
       max_bytes: config.hot_object_cache_max_bytes,
       max_file_bytes: config.hot_object_cache_max_file_bytes,
-      inner: Mutex::new(StaticHotObjectCacheInner::default()),
+      inner: RwLock::new(StaticHotObjectCacheInner::default()),
     }
   }
 
@@ -182,27 +188,36 @@ impl StaticHotObjectCache {
         .is_some_and(|len| len <= self.max_file_bytes && len <= self.max_bytes)
   }
 
-  fn get(&self, root: &Path, path: &Path) -> Option<CachedStaticObject> {
+  fn get(&self, _root: &Path, path: &Path) -> Option<CachedStaticObject> {
     if !self.enabled() {
       return None;
     }
     let key = StaticObjectCacheKey {
-      root: root.to_path_buf(),
       path: path.to_path_buf(),
     };
     let now = Instant::now();
-    let mut inner = self.inner.lock().expect("static file cache lock poisoned");
-    let entry = inner.entries.get(&key)?;
-    if entry.expires_at <= now {
-      remove_entry(&mut inner, &key);
-      return None;
+    {
+      let inner = self.inner.read().expect("static file cache lock poisoned");
+      let entry = inner.entries.get(&key)?;
+      if entry.expires_at > now {
+        return Some(entry.object.clone());
+      }
     }
-    Some(entry.object.clone())
+
+    let mut inner = self.inner.write().expect("static file cache lock poisoned");
+    if inner
+      .entries
+      .get(&key)
+      .is_some_and(|entry| entry.expires_at <= now)
+    {
+      remove_entry(&mut inner, &key);
+    }
+    None
   }
 
   fn insert(
     &self,
-    root: &Path,
+    _root: &Path,
     path: PathBuf,
     etag: String,
     modified: Option<SystemTime>,
@@ -211,25 +226,43 @@ impl StaticHotObjectCache {
     if !self.accepts(body.len() as u64) {
       return;
     }
-    let key = StaticObjectCacheKey {
-      root: root.to_path_buf(),
-      path: path.clone(),
-    };
+    let key = StaticObjectCacheKey { path: path.clone() };
     let entry = StaticHotObjectCacheEntry {
-      object: CachedStaticObject {
-        path,
-        etag,
-        modified,
-        body,
-      },
+      object: CachedStaticObject::new(path, etag, modified, body),
       expires_at: Instant::now() + self.ttl,
     };
-    let mut inner = self.inner.lock().expect("static file cache lock poisoned");
+    let mut inner = self.inner.write().expect("static file cache lock poisoned");
     remove_entry(&mut inner, &key);
     inner.total_bytes = inner.total_bytes.saturating_add(entry.object.body.len());
     inner.entries.insert(key.clone(), entry);
     inner.order.push_back(key);
     evict_over_limits(&mut inner, self.max_entries, self.max_bytes);
+  }
+}
+
+impl CachedStaticObject {
+  pub(crate) fn new(
+    path: PathBuf,
+    etag: String,
+    modified: Option<SystemTime>,
+    body: Bytes,
+  ) -> Self {
+    let etag_header = HeaderValue::from_str(&etag).ok();
+    let last_modified_header = modified
+      .map(httpdate::fmt_http_date)
+      .and_then(|value| HeaderValue::from_str(&value).ok());
+    let full_content_length_header = HeaderValue::from_str(&body.len().to_string()).ok();
+    let content_type_header = HeaderValue::from_static(content_type_for_path(&path));
+    Self {
+      path,
+      etag,
+      modified,
+      etag_header,
+      last_modified_header,
+      content_type_header,
+      full_content_length_header,
+      body,
+    }
   }
 }
 

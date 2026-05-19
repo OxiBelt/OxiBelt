@@ -523,6 +523,7 @@ jobs:
       - docker-performance
     if: always()
     permissions:
+      actions: read
       contents: read
     env:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
@@ -545,7 +546,55 @@ jobs:
           pattern: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-*
           path: ${{ runner.temp }}/oxibelt-performance-artifacts
 
+      - name: Download previous Docker performance comparison
+        id: download-performance-baseline
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          baseline_dir="${RUNNER_TEMP}/oxibelt-performance-baseline"
+          mkdir -p "${baseline_dir}"
+
+          runs_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/check-oxibelt.yml/runs?branch=${GITHUB_REF_NAME}&status=success&per_page=20"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${runs_url}" > "${baseline_dir}/runs.json"
+
+          baseline_run_id="$(jq -r --arg current "${GITHUB_RUN_ID}" 'first(.workflow_runs[] | select((.id | tostring) != $current) | .id) // empty' "${baseline_dir}/runs.json")"
+          if [[ -z "${baseline_run_id}" ]]; then
+            echo "::warning title=Docker performance delta::no previous successful Check OxiBelt run was found for ${GITHUB_REF_NAME}"
+            exit 0
+          fi
+
+          artifacts_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${baseline_run_id}/artifacts?per_page=100"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${artifacts_url}" > "${baseline_dir}/artifacts.json"
+
+          artifact_url="$(jq -r --arg name "oxibelt-docker-performance-${PERFORMANCE_PROFILE}-comparison" 'first(.artifacts[] | select(.name == $name and .expired == false) | .archive_download_url) // empty' "${baseline_dir}/artifacts.json")"
+          if [[ -z "${artifact_url}" ]]; then
+            echo "::warning title=Docker performance delta::previous run ${baseline_run_id} has no reusable performance comparison artifact"
+            exit 0
+          fi
+
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -L "${artifact_url}" \
+            -o "${baseline_dir}/comparison.zip"
+          unzip -q -o "${baseline_dir}/comparison.zip" -d "${baseline_dir}/comparison"
+          if [[ -f "${baseline_dir}/comparison/performance-comparison.json" ]]; then
+            echo "baseline_report=${baseline_dir}/comparison/performance-comparison.json" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::warning title=Docker performance delta::baseline comparison artifact did not contain performance-comparison.json"
+          fi
+
       - name: Aggregate Docker performance comparison
+        env:
+          BASELINE_REPORT: ${{ steps.download-performance-baseline.outputs.baseline_report }}
         run: |
           aggregate_args=(
             --input-dir "${RUNNER_TEMP}/oxibelt-performance-artifacts"
@@ -557,11 +606,21 @@ jobs:
           else
             echo "::warning title=Docker performance summary::performance_iterations is not a positive integer; missing-run checks will be skipped"
           fi
+          if [[ -n "${BASELINE_REPORT}" ]]; then
+            aggregate_args+=(--baseline-report "${BASELINE_REPORT}")
+          else
+            echo "::warning title=Docker performance delta::baseline comparison artifact was not available; delta report will be skipped"
+          fi
 
           cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate -- "${aggregate_args[@]}"
 
       - name: Append Docker performance comparison summary
-        run: cat "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.md" >> "${GITHUB_STEP_SUMMARY}"
+        run: |
+          cat "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.md" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ -f "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-delta.md" ]]; then
+            printf '\n' >> "${GITHUB_STEP_SUMMARY}"
+            cat "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-delta.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Upload Docker performance comparison
         if: always()

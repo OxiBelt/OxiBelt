@@ -8,6 +8,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 const READ_CHUNK_BYTES: usize = 4096;
+const STACK_HEADER_CAPACITY: usize = 128;
 
 pub(super) enum ReadRequestOutcome {
   Closed,
@@ -49,8 +50,8 @@ pub(super) async fn read_request(
         header_len,
         request,
       } => {
-        let raw = buffer[..header_len].to_vec();
-        let remaining = buffer[header_len..].to_vec();
+        let remaining = buffer.split_off(header_len);
+        let raw = buffer;
         return Ok(ReadRequestOutcome::Request(ParsedPlainRequest {
           method: request.method,
           target: request.target,
@@ -127,8 +128,19 @@ pub(super) struct ParsedPlainRequestSeed {
 }
 
 pub(super) fn parse_buffered_request(buffer: &[u8], max_headers: usize) -> ParseResult {
+  if max_headers <= STACK_HEADER_CAPACITY {
+    let mut parsed_headers = [httparse::EMPTY_HEADER; STACK_HEADER_CAPACITY];
+    return parse_buffered_request_with_headers(buffer, &mut parsed_headers[..max_headers]);
+  }
   let mut parsed_headers = vec![httparse::EMPTY_HEADER; max_headers];
-  let mut request = httparse::Request::new(&mut parsed_headers);
+  parse_buffered_request_with_headers(buffer, &mut parsed_headers)
+}
+
+fn parse_buffered_request_with_headers<'a>(
+  buffer: &'a [u8],
+  parsed_headers: &mut [httparse::Header<'a>],
+) -> ParseResult {
+  let mut request = httparse::Request::new(parsed_headers);
   let header_len = match request.parse(buffer) {
     Ok(Status::Complete(len)) => len,
     Ok(Status::Partial) => return ParseResult::Partial,

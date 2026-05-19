@@ -41,14 +41,14 @@ pub(crate) fn prepare_plain_fast_path_waf<B>(
   downstream_scheme: &'static str,
   access_log: &mut SystemAccessLogContext<'_>,
 ) -> Result<PlainFastPathWaf, Box<Response<ProxyBody>>> {
-  let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
+  let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
   let request_headers = if response_waf_enabled {
     Some(request.headers().clone())
   } else {
     None
   };
   let mut tags = None;
-  let mut request_waf = if state.waf.has_request_rules(&resolved.route.name) {
+  let mut request_waf = if resolved.execution_plan.waf.request.enabled() {
     access_log.ensure_request_ids();
     state.waf.evaluate_request(WafRequestInput {
       request_id: access_log.request_id(),

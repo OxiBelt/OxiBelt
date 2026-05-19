@@ -116,7 +116,7 @@ impl PlainProxyFastPath {
     let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
     let retry_enabled = state.config.proxy.retry.enabled && is_idempotent(request.method());
-    let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
+    let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
     let request_context =
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
     let request_body_definitely_empty =

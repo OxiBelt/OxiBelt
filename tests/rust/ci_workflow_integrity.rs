@@ -352,6 +352,18 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should download all profile-scoped performance artifacts"
     );
     assert!(
+        workflow.contains("actions: read"),
+        "summary job should have permission to inspect prior workflow artifacts"
+    );
+    assert!(
+        workflow.contains("name: Download previous Docker performance comparison"),
+        "summary job should look for the previous successful branch comparison artifact"
+    );
+    assert!(
+        workflow.contains("baseline_report=${baseline_dir}/comparison/performance-comparison.json"),
+        "summary job should expose the downloaded baseline report path"
+    );
+    assert!(
         workflow.contains(
             "cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate --"
         ),
@@ -366,8 +378,16 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should pass the comparison output directory"
     );
     assert!(
+        workflow.contains("--baseline-report \"${BASELINE_REPORT}\""),
+        "summary job should pass the previous report to the aggregate binary when available"
+    );
+    assert!(
         workflow.contains("cat \"${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.md\" >> \"${GITHUB_STEP_SUMMARY}\""),
         "summary job should append the markdown comparison to the run summary"
+    );
+    assert!(
+        workflow.contains("performance-delta.md"),
+        "summary job should append and upload the baseline delta report when it is produced"
     );
     assert!(
         workflow

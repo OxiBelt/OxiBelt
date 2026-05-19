@@ -59,6 +59,12 @@ pub enum WafExecutionPlan {
   FullBody,
 }
 
+impl WafExecutionPlan {
+  pub fn enabled(self) -> bool {
+    self != Self::None
+  }
+}
+
 pub(super) fn route_execution_plan(
   config: &Config,
   route: &RouteConfig,

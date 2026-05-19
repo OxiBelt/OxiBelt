@@ -171,12 +171,7 @@ pub(crate) async fn plan_response(
     return cached_object_plan(
       method,
       headers,
-      CachedStaticObject {
-        path,
-        etag,
-        modified,
-        body: bytes,
-      },
+      CachedStaticObject::new(path, etag, modified, bytes),
     );
   }
 

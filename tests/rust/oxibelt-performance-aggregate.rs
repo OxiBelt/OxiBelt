@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const MAX_RESULTS_BYTES: u64 = 10 * 1024 * 1024;
@@ -30,6 +30,8 @@ struct Args {
     profile: Option<String>,
     #[arg(long)]
     expected_runs: Option<usize>,
+    #[arg(long)]
+    baseline_report: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -144,7 +146,7 @@ struct AggregateBuilder {
     source_files: BTreeSet<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct AggregateStats {
     label: String,
     comparator: String,
@@ -267,6 +269,52 @@ struct Report {
     warnings_omitted: usize,
 }
 
+#[derive(Deserialize)]
+struct BaselineReport {
+    aggregates: Vec<AggregateStats>,
+}
+
+#[derive(Serialize)]
+struct DeltaReport {
+    schema_version: u32,
+    baseline_report: String,
+    summary: DeltaSummary,
+    rows: Vec<PerformanceDeltaRow>,
+    warnings: Vec<String>,
+}
+
+#[derive(Default, Serialize)]
+struct DeltaSummary {
+    rows: usize,
+    oxibelt_regression: usize,
+    comparator_shift: usize,
+    mixed: usize,
+    improvement: usize,
+    stable: usize,
+    incomplete: usize,
+}
+
+#[derive(Serialize)]
+struct PerformanceDeltaRow {
+    group: String,
+    scenario: String,
+    comparator: String,
+    before_oxibelt_rps: Option<f64>,
+    after_oxibelt_rps: Option<f64>,
+    oxibelt_rps_delta_percent: Option<f64>,
+    before_comparator_rps: Option<f64>,
+    after_comparator_rps: Option<f64>,
+    comparator_rps_delta_percent: Option<f64>,
+    before_ratio: Option<f64>,
+    after_ratio: Option<f64>,
+    ratio_delta_percent: Option<f64>,
+    before_oxibelt_p99_ms: Option<f64>,
+    after_oxibelt_p99_ms: Option<f64>,
+    oxibelt_p99_delta_percent: Option<f64>,
+    classification: String,
+    reason: String,
+}
+
 impl AggregateBuilder {
     fn push(&mut self, row: BenchmarkRow) {
         if self.label.is_empty() {
@@ -351,6 +399,17 @@ fn main() -> Result<()> {
         args.output_dir.join("performance-comparison.md"),
         render_markdown(&report),
     )?;
+    if let Some(baseline_report) = args.baseline_report.as_deref() {
+        let delta = build_delta_report(baseline_report, &report);
+        fs::write(
+            args.output_dir.join("performance-delta.json"),
+            serde_json::to_string_pretty(&delta)?,
+        )?;
+        fs::write(
+            args.output_dir.join("performance-delta.md"),
+            render_delta_markdown(&delta),
+        )?;
+    }
     Ok(())
 }
 
@@ -1111,6 +1170,245 @@ fn collect_missing_row(
     });
 }
 
+fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
+    let baseline_label = baseline_report.display().to_string();
+    let baseline = match fs::read_to_string(baseline_report)
+        .map_err(|error| error.to_string())
+        .and_then(|raw| {
+            serde_json::from_str::<BaselineReport>(&raw).map_err(|error| error.to_string())
+        }) {
+        Ok(report) => report,
+        Err(error) => {
+            return DeltaReport {
+                schema_version: 1,
+                baseline_report: baseline_label,
+                summary: DeltaSummary::default(),
+                rows: Vec::new(),
+                warnings: vec![format!(
+                    "failed to read baseline performance report: {error}"
+                )],
+            };
+        }
+    };
+
+    let baseline_map = aggregate_lookup(&baseline.aggregates);
+    let current_map = aggregate_lookup(&current.aggregates);
+    let mut rows = Vec::new();
+    collect_delta_rows(
+        &current.comparisons.reverse_proxy,
+        Comparator::Nginx,
+        &baseline_map,
+        &current_map,
+        &mut rows,
+    );
+    collect_delta_rows(
+        &current.comparisons.reverse_proxy,
+        Comparator::Caddy,
+        &baseline_map,
+        &current_map,
+        &mut rows,
+    );
+    collect_delta_rows(
+        &current.comparisons.static_files,
+        Comparator::Nginx,
+        &baseline_map,
+        &current_map,
+        &mut rows,
+    );
+    collect_delta_rows(
+        &current.comparisons.static_files,
+        Comparator::Caddy,
+        &baseline_map,
+        &current_map,
+        &mut rows,
+    );
+
+    DeltaReport {
+        schema_version: 1,
+        baseline_report: baseline_label,
+        summary: summarize_delta_rows(&rows),
+        rows,
+        warnings: Vec::new(),
+    }
+}
+
+fn aggregate_lookup(aggregates: &[AggregateStats]) -> BTreeMap<(String, String), &AggregateStats> {
+    aggregates
+        .iter()
+        .map(|aggregate| {
+            (
+                (aggregate.comparator.clone(), aggregate.scenario.clone()),
+                aggregate,
+            )
+        })
+        .collect()
+}
+
+fn collect_delta_rows(
+    comparisons: &[ScenarioComparison],
+    comparator: Comparator,
+    baseline: &BTreeMap<(String, String), &AggregateStats>,
+    current: &BTreeMap<(String, String), &AggregateStats>,
+    rows: &mut Vec<PerformanceDeltaRow>,
+) {
+    let comparator_name = comparator.as_str();
+    for comparison in comparisons {
+        let oxibelt_key = ("oxibelt".to_owned(), comparison.scenario.clone());
+        let comparator_key = (comparator_name.to_owned(), comparison.scenario.clone());
+        rows.push(delta_row(
+            &comparison.group,
+            &comparison.scenario,
+            comparator_name,
+            baseline.get(&oxibelt_key).copied(),
+            current.get(&oxibelt_key).copied(),
+            baseline.get(&comparator_key).copied(),
+            current.get(&comparator_key).copied(),
+        ));
+    }
+}
+
+fn delta_row(
+    group: &str,
+    scenario: &str,
+    comparator: &str,
+    before_oxibelt: Option<&AggregateStats>,
+    after_oxibelt: Option<&AggregateStats>,
+    before_comparator: Option<&AggregateStats>,
+    after_comparator: Option<&AggregateStats>,
+) -> PerformanceDeltaRow {
+    let before_oxibelt_rps = before_oxibelt.and_then(|stats| stats.median_rps);
+    let after_oxibelt_rps = after_oxibelt.and_then(|stats| stats.median_rps);
+    let before_comparator_rps = before_comparator.and_then(|stats| stats.median_rps);
+    let after_comparator_rps = after_comparator.and_then(|stats| stats.median_rps);
+    let before_ratio = ratio(before_oxibelt_rps, before_comparator_rps);
+    let after_ratio = ratio(after_oxibelt_rps, after_comparator_rps);
+    let before_oxibelt_p99_ms = before_oxibelt.and_then(|stats| stats.median_p99_ms);
+    let after_oxibelt_p99_ms = after_oxibelt.and_then(|stats| stats.median_p99_ms);
+    let mut row = PerformanceDeltaRow {
+        group: group.to_owned(),
+        scenario: scenario.to_owned(),
+        comparator: comparator.to_owned(),
+        before_oxibelt_rps,
+        after_oxibelt_rps,
+        oxibelt_rps_delta_percent: percent_delta(before_oxibelt_rps, after_oxibelt_rps),
+        before_comparator_rps,
+        after_comparator_rps,
+        comparator_rps_delta_percent: percent_delta(before_comparator_rps, after_comparator_rps),
+        before_ratio,
+        after_ratio,
+        ratio_delta_percent: percent_delta(before_ratio, after_ratio),
+        before_oxibelt_p99_ms,
+        after_oxibelt_p99_ms,
+        oxibelt_p99_delta_percent: percent_delta(before_oxibelt_p99_ms, after_oxibelt_p99_ms),
+        classification: String::new(),
+        reason: String::new(),
+    };
+    let (classification, reason) = classify_delta_row(&row);
+    row.classification = classification.to_owned();
+    row.reason = reason;
+    row
+}
+
+fn ratio(oxibelt: Option<f64>, comparator: Option<f64>) -> Option<f64> {
+    match (oxibelt, comparator) {
+        (Some(oxibelt), Some(comparator)) if comparator > 0.0 => Some(oxibelt / comparator),
+        _ => None,
+    }
+}
+
+fn percent_delta(before: Option<f64>, after: Option<f64>) -> Option<f64> {
+    match (before, after) {
+        (Some(before), Some(after)) if before > 0.0 => Some(((after - before) / before) * 100.0),
+        _ => None,
+    }
+}
+
+fn classify_delta_row(row: &PerformanceDeltaRow) -> (&'static str, String) {
+    let Some(oxibelt_rps_delta) = row.oxibelt_rps_delta_percent else {
+        return (
+            "incomplete",
+            "missing OxiBelt baseline or current RPS".to_owned(),
+        );
+    };
+    let Some(comparator_rps_delta) = row.comparator_rps_delta_percent else {
+        return (
+            "incomplete",
+            "missing comparator baseline or current RPS".to_owned(),
+        );
+    };
+    let Some(ratio_delta) = row.ratio_delta_percent else {
+        return (
+            "incomplete",
+            "missing baseline or current ratio denominator".to_owned(),
+        );
+    };
+    let oxibelt_p99_delta = row.oxibelt_p99_delta_percent.unwrap_or(0.0);
+    let oxibelt_regressed = oxibelt_rps_delta <= -3.0 || oxibelt_p99_delta >= 5.0;
+    let ratio_regressed = ratio_delta < -0.5;
+    let comparator_improved = comparator_rps_delta >= 3.0;
+
+    if ratio_regressed && oxibelt_regressed && comparator_improved {
+        (
+            "mixed",
+            format!(
+                "OxiBelt changed {oxibelt_rps_delta:.1}% RPS / {oxibelt_p99_delta:.1}% p99 while comparator changed {comparator_rps_delta:.1}% RPS"
+            ),
+        )
+    } else if oxibelt_regressed {
+        (
+            "oxibelt_regression",
+            format!("OxiBelt changed {oxibelt_rps_delta:.1}% RPS / {oxibelt_p99_delta:.1}% p99"),
+        )
+    } else if ratio_regressed && comparator_improved {
+        (
+            "comparator_shift",
+            format!(
+                "ratio fell {ratio_delta:.1}% while OxiBelt held {oxibelt_rps_delta:.1}% RPS and comparator rose {comparator_rps_delta:.1}%"
+            ),
+        )
+    } else if ratio_regressed {
+        (
+            "mixed",
+            format!(
+                "ratio fell {ratio_delta:.1}% with OxiBelt at {oxibelt_rps_delta:.1}% RPS and comparator at {comparator_rps_delta:.1}%"
+            ),
+        )
+    } else if ratio_delta >= 0.5 || oxibelt_rps_delta >= 3.0 || oxibelt_p99_delta <= -5.0 {
+        (
+            "improvement",
+            format!(
+                "ratio changed {ratio_delta:.1}% and OxiBelt changed {oxibelt_rps_delta:.1}% RPS / {oxibelt_p99_delta:.1}% p99"
+            ),
+        )
+    } else {
+        (
+            "stable",
+            format!(
+                "ratio changed {ratio_delta:.1}% and OxiBelt changed {oxibelt_rps_delta:.1}% RPS / {oxibelt_p99_delta:.1}% p99"
+            ),
+        )
+    }
+}
+
+fn summarize_delta_rows(rows: &[PerformanceDeltaRow]) -> DeltaSummary {
+    let mut summary = DeltaSummary {
+        rows: rows.len(),
+        ..DeltaSummary::default()
+    };
+    for row in rows {
+        match row.classification.as_str() {
+            "oxibelt_regression" => summary.oxibelt_regression += 1,
+            "comparator_shift" => summary.comparator_shift += 1,
+            "mixed" => summary.mixed += 1,
+            "improvement" => summary.improvement += 1,
+            "stable" => summary.stable += 1,
+            "incomplete" => summary.incomplete += 1,
+            _ => {}
+        }
+    }
+    summary
+}
+
 fn render_markdown(report: &Report) -> String {
     let mut markdown = String::new();
     writeln!(markdown, "# OxiBelt Docker Performance Comparison\n").unwrap();
@@ -1358,6 +1656,67 @@ fn write_warnings(markdown: &mut String, report: &Report) {
     writeln!(markdown).unwrap();
 }
 
+fn render_delta_markdown(report: &DeltaReport) -> String {
+    let mut markdown = String::new();
+    writeln!(markdown, "# OxiBelt Docker Performance Delta\n").unwrap();
+    writeln!(markdown, "## Summary\n").unwrap();
+    writeln!(markdown, "- Baseline: `{}`", report.baseline_report).unwrap();
+    writeln!(markdown, "- Rows compared: `{}`", report.summary.rows).unwrap();
+    writeln!(
+        markdown,
+        "- Classifications: `{}` OxiBelt regression, `{}` comparator shift, `{}` mixed, `{}` improvement, `{}` stable, `{}` incomplete\n",
+        report.summary.oxibelt_regression,
+        report.summary.comparator_shift,
+        report.summary.mixed,
+        report.summary.improvement,
+        report.summary.stable,
+        report.summary.incomplete,
+    )
+    .unwrap();
+
+    writeln!(markdown, "## Scenario deltas\n").unwrap();
+    if report.rows.is_empty() {
+        writeln!(markdown, "No baseline rows could be compared.\n").unwrap();
+    } else {
+        writeln!(
+            markdown,
+            "| Group | Scenario | Comparator | OxiBelt RPS delta | Comparator RPS delta | Ratio delta | OxiBelt p99 delta | Classification | Reason |"
+        )
+        .unwrap();
+        writeln!(
+            markdown,
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |"
+        )
+        .unwrap();
+        for row in &report.rows {
+            writeln!(
+                markdown,
+                "| `{}` | `{}` | `{}` | {} | {} | {} | {} | `{}` | {} |",
+                row.group,
+                row.scenario,
+                row.comparator,
+                format_percent(row.oxibelt_rps_delta_percent),
+                format_percent(row.comparator_rps_delta_percent),
+                format_percent(row.ratio_delta_percent),
+                format_percent(row.oxibelt_p99_delta_percent),
+                row.classification,
+                row.reason,
+            )
+            .unwrap();
+        }
+        writeln!(markdown).unwrap();
+    }
+
+    if !report.warnings.is_empty() {
+        writeln!(markdown, "## Warnings\n").unwrap();
+        for warning in &report.warnings {
+            writeln!(markdown, "- {warning}").unwrap();
+        }
+        writeln!(markdown).unwrap();
+    }
+    markdown
+}
+
 fn merge_text_field(target: &mut Option<String>, value: Option<String>) {
     let Some(value) = value else {
         return;
@@ -1398,6 +1757,10 @@ fn max_value(values: &[f64]) -> Option<f64> {
 
 fn format_number(value: Option<f64>) -> String {
     value.map_or_else(|| "n/a".to_owned(), |value| format!("{value:.2}"))
+}
+
+fn format_percent(value: Option<f64>) -> String {
+    value.map_or_else(|| "n/a".to_owned(), |value| format!("{value:.1}%"))
 }
 
 fn display_path(input_dir: &Path, path: &Path) -> String {
