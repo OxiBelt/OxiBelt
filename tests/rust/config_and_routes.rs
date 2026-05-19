@@ -2186,6 +2186,71 @@ connection_url = "redis://:secret@redis.example:6379/0"
 }
 
 #[test]
+fn effective_config_dump_redacts_webrtc_turn_auth_secrets() {
+    let temp_dir = common::TempDir::new("turn-redacted");
+    let config_path = write_loadable_config(&temp_dir, "turn-redacted", |raw| {
+        raw.replace(
+            "[[upstreams]]",
+            r#"[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "edge_relay"
+bind_udp = "127.0.0.1:0"
+realm = "example.test"
+public_ip = "127.0.0.1"
+relay_bind_ip = "127.0.0.1"
+
+[webrtc_turn_listeners.relay_port_range]
+start = 49152
+end = 49160
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+rest_shared_secret = "REST-SHARED-SECRET-LEAK"
+
+[[webrtc_turn_listeners.auth.static_credentials]]
+username = "media-user"
+password = "STATIC-PASSWORD-LEAK"
+
+[[upstreams]]"#,
+        )
+    });
+
+    let value = Config::load_effective_toml_redacted(&config_path).unwrap();
+    let listeners = value
+        .get("webrtc_turn_listeners")
+        .and_then(toml::Value::as_array)
+        .expect("effective TOML should contain TURN listeners");
+    let auth = listeners[0]
+        .get("auth")
+        .and_then(toml::Value::as_table)
+        .expect("effective TOML should contain TURN auth");
+    assert_eq!(
+        auth.get("rest_shared_secret").and_then(toml::Value::as_str),
+        Some("<redacted>")
+    );
+    let static_credentials = auth
+        .get("static_credentials")
+        .and_then(toml::Value::as_array)
+        .expect("effective TOML should contain TURN static credentials");
+    assert_eq!(
+        static_credentials[0]
+            .get("password")
+            .and_then(toml::Value::as_str),
+        Some("<redacted>")
+    );
+    assert_eq!(
+        static_credentials[0]
+            .get("username")
+            .and_then(toml::Value::as_str),
+        Some("media-user")
+    );
+
+    let redacted = toml::to_string_pretty(&value).expect("redacted TOML should serialize");
+    assert!(!redacted.contains("REST-SHARED-SECRET-LEAK"));
+    assert!(!redacted.contains("STATIC-PASSWORD-LEAK"));
+}
+
+#[test]
 fn effective_config_dump_resolves_auto_worker_counts() {
     let temp_dir = common::TempDir::new("effective-workers");
     let config_path = write_loadable_config(&temp_dir, "effective-workers", |raw| raw);

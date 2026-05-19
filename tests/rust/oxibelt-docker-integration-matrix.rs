@@ -2497,6 +2497,12 @@ run_case_checks() {
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/effective" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
   assert_response_jq "${response}" '.body | fromjson | .config | contains("[admin]")'
 
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/effective" 200 "GET" "" "Authorization: Bearer matrix-viewer-token")"
+  assert_response_jq "${response}" '.body | fromjson | .config | contains("rest_shared_secret = \"<redacted>\"")'
+  assert_response_jq "${response}" '.body | fromjson | .config | contains("password = \"<redacted>\"")'
+  assert_response_jq "${response}" '(.body | fromjson | .config | contains("REST-SHARED-SECRET-LEAK")) | not'
+  assert_response_jq "${response}" '(.body | fromjson | .config | contains("STATIC-PASSWORD-LEAK")) | not'
+
   raw_config="$(docker exec "${proxy_container}" cat /etc/oxibelt/config/oxibelt.toml)"
   validate_body="$(jq -cn --arg config "${raw_config}" '{format:"toml",config:$config}')"
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/validate" 200 "POST" "${validate_body}" "Authorization: Bearer matrix-upstream-token")"

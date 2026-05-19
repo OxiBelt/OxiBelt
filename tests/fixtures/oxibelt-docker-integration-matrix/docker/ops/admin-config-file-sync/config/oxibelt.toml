@@ -70,6 +70,26 @@ type = "reject"
 status = 403
 body = "synced group"
 
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "edge_relay"
+bind_udp = "0.0.0.0:3478"
+realm = "example.test"
+public_ip = "127.0.0.1"
+relay_bind_ip = "0.0.0.0"
+
+[webrtc_turn_listeners.relay_port_range]
+start = 49152
+end = 49160
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+rest_shared_secret = "REST-SHARED-SECRET-LEAK"
+
+[[webrtc_turn_listeners.auth.static_credentials]]
+username = "media-user"
+password = "STATIC-PASSWORD-LEAK"
+
 [[upstreams]]
 name = "http-upstream"
 origin = "http://mock-http:18080/origin"
@@ -86,4 +106,3 @@ name = "main-route"
 hosts = ["example.test"]
 path_prefix = "/app"
 upstream = "http-upstream"
-

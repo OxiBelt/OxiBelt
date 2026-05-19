@@ -2851,39 +2851,56 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
   Some(keys.iter().copied().collect())
 }
 
+const REDACTED_TOML_VALUE: &str = "<redacted>";
+
 fn redact_effective_toml(value: &mut toml::Value) {
-  if let Some(connection_url) = value
-    .get_mut("database")
-    .and_then(|database| database.get_mut("access_log"))
-    .and_then(|access_log| access_log.get_mut("connection_url"))
-  {
-    *connection_url = toml::Value::String("<redacted>".to_string());
-  }
-  if let Some(connection_url) = value
-    .get_mut("database")
-    .and_then(|database| database.get_mut("mitigation"))
-    .and_then(|mitigation| mitigation.get_mut("connection_url"))
-  {
-    *connection_url = toml::Value::String("<redacted>".to_string());
-  }
-  if let Some(connection_url) = value
-    .get_mut("logging")
-    .and_then(|logging| logging.get_mut("access_log"))
-    .and_then(|access_log| access_log.get_mut("database"))
-    .and_then(|database| database.get_mut("connection_url"))
-  {
-    *connection_url = toml::Value::String("<redacted>".to_string());
-  }
+  redact_toml_path(value, &["database", "access_log", "connection_url"]);
+  redact_toml_path(value, &["database", "mitigation", "connection_url"]);
+  redact_toml_path(
+    value,
+    &["logging", "access_log", "database", "connection_url"],
+  );
   if let Some(backends) = value
     .get_mut("shared_state")
     .and_then(|shared_state| shared_state.get_mut("backends"))
     .and_then(toml::Value::as_array_mut)
   {
     for backend in backends {
-      if let Some(connection_url) = backend.get_mut("connection_url") {
-        *connection_url = toml::Value::String("<redacted>".to_string());
+      redact_toml_path(backend, &["connection_url"]);
+    }
+  }
+  if let Some(listeners) = value
+    .get_mut("webrtc_turn_listeners")
+    .and_then(toml::Value::as_array_mut)
+  {
+    for listener in listeners {
+      redact_toml_path(listener, &["auth", "rest_shared_secret"]);
+      if let Some(static_credentials) = listener
+        .get_mut("auth")
+        .and_then(|auth| auth.get_mut("static_credentials"))
+        .and_then(toml::Value::as_array_mut)
+      {
+        for credential in static_credentials {
+          redact_toml_path(credential, &["password"]);
+        }
       }
     }
+  }
+}
+
+fn redact_toml_path(value: &mut toml::Value, path: &[&str]) {
+  let Some((last, parents)) = path.split_last() else {
+    return;
+  };
+  let mut current = value;
+  for key in parents {
+    let Some(next) = current.get_mut(*key) else {
+      return;
+    };
+    current = next;
+  }
+  if let Some(secret) = current.get_mut(*last) {
+    *secret = toml::Value::String(REDACTED_TOML_VALUE.to_string());
   }
 }
 
