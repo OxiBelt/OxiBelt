@@ -109,6 +109,8 @@ pub(super) fn signed_cache_purge_actor(
   Ok(AdminActor {
     name: "signed-cache-purge".to_string(),
     roles: vec![AdminRole::CacheOperator],
+    permissions: Vec::new(),
+    deny_permissions: Vec::new(),
   })
 }
 

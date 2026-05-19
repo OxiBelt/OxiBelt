@@ -127,7 +127,7 @@ Functions may call other functions when the call graph is acyclic. Global rules 
 
 ## Rule Groups
 
-Rule groups bundle reusable condition fragments and actions. Define global groups under `[[waf.rule_groups]]`, route-local groups under `[[routes.waf.rule_groups]]`, and external file-local groups under `[[rule_groups]]` inside an external `.oxirule.toml` file.
+Rule groups bundle reusable condition fragments and actions. Define global groups under `[[waf.rule_groups]]`, route-local groups under `[[routes.waf.rule_groups]]`, external file-local groups under `[[rule_groups]]` inside an external `.oxirule.toml` file, or shared group files referenced by `[waf] rule_group_files` and route-level `rule_group_files`. Shared group files use a top-level `[[rule_groups]]` array, resolve under the OxiRule directory, and use the same group fields as inline TOML groups. Exact paths must exist; glob entries may match zero files and are loaded in sorted order.
 
 ```toml
 [[waf.rule_groups]]

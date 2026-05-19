@@ -354,7 +354,9 @@ nonce_ttl_seconds = 600
 #[[admin.rbac.tokens]]
 # name = "upstream-ops"
 # bearer_token_env = "OXIBELT_UPSTREAM_TOKEN"
-# roles = ["viewer", "upstream_operator"] # viewer | cache_operator | upstream_operator | admin
+# roles = ["viewer", "upstream_operator"] # viewer | cache_operator | upstream_operator | security_operator | config_operator | admin
+# permissions = ["config.validate"]
+# deny_permissions = ["files.delete"]
 
 [admin.tls]
 enabled = false

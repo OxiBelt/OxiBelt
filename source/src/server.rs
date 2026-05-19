@@ -21,8 +21,10 @@ use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
+#[cfg(test)]
+use crate::config::AdminPermission;
 use crate::config::{
-  AdminConfig, AdminRole, AdminTransportMode, ConnectionLimitIdentityMode, RuntimeOverrides,
+  AdminRole, AdminTransportMode, Config, ConnectionLimitIdentityMode, RuntimeOverrides,
   UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
 };
 use crate::identity::Cidr;
@@ -43,11 +45,20 @@ use crate::upstream_control;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod admin;
+mod admin_auth;
+mod admin_control;
+mod admin_ops;
 mod connection_errors;
 mod plain_http;
 #[cfg(test)]
 mod reload_tests;
 use admin::json_response;
+#[cfg(test)]
+use admin_auth::admin_actor_has_permission;
+use admin_auth::{AdminActor, admin_actor, admin_actor_has_any_role, admin_actor_has_role};
+use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
+#[cfg(test)]
+use admin_ops::admin_lifecycle_response;
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
 const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
@@ -58,13 +69,19 @@ pub async fn serve(
   runtime_overrides: RuntimeOverrides,
 ) -> anyhow::Result<()> {
   let (error_tx, mut error_rx) = mpsc::unbounded_channel();
-  let mut listeners = ListenerSupervisor::start(state.clone(), error_tx.clone()).await?;
+  let effective_config = config_path
+    .as_ref()
+    .and_then(|path| Config::load_effective_toml_redacted(path).ok())
+    .and_then(|value| toml::to_string_pretty(&value).ok());
+  let (admin_control, mut admin_control_rx) = AdminControlHandle::new(effective_config);
+  let mut listeners =
+    ListenerSupervisor::start(state.clone(), error_tx.clone(), admin_control.clone()).await?;
   let _ops = OpsTasks::start(state.clone(), error_tx.clone()).await?;
   let reload = if state.snapshot().config.runtime.hot_reload.mode.enabled() {
     match config_path {
       Some(config_path) => Some(ReloadManager::new(
         config_path,
-        runtime_overrides,
+        runtime_overrides.clone(),
         state.snapshot().as_ref(),
       )?),
       None => {
@@ -79,9 +96,26 @@ pub async fn serve(
   drop(error_tx);
 
   if let Some(reload) = reload {
-    serve_with_reload(state, &mut listeners, &mut error_rx, reload).await
+    serve_with_reload(
+      state,
+      &mut listeners,
+      &mut error_rx,
+      &mut admin_control_rx,
+      admin_control,
+      runtime_overrides,
+      reload,
+    )
+    .await
   } else {
-    serve_until_shutdown(state, &mut listeners, &mut error_rx).await
+    serve_until_shutdown(
+      state,
+      &mut listeners,
+      &mut error_rx,
+      &mut admin_control_rx,
+      admin_control,
+      runtime_overrides,
+    )
+    .await
   }
 }
 
@@ -246,6 +280,7 @@ async fn serve_admin_listener(
   listener: TcpListener,
   configured_bind: SocketAddr,
   state: AppHandle,
+  admin_control: AdminControlHandle,
   mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
   let bind = listener
@@ -271,8 +306,11 @@ async fn serve_admin_listener(
         };
         crate::tcp_socket::enable_tcp_nodelay(&stream, peer_addr, "admin listener");
         let state = state.clone();
+        let admin_control = admin_control.clone();
         tokio::spawn(async move {
-          if let Err(error) = handle_admin_connection(stream, peer_addr, configured_bind, state).await {
+          if let Err(error) =
+            handle_admin_connection(stream, peer_addr, configured_bind, state, admin_control).await
+          {
             warn!(peer = %peer_addr, error = %error, "admin connection failed");
           }
         });
@@ -286,6 +324,7 @@ async fn handle_admin_connection(
   peer_addr: SocketAddr,
   listener_bind: SocketAddr,
   state: AppHandle,
+  admin_control: AdminControlHandle,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
   if !admin_listener_current(&snapshot, listener_bind) {
@@ -296,22 +335,25 @@ async fn handle_admin_connection(
   drop(snapshot);
   match transport {
     AdminTransportMode::Tls => {
-      handle_admin_tls_connection(stream, peer_addr, listener_bind, state).await
+      handle_admin_tls_connection(stream, peer_addr, listener_bind, state, admin_control).await
     }
     AdminTransportMode::Plaintext => {
-      handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state).await
+      handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state, admin_control)
+        .await
     }
     AdminTransportMode::PlaintextAllowlist if plaintext_allowed => {
-      handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state).await
+      handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state, admin_control)
+        .await
     }
     AdminTransportMode::PlaintextAllowlist => {
       bail!("admin plaintext connection from {peer_addr} is not allowlisted");
     }
     AdminTransportMode::Auto => {
       if plaintext_allowed && !tcp_stream_starts_with_tls(&stream).await {
-        handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state).await
+        handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state, admin_control)
+          .await
       } else {
-        handle_admin_tls_connection(stream, peer_addr, listener_bind, state).await
+        handle_admin_tls_connection(stream, peer_addr, listener_bind, state, admin_control).await
       }
     }
   }
@@ -341,6 +383,7 @@ async fn handle_admin_tls_connection(
   peer_addr: SocketAddr,
   listener_bind: SocketAddr,
   state: AppHandle,
+  admin_control: AdminControlHandle,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
   let config = snapshot
@@ -361,6 +404,7 @@ async fn handle_admin_tls_connection(
     peer_addr,
     listener_bind,
     state,
+    admin_control,
     "https",
   )
   .await
@@ -371,12 +415,14 @@ async fn handle_admin_plaintext_connection(
   peer_addr: SocketAddr,
   listener_bind: SocketAddr,
   state: AppHandle,
+  admin_control: AdminControlHandle,
 ) -> anyhow::Result<()> {
   serve_admin_http1(
     TokioIo::new(stream),
     peer_addr,
     listener_bind,
     state,
+    admin_control,
     "http",
   )
   .await
@@ -387,6 +433,7 @@ async fn serve_admin_http1<I>(
   peer_addr: SocketAddr,
   listener_bind: SocketAddr,
   state: AppHandle,
+  admin_control: AdminControlHandle,
   scheme: &'static str,
 ) -> anyhow::Result<()>
 where
@@ -394,8 +441,19 @@ where
 {
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
+    let admin_control = admin_control.clone();
     async move {
-      Ok::<_, Infallible>(admin_response(request, state, peer_addr, listener_bind, scheme).await)
+      Ok::<_, Infallible>(
+        admin_response(
+          request,
+          state,
+          admin_control,
+          peer_addr,
+          listener_bind,
+          scheme,
+        )
+        .await,
+      )
     }
   });
   hyper::server::conn::http1::Builder::new()
@@ -407,6 +465,7 @@ where
 async fn admin_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
+  admin_control: AdminControlHandle,
   peer_addr: SocketAddr,
   listener_bind: SocketAddr,
   scheme: &'static str,
@@ -459,6 +518,42 @@ async fn admin_response(
     return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
   };
 
+  if path == "/admin/v1/config/status"
+    || path == "/admin/v1/config/effective"
+    || path == "/admin/v1/config/validate"
+    || path == "/admin/v1/config/diff"
+    || path == "/admin/v1/config/load"
+    || path == "/admin/v1/config/rollback"
+  {
+    return admin_ops::admin_config_response(
+      request,
+      state.clone(),
+      admin_control.clone(),
+      &actor,
+      &method,
+      &path,
+    )
+    .await;
+  }
+
+  if let Some(response) = admin_ops::admin_tls_response(
+    &request,
+    snapshot.as_ref(),
+    admin_control.clone(),
+    &actor,
+    &method,
+    &path,
+  )
+  .await
+  {
+    return response;
+  }
+
+  if path == "/admin/v1/files/sync" {
+    return admin_ops::admin_files_response(request, admin_control.clone(), &actor, &method, &path)
+      .await;
+  }
+
   if path == "/admin/v1/cache/key-explain" {
     return admin::cache_key_explain_response(request, snapshot.as_ref(), &actor, &method).await;
   }
@@ -479,11 +574,13 @@ async fn admin_response(
     .await;
   }
 
-  if let Some(response) = admin_waf_response(snapshot.as_ref(), &actor, &method, &path) {
+  if let Some(response) = admin_ops::admin_waf_response(snapshot.as_ref(), &actor, &method, &path) {
     return response;
   }
 
-  if let Some(response) = admin_lifecycle_response(snapshot.as_ref(), &actor, &method, &path) {
+  if let Some(response) =
+    admin_ops::admin_lifecycle_response(snapshot.as_ref(), &actor, &method, &path)
+  {
     return response;
   }
 
@@ -512,98 +609,6 @@ async fn admin_response(
   }
 
   text_response(StatusCode::NOT_FOUND, "not found")
-}
-
-fn admin_waf_response(
-  snapshot: &AppSnapshot,
-  actor: &AdminActor,
-  method: &::http::Method,
-  path: &str,
-) -> Option<Response<ProxyBody>> {
-  if path != "/admin/v1/waf/rule-hits" && path != "/admin/v1/waf/crs/compatibility" {
-    return None;
-  }
-  if !admin_actor_has_role(actor, AdminRole::Viewer) {
-    return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
-  }
-  if *method != ::http::Method::GET {
-    return Some(text_response(
-      StatusCode::METHOD_NOT_ALLOWED,
-      "method not allowed",
-    ));
-  }
-  match path {
-    "/admin/v1/waf/rule-hits" => Some(json_response(
-      StatusCode::OK,
-      &json!({ "rules": snapshot.waf.rule_hit_snapshots() }),
-    )),
-    "/admin/v1/waf/crs/compatibility" => Some(json_response(
-      StatusCode::OK,
-      &crate::waf::crs_compatibility_matrix(),
-    )),
-    _ => None,
-  }
-}
-
-fn admin_lifecycle_response(
-  snapshot: &AppSnapshot,
-  actor: &AdminActor,
-  method: &::http::Method,
-  path: &str,
-) -> Option<Response<ProxyBody>> {
-  match path {
-    "/admin/v1/lifecycle" => {
-      if !admin_actor_has_role(actor, AdminRole::Viewer) {
-        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
-      }
-      if *method != ::http::Method::GET {
-        return Some(text_response(
-          StatusCode::METHOD_NOT_ALLOWED,
-          "method not allowed",
-        ));
-      }
-      Some(json_response(
-        StatusCode::OK,
-        &json!({
-          "draining": snapshot.lifecycle.is_draining(),
-          "reason": snapshot.lifecycle.reason(),
-        }),
-      ))
-    }
-    "/admin/v1/lifecycle/drain" => {
-      if !admin_actor_has_role(actor, AdminRole::Admin) {
-        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
-      }
-      if *method != ::http::Method::POST {
-        return Some(text_response(
-          StatusCode::METHOD_NOT_ALLOWED,
-          "method not allowed",
-        ));
-      }
-      snapshot.lifecycle.set_admin_draining();
-      Some(json_response(StatusCode::OK, &json!({ "ok": true })))
-    }
-    "/admin/v1/lifecycle/undrain" => {
-      if !admin_actor_has_role(actor, AdminRole::Admin) {
-        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
-      }
-      if *method != ::http::Method::POST {
-        return Some(text_response(
-          StatusCode::METHOD_NOT_ALLOWED,
-          "method not allowed",
-        ));
-      }
-      snapshot.lifecycle.clear_admin_draining();
-      Some(json_response(StatusCode::OK, &json!({ "ok": true })))
-    }
-    _ => None,
-  }
-}
-
-#[derive(Debug, Clone)]
-struct AdminActor {
-  name: String,
-  roles: Vec<AdminRole>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -966,7 +971,7 @@ where
     .await
     .map_err(|_| text_response(StatusCode::BAD_REQUEST, "failed to read request body"))?
     .to_bytes();
-  if bytes.len() > 64 * 1024 {
+  if bytes.len() > admin_control::ADMIN_CONFIG_BODY_LIMIT {
     return Err(text_response(
       StatusCode::PAYLOAD_TOO_LARGE,
       "request body is too large",
@@ -974,43 +979,6 @@ where
   }
   serde_json::from_slice(&bytes)
     .map_err(|_| text_response(StatusCode::BAD_REQUEST, "invalid JSON request body"))
-}
-
-fn admin_actor(request: &hyper::Request<Incoming>, config: &AdminConfig) -> Option<AdminActor> {
-  let actual = request
-    .headers()
-    .get(::http::header::AUTHORIZATION)
-    .and_then(|value| value.to_str().ok())
-    .and_then(|value| value.strip_prefix("Bearer "))?;
-  if std::env::var(&config.bearer_token_env)
-    .ok()
-    .is_some_and(|expected| !expected.is_empty() && expected == actual)
-  {
-    return Some(AdminActor {
-      name: "admin".to_string(),
-      roles: vec![AdminRole::Admin],
-    });
-  }
-  for token in &config.rbac.tokens {
-    if std::env::var(&token.bearer_token_env)
-      .ok()
-      .is_some_and(|expected| !expected.is_empty() && expected == actual)
-    {
-      return Some(AdminActor {
-        name: token.name.clone(),
-        roles: token.roles.clone(),
-      });
-    }
-  }
-  None
-}
-
-fn admin_actor_has_role(actor: &AdminActor, role: AdminRole) -> bool {
-  actor.roles.contains(&AdminRole::Admin) || actor.roles.contains(&role)
-}
-
-fn admin_actor_has_any_role(actor: &AdminActor, roles: &[AdminRole]) -> bool {
-  actor.roles.contains(&AdminRole::Admin) || roles.iter().any(|role| actor.roles.contains(role))
 }
 
 fn admin_audit(
@@ -1040,13 +1008,29 @@ async fn serve_until_shutdown(
   state: AppHandle,
   listeners: &mut ListenerSupervisor,
   error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
+  admin_control_rx: &mut mpsc::UnboundedReceiver<AdminControlCommand>,
+  admin_control: AdminControlHandle,
+  runtime_overrides: RuntimeOverrides,
 ) -> anyhow::Result<()> {
-  tokio::select! {
+  let mut rollback: Option<RollbackSnapshot> = None;
+  loop {
+    tokio::select! {
       result = shutdown_signal() => {
           result?;
-          graceful_process_shutdown(&state, listeners).await
+          return graceful_process_shutdown(&state, listeners).await;
       }
-      Some(error) = error_rx.recv() => Err(error),
+      Some(error) = error_rx.recv() => return Err(error),
+      Some(command) = admin_control_rx.recv() => {
+        admin_control::handle_admin_control_command(
+          command,
+          &state,
+          listeners,
+          &admin_control,
+          &runtime_overrides,
+          &mut rollback,
+        ).await;
+      }
+    }
   }
 }
 
@@ -1054,12 +1038,16 @@ async fn serve_with_reload(
   state: AppHandle,
   listeners: &mut ListenerSupervisor,
   error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
+  admin_control_rx: &mut mpsc::UnboundedReceiver<AdminControlCommand>,
+  admin_control: AdminControlHandle,
+  runtime_overrides: RuntimeOverrides,
   mut reload: ReloadManager,
 ) -> anyhow::Result<()> {
   #[cfg(unix)]
   let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
     .context("failed to install SIGHUP listener")?;
 
+  let mut rollback: Option<RollbackSnapshot> = None;
   loop {
     let poll_sleep = tokio::time::sleep(reload.poll_interval());
     tokio::pin!(poll_sleep);
@@ -1069,6 +1057,16 @@ async fn serve_with_reload(
             return graceful_process_shutdown(&state, listeners).await;
         }
         Some(error) = error_rx.recv() => return Err(error),
+        Some(command) = admin_control_rx.recv() => {
+            admin_control::handle_admin_control_command(
+              command,
+              &state,
+              listeners,
+              &admin_control,
+              &runtime_overrides,
+              &mut rollback,
+            ).await;
+        }
         _ = &mut poll_sleep => {
             reload.reload_if_changed(ReloadTrigger::Poll, &state, listeners).await;
         }
@@ -1123,6 +1121,7 @@ pub(crate) struct ListenerSupervisor {
   streams: Vec<StreamListenerTask>,
   turns: Vec<TurnListenerTask>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  admin_control: AdminControlHandle,
 }
 
 struct TcpListenerTask {
@@ -1209,6 +1208,7 @@ impl ListenerSupervisor {
   async fn start(
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
+    admin_control: AdminControlHandle,
   ) -> anyhow::Result<Self> {
     let snapshot = state.snapshot();
     let mut supervisor = Self {
@@ -1219,6 +1219,7 @@ impl ListenerSupervisor {
       streams: Vec::new(),
       turns: Vec::new(),
       error_tx,
+      admin_control,
     };
     let pending = supervisor.prepare(&snapshot).await?;
     supervisor.commit(pending, &snapshot, state);
@@ -1451,7 +1452,12 @@ impl ListenerSupervisor {
     }
     match pending.admin {
       Some(Some(admin)) => {
-        let admin = admin.start(state.clone(), self.error_tx.clone(), drain_timeouts);
+        let admin = admin.start(
+          state.clone(),
+          self.error_tx.clone(),
+          self.admin_control.clone(),
+          drain_timeouts,
+        );
         if let Some(old) = self.admin.replace(admin) {
           old.drain_background();
         }
@@ -1737,12 +1743,15 @@ impl BoundAdminListener {
     self,
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
+    admin_control: AdminControlHandle,
     drain_timeouts: DrainTimeouts,
   ) -> AdminListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
     let task = tokio::spawn(async move {
-      if let Err(error) = serve_admin_listener(self.listener, bind, state, shutdown_rx).await {
+      if let Err(error) =
+        serve_admin_listener(self.listener, bind, state, admin_control, shutdown_rx).await
+      {
         let _ = error_tx.send(error.context("admin listener failed"));
       }
     });
@@ -1777,6 +1786,11 @@ async fn bind_admin_listener(bind: SocketAddr) -> anyhow::Result<BoundAdminListe
     .await
     .with_context(|| format!("failed to bind admin listener to {bind}"))?;
   Ok(BoundAdminListener { bind, listener })
+}
+
+#[cfg(test)]
+fn test_admin_control() -> AdminControlHandle {
+  AdminControlHandle::new(None).0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2417,20 +2431,20 @@ mod tests {
 
   const ADMIN_TOKEN_ENV: &str = "PATH";
 
+  fn test_actor(name: &str, roles: Vec<AdminRole>) -> AdminActor {
+    AdminActor {
+      name: name.to_string(),
+      roles,
+      permissions: Vec::new(),
+      deny_permissions: Vec::new(),
+    }
+  }
+
   #[test]
   fn admin_rbac_role_checks_match_endpoint_scopes() {
-    let viewer = AdminActor {
-      name: "viewer".to_string(),
-      roles: vec![AdminRole::Viewer],
-    };
-    let upstream_operator = AdminActor {
-      name: "upstream".to_string(),
-      roles: vec![AdminRole::UpstreamOperator],
-    };
-    let admin = AdminActor {
-      name: "admin".to_string(),
-      roles: vec![AdminRole::Admin],
-    };
+    let viewer = test_actor("viewer", vec![AdminRole::Viewer]);
+    let upstream_operator = test_actor("upstream", vec![AdminRole::UpstreamOperator]);
+    let admin = test_actor("admin", vec![AdminRole::Admin]);
 
     assert!(admin_actor_has_any_role(
       &viewer,
@@ -2449,6 +2463,39 @@ mod tests {
     assert!(admin_actor_has_role(&admin, AdminRole::UpstreamOperator));
   }
 
+  #[test]
+  fn admin_permissions_allow_fine_grained_tokens_and_deny_overrides_roles() {
+    let config_token = AdminActor {
+      name: "config-token".to_string(),
+      roles: Vec::new(),
+      permissions: vec![AdminPermission::ConfigValidate],
+      deny_permissions: Vec::new(),
+    };
+    assert!(admin_actor_has_permission(
+      &config_token,
+      AdminPermission::ConfigValidate
+    ));
+    assert!(!admin_actor_has_permission(
+      &config_token,
+      AdminPermission::ConfigLoad
+    ));
+
+    let limited_admin = AdminActor {
+      name: "limited-admin".to_string(),
+      roles: vec![AdminRole::Admin],
+      permissions: Vec::new(),
+      deny_permissions: vec![AdminPermission::FilesDelete],
+    };
+    assert!(admin_actor_has_permission(
+      &limited_admin,
+      AdminPermission::ConfigLoad
+    ));
+    assert!(!admin_actor_has_permission(
+      &limited_admin,
+      AdminPermission::FilesDelete
+    ));
+  }
+
   #[tokio::test]
   async fn admin_lifecycle_endpoints_enforce_rbac_and_toggle_drain() {
     let temp_dir = common::TempDir::new("admin-lifecycle");
@@ -2457,14 +2504,8 @@ mod tests {
     let snapshot = AppSnapshot::new(config)
       .await
       .expect("snapshot should initialize");
-    let viewer = AdminActor {
-      name: "viewer".to_string(),
-      roles: vec![AdminRole::Viewer],
-    };
-    let admin = AdminActor {
-      name: "admin".to_string(),
-      roles: vec![AdminRole::Admin],
-    };
+    let viewer = test_actor("viewer", vec![AdminRole::Viewer]);
+    let admin = test_actor("admin", vec![AdminRole::Admin]);
 
     let response = admin_lifecycle_response(
       &snapshot,
@@ -2526,7 +2567,13 @@ mod tests {
       .local_addr()
       .expect("admin listener address should be available");
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let task = tokio::spawn(serve_admin_listener(listener, addr, state, shutdown_rx));
+    let task = tokio::spawn(serve_admin_listener(
+      listener,
+      addr,
+      state,
+      test_admin_control(),
+      shutdown_rx,
+    ));
 
     match admin_purge_response(addr).await {
       Ok(response) => assert!(
@@ -2563,7 +2610,7 @@ mod tests {
         .expect("initial snapshot should initialize"),
     );
     let (error_tx, _error_rx) = mpsc::unbounded_channel();
-    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx)
+    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx, test_admin_control())
       .await
       .expect("listener supervisor should start");
 
@@ -2624,7 +2671,7 @@ mod tests {
         .expect("initial snapshot should initialize"),
     );
     let (error_tx, _error_rx) = mpsc::unbounded_channel();
-    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx)
+    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx, test_admin_control())
       .await
       .expect("listener supervisor should start");
 
@@ -2668,7 +2715,7 @@ mod tests {
         .expect("initial snapshot should initialize"),
     );
     let (error_tx, _error_rx) = mpsc::unbounded_channel();
-    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx)
+    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx, test_admin_control())
       .await
       .expect("listener supervisor should start");
 

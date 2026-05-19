@@ -169,6 +169,7 @@ impl AppHandle {
   }
 }
 
+#[derive(Clone)]
 pub struct AppSnapshot {
   pub config: Config,
   pub route_table: RouteTable,

@@ -41,7 +41,13 @@ async fn admin_v1_json_purge_removes_exact_prefix_and_tag_entries() {
   }
   let state = AppHandle::new(snapshot);
   let (shutdown, shutdown_rx) = watch::channel(false);
-  let task = tokio::spawn(serve_admin_listener(listener, addr, state, shutdown_rx));
+  let task = tokio::spawn(serve_admin_listener(
+    listener,
+    addr,
+    state,
+    test_admin_control(),
+    shutdown_rx,
+  ));
 
   for (body, expected) in [
     (
@@ -169,4 +175,29 @@ async fn admin_json_purge_response(addr: SocketAddr, body: &str) -> String {
 
 fn log_safe_text(input: &str) -> String {
   input.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+#[test]
+fn file_sync_payload_accepts_public_oxirule_names() {
+  let payload: admin_control::AdminFilesSyncRequest = serde_json::from_str(
+    r#"{
+      "apply": "oxirule",
+      "operations": [
+        {
+          "op": "put",
+          "root": "oxirule_group",
+          "path": "groups/main.oxirule-group.toml",
+          "content": "[[rule_groups]]\nname = \"main\"\n"
+        }
+      ]
+    }"#,
+  )
+  .expect("public file sync payload names should deserialize");
+
+  assert_eq!(payload.apply, admin_control::AdminApplyMode::OxiRule);
+  assert_eq!(payload.operations.len(), 1);
+  assert_eq!(
+    payload.operations[0].root,
+    admin_control::AdminFileRoot::OxiRuleGroup
+  );
 }

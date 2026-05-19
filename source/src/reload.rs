@@ -245,7 +245,7 @@ impl ReloadManager {
   }
 }
 
-fn validate_full_reload_runtime_compatibility(
+pub(crate) fn validate_full_reload_runtime_compatibility(
   active: &Config,
   replacement: &Config,
 ) -> anyhow::Result<()> {
@@ -259,7 +259,7 @@ fn validate_full_reload_runtime_compatibility(
   Ok(())
 }
 
-fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
+pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {
   let cert_dir = config
     .source_paths
     .cert_dir

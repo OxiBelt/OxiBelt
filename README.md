@@ -67,6 +67,15 @@ Full reloads activate replacement listeners before old listener generations drai
 The admin listener exposes lifecycle control when enabled:
 
 ```text
+GET  /admin/v1/config/status
+GET  /admin/v1/config/effective
+POST /admin/v1/config/validate
+POST /admin/v1/config/diff
+POST /admin/v1/config/load
+POST /admin/v1/config/rollback
+POST /admin/v1/files/sync
+GET  /admin/v1/tls/downstream
+POST /admin/v1/tls/downstream/reload
 GET  /admin/v1/lifecycle
 POST /admin/v1/lifecycle/drain
 POST /admin/v1/lifecycle/undrain

@@ -40,7 +40,7 @@ async fn same_listener_reload_drains_keepalive_and_new_connections_use_new_snaps
       .expect("initial snapshot should initialize"),
   );
   let (error_tx, _error_rx) = mpsc::unbounded_channel();
-  let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx)
+  let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx, test_admin_control())
     .await
     .expect("listener supervisor should start");
 

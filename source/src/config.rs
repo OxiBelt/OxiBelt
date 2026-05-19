@@ -10,6 +10,7 @@ use url::Url;
 
 use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 
+mod admin_runtime;
 mod database;
 mod dynamic_policy;
 mod http2;
@@ -173,6 +174,7 @@ pub struct ConfigSourcePaths {
   pub config_entry: Option<PathBuf>,
   pub config_dir: Option<PathBuf>,
   pub cert_dir: Option<PathBuf>,
+  pub oxirule_dir: Option<PathBuf>,
   pub config_files: Vec<PathBuf>,
   pub runtime_files: Vec<PathBuf>,
   pub discovery_files: Vec<PathBuf>,
@@ -390,6 +392,7 @@ impl Config {
   fn resolve_relative_paths(&mut self, path_roots: &ConfigPathRoots) -> anyhow::Result<()> {
     self.source_paths.config_dir = Some(path_roots.config_dir.clone());
     self.source_paths.cert_dir = Some(path_roots.cert_dir.clone());
+    self.source_paths.oxirule_dir = Some(path_roots.oxirule_dir.clone());
     let (tls_cert_chain, tls_cert_chain_logical) =
       resolve_existing_local_config_file_path_with_logical(
         "tls.cert_chain",
@@ -1622,8 +1625,11 @@ impl Config {
       if !names.insert(token.name.as_str()) {
         bail!("duplicate admin.rbac.tokens name {}", token.name);
       }
-      if token.roles.is_empty() {
-        bail!("admin.rbac.tokens {} roles must not be empty", token.name);
+      if token.roles.is_empty() && token.permissions.is_empty() {
+        bail!(
+          "admin.rbac.tokens {} must include at least one role or permission",
+          token.name
+        );
       }
       if std::env::var(&token.bearer_token_env)
         .ok()
@@ -2550,7 +2556,13 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "nonce_ttl_seconds",
     ][..],
     "admin.rbac" => &["tokens"][..],
-    "admin.rbac.tokens" => &["bearer_token_env", "name", "roles"][..],
+    "admin.rbac.tokens" => &[
+      "bearer_token_env",
+      "deny_permissions",
+      "name",
+      "permissions",
+      "roles",
+    ][..],
     "admin.tls" => &[
       "certificates",
       "client_auth",
@@ -4448,7 +4460,12 @@ pub struct AdminRbacConfig {
 pub struct AdminRbacTokenConfig {
   pub name: String,
   pub bearer_token_env: String,
+  #[serde(default)]
   pub roles: Vec<AdminRole>,
+  #[serde(default)]
+  pub permissions: Vec<AdminPermission>,
+  #[serde(default)]
+  pub deny_permissions: Vec<AdminPermission>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
@@ -4458,6 +4475,7 @@ pub enum AdminRole {
   CacheOperator,
   UpstreamOperator,
   SecurityOperator,
+  ConfigOperator,
   Admin,
 }
 
@@ -4468,8 +4486,73 @@ impl AdminRole {
       Self::CacheOperator => "cache_operator",
       Self::UpstreamOperator => "upstream_operator",
       Self::SecurityOperator => "security_operator",
+      Self::ConfigOperator => "config_operator",
       Self::Admin => "admin",
     }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+pub enum AdminPermission {
+  ConfigRead,
+  ConfigValidate,
+  ConfigDiff,
+  ConfigLoad,
+  ConfigRollback,
+  FilesSyncConfig,
+  FilesSyncOxiRule,
+  FilesSyncOxiRuleGroup,
+  FilesDelete,
+  TlsDownstreamRead,
+  TlsDownstreamReload,
+}
+
+impl AdminPermission {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::ConfigRead => "config.read",
+      Self::ConfigValidate => "config.validate",
+      Self::ConfigDiff => "config.diff",
+      Self::ConfigLoad => "config.load",
+      Self::ConfigRollback => "config.rollback",
+      Self::FilesSyncConfig => "files.sync.config",
+      Self::FilesSyncOxiRule => "files.sync.oxirule",
+      Self::FilesSyncOxiRuleGroup => "files.sync.oxirule_group",
+      Self::FilesDelete => "files.delete",
+      Self::TlsDownstreamRead => "tls.downstream.read",
+      Self::TlsDownstreamReload => "tls.downstream.reload",
+    }
+  }
+}
+
+impl std::str::FromStr for AdminPermission {
+  type Err = anyhow::Error;
+
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    match value {
+      "config.read" => Ok(Self::ConfigRead),
+      "config.validate" => Ok(Self::ConfigValidate),
+      "config.diff" => Ok(Self::ConfigDiff),
+      "config.load" => Ok(Self::ConfigLoad),
+      "config.rollback" => Ok(Self::ConfigRollback),
+      "files.sync.config" => Ok(Self::FilesSyncConfig),
+      "files.sync.oxirule" => Ok(Self::FilesSyncOxiRule),
+      "files.sync.oxirule_group" => Ok(Self::FilesSyncOxiRuleGroup),
+      "files.delete" => Ok(Self::FilesDelete),
+      "tls.downstream.read" => Ok(Self::TlsDownstreamRead),
+      "tls.downstream.reload" => Ok(Self::TlsDownstreamReload),
+      _ => bail!("unknown admin permission {value}"),
+    }
+  }
+}
+
+impl<'de> Deserialize<'de> for AdminPermission {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    let value = String::deserialize(deserializer)?;
+    value.parse().map_err(serde::de::Error::custom)
   }
 }
 

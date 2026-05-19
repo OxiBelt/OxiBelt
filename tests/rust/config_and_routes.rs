@@ -5,13 +5,13 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-    AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
-    ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
-    DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
-    ForwardedHeaderMode, GrpcRetryMode, HotReloadMode, MitigationFailurePolicy, OcspMode,
-    PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey,
-    RetryCondition, RuntimeOverrides, SharedStateBackendKind, StaticFilesSendfileMode,
-    TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    AdminPermission, AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig,
+    Config, ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode,
+    DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
+    ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode, MitigationFailurePolicy,
+    OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
+    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
+    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
     UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
     UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
@@ -56,6 +56,41 @@ fn protocol_operations_defaults_are_disabled() {
         ProxyProtocolEgressMode::Off
     );
     assert!(config.stream_listeners.is_empty());
+}
+
+#[test]
+fn admin_rbac_tokens_accept_permissions_without_roles_and_parse_denies() {
+    let temp_dir = common::TempDir::new("admin-rbac-permissions");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "admin-rbac-permissions");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+bearer_token_env = "PATH"
+transport = "plaintext_allowlist"
+
+[[admin.rbac.tokens]]
+name = "config-ci"
+bearer_token_env = "PATH"
+permissions = ["config.validate", "files.sync.oxirule_group"]
+deny_permissions = ["files.delete"]
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let token = &config.admin.rbac.tokens[0];
+    assert!(token.roles.is_empty());
+    assert_eq!(
+        token.permissions,
+        vec![
+            AdminPermission::ConfigValidate,
+            AdminPermission::FilesSyncOxiRuleGroup
+        ]
+    );
+    assert_eq!(token.deny_permissions, vec![AdminPermission::FilesDelete]);
 }
 
 fn available_parallelism() -> usize {
@@ -2392,7 +2427,9 @@ roles = ["viewer"]
         .validate()
         .expect_err("empty RBAC token roles should be rejected");
     assert!(
-        error.to_string().contains("roles must not be empty"),
+        error
+            .to_string()
+            .contains("must include at least one role or permission"),
         "unexpected error: {error}"
     );
 

@@ -1,0 +1,3 @@
+[[rule_groups]]
+name = "synced-block"
+when = "false"

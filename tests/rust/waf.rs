@@ -6374,6 +6374,94 @@ path = "rules/grouped.oxirule.toml"
 }
 
 #[test]
+fn oxirule_group_files_load_for_global_and_route_scopes() {
+    let temp_dir = common::TempDir::new("waf-rule-group-files");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let group_dir = temp_dir.path().join("oxirule").join("groups");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&group_dir).expect("failed to create group directory");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "waf-rule-group-files");
+    std::fs::write(
+        group_dir.join("global.oxirule-group.toml"),
+        r#"
+[[rule_groups]]
+name = "global-deny"
+when = "Request.Http.Path == '/global'"
+"#,
+    )
+    .expect("failed to write global group file");
+    std::fs::write(
+        group_dir.join("route.oxirule-group.toml"),
+        r#"
+[[rule_groups]]
+name = "route-deny"
+when = "Request.Http.Path == '/route'"
+"#,
+    )
+    .expect("failed to write route group file");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+rule_group_files = ["groups/global.oxirule-group.toml", "groups/no-match-*.toml"]
+
+[[waf.rules]]
+name = "global-file-rule"
+phase = "request"
+priority = 1
+groups = ["global-deny"]
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+
+[[routes]]
+name = "route-file"
+hosts = ["example.com"]
+path_prefix = "/route"
+upstream = "app"
+
+[routes.waf]
+rule_group_files = ["groups/route.oxirule-group.toml"]
+
+[[routes.waf.rules]]
+name = "route-file-rule"
+phase = "request"
+priority = 1
+groups = ["route-deny"]
+
+[[routes.waf.rules.actions]]
+type = "reject"
+status = 451
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load group files");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let global = evaluate_simple_request(&engine, "/global");
+
+    assert_eq!(
+        global.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn external_rule_file_groups_are_not_exported() {
     let temp_dir = common::TempDir::new("waf-external-rule-group-local-only");
     let config_dir = temp_dir.path().join("config");

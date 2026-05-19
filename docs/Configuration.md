@@ -831,6 +831,8 @@ nonce_ttl_seconds = 600
 name = "upstream-ops"
 bearer_token_env = "OXIBELT_UPSTREAM_TOKEN"
 roles = ["viewer", "upstream_operator"]
+permissions = []
+deny_permissions = []
 
 [admin.tls]
 enabled = false
@@ -910,7 +912,55 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 
 `[admin]` exposes operations APIs such as cache purge and upstream-pool runtime control. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>`, even when mTLS is enabled.
 
-`admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and roles. Roles are `viewer`, `cache_operator`, `upstream_operator`, `security_operator`, and `admin`; `admin` implies all scopes. Cache purge requires `cache_operator` or a valid `[admin.cache_purge_signing]` HMAC signature; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`; dynamic policy automation APIs require `security_operator`. Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
+`admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and may set `roles`, `permissions`, and `deny_permissions`. Roles are `viewer`, `cache_operator`, `upstream_operator`, `security_operator`, `config_operator`, and `admin`; `admin` implies all scopes. A token with empty `roles` is valid when it grants at least one explicit permission. Explicit `permissions` add scopes beyond the listed roles, and `deny_permissions` wins last even over `admin`. Cache purge requires `cache_operator` or a valid `[admin.cache_purge_signing]` HMAC signature; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`; dynamic policy automation APIs require `security_operator`. Config/file-sync/TLS operations use fine-grained permissions:
+
+- `config.read`, `config.validate`, `config.diff`, `config.load`, `config.rollback`
+- `files.sync.config`, `files.sync.oxirule`, `files.sync.oxirule_group`, `files.delete`
+- `tls.downstream.read`, `tls.downstream.reload`
+
+Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
+
+Admin config and downstream TLS endpoints:
+
+- `GET /admin/v1/config/status`
+- `GET /admin/v1/config/effective`
+- `POST /admin/v1/config/validate`
+- `POST /admin/v1/config/diff`
+- `POST /admin/v1/config/load`
+- `POST /admin/v1/config/rollback`
+- `GET /admin/v1/tls/downstream`
+- `POST /admin/v1/tls/downstream/reload`
+
+Config read endpoints require `config.read`. Validate, diff, load, and rollback require their matching `config.*` permissions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS read and reload require `tls.downstream.read` and `tls.downstream.reload`. TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
+
+Admin file sync endpoint:
+
+- `POST /admin/v1/files/sync`
+
+File sync requires the matching `files.sync.*` permission for every operation root, and `files.delete` for delete operations. The request body is explicit: missing files are never implicitly removed.
+
+```json
+{
+  "apply": "full",
+  "operations": [
+    {
+      "op": "put",
+      "root": "config",
+      "path": "oxibelt.toml",
+      "expected_sha256": "existing-file-sha256-or-null",
+      "content": "[proxy]\n..."
+    },
+    {
+      "op": "put",
+      "root": "oxirule_group",
+      "path": "groups/bot.oxirule-group.toml",
+      "content": "[[rule_groups]]\nname = \"bot\"\n..."
+    }
+  ]
+}
+```
+
+`root` is `config`, `oxirule`, or `oxirule_group`. Paths are UTF-8 relative paths, normalized, and must stay under the configured root. `put` writes `content`, optionally guarded by `expected_sha256`; `delete` removes exactly the named file. `apply` defaults to `none`; `oxirule` reloads rule policy from disk, `full` reloads the full TOML/runtime view from disk, and `downstream_tls` reloads downstream TLS material. File sync commits with same-directory temporary files and restores touched files if validation or apply fails. The endpoint is not a certificate lifecycle API: private key upload, ACME credentials, DNS provider credentials, and ACME issuance are out of scope.
 
 Admin lifecycle endpoints:
 
@@ -1085,7 +1135,7 @@ reason = "editor intentionally submits HTML"
 
 `max_body_inspection_bytes` controls the request body, response body, and native stream payload prefix captured for OxiRule and CRS body inspection. The default is `1048576` bytes. Bytes after this prefix are forwarded or replayed without inspection and are reflected through `Body.IsTruncated` or `Stream.Payload.IsTruncated`. The same value also bounds WebSocket stream-WAF frame buffering: an individual WebSocket frame payload larger than this value is closed fail-closed instead of being buffered for prefix inspection.
 
-Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. Reusable rule groups are configured under `[[waf.rule_groups]]` or `[[routes.waf.rule_groups]]` and are referenced from rules with `groups = ["name"]`. External rule entries use `path` and resolve under the oxirule directory. A rule entry may use inline `when`, `groups`, or both; `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry.
+Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. Reusable rule groups are configured under `[[waf.rule_groups]]` or `[[routes.waf.rule_groups]]` and are referenced from rules with `groups = ["name"]`. Shared group files can be loaded with `[waf] rule_group_files = ["groups/*.oxirule-group.toml"]` and route-level `rule_group_files`. Each group file uses a top-level `[[rule_groups]]` array and the same fields as inline `WafRuleGroupConfig`. Exact file paths must exist; glob entries may match zero files and are loaded in sorted order. External rule entries use `path` and resolve under the oxirule directory. A rule entry may use inline `when`, `groups`, or both; `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry.
 
 ```toml
 [[waf.rules]]

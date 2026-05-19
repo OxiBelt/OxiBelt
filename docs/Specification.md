@@ -177,12 +177,21 @@ Operational endpoints are optional:
 
 - `[health]` exposes local readiness and liveness endpoints.
 - `[metrics]` exposes Prometheus-style metrics. Rule-level WAF telemetry is intentionally excluded from this unauthenticated endpoint; use the authenticated admin WAF telemetry endpoint for rule names, IDs, modes, routes, and per-rule hit counters.
-- `[admin]` exposes authenticated operations APIs such as cache purge, upstream-pool runtime control, dynamic policy automation, and lifecycle drain/undrain on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist. Admin RBAC maps bearer-token environment variables to `viewer`, `cache_operator`, `upstream_operator`, `security_operator`, or `admin` roles; the legacy `admin.bearer_token_env` token has the `admin` role. Full hot reload starts, stops, or rebinds this listener when admin listener settings change.
+- `[admin]` exposes authenticated operations APIs such as cache purge, upstream-pool runtime control, dynamic policy automation, config validation/load/rollback, explicit file sync, downstream TLS reload, and lifecycle drain/undrain on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist. Admin RBAC maps bearer-token environment variables to roles (`viewer`, `cache_operator`, `upstream_operator`, `security_operator`, `config_operator`, or `admin`) plus optional fine-grained `permissions` and `deny_permissions`; the legacy `admin.bearer_token_env` token has the `admin` role. Full hot reload starts, stops, or rebinds this listener when admin listener settings change.
 - `[logging.access_log]` emits request-wide newline-delimited JSON access logs with `scope = "system"` and can use its own stdout and PostgreSQL sinks.
 - OxiRule `emit_access_log` writes newline-delimited JSON with `scope = "waf"` to stdout and can optionally mirror records to PostgreSQL through the separate `[database.access_log]` sink.
 
 Lifecycle endpoints are:
 
+- `GET /admin/v1/config/status`: requires `config.read`, returns active config revision, ETag, rollback availability, and last admin operation status.
+- `GET /admin/v1/config/effective`: requires `config.read`, returns the redacted active effective TOML and ETag.
+- `POST /admin/v1/config/validate`: requires `config.validate`, validates submitted TOML against the active path roots without installing it.
+- `POST /admin/v1/config/diff`: requires `config.diff`, returns a coarse redacted effective-config diff for submitted TOML.
+- `POST /admin/v1/config/load`: requires `config.load` and matching `If-Match`, installs a runtime-only config snapshot.
+- `POST /admin/v1/config/rollback`: requires `config.rollback` and matching `If-Match`, restores the last-good runtime snapshot.
+- `POST /admin/v1/files/sync`: requires matching `files.sync.*` permissions, and `files.delete` for deletes, writes explicit files under configured config/OxiRule roots and can apply `none`, `oxirule`, `full`, or `downstream_tls`.
+- `GET /admin/v1/tls/downstream`: requires `tls.downstream.read`, returns downstream TLS material status.
+- `POST /admin/v1/tls/downstream/reload`: requires `tls.downstream.reload` and matching `If-Match`, reloads configured certificate, key, and static OCSP files from disk.
 - `GET /admin/v1/lifecycle`: requires `viewer`, returns draining state and reason.
 - `POST /admin/v1/lifecycle/drain`: requires `admin`, starts admin drain.
 - `POST /admin/v1/lifecycle/undrain`: requires `admin`, clears admin drain.

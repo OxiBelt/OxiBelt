@@ -1,0 +1,728 @@
+use std::sync::Arc;
+
+use ::http::StatusCode;
+use anyhow::{anyhow, bail};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tracing::{info, warn};
+
+use crate::config::{AdminPermission, Config, RuntimeOverrides};
+use crate::proxy::http::body::ProxyBody;
+use crate::proxy::http::response::text_response;
+use crate::reload::{reload_downstream_tls_paths, validate_full_reload_runtime_compatibility};
+use crate::routes::RouteTable;
+use crate::state::{AppHandle, AppSnapshot};
+use crate::waf::WafEngine;
+
+use super::{ListenerSupervisor, admin::json_response};
+
+mod file_sync;
+
+pub(super) const ADMIN_CONFIG_BODY_LIMIT: usize = 1024 * 1024;
+
+#[derive(Clone)]
+pub(super) struct AdminControlHandle {
+  sender: mpsc::UnboundedSender<AdminControlCommand>,
+  state: Arc<Mutex<AdminControlState>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct AdminOperationStatus {
+  operation: String,
+  outcome: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  message: Option<String>,
+}
+
+#[derive(Debug)]
+struct AdminControlState {
+  revision: u64,
+  effective_config: Option<String>,
+  last_operation: Option<AdminOperationStatus>,
+  rollback_available: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct RollbackSnapshot {
+  snapshot: AppSnapshot,
+  effective_config: Option<String>,
+}
+
+pub(super) enum AdminControlCommand {
+  LoadConfig {
+    actor: String,
+    if_match: Option<String>,
+    raw: String,
+    respond: oneshot::Sender<AdminControlResponse>,
+  },
+  RollbackConfig {
+    actor: String,
+    if_match: Option<String>,
+    respond: oneshot::Sender<AdminControlResponse>,
+  },
+  ReloadDownstreamTls {
+    actor: String,
+    if_match: Option<String>,
+    respond: oneshot::Sender<AdminControlResponse>,
+  },
+  SyncFiles {
+    actor: String,
+    if_match: Option<String>,
+    request: AdminFilesSyncRequest,
+    respond: oneshot::Sender<AdminControlResponse>,
+  },
+}
+
+pub(super) struct AdminControlResponse {
+  pub(super) status: StatusCode,
+  pub(super) body: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AdminConfigPayload {
+  #[serde(default = "default_config_format")]
+  pub(super) format: String,
+  pub(super) config: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AdminFilesSyncRequest {
+  #[serde(default)]
+  pub(super) apply: AdminApplyMode,
+  #[serde(default)]
+  pub(super) operations: Vec<AdminFileOperation>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AdminApplyMode {
+  #[default]
+  None,
+  #[serde(rename = "oxirule", alias = "oxi_rule")]
+  OxiRule,
+  Full,
+  DownstreamTls,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AdminFileOperation {
+  #[serde(rename = "op", alias = "type")]
+  pub(super) op: AdminFileOperationKind,
+  pub(super) root: AdminFileRoot,
+  pub(super) path: String,
+  #[serde(default)]
+  pub(super) expected_sha256: Option<String>,
+  #[serde(default)]
+  pub(super) content: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AdminFileOperationKind {
+  Put,
+  Delete,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AdminFileRoot {
+  Config,
+  #[serde(rename = "oxirule", alias = "oxi_rule")]
+  OxiRule,
+  #[serde(rename = "oxirule_group", alias = "oxi_rule_group")]
+  OxiRuleGroup,
+}
+
+impl AdminFileRoot {
+  pub(super) fn sync_permission(self) -> AdminPermission {
+    match self {
+      Self::Config => AdminPermission::FilesSyncConfig,
+      Self::OxiRule => AdminPermission::FilesSyncOxiRule,
+      Self::OxiRuleGroup => AdminPermission::FilesSyncOxiRuleGroup,
+    }
+  }
+}
+
+impl AdminControlHandle {
+  pub(super) fn new(
+    effective_config: Option<String>,
+  ) -> (Self, mpsc::UnboundedReceiver<AdminControlCommand>) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let state = Arc::new(Mutex::new(AdminControlState {
+      revision: 1,
+      effective_config,
+      last_operation: None,
+      rollback_available: false,
+    }));
+    (Self { sender, state }, receiver)
+  }
+
+  pub(super) async fn status(&self) -> serde_json::Value {
+    let state = self.state.lock().await;
+    json!({
+      "revision": state.revision,
+      "etag": etag_for_revision(state.revision),
+      "runtime_only": true,
+      "rollback_available": state.rollback_available,
+      "last_operation": state.last_operation,
+    })
+  }
+
+  pub(super) async fn effective_config(&self) -> Option<(u64, String, String)> {
+    let state = self.state.lock().await;
+    state
+      .effective_config
+      .clone()
+      .map(|config| (state.revision, etag_for_revision(state.revision), config))
+  }
+
+  pub(super) async fn load_config(
+    &self,
+    actor: String,
+    if_match: Option<String>,
+    raw: String,
+  ) -> AdminControlResponse {
+    self
+      .request(|respond| AdminControlCommand::LoadConfig {
+        actor,
+        if_match,
+        raw,
+        respond,
+      })
+      .await
+  }
+
+  pub(super) async fn rollback_config(
+    &self,
+    actor: String,
+    if_match: Option<String>,
+  ) -> AdminControlResponse {
+    self
+      .request(|respond| AdminControlCommand::RollbackConfig {
+        actor,
+        if_match,
+        respond,
+      })
+      .await
+  }
+
+  pub(super) async fn reload_downstream_tls(
+    &self,
+    actor: String,
+    if_match: Option<String>,
+  ) -> AdminControlResponse {
+    self
+      .request(|respond| AdminControlCommand::ReloadDownstreamTls {
+        actor,
+        if_match,
+        respond,
+      })
+      .await
+  }
+
+  pub(super) async fn sync_files(
+    &self,
+    actor: String,
+    if_match: Option<String>,
+    request: AdminFilesSyncRequest,
+  ) -> AdminControlResponse {
+    self
+      .request(|respond| AdminControlCommand::SyncFiles {
+        actor,
+        if_match,
+        request,
+        respond,
+      })
+      .await
+  }
+
+  async fn request(
+    &self,
+    build: impl FnOnce(oneshot::Sender<AdminControlResponse>) -> AdminControlCommand,
+  ) -> AdminControlResponse {
+    let (respond, receiver) = oneshot::channel();
+    if self.sender.send(build(respond)).is_err() {
+      return AdminControlResponse::error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "admin control channel is unavailable",
+      );
+    }
+    receiver.await.unwrap_or_else(|_| {
+      AdminControlResponse::error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "admin control operation was cancelled",
+      )
+    })
+  }
+}
+
+impl AdminControlResponse {
+  fn ok(body: serde_json::Value) -> Self {
+    Self {
+      status: StatusCode::OK,
+      body,
+    }
+  }
+
+  fn error(status: StatusCode, message: impl Into<String>) -> Self {
+    Self {
+      status,
+      body: json!({ "error": message.into() }),
+    }
+  }
+
+  pub(super) fn into_http(self) -> ::http::Response<ProxyBody> {
+    json_response(self.status, &self.body)
+  }
+}
+
+pub(super) async fn handle_admin_control_command(
+  command: AdminControlCommand,
+  state: &AppHandle,
+  listeners: &mut ListenerSupervisor,
+  control: &AdminControlHandle,
+  runtime_overrides: &RuntimeOverrides,
+  rollback: &mut Option<RollbackSnapshot>,
+) {
+  match command {
+    AdminControlCommand::LoadConfig {
+      actor,
+      if_match,
+      raw,
+      respond,
+    } => {
+      let response = apply_config_load(
+        &actor,
+        if_match,
+        raw,
+        state,
+        listeners,
+        control,
+        runtime_overrides,
+        rollback,
+      )
+      .await;
+      let _ = respond.send(response);
+    }
+    AdminControlCommand::RollbackConfig {
+      actor,
+      if_match,
+      respond,
+    } => {
+      let response =
+        apply_config_rollback(&actor, if_match, state, listeners, control, rollback).await;
+      let _ = respond.send(response);
+    }
+    AdminControlCommand::ReloadDownstreamTls {
+      actor,
+      if_match,
+      respond,
+    } => {
+      let response =
+        apply_downstream_tls_reload(&actor, if_match, state, listeners, control, rollback).await;
+      let _ = respond.send(response);
+    }
+    AdminControlCommand::SyncFiles {
+      actor,
+      if_match,
+      request,
+      respond,
+    } => {
+      let response = file_sync::apply_file_sync(
+        &actor,
+        if_match,
+        request,
+        state,
+        listeners,
+        control,
+        runtime_overrides,
+        rollback,
+      )
+      .await;
+      let _ = respond.send(response);
+    }
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_config_load(
+  actor: &str,
+  if_match: Option<String>,
+  raw: String,
+  state: &AppHandle,
+  listeners: &mut ListenerSupervisor,
+  control: &AdminControlHandle,
+  runtime_overrides: &RuntimeOverrides,
+  rollback: &mut Option<RollbackSnapshot>,
+) -> AdminControlResponse {
+  if let Err(response) = check_if_match(control, if_match).await {
+    return response;
+  }
+  let active = state.snapshot();
+  let mut config = match Config::load_admin_inline_toml(&raw, &active.config) {
+    Ok(config) => config,
+    Err(error) => {
+      record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
+      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+    }
+  };
+  for warning in config.apply_runtime_overrides(runtime_overrides) {
+    warn!("{warning}");
+  }
+  if let Err(error) = config.validate() {
+    record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
+    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+  }
+  if let Err(error) = validate_full_reload_runtime_compatibility(&active.config, &config) {
+    record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
+    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+  }
+  let effective = match Config::load_admin_inline_effective_toml_redacted(&raw, &active.config)
+    .and_then(|value| toml::to_string_pretty(&value).map_err(Into::into))
+  {
+    Ok(value) => Some(value),
+    Err(error) => {
+      record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
+      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+    }
+  };
+  let snapshot = match AppSnapshot::new_with_previous(config, Some(active.as_ref())).await {
+    Ok(snapshot) => snapshot,
+    Err(error) => {
+      record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
+      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+    }
+  };
+  if let Err(error) = install_snapshot(
+    snapshot,
+    state,
+    listeners,
+    Some(rollback),
+    control,
+    effective,
+  )
+  .await
+  {
+    record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
+    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+  }
+  info!(actor, "admin config load applied");
+  record_operation(control, "config_load", "applied", None).await;
+  AdminControlResponse::ok(json!({ "ok": true, "revision": current_revision(control).await }))
+}
+
+async fn apply_config_rollback(
+  actor: &str,
+  if_match: Option<String>,
+  state: &AppHandle,
+  listeners: &mut ListenerSupervisor,
+  control: &AdminControlHandle,
+  rollback: &mut Option<RollbackSnapshot>,
+) -> AdminControlResponse {
+  if let Err(response) = check_if_match(control, if_match).await {
+    return response;
+  }
+  let Some(previous) = rollback.take() else {
+    return AdminControlResponse::error(StatusCode::CONFLICT, "no rollback snapshot is available");
+  };
+  let current = state.snapshot().as_ref().clone();
+  let current_effective = control.state.lock().await.effective_config.clone();
+  let pending = match listeners.prepare(&previous.snapshot).await {
+    Ok(pending) => pending,
+    Err(error) => {
+      *rollback = Some(previous);
+      record_operation(
+        control,
+        "config_rollback",
+        "rejected",
+        Some(error.to_string()),
+      )
+      .await;
+      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+    }
+  };
+  state.replace(previous.snapshot);
+  let active = state.snapshot();
+  listeners.commit(pending, active.as_ref(), state.clone());
+  *rollback = Some(RollbackSnapshot {
+    snapshot: current,
+    effective_config: current_effective,
+  });
+  control.state.lock().await.rollback_available = true;
+  advance_revision(control, previous.effective_config).await;
+  info!(actor, "admin config rollback applied");
+  record_operation(control, "config_rollback", "applied", None).await;
+  AdminControlResponse::ok(json!({ "ok": true, "revision": current_revision(control).await }))
+}
+
+async fn apply_downstream_tls_reload(
+  actor: &str,
+  if_match: Option<String>,
+  state: &AppHandle,
+  listeners: &mut ListenerSupervisor,
+  control: &AdminControlHandle,
+  rollback: &mut Option<RollbackSnapshot>,
+) -> AdminControlResponse {
+  if let Err(response) = check_if_match(control, if_match).await {
+    return response;
+  }
+  let active = state.snapshot();
+  let mut config = active.config.clone();
+  if let Err(error) = reload_downstream_tls_paths(&mut config) {
+    record_operation(
+      control,
+      "tls_downstream_reload",
+      "rejected",
+      Some(error.to_string()),
+    )
+    .await;
+    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+  }
+  let tls_server_config = match crate::tls::build_server_config_with_resumption(
+    &config.tls,
+    &config.listeners,
+    Some(&active.tls_resumption),
+  ) {
+    Ok(config) => config,
+    Err(error) => {
+      record_operation(
+        control,
+        "tls_downstream_reload",
+        "rejected",
+        Some(error.to_string()),
+      )
+      .await;
+      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+    }
+  };
+  let quic_server_config = if config.listeners.http3 {
+    match crate::tls::build_quic_server_config_with_resumption(
+      &config.tls,
+      &config.quic,
+      config.source_paths.cert_dir.as_deref(),
+      Some(&active.tls_resumption),
+    ) {
+      Ok(config) => Some(config),
+      Err(error) => {
+        record_operation(
+          control,
+          "tls_downstream_reload",
+          "rejected",
+          Some(error.to_string()),
+        )
+        .await;
+        return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+      }
+    }
+  } else {
+    None
+  };
+  let mut snapshot = active.as_ref().clone();
+  snapshot.config = config;
+  snapshot.tls_server_config = tls_server_config;
+  snapshot.quic_server_config = quic_server_config;
+  if let Err(error) =
+    install_snapshot(snapshot, state, listeners, Some(rollback), control, None).await
+  {
+    record_operation(
+      control,
+      "tls_downstream_reload",
+      "rejected",
+      Some(error.to_string()),
+    )
+    .await;
+    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+  }
+  info!(actor, "admin downstream TLS reload applied");
+  record_operation(control, "tls_downstream_reload", "applied", None).await;
+  AdminControlResponse::ok(json!({ "ok": true, "revision": current_revision(control).await }))
+}
+
+async fn apply_full_from_files(
+  state: &AppHandle,
+  listeners: &mut ListenerSupervisor,
+  control: &AdminControlHandle,
+  runtime_overrides: &RuntimeOverrides,
+  rollback: &mut Option<RollbackSnapshot>,
+) -> anyhow::Result<()> {
+  let active = state.snapshot();
+  let config_entry = active
+    .config
+    .source_paths
+    .config_entry
+    .as_ref()
+    .ok_or_else(|| anyhow!("active configuration does not have a config entry"))?;
+  let mut config = Config::load(config_entry)?;
+  for warning in config.apply_runtime_overrides(runtime_overrides) {
+    warn!("{warning}");
+  }
+  config.validate()?;
+  validate_full_reload_runtime_compatibility(&active.config, &config)?;
+  let effective = Config::load_effective_toml_redacted(config_entry)
+    .and_then(|value| toml::to_string_pretty(&value).map_err(Into::into))
+    .ok();
+  let snapshot = AppSnapshot::new_with_previous(config, Some(active.as_ref())).await?;
+  install_snapshot(
+    snapshot,
+    state,
+    listeners,
+    Some(rollback),
+    control,
+    effective,
+  )
+  .await
+}
+
+async fn apply_oxirule_from_files(
+  state: &AppHandle,
+  listeners: &mut ListenerSupervisor,
+  control: &AdminControlHandle,
+  runtime_overrides: &RuntimeOverrides,
+  rollback: &mut Option<RollbackSnapshot>,
+) -> anyhow::Result<()> {
+  let active = state.snapshot();
+  let config_entry = active
+    .config
+    .source_paths
+    .config_entry
+    .as_ref()
+    .ok_or_else(|| anyhow!("active configuration does not have a config entry"))?;
+  let mut config = Config::load(config_entry)?;
+  for warning in config.apply_runtime_overrides(runtime_overrides) {
+    warn!("{warning}");
+  }
+  config.validate()?;
+  if !active.config.non_waf_equivalent(&config) {
+    bail!("OxiRule reload rejected because non-WAF OxiBelt configuration changed");
+  }
+  if active.config.waf_equivalent(&config) {
+    return Ok(());
+  }
+  let waf = WafEngine::new_with_previous_limits_and_mitigation(
+    &config,
+    Some(&active.waf),
+    active.shared_state.clone(),
+    Some(active.limits.clone()),
+    active.mitigation.clone(),
+  )?;
+  let route_table = RouteTable::new_with_waf(&config, &waf);
+  let mut snapshot = active.as_ref().clone();
+  snapshot.config = config;
+  snapshot.route_table = route_table;
+  snapshot.waf = waf;
+  install_snapshot(snapshot, state, listeners, Some(rollback), control, None).await
+}
+
+async fn install_snapshot(
+  snapshot: AppSnapshot,
+  state: &AppHandle,
+  listeners: &mut ListenerSupervisor,
+  rollback: Option<&mut Option<RollbackSnapshot>>,
+  control: &AdminControlHandle,
+  effective_config: Option<String>,
+) -> anyhow::Result<()> {
+  let active = state.snapshot();
+  let pending = listeners.prepare(&snapshot).await?;
+  let previous_effective = control.state.lock().await.effective_config.clone();
+  if let Some(rollback) = rollback {
+    *rollback = Some(RollbackSnapshot {
+      snapshot: active.as_ref().clone(),
+      effective_config: previous_effective,
+    });
+    control.state.lock().await.rollback_available = true;
+  }
+  state.replace(snapshot);
+  let active = state.snapshot();
+  listeners.commit(pending, active.as_ref(), state.clone());
+  advance_revision(control, effective_config).await;
+  Ok(())
+}
+
+async fn check_if_match(
+  control: &AdminControlHandle,
+  if_match: Option<String>,
+) -> Result<(), AdminControlResponse> {
+  let state = control.state.lock().await;
+  let expected = etag_for_revision(state.revision);
+  match if_match {
+    Some(value) if value == expected => Ok(()),
+    Some(_) => Err(AdminControlResponse::error(
+      StatusCode::PRECONDITION_FAILED,
+      "If-Match does not match the active config revision",
+    )),
+    None => Err(AdminControlResponse::error(
+      StatusCode::PRECONDITION_REQUIRED,
+      "If-Match is required",
+    )),
+  }
+}
+
+async fn advance_revision(control: &AdminControlHandle, effective_config: Option<String>) {
+  let mut state = control.state.lock().await;
+  state.revision += 1;
+  if effective_config.is_some() {
+    state.effective_config = effective_config;
+  }
+}
+
+async fn current_revision(control: &AdminControlHandle) -> u64 {
+  control.state.lock().await.revision
+}
+
+async fn record_operation(
+  control: &AdminControlHandle,
+  operation: &str,
+  outcome: &str,
+  message: Option<String>,
+) {
+  if let Some(error) = message.as_deref() {
+    warn!(
+      event = "oxibelt.admin.audit",
+      operation, outcome, error, "admin operation audit"
+    );
+  } else {
+    info!(
+      event = "oxibelt.admin.audit",
+      operation, outcome, "admin operation audit"
+    );
+  }
+  let mut state = control.state.lock().await;
+  state.last_operation = Some(AdminOperationStatus {
+    operation: operation.to_string(),
+    outcome: outcome.to_string(),
+    message,
+  });
+}
+
+pub(super) fn etag_for_revision(revision: u64) -> String {
+  format!("\"oxibelt-config-{revision}\"")
+}
+
+fn default_config_format() -> String {
+  "toml".to_string()
+}
+
+pub(super) fn validate_config_payload(
+  payload: &AdminConfigPayload,
+) -> Option<::http::Response<ProxyBody>> {
+  if payload.format != "toml" {
+    return Some(text_response(
+      StatusCode::BAD_REQUEST,
+      "format must be toml",
+    ));
+  }
+  if payload.config.len() > ADMIN_CONFIG_BODY_LIMIT {
+    return Some(text_response(
+      StatusCode::PAYLOAD_TOO_LARGE,
+      "config payload is too large",
+    ));
+  }
+  None
+}
+
+pub(super) fn validate_file_sync_payload(
+  payload: &AdminFilesSyncRequest,
+) -> Option<::http::Response<ProxyBody>> {
+  file_sync::validate_file_sync_payload(payload)
+}
