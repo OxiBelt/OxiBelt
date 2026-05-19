@@ -109,7 +109,10 @@ def open_proxy_socket(args, proxy_protocol_line=None):
     if proxy_protocol_line:
       sock.sendall((proxy_protocol_line + "\r\n").encode("ascii"))
     if args.scheme == "https":
-      sock = create_tls_context(args.ca_file).wrap_socket(sock, server_hostname=args.target_host)
+      sock = create_tls_context(args.ca_file).wrap_socket(
+        sock,
+        server_hostname=args.server_name or args.target_host,
+      )
     return sock
   except Exception:
     sock.close()
@@ -299,6 +302,7 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--target", choices=sorted(TARGET_PATHS))
   parser.add_argument("--target-host", default=TARGET_HOST)
+  parser.add_argument("--server-name")
   parser.add_argument("--path")
   parser.add_argument("--method", default="GET")
   parser.add_argument("--body", default="")

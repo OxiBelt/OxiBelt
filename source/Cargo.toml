@@ -50,6 +50,8 @@ unicode-normalization = "0.1"
 url = { version = "2", features = ["serde"] }
 webpki-roots = "1"
 web-transport-quinn = { version = "0.11", default-features = false, features = ["aws-lc-rs"] }
+clienthello = { version = "0.1.3", features = ["full"] }
+quic-parser = { version = "0.1.5", features = ["ring"] }
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
 aws-lc-rs = { version = "1", default-features = false, features = ["bindgen"] }
@@ -76,6 +78,10 @@ path = "../tests/rust/tls_client_roots.rs"
 [[test]]
 name = "stream_listener_limits"
 path = "../tests/rust/stream_listener_limits.rs"
+
+[[test]]
+name = "sni_forward"
+path = "../tests/rust/sni_forward.rs"
 
 [[test]]
 name = "pq_negotiation_support"

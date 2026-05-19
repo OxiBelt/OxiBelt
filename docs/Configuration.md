@@ -67,6 +67,8 @@ include = ["conf.d/*.toml"]
 [runtime.hot_reload]
 [listeners]
 [listeners.proxy_protocol]
+[sni_forward]
+[[sni_forward.rules]]
 [tls]
 [tls.client_auth]
 [tls.ocsp]
@@ -110,7 +112,7 @@ include = ["conf.d/*.toml"]
 
 Required routing inputs:
 
-- At least one `[[routes]]`, `[[stream_listeners]]`, or `[[webrtc_turn_listeners]]`.
+- At least one `[[routes]]`, `[sni_forward]` rule/default target, `[[stream_listeners]]`, or `[[webrtc_turn_listeners]]`.
 - Each route must set exactly one of `upstream`, `upstream_pool`, or `static_root`.
 
 ## Includes
@@ -416,6 +418,35 @@ When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/
 `quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets, and startup fails if the OS rejects an explicitly configured buffer size. `quic.socket.workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].quic_socket`. When HTTP/3 is enabled, set `reuse_port = true` whenever the resolved worker count can be greater than one, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. QUIC transport and pool numeric values must be greater than zero, except `keep_alive_interval_ms = 0`; socket receive/send buffer `0` is the explicit OS-default sentinel.
 
 The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary HTTP/3 upstream requests use one-shot QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
+
+## SNI Forwarding
+
+`[sni_forward]` enables opt-in L4 forwarding before OxiBelt terminates downstream TLS. It inspects only the visible TLS ClientHello SNI value. ECH-hidden inner names are not available to this matcher.
+
+```toml
+[sni_forward]
+enabled = true
+client_hello_max_bytes = 65536
+idle_timeout_ms = 75000
+# default_target = "10.0.10.20:443"
+
+[[sni_forward.rules]]
+name = "legacy-tls"
+server_names = ["legacy.example.com", "*.legacy.example.com"]
+target = "10.0.10.10:443"
+protocols = ["tcp_tls", "quic"]
+connect_timeout_ms = 3000
+idle_timeout_ms = 75000
+tcp_proxy_protocol_egress = "off"
+```
+
+Matching order is explicit `[[sni_forward.rules]]` first, then local `[[routes]].hosts`, then `sni_forward.default_target` when configured. A route host of `"*"` is not treated as a defined SNI name. Missing, malformed, or unparseable SNI fails closed when SNI forwarding is enabled. Exact SNI patterns and leftmost wildcard patterns such as `"*.example.com"` are accepted; duplicate rule names or duplicate SNI patterns across forwarding rules are rejected.
+
+For TCP TLS, OxiBelt peeks at a bounded ClientHello before `rustls` accepts the connection. Forwarded sessions are raw TCP tunnels, and the original ClientHello remains unread by OxiBelt because `peek` does not consume bytes. Local SNI matches continue through the normal HTTP/1.1 and HTTP/2 TLS termination path.
+
+For QUIC, `protocols = ["quic"]` uses the same UDP address as downstream HTTP/3 and therefore requires `listeners.http3 = true`. OxiBelt decrypts QUIC Initial packets, reassembles visible CRYPTO frames, extracts ClientHello SNI, and forwards matched sessions as UDP passthrough while local sessions are queued into Quinn. QUIC forwarding tracks connection IDs and expires idle sessions using the rule or global idle timeout.
+
+Prometheus metrics include aggregate SNI-forward decision, parse-failure, session, active-QUIC-session, TCP-byte, and UDP-byte counters. With `metrics.detail = "detailed"`, bounded labels add protocol, decision, rule, target, and outcome. Structured tracing events are emitted for L4 session start/end with protocol, rule, target, SNI, duration, and byte counts.
 
 ## Proxy Sections
 
@@ -1425,7 +1456,7 @@ idle_timeout_ms = 75000
 proxy_protocol_egress = "off" # off | v1 | v2
 ```
 
-Stream listeners proxy raw TCP from a dedicated bind address to a single `host:port` target. They do not perform HTTP routing, TLS termination, SNI routing, HTTP rate limiting, or WAF inspection, but their downstream connections are counted by the global connection limits.
+Stream listeners proxy raw TCP from a dedicated bind address to a single `host:port` target. They do not perform HTTP routing, TLS termination, HTTP rate limiting, or WAF inspection, but their downstream connections are counted by the global connection limits. Use `[sni_forward]` when TLS or QUIC traffic on `listeners.https_bind` must be selected by visible SNI before local HTTP termination.
 
 ## WebRTC TURN Listeners
 
@@ -1524,11 +1555,12 @@ Configuration validation rejects:
 - Invalid include values, include cycles, escaped include paths, and missing exact include files.
 - Duplicate scalar keys or incompatible value types across included TOML files.
 - Unknown keys when `config.strict_unknown_fields = true`.
-- No enabled downstream HTTP versions.
+- No enabled downstream HTTP versions or SNI forwarding protocols.
 - Privileged listener ports when `runtime.unprivileged_mode = true`.
 - Non-Linux runtime when `runtime.linux_only = true`.
 - Invalid hot reload mode, zero worker counts, non-positive worker multipliers, zero `poll_interval_ms`, zero accept backlog/backoff values, accept worker counts greater than one without `runtime.accept.reuse_port = true`, or HTTP/3 QUIC socket worker counts greater than one without `quic.socket.reuse_port = true`.
-- Missing all `[[routes]]`, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
+- Missing all `[[routes]]`, `[sni_forward]` rule/default targets, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
+- Invalid SNI forwarding targets, duplicate SNI forwarding rule names or server-name patterns, unsupported wildcard placement, zero SNI forwarding timeouts, or QUIC SNI forwarding without downstream HTTP/3.
 - Routes that set zero or more than one of `upstream`, `upstream_pool`, or `static_root`.
 - Unsafe route paths.
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.

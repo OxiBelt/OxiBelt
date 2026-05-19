@@ -43,6 +43,13 @@ pub struct Metrics {
   mitigation_fail_closed_total: AtomicU64,
   mitigation_queue_depth: AtomicU64,
   mitigation_writer_healthy: AtomicU64,
+  sni_forward_decisions_total: AtomicU64,
+  sni_forward_parse_failures_total: AtomicU64,
+  sni_forward_sessions_total: AtomicU64,
+  sni_forward_session_errors_total: AtomicU64,
+  sni_forward_active_quic_sessions: AtomicU64,
+  sni_forward_tcp_bytes_total: AtomicU64,
+  sni_forward_udp_bytes_total: AtomicU64,
   detailed: Mutex<detail::DetailedMetrics>,
 }
 
@@ -283,6 +290,73 @@ impl Metrics {
       .store(u64::from(healthy), Ordering::Relaxed);
   }
 
+  pub fn record_sni_forward_decision(
+    &self,
+    protocol: &str,
+    decision: &str,
+    rule: &str,
+    target: &str,
+  ) {
+    self
+      .sni_forward_decisions_total
+      .fetch_add(1, Ordering::Relaxed);
+    self.record_sni_forward_decision_detail(protocol, decision, rule, target);
+  }
+
+  pub fn record_sni_forward_parse_failure(&self, protocol: &str) {
+    self
+      .sni_forward_parse_failures_total
+      .fetch_add(1, Ordering::Relaxed);
+    self.record_sni_forward_decision_detail(protocol, "parse_failure", "none", "none");
+  }
+
+  pub fn record_sni_forward_session_end(
+    &self,
+    config: &MetricsConfig,
+    protocol: &str,
+    rule: &str,
+    target: &str,
+    outcome: &str,
+    duration_ms: u64,
+  ) {
+    self
+      .sni_forward_sessions_total
+      .fetch_add(1, Ordering::Relaxed);
+    if outcome != "closed" {
+      self
+        .sni_forward_session_errors_total
+        .fetch_add(1, Ordering::Relaxed);
+    }
+    self.record_sni_forward_session_detail(config, protocol, rule, target, outcome, duration_ms);
+  }
+
+  pub fn add_sni_forward_tcp_bytes(&self, bytes: u64) {
+    self
+      .sni_forward_tcp_bytes_total
+      .fetch_add(bytes, Ordering::Relaxed);
+  }
+
+  pub fn add_sni_forward_udp_bytes(&self, bytes: u64) {
+    self
+      .sni_forward_udp_bytes_total
+      .fetch_add(bytes, Ordering::Relaxed);
+  }
+
+  pub fn add_sni_forward_active_quic_session(&self, delta: i64) {
+    if delta >= 0 {
+      self
+        .sni_forward_active_quic_sessions
+        .fetch_add(delta as u64, Ordering::Relaxed);
+    } else {
+      self
+        .sni_forward_active_quic_sessions
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+          Some(current.saturating_sub(delta.unsigned_abs()))
+        })
+        .ok();
+    }
+  }
+
   pub fn prometheus(
     &self,
     config: &MetricsConfig,
@@ -495,6 +569,54 @@ impl Metrics {
       "oxibelt_mitigation_writer_healthy",
       "gauge",
       self.mitigation_writer_healthy.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_sni_forward_decisions_total",
+      "counter",
+      self.sni_forward_decisions_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_sni_forward_parse_failures_total",
+      "counter",
+      self
+        .sni_forward_parse_failures_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_sni_forward_sessions_total",
+      "counter",
+      self.sni_forward_sessions_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_sni_forward_session_errors_total",
+      "counter",
+      self
+        .sni_forward_session_errors_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_sni_forward_active_quic_sessions",
+      "gauge",
+      self
+        .sni_forward_active_quic_sessions
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_sni_forward_tcp_bytes_total",
+      "counter",
+      self.sni_forward_tcp_bytes_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_sni_forward_udp_bytes_total",
+      "counter",
+      self.sni_forward_udp_bytes_total.load(Ordering::Relaxed),
     );
     append_metric(
       &mut output,

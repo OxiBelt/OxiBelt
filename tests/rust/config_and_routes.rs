@@ -11,8 +11,8 @@ use oxibelt::config::{
     ExpectContinueMode, ExternalAuthProvider, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode,
     MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode,
     ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides,
-    SharedStateBackendKind, StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode,
-    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
+    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
     UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
@@ -56,6 +56,164 @@ fn protocol_operations_defaults_are_disabled() {
         ProxyProtocolEgressMode::Off
     );
     assert!(config.stream_listeners.is_empty());
+    assert!(!config.sni_forward.enabled);
+    assert!(config.sni_forward.rules.is_empty());
+}
+
+#[test]
+fn sni_forward_tcp_rule_parses_and_validates() {
+    let temp_dir = common::TempDir::new("sni-forward-valid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "sni-forward-valid");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[sni_forward]
+enabled = true
+client_hello_max_bytes = 8192
+idle_timeout_ms = 60000
+
+[[sni_forward.rules]]
+name = "legacy-tls"
+server_names = ["legacy.example.com", "*.legacy.example.com"]
+target = "127.0.0.1:9443"
+protocols = ["tcp_tls"]
+connect_timeout_ms = 1000
+idle_timeout_ms = 30000
+tcp_proxy_protocol_egress = "v1"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(config.sni_forward.enabled);
+    assert_eq!(config.sni_forward.client_hello_max_bytes, 8192);
+    assert_eq!(
+        config.sni_forward.rules[0].protocols,
+        vec![SniForwardProtocol::TcpTls]
+    );
+}
+
+#[test]
+fn sni_forward_default_target_can_enable_tcp_without_http3() {
+    let temp_dir = common::TempDir::new("sni-forward-default-target");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "sni-forward-default-target");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[sni_forward]
+enabled = true
+default_target = "127.0.0.1:9443"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert!(config.sni_forward.has_tcp_tls());
+}
+
+#[test]
+fn sni_forward_rejects_invalid_rules() {
+    let temp_dir = common::TempDir::new("sni-forward-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "sni-forward-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (suffix, expected) in [
+        (
+            r#"
+[sni_forward]
+enabled = true
+
+[[sni_forward.rules]]
+name = "a"
+server_names = ["dup.example.com"]
+target = "127.0.0.1:9443"
+protocols = ["tcp_tls"]
+
+[[sni_forward.rules]]
+name = "b"
+server_names = ["dup.example.com"]
+target = "127.0.0.1:9444"
+protocols = ["tcp_tls"]
+"#,
+            "duplicate sni_forward server_name pattern",
+        ),
+        (
+            r#"
+[sni_forward]
+enabled = true
+
+[[sni_forward.rules]]
+name = "bad-wildcard"
+server_names = ["api.*.example.com"]
+target = "127.0.0.1:9443"
+protocols = ["tcp_tls"]
+"#,
+            "leftmost wildcard",
+        ),
+        (
+            r#"
+[sni_forward]
+enabled = true
+
+[[sni_forward.rules]]
+name = "bad-target"
+server_names = ["bad-target.example.com"]
+target = "127.0.0.1"
+protocols = ["tcp_tls"]
+"#,
+            "host:port",
+        ),
+        (
+            r#"
+[sni_forward]
+enabled = true
+
+[[sni_forward.rules]]
+name = "quic-needs-http3"
+server_names = ["quic.example.com"]
+target = "127.0.0.1:9443"
+protocols = ["quic"]
+"#,
+            "requires listeners.http3",
+        ),
+    ] {
+        let config: Config = toml::from_str(&(base.clone() + suffix)).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid SNI forwarding should fail");
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains(expected),
+            "unexpected error: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn sni_forward_unknown_fields_fail_strict_shape_validation() {
+    let temp_dir = common::TempDir::new("sni-forward-unknown");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "sni-forward-unknown");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[sni_forward]
+enabled = true
+unexpected = true
+"#;
+    let config_path = temp_dir.path().join("oxibelt.toml");
+    std::fs::write(&config_path, raw).expect("config should write");
+
+    let error = Config::load(&config_path).expect_err("unknown SNI forwarding field should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("configuration contains unknown field(s): sni_forward.unexpected"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[test]

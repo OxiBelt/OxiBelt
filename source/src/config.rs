@@ -18,6 +18,7 @@ mod http2;
 mod limits;
 mod quic;
 mod route;
+mod sni_forward;
 mod stream;
 mod telemetry;
 mod tls;
@@ -35,6 +36,7 @@ use limits::{
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
 pub use route::*;
+pub use sni_forward::*;
 pub use stream::*;
 pub use telemetry::*;
 pub use tls::*;
@@ -68,6 +70,7 @@ pub struct Config {
   pub upstreams: Vec<UpstreamConfig>,
   pub upstream_pools: Vec<UpstreamPoolConfig>,
   pub turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
+  pub sni_forward: SniForwardConfig,
   pub stream_listeners: Vec<StreamListenerConfig>,
   pub webrtc_turn_listeners: Vec<WebRtcTurnListenerConfig>,
   pub routes: Vec<RouteConfig>,
@@ -124,6 +127,8 @@ struct RawConfig {
   #[serde(default)]
   turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
   #[serde(default)]
+  sni_forward: SniForwardConfig,
+  #[serde(default)]
   stream_listeners: Vec<StreamListenerConfig>,
   #[serde(default)]
   webrtc_turn_listeners: Vec<WebRtcTurnListenerConfig>,
@@ -165,6 +170,7 @@ impl TryFrom<RawConfig> for Config {
       upstreams: raw.upstreams,
       upstream_pools: raw.upstream_pools,
       turn_upstream_pools: raw.turn_upstream_pools,
+      sni_forward: raw.sni_forward,
       stream_listeners: raw.stream_listeners,
       webrtc_turn_listeners: raw.webrtc_turn_listeners,
       routes: raw.routes,
@@ -398,6 +404,7 @@ impl Config {
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools
       && self.turn_upstream_pools == other.turn_upstream_pools
+      && self.sni_forward == other.sni_forward
       && self.stream_listeners == other.stream_listeners
       && self.webrtc_turn_listeners == other.webrtc_turn_listeners
       && routes_without_waf_are_equivalent(&self.routes, &other.routes)
@@ -601,8 +608,13 @@ impl Config {
   }
 
   pub fn validate(&self) -> anyhow::Result<()> {
-    if !self.listeners.http1 && !self.listeners.http2 && !self.listeners.http3 {
-      bail!("at least one downstream HTTP version must be enabled");
+    if !self.listeners.http1
+      && !self.listeners.http2
+      && !self.listeners.http3
+      && !self.sni_forward.has_tcp_tls()
+      && !self.sni_forward.has_quic()
+    {
+      bail!("at least one downstream HTTP version or SNI forwarding protocol must be enabled");
     }
 
     if self.runtime.unprivileged_mode && self.listeners.https_bind.port() < 1024 {
@@ -642,6 +654,7 @@ impl Config {
     self.validate_security_headers()?;
     self.validate_tls()?;
     self.quic.validate(self.listeners.http3)?;
+    self.validate_sni_forward()?;
     self.logging.validate()?;
 
     if self.runtime.linux_only && !cfg!(target_os = "linux") {
@@ -651,8 +664,12 @@ impl Config {
     if self.routes.is_empty()
       && self.stream_listeners.is_empty()
       && self.webrtc_turn_listeners.is_empty()
+      && !(self.sni_forward.enabled
+        && (self.sni_forward.default_target.is_some() || !self.sni_forward.rules.is_empty()))
     {
-      bail!("at least one route, stream listener, or WebRTC TURN listener must be configured");
+      bail!(
+        "at least one route, SNI forwarding rule/default target, stream listener, or WebRTC TURN listener must be configured"
+      );
     }
 
     self.database.validate()?;
@@ -2156,6 +2173,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "runtime",
       "security",
       "shared_state",
+      "sni_forward",
       "stream_listeners",
       "telemetry",
       "tls",
@@ -2214,6 +2232,22 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "proxy_protocol",
     ][..],
     "listeners.proxy_protocol" => &["enabled", "trusted_sources", "version"][..],
+    "sni_forward" => &[
+      "client_hello_max_bytes",
+      "default_target",
+      "enabled",
+      "idle_timeout_ms",
+      "rules",
+    ][..],
+    "sni_forward.rules" => &[
+      "connect_timeout_ms",
+      "idle_timeout_ms",
+      "name",
+      "protocols",
+      "server_names",
+      "target",
+      "tcp_proxy_protocol_egress",
+    ][..],
     "tls" => &[
       "cert_chain",
       "client_auth",

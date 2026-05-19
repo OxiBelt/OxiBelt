@@ -31,6 +31,7 @@ use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
 use crate::shared_state::SharedState;
+use crate::sni_forward::SniForwardTable;
 use crate::telemetry::TelemetryRuntime;
 use crate::tls;
 use crate::turn::TurnPoolState;
@@ -176,6 +177,7 @@ impl AppHandle {
 pub struct AppSnapshot {
   pub config: Config,
   pub route_table: RouteTable,
+  pub(crate) sni_forward: SniForwardTable,
   pub upstreams: Vec<UpstreamConfig>,
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub clients: UpstreamClientPools,
@@ -319,6 +321,8 @@ impl AppSnapshot {
     )
     .context("failed to build WAF engine")?;
     let route_table = RouteTable::new_with_waf(&config, &waf);
+    let sni_forward =
+      SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
     let access_logs = AccessLogSinks::new(&config.database.access_log)
       .await
       .context("failed to build access log sinks")?;
@@ -331,6 +335,7 @@ impl AppSnapshot {
     Ok(Self {
       config,
       route_table,
+      sni_forward,
       upstreams,
       upstream_uri_parts,
       clients,
@@ -367,6 +372,8 @@ impl AppSnapshot {
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let route_table = RouteTable::new_with_waf(&config, &previous.waf);
+    let sni_forward =
+      SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
     let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
     let clients = build_clients(
       &upstreams,
@@ -392,6 +399,7 @@ impl AppSnapshot {
     Ok(Self {
       config,
       route_table,
+      sni_forward,
       upstreams,
       upstream_uri_parts,
       clients,

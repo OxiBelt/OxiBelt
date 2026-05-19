@@ -219,7 +219,10 @@ pub fn load_host_key(base_dir: &Path, path: &Path) -> anyhow::Result<[u8; QUIC_H
   Ok(key)
 }
 
-fn bind_udp_socket(bind: SocketAddr, config: &QuicSocketConfig) -> anyhow::Result<UdpSocket> {
+pub(crate) fn bind_udp_socket(
+  bind: SocketAddr,
+  config: &QuicSocketConfig,
+) -> anyhow::Result<UdpSocket> {
   let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))
     .with_context(|| format!("failed to create UDP socket for {bind}"))?;
   if config.receive_buffer_bytes > 0 {

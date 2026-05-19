@@ -139,6 +139,21 @@ enabled = true
 max_connections_per_upstream = 1
 max_lifetime_ms = 600000
 
+# [sni_forward]
+# enabled = true
+# client_hello_max_bytes = 65536
+# idle_timeout_ms = 75000
+# default_target = "10.0.10.20:443"
+#
+# [[sni_forward.rules]]
+# name = "legacy-tls"
+# server_names = ["legacy.example.com", "*.legacy.example.com"]
+# target = "10.0.10.10:443"
+# protocols = ["tcp_tls", "quic"]
+# connect_timeout_ms = 3000
+# idle_timeout_ms = 75000
+# tcp_proxy_protocol_egress = "off"
+
 [proxy]
 trusted_ca_certs = []
 

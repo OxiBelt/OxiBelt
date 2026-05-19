@@ -180,6 +180,61 @@ client_request_to_target() {
   client_request_with_headers_to_target "$1" 8443 "$2" "$3" "$4" "GET" ""
 }
 
+client_request_with_sni() {
+  client_request_with_sni_and_ca "${cert_dir}/fullchain.pem" "$1" "$2" "$3" "$4"
+}
+
+sni_forward_tls_request() {
+  client_request_with_sni_and_ca "${upstream_tls_dir}/ca.pem" "$1" "$1" "$2" "$3"
+}
+
+client_request_with_sni_and_ca() {
+  local ca_file="$1"
+  local server_name="$2"
+  local host="$3"
+  local path="$4"
+  local expect_status="$5"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-sni-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --entrypoint python \
+      "${mock_image}" \
+      /opt/mock_upstream/client.py \
+      --target-host proxy \
+      --server-name "${server_name}" \
+      --path "${path}" \
+      --host "${host}" \
+      --port 8443 \
+      --method GET \
+      --body "" \
+      --ca-file /tmp/sni-ca.pem \
+      --dump-response-json \
+      --expect-status "${expect_status}" >/dev/null
+    docker cp "${ca_file}" "${client_container}:/tmp/sni-ca.pem"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "SNI client request for ${server_name} failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "SNI client request did not reach expected status ${expect_status}"
+}
+
 client_request_on_port() {
   local port="$1"
   shift
@@ -991,11 +1046,21 @@ protocol_probe_client() {
   local authority="$2"
   local path="$3"
   local expect_status="$4"
+  protocol_probe_client_with_sni_and_ca "${protocol}" "proxy" "${authority}" "${path}" "${expect_status}" "${cert_dir}/fullchain.pem"
+}
+
+protocol_probe_client_with_sni_and_ca() {
+  local protocol="$1"
+  local server_name="$2"
+  local authority="$3"
+  local path="$4"
+  local expect_status="$5"
+  local ca_file="$6"
   local output=""
   local status=0
   local client_container=""
 
-  for attempt in $(seq 1 30); do
+  for attempt in $(seq 1 "${PROTOCOL_PROBE_ATTEMPTS:-30}"); do
     client_container="$(unique_docker_container_name "oxibelt-protocol-client" "${attempt}")"
     docker create \
       --name "${client_container}" \
@@ -1006,12 +1071,12 @@ protocol_probe_client() {
       --protocol "${protocol}" \
       --host proxy \
       --port 8443 \
-      --server-name proxy \
+      --server-name "${server_name}" \
       --authority "${authority}" \
       --path "${path}" \
-      --ca-cert /tmp/proxy-ca.pem \
+      --ca-cert /tmp/probe-ca.pem \
       --expect-status "${expect_status}" >/dev/null
-    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+    docker cp "${ca_file}" "${client_container}:/tmp/probe-ca.pem"
 
     if output="$(docker_start_stdout_only "${client_container}")"; then
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
@@ -1024,7 +1089,7 @@ protocol_probe_client() {
     sleep 1
   done
 
-  echo "protocol probe client failed after retries with status ${status}" >&2
+  echo "protocol probe client failed after retries with status ${status}: protocol=${protocol} server_name=${server_name} authority=${authority} path=${path}" >&2
   echo "${output}" >&2
   fail_with_diagnostics "protocol probe did not reach expected status ${expect_status}"
 }
@@ -1405,6 +1470,9 @@ DNS.1 = mock-https
 DNS.2 = mock-h2
 DNS.3 = mock-h3
 DNS.4 = mock-webtransport
+DNS.5 = sni-forward.test
+DNS.6 = sni-default.test
+DNS.7 = quic-forward.test
 EOF
 
 cat >"${work_dir}/downstream.cnf" <<'EOF'
@@ -1424,6 +1492,7 @@ extendedKeyUsage = serverAuth
 DNS.1 = proxy
 DNS.2 = localhost
 DNS.3 = proxy-b
+DNS.4 = example.test
 IP.1 = 127.0.0.1
 EOF
 

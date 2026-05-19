@@ -108,6 +108,7 @@ impl ReloadManager {
     let route_table = RouteTable::new_with_waf(&config, &waf);
     let snapshot = AppSnapshot {
       route_table,
+      sni_forward: active.sni_forward.clone(),
       upstreams: active.upstreams.clone(),
       upstream_uri_parts: active.upstream_uri_parts.clone(),
       config,
@@ -204,6 +205,7 @@ impl ReloadManager {
     };
     let snapshot = AppSnapshot {
       route_table: active.route_table.clone(),
+      sni_forward: active.sni_forward.clone(),
       upstreams: active.upstreams.clone(),
       upstream_uri_parts: active.upstream_uri_parts.clone(),
       config,

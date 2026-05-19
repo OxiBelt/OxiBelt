@@ -35,6 +35,7 @@ pub mod routes;
 pub mod runtime;
 pub mod server;
 pub mod shared_state;
+pub(crate) mod sni_forward;
 pub mod state;
 pub mod stream;
 mod tcp_hop;

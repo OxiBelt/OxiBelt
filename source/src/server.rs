@@ -37,6 +37,7 @@ use crate::proxy::http::response::text_response;
 use crate::proxy::{http, http3};
 use crate::proxy_protocol;
 use crate::reload::{ReloadManager, ReloadTrigger};
+use crate::sni_forward::tcp::TcpSniForwardResult;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::{BoundStreamListener, StreamListenerTask};
 use crate::tcp_hop;
@@ -1165,6 +1166,7 @@ struct BoundHttp3Listener {
   socket: crate::config::QuicSocketConfig,
   transport: crate::config::QuicTransportConfig,
   endpoints: Vec<h3_quinn::quinn::Endpoint>,
+  sni_forward_quic: Vec<crate::sni_forward::quic::BoundQuicForwardSocket>,
 }
 
 struct AdminListenerTask {
@@ -1233,7 +1235,10 @@ impl ListenerSupervisor {
     snapshot: &AppSnapshot,
   ) -> anyhow::Result<PendingListenerUpdate> {
     let tcp_options = TcpListenOptions::from(&snapshot.config.runtime.accept);
-    let tcp = if snapshot.config.listeners.http1 || snapshot.config.listeners.http2 {
+    let tcp = if snapshot.config.listeners.http1
+      || snapshot.config.listeners.http2
+      || snapshot.config.sni_forward.has_tcp_tls()
+    {
       let bind = snapshot.config.listeners.https_bind;
       if self
         .tcp
@@ -1677,32 +1682,52 @@ impl BoundHttp3Listener {
     let socket = self.socket;
     let transport = self.transport;
     let connections = TaskRegistry::default();
-    let tasks = self
-      .endpoints
-      .iter()
-      .cloned()
-      .enumerate()
-      .map(|(worker_index, endpoint)| {
-        let worker_shutdown = shutdown_rx.clone();
-        let worker_state = state.clone();
-        let worker_error_tx = error_tx.clone();
-        let worker_connections = connections.clone();
-        tokio::spawn(async move {
-          if let Err(error) = serve_http3(
-            endpoint,
-            worker_state,
-            worker_shutdown,
-            worker_index,
-            worker_connections,
-            drain_timeouts.long_connection_close_delay,
-          )
-          .await
-          {
-            let _ = worker_error_tx.send(error.context("downstream HTTP/3 listener failed"));
+    let mut tasks = Vec::new();
+    for demux in self.sni_forward_quic {
+      let demux_shutdown = shutdown_rx.clone();
+      let demux_state = state.clone();
+      let demux_error_tx = error_tx.clone();
+      tasks.push(tokio::spawn(async move {
+        match demux.start(demux_state, demux_shutdown).await {
+          Ok(Ok(())) => {}
+          Ok(Err(error)) => {
+            let _ = demux_error_tx.send(error.context("SNI forwarding QUIC demux failed"));
           }
-        })
-      })
-      .collect();
+          Err(error) => {
+            let _ = demux_error_tx.send(anyhow::anyhow!(
+              "SNI forwarding QUIC demux task panicked: {error}"
+            ));
+          }
+        }
+      }));
+    }
+    tasks.extend(
+      self
+        .endpoints
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(worker_index, endpoint)| {
+          let worker_shutdown = shutdown_rx.clone();
+          let worker_state = state.clone();
+          let worker_error_tx = error_tx.clone();
+          let worker_connections = connections.clone();
+          tokio::spawn(async move {
+            if let Err(error) = serve_http3(
+              endpoint,
+              worker_state,
+              worker_shutdown,
+              worker_index,
+              worker_connections,
+              drain_timeouts.long_connection_close_delay,
+            )
+            .await
+            {
+              let _ = worker_error_tx.send(error.context("downstream HTTP/3 listener failed"));
+            }
+          })
+        }),
+    );
     Http3ListenerTask {
       bind,
       socket,
@@ -1877,17 +1902,25 @@ fn bind_http3_listener(
     .quic_server_config
     .clone()
     .ok_or_else(|| anyhow::anyhow!("HTTP/3 listener is enabled without QUIC server config"))?;
-  let endpoints = crate::quic::bind_server_endpoints(
-    bind,
-    server_config,
-    &snapshot.config.quic,
-    snapshot.config.source_paths.cert_dir.as_deref(),
-  )?;
+  let (endpoints, sni_forward_quic) = if snapshot.config.sni_forward.has_quic() {
+    crate::sni_forward::quic::bind_server_endpoints(bind, server_config, snapshot)?
+  } else {
+    (
+      crate::quic::bind_server_endpoints(
+        bind,
+        server_config,
+        &snapshot.config.quic,
+        snapshot.config.source_paths.cert_dir.as_deref(),
+      )?,
+      Vec::new(),
+    )
+  };
   Ok(BoundHttp3Listener {
     bind,
     socket: snapshot.config.quic.socket.clone(),
     transport: snapshot.config.quic.downstream.transport.clone(),
     endpoints,
+    sni_forward_quic,
   })
 }
 
@@ -2032,6 +2065,18 @@ async fn handle_connection(
     tcp_hop::apply_tcp_max_hop(&stream, peer_addr.ip(), max_hop)
       .with_context(|| format!("failed to apply TCP max hop {max_hop} for {peer_addr}"))?;
   }
+
+  let stream = match crate::sni_forward::tcp::classify_and_maybe_forward(
+    stream,
+    peer_addr,
+    handshake_state.clone(),
+    drain.clone(),
+  )
+  .await?
+  {
+    TcpSniForwardResult::Local(stream) => stream,
+    TcpSniForwardResult::Forwarded => return Ok(()),
+  };
 
   let handshake_started_at = TelemetryRuntime::start();
   let start = tokio::time::timeout(

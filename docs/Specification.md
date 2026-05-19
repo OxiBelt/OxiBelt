@@ -27,15 +27,16 @@ At a high level, each HTTP transaction follows this order:
 
 1. Accept TCP or QUIC traffic from a downstream client.
 2. Apply listener-level checks such as the global connection limit, PROXY protocol intake, configured per-IP connection-limit identity, TLS handshake limits, and optional TCP max-hop policy.
-3. Terminate downstream TLS and collect transport metadata, including SNI, ALPN, client certificate presence, and QUIC metadata where available.
-4. Parse the HTTP request and normalize the client IP used for Real-IP connection-limit modes, rate limits, and WAF evaluation.
-5. Match a route by host and path prefix.
-6. Evaluate request-phase OxiRule rules and enabled CRS phase 1/2 rules when WAF is enabled.
-7. Select the configured upstream or upstream pool, optionally using request-phase routing actions.
-8. Apply the effective request buffering policy, normalize forwarded headers, and forward the request upstream.
-9. Build a response context from the upstream response or from a synthetic upstream-error response.
-10. Evaluate response-phase OxiRule rules and enabled CRS phase 3/4 rules when WAF is enabled.
-11. Apply response mutations, the effective response buffering policy, cache behavior, structured access-log actions, and response forwarding back to the downstream client.
+3. When `[sni_forward]` is enabled, inspect visible TCP TLS or QUIC Initial ClientHello SNI before local TLS termination; explicit forwarding rules may tunnel the L4 session to a configured target.
+4. Terminate downstream TLS for local sessions and collect transport metadata, including SNI, ALPN, client certificate presence, and QUIC metadata where available.
+5. Parse the HTTP request and normalize the client IP used for Real-IP connection-limit modes, rate limits, and WAF evaluation.
+6. Match a route by host and path prefix.
+7. Evaluate request-phase OxiRule rules and enabled CRS phase 1/2 rules when WAF is enabled.
+8. Select the configured upstream or upstream pool, optionally using request-phase routing actions.
+9. Apply the effective request buffering policy, normalize forwarded headers, and forward the request upstream.
+10. Build a response context from the upstream response or from a synthetic upstream-error response.
+11. Evaluate response-phase OxiRule rules and enabled CRS phase 3/4 rules when WAF is enabled.
+12. Apply response mutations, the effective response buffering policy, cache behavior, structured access-log actions, and response forwarding back to the downstream client.
 
 If a validation, runtime, or WAF policy failure occurs, the configured fail policy determines whether OxiBelt rejects the transaction or allows it to continue.
 
@@ -51,6 +52,9 @@ Downstream protocol support:
 
 - HTTP/1.1 and HTTP/2 are served over TCP.
 - HTTP/3 is served over QUIC on the configured `https_bind` UDP address.
+- `[sni_forward]` can inspect visible TLS ClientHello SNI before OxiBelt terminates local traffic. Explicit SNI forwarding rules override local route hosts; otherwise configured route hosts remain local, and unknown SNI forwards only when `sni_forward.default_target` is configured. Missing, malformed, or unparseable SNI fails closed. Route host `"*"` does not count as a defined SNI name.
+- TCP SNI forwarding uses bounded `TcpStream::peek`, preserving the original ClientHello for raw TCP passthrough targets. Local matches continue through the normal rustls HTTP/1.1 and HTTP/2 path.
+- QUIC SNI forwarding uses the same UDP address as downstream HTTP/3. OxiBelt decrypts QUIC Initial payloads, extracts CRYPTO frames, parses visible ClientHello SNI, and forwards matched sessions as UDP passthrough while local sessions are queued into Quinn. QUIC SNI forwarding requires downstream HTTP/3 to be enabled.
 - Deployments that enable HTTP/3 must expose the HTTPS bind address for both TCP and UDP.
 - Downstream HTTP/3 always requires TLS 1.3.
 - The same downstream client certificate policy is enforced for TCP TLS and HTTP/3/QUIC listeners.
@@ -178,7 +182,7 @@ The lifecycle drain configuration is:
 Operational endpoints are optional:
 
 - `[health]` exposes local readiness and liveness endpoints.
-- `[metrics]` exposes Prometheus-style metrics. Basic mode keeps aggregate counters and gauges. Detailed mode adds bounded route/upstream/method/status/protocol/cache-reason style labels for HTTPS, HTTP/1.1, HTTP/2, HTTP/3 over QUIC, WebSocket, WebTransport, and WebRTC TURN surfaces. Rule-level WAF names, IDs, tags, modes, routes, hit counters, and cost counters are intentionally excluded from this unauthenticated endpoint; use the authenticated admin WAF telemetry endpoint for rule-level snapshots.
+- `[metrics]` exposes Prometheus-style metrics. Basic mode keeps aggregate counters and gauges. Detailed mode adds bounded route/upstream/method/status/protocol/cache-reason style labels for HTTPS, HTTP/1.1, HTTP/2, HTTP/3 over QUIC, WebSocket, WebTransport, WebRTC TURN, and SNI-forwarding decision/session surfaces. Rule-level WAF names, IDs, tags, modes, routes, hit counters, and cost counters are intentionally excluded from this unauthenticated endpoint; use the authenticated admin WAF telemetry endpoint for rule-level snapshots.
 - `[telemetry.tracing]` is startup-scoped optional observability: it extracts incoming W3C `traceparent`, propagates trace context to upstream HTTP/1.1, HTTP/2, HTTP/3, and WebTransport CONNECT requests, and exports sampled spans to an OTLP HTTP/protobuf collector.
 - `[admin]` exposes authenticated operations APIs such as cache purge, upstream-pool runtime control, dynamic policy automation, config validation/load/rollback, explicit file sync, downstream TLS reload, and lifecycle drain/undrain on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist. Admin RBAC maps bearer-token environment variables to roles (`viewer`, `cache_operator`, `upstream_operator`, `security_operator`, `config_operator`, or `admin`) plus optional fine-grained `permissions` and `deny_permissions`; the legacy `admin.bearer_token_env` token has the `admin` role. Full hot reload starts, stops, or rebinds this listener when admin listener settings change.
 - `[logging.access_log]` emits request-wide newline-delimited JSON access logs with `scope = "system"` and can use its own stdout and PostgreSQL sinks.
@@ -244,4 +248,4 @@ The current implementation reserves or defers this work:
 - Sticky-cookie upstream sessions.
 - CRS stream-payload inspection for WebSocket and WebTransport traffic.
 - Downstream ECH configuration.
-- Advanced UDP/L4 proxying such as UDP stream proxying, TLS passthrough SNI routing, and QUIC passthrough forwarding. The priority-4 implementation is observability-only for the public-facing web proxy surfaces listed above.
+- General-purpose UDP stream proxying outside the configured same-port QUIC SNI forwarding path.

@@ -16,6 +16,8 @@ pub(super) struct DetailedMetrics {
   cache: HashMap<CacheMetricKey, u64>,
   tls_handshake: HashMap<TlsHandshakeMetricKey, HistogramSeries>,
   quic_retries: HashMap<QuicRetryMetricKey, u64>,
+  sni_forward_decisions: HashMap<SniForwardDecisionMetricKey, u64>,
+  sni_forward_sessions: HashMap<SniForwardSessionMetricKey, HistogramSeries>,
   websocket: HashMap<LongSessionMetricKey, LongSessionSeries>,
   webtransport: HashMap<LongSessionMetricKey, LongSessionSeries>,
   turn: HashMap<TurnMetricKey, u64>,
@@ -56,6 +58,22 @@ struct TlsHandshakeMetricKey {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 struct QuicRetryMetricKey {
+  outcome: String,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct SniForwardDecisionMetricKey {
+  protocol: String,
+  decision: String,
+  rule: String,
+  target: String,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct SniForwardSessionMetricKey {
+  protocol: String,
+  rule: String,
+  target: String,
   outcome: String,
 }
 
@@ -217,6 +235,51 @@ impl Metrics {
     {
       *detailed.quic_retries.entry(key).or_default() += 1;
     }
+  }
+
+  pub fn record_sni_forward_decision_detail(
+    &self,
+    protocol: &str,
+    decision: &str,
+    rule: &str,
+    target: &str,
+  ) {
+    let key = SniForwardDecisionMetricKey {
+      protocol: sanitize_label_value(protocol),
+      decision: sanitize_label_value(decision),
+      rule: sanitize_label_value(rule),
+      target: sanitize_label_value(target),
+    };
+    let mut detailed = lock_detailed(&self.detailed);
+    if detailed.sni_forward_decisions.contains_key(&key)
+      || detailed.sni_forward_decisions.len() < MAX_DETAILED_SERIES
+    {
+      *detailed.sni_forward_decisions.entry(key).or_default() += 1;
+    }
+  }
+
+  pub fn record_sni_forward_session_detail(
+    &self,
+    config: &MetricsConfig,
+    protocol: &str,
+    rule: &str,
+    target: &str,
+    outcome: &str,
+    duration_ms: u64,
+  ) {
+    let key = SniForwardSessionMetricKey {
+      protocol: sanitize_label_value(protocol),
+      rule: sanitize_label_value(rule),
+      target: sanitize_label_value(target),
+      outcome: sanitize_label_value(outcome),
+    };
+    let mut detailed = lock_detailed(&self.detailed);
+    observe_histogram(
+      &mut detailed.sni_forward_sessions,
+      key,
+      duration_ms,
+      &config.histogram_buckets_ms,
+    );
   }
 
   pub fn record_websocket_session_start(
@@ -417,6 +480,42 @@ impl Metrics {
         "counter",
         &labels,
         *value,
+      );
+    }
+    for (key, value) in &detailed.sni_forward_decisions {
+      let labels = [
+        ("protocol", key.protocol.as_str()),
+        ("decision", key.decision.as_str()),
+        ("rule", key.rule.as_str()),
+        ("target", key.target.as_str()),
+      ];
+      append_labeled_metric(
+        output,
+        "oxibelt_sni_forward_decisions_detail_total",
+        "counter",
+        &labels,
+        *value,
+      );
+    }
+    for (key, series) in &detailed.sni_forward_sessions {
+      let labels = [
+        ("protocol", key.protocol.as_str()),
+        ("rule", key.rule.as_str()),
+        ("target", key.target.as_str()),
+        ("outcome", key.outcome.as_str()),
+      ];
+      append_labeled_metric(
+        output,
+        "oxibelt_sni_forward_l4_sessions_total",
+        "counter",
+        &labels,
+        series.count,
+      );
+      append_histogram(
+        output,
+        "oxibelt_sni_forward_l4_session_duration_ms",
+        &labels,
+        series,
       );
     }
     append_long_session_metrics(output, "oxibelt_websocket", &detailed.websocket);
