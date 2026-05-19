@@ -50,6 +50,14 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         .arg(input_dir)
         .arg("--output-dir")
         .arg(output_dir);
+    for name in [
+        "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO",
+        "OXIBELT_PERF_WAF_ENFORCING_MIN_RPS",
+        "OXIBELT_PERF_CRS_ENFORCING_MIN_RPS",
+        "OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO",
+    ] {
+        command.env_remove(name);
+    }
     for arg in extra_args {
         command.arg(arg);
     }
@@ -71,6 +79,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         "## Accept multiplier comparison",
         "## OxiBelt-only results",
         "## Skipped/missing comparator rows",
+        "## Regression gates",
         "## Warnings",
     ] {
         assert!(
@@ -201,6 +210,15 @@ fn find_accept_comparison<'a>(report: &'a Value, scenario: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing accept multiplier comparison for {scenario}"))
 }
 
+fn find_regression_violation<'a>(report: &'a Value, gate: &str, scenario: &str) -> &'a Value {
+    report["regression_gates"]["violations"]
+        .as_array()
+        .expect("regression gate violations should be an array")
+        .iter()
+        .find(|violation| violation["gate"] == gate && violation["scenario"] == scenario)
+        .unwrap_or_else(|| panic!("missing regression gate violation for {gate}/{scenario}"))
+}
+
 fn assert_close(actual: f64, expected: f64) {
     let difference = (actual - expected).abs();
     assert!(
@@ -319,7 +337,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
     assert_eq!(oxibelt_h1["sample_count"], 25);
@@ -444,6 +462,105 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
             .iter()
             .any(|warning| warning.contains("missing rps or handshake_per_sec")),
         "missing throughput fields should produce a warning: {warnings:?}"
+    );
+}
+
+#[test]
+fn regression_gates_pass_when_median_recovers_from_low_samples() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 10.0),
+            load_row("oxibelt-waf-enforcing", "h2", 12000.0, 1.0, 11.0),
+            load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 10.0),
+            load_row("oxibelt-crs-enforcing", "h2", 8600.0, 1.0, 11.0),
+            load_row("oxibelt-crs-enforcing", "h2", 8700.0, 1.0, 11.0),
+            load_row("oxibelt-crs-enforcing", "h2", 9200.0, 1.0, 11.0),
+            load_row("oxibelt-crs-enforcing", "h2", 9300.0, 1.0, 11.0),
+            load_row("oxibelt-crs-enforcing", "h2", 9400.0, 1.0, 11.0),
+        ],
+    );
+
+    let report = run_aggregate(&input_dir, &output_dir);
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    assert_eq!(
+        report["regression_gates"]["violations"]
+            .as_array()
+            .expect("violations should be an array")
+            .len(),
+        0
+    );
+    assert_close(
+        find_aggregate(&report, "oxibelt", "crs-enforcing")["median_rps"]
+            .as_f64()
+            .expect("CRS median RPS should exist"),
+        9200.0,
+    );
+}
+
+#[test]
+fn regression_gates_report_static_crs_and_p99_violations() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-static-16k-h1c", "h1c", 80.0, 1.0, 4.0),
+            load_row("caddy-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+        ],
+    );
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 10.0),
+            load_row("oxibelt-waf-enforcing", "h2", 12000.0, 1.0, 13.0),
+            load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 10.0),
+            load_row("oxibelt-crs-enforcing", "h2", 8700.0, 1.0, 13.0),
+        ],
+    );
+
+    let report = run_aggregate(&input_dir, &output_dir);
+    assert_eq!(report["regression_gates"]["status"], "fail");
+
+    let static_ratio =
+        find_regression_violation(&report, "static_16k_h1c_min_caddy_ratio", "static-16k-h1c");
+    assert_eq!(static_ratio["metric"], "median_rps_ratio");
+    assert_close(
+        static_ratio["observed"]
+            .as_f64()
+            .expect("static ratio should exist"),
+        0.8,
+    );
+
+    let crs_min = find_regression_violation(&report, "crs_enforcing_min_rps", "crs-enforcing");
+    assert_eq!(crs_min["metric"], "median_rps");
+    assert_close(
+        crs_min["observed"].as_f64().expect("CRS RPS should exist"),
+        8700.0,
+    );
+
+    let waf_p99 = find_regression_violation(&report, "waf_enforce_p99_ratio", "waf-enforcing");
+    assert_eq!(waf_p99["metric"], "median_p99_ratio");
+    assert_close(
+        waf_p99["observed"]
+            .as_f64()
+            .expect("WAF p99 ratio should exist"),
+        1.3,
+    );
+
+    let crs_p99 = find_regression_violation(&report, "crs_enforce_p99_ratio", "crs-enforcing");
+    assert_eq!(crs_p99["metric"], "median_p99_ratio");
+    assert_close(
+        crs_p99["observed"]
+            .as_f64()
+            .expect("CRS p99 ratio should exist"),
+        1.3,
     );
 }
 

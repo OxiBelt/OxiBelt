@@ -466,6 +466,7 @@ jobs:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
       PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
       PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}
+      OXIBELT_PERF_REGRESSION_GATE_MODE: warn
 
     steps:
       - name: Checkout
@@ -630,3 +631,16 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-performance-comparison
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Evaluate Docker performance regression gates
+        run: |
+          gate_status="$(jq -r '.regression_gates.status // "unknown"' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          if [[ "${gate_status}" == "pass" ]]; then
+            echo "Docker performance regression gates passed"
+            exit 0
+          fi
+
+          jq -r '.regression_gates.violations[]? | "::error title=Docker performance regression gate::" + .message' \
+            "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
+          echo "Docker performance regression gates failed with status '${gate_status}'" >&2
+          exit 1

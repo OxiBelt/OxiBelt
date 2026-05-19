@@ -42,6 +42,7 @@ OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO=0.85
 OXIBELT_PERF_WAF_ENFORCING_MIN_RPS=11000
 OXIBELT_PERF_CRS_ENFORCING_MIN_RPS=9000
 OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO=1.20
+OXIBELT_PERF_REGRESSION_GATE_MODE=fail
 OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO=baseline-accept-1
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
@@ -75,14 +76,14 @@ The runner writes:
 
 The runner generates one-run TLS material and a one-run 64-byte QUIC host key under `configs/*/cert/`. The performance baseline enables `quic.host_key_file` only against that generated key so Retry/stateless reset token behavior is stable within the run without baking shared key material into fixtures or images.
 
-CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards for each serving type. Push and pull-request smoke runs intentionally collect all serving-type groups so reverse-proxy, static-file, OxiBelt feature, soak/stress, and accept multiplier evidence land in separate artifacts. Each shard uploads one artifact named `oxibelt-docker-performance-<profile>-<serving_type>-shard-<n>` and stores repeated samples under `run-1/` through `run-5/` by default. The workflow keeps running later iterations in the same shard after one iteration fails, then fails the job at the end with the failed iteration list so artifacts stay complete. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
+CI runs the `docker-performance` job as five parallel `ubuntu-latest` shards for each serving type. Push and pull-request smoke runs intentionally collect all serving-type groups so reverse-proxy, static-file, OxiBelt feature, soak/stress, and accept multiplier evidence land in separate artifacts. Each shard uploads one artifact named `oxibelt-docker-performance-<profile>-<serving_type>-shard-<n>` and stores repeated samples under `run-1/` through `run-5/` by default. The workflow keeps running later iterations in the same shard after one iteration fails, then fails the job at the end with the failed iteration list so artifacts stay complete. In CI, targeted RPS and p99 regression gates run with `OXIBELT_PERF_REGRESSION_GATE_MODE=warn`, so noisy single-iteration threshold misses are recorded while the summary job makes the final median-based decision. Failed runs also keep the same files when `OXIBELT_TEST_ARTIFACT_DIR` is set.
 
 After the sharded jobs finish, CI runs a `Docker performance summary` job that downloads all `oxibelt-docker-performance-<profile>-*` artifacts from the same workflow run and writes an aggregate artifact named `oxibelt-docker-performance-<profile>-comparison`. That artifact contains:
 
 - `performance-comparison.md`: a run-summary-friendly comparison report.
 - `performance-comparison.json`: a stable machine-readable schema for follow-up analysis.
 
-The comparison job also appends `performance-comparison.md` to the GitHub Actions run summary. If some matrix artifacts are missing because a shard failed before upload or a dependency skipped the performance job, the aggregate report is still generated from the artifacts that exist and records the missing paths in the Warnings section.
+The comparison job also appends `performance-comparison.md` to the GitHub Actions run summary and fails when `performance-comparison.json` reports median regression gate violations. If some matrix artifacts are missing because a shard failed before upload or a dependency skipped the performance job, the aggregate report is still generated from the artifacts that exist and records the missing paths in the Warnings section.
 
 To reproduce the aggregation locally after downloading artifacts:
 
@@ -96,7 +97,7 @@ cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate -- \
 
 CI thresholds are sanity gates, not competitive claims. The job fails when the probe produces no traffic, sees handshake request errors, crosses the configured p99 latency ceiling, or sees load request errors above `OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION`. The default load budget is `100`, which permits at most 100 load transport errors per million completed requests so noisy shared runners do not fail a long smoke soak after millions of successful responses. Set it to `0` to restore strict no-error load gating. `results.json` includes a bounded `error_samples` list for request, handshake, and stress errors, while `probe-logs/` keeps the surrounding probe stdout and stderr. OxiBelt and Caddy HTTP/3 are mandatory gates: if their functional QUIC readiness probe fails, the job fails instead of recording a skipped row. It also applies a narrower OxiBelt H1/H2 baseline latency-floor gate after the baseline HTTP/1.1, HTTP/2, and HTTP/3 rows are collected; override `OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS` and `OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS` when intentionally running on slower or noisier hosts. Noisy shared runners can move RPS and tail latency substantially, so compare trends across repeated runs and shards and inspect `docker-stats.jsonl` before treating a single result as a regression.
 
-Targeted regression gates pin known-sensitive paths. The static file group fails when `oxibelt-static-16k-h1c` falls below `OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO` of the matching Caddy row. The `oxibelt-features` group fails when WAF enforcing RPS is below `OXIBELT_PERF_WAF_ENFORCING_MIN_RPS`, CRS enforcing RPS is below `OXIBELT_PERF_CRS_ENFORCING_MIN_RPS`, or either WAF/CRS enforcing p99 exceeds its monitor p99 by more than `OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO`.
+Targeted regression gates pin known-sensitive paths. The static file group checks whether `oxibelt-static-16k-h1c` falls below `OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO` of the matching Caddy row. The `oxibelt-features` group checks whether WAF enforcing RPS is below `OXIBELT_PERF_WAF_ENFORCING_MIN_RPS`, CRS enforcing RPS is below `OXIBELT_PERF_CRS_ENFORCING_MIN_RPS`, or either WAF/CRS enforcing p99 exceeds its monitor p99 by more than `OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO`. Local runs use `OXIBELT_PERF_REGRESSION_GATE_MODE=fail` by default and fail as soon as one of these targeted gates is crossed. CI sets that mode to `warn` for shard iterations, then the aggregate summary evaluates the same threshold variables against median RPS and median p99 ratios across the downloaded samples.
 
 The comparison report is a median-based reference over the repeated shard and iteration samples, not a standalone performance claim. It normalizes labels by comparator prefix, so `oxibelt-h1-keepalive`, `nginx-h1-keepalive`, and `caddy-h1-keepalive` are compared as the same `h1-keepalive` scenario. Ratios use median RPS:
 

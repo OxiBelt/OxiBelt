@@ -287,6 +287,10 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should expose the current serving type to the run loop"
     );
     assert!(
+        workflow.contains("OXIBELT_PERF_REGRESSION_GATE_MODE: warn"),
+        "docker-performance should defer noisy per-iteration regression gates to the summary job"
+    );
+    assert!(
         workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),
         "docker-performance should loop over the configured iteration count"
     );
@@ -380,6 +384,18 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         workflow.contains("--baseline-report \"${BASELINE_REPORT}\""),
         "summary job should pass the previous report to the aggregate binary when available"
+    );
+    assert!(
+        workflow.contains("name: Evaluate Docker performance regression gates"),
+        "summary job should evaluate median regression gates after aggregation"
+    );
+    assert!(
+        workflow.contains("gate_status=\"$(jq -r '.regression_gates.status // \"unknown\"'"),
+        "summary job should read the regression gate status from the comparison JSON"
+    );
+    assert!(
+        workflow.contains("Docker performance regression gates failed with status"),
+        "summary job should fail when median regression gates report violations"
     );
     assert!(
         workflow.contains("cat \"${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.md\" >> \"${GITHUB_STEP_SUMMARY}\""),

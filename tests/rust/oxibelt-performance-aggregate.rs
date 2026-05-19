@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,10 @@ use serde_json::Value;
 
 const MAX_RESULTS_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_WARNINGS: usize = 200;
+const DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO: f64 = 0.85;
+const DEFAULT_WAF_ENFORCING_MIN_RPS: f64 = 11000.0;
+const DEFAULT_CRS_ENFORCING_MIN_RPS: f64 = 9000.0;
+const DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO: f64 = 1.20;
 const SERVING_TYPES: [&str; 5] = [
     "reverse-proxy",
     "static-files",
@@ -236,6 +241,33 @@ struct ReportSummary {
     oxibelt_only_row_count: usize,
 }
 
+#[derive(Clone, Copy, Serialize)]
+struct RegressionGateThresholds {
+    static_16k_h1c_min_caddy_ratio: f64,
+    waf_enforcing_min_rps: f64,
+    crs_enforcing_min_rps: f64,
+    waf_crs_max_enforce_p99_ratio: f64,
+}
+
+#[derive(Serialize)]
+struct RegressionGateViolation {
+    gate: String,
+    group: String,
+    scenario: String,
+    metric: String,
+    observed: Option<f64>,
+    threshold: f64,
+    comparator: Option<String>,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct RegressionGateReport {
+    status: String,
+    thresholds: RegressionGateThresholds,
+    violations: Vec<RegressionGateViolation>,
+}
+
 #[derive(Serialize)]
 struct AcceptMultiplierSummary {
     scenario_count: usize,
@@ -264,6 +296,7 @@ struct Report {
     accept_multiplier_comparisons: Vec<AcceptMultiplierComparison>,
     oxibelt_only_results: Vec<AggregateStats>,
     skipped_or_missing_comparator_rows: Vec<MissingComparatorRow>,
+    regression_gates: RegressionGateReport,
     aggregates: Vec<AggregateStats>,
     warnings: Vec<String>,
     warnings_omitted: usize,
@@ -415,6 +448,7 @@ fn main() -> Result<()> {
 
 fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<usize>) -> Report {
     let mut warnings = WarningBag::default();
+    let regression_gate_thresholds = regression_gate_thresholds(&mut warnings);
     let discovered = discover_files(input_dir, &mut warnings);
     let mut artifact_discovery = ArtifactDiscovery {
         results_files: discovered.results.len(),
@@ -453,6 +487,7 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
     let reverse_proxy = build_group_comparisons(ScenarioGroup::ReverseProxy, &aggregate_map);
     let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
     let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
+    let regression_gates = build_regression_gate_report(&aggregate_map, regression_gate_thresholds);
     let oxibelt_only_results = aggregate_map
         .iter()
         .filter(|((comparator, _), aggregate)| {
@@ -472,7 +507,7 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 2,
+        schema_version: 3,
         profile,
         expected_runs,
         artifact_discovery,
@@ -484,6 +519,7 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
         accept_multiplier_comparisons,
         oxibelt_only_results,
         skipped_or_missing_comparator_rows,
+        regression_gates,
         aggregates,
         warnings,
         warnings_omitted,
@@ -1085,6 +1121,237 @@ fn ratio_status(status: &str, ratio: Option<f64>, reason: impl Into<String>) -> 
     }
 }
 
+fn regression_gate_thresholds(warnings: &mut WarningBag) -> RegressionGateThresholds {
+    RegressionGateThresholds {
+        static_16k_h1c_min_caddy_ratio: env_threshold(
+            "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO",
+            DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
+        waf_enforcing_min_rps: env_threshold(
+            "OXIBELT_PERF_WAF_ENFORCING_MIN_RPS",
+            DEFAULT_WAF_ENFORCING_MIN_RPS,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
+        crs_enforcing_min_rps: env_threshold(
+            "OXIBELT_PERF_CRS_ENFORCING_MIN_RPS",
+            DEFAULT_CRS_ENFORCING_MIN_RPS,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
+        waf_crs_max_enforce_p99_ratio: env_threshold(
+            "OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO",
+            DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
+            ThresholdKind::Positive,
+            warnings,
+        ),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ThresholdKind {
+    NonNegative,
+    Positive,
+}
+
+fn env_threshold(name: &str, default: f64, kind: ThresholdKind, warnings: &mut WarningBag) -> f64 {
+    let Ok(raw) = env::var(name) else {
+        return default;
+    };
+    let valid = match raw.parse::<f64>() {
+        Ok(value) if value.is_finite() => match kind {
+            ThresholdKind::NonNegative => value >= 0.0,
+            ThresholdKind::Positive => value > 0.0,
+        },
+        _ => false,
+    };
+    if !valid {
+        warnings.push(format!(
+            "{name} must be a finite {} number; using default {default}",
+            match kind {
+                ThresholdKind::NonNegative => "non-negative",
+                ThresholdKind::Positive => "positive",
+            }
+        ));
+        return default;
+    }
+
+    raw.parse::<f64>().unwrap_or(default)
+}
+
+fn build_regression_gate_report(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    thresholds: RegressionGateThresholds,
+) -> RegressionGateReport {
+    let mut violations = Vec::new();
+
+    collect_static_regression_gate(aggregates, thresholds, &mut violations);
+    collect_min_rps_regression_gate(
+        aggregates,
+        "waf_enforcing_min_rps",
+        "waf-enforcing",
+        thresholds.waf_enforcing_min_rps,
+        &mut violations,
+    );
+    collect_min_rps_regression_gate(
+        aggregates,
+        "crs_enforcing_min_rps",
+        "crs-enforcing",
+        thresholds.crs_enforcing_min_rps,
+        &mut violations,
+    );
+    collect_p99_ratio_regression_gate(
+        aggregates,
+        "waf_enforce_p99_ratio",
+        "waf-monitor",
+        "waf-enforcing",
+        thresholds.waf_crs_max_enforce_p99_ratio,
+        &mut violations,
+    );
+    collect_p99_ratio_regression_gate(
+        aggregates,
+        "crs_enforce_p99_ratio",
+        "crs-monitor",
+        "crs-enforcing",
+        thresholds.waf_crs_max_enforce_p99_ratio,
+        &mut violations,
+    );
+
+    let status = if violations.is_empty() {
+        "pass"
+    } else {
+        "fail"
+    };
+    RegressionGateReport {
+        status: status.to_owned(),
+        thresholds,
+        violations,
+    }
+}
+
+fn collect_static_regression_gate(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    thresholds: RegressionGateThresholds,
+    violations: &mut Vec<RegressionGateViolation>,
+) {
+    let Some(oxibelt_rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, "static-16k-h1c")
+    else {
+        return;
+    };
+    let Some(caddy_rps) = aggregate_median_rps(aggregates, Comparator::Caddy, "static-16k-h1c")
+    else {
+        return;
+    };
+    if caddy_rps <= 0.0 {
+        return;
+    }
+
+    let ratio = oxibelt_rps / caddy_rps;
+    if ratio < thresholds.static_16k_h1c_min_caddy_ratio {
+        violations.push(RegressionGateViolation {
+            gate: "static_16k_h1c_min_caddy_ratio".to_owned(),
+            group: ScenarioGroup::StaticFiles.as_str().to_owned(),
+            scenario: "static-16k-h1c".to_owned(),
+            metric: "median_rps_ratio".to_owned(),
+            observed: Some(ratio),
+            threshold: thresholds.static_16k_h1c_min_caddy_ratio,
+            comparator: Some("caddy".to_owned()),
+            message: format!(
+                "OxiBelt static-16k-h1c median RPS ratio {:.4} < {:.4} vs Caddy ({:.3} RPS vs {:.3} RPS)",
+                ratio, thresholds.static_16k_h1c_min_caddy_ratio, oxibelt_rps, caddy_rps
+            ),
+        });
+    }
+}
+
+fn collect_min_rps_regression_gate(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    gate: &str,
+    scenario: &str,
+    threshold: f64,
+    violations: &mut Vec<RegressionGateViolation>,
+) {
+    let Some(rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, scenario) else {
+        return;
+    };
+    if rps < threshold {
+        violations.push(RegressionGateViolation {
+            gate: gate.to_owned(),
+            group: ScenarioGroup::OxibeltOnly.as_str().to_owned(),
+            scenario: scenario.to_owned(),
+            metric: "median_rps".to_owned(),
+            observed: Some(rps),
+            threshold,
+            comparator: None,
+            message: format!(
+                "OxiBelt {scenario} median RPS {:.3} < {:.3}",
+                rps, threshold
+            ),
+        });
+    }
+}
+
+fn collect_p99_ratio_regression_gate(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    gate: &str,
+    monitor_scenario: &str,
+    enforcing_scenario: &str,
+    threshold: f64,
+    violations: &mut Vec<RegressionGateViolation>,
+) {
+    let Some(monitor_p99) = aggregate_median_p99(aggregates, Comparator::Oxibelt, monitor_scenario)
+    else {
+        return;
+    };
+    let Some(enforcing_p99) =
+        aggregate_median_p99(aggregates, Comparator::Oxibelt, enforcing_scenario)
+    else {
+        return;
+    };
+    if monitor_p99 <= 0.0 {
+        return;
+    }
+
+    let ratio = enforcing_p99 / monitor_p99;
+    if ratio > threshold {
+        violations.push(RegressionGateViolation {
+            gate: gate.to_owned(),
+            group: ScenarioGroup::OxibeltOnly.as_str().to_owned(),
+            scenario: enforcing_scenario.to_owned(),
+            metric: "median_p99_ratio".to_owned(),
+            observed: Some(ratio),
+            threshold,
+            comparator: Some(monitor_scenario.to_owned()),
+            message: format!(
+                "OxiBelt {enforcing_scenario} median p99 ratio {:.4} > {:.4} vs {monitor_scenario} ({:.3}ms vs {:.3}ms)",
+                ratio, threshold, enforcing_p99, monitor_p99
+            ),
+        });
+    }
+}
+
+fn aggregate_median_rps(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    comparator: Comparator,
+    scenario: &str,
+) -> Option<f64> {
+    aggregates
+        .get(&(comparator, scenario.to_owned()))
+        .and_then(|aggregate| aggregate.median_rps)
+}
+
+fn aggregate_median_p99(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    comparator: Comparator,
+    scenario: &str,
+) -> Option<f64> {
+    aggregates
+        .get(&(comparator, scenario.to_owned()))
+        .and_then(|aggregate| aggregate.median_p99_ms)
+}
+
 fn summarize_group(comparisons: &[ScenarioComparison]) -> GroupSummary {
     GroupSummary {
         scenarios: comparisons.len(),
@@ -1451,6 +1718,13 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- Regression gates: `{}` ({} violation(s))",
+        report.regression_gates.status,
+        report.regression_gates.violations.len()
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- OxiBelt-only rows: `{}`\n",
         report.summary.oxibelt_only_row_count
     )
@@ -1469,6 +1743,7 @@ fn render_markdown(report: &Report) -> String {
     write_accept_multiplier_table(&mut markdown, &report.accept_multiplier_comparisons);
     write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
     write_missing_table(&mut markdown, &report.skipped_or_missing_comparator_rows);
+    write_regression_gate_table(&mut markdown, &report.regression_gates);
     write_warnings(&mut markdown, report);
     markdown
 }
@@ -1629,6 +1904,42 @@ fn write_missing_table(markdown: &mut String, rows: &[MissingComparatorRow]) {
             markdown,
             "| `{}` | `{}` | `{}` | `{}` | {} |",
             row.group, row.scenario, row.comparator, row.status, row.reason
+        )
+        .unwrap();
+    }
+    writeln!(markdown).unwrap();
+}
+
+fn write_regression_gate_table(markdown: &mut String, gates: &RegressionGateReport) {
+    writeln!(markdown, "## Regression gates\n").unwrap();
+    writeln!(markdown, "Status: `{}`\n", gates.status).unwrap();
+    if gates.violations.is_empty() {
+        writeln!(markdown, "None.\n").unwrap();
+        return;
+    }
+
+    writeln!(
+        markdown,
+        "| Gate | Group | Scenario | Metric | Observed | Threshold | Comparator | Message |"
+    )
+    .unwrap();
+    writeln!(
+        markdown,
+        "| --- | --- | --- | --- | ---: | ---: | --- | --- |"
+    )
+    .unwrap();
+    for violation in &gates.violations {
+        writeln!(
+            markdown,
+            "| `{}` | `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
+            violation.gate,
+            violation.group,
+            violation.scenario,
+            violation.metric,
+            format_number(violation.observed),
+            format_number(Some(violation.threshold)),
+            violation.comparator.as_deref().unwrap_or("-"),
+            violation.message,
         )
         .unwrap();
     }
