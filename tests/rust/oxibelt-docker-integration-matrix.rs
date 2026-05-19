@@ -4508,11 +4508,13 @@ run_case_checks() {
         docker_case(
             "config-invalid",
             "no-http-versions",
-            "listener validation rejects all downstream HTTP versions disabled",
+            "listener validation rejects all downstream HTTP versions and SNI forwarding protocols disabled",
             ExpectStart::Failure,
             Needs::default(),
             "",
-            Some("at least one downstream HTTP version must be enabled"),
+            Some(
+                "at least one downstream HTTP version or SNI forwarding protocol must be enabled",
+            ),
         ),
         docker_case(
             "config-invalid",
