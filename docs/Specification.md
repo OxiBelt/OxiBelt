@@ -178,7 +178,8 @@ The lifecycle drain configuration is:
 Operational endpoints are optional:
 
 - `[health]` exposes local readiness and liveness endpoints.
-- `[metrics]` exposes Prometheus-style metrics. Rule-level WAF telemetry is intentionally excluded from this unauthenticated endpoint; use the authenticated admin WAF telemetry endpoint for rule names, IDs, modes, routes, and per-rule hit counters.
+- `[metrics]` exposes Prometheus-style metrics. Basic mode keeps aggregate counters and gauges. Detailed mode adds bounded route/upstream/method/status/protocol/cache-reason style labels for HTTPS, HTTP/1.1, HTTP/2, HTTP/3 over QUIC, WebSocket, WebTransport, and WebRTC TURN surfaces. Rule-level WAF names, IDs, tags, modes, routes, hit counters, and cost counters are intentionally excluded from this unauthenticated endpoint; use the authenticated admin WAF telemetry endpoint for rule-level snapshots.
+- `[telemetry.tracing]` is startup-scoped optional observability: it extracts incoming W3C `traceparent`, propagates trace context to upstream HTTP/1.1, HTTP/2, HTTP/3, and WebTransport CONNECT requests, and exports sampled spans to an OTLP HTTP/protobuf collector.
 - `[admin]` exposes authenticated operations APIs such as cache purge, upstream-pool runtime control, dynamic policy automation, config validation/load/rollback, explicit file sync, downstream TLS reload, and lifecycle drain/undrain on a dedicated listener. Plaintext admin traffic is loopback-allowlisted by default; non-loopback admin traffic uses TLS unless the operator explicitly configures a plaintext source allowlist. Admin RBAC maps bearer-token environment variables to roles (`viewer`, `cache_operator`, `upstream_operator`, `security_operator`, `config_operator`, or `admin`) plus optional fine-grained `permissions` and `deny_permissions`; the legacy `admin.bearer_token_env` token has the `admin` role. Full hot reload starts, stops, or rebinds this listener when admin listener settings change.
 - `[logging.access_log]` emits request-wide newline-delimited JSON access logs with `scope = "system"` and can use its own stdout and PostgreSQL sinks.
 - OxiRule `emit_access_log` writes newline-delimited JSON with `scope = "waf"` to stdout and can optionally mirror records to PostgreSQL through the separate `[database.access_log]` sink.
@@ -243,4 +244,4 @@ The current implementation reserves or defers this work:
 - Sticky-cookie upstream sessions.
 - CRS stream-payload inspection for WebSocket and WebTransport traffic.
 - Downstream ECH configuration.
-- Advanced UDP/L4 proxying such as UDP stream proxying and TLS passthrough SNI routing.
+- Advanced UDP/L4 proxying such as UDP stream proxying, TLS passthrough SNI routing, and QUIC passthrough forwarding. The priority-4 implementation is observability-only for the public-facing web proxy surfaces listed above.

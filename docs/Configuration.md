@@ -90,6 +90,8 @@ include = ["conf.d/*.toml"]
 [[admin.tls.certificates]]
 [admin.tls.client_auth]
 [metrics]
+[telemetry]
+[telemetry.tracing]
 [health]
 [security.headers]
 [database.access_log]
@@ -862,6 +864,16 @@ ca_certs = []
 enabled = false
 bind = "127.0.0.1:9090"
 format = "prometheus"
+detail = "detailed"
+histogram_buckets_ms = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+
+[telemetry.tracing]
+enabled = false
+endpoint = "http://127.0.0.1:4318/v1/traces"
+service_name = "oxibelt"
+sample_ratio = 1.0
+export_timeout_ms = 3000
+propagate_trace_context = true
 
 [health]
 enabled = false
@@ -973,9 +985,10 @@ Lifecycle read requires `viewer` or `admin` and returns `{"draining": bool, "rea
 Admin WAF telemetry endpoint:
 
 - `GET /admin/v1/waf/rule-hits`
+- `GET /admin/v1/waf/rule-costs`
 - `GET /admin/v1/waf/crs/compatibility`
 
-These endpoints require `viewer` or `admin`. Rule hits returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`. CRS rule hit entries also include `tags`, `tuned_hits`, latest observed anomaly scores, and latest blocking scores when available. The CRS compatibility endpoint returns the OxiBelt-supported CRS release lines, supported directives/operators/transforms/variables/actions, accepted-but-ignored syntax, fail-closed policy, and known unsupported surfaces.
+These endpoints require `viewer` or `admin`. Rule hits returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`. Rule costs returns OxiRule evaluation counters and total/average runtime in nanoseconds using the same authenticated rule metadata; CRS rule cost accounting is intentionally not exposed through the public metrics listener. CRS rule hit entries also include `tags`, `tuned_hits`, latest observed anomaly scores, and latest blocking scores when available. The CRS compatibility endpoint returns the OxiBelt-supported CRS release lines, supported directives/operators/transforms/variables/actions, accepted-but-ignored syntax, fail-closed policy, and known unsupported surfaces.
 
 Admin upstream-pool endpoints:
 
@@ -1021,7 +1034,9 @@ POST /admin/v1/cache/warm
 
 `key-explain` requires `viewer` and accepts `{ "policy": "default", "method": "GET", "scheme": "https", "host": "example.test", "uri": "/asset.css", "headers": {}, "response_headers": {} }`. It returns the selected policy, partition, base key, optional variant key, Vary fields, and cacheability reasons. `warm` requires `cache_operator` and accepts `{ "items": [{ "scheme": "https", "host": "example.test", "uri": "/asset.css", "method": "GET", "headers": {} }] }`; methods are limited to `GET` and `HEAD`, and each item returns `stored`, `not_cacheable`, `upstream_error`, or `validation_error`.
 
-Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics include aggregate TLS server session storage diagnostic counters for stateful resumption cache calls and approximate lock/put timing, but omit detailed WAF rule names, IDs, modes, routes, and per-rule hit counters because the metrics listener is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoint for that rule-level data.
+Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics include aggregate TLS server session storage diagnostic counters for stateful resumption cache calls and approximate lock/put timing. With `metrics.detail = "detailed"`, Prometheus also includes bounded-label HTTP, upstream, cache, TLS handshake, QUIC Retry, WebSocket, WebTransport, and TURN counters/histograms using route/upstream/protocol/status/cache-reason style labels. `metrics.detail = "basic"` keeps only aggregate counters and gauges. `metrics.histogram_buckets_ms` must be a non-empty strictly increasing list of positive millisecond buckets. The public metrics listener omits detailed WAF rule names, IDs, modes, routes, and per-rule hit/cost counters because it is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoints for rule-level data.
+
+`[telemetry.tracing]` enables W3C `traceparent` extraction/injection and OTLP HTTP/protobuf trace export. `enabled = false` is the default. The v1 exporter supports `http://` OTLP collector endpoints, uses `service_name` as the OpenTelemetry resource service name, samples new root traces with `sample_ratio`, and bounds blocking exporter I/O with `export_timeout_ms`. Export failures after startup are logged and dropped; they do not block data-plane requests. `propagate_trace_context = true` forwards trace context to upstream HTTP/1.1, HTTP/2, HTTP/3, and WebTransport CONNECT requests.
 
 ## Database Access Log Sink
 

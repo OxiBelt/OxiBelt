@@ -1,0 +1,39 @@
+use std::sync::Arc;
+use std::time::Instant;
+
+use tokio::task::JoinHandle;
+
+use super::super::super::H3RequestStream;
+use super::connection_limits::WebTransportSessionPermits;
+use crate::proxy::http::EffectiveTimeouts;
+use crate::proxy::stream_waf::StreamWafRequestContext;
+use crate::state::AppSnapshot;
+use crate::telemetry::{TelemetryStart, TraceContext};
+
+pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSession {
+  pub(super) upstream: Arc<web_transport_quinn::Session>,
+  pub(super) connect_stream: H3RequestStream,
+  pub(super) _connection_permits: WebTransportSessionPermits,
+  pub(super) stream_waf_state: Option<Arc<AppSnapshot>>,
+  pub(super) metrics_state: Arc<AppSnapshot>,
+  pub(super) stream_waf: Option<StreamWafRequestContext>,
+  pub(super) timeouts: EffectiveTimeouts,
+  pub(super) route_name: String,
+  pub(super) upstream_name: String,
+  pub(super) trace_context: Option<TraceContext>,
+  pub(super) started_at: TelemetryStart,
+  pub(in crate::proxy::http3::webtransport_bridge) last_activity: Instant,
+  pub(super) tasks: Vec<JoinHandle<()>>,
+}
+
+impl ActiveWebTransportSession {
+  pub(in crate::proxy::http3::webtransport_bridge) fn webtransport_idle(
+    &self,
+  ) -> std::time::Duration {
+    self.timeouts.webtransport_idle
+  }
+
+  pub(in crate::proxy::http3::webtransport_bridge) fn reap_finished_tasks(&mut self) {
+    self.tasks.retain(|task| !task.is_finished());
+  }
+}

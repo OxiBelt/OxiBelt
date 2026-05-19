@@ -17,7 +17,10 @@ pub(super) fn admin_waf_response(
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
-  if path != "/admin/v1/waf/rule-hits" && path != "/admin/v1/waf/crs/compatibility" {
+  if path != "/admin/v1/waf/rule-hits"
+    && path != "/admin/v1/waf/rule-costs"
+    && path != "/admin/v1/waf/crs/compatibility"
+  {
     return None;
   }
   if !admin_actor_has_role(actor, AdminRole::Viewer) {
@@ -33,6 +36,10 @@ pub(super) fn admin_waf_response(
     "/admin/v1/waf/rule-hits" => Some(admin::json_response(
       StatusCode::OK,
       &json!({ "rules": snapshot.waf.rule_hit_snapshots() }),
+    )),
+    "/admin/v1/waf/rule-costs" => Some(admin::json_response(
+      StatusCode::OK,
+      &json!({ "rules": snapshot.waf.rule_cost_snapshots() }),
     )),
     "/admin/v1/waf/crs/compatibility" => Some(admin::json_response(
       StatusCode::OK,

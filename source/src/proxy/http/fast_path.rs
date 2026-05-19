@@ -20,6 +20,7 @@ use crate::proxy::http::uri::rewrite_uri;
 use crate::proxy::http::version::select_upstream_http_version;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
+use crate::telemetry::TraceContext;
 use crate::waf::{
   RequestWafDecision, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
   WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
@@ -102,6 +103,7 @@ impl PlainProxyFastPath {
     request_headers: Option<HeaderMap>,
     tags: Option<HashMap<String, String>>,
     access_log: &mut SystemAccessLogContext<'_>,
+    trace_context: Option<TraceContext>,
   ) -> Response<ProxyBody>
   where
     B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
@@ -154,6 +156,9 @@ impl PlainProxyFastPath {
     rebuild_request_parts(&mut parts, rebuild);
     semantics::strip_accepted_expect(&mut parts.headers);
     semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
+    state
+      .telemetry
+      .inject_trace_context(&mut parts.headers, trace_context);
     let body = fast_path_request_body(
       body,
       state.config.limits.max_request_body_bytes as usize,

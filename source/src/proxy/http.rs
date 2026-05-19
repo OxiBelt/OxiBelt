@@ -24,6 +24,7 @@ use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
 use crate::state::{AppSnapshot, UpstreamClientRef};
+use crate::telemetry::{TelemetryRuntime, TraceContext};
 use crate::waf::{
   BodyNeed, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
   WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations, request_protocol,
@@ -36,6 +37,7 @@ pub(crate) mod compression;
 pub(crate) mod fast_path;
 pub(crate) mod grpc_web;
 pub(crate) mod headers;
+pub(crate) mod observability;
 pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod semantics;
@@ -55,6 +57,7 @@ use self::body::{
 use self::headers::{
   add_forwarded_headers, extract_host, is_upgrade_request, strip_hop_by_hop_headers,
 };
+use self::observability::{record_request_observability, record_websocket_session_end};
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::response::{
   apply_security_headers, text_response, upstream_error_response, waf_terminal_response,
@@ -263,6 +266,8 @@ where
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
   let system_access_log_enabled = state.system_access_log.enabled();
+  let telemetry_start = TelemetryRuntime::start();
+  let trace_context = state.telemetry.context_from_headers(request.headers());
   let mut access_log = SystemAccessLogContext::new(
     &request,
     peer_addr,
@@ -290,6 +295,7 @@ where
     drain,
     &mut access_log,
     &mut request_connection_permit,
+    trace_context,
   )
   .await;
   let response = if let Some(permit) = request_connection_permit {
@@ -298,6 +304,13 @@ where
     response
   };
   emit_system_access_log(state.as_ref(), &mut access_log, &response);
+  record_request_observability(
+    &state,
+    &access_log,
+    &response,
+    trace_context,
+    telemetry_start,
+  );
   response
 }
 
@@ -317,6 +330,7 @@ async fn handle_inner_impl<B>(
   drain: ConnectionDrain,
   access_log: &mut SystemAccessLogContext<'_>,
   request_connection_permit: &mut Option<ConnectionPermit>,
+  trace_context: Option<TraceContext>,
 ) -> Response<ProxyBody>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
@@ -457,6 +471,7 @@ where
       fast_path_waf.request_headers,
       fast_path_waf.tags,
       access_log,
+      trace_context,
     )
     .await;
   }
@@ -504,6 +519,7 @@ where
       fast_path_waf.request_headers,
       fast_path_waf.tags,
       access_log,
+      trace_context,
     )
     .await;
   }
@@ -696,6 +712,7 @@ where
       request_connection_permit,
       drain,
       access_log,
+      trace_context,
     )
     .await;
   }
@@ -745,6 +762,7 @@ where
       request_connection_permit,
       drain,
       access_log,
+      trace_context,
     )
     .await
     {
@@ -926,6 +944,9 @@ where
       )
     })
   };
+  state
+    .telemetry
+    .inject_trace_context(outbound.headers_mut(), trace_context);
 
   let mut revalidation_entry = None;
   let mut stale_on_error = None;
@@ -941,6 +962,12 @@ where
     match lookup {
       crate::cache::CacheLookup::Fresh(entry) => {
         state.metrics.record_cache_hit();
+        state.metrics.record_cache_event(
+          &resolved.route.name,
+          resolved.route.cache.as_deref(),
+          "hit",
+          "fresh",
+        );
         let response = cached_entry_response(entry, &request_method, &request_headers);
         let response = compression::maybe_compress_response(
           response,
@@ -976,6 +1003,12 @@ where
           )
         {
           state.metrics.record_cache_stale();
+          state.metrics.record_cache_event(
+            &resolved.route.name,
+            resolved.route.cache.as_deref(),
+            "stale",
+            "background_refresh",
+          );
           let response = cached_entry_response(stale.entry, &request_method, &request_headers);
           let response = compression::maybe_compress_response(
             response,
@@ -993,6 +1026,12 @@ where
         }
         if !stale.request_headers.is_empty() {
           state.metrics.record_cache_revalidation();
+          state.metrics.record_cache_event(
+            &resolved.route.name,
+            resolved.route.cache.as_deref(),
+            "revalidate",
+            "stale_validators",
+          );
           for (name, value) in &stale.request_headers {
             outbound.headers_mut().insert(name.clone(), value.clone());
           }
@@ -1002,6 +1041,12 @@ where
           revalidation_entry = Some(stale.entry);
         } else {
           state.metrics.record_cache_hit();
+          state.metrics.record_cache_event(
+            &resolved.route.name,
+            resolved.route.cache.as_deref(),
+            "hit",
+            "stale_without_validators",
+          );
           let response = cached_entry_response(stale.entry, &request_method, &request_headers);
           let response = compression::maybe_compress_response(
             response,
@@ -1020,6 +1065,12 @@ where
       }
       crate::cache::CacheLookup::Revalidate(revalidation) => {
         state.metrics.record_cache_revalidation();
+        state.metrics.record_cache_event(
+          &resolved.route.name,
+          resolved.route.cache.as_deref(),
+          "revalidate",
+          "explicit",
+        );
         for (name, value) in &revalidation.request_headers {
           outbound.headers_mut().insert(name.clone(), value.clone());
         }
@@ -1031,6 +1082,12 @@ where
     }
   } else if cache_enabled_for_route {
     state.metrics.record_cache_miss();
+    state.metrics.record_cache_event(
+      &resolved.route.name,
+      resolved.route.cache.as_deref(),
+      "miss",
+      "lookup",
+    );
   }
 
   if cache_enabled_for_route {
@@ -2005,6 +2062,7 @@ async fn handle_connect_request(
   request_connection_permit: &mut Option<ConnectionPermit>,
   drain: ConnectionDrain,
   access_log: &mut SystemAccessLogContext<'_>,
+  _trace_context: Option<TraceContext>,
 ) -> Response<ProxyBody> {
   if !state.config.proxy.upgrades.connect_tunneling || !resolved.route.connect_tunneling {
     return text_response(
@@ -2303,6 +2361,7 @@ async fn handle_upgrade_request(
   request_connection_permit: &mut Option<ConnectionPermit>,
   drain: ConnectionDrain,
   access_log: &mut SystemAccessLogContext<'_>,
+  trace_context: Option<TraceContext>,
 ) -> Option<Response<ProxyBody>> {
   if request.version() != http::Version::HTTP_11 {
     return Some(text_response(
@@ -2417,6 +2476,9 @@ async fn handle_upgrade_request(
     state.config.proxy.forwarded_headers.mode,
   );
   apply_header_mutations(&mut parts.headers, &request_waf.request_header_mutations);
+  state
+    .telemetry
+    .inject_trace_context(&mut parts.headers, trace_context);
   let outbound = Request::from_parts(parts, body);
   let outbound = outbound.map(|body| {
     body::with_send_timeout(
@@ -2469,7 +2531,17 @@ async fn handle_upgrade_request(
   let upstream_upgrade = hyper::upgrade::on(&mut upstream_response);
   let pool_report = state.pools.clone();
   let upstream_name = upstream.name.clone();
+  let route_name = resolved.route.name.clone();
   let stream_waf_state = state.clone();
+  let websocket_metrics_state = state.clone();
+  let websocket_started_at = TelemetryRuntime::start();
+  if websocket_upgrade {
+    state.metrics.record_websocket_session_start(
+      &state.config.metrics,
+      &route_name,
+      &upstream_name,
+    );
+  }
   let websocket_stream_waf = if websocket_upgrade { stream_waf } else { None };
   let connection_limit_hold =
     TunnelConnectionLimitHold::capture(request_connection_permit, connection_limit_context);
@@ -2504,6 +2576,16 @@ async fn handle_upgrade_request(
       pool_report.report_success(&upstream_name);
     } else {
       pool_report.report_failure(&upstream_name);
+    }
+    if websocket_upgrade {
+      record_websocket_session_end(
+        &websocket_metrics_state,
+        &route_name,
+        &upstream_name,
+        trace_context,
+        websocket_started_at,
+        if result.is_ok() { "closed" } else { "error" },
+      );
     }
   });
   drop(pool_selection);

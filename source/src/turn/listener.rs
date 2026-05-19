@@ -279,6 +279,11 @@ fn spawn_tcp_acceptor(
             next_stream_id = next_stream_id.wrapping_add(1024);
             let stream_id = next_stream_id;
             connections.spawn(async move {
+              conn_state.snapshot().metrics.record_turn_event(
+                &conn_config.name,
+                if conn_acceptor.is_some() { "tls" } else { "tcp" },
+                "connection_started",
+              );
               let result = if let Some(acceptor) = conn_acceptor {
                 match acceptor.accept(stream).await {
                   Ok(tls_stream) => serve_turn_stream(Box::new(tls_stream), peer_addr, stream_id, stream_pool, conn_config, conn_state, connection_drain, conn_edge).await,
@@ -324,6 +329,7 @@ async fn serve_turn_udp(
       }
       received = socket.recv_from(&mut buffer) => {
         let (len, client_addr) = received.context("failed to receive TURN UDP datagram")?;
+        state.snapshot().metrics.record_turn_event(&config.name, "udp", "datagram_received");
         let packet = &buffer[..len];
         match config.mode {
           WebRtcTurnListenerMode::ProxyPool => {

@@ -1,10 +1,13 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use http::StatusCode;
 
 use crate::cache::CacheStats;
+use crate::config::{MetricsConfig, MetricsDetail};
 use crate::tls::TlsServerSessionStorageStats;
+
+mod detail;
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -40,6 +43,7 @@ pub struct Metrics {
   mitigation_fail_closed_total: AtomicU64,
   mitigation_queue_depth: AtomicU64,
   mitigation_writer_healthy: AtomicU64,
+  detailed: Mutex<detail::DetailedMetrics>,
 }
 
 const COUNTER_STRIPES: usize = 64;
@@ -281,6 +285,7 @@ impl Metrics {
 
   pub fn prometheus(
     &self,
+    config: &MetricsConfig,
     cache: CacheStats,
     tls_session_storage: TlsServerSessionStorageStats,
   ) -> String {
@@ -575,6 +580,9 @@ impl Metrics {
       "counter",
       tls_session_storage.put_duration_ns,
     );
+    if config.detail == MetricsDetail::Detailed {
+      self.append_detailed_prometheus(&mut output);
+    }
     output
   }
 }
@@ -598,7 +606,9 @@ mod tests {
   #[test]
   fn prometheus_output_omits_waf_rule_metadata() {
     let metrics = Metrics::new();
+    let config = MetricsConfig::default();
     let body = metrics.prometheus(
+      &config,
       CacheStats::default(),
       TlsServerSessionStorageStats::default(),
     );
@@ -616,7 +626,9 @@ mod tests {
   #[test]
   fn prometheus_output_includes_tls_session_storage_diagnostics() {
     let metrics = Metrics::new();
+    let config = MetricsConfig::default();
     let body = metrics.prometheus(
+      &config,
       CacheStats::default(),
       TlsServerSessionStorageStats {
         put_count: 11,
@@ -650,6 +662,7 @@ mod tests {
     }
 
     let body = metrics.prometheus(
+      &MetricsConfig::default(),
       CacheStats::default(),
       TlsServerSessionStorageStats::default(),
     );

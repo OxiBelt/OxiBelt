@@ -380,6 +380,16 @@ ca_certs = []
 enabled = false
 bind = "127.0.0.1:9090"
 format = "prometheus"
+detail = "detailed" # basic | detailed
+histogram_buckets_ms = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+
+[telemetry.tracing]
+enabled = false
+endpoint = "http://127.0.0.1:4318/v1/traces"
+service_name = "oxibelt"
+sample_ratio = 1.0
+export_timeout_ms = 3000
+propagate_trace_context = true
 
 [health]
 enabled = false

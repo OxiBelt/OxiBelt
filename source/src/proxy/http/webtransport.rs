@@ -10,6 +10,7 @@ use crate::external_auth::ExternalAuthOutcome;
 use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
 use crate::state::AppSnapshot;
+use crate::telemetry::TraceContext;
 use crate::waf::{
   WafProtocol, WafRequestInput, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
   apply_header_mutations,
@@ -24,6 +25,8 @@ use super::{EffectiveTimeouts, tags_ref};
 
 pub(crate) struct PreparedWebTransport {
   pub(crate) client_addr: std::net::SocketAddr,
+  pub(crate) route_name: String,
+  pub(crate) trace_context: Option<TraceContext>,
   pub(crate) target_url: url::Url,
   pub(crate) headers: http::HeaderMap,
   pub(crate) protocols: Vec<String>,
@@ -52,6 +55,7 @@ pub(crate) async fn prepare_webtransport(
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
   let request_headers = request.headers().clone();
+  let trace_context = state.telemetry.context_from_headers(&request_headers);
   let received_at_unix_ms = crate::waf::current_unix_ms();
   let mut tags: Option<HashMap<String, String>> = None;
   let client_addr = match crate::identity::resolve_client_addr(
@@ -315,11 +319,16 @@ pub(crate) async fn prepare_webtransport(
     state.config.proxy.forwarded_headers.mode,
   );
   apply_header_mutations(&mut headers, &request_waf.request_header_mutations);
+  state
+    .telemetry
+    .inject_trace_context(&mut headers, trace_context);
 
   let protocols = parse_webtransport_protocols(&headers);
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
   Ok(PreparedWebTransport {
     client_addr,
+    route_name: resolved.route.name.clone(),
+    trace_context,
     target_url,
     headers,
     protocols,

@@ -19,7 +19,6 @@ use super::connection::DownstreamWebTransportConnection;
 use super::{DispatcherEvent, DownstreamBidiStream, DownstreamUniRecvStream};
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
-use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::response::text_response;
 use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContext};
 use crate::state::AppSnapshot;
@@ -27,12 +26,16 @@ use crate::waf::{WafStreamClose, WafStreamDirection, WafWebTransportStreamKind};
 
 #[path = "session/connection_limits.rs"]
 mod connection_limits;
+#[path = "session/metrics.rs"]
+mod metrics;
+#[path = "session/state.rs"]
+mod state;
 
-use connection_limits::{WebTransportSessionPermits, acquire_webtransport_session_permits};
-
+use connection_limits::acquire_webtransport_session_permits;
+use metrics::record_session_end_metrics;
+pub(super) use state::ActiveWebTransportSession;
 const WEBTRANSPORT_DRAFT_HEADER: &str = "sec-webtransport-http3-draft";
 const WEBTRANSPORT_DRAFT_VALUE: &str = "draft02";
-
 #[derive(Default)]
 pub(super) struct WebTransportSessionIndex {
   connect_stream_ids: HashMap<SessionId, StreamId>,
@@ -69,28 +72,6 @@ impl WebTransportSessionIndex {
 fn session_id_for_stream_id(stream_id: StreamId) -> SessionId {
   SessionId::from(stream_id)
 }
-
-pub(super) struct ActiveWebTransportSession {
-  upstream: Arc<web_transport_quinn::Session>,
-  connect_stream: H3RequestStream,
-  _connection_permits: WebTransportSessionPermits,
-  stream_waf_state: Option<Arc<AppSnapshot>>,
-  stream_waf: Option<StreamWafRequestContext>,
-  timeouts: EffectiveTimeouts,
-  pub(super) last_activity: Instant,
-  tasks: Vec<JoinHandle<()>>,
-}
-
-impl ActiveWebTransportSession {
-  pub(super) fn webtransport_idle(&self) -> std::time::Duration {
-    self.timeouts.webtransport_idle
-  }
-
-  pub(super) fn reap_finished_tasks(&mut self) {
-    self.tasks.retain(|task| !task.is_finished());
-  }
-}
-
 fn report_activity(events: &mpsc::Sender<DispatcherEvent>, session_id: SessionId) {
   let _ = events.try_send(DispatcherEvent::Activity(session_id));
 }
@@ -246,6 +227,11 @@ pub(super) async fn accept_webtransport_session(
   let upstream = Arc::new(upstream);
   let stream_waf = prepared.stream_waf.take();
   let stream_waf_state = stream_waf.as_ref().map(|_| snapshot.clone());
+  snapshot.metrics.record_webtransport_session_start(
+    &snapshot.config.metrics,
+    &prepared.route_name,
+    &prepared.upstream.name,
+  );
   let tasks = spawn_upstream_session_tasks(
     session_id,
     connect_stream_id,
@@ -262,8 +248,13 @@ pub(super) async fn accept_webtransport_session(
       connect_stream: stream,
       _connection_permits: connection_permits,
       stream_waf_state,
+      metrics_state: snapshot,
       stream_waf,
       timeouts: prepared.timeouts,
+      route_name: prepared.route_name,
+      upstream_name: prepared.upstream.name,
+      trace_context: prepared.trace_context,
+      started_at: crate::telemetry::TelemetryRuntime::start(),
       last_activity: Instant::now(),
       tasks,
     },
@@ -634,6 +625,7 @@ pub(super) fn close_session(
   let Some(mut session) = sessions.remove(&session_id) else {
     return;
   };
+  record_session_end_metrics(&session, close);
   session_index.remove(session_id);
   for task in session.tasks {
     task.abort();

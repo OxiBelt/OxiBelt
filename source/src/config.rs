@@ -19,6 +19,7 @@ mod limits;
 mod quic;
 mod route;
 mod stream;
+mod telemetry;
 mod tls;
 mod turn;
 mod upstream_pool;
@@ -35,6 +36,7 @@ pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
 pub use route::*;
 pub use stream::*;
+pub use telemetry::*;
 pub use tls::*;
 pub use turn::*;
 pub use upstream_pool::*;
@@ -56,6 +58,7 @@ pub struct Config {
   pub cache: CacheConfig,
   pub admin: AdminConfig,
   pub metrics: MetricsConfig,
+  pub telemetry: TelemetryConfig,
   pub health: HealthConfig,
   pub security: SecurityConfig,
   pub database: DatabaseConfig,
@@ -100,6 +103,8 @@ struct RawConfig {
   admin: AdminConfig,
   #[serde(default)]
   metrics: MetricsConfig,
+  #[serde(default)]
+  telemetry: TelemetryConfig,
   #[serde(default)]
   health: HealthConfig,
   #[serde(default)]
@@ -150,6 +155,7 @@ impl TryFrom<RawConfig> for Config {
       cache: raw.cache,
       admin: raw.admin,
       metrics: raw.metrics,
+      telemetry: raw.telemetry,
       health: raw.health,
       security: raw.security,
       database: raw.database,
@@ -382,6 +388,7 @@ impl Config {
       && self.cache == other.cache
       && self.admin == other.admin
       && self.metrics == other.metrics
+      && self.telemetry == other.telemetry
       && self.health == other.health
       && self.security == other.security
       && self.database == other.database
@@ -631,6 +638,7 @@ impl Config {
     self.validate_cache()?;
     self.validate_admin()?;
     self.validate_metrics_and_health()?;
+    self.telemetry.validate()?;
     self.validate_security_headers()?;
     self.validate_tls()?;
     self.quic.validate(self.listeners.http3)?;
@@ -1666,6 +1674,19 @@ impl Config {
   }
 
   fn validate_metrics_and_health(&self) -> anyhow::Result<()> {
+    if self.metrics.histogram_buckets_ms.is_empty() {
+      bail!("metrics.histogram_buckets_ms must not be empty");
+    }
+    let mut previous = 0;
+    for bucket in &self.metrics.histogram_buckets_ms {
+      if *bucket == 0 {
+        bail!("metrics.histogram_buckets_ms values must be greater than 0");
+      }
+      if *bucket <= previous {
+        bail!("metrics.histogram_buckets_ms values must be strictly increasing");
+      }
+      previous = *bucket;
+    }
     if !self.health.ready_path.starts_with('/') || !self.health.live_path.starts_with('/') {
       bail!("health ready_path and live_path must start with '/'");
     }
@@ -2136,6 +2157,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "security",
       "shared_state",
       "stream_listeners",
+      "telemetry",
       "tls",
       "turn_upstream_pools",
       "upstream_pools",
@@ -2558,7 +2580,22 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "admin.tls.certificates" => &["cert_chain", "default", "private_key", "server_names"][..],
     "admin.tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
-    "metrics" => &["bind", "enabled", "format"][..],
+    "metrics" => &[
+      "bind",
+      "detail",
+      "enabled",
+      "format",
+      "histogram_buckets_ms",
+    ][..],
+    "telemetry" => &["tracing"][..],
+    "telemetry.tracing" => &[
+      "enabled",
+      "endpoint",
+      "export_timeout_ms",
+      "propagate_trace_context",
+      "sample_ratio",
+      "service_name",
+    ][..],
     "health" => &["bind", "enabled", "live_path", "ready_path"][..],
     "security" => &["headers"][..],
     "security.headers" => &[
@@ -4605,6 +4642,10 @@ pub struct MetricsConfig {
   pub bind: SocketAddr,
   #[serde(default)]
   pub format: MetricsFormat,
+  #[serde(default)]
+  pub detail: MetricsDetail,
+  #[serde(default = "default_metrics_histogram_buckets_ms")]
+  pub histogram_buckets_ms: Vec<u64>,
 }
 
 impl Default for MetricsConfig {
@@ -4613,6 +4654,8 @@ impl Default for MetricsConfig {
       enabled: false,
       bind: default_metrics_bind(),
       format: MetricsFormat::Prometheus,
+      detail: MetricsDetail::Detailed,
+      histogram_buckets_ms: default_metrics_histogram_buckets_ms(),
     }
   }
 }
@@ -4622,6 +4665,14 @@ impl Default for MetricsConfig {
 pub enum MetricsFormat {
   #[default]
   Prometheus,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsDetail {
+  Basic,
+  #[default]
+  Detailed,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -5639,6 +5690,10 @@ fn default_metrics_bind() -> SocketAddr {
   "127.0.0.1:9090"
     .parse()
     .expect("valid metrics bind default")
+}
+
+fn default_metrics_histogram_buckets_ms() -> Vec<u64> {
+  vec![1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
 }
 
 fn default_health_bind() -> SocketAddr {

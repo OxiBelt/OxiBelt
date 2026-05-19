@@ -1517,6 +1517,26 @@ impl WafEngine {
     snapshots
   }
 
+  pub fn rule_cost_snapshots(&self) -> Vec<WafRuleCostSnapshot> {
+    let mut snapshots = self
+      .global_rules
+      .iter()
+      .chain(self.route_rules.values().flat_map(|rules| rules.iter()))
+      .map(CompiledRule::cost_snapshot)
+      .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| {
+      left
+        .scope
+        .cmp(&right.scope)
+        .then_with(|| left.route.cmp(&right.route))
+        .then_with(|| left.phase.cmp(&right.phase))
+        .then_with(|| left.name.cmp(&right.name))
+        .then_with(|| left.id.cmp(&right.id))
+        .then_with(|| left.effective_mode.cmp(&right.effective_mode))
+    });
+    snapshots
+  }
+
   pub fn has_response_rules(&self, route_name: &str) -> bool {
     self.route_plan(route_name).response().enabled()
   }
@@ -1946,7 +1966,10 @@ impl WafEngine {
       locals: &[],
       ..*ctx
     };
-    let value = rule.expression.eval(&rule_ctx, tx)?;
+    let started_at = Instant::now();
+    let value = rule.expression.eval(&rule_ctx, tx);
+    rule.record_eval(started_at.elapsed());
+    let value = value?;
     value
       .as_bool()
       .with_context(|| format!("WAF rule {} expression did not evaluate to Bool", rule.name))
@@ -2029,6 +2052,8 @@ fn compile_rules(
         mode,
         hit_key,
         hit_counter,
+        eval_counter: Arc::new(AtomicU64::new(0)),
+        eval_duration_ns: Arc::new(AtomicU64::new(0)),
         request_body_need,
         response_body_need,
         regex_cache,
@@ -2298,6 +2323,21 @@ pub struct WafRuleHitSnapshot {
   pub latest_outbound_blocking_score: Option<i64>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct WafRuleCostSnapshot {
+  pub scope: String,
+  pub route: Option<String>,
+  pub phase: String,
+  pub name: String,
+  pub id: Option<String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub tags: Vec<String>,
+  pub effective_mode: String,
+  pub evaluations: u64,
+  pub total_duration_ns: u64,
+  pub average_duration_ns: u64,
+}
+
 #[derive(Clone)]
 struct CompiledRule {
   name: String,
@@ -2311,6 +2351,8 @@ struct CompiledRule {
   mode: WafMode,
   hit_key: WafRuleHitKey,
   hit_counter: Arc<AtomicU64>,
+  eval_counter: Arc<AtomicU64>,
+  eval_duration_ns: Arc<AtomicU64>,
   request_body_need: BodyNeed,
   response_body_need: BodyNeed,
   regex_cache: CompiledRegexCache,
@@ -2324,6 +2366,14 @@ struct CompiledRule {
 impl CompiledRule {
   fn record_hit(&self) {
     self.hit_counter.fetch_add(1, Ordering::Relaxed);
+  }
+
+  fn record_eval(&self, duration: Duration) {
+    self.eval_counter.fetch_add(1, Ordering::Relaxed);
+    self.eval_duration_ns.fetch_add(
+      duration.as_nanos().min(u128::from(u64::MAX)) as u64,
+      Ordering::Relaxed,
+    );
   }
 
   fn hit_snapshot(&self) -> WafRuleHitSnapshot {
@@ -2341,6 +2391,23 @@ impl CompiledRule {
       latest_outbound_anomaly_score: None,
       latest_inbound_blocking_score: None,
       latest_outbound_blocking_score: None,
+    }
+  }
+
+  fn cost_snapshot(&self) -> WafRuleCostSnapshot {
+    let evaluations = self.eval_counter.load(Ordering::Relaxed);
+    let total_duration_ns = self.eval_duration_ns.load(Ordering::Relaxed);
+    WafRuleCostSnapshot {
+      scope: self.scope.clone(),
+      route: self.route.clone(),
+      phase: self.phase.as_str().to_string(),
+      name: self.name.clone(),
+      id: self.id.clone(),
+      tags: self.tags.clone(),
+      effective_mode: self.mode.as_str().to_string(),
+      evaluations,
+      total_duration_ns,
+      average_duration_ns: total_duration_ns.checked_div(evaluations).unwrap_or(0),
     }
   }
 }

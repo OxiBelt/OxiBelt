@@ -39,6 +39,7 @@ pub mod state;
 pub mod stream;
 mod tcp_hop;
 mod tcp_socket;
+pub mod telemetry;
 pub mod tls;
 pub mod turn;
 pub mod upstream_control;
@@ -60,13 +61,13 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 }
 
 pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
-  runtime::init_tracing(&config.logging)?;
+  let observability = runtime::init_observability(&config)?;
   config.validate()?;
   config.log_worker_resolution();
   tls::install_default_provider()?;
 
   let state = AppHandle::new(
-    AppSnapshot::new(config)
+    AppSnapshot::new_with_telemetry(config, observability.telemetry())
       .await
       .context("failed to initialize application state")?,
   );

@@ -40,6 +40,7 @@ use crate::reload::{ReloadManager, ReloadTrigger};
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::{BoundStreamListener, StreamListenerTask};
 use crate::tcp_hop;
+use crate::telemetry::TelemetryRuntime;
 use crate::turn::{BoundTurnListener, TurnListenerTask};
 use crate::upstream_control;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
@@ -253,6 +254,7 @@ fn ops_response(
     OpsKind::Metrics => {
       let snapshot = state.snapshot();
       let body = snapshot.metrics.prometheus(
+        &snapshot.config.metrics,
         snapshot.cache.stats(),
         snapshot.tls_resumption.server_session_storage_stats(),
       );
@@ -1920,7 +1922,10 @@ async fn serve_http3(
             let data_plane_drain = connection_state.data_plane_drain;
             if connection_snapshot.config.quic.retry && !connecting.remote_address_validated() && connecting.may_retry() {
                 if let Err(error) = connecting.retry() {
+                    connection_snapshot.metrics.record_quic_retry("error");
                     warn!(error = %error, "failed to send QUIC Retry packet");
+                } else {
+                    connection_snapshot.metrics.record_quic_retry("sent");
                 }
                 continue;
             }
@@ -2028,6 +2033,7 @@ async fn handle_connection(
       .with_context(|| format!("failed to apply TCP max hop {max_hop} for {peer_addr}"))?;
   }
 
+  let handshake_started_at = TelemetryRuntime::start();
   let start = tokio::time::timeout(
     Duration::from_millis(handshake_state.config.limits.tls_handshake_timeout_ms),
     LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream),
@@ -2050,6 +2056,14 @@ async fn handle_connection(
     .alpn_protocol()
     .map(|proto| proto.to_vec())
     .unwrap_or_else(|| b"http/1.1".to_vec());
+  let alpn = String::from_utf8_lossy(&negotiated).to_string();
+  handshake_state.metrics.record_tls_handshake(
+    &handshake_state.config.metrics,
+    "tcp",
+    &alpn,
+    "success",
+    handshake_started_at.elapsed_ms(),
+  );
   let tls_metadata = Arc::new(downstream_tls_metadata(
     tls_stream.get_ref().1,
     &client_hello_metadata,

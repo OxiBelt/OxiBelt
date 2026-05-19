@@ -24,6 +24,8 @@ pub(crate) struct SystemAccessLogContext<'a> {
   response_id: Option<String>,
   transaction_id: Option<String>,
   request: Option<SystemAccessLogRequest>,
+  method: Method,
+  version: Version,
   pub(super) request_received_at_unix_ms: u64,
   pub(super) response_received_at_unix_ms: u64,
   pub(super) client_addr: std::net::SocketAddr,
@@ -71,6 +73,8 @@ impl<'a> SystemAccessLogContext<'a> {
       response_id: None,
       transaction_id: None,
       request: request_snapshot,
+      method: request.method().clone(),
+      version: request.version(),
       request_received_at_unix_ms: 0,
       response_received_at_unix_ms: 0,
       client_addr: peer_addr,
@@ -115,43 +119,35 @@ impl<'a> SystemAccessLogContext<'a> {
     }
   }
 
-  pub(super) fn system_access_log_enabled(&self) -> bool {
-    self.request.is_some()
-  }
-
   pub(super) fn set_downstream_host(&mut self, host: &str) {
-    if self.system_access_log_enabled() {
-      self.downstream_host.clear();
-      self.downstream_host.push_str(host);
+    if self.request.is_none() {
+      return;
     }
+    self.downstream_host.clear();
+    self.downstream_host.push_str(host);
   }
 
   pub(super) fn set_route_name(&mut self, route_name: &str) {
-    if self.system_access_log_enabled() {
-      self.route_name.clear();
-      self.route_name.push_str(route_name);
-    }
+    self.route_name.clear();
+    self.route_name.push_str(route_name);
   }
 
   pub(super) fn set_tags(&mut self, tags: Option<HashMap<String, String>>) {
-    if self.system_access_log_enabled() {
-      self.tags = tags;
+    if self.request.is_none() {
+      return;
     }
+    self.tags = tags;
   }
 
   pub(super) fn set_upstream(&mut self, upstream_name: &str, upstream_scheme: &str) {
-    if self.system_access_log_enabled() {
-      self.upstream_name.clear();
-      self.upstream_name.push_str(upstream_name);
-      self.upstream_scheme.clear();
-      self.upstream_scheme.push_str(upstream_scheme);
-    }
+    self.upstream_name.clear();
+    self.upstream_name.push_str(upstream_name);
+    self.upstream_scheme.clear();
+    self.upstream_scheme.push_str(upstream_scheme);
   }
 
   pub(super) fn set_upstream_pool(&mut self, upstream_pool: String) {
-    if self.system_access_log_enabled() {
-      self.upstream_pool = Some(upstream_pool);
-    }
+    self.upstream_pool = Some(upstream_pool);
   }
 
   pub(super) fn request_id(&self) -> &str {
@@ -230,11 +226,56 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn record_upstream_error(&mut self, code: &str, message: &str) {
-    if !self.system_access_log_enabled() {
-      return;
-    }
     self.upstream_error_code = Some(code.to_string());
     self.upstream_error_message = Some(message.to_string());
+  }
+
+  pub(super) fn method(&self) -> &Method {
+    &self.method
+  }
+
+  pub(super) fn protocol_label(&self) -> &'static str {
+    match (self.protocol, self.version) {
+      (WafProtocol::Websocket, _) => "websocket",
+      (WafProtocol::Webtransport, _) => "webtransport",
+      (_, Version::HTTP_3) => "h3",
+      (_, Version::HTTP_2) => "h2",
+      (_, Version::HTTP_11) => "h1",
+      (_, Version::HTTP_10) => "h1",
+      _ => "http",
+    }
+  }
+
+  pub(super) fn route_name_for_metrics(&self) -> &str {
+    if self.route_name.is_empty() {
+      "unmatched"
+    } else {
+      &self.route_name
+    }
+  }
+
+  pub(super) fn upstream_name_for_metrics(&self) -> &str {
+    if self.upstream_name.is_empty() {
+      "none"
+    } else {
+      &self.upstream_name
+    }
+  }
+
+  pub(super) fn upstream_protocol_for_metrics(&self) -> &str {
+    if self.upstream_scheme.is_empty() {
+      "none"
+    } else {
+      &self.upstream_scheme
+    }
+  }
+
+  pub(super) fn upstream_outcome_for_metrics(&self) -> &str {
+    self.upstream_error_code.as_deref().unwrap_or("success")
+  }
+
+  pub(super) fn upstream_duration_ms_for_metrics(&self) -> Option<u64> {
+    self.upstream_first_byte_time_ms
   }
 
   pub(super) fn tags(&self) -> &HashMap<String, String> {

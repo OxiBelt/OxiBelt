@@ -9,11 +9,11 @@ use oxibelt::config::{
     Config, ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode,
     DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
     ExpectContinueMode, ExternalAuthProvider, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode,
-    MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
-    QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
-    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-    UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode,
+    ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides,
+    SharedStateBackendKind, StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode,
+    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -56,6 +56,131 @@ fn protocol_operations_defaults_are_disabled() {
         ProxyProtocolEgressMode::Off
     );
     assert!(config.stream_listeners.is_empty());
+}
+
+#[test]
+fn telemetry_tracing_and_detailed_metrics_parse() {
+    let temp_dir = common::TempDir::new("telemetry-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "telemetry-config");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[metrics]
+enabled = true
+detail = "detailed"
+histogram_buckets_ms = [1, 10, 100]
+
+[telemetry.tracing]
+enabled = true
+endpoint = "http://127.0.0.1:4318/v1/traces"
+service_name = "oxibelt-test"
+sample_ratio = 0.5
+export_timeout_ms = 250
+propagate_trace_context = true
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(config.metrics.detail, MetricsDetail::Detailed);
+    assert_eq!(config.metrics.histogram_buckets_ms, vec![1, 10, 100]);
+    assert!(config.telemetry.tracing.enabled);
+    assert_eq!(config.telemetry.tracing.service_name, "oxibelt-test");
+    assert_eq!(config.telemetry.tracing.sample_ratio, 0.5);
+}
+
+#[test]
+fn telemetry_tracing_rejects_invalid_values() {
+    let temp_dir = common::TempDir::new("telemetry-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "telemetry-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    for (suffix, expected) in [
+        (
+            r#"
+[telemetry.tracing]
+enabled = true
+sample_ratio = 1.5
+"#,
+            "sample_ratio",
+        ),
+        (
+            r#"
+[telemetry.tracing]
+enabled = true
+export_timeout_ms = 0
+"#,
+            "export_timeout_ms",
+        ),
+        (
+            r#"
+[telemetry.tracing]
+enabled = true
+endpoint = "https://collector.example/v1/traces"
+"#,
+            "only http://",
+        ),
+    ] {
+        let config: Config = toml::from_str(&(base.clone() + suffix)).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid telemetry should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn metrics_histogram_buckets_must_be_strictly_increasing() {
+    let temp_dir = common::TempDir::new("metrics-buckets-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "metrics-buckets-invalid");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[metrics]
+histogram_buckets_ms = [10, 10]
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("duplicate buckets should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("metrics.histogram_buckets_ms values must be strictly increasing"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn telemetry_unknown_fields_fail_strict_shape_validation() {
+    let temp_dir = common::TempDir::new("telemetry-unknown");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "telemetry-unknown");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[telemetry.tracing]
+enabled = false
+unexpected = true
+"#;
+    let config_path = temp_dir.path().join("oxibelt.toml");
+    std::fs::write(&config_path, raw).expect("config should write");
+
+    let error = Config::load(&config_path).expect_err("unknown telemetry field should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("configuration contains unknown field(s): telemetry.tracing.unexpected"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[test]

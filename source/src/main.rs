@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     .with_context(|| format!("failed to load {}", cli.config.display()))?;
   let override_warnings = config.apply_runtime_overrides(&runtime_overrides);
 
-  oxibelt::runtime::init_tracing(&config.logging)?;
+  let observability = oxibelt::runtime::init_observability(&config)?;
   for warning in override_warnings {
     tracing::warn!("{warning}");
   }
@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
   let runtime = build_runtime(worker_threads)?;
   runtime.block_on(async move {
     let state = oxibelt::state::AppHandle::new(
-      oxibelt::state::AppSnapshot::new(config)
+      oxibelt::state::AppSnapshot::new_with_telemetry(config, observability.telemetry())
         .await
         .context("failed to initialize application state")?,
     );

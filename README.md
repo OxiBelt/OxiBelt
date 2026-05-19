@@ -16,6 +16,7 @@ The current implementation is a production-oriented foundation: configuration is
 - Opt-in TCP stream listeners for raw TCP forwarding to fixed targets.
 - OxiRule request, response, and stream WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, structured access logs, bounded HTTP body scanning, WebSocket/WebTransport payload inspection, and optional CRS-compatible anomaly scoring.
 - Request-wide structured system access logs with stdout and PostgreSQL sinks.
+- Prometheus metrics with aggregate or detailed route/upstream/protocol labels, plus optional W3C tracecontext propagation and OTLP trace export.
 - Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload, with graceful listener drain for in-flight requests and long-lived tunnels.
 
 See [docs/Specification.md](docs/Specification.md) for the compact behavior spec and current non-goals.
@@ -189,4 +190,4 @@ OxiBelt intentionally keeps ACME challenge handling, including HTTP-01 and DNS-0
 
 This keeps ACME account keys, DNS provider API tokens, challenge credentials, and optionally TLS private keys outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised process should not also contain the credentials needed to issue arbitrary new TLS certificates or export configured private keys, especially through DNS-01 provider tokens.
 
-Live OCSP fetch/refresh, sticky-cookie upstream sessions, downstream ECH configuration, and advanced UDP/L4 proxying such as general UDP stream proxying and TLS passthrough SNI routing remain reserved or deferred. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
+Live OCSP fetch/refresh, sticky-cookie upstream sessions, downstream ECH configuration, and advanced UDP/L4 proxying such as general UDP stream proxying, TLS passthrough SNI routing, and QUIC passthrough forwarding remain reserved or deferred. The current priority-4 work is observability-only. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.

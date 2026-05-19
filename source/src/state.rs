@@ -31,6 +31,7 @@ use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
 use crate::shared_state::SharedState;
+use crate::telemetry::TelemetryRuntime;
 use crate::tls;
 use crate::turn::TurnPoolState;
 use crate::waf::WafEngine;
@@ -187,6 +188,7 @@ pub struct AppSnapshot {
   pub(crate) compression: Arc<CompressionState>,
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
+  pub telemetry: TelemetryRuntime,
   pub dynamic_policy: DynamicPolicyRuntime,
   pub external_auth: ExternalAuthRuntime,
   pub lifecycle: Arc<LifecycleState>,
@@ -207,9 +209,24 @@ impl AppSnapshot {
     Self::new_with_previous(config, None).await
   }
 
+  pub async fn new_with_telemetry(
+    config: Config,
+    telemetry: TelemetryRuntime,
+  ) -> anyhow::Result<Self> {
+    Self::new_with_previous_and_telemetry(config, None, Some(telemetry)).await
+  }
+
   pub async fn new_with_previous(
     config: Config,
     previous: Option<&AppSnapshot>,
+  ) -> anyhow::Result<Self> {
+    Self::new_with_previous_and_telemetry(config, previous, None).await
+  }
+
+  async fn new_with_previous_and_telemetry(
+    config: Config,
+    previous: Option<&AppSnapshot>,
+    initial_telemetry: Option<TelemetryRuntime>,
   ) -> anyhow::Result<Self> {
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
@@ -244,6 +261,14 @@ impl AppSnapshot {
     let metrics = previous
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
+    let telemetry = match previous {
+      Some(snapshot) => snapshot.telemetry.clone(),
+      None => match initial_telemetry {
+        Some(telemetry) => telemetry,
+        None => TelemetryRuntime::new(&config.telemetry.tracing)
+          .context("failed to build telemetry runtime")?,
+      },
+    };
     let compression = CompressionState::new(&config.compression);
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
@@ -318,6 +343,7 @@ impl AppSnapshot {
       compression,
       static_files: Arc::new(static_files),
       metrics,
+      telemetry,
       dynamic_policy,
       external_auth,
       lifecycle,
@@ -378,6 +404,7 @@ impl AppSnapshot {
       compression: previous.compression.clone(),
       static_files: Arc::new(static_files),
       metrics: previous.metrics.clone(),
+      telemetry: previous.telemetry.clone(),
       dynamic_policy: previous.dynamic_policy.clone(),
       external_auth,
       lifecycle: previous.lifecycle.clone(),
