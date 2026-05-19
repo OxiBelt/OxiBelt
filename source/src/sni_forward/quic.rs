@@ -287,13 +287,15 @@ impl QuicDemuxSocket {
           .with_context(|| format!("invalid SNI forwarding target {}", rule.target))?;
         let target = resolve_target_addr(&host, port).await?;
         self.remember_forward(
-          peer,
-          target,
-          client_scid,
-          sni.as_deref(),
-          &rule,
+          QuicForwardRecord {
+            peer,
+            target,
+            client_scid,
+            sni: sni.as_deref(),
+            rule: &rule,
+            connection_permit,
+          },
           snapshot.as_ref(),
-          connection_permit,
         );
         self.socket.send_to(datagram, target).await?;
         snapshot
@@ -338,16 +340,15 @@ impl QuicDemuxSocket {
     }
   }
 
-  fn remember_forward(
-    &self,
-    peer: SocketAddr,
-    target: SocketAddr,
-    client_scid: Vec<u8>,
-    sni: Option<&str>,
-    rule: &crate::sni_forward::SniForwardRule,
-    snapshot: &AppSnapshot,
-    connection_permit: ConnectionPermit,
-  ) {
+  fn remember_forward(&self, record: QuicForwardRecord<'_>, snapshot: &AppSnapshot) {
+    let QuicForwardRecord {
+      peer,
+      target,
+      client_scid,
+      sni,
+      rule,
+      connection_permit,
+    } = record;
     let mut sessions = lock_sessions(&self.sessions);
     let inserted = sessions.forward_by_client.insert(
       peer,
@@ -502,6 +503,15 @@ enum DatagramAction {
   QueueLocal,
   SendTo(SocketAddr),
   Classify,
+}
+
+struct QuicForwardRecord<'a> {
+  peer: SocketAddr,
+  target: SocketAddr,
+  client_scid: Vec<u8>,
+  sni: Option<&'a str>,
+  rule: &'a crate::sni_forward::SniForwardRule,
+  connection_permit: ConnectionPermit,
 }
 
 #[derive(Default)]
