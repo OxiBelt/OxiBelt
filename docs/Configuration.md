@@ -450,7 +450,7 @@ For QUIC, `protocols = ["quic"]` uses the same UDP address as downstream HTTP/3 
 
 `quic_max_sessions` caps SNI-forwarding QUIC pre-classification state across local and forwarded clients; when the cap is exceeded, the oldest tracked client is evicted and forwarded sessions are ended with a `capacity` outcome. `quic_local_queue_capacity` caps queued local QUIC datagrams waiting for Quinn; excess local datagrams are dropped instead of growing memory without bound. Both values must be greater than zero.
 
-Prometheus metrics include aggregate SNI-forward decision, parse-failure, session, active-QUIC-session, TCP-byte, and UDP-byte counters. With `metrics.detail = "detailed"`, bounded labels add protocol, decision, rule, target, and outcome. Structured tracing events are emitted for L4 session start/end with protocol, rule, target, SNI, duration, and byte counts.
+Prometheus metrics include aggregate SNI-forward decision, parse-failure, session, active-QUIC-session, TCP-byte, and UDP-byte counters. With `metrics.detail = "detailed"`, bounded labels add protocol, decision, rule, target, and outcome. SNI forwarding emits structured `tracing` log events for session start, end, and failure; those events include the protocol, rule, target, SNI, peer, duration, error, and byte-count fields that are available at that point.
 
 ## Proxy Sections
 
