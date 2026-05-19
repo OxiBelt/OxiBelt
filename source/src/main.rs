@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
   let runtime = build_runtime(worker_threads)?;
   runtime.block_on(async move {
     let state = oxibelt::state::AppHandle::new(
-      oxibelt::state::AppSnapshot::new_with_telemetry(config, observability.telemetry())
+      oxibelt::state::AppSnapshot::new_with_telemetry(config, observability.into_telemetry())
         .await
         .context("failed to initialize application state")?,
     );

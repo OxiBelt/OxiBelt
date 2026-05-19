@@ -68,7 +68,7 @@ pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Re
   tls::install_default_provider()?;
 
   let state = AppHandle::new(
-    AppSnapshot::new_with_telemetry(config, observability.telemetry())
+    AppSnapshot::new_with_telemetry(config, observability.into_telemetry())
       .await
       .context("failed to initialize application state")?,
   );

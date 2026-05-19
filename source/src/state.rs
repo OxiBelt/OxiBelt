@@ -264,7 +264,8 @@ impl AppSnapshot {
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
     let telemetry = match previous {
-      Some(snapshot) => snapshot.telemetry.clone(),
+      Some(_) => TelemetryRuntime::new(&config.telemetry.tracing)
+        .context("failed to build telemetry runtime")?,
       None => match initial_telemetry {
         Some(telemetry) => telemetry,
         None => TelemetryRuntime::new(&config.telemetry.tracing)
@@ -605,5 +606,67 @@ mod tests {
     let new_connection = handle.connection_snapshot();
     assert!(!new_connection.snapshot.config.compression.enabled);
     assert!(!*new_connection.data_plane_drain.borrow());
+  }
+
+  #[tokio::test]
+  async fn full_reload_rebuilds_telemetry_runtime_from_new_config() {
+    let temp_dir = common::TempDir::new("telemetry-full-reload");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "telemetry-full-reload");
+    let base_raw = common::minimal_config_toml(&cert_path, &key_path);
+    let initial_raw = base_raw.clone()
+      + r#"
+
+[telemetry.tracing]
+enabled = true
+endpoint = "http://127.0.0.1:4318/v1/traces"
+service_name = "oxibelt-test"
+sample_ratio = 1.0
+export_timeout_ms = 1
+propagate_trace_context = true
+"#;
+    let disabled_raw = base_raw
+      + r#"
+
+[telemetry.tracing]
+enabled = false
+endpoint = "http://127.0.0.1:4319/v1/traces"
+service_name = "oxibelt-test-disabled"
+sample_ratio = 0.0
+export_timeout_ms = 1
+propagate_trace_context = false
+"#;
+
+    let initial = AppSnapshot::new(parse_config(&initial_raw))
+      .await
+      .expect("initial telemetry snapshot should initialize");
+    let initial_context = initial
+      .telemetry
+      .context_from_headers(&http::HeaderMap::new());
+    let mut initial_headers = http::HeaderMap::new();
+    initial
+      .telemetry
+      .inject_trace_context(&mut initial_headers, initial_context);
+    assert!(initial.telemetry.enabled());
+    assert!(initial_headers.contains_key("traceparent"));
+
+    let reloaded = AppSnapshot::new_with_previous(parse_config(&disabled_raw), Some(&initial))
+      .await
+      .expect("reloaded telemetry snapshot should initialize");
+    let mut reloaded_headers = http::HeaderMap::new();
+    reloaded
+      .telemetry
+      .inject_trace_context(&mut reloaded_headers, initial_context);
+
+    assert!(!reloaded.config.telemetry.tracing.enabled);
+    assert!(!reloaded.telemetry.enabled());
+    assert!(
+      reloaded
+        .telemetry
+        .context_from_headers(&http::HeaderMap::new())
+        .is_none()
+    );
+    assert!(!reloaded_headers.contains_key("traceparent"));
+    assert!(initial.telemetry.enabled());
   }
 }

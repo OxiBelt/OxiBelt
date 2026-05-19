@@ -13,8 +13,8 @@ pub struct ObservabilityGuard {
 }
 
 impl ObservabilityGuard {
-  pub fn telemetry(&self) -> TelemetryRuntime {
-    self.telemetry.clone()
+  pub fn into_telemetry(self) -> TelemetryRuntime {
+    self.telemetry
   }
 }
 
