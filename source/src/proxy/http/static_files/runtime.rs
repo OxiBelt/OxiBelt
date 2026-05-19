@@ -192,9 +192,7 @@ impl StaticHotObjectCache {
     };
     let now = Instant::now();
     let mut inner = self.inner.lock().expect("static file cache lock poisoned");
-    let Some(entry) = inner.entries.get(&key) else {
-      return None;
-    };
+    let entry = inner.entries.get(&key)?;
     if entry.expires_at <= now {
       remove_entry(&mut inner, &key);
       return None;
