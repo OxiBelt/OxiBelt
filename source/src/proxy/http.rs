@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use http::{HeaderMap, Method, Request, Response, StatusCode};
+use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Either, Full, Limited};
 use hyper::body::{Body, Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -18,6 +18,7 @@ use crate::config::{
   ProxyProtocolEgressMode, RouteConfig, UpstreamConfig,
 };
 use crate::dynamic_policy::DynamicPolicyRequest;
+use crate::external_auth::{ExternalAuthOutcome, ExternalAuthTerminal};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::pools::PoolSelection;
@@ -461,7 +462,7 @@ where
   }
 
   let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-  let request =
+  let mut request =
     match reject_content_length_zero_data(request, client_body_timeout, request_version).await {
       Ok(request) => request,
       Err(response) => return response,
@@ -546,6 +547,24 @@ where
   access_log.dynamic_policy = dynamic_policy.context;
   if let Some(terminal) = dynamic_policy.terminal {
     return text_response(terminal.status, &terminal.body);
+  }
+
+  if let Some(provider) = resolved.route.external_auth.as_deref() {
+    match state
+      .external_auth
+      .authorize(
+        provider,
+        &mut request,
+        client_addr.ip(),
+        &host,
+        downstream_scheme,
+        &resolved.route.name,
+      )
+      .await
+    {
+      ExternalAuthOutcome::Allowed => {}
+      ExternalAuthOutcome::Denied(terminal) => return external_auth_response(terminal),
+    }
   }
 
   let request = request.map(|body| {
@@ -755,11 +774,12 @@ where
     .as_deref()
     .or(resolved.route.upstream_pool.as_deref())
   {
-    match state.pools.select(
+    match state.pools.select_with_cookie_header(
       pool_name,
       client_addr.ip(),
       &format!("{host}{}", request.uri()),
       request_waf.load_balancing_policy.as_deref(),
+      request.headers().get(http::header::COOKIE),
     ) {
       Ok(selection) => {
         let name = selection.upstream_name.clone();
@@ -783,6 +803,9 @@ where
   } else {
     resolved.upstream.expect("validated route upstream")
   };
+  let sticky_cookie = pool_selection
+    .as_ref()
+    .and_then(PoolSelection::sticky_cookie);
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
   let native_grpc_request = semantics::is_native_grpc_request(request.headers(), &state.config);
   let mut timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
@@ -1672,10 +1695,26 @@ where
     &state.config.compression,
     &state.compression,
   );
-  let response =
+  let mut response =
     with_downstream_response_timeout(response, timeouts.response_send, transport_network);
+  apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
   state.metrics.record_response(response.status());
   response
+}
+
+fn external_auth_response(terminal: ExternalAuthTerminal) -> Response<ProxyBody> {
+  let mut response = Response::new(full_body(terminal.body));
+  *response.status_mut() = terminal.status;
+  *response.headers_mut() = terminal.headers;
+  response
+}
+
+fn apply_sticky_cookie(response: &mut Response<ProxyBody>, sticky_cookie: Option<&HeaderValue>) {
+  if let Some(value) = sticky_cookie {
+    response
+      .headers_mut()
+      .append(http::header::SET_COOKIE, value.clone());
+  }
 }
 
 fn draining_response() -> Response<ProxyBody> {
@@ -1895,6 +1934,7 @@ fn select_request_upstream<'a>(
   client_addr: std::net::SocketAddr,
   downstream_host: &str,
   uri: &http::Uri,
+  cookie_header: Option<&HeaderValue>,
   request_waf: &crate::waf::RequestWafDecision,
 ) -> Result<SelectedUpstream<'a>, Box<Response<ProxyBody>>> {
   if let Some(upstream_name) = request_waf.upstream_override.as_deref() {
@@ -1921,11 +1961,12 @@ fn select_request_upstream<'a>(
   {
     let selection = state
       .pools
-      .select(
+      .select_with_cookie_header(
         pool_name,
         client_addr.ip(),
         &format!("{downstream_host}{uri}"),
         request_waf.load_balancing_policy.as_deref(),
+        cookie_header,
       )
       .map_err(|_| {
         Box::new(text_response(
@@ -1978,6 +2019,7 @@ async fn handle_connect_request(
     client_addr,
     downstream_host,
     request.uri(),
+    request.headers().get(http::header::COOKIE),
     request_waf,
   ) {
     Ok(selected) => selected,
@@ -1989,6 +2031,10 @@ async fn handle_connect_request(
   if let Some(selection) = selected.pool_selection.as_ref() {
     access_log.set_upstream_pool(selection.pool_name.clone());
   }
+  let sticky_cookie = selected
+    .pool_selection
+    .as_ref()
+    .and_then(PoolSelection::sticky_cookie);
   let pool_report = state.pools.clone();
   let pool_selection = selected.pool_selection;
 
@@ -2014,20 +2060,24 @@ async fn handle_connect_request(
       }
       drop(pool_selection);
     });
-    return Response::builder()
+    let mut response = Response::builder()
       .status(StatusCode::OK)
       .body(full_body(bytes::Bytes::new()))
       .expect("CONNECT response should build");
+    apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
+    return response;
   }
 
   match dial_tunnel_upstream(&upstream, client_addr, timeouts).await {
     Ok(upstream_stream) => {
       let body = bridge_connect_body(request.into_body(), upstream_stream, timeouts, drain);
       drop(pool_selection);
-      Response::builder()
+      let mut response = Response::builder()
         .status(StatusCode::OK)
         .body(body)
-        .expect("CONNECT response should build")
+        .expect("CONNECT response should build");
+      apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
+      response
     }
     Err(error) => {
       pool_report.report_failure(&upstream.name);
@@ -2292,11 +2342,12 @@ async fn handle_upgrade_request(
     .as_deref()
     .or(resolved.route.upstream_pool.as_deref())
   {
-    match state.pools.select(
+    match state.pools.select_with_cookie_header(
       pool_name,
       client_addr.ip(),
       &format!("{downstream_host}{}", request.uri()),
       request_waf.load_balancing_policy.as_deref(),
+      request.headers().get(http::header::COOKIE),
     ) {
       Ok(selection) => {
         let name = selection.upstream_name.clone();
@@ -2318,6 +2369,9 @@ async fn handle_upgrade_request(
   } else {
     resolved.upstream.expect("validated route upstream")
   };
+  let sticky_cookie = pool_selection
+    .as_ref()
+    .and_then(PoolSelection::sticky_cookie);
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
 
@@ -2453,7 +2507,9 @@ async fn handle_upgrade_request(
     }
   });
   drop(pool_selection);
-  Some(upstream_response.map(|body| body.map_err(boxed_error).boxed()))
+  let mut response = upstream_response.map(|body| body.map_err(boxed_error).boxed());
+  apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
+  Some(response)
 }
 
 fn is_websocket_upgrade<B>(request: &Request<B>) -> bool {

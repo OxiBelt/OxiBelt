@@ -6,6 +6,7 @@ use tracing::warn;
 
 use crate::config::{HttpVersion, UpstreamConfig};
 use crate::dynamic_policy::DynamicPolicyRequest;
+use crate::external_auth::ExternalAuthOutcome;
 use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
 use crate::state::AppSnapshot;
@@ -32,7 +33,7 @@ pub(crate) struct PreparedWebTransport {
   _pool_selection: Option<PoolSelection>,
 }
 
-pub(crate) fn prepare_webtransport(
+pub(crate) async fn prepare_webtransport(
   request: &Request<()>,
   peer_addr: std::net::SocketAddr,
   transport_metadata: WafTransportMetadataInput<'_>,
@@ -94,6 +95,28 @@ pub(crate) fn prepare_webtransport(
     return Err(Box::new(text_response(terminal.status, &terminal.body)));
   }
   let dynamic_policy_context = dynamic_policy.context;
+
+  let mut auth_request = request.clone();
+  if let Some(provider) = resolved.route.external_auth.as_deref() {
+    match state
+      .external_auth
+      .authorize(
+        provider,
+        &mut auth_request,
+        client_addr.ip(),
+        &host,
+        "https",
+        &resolved.route.name,
+      )
+      .await
+    {
+      ExternalAuthOutcome::Allowed => {}
+      ExternalAuthOutcome::Denied(terminal) => {
+        return Err(Box::new(super::external_auth_response(terminal)));
+      }
+    }
+  }
+  let request_headers = auth_request.headers().clone();
 
   let mut request_ids = None;
   let request_waf = if state.waf.enabled() {
@@ -198,11 +221,12 @@ pub(crate) fn prepare_webtransport(
     .as_deref()
     .or(resolved.route.upstream_pool.as_deref())
   {
-    match state.pools.select(
+    match state.pools.select_with_cookie_header(
       pool_name,
       client_addr.ip(),
       &format!("{host}{}", request.uri()),
       request_waf.load_balancing_policy.as_deref(),
+      request.headers().get(http::header::COOKIE),
     ) {
       Ok(selection) => {
         let name = selection.upstream_name.clone();
@@ -278,7 +302,7 @@ pub(crate) fn prepare_webtransport(
     ))
   })?;
 
-  let mut headers = request.headers().clone();
+  let mut headers = request_headers;
   strip_hop_by_hop_headers(&mut headers);
   if !upstream.preserve_host {
     headers.remove(http::header::HOST);

@@ -8,9 +8,9 @@ use oxibelt::config::{
     AdminPermission, AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig,
     Config, ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode,
     DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
-    ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode, MitigationFailurePolicy,
-    OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
+    ExpectContinueMode, ExternalAuthProvider, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode,
+    MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
+    QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
     StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
     UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
     UpstreamTlsResumptionMode, resolve_auto_worker_count,
@@ -2484,7 +2484,96 @@ min_ttl_ms = 1000
 }
 
 #[test]
-fn upstream_pool_discovery_rejects_reserved_providers_and_bad_values() {
+fn enterprise_reverse_proxy_config_parses_external_auth_sticky_cookie_and_discovery() {
+    let temp_dir = common::TempDir::new("enterprise-reverse-proxy");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "enterprise-reverse-proxy");
+    let raw = format!(
+        r#"
+{}
+
+[[external_auth]]
+name = "edge-auth"
+provider = "oidc"
+endpoint = "https://idp.example/userinfo"
+required_scopes = ["openid"]
+
+[[external_auth.required_claims]]
+name = "aud"
+value = "oxibelt"
+
+[[external_auth.claim_headers]]
+claim = "sub"
+header = "remote-user"
+
+[[routes]]
+name = "auth-route"
+hosts = ["secure.example"]
+path_prefix = "/"
+upstream = "app"
+external_auth = "edge-auth"
+
+[[upstream_pools]]
+name = "sticky-pool"
+algorithm = "sticky_cookie"
+
+[upstream_pools.sticky_cookie]
+cookie_name = "oxibelt_affinity"
+ttl_seconds = 60
+fallback_algorithm = "round_robin"
+same_site = "strict"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+
+[[upstream_pools.discovery]]
+provider = "kubernetes"
+endpoint = "https://kubernetes.default.svc"
+namespace = "default"
+service = "api"
+port_name = "http"
+
+[[upstream_pools]]
+name = "consul-pool"
+
+[[upstream_pools.discovery]]
+provider = "consul"
+endpoint = "http://consul.service.consul:8500"
+service = "api"
+datacenter = "dc1"
+
+[[upstream_pools]]
+name = "etcd-pool"
+
+[[upstream_pools.discovery]]
+provider = "etcd"
+endpoint = "https://etcd.example:2379"
+key_prefix = "/oxibelt/upstreams/api/"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.external_auth[0].provider, ExternalAuthProvider::Oidc);
+    assert_eq!(config.routes[1].external_auth.as_deref(), Some("edge-auth"));
+    assert_eq!(
+        config.upstream_pools[0].discovery[0].provider,
+        UpstreamDiscoveryProvider::Kubernetes
+    );
+    assert_eq!(
+        config.upstream_pools[1].discovery[0].provider,
+        UpstreamDiscoveryProvider::Consul
+    );
+    assert_eq!(
+        config.upstream_pools[2].discovery[0].provider,
+        UpstreamDiscoveryProvider::Etcd
+    );
+}
+
+#[test]
+fn upstream_pool_discovery_rejects_bad_values() {
     let temp_dir = common::TempDir::new("pool-discovery-invalid");
     let (cert_path, key_path) =
         common::create_self_signed_cert(temp_dir.path(), "pool-discovery-invalid");
@@ -2498,22 +2587,25 @@ algorithm = "round_robin"
 
 [[upstream_pools.discovery]]
 provider = "consul"
-name = "app"
+service = "app"
 "#,
         common::minimal_config_toml(&cert_path, &key_path)
     );
     let config: Config = toml::from_str(&raw).expect("config should parse");
     let error = config
         .validate()
-        .expect_err("reserved discovery provider should be rejected");
+        .expect_err("missing Consul endpoint should be rejected");
     assert!(
-        error.to_string().contains("reserved and not implemented"),
+        error.to_string().contains("consul discovery endpoint"),
         "unexpected error: {error}"
     );
 
     let raw = raw
         .replace("provider = \"consul\"", "provider = \"dns\"")
-        .replace("name = \"app\"", "name = \"app\"\nrefresh_interval_ms = 0");
+        .replace(
+            "service = \"app\"",
+            "name = \"app\"\nrefresh_interval_ms = 0",
+        );
     let config: Config = toml::from_str(&raw).expect("config should parse");
     let error = config
         .validate()

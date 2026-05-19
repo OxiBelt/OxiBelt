@@ -16,7 +16,9 @@ use tokio::sync::watch;
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::cache::ResponseCache;
 use crate::config::{Config, HttpVersion, ProxyHttp2Config, UpstreamConfig};
+use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
+use crate::external_auth::ExternalAuthRuntime;
 use crate::lifecycle::LifecycleState;
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
@@ -176,6 +178,7 @@ pub struct AppSnapshot {
   pub upstreams: Vec<UpstreamConfig>,
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub clients: UpstreamClientPools,
+  pub(crate) control_http: ControlHttpClient,
   pub(crate) h3_clients: UpstreamH3Pools,
   pub limits: Arc<LimitState>,
   pub pools: Arc<PoolState>,
@@ -185,6 +188,7 @@ pub struct AppSnapshot {
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
   pub dynamic_policy: DynamicPolicyRuntime,
+  pub external_auth: ExternalAuthRuntime,
   pub lifecycle: Arc<LifecycleState>,
   pub shared_state: Option<Arc<SharedState>>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
@@ -222,6 +226,8 @@ impl AppSnapshot {
     .context("failed to build upstream HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(&upstreams, &config, &tls_resumption)
       .context("failed to build upstream HTTP/3 pools")?;
+    let control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
+      .context("failed to build control-plane HTTP client")?;
     let shared_state = SharedState::new(&config)
       .await
       .context("failed to build shared state")?;
@@ -244,6 +250,8 @@ impl AppSnapshot {
     let dynamic_policy = DynamicPolicyRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build dynamic policy runtime")?;
+    let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
+      .context("failed to build external auth runtime")?;
     let mitigation = MitigationSink::new(&config, metrics.clone())
       .await
       .context("failed to build mitigation sink")?;
@@ -301,6 +309,7 @@ impl AppSnapshot {
       upstreams,
       upstream_uri_parts,
       clients,
+      control_http,
       h3_clients,
       limits,
       pools,
@@ -310,6 +319,7 @@ impl AppSnapshot {
       static_files: Arc::new(static_files),
       metrics,
       dynamic_policy,
+      external_auth,
       lifecycle,
       shared_state,
       tls_server_config,
@@ -341,12 +351,17 @@ impl AppSnapshot {
     .context("failed to build upstream HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(&upstreams, &config, &previous.tls_resumption)
       .context("failed to build upstream HTTP/3 pools")?;
+    let control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
+      .context("failed to build control-plane HTTP client")?;
     let pools = PoolState::new(&config.upstream_pools, previous.shared_state.clone());
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let alt_svc_header_value = build_alt_svc_header_value(&config)
       .context("failed to build precomputed Alt-Svc header value")?;
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
+    let external_auth =
+      ExternalAuthRuntime::new(&config, control_http.clone(), previous.metrics.clone())
+        .context("failed to build external auth runtime")?;
 
     Ok(Self {
       config,
@@ -354,6 +369,7 @@ impl AppSnapshot {
       upstreams,
       upstream_uri_parts,
       clients,
+      control_http: control_http.clone(),
       h3_clients,
       limits: previous.limits.clone(),
       pools,
@@ -363,6 +379,7 @@ impl AppSnapshot {
       static_files: Arc::new(static_files),
       metrics: previous.metrics.clone(),
       dynamic_policy: previous.dynamic_policy.clone(),
+      external_auth,
       lifecycle: previous.lifecycle.clone(),
       shared_state: previous.shared_state.clone(),
       tls_server_config: previous.tls_server_config.clone(),

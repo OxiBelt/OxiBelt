@@ -651,6 +651,7 @@ private_key = "/tmp/key.pem"
       generic_http_upgrade: false,
       connect_tunneling: false,
       grpc_web: false,
+      external_auth: None,
       cache: None,
       compression: None,
       buffering: RouteBufferingConfig {

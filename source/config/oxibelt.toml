@@ -442,6 +442,7 @@ cache_lock_ms = 10000
 # connection_limits_backend = "cluster"
 # person_proof_backend = "cluster"
 # upstream_health_backend = "cluster"
+# sticky_sessions_backend = "cluster"
 # cache_backend = "cluster"
 # reload_backend = "cluster"
 # dynamic_policy_backend = "cluster"
@@ -481,6 +482,29 @@ signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
 [dynamic_policy.matching]
 trust_route_name = true
 normalize_path = true
+
+#[[external_auth]]
+# name = "edge-auth"
+# provider = "authelia" # authelia | oauth2 | oidc
+# endpoint = "https://auth.internal.example/api/authz/forward-auth"
+# timeout_ms = 2000
+# fail_policy = "closed" # closed | open
+# forward_headers = ["authorization", "cookie"]
+# identity_headers = ["remote-user", "remote-groups", "remote-email", "remote-name"]
+# terminal_response_headers = ["location", "www-authenticate", "set-cookie"]
+# max_response_body_bytes = 65536
+# OAuth2 introspection only:
+# client_id_env = "OAUTH2_INTROSPECTION_CLIENT_ID"
+# client_secret_env = "OAUTH2_INTROSPECTION_CLIENT_SECRET"
+# required_scopes = ["openid", "profile"]
+#
+#[[external_auth.required_claims]]
+# name = "aud"
+# value = "oxibelt"
+#
+#[[external_auth.claim_headers]]
+# claim = "sub"
+# header = "remote-user"
 
 [waf]
 enabled = false
@@ -568,7 +592,17 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 
 #[[upstream_pools]]
 # name = "app-pool"
-# algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash
+# algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash | sticky_cookie
+#
+#[upstream_pools.sticky_cookie]
+# cookie_name = "oxibelt_sticky"
+# ttl_seconds = 3600
+# fallback_algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash
+# secret_env = "OXIBELT_STICKY_COOKIE_SECRET"
+# secure = true
+# http_only = true
+# same_site = "lax" # lax | strict | none
+# path = "/"
 #
 #[[upstream_pools.servers]]
 # id = "app-1"
@@ -591,6 +625,30 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # port = 8080
 # refresh_interval_ms = 30000
 # min_ttl_ms = 1000
+#
+#[[upstream_pools.discovery]]
+# provider = "kubernetes"
+# endpoint = "https://kubernetes.default.svc"
+# namespace = "default"
+# service = "app"
+# port_name = "http"
+# token_env = "KUBERNETES_SERVICE_TOKEN"
+# refresh_interval_ms = 30000
+#
+#[[upstream_pools.discovery]]
+# provider = "consul"
+# endpoint = "http://consul.service.consul:8500"
+# service = "app"
+# datacenter = "dc1"
+# token_env = "CONSUL_HTTP_TOKEN"
+# refresh_interval_ms = 30000
+#
+#[[upstream_pools.discovery]]
+# provider = "etcd"
+# endpoint = "https://etcd.internal.example:2379"
+# key_prefix = "/oxibelt/upstreams/app/"
+# token_env = "ETCD_TOKEN"
+# refresh_interval_ms = 30000
 
 #[[turn_upstream_pools]]
 # name = "turn-udp"
@@ -645,6 +703,7 @@ upstream = "app"
 generic_http_upgrade = false
 connect_tunneling = false
 grpc_web = false
+# external_auth = "edge-auth"
 
 [[routes]]
 name = "api-v1"
@@ -655,6 +714,7 @@ upstream = "app"
 generic_http_upgrade = false
 connect_tunneling = false
 grpc_web = false
+# external_auth = "edge-auth"
 
 #[[routes]]
 #name = "static-assets"

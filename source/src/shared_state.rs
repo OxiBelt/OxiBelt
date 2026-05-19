@@ -23,6 +23,9 @@ use crate::cache::{CacheEntry, CacheLookup, Revalidation, StaleEntry};
 use crate::config::{Config, DatabaseTlsMode, SharedStateBackendConfig, SharedStateBackendKind};
 use crate::limits::ParsedRate;
 
+mod feature_flags;
+mod sticky_sessions;
+
 #[derive(Clone, Debug)]
 pub struct SharedState {
   namespace: Arc<str>,
@@ -35,6 +38,7 @@ pub struct SharedState {
   connection_limits: Option<Arc<Backend>>,
   person_proof: Option<Arc<Backend>>,
   upstream_health: Option<Arc<Backend>>,
+  sticky_sessions: Option<Arc<Backend>>,
   cache: Option<Arc<Backend>>,
   reload: Option<Arc<Backend>>,
 }
@@ -176,6 +180,7 @@ impl SharedState {
       connection_limits: pick(&shared.connection_limits_backend),
       person_proof: pick(&shared.person_proof_backend),
       upstream_health: pick(&shared.upstream_health_backend),
+      sticky_sessions: pick(&shared.sticky_sessions_backend),
       cache: pick(&shared.cache_backend),
       reload: pick(&shared.reload_backend),
     });
@@ -197,29 +202,10 @@ impl SharedState {
       connection_limits: Some(backend.clone()),
       person_proof: Some(backend.clone()),
       upstream_health: Some(backend.clone()),
+      sticky_sessions: Some(backend.clone()),
       cache: Some(backend.clone()),
       reload: Some(backend),
     })
-  }
-
-  pub fn has_rate_limits(&self) -> bool {
-    self.rate_limits.is_some()
-  }
-
-  pub fn has_connection_limits(&self) -> bool {
-    self.connection_limits.is_some()
-  }
-
-  pub fn has_person_proof(&self) -> bool {
-    self.person_proof.is_some()
-  }
-
-  pub fn has_upstream_health(&self) -> bool {
-    self.upstream_health.is_some()
-  }
-
-  pub fn has_cache(&self) -> bool {
-    self.cache.is_some()
   }
 
   pub fn instance_id(&self) -> &str {

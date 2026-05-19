@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use anyhow::bail;
+use http::HeaderValue;
 use serde::Serialize;
 
 use crate::config::{
@@ -13,6 +14,8 @@ use crate::config::{
   upstream_pool_server_id,
 };
 use crate::shared_state::SharedState;
+
+mod sticky;
 
 #[derive(Debug)]
 pub struct PoolState {
@@ -26,6 +29,7 @@ struct PoolRuntime {
   servers: Vec<Arc<PoolServerRuntime>>,
   round_robin: AtomicUsize,
   random: AtomicUsize,
+  sticky_secret: [u8; 32],
   shared_state: Option<Arc<SharedState>>,
 }
 
@@ -44,6 +48,7 @@ pub struct PoolSelection {
   pub upstream_name: String,
   server: Arc<PoolServerRuntime>,
   shared_state: Option<Arc<SharedState>>,
+  sticky_cookie: Option<HeaderValue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +111,7 @@ impl PoolState {
             servers,
             round_robin: AtomicUsize::new(0),
             random: AtomicUsize::new(0x9e37_79b9),
+            sticky_secret: sticky::sticky_secret_for_pool(config, shared_state.as_ref()),
             shared_state: shared_state.clone(),
           }),
         )
@@ -163,6 +169,17 @@ impl PoolState {
     hash_key: &str,
     policy_override: Option<&str>,
   ) -> anyhow::Result<PoolSelection> {
+    self.select_with_cookie_header(pool_name, client_ip, hash_key, policy_override, None)
+  }
+
+  pub fn select_with_cookie_header(
+    &self,
+    pool_name: &str,
+    client_ip: IpAddr,
+    hash_key: &str,
+    policy_override: Option<&str>,
+    cookie_header: Option<&HeaderValue>,
+  ) -> anyhow::Result<PoolSelection> {
     let Some(pool) = self.pools.get(pool_name).cloned() else {
       bail!("unknown upstream pool {pool_name}");
     };
@@ -170,28 +187,17 @@ impl PoolState {
       .and_then(parse_policy_override)
       .unwrap_or(pool.config.algorithm);
 
-    let server = match algorithm {
-      LoadBalancingAlgorithm::RoundRobin => select_round_robin(&pool),
-      LoadBalancingAlgorithm::LeastConn => select_least_conn(&pool),
-      LoadBalancingAlgorithm::Random => select_random(&pool),
-      LoadBalancingAlgorithm::Hash => select_hash(&pool, hash_key),
-      LoadBalancingAlgorithm::IpHash => select_hash(&pool, &client_ip.to_string()),
-      LoadBalancingAlgorithm::StickyCookie => None,
-    }
-    .ok_or_else(|| anyhow::anyhow!("upstream pool {pool_name} has no available servers"))?;
-
-    server.active.fetch_add(1, Ordering::Relaxed);
-    if let Some(shared) = &self.shared_state
-      && let Err(error) = shared.pool_active_add(&server.upstream_name, 1)
-    {
-      tracing::warn!(error = %error, upstream = %server.upstream_name, "failed to update shared upstream active count");
-    }
-    Ok(PoolSelection {
-      pool_name: pool_name.to_string(),
-      upstream_name: server.upstream_name.clone(),
-      server,
-      shared_state: self.shared_state.clone(),
-    })
+    let (server, sticky_cookie) = if algorithm == LoadBalancingAlgorithm::StickyCookie {
+      sticky::select_sticky_cookie(&pool, client_ip, hash_key, cookie_header)
+    } else {
+      (
+        select_by_algorithm(&pool, algorithm, client_ip, hash_key),
+        None,
+      )
+    };
+    let server = server
+      .ok_or_else(|| anyhow::anyhow!("upstream pool {pool_name} has no available servers"))?;
+    Ok(self.selection_from_server(pool_name, server, sticky_cookie))
   }
 
   pub fn snapshots(&self) -> Vec<PoolRuntimeSnapshot> {
@@ -271,6 +277,33 @@ impl PoolState {
     }
     None
   }
+
+  fn selection_from_server(
+    &self,
+    pool_name: &str,
+    server: Arc<PoolServerRuntime>,
+    sticky_cookie: Option<HeaderValue>,
+  ) -> PoolSelection {
+    server.active.fetch_add(1, Ordering::Relaxed);
+    if let Some(shared) = &self.shared_state
+      && let Err(error) = shared.pool_active_add(&server.upstream_name, 1)
+    {
+      tracing::warn!(error = %error, upstream = %server.upstream_name, "failed to update shared upstream active count");
+    }
+    PoolSelection {
+      pool_name: pool_name.to_string(),
+      upstream_name: server.upstream_name.clone(),
+      server,
+      shared_state: self.shared_state.clone(),
+      sticky_cookie,
+    }
+  }
+}
+
+impl PoolSelection {
+  pub fn sticky_cookie(&self) -> Option<HeaderValue> {
+    self.sticky_cookie.clone()
+  }
 }
 
 fn parse_policy_override(raw: &str) -> Option<LoadBalancingAlgorithm> {
@@ -280,8 +313,34 @@ fn parse_policy_override(raw: &str) -> Option<LoadBalancingAlgorithm> {
     "random" => Some(LoadBalancingAlgorithm::Random),
     "hash" => Some(LoadBalancingAlgorithm::Hash),
     "ip_hash" => Some(LoadBalancingAlgorithm::IpHash),
+    "sticky_cookie" => Some(LoadBalancingAlgorithm::StickyCookie),
     _ => None,
   }
+}
+
+fn select_by_algorithm(
+  pool: &Arc<PoolRuntime>,
+  algorithm: LoadBalancingAlgorithm,
+  client_ip: IpAddr,
+  hash_key: &str,
+) -> Option<Arc<PoolServerRuntime>> {
+  match algorithm {
+    LoadBalancingAlgorithm::RoundRobin => select_round_robin(pool),
+    LoadBalancingAlgorithm::LeastConn => select_least_conn(pool),
+    LoadBalancingAlgorithm::Random => select_random(pool),
+    LoadBalancingAlgorithm::Hash => select_hash(pool, hash_key),
+    LoadBalancingAlgorithm::IpHash => select_hash(pool, &client_ip.to_string()),
+    LoadBalancingAlgorithm::StickyCookie => None,
+  }
+}
+
+fn build_sticky_fallback(
+  pool: &Arc<PoolRuntime>,
+  algorithm: LoadBalancingAlgorithm,
+  client_ip: IpAddr,
+  hash_key: &str,
+) -> Option<Arc<PoolServerRuntime>> {
+  select_by_algorithm(pool, algorithm, client_ip, hash_key)
 }
 
 fn select_round_robin(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>> {
@@ -454,266 +513,4 @@ fn pool_snapshot(pool: &Arc<PoolRuntime>) -> PoolRuntimeSnapshot {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::config::{
-    UpstreamPoolHealthCheckConfig, UpstreamPoolKeepaliveConfig, UpstreamPoolServerConfig,
-    UpstreamPoolServerState,
-  };
-
-  fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig {
-    UpstreamPoolConfig {
-      name: "app-pool".to_string(),
-      algorithm,
-      hash_key: None,
-      keepalive: UpstreamPoolKeepaliveConfig::default(),
-      servers: vec![
-        UpstreamPoolServerConfig {
-          id: None,
-          origin: "http://app-a.example".parse().unwrap(),
-          weight: 1,
-          max_conns: 0,
-          backup: false,
-          state: Default::default(),
-          source: Default::default(),
-        },
-        UpstreamPoolServerConfig {
-          id: None,
-          origin: "http://app-b.example".parse().unwrap(),
-          weight: 1,
-          max_conns: 0,
-          backup: false,
-          state: Default::default(),
-          source: Default::default(),
-        },
-      ],
-      discovery: Vec::new(),
-      health_check: UpstreamPoolHealthCheckConfig::default(),
-    }
-  }
-
-  #[test]
-  fn synthetic_upstreams_preserve_keepalive_pool_cap() {
-    let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
-    pool.keepalive.max_idle = 7;
-    pool.keepalive.idle_timeout_ms = 12_345;
-
-    let upstreams = PoolState::synthetic_upstreams(&[pool]);
-
-    assert_eq!(upstreams.len(), 2);
-    for upstream in upstreams {
-      assert_eq!(upstream.pool_max_idle_per_host, 7);
-      assert_eq!(upstream.idle_timeout_ms, 12_345);
-    }
-  }
-
-  #[test]
-  fn round_robin_rotates_pool_servers() {
-    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::RoundRobin)], None);
-
-    let first = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(first.upstream_name, synthetic_upstream_name("app-pool", 0));
-    drop(first);
-
-    let second = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 1));
-  }
-
-  #[test]
-  fn max_conns_excludes_busy_pool_server() {
-    let mut pool = test_pool(LoadBalancingAlgorithm::LeastConn);
-    pool.servers[0].max_conns = 1;
-    let state = PoolState::new(&[pool], None);
-
-    let first = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(first.upstream_name, synthetic_upstream_name("app-pool", 0));
-
-    let second = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 1));
-  }
-
-  #[test]
-  fn runtime_state_excludes_servers_from_new_selection() {
-    let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
-    pool.servers[0].state = UpstreamPoolServerState::Drain;
-    pool.servers[1].state = UpstreamPoolServerState::Maintenance;
-    let state = PoolState::new(&[pool], None);
-
-    let error = match state.select("app-pool", "203.0.113.10".parse().unwrap(), "/", None) {
-      Ok(selection) => panic!(
-        "drain and maintenance servers should not be selected, got {}",
-        selection.upstream_name
-      ),
-      Err(error) => error,
-    };
-    assert!(error.to_string().contains("no available servers"));
-  }
-
-  #[test]
-  fn runtime_weight_is_used_for_round_robin_selection() {
-    let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
-    pool.servers[0].weight = 2;
-    pool.servers[1].weight = 1;
-    let state = PoolState::new(&[pool], None);
-
-    let first = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(first.upstream_name, synthetic_upstream_name("app-pool", 0));
-    drop(first);
-
-    let second = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 0));
-    drop(second);
-
-    let third = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(third.upstream_name, synthetic_upstream_name("app-pool", 1));
-  }
-
-  #[test]
-  fn random_selection_excludes_busy_capacity_limited_servers() {
-    let mut pool = test_pool(LoadBalancingAlgorithm::Random);
-    pool.servers[0].max_conns = 1;
-    pool.servers[1].max_conns = 1;
-    let state = PoolState::new(&[pool], None);
-
-    let first = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    let second = state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_ne!(first.upstream_name, second.upstream_name);
-
-    let error = match state.select("app-pool", "203.0.113.10".parse().unwrap(), "/", None) {
-      Ok(selection) => panic!(
-        "all capacity-limited servers should be busy, got {}",
-        selection.upstream_name
-      ),
-      Err(error) => error,
-    };
-    assert!(error.to_string().contains("no available servers"));
-  }
-
-  #[test]
-  fn hash_selection_is_stable_for_same_hash_key() {
-    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::Hash)], None);
-
-    let first = state
-      .select(
-        "app-pool",
-        "203.0.113.10".parse().unwrap(),
-        "stable-key",
-        None,
-      )
-      .unwrap();
-    let expected = first.upstream_name.clone();
-    drop(first);
-
-    for _ in 0..5 {
-      let selection = state
-        .select(
-          "app-pool",
-          "203.0.113.10".parse().unwrap(),
-          "stable-key",
-          None,
-        )
-        .unwrap();
-      assert_eq!(selection.upstream_name, expected);
-    }
-  }
-
-  #[test]
-  fn ip_hash_selection_is_stable_for_same_client_ip() {
-    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::IpHash)], None);
-
-    let first = state
-      .select(
-        "app-pool",
-        "203.0.113.44".parse().unwrap(),
-        "first-request-path",
-        None,
-      )
-      .unwrap();
-    let expected = first.upstream_name.clone();
-    drop(first);
-
-    for hash_key in ["other-path", "unrelated-key", "/"] {
-      let selection = state
-        .select("app-pool", "203.0.113.44".parse().unwrap(), hash_key, None)
-        .unwrap();
-      assert_eq!(selection.upstream_name, expected);
-    }
-  }
-
-  #[test]
-  fn policy_override_strings_take_precedence_over_pool_algorithm() {
-    let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::StickyCookie)], None);
-
-    let error = match state.select("app-pool", "203.0.113.10".parse().unwrap(), "/", None) {
-      Ok(selection) => panic!(
-        "sticky_cookie pool should not select without an override, got {}",
-        selection.upstream_name
-      ),
-      Err(error) => error,
-    };
-    assert!(error.to_string().contains("no available servers"));
-
-    for policy in ["least_connections", "random", "hash", "ip_hash"] {
-      let selection = state
-        .select(
-          "app-pool",
-          "203.0.113.10".parse().unwrap(),
-          "override-key",
-          Some(policy),
-        )
-        .unwrap();
-      assert!(selection.upstream_name.starts_with("pool:app-pool:"));
-    }
-  }
-
-  #[test]
-  fn shared_state_coordinates_pool_active_counts_and_health() {
-    let shared = SharedState::test_memory("pool-test");
-    let mut pool = test_pool(LoadBalancingAlgorithm::LeastConn);
-    pool.servers[0].max_conns = 1;
-    pool.health_check.enabled = true;
-    pool.health_check.healthy_threshold = 1;
-    pool.health_check.unhealthy_threshold = 1;
-    let first_state = PoolState::new(&[pool.clone()], Some(shared.clone()));
-    let second_state = PoolState::new(&[pool], Some(shared));
-
-    let first = first_state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(first.upstream_name, synthetic_upstream_name("app-pool", 0));
-
-    let second = second_state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 1));
-    drop(second);
-    drop(first);
-
-    first_state.report_failure(&synthetic_upstream_name("app-pool", 0));
-    let after_failure = second_state
-      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
-      .unwrap();
-    assert_eq!(
-      after_failure.upstream_name,
-      synthetic_upstream_name("app-pool", 1)
-    );
-  }
-}
+mod tests;

@@ -89,6 +89,7 @@ upstream = "app"
     &WafTlsMetadata::default(),
     &state,
   )
+  .await
   .expect("direct WebTransport route should prepare");
 
   assert_eq!(prepared.upstream.name, "app");
@@ -152,7 +153,9 @@ upstream_pool = "app-pool"
     WafTransportMetadataInput::default(),
     &WafTlsMetadata::default(),
     &state,
-  ) {
+  )
+  .await
+  {
     Ok(_) => panic!("pool route should be rejected with a response, not panic"),
     Err(response) => response,
   };

@@ -75,9 +75,13 @@ pub(crate) fn replace_discovered_servers(
 ) -> anyhow::Result<()> {
   if !matches!(
     source,
-    UpstreamPoolServerSource::Dns | UpstreamPoolServerSource::File
+    UpstreamPoolServerSource::Dns
+      | UpstreamPoolServerSource::File
+      | UpstreamPoolServerSource::Kubernetes
+      | UpstreamPoolServerSource::Consul
+      | UpstreamPoolServerSource::Etcd
   ) {
-    bail!("discovery updates require dns or file source");
+    bail!("discovery updates require a supported discovery source");
   }
 
   let pool = find_pool_mut(config, pool_name)?;

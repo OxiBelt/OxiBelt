@@ -31,6 +31,9 @@ pub struct Metrics {
   dynamic_policy_refresh_success_total: AtomicU64,
   dynamic_policy_refresh_errors_total: AtomicU64,
   dynamic_policy_active_policies: AtomicU64,
+  external_auth_allowed_total: AtomicU64,
+  external_auth_denied_total: AtomicU64,
+  external_auth_errors_total: AtomicU64,
   mitigation_queued_total: AtomicU64,
   mitigation_dropped_total: AtomicU64,
   mitigation_write_errors_total: AtomicU64,
@@ -213,6 +216,24 @@ impl Metrics {
     self
       .dynamic_policy_active_policies
       .store(count, Ordering::Relaxed);
+  }
+
+  pub fn record_external_auth_allowed(&self) {
+    self
+      .external_auth_allowed_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_external_auth_denied(&self) {
+    self
+      .external_auth_denied_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_external_auth_error(&self) {
+    self
+      .external_auth_errors_total
+      .fetch_add(1, Ordering::Relaxed);
   }
 
   pub fn record_mitigation_queued(&self) {
@@ -415,6 +436,24 @@ impl Metrics {
       "oxibelt_dynamic_policy_active_policies",
       "gauge",
       self.dynamic_policy_active_policies.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_external_auth_allowed_total",
+      "counter",
+      self.external_auth_allowed_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_external_auth_denied_total",
+      "counter",
+      self.external_auth_denied_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_external_auth_errors_total",
+      "counter",
+      self.external_auth_errors_total.load(Ordering::Relaxed),
     );
     append_metric(
       &mut output,

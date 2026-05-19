@@ -88,6 +88,7 @@ pub(super) fn route_execution_plan(
 fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
   config.rate_limits.is_empty()
     && !config.dynamic_policy.enabled
+    && route.external_auth.is_none()
     && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
     && route.static_root.is_none()
     && route.upstream_pool.is_none()
@@ -105,6 +106,7 @@ fn can_static_sendfile_fast_path(config: &Config, route: &RouteConfig) -> bool {
   config.proxy.static_files.sendfile == StaticFilesSendfileMode::Auto
     && config.rate_limits.is_empty()
     && !config.dynamic_policy.enabled
+    && route.external_auth.is_none()
     && !config.compression.enabled
     && route.static_root.is_some()
     && route

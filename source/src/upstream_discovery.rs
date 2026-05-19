@@ -13,8 +13,12 @@ use crate::config::{
   UpstreamPoolDiscoveryConfig, UpstreamPoolServerConfig, UpstreamPoolServerSource,
   UpstreamPoolServerState,
 };
+use crate::control_http::ControlHttpClient;
 use crate::state::AppHandle;
 use crate::upstream_control;
+
+mod dns;
+mod enterprise;
 
 pub(crate) async fn run_dynamic_upstream_discovery(
   state: AppHandle,
@@ -41,7 +45,7 @@ pub(crate) async fn run_dynamic_upstream_discovery(
         }
 
         let fallback_delay = Duration::from_millis(discovery.refresh_interval_ms);
-        let result = discover_servers(&discovery).await;
+        let result = discover_servers(&snapshot.control_http, &discovery).await;
         let delay = match result {
           Ok((servers, delay)) => {
             if let Err(error) =
@@ -87,11 +91,9 @@ async fn apply_discovered_servers(
   let source = match provider {
     UpstreamDiscoveryProvider::Dns => UpstreamPoolServerSource::Dns,
     UpstreamDiscoveryProvider::File => UpstreamPoolServerSource::File,
-    UpstreamDiscoveryProvider::Kubernetes
-    | UpstreamDiscoveryProvider::Consul
-    | UpstreamDiscoveryProvider::Etcd => {
-      bail!("unsupported discovery provider {provider:?}");
-    }
+    UpstreamDiscoveryProvider::Kubernetes => UpstreamPoolServerSource::Kubernetes,
+    UpstreamDiscoveryProvider::Consul => UpstreamPoolServerSource::Consul,
+    UpstreamDiscoveryProvider::Etcd => UpstreamPoolServerSource::Etcd,
   };
   upstream_control::apply_runtime_pool_update(state, |config| {
     upstream_control::replace_discovered_servers(config, pool_name, source, servers)
@@ -100,16 +102,19 @@ async fn apply_discovered_servers(
 }
 
 async fn discover_servers(
+  client: &ControlHttpClient,
   discovery: &UpstreamPoolDiscoveryConfig,
 ) -> anyhow::Result<(Vec<UpstreamPoolServerConfig>, Duration)> {
   match discovery.provider {
     UpstreamDiscoveryProvider::File => discover_file_servers(discovery).await,
     UpstreamDiscoveryProvider::Dns => discover_dns_servers(discovery).await,
-    UpstreamDiscoveryProvider::Kubernetes
-    | UpstreamDiscoveryProvider::Consul
-    | UpstreamDiscoveryProvider::Etcd => {
-      bail!("discovery provider {:?} is reserved", discovery.provider);
+    UpstreamDiscoveryProvider::Kubernetes => {
+      enterprise::discover_kubernetes_servers(client, discovery).await
     }
+    UpstreamDiscoveryProvider::Consul => {
+      enterprise::discover_consul_servers(client, discovery).await
+    }
+    UpstreamDiscoveryProvider::Etcd => enterprise::discover_etcd_servers(client, discovery).await,
   }
 }
 
@@ -387,7 +392,7 @@ fn dns_nameservers() -> Vec<SocketAddr> {
 }
 
 fn build_dns_query(name: &str, query_type: DnsQueryType) -> anyhow::Result<DnsQuery> {
-  let name = canonical_dns_name(name)?;
+  let name = dns::canonical_dns_name(name)?;
   let id = random_dns_transaction_id()?;
   let mut packet = Vec::new();
   packet.extend_from_slice(&id.to_be_bytes());
@@ -408,7 +413,7 @@ fn build_dns_query(name: &str, query_type: DnsQueryType) -> anyhow::Result<DnsQu
 }
 
 fn encode_dns_name(name: &str, out: &mut Vec<u8>) -> anyhow::Result<()> {
-  let name = canonical_dns_name(name)?;
+  let name = dns::canonical_dns_name(name)?;
   for label in name.split('.') {
     if label.is_empty() || label.len() > 63 {
       bail!("DNS name contains an invalid label");
@@ -426,19 +431,6 @@ fn random_dns_transaction_id() -> anyhow::Result<u16> {
     .fill(&mut bytes)
     .map_err(|_| anyhow!("failed to generate DNS transaction ID"))?;
   Ok(u16::from_be_bytes(bytes))
-}
-
-fn canonical_dns_name(name: &str) -> anyhow::Result<String> {
-  let trimmed = name.trim_end_matches('.');
-  if trimmed.is_empty() {
-    bail!("DNS name must not be empty");
-  }
-  for label in trimmed.split('.') {
-    if label.is_empty() || label.len() > 63 {
-      bail!("DNS name contains an invalid label");
-    }
-  }
-  Ok(trimmed.to_ascii_lowercase())
 }
 
 fn parse_dns_response(response: &[u8], query: &DnsQuery) -> anyhow::Result<(Vec<DnsAnswer>, u64)> {
@@ -470,7 +462,7 @@ fn parse_dns_response(response: &[u8], query: &DnsQuery) -> anyhow::Result<(Vec<
     bail!("DNS response question count does not match query");
   }
   let mut offset = 12;
-  let question_name = canonical_dns_name(&read_dns_name(response, &mut offset)?)?;
+  let question_name = dns::canonical_dns_name(&read_dns_name(response, &mut offset)?)?;
   let question_type = read_u16(response, offset)?;
   offset += 2;
   let question_class = read_u16(response, offset)?;
@@ -484,7 +476,7 @@ fn parse_dns_response(response: &[u8], query: &DnsQuery) -> anyhow::Result<(Vec<
 
   let mut records = Vec::new();
   for _ in 0..ancount {
-    let owner = canonical_dns_name(&read_dns_name(response, &mut offset)?)?;
+    let owner = dns::canonical_dns_name(&read_dns_name(response, &mut offset)?)?;
     let record_type = read_u16(response, offset)?;
     offset += 2;
     let class = read_u16(response, offset)?;
@@ -522,7 +514,7 @@ fn parse_dns_response(response: &[u8], query: &DnsQuery) -> anyhow::Result<(Vec<
         if target_offset > offset {
           bail!("DNS CNAME record is truncated");
         }
-        ParsedDnsRecordData::Cname(canonical_dns_name(&target)?)
+        ParsedDnsRecordData::Cname(dns::canonical_dns_name(&target)?)
       }
       (DNS_TYPE_SRV, len) if len >= 6 => {
         let priority = read_u16(response, rdata)?;
@@ -536,7 +528,7 @@ fn parse_dns_response(response: &[u8], query: &DnsQuery) -> anyhow::Result<(Vec<
         ParsedDnsRecordData::Srv(SrvRecord {
           priority,
           port,
-          target: canonical_dns_name(&target)?,
+          target: dns::canonical_dns_name(&target)?,
         })
       }
       _ => ParsedDnsRecordData::Other,
@@ -687,7 +679,7 @@ mod tests {
   fn test_query(name: &str, query_type: DnsQueryType) -> DnsQuery {
     DnsQuery {
       id: 0x1234,
-      name: canonical_dns_name(name).expect("valid test DNS name"),
+      name: dns::canonical_dns_name(name).expect("valid test DNS name"),
       query_type,
       packet: Vec::new(),
     }

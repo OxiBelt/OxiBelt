@@ -8,20 +8,24 @@ use base64::Engine;
 use serde::Deserialize;
 use url::Url;
 
-use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
+use crate::waf::{AccessLogFieldConfig, WafConfig};
 
 mod admin_runtime;
 mod database;
 mod dynamic_policy;
+mod external_auth;
 mod http2;
 mod limits;
 mod quic;
+mod route;
 mod stream;
 mod tls;
 mod turn;
+mod upstream_pool;
 mod workers;
 pub use database::*;
 pub use dynamic_policy::*;
+pub use external_auth::*;
 pub use http2::*;
 use limits::{
   default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
@@ -29,9 +33,11 @@ use limits::{
 };
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
+pub use route::*;
 pub use stream::*;
 pub use tls::*;
 pub use turn::*;
+pub use upstream_pool::*;
 pub use workers::*;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +61,7 @@ pub struct Config {
   pub database: DatabaseConfig,
   pub shared_state: SharedStateConfig,
   pub dynamic_policy: DynamicPolicyConfig,
+  pub external_auth: Vec<ExternalAuthConfig>,
   pub upstreams: Vec<UpstreamConfig>,
   pub upstream_pools: Vec<UpstreamPoolConfig>,
   pub turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
@@ -104,6 +111,8 @@ struct RawConfig {
   #[serde(default)]
   dynamic_policy: DynamicPolicyConfig,
   #[serde(default)]
+  external_auth: Vec<ExternalAuthConfig>,
+  #[serde(default)]
   upstreams: Vec<UpstreamConfig>,
   #[serde(default)]
   upstream_pools: Vec<UpstreamPoolConfig>,
@@ -146,6 +155,7 @@ impl TryFrom<RawConfig> for Config {
       database: raw.database,
       shared_state: raw.shared_state,
       dynamic_policy: raw.dynamic_policy,
+      external_auth: raw.external_auth,
       upstreams: raw.upstreams,
       upstream_pools: raw.upstream_pools,
       turn_upstream_pools: raw.turn_upstream_pools,
@@ -377,6 +387,7 @@ impl Config {
       && self.database == other.database
       && self.shared_state == other.shared_state
       && self.dynamic_policy == other.dynamic_policy
+      && self.external_auth == other.external_auth
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools
       && self.turn_upstream_pools == other.turn_upstream_pools
@@ -638,6 +649,7 @@ impl Config {
 
     self.database.validate()?;
     self.shared_state.validate()?;
+    self.validate_external_auth()?;
     self.validate_mitigation_database()?;
 
     let mut upstream_names = HashSet::new();
@@ -695,17 +707,14 @@ impl Config {
       if !pool_names.insert(pool.name.clone()) {
         bail!("duplicate upstream pool name: {}", pool.name);
       }
-      if pool.algorithm == LoadBalancingAlgorithm::StickyCookie {
-        bail!(
-          "upstream pool {} uses sticky_cookie, but sticky sessions are reserved and not implemented yet",
-          pool.name
-        );
-      }
       if matches!(pool.algorithm, LoadBalancingAlgorithm::Hash) && pool.hash_key.is_none() {
         bail!(
           "upstream pool {} requires hash_key when algorithm = \"hash\"",
           pool.name
         );
+      }
+      if pool.algorithm == LoadBalancingAlgorithm::StickyCookie {
+        upstream_pool::validate_sticky_cookie_pool(pool)?;
       }
       if pool.servers.is_empty() && pool.discovery.is_empty() {
         bail!(
@@ -746,7 +755,7 @@ impl Config {
           );
         }
       }
-      validate_pool_discovery(pool)?;
+      upstream_pool::validate_pool_discovery(pool)?;
       if !pool.health_check.path.starts_with('/') {
         bail!(
           "upstream pool {} health_check.path must start with '/'",
@@ -889,6 +898,18 @@ impl Config {
           "route {} references unknown compression policy {}",
           route.name,
           compression
+        );
+      }
+      if let Some(external_auth) = &route.external_auth
+        && !self
+          .external_auth
+          .iter()
+          .any(|config| config.name == *external_auth)
+      {
+        bail!(
+          "route {} references unknown external_auth {}",
+          route.name,
+          external_auth
         );
       }
       if route.grpc_web && !self.proxy.grpc_web.enabled {
@@ -1949,54 +1970,6 @@ fn validate_admin_server_name(name: &str) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Result<()> {
-  let mut providers = HashSet::new();
-  for discovery in &pool.discovery {
-    if !providers.insert(discovery.provider) {
-      bail!(
-        "upstream pool {} must not configure duplicate {:?} discovery providers",
-        pool.name,
-        discovery.provider
-      );
-    }
-    if discovery.refresh_interval_ms == 0 || discovery.min_ttl_ms == 0 {
-      bail!(
-        "upstream pool {} discovery refresh_interval_ms and min_ttl_ms must be greater than 0",
-        pool.name
-      );
-    }
-    match discovery.provider {
-      UpstreamDiscoveryProvider::Dns => {
-        let Some(name) = discovery.name.as_deref() else {
-          bail!("upstream pool {} DNS discovery requires name", pool.name);
-        };
-        validate_optional_non_empty("upstream_pools.discovery.name", Some(name))?;
-        if discovery.record_type != DnsDiscoveryRecordType::Srv && discovery.port.is_none() {
-          bail!(
-            "upstream pool {} DNS A/AAAA discovery requires port",
-            pool.name
-          );
-        }
-      }
-      UpstreamDiscoveryProvider::File => {
-        if discovery.file.is_none() {
-          bail!("upstream pool {} file discovery requires file", pool.name);
-        }
-      }
-      UpstreamDiscoveryProvider::Kubernetes
-      | UpstreamDiscoveryProvider::Consul
-      | UpstreamDiscoveryProvider::Etcd => {
-        bail!(
-          "upstream pool {} discovery provider {:?} is reserved and not implemented yet",
-          pool.name,
-          discovery.provider
-        );
-      }
-    }
-  }
-  Ok(())
-}
-
 pub(crate) fn upstream_pool_server_id(index: usize, server: &UpstreamPoolServerConfig) -> String {
   server.id.clone().unwrap_or_else(|| index.to_string())
 }
@@ -2035,6 +2008,7 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.generic_http_upgrade == right.generic_http_upgrade
         && left.connect_tunneling == right.connect_tunneling
         && left.grpc_web == right.grpc_web
+        && left.external_auth == right.external_auth
         && left.cache == right.cache
         && left.compression == right.compression
         && left.buffering == right.buffering
@@ -2148,6 +2122,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "connection_limits",
       "database",
       "dynamic_policy",
+      "external_auth",
       "health",
       "limits",
       "listeners",
@@ -2644,6 +2619,24 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "dynamic_policy.automation_api.source_quotas" => &["max_active_policies", "source"][..],
     "dynamic_policy.matching" => &["normalize_path", "trust_route_name"][..],
+    "external_auth" => &[
+      "claim_headers",
+      "client_id_env",
+      "client_secret_env",
+      "endpoint",
+      "fail_policy",
+      "forward_headers",
+      "identity_headers",
+      "max_response_body_bytes",
+      "name",
+      "provider",
+      "required_claims",
+      "required_scopes",
+      "terminal_response_headers",
+      "timeout_ms",
+    ][..],
+    "external_auth.required_claims" => &["name", "value"][..],
+    "external_auth.claim_headers" => &["claim", "header"][..],
     "shared_state" => &[
       "backends",
       "cache_backend",
@@ -2659,6 +2652,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "person_proof_backend",
       "rate_limits_backend",
       "reload_backend",
+      "sticky_sessions_backend",
       "upstream_health_backend",
     ][..],
     "shared_state.backends" => &[
@@ -2700,16 +2694,35 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "keepalive",
       "name",
       "servers",
+      "sticky_cookie",
     ][..],
     "upstream_pools.discovery" => &[
+      "datacenter",
+      "endpoint",
       "file",
+      "filter",
+      "key_prefix",
       "min_ttl_ms",
       "name",
+      "namespace",
       "port",
+      "port_name",
       "provider",
       "record_type",
       "refresh_interval_ms",
       "scheme",
+      "service",
+      "token_env",
+    ][..],
+    "upstream_pools.sticky_cookie" => &[
+      "cookie_name",
+      "fallback_algorithm",
+      "http_only",
+      "path",
+      "same_site",
+      "secret_env",
+      "secure",
+      "ttl_seconds",
     ][..],
     "upstream_pools.keepalive" => &["idle_timeout_ms", "max_idle", "max_lifetime_ms"][..],
     "upstream_pools.health_check" => &[
@@ -2737,6 +2750,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "connect_tunneling",
       "generic_http_upgrade",
       "grpc_web",
+      "external_auth",
       "static_root",
       "upstream",
       "upstream_http_version",
@@ -4679,6 +4693,8 @@ pub struct SharedStateConfig {
   #[serde(default)]
   pub upstream_health_backend: Option<String>,
   #[serde(default)]
+  pub sticky_sessions_backend: Option<String>,
+  #[serde(default)]
   pub cache_backend: Option<String>,
   #[serde(default)]
   pub reload_backend: Option<String>,
@@ -4702,6 +4718,7 @@ impl Default for SharedStateConfig {
       connection_limits_backend: None,
       person_proof_backend: None,
       upstream_health_backend: None,
+      sticky_sessions_backend: None,
       cache_backend: None,
       reload_backend: None,
       dynamic_policy_backend: None,
@@ -4750,6 +4767,10 @@ impl SharedStateConfig {
       (
         "shared_state.upstream_health_backend",
         self.upstream_health_backend.as_deref(),
+      ),
+      (
+        "shared_state.sticky_sessions_backend",
+        self.sticky_sessions_backend.as_deref(),
       ),
       ("shared_state.cache_backend", self.cache_backend.as_deref()),
       (
@@ -4921,6 +4942,8 @@ pub struct UpstreamPoolConfig {
   #[serde(default)]
   pub hash_key: Option<String>,
   #[serde(default)]
+  pub sticky_cookie: UpstreamPoolStickyCookieConfig,
+  #[serde(default)]
   pub keepalive: UpstreamPoolKeepaliveConfig,
   #[serde(default)]
   pub servers: Vec<UpstreamPoolServerConfig>,
@@ -4956,6 +4979,22 @@ pub struct UpstreamPoolDiscoveryConfig {
   pub provider: UpstreamDiscoveryProvider,
   #[serde(default)]
   pub name: Option<String>,
+  #[serde(default)]
+  pub endpoint: Option<Url>,
+  #[serde(default)]
+  pub namespace: Option<String>,
+  #[serde(default)]
+  pub service: Option<String>,
+  #[serde(default)]
+  pub port_name: Option<String>,
+  #[serde(default)]
+  pub key_prefix: Option<String>,
+  #[serde(default)]
+  pub token_env: Option<String>,
+  #[serde(default)]
+  pub filter: Option<String>,
+  #[serde(default)]
+  pub datacenter: Option<String>,
   #[serde(default)]
   pub file: Option<PathBuf>,
   #[serde(default)]
@@ -5088,6 +5127,9 @@ pub enum UpstreamPoolServerSource {
   Static,
   Dns,
   File,
+  Kubernetes,
+  Consul,
+  Etcd,
   Admin,
 }
 
@@ -5097,6 +5139,9 @@ impl UpstreamPoolServerSource {
       Self::Static => "static",
       Self::Dns => "dns",
       Self::File => "file",
+      Self::Kubernetes => "kubernetes",
+      Self::Consul => "consul",
+      Self::Etcd => "etcd",
       Self::Admin => "admin",
     }
   }
@@ -5255,108 +5300,6 @@ pub enum UpstreamEchMode {
   Disabled,
   Grease,
   ConfigList,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct RouteConfig {
-  pub name: String,
-  #[serde(default = "default_hosts")]
-  pub hosts: Vec<String>,
-  #[serde(default = "default_path_prefix")]
-  pub path_prefix: String,
-  #[serde(default)]
-  pub replace_prefix_with: Option<String>,
-  #[serde(default)]
-  pub upstream: Option<String>,
-  #[serde(default)]
-  pub upstream_pool: Option<String>,
-  #[serde(default)]
-  pub static_root: Option<PathBuf>,
-  #[serde(default)]
-  pub upstream_http_version: Option<HttpVersion>,
-  #[serde(default)]
-  pub generic_http_upgrade: bool,
-  #[serde(default)]
-  pub connect_tunneling: bool,
-  #[serde(default)]
-  pub grpc_web: bool,
-  #[serde(default)]
-  pub cache: Option<String>,
-  #[serde(default)]
-  pub compression: Option<String>,
-  #[serde(default)]
-  pub buffering: RouteBufferingConfig,
-  #[serde(default)]
-  pub timeouts: RouteTimeoutConfig,
-  #[serde(default)]
-  pub waf: RouteWafConfig,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct RouteBufferingConfig {
-  #[serde(default)]
-  pub request: Option<BufferingMode>,
-  #[serde(default)]
-  pub response: Option<BufferingMode>,
-  #[serde(default)]
-  pub max_memory_body_bytes: Option<usize>,
-  #[serde(default)]
-  pub max_temp_file_bytes: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct RouteTimeoutConfig {
-  #[serde(default)]
-  pub client_body_timeout_ms: Option<u64>,
-  #[serde(default)]
-  pub response_send_timeout_ms: Option<u64>,
-  #[serde(default)]
-  pub websocket_idle_timeout_ms: Option<u64>,
-  #[serde(default)]
-  pub webtransport_idle_timeout_ms: Option<u64>,
-  #[serde(default)]
-  pub upstream_connect_timeout_ms: Option<u64>,
-  #[serde(default)]
-  pub upstream_request_timeout_ms: Option<u64>,
-  #[serde(default)]
-  pub upstream_first_byte_timeout_ms: Option<u64>,
-  #[serde(default)]
-  pub upstream_read_timeout_ms: Option<u64>,
-  #[serde(default)]
-  pub upstream_send_timeout_ms: Option<u64>,
-}
-
-impl RouteTimeoutConfig {
-  fn validate(&self, route_name: &str) -> anyhow::Result<()> {
-    for (field, value) in [
-      ("client_body_timeout_ms", self.client_body_timeout_ms),
-      ("response_send_timeout_ms", self.response_send_timeout_ms),
-      ("websocket_idle_timeout_ms", self.websocket_idle_timeout_ms),
-      (
-        "webtransport_idle_timeout_ms",
-        self.webtransport_idle_timeout_ms,
-      ),
-      (
-        "upstream_connect_timeout_ms",
-        self.upstream_connect_timeout_ms,
-      ),
-      (
-        "upstream_request_timeout_ms",
-        self.upstream_request_timeout_ms,
-      ),
-      (
-        "upstream_first_byte_timeout_ms",
-        self.upstream_first_byte_timeout_ms,
-      ),
-      ("upstream_read_timeout_ms", self.upstream_read_timeout_ms),
-      ("upstream_send_timeout_ms", self.upstream_send_timeout_ms),
-    ] {
-      if value == Some(0) {
-        bail!("route {route_name} timeouts.{field} must be greater than 0");
-      }
-    }
-    Ok(())
-  }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]

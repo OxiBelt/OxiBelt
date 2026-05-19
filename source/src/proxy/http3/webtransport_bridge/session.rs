@@ -162,7 +162,9 @@ pub(super) async fn accept_webtransport_session(
     },
     tls_metadata.as_ref(),
     snapshot.as_ref(),
-  ) {
+  )
+  .await
+  {
     Ok(prepared) => prepared,
     Err(response) => {
       respond_to_h3_request(stream, *response).await?;

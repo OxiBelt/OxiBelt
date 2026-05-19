@@ -1206,10 +1206,49 @@ Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` req
 `idle_timeout_ms` is also the idle connection timeout for the upstream Hyper client pool. `pool_max_idle_per_host` caps idle HTTP/1.1 and HTTP/2 TCP upstream connections retained per origin; `0` disables keeping idle connections for that upstream. For `[[upstream_pools]]`, each synthetic upstream server uses `[upstream_pools.keepalive].max_idle` as this cap.
 
 ```toml
+[[external_auth]]
+name = "edge-auth"
+provider = "authelia" # authelia | oauth2 | oidc
+endpoint = "https://auth.internal.example/api/authz/forward-auth"
+timeout_ms = 2000
+fail_policy = "closed" # closed | open
+forward_headers = ["authorization", "cookie"]
+identity_headers = ["remote-user", "remote-groups", "remote-email", "remote-name"]
+terminal_response_headers = ["location", "www-authenticate", "set-cookie"]
+max_response_body_bytes = 65536
+# OAuth2 introspection only:
+# client_id_env = "OAUTH2_INTROSPECTION_CLIENT_ID"
+# client_secret_env = "OAUTH2_INTROSPECTION_CLIENT_SECRET"
+# required_scopes = ["openid", "profile"]
+
+[[external_auth.required_claims]]
+name = "aud"
+value = "oxibelt"
+
+[[external_auth.claim_headers]]
+claim = "sub"
+header = "remote-user"
+```
+
+`[[external_auth]]` defines authorization checks that routes can reference with `external_auth = "edge-auth"`. OxiBelt does not implement the browser login flow. For `provider = "authelia"`, it performs a forward-auth GET to `endpoint`, forwarding the configured request headers plus `X-Forwarded-*` context; 2xx allows the request and non-2xx becomes the downstream terminal response with only allowlisted response headers. For `provider = "oauth2"`, it requires an inbound `Authorization: Bearer` token and POSTs to an OAuth2 token introspection endpoint; `required_scopes` must all be present when configured. For `provider = "oidc"`, it calls an OIDC UserInfo endpoint with the bearer token and enforces `required_claims`.
+
+Before forwarding upstream, OxiBelt strips configured `identity_headers` from the client request and injects identity headers only from the trusted auth response/token claims. Routes with `external_auth` use the general proxy path so fast paths cannot bypass the check. `fail_policy = "closed"` returns `503` on auth-service errors; `open` allows the request and records an auth error metric.
+
+```toml
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash
+algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash | sticky_cookie
 # hash_key = "Request.Http.Path"
+
+[upstream_pools.sticky_cookie]
+cookie_name = "oxibelt_sticky"
+ttl_seconds = 3600
+fallback_algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash
+secret_env = "OXIBELT_STICKY_COOKIE_SECRET"
+secure = true
+http_only = true
+same_site = "lax" # lax | strict | none
+path = "/"
 
 [upstream_pools.keepalive]
 max_idle = 32
@@ -1238,6 +1277,32 @@ port = 8080
 refresh_interval_ms = 30000
 min_ttl_ms = 1000
 
+[[upstream_pools.discovery]]
+provider = "kubernetes"
+endpoint = "https://kubernetes.default.svc"
+namespace = "default"
+service = "app"
+port_name = "http"
+# token_env = "KUBERNETES_SERVICE_TOKEN"
+refresh_interval_ms = 30000
+
+[[upstream_pools.discovery]]
+provider = "consul"
+endpoint = "http://consul.service.consul:8500"
+service = "app"
+# namespace = "default"
+# datacenter = "dc1"
+# filter = "Service.Meta.version == v1"
+# token_env = "CONSUL_HTTP_TOKEN"
+refresh_interval_ms = 30000
+
+[[upstream_pools.discovery]]
+provider = "etcd"
+endpoint = "https://etcd.internal.example:2379"
+key_prefix = "/oxibelt/upstreams/app/"
+# token_env = "ETCD_TOKEN"
+refresh_interval_ms = 30000
+
 [upstream_pools.health_check]
 enabled = true
 mode = "passive" # passive | active
@@ -1252,7 +1317,7 @@ grpc_service = ""
 grpc_expected_statuses = ["SERVING"]
 ```
 
-Pool names and upstream names are separate namespaces. `sticky_cookie` is reserved and rejected. `algorithm = "hash"` requires `hash_key`. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
+Pool names and upstream names are separate namespaces. `algorithm = "hash"` requires `hash_key`. `algorithm = "sticky_cookie"` selects an upstream by a signed affinity cookie when present, otherwise it uses `sticky_cookie.fallback_algorithm` and emits `Set-Cookie`. `fallback_algorithm = "hash"` also requires `hash_key`. The cookie HMAC secret comes from `sticky_cookie.secret_env` when set, from `[shared_state].sticky_sessions_backend` when configured, or from a process-local generated secret. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
 
 Pool server `state` controls new request selection. `ready` accepts traffic. `drain`, `down`, and `maintenance` stop new selection while already selected in-flight requests finish naturally.
 
@@ -1272,7 +1337,9 @@ Dynamic discovery applies to `upstream_pools` only. `provider = "file"` reads a 
 }
 ```
 
-`provider = "dns"` resolves `name` using `record_type = "a"`, `"aaaa"`, `"a_aaaa"`, or `"srv"`. A/AAAA discovery requires `port`; SRV discovery uses the SRV target port. DNS refresh uses the lower of the configured `refresh_interval_ms` and the observed DNS TTL, bounded by `min_ttl_ms`. DNS discovery rejects unsuccessful responses and responses whose transaction ID, question, answer owner, or verified CNAME chain does not match the active query. `kubernetes`, `consul`, and `etcd` are reserved provider names and are rejected in this version.
+`provider = "dns"` resolves `name` using `record_type = "a"`, `"aaaa"`, `"a_aaaa"`, or `"srv"`. A/AAAA discovery requires `port`; SRV discovery uses the SRV target port. DNS refresh uses the lower of the configured `refresh_interval_ms` and the observed DNS TTL, bounded by `min_ttl_ms`. DNS discovery rejects unsuccessful responses and responses whose transaction ID, question, answer owner, or verified CNAME chain does not match the active query.
+
+`provider = "kubernetes"` polls the core Endpoints API at `/api/v1/namespaces/{namespace}/endpoints/{service}` and uses ready endpoint addresses with either `port` or `port_name`. `provider = "consul"` polls `/v1/health/service/{service}?passing=true` and uses service addresses and ports. `provider = "etcd"` polls the v3 KV range API under `key_prefix`; each value may be a URL string or a JSON object with `origin`, optional `id`, `weight`, `max_conns`, `backup`, and `state`. Kubernetes and etcd `token_env` values are sent as bearer tokens; Consul uses `X-Consul-Token`.
 
 ## Routes
 
@@ -1286,6 +1353,7 @@ upstream = "app"
 # upstream_pool = "app-pool"
 # static_root = "public"
 # upstream_http_version = "h2" # h1 | h2 | h3
+# external_auth = "edge-auth"
 # generic_http_upgrade = false
 # connect_tunneling = false
 # grpc_web = false
