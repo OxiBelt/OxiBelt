@@ -24,6 +24,9 @@ use crate::sni_forward::connection_limits::acquire_quic_forward_connection_permi
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::resolve_target_addr;
 
+mod forward_record;
+use forward_record::QuicForwardRecord;
+
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
 
 pub(crate) struct BoundQuicForwardSocket {
@@ -503,15 +506,6 @@ enum DatagramAction {
   QueueLocal,
   SendTo(SocketAddr),
   Classify,
-}
-
-struct QuicForwardRecord<'a> {
-  peer: SocketAddr,
-  target: SocketAddr,
-  client_scid: Vec<u8>,
-  sni: Option<&'a str>,
-  rule: &'a crate::sni_forward::SniForwardRule,
-  connection_permit: ConnectionPermit,
 }
 
 #[derive(Default)]
