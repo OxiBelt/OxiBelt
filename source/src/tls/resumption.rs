@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,8 +21,36 @@ pub struct TlsResumptionState {
 
 #[derive(Clone, Debug)]
 enum TlsServerResumptionRuntime {
-  Stateful(Arc<dyn rustls::server::StoresServerSessions>),
+  Stateful(Arc<TtlServerSessionCache>),
   Stateless(Arc<dyn rustls::server::ProducesTickets>),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TlsServerSessionStorageStats {
+  pub put_count: u64,
+  pub get_count: u64,
+  pub take_count: u64,
+  pub lock_wait_ns: u64,
+  pub put_duration_ns: u64,
+}
+
+impl TlsServerSessionStorageStats {
+  fn add(&mut self, other: Self) {
+    self.put_count = self.put_count.saturating_add(other.put_count);
+    self.get_count = self.get_count.saturating_add(other.get_count);
+    self.take_count = self.take_count.saturating_add(other.take_count);
+    self.lock_wait_ns = self.lock_wait_ns.saturating_add(other.lock_wait_ns);
+    self.put_duration_ns = self.put_duration_ns.saturating_add(other.put_duration_ns);
+  }
+}
+
+#[derive(Debug, Default)]
+struct TtlServerSessionCacheStats {
+  put_count: AtomicU64,
+  get_count: AtomicU64,
+  take_count: AtomicU64,
+  lock_wait_ns: AtomicU64,
+  put_duration_ns: AtomicU64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -49,6 +78,7 @@ struct TtlServerSessionCache {
   capacity: usize,
   ttl: Duration,
   inner: Mutex<TtlServerSessionCacheInner>,
+  stats: TtlServerSessionCacheStats,
 }
 
 #[derive(Debug, Default)]
@@ -69,6 +99,7 @@ impl TtlServerSessionCache {
       capacity,
       ttl,
       inner: Mutex::new(TtlServerSessionCacheInner::default()),
+      stats: TtlServerSessionCacheStats::default(),
     }
   }
 
@@ -94,15 +125,44 @@ impl TtlServerSessionCache {
       inner.entries.remove(&key);
     }
   }
+
+  fn record_lock_wait(&self, elapsed: Duration) {
+    self
+      .stats
+      .lock_wait_ns
+      .fetch_add(duration_ns(elapsed), Ordering::Relaxed);
+  }
+
+  fn record_put_duration(&self, elapsed: Duration) {
+    self
+      .stats
+      .put_duration_ns
+      .fetch_add(duration_ns(elapsed), Ordering::Relaxed);
+  }
+
+  fn snapshot(&self) -> TlsServerSessionStorageStats {
+    TlsServerSessionStorageStats {
+      put_count: self.stats.put_count.load(Ordering::Relaxed),
+      get_count: self.stats.get_count.load(Ordering::Relaxed),
+      take_count: self.stats.take_count.load(Ordering::Relaxed),
+      lock_wait_ns: self.stats.lock_wait_ns.load(Ordering::Relaxed),
+      put_duration_ns: self.stats.put_duration_ns.load(Ordering::Relaxed),
+    }
+  }
 }
 
 impl rustls::server::StoresServerSessions for TtlServerSessionCache {
   fn put(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
+    let started = Instant::now();
+    self.stats.put_count.fetch_add(1, Ordering::Relaxed);
     if self.capacity == 0 {
+      self.record_put_duration(started.elapsed());
       return false;
     }
     let now = Instant::now();
+    let lock_started = Instant::now();
     let mut inner = self.inner.lock().expect("TLS session cache lock poisoned");
+    self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     if inner.entries.contains_key(&key) {
       inner.order.retain(|queued| queued != &key);
@@ -116,19 +176,26 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
       },
     );
     self.remove_over_capacity(&mut inner);
+    self.record_put_duration(started.elapsed());
     true
   }
 
   fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+    self.stats.get_count.fetch_add(1, Ordering::Relaxed);
     let now = Instant::now();
+    let lock_started = Instant::now();
     let mut inner = self.inner.lock().expect("TLS session cache lock poisoned");
+    self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     inner.entries.get(key).map(|stored| stored.value.clone())
   }
 
   fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
+    self.stats.take_count.fetch_add(1, Ordering::Relaxed);
     let now = Instant::now();
+    let lock_started = Instant::now();
     let mut inner = self.inner.lock().expect("TLS session cache lock poisoned");
+    self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     let value = inner.entries.remove(key).map(|stored| stored.value);
     if value.is_some() {
@@ -140,6 +207,10 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
   fn can_cache(&self) -> bool {
     self.capacity > 0
   }
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+  duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 pub(super) fn configure_server_resumption(
@@ -234,6 +305,20 @@ impl TlsResumptionState {
     clients.insert(key, config.clone());
     Ok(config)
   }
+
+  pub(crate) fn server_session_storage_stats(&self) -> TlsServerSessionStorageStats {
+    let server = self
+      .server
+      .lock()
+      .expect("TLS resumption state lock poisoned");
+    let mut stats = TlsServerSessionStorageStats::default();
+    for runtime in server.values() {
+      if let TlsServerResumptionRuntime::Stateful(cache) = runtime {
+        stats.add(cache.snapshot());
+      }
+    }
+    stats
+  }
 }
 
 pub(super) fn upstream_client_resumption(config: &UpstreamTlsResumptionConfig) -> Resumption {
@@ -327,6 +412,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
   use super::TtlServerSessionCache;
   use rustls::server::StoresServerSessions;
+  use std::sync::Arc;
   use std::time::Duration;
 
   #[test]
@@ -399,6 +485,45 @@ mod tests {
     assert_eq!(cache.get(b"second"), Some(b"2".to_vec()));
     assert_eq!(cache.get(b"third"), Some(b"3".to_vec()));
     assert_cache_lengths(&cache, 2, 2);
+  }
+
+  #[test]
+  fn stateful_cache_diagnostic_counters_track_operations() {
+    let cache = TtlServerSessionCache::new(2, Duration::from_secs(60));
+
+    assert!(cache.put(b"first".to_vec(), b"1".to_vec()));
+    assert_eq!(cache.get(b"first"), Some(b"1".to_vec()));
+    assert_eq!(cache.take(b"first"), Some(b"1".to_vec()));
+
+    let stats = cache.snapshot();
+    assert_eq!(stats.put_count, 1);
+    assert_eq!(stats.get_count, 1);
+    assert_eq!(stats.take_count, 1);
+    assert!(
+      stats.put_duration_ns > 0,
+      "put duration should accumulate elapsed time"
+    );
+  }
+
+  #[test]
+  fn stateful_cache_diagnostic_counters_track_lock_wait() {
+    let cache = Arc::new(TtlServerSessionCache::new(2, Duration::from_secs(60)));
+    let guard = cache.inner.lock().expect("TLS session cache lock poisoned");
+    let waiting_cache = cache.clone();
+    let handle = std::thread::spawn(move || {
+      assert_eq!(waiting_cache.get(b"missing"), None);
+    });
+
+    std::thread::sleep(Duration::from_millis(5));
+    drop(guard);
+    handle.join().expect("worker should not panic");
+
+    let stats = cache.snapshot();
+    assert_eq!(stats.get_count, 1);
+    assert!(
+      stats.lock_wait_ns > 0,
+      "lock wait should accumulate elapsed time"
+    );
   }
 
   fn assert_cache_lengths(cache: &TtlServerSessionCache, entries: usize, order: usize) {

@@ -17,7 +17,7 @@ use crate::config::{
 
 mod resumption;
 
-pub use resumption::TlsResumptionState;
+pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
 use resumption::{
   TlsServerResumptionKey, certificate_identity, client_auth_identity, configure_server_resumption,
   upstream_client_config_key, upstream_client_resumption,

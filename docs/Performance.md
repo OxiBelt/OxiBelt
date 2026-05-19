@@ -19,7 +19,7 @@ Profiles:
 Serving type filters:
 
 - `all`: run the legacy combined local set.
-- `reverse-proxy`: common OxiBelt, nginx, and Caddy H1/H2/H3 reverse-proxy rows plus the OxiBelt TLS handshake row.
+- `reverse-proxy`: common OxiBelt, nginx, and Caddy H1/H2/H3 reverse-proxy rows plus the OxiBelt TLS handshake and TLS resumption-mode diagnostic rows.
 - `static-files`: static file rows for `/static/1k.bin`, `/static/16k.bin`, and `/static/1m.bin` according to the selected profile.
 - `oxibelt-features`: OxiBelt-only WAF, CRS, and cache rows.
 - `oxibelt-soak-stress`: OxiBelt smoke soak, benchmark stress, or soak concurrency rows according to the selected profile.
@@ -51,6 +51,8 @@ OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 For cold TLS handshake investigations where post-quantum hybrid key exchange cost should be isolated, set `OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO=baseline-classical-kx`. That fixture keeps the handshake-heavy accept-worker profile and sets `tls.key_exchange_groups = ["x25519", "secp256r1", "secp384r1"]`.
 
 The `oxibelt-tls-handshake-h2` row keeps a fresh client TLS configuration per connection, so it remains a cold-handshake measurement. The companion `oxibelt-tls-handshake-h2-resumption-diagnostic` row reuses client TLS state per probe worker and briefly observes post-handshake TLS records so `results.json` can show whether tickets were received and whether later handshakes resumed. Its handshake result includes `client_resumption`, `post_handshake_observe_ms`, `handshake_kinds`, `tls13_tickets_received`, and `negotiated_key_exchange_groups` fields. Use that non-gating row to diagnose stateful resumption behavior; use the fresh row for cold-handshake throughput comparisons.
+
+The OxiBelt-only resumption-mode handshake rows also use fresh client TLS state so they isolate server-side ticket issuance and storage overhead without measuring resumed handshakes. Smoke and benchmark reverse-proxy runs record `oxibelt-tls-handshake-h2-resumption-off`, `oxibelt-tls-handshake-h2-resumption-stateless-tickets-2`, `oxibelt-tls-handshake-h2-resumption-stateful-tickets-1`, and `oxibelt-tls-handshake-h2-resumption-stateful-tickets-2`. These rows include the same handshake fields plus a `server_session_storage` delta with stateful `StoresServerSessions` `put_count`, `get_count`, `take_count`, `lock_wait_ns`, and `put_duration_ns` counters. Per-run summaries and aggregate reports retain p95 and p99 latency columns for these rows.
 
 The plain reverse-proxy fast path and plaintext static sendfile path are allowed to stay active for low-cost response metadata work such as configured security response headers and request-wide system access logs. Routes with `compression = "off"` can also use the plain reverse-proxy fast path even when global compression is enabled. Body-transforming compression, cache lookup/fill, WAF inspection that needs body bytes, dynamic policy, rate limiting, upgrades, CONNECT, upstream pools, upstream HTTP/3, PROXY protocol egress, and buffering remain on the general proxy path so HTTP and security semantics stay unchanged.
 

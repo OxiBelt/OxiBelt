@@ -962,7 +962,7 @@ POST /admin/v1/cache/warm
 
 `key-explain` requires `viewer` and accepts `{ "policy": "default", "method": "GET", "scheme": "https", "host": "example.test", "uri": "/asset.css", "headers": {}, "response_headers": {} }`. It returns the selected policy, partition, base key, optional variant key, Vary fields, and cacheability reasons. `warm` requires `cache_operator` and accepts `{ "items": [{ "scheme": "https", "host": "example.test", "uri": "/asset.css", "method": "GET", "headers": {} }] }`; methods are limited to `GET` and `HEAD`, and each item returns `stored`, `not_cacheable`, `upstream_error`, or `validation_error`.
 
-Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics omit detailed WAF rule names, IDs, modes, routes, and per-rule hit counters because the metrics listener is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoint for that rule-level data.
+Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics include aggregate TLS server session storage diagnostic counters for stateful resumption cache calls and approximate lock/put timing, but omit detailed WAF rule names, IDs, modes, routes, and per-rule hit counters because the metrics listener is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoint for that rule-level data.
 
 ## Database Access Log Sink
 

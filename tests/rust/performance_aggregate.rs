@@ -98,6 +98,7 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
         "rps": rps,
         "p50_ms": p50_ms,
         "p90_ms": p50_ms + 1.0,
+        "p95_ms": p50_ms + 2.0,
         "p99_ms": p99_ms,
         "errors": 1
     })
@@ -112,6 +113,7 @@ fn handshake_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64
         "handshake_per_sec": rps,
         "p50_ms": p50_ms,
         "p90_ms": p50_ms + 1.0,
+        "p95_ms": p50_ms + 2.0,
         "p99_ms": p99_ms,
         "errors": 0
     })
@@ -293,6 +295,12 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
         119.0,
     );
     assert_eq!(oxibelt_h1["total_errors"], 25);
+    assert_close(
+        oxibelt_h1["median_p95_ms"]
+            .as_f64()
+            .expect("median p95 should exist"),
+        3.0,
+    );
 
     let h1_comparison = find_comparison(&report, "reverse_proxy", "h1-keepalive");
     assert_close(

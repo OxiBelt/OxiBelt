@@ -130,6 +130,15 @@ struct StressArgs {
     bytes: usize,
 }
 
+#[derive(Clone)]
+struct MetricsArgs {
+    label: String,
+    host: String,
+    port: u16,
+    authority: String,
+    path: String,
+}
+
 struct UpstreamArgs {
     listen: SocketAddr,
     name: String,
@@ -316,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
         "load" => run_load(parse_load_args(args)?).await,
         "handshake" => run_handshake(parse_handshake_args(args)?).await,
         "stress" => run_stress(parse_stress_args(args)?).await,
+        "metrics" => run_metrics(parse_metrics_args(args)?).await,
         _ => {
             usage();
             bail!("unknown command: {command}");
@@ -329,7 +339,8 @@ fn usage() {
   perf-probe upstream --listen <addr:port> [--name <name>]
   perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
-  perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>]"
+  perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>]
+  perf-probe metrics --host <host> --port <port> --authority <authority> --path <path> [--label <label>]"
     );
 }
 
@@ -436,6 +447,20 @@ fn parse_stress_args(args: impl Iterator<Item = String>) -> anyhow::Result<Stres
             .map(|value| value.parse().context("invalid --bytes value"))
             .transpose()?
             .unwrap_or(1024 * 1024),
+    })
+}
+
+fn parse_metrics_args(args: impl Iterator<Item = String>) -> anyhow::Result<MetricsArgs> {
+    let values = flag_map(args)?;
+    Ok(MetricsArgs {
+        label: values
+            .get("--label")
+            .cloned()
+            .unwrap_or_else(|| "metrics".to_owned()),
+        host: required(&values, "--host")?.to_owned(),
+        port: parse_u16(&values, "--port")?,
+        authority: required(&values, "--authority")?.to_owned(),
+        path: required(&values, "--path")?.to_owned(),
     })
 }
 
@@ -1146,6 +1171,155 @@ async fn run_stress(args: StressArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_metrics(args: MetricsArgs) -> anyhow::Result<()> {
+    let body = fetch_plaintext_http1(&args).await?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "type": "metrics",
+            "label": args.label,
+            "mode": "prometheus",
+            "server_session_storage": server_session_storage_metrics_json(&body),
+        })
+    );
+    Ok(())
+}
+
+async fn fetch_plaintext_http1(args: &MetricsArgs) -> anyhow::Result<String> {
+    let mut stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect metrics endpoint {}:{}",
+                args.host, args.port
+            )
+        })?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        args.path, args.authority
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("failed to write metrics request")?;
+    stream
+        .flush()
+        .await
+        .context("failed to flush metrics request")?;
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .context("failed to read metrics response")?;
+    decode_http_response_body(&raw)
+}
+
+fn decode_http_response_body(raw: &[u8]) -> anyhow::Result<String> {
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("metrics response did not contain HTTP headers"))?;
+    let headers = std::str::from_utf8(&raw[..header_end])
+        .context("metrics response headers were not valid UTF-8")?;
+    let status = headers
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("metrics response was missing a status line"))?;
+    if !status.contains(" 200 ") {
+        bail!("metrics endpoint returned unexpected status line: {status}");
+    }
+
+    let body = &raw[(header_end + 4)..];
+    let lower_headers = headers.to_ascii_lowercase();
+    let decoded = if lower_headers.contains("transfer-encoding: chunked") {
+        decode_chunked_body(body)?
+    } else if let Some(length) = content_length(headers)? {
+        body.get(..length)
+            .ok_or_else(|| anyhow!("metrics response body was shorter than Content-Length"))?
+            .to_vec()
+    } else {
+        body.to_vec()
+    };
+    String::from_utf8(decoded).context("metrics response body was not valid UTF-8")
+}
+
+fn content_length(headers: &str) -> anyhow::Result<Option<usize>> {
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            return value
+                .trim()
+                .parse::<usize>()
+                .map(Some)
+                .context("invalid metrics Content-Length");
+        }
+    }
+    Ok(None)
+}
+
+fn decode_chunked_body(mut input: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    loop {
+        let line_end = find_crlf(input).ok_or_else(|| anyhow!("invalid chunk header"))?;
+        let size_text =
+            std::str::from_utf8(&input[..line_end]).context("chunk size was not valid UTF-8")?;
+        let size_hex = size_text.split_once(';').map_or(size_text, |(size, _)| size);
+        let size = usize::from_str_radix(size_hex.trim(), 16)
+            .context("chunk size was not valid hexadecimal")?;
+        input = &input[(line_end + 2)..];
+        if size == 0 {
+            break;
+        }
+        if input.len() < size + 2 {
+            bail!("chunk body was shorter than declared size");
+        }
+        output.extend_from_slice(&input[..size]);
+        if &input[size..(size + 2)] != b"\r\n" {
+            bail!("chunk body was not followed by CRLF");
+        }
+        input = &input[(size + 2)..];
+    }
+    Ok(output)
+}
+
+fn find_crlf(input: &[u8]) -> Option<usize> {
+    input.windows(2).position(|window| window == b"\r\n")
+}
+
+fn server_session_storage_metrics_json(metrics: &str) -> serde_json::Value {
+    serde_json::json!({
+        "put_count": prometheus_u64(metrics, "oxibelt_tls_server_session_storage_put_total"),
+        "get_count": prometheus_u64(metrics, "oxibelt_tls_server_session_storage_get_total"),
+        "take_count": prometheus_u64(metrics, "oxibelt_tls_server_session_storage_take_total"),
+        "lock_wait_ns": prometheus_u64(metrics, "oxibelt_tls_server_session_storage_lock_wait_ns_total"),
+        "put_duration_ns": prometheus_u64(metrics, "oxibelt_tls_server_session_storage_put_duration_ns_total"),
+    })
+}
+
+fn prometheus_u64(metrics: &str, name: &str) -> u64 {
+    metrics
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let mut parts = line.split_whitespace();
+            if parts.next()? != name {
+                return None;
+            }
+            let value = parts.next()?.parse::<f64>().ok()?;
+            if value.is_finite() && value >= 0.0 {
+                Some(value as u64)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+}
+
 async fn stress_slowloris(args: &StressArgs) -> anyhow::Result<Option<u16>> {
     let mut stream = TcpStream::connect((args.host.as_str(), args.port))
         .await
@@ -1517,6 +1691,65 @@ mod tests {
 
         assert_eq!(args.client_resumption, ClientResumptionMode::Fresh);
         assert_eq!(args.post_handshake_observe, Duration::ZERO);
+    }
+
+    #[test]
+    fn metrics_args_parse_plaintext_endpoint() {
+        let args = parse_metrics_args(
+            [
+                "--label",
+                "tls-storage",
+                "--host",
+                "oxibelt",
+                "--port",
+                "9090",
+                "--authority",
+                "ops.test",
+                "--path",
+                "/metrics",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("metrics args should parse");
+
+        assert_eq!(args.label, "tls-storage");
+        assert_eq!(args.host, "oxibelt");
+        assert_eq!(args.port, 9090);
+        assert_eq!(args.authority, "ops.test");
+        assert_eq!(args.path, "/metrics");
+    }
+
+    #[test]
+    fn metrics_parser_extracts_tls_session_storage_counters() {
+        let metrics = "\
+# TYPE oxibelt_tls_server_session_storage_put_total counter
+oxibelt_tls_server_session_storage_put_total 11
+# TYPE oxibelt_tls_server_session_storage_get_total counter
+oxibelt_tls_server_session_storage_get_total 13
+# TYPE oxibelt_tls_server_session_storage_take_total counter
+oxibelt_tls_server_session_storage_take_total 17
+# TYPE oxibelt_tls_server_session_storage_lock_wait_ns_total counter
+oxibelt_tls_server_session_storage_lock_wait_ns_total 19
+# TYPE oxibelt_tls_server_session_storage_put_duration_ns_total counter
+oxibelt_tls_server_session_storage_put_duration_ns_total 23
+";
+
+        let parsed = server_session_storage_metrics_json(metrics);
+
+        assert_eq!(parsed["put_count"], 11);
+        assert_eq!(parsed["get_count"], 13);
+        assert_eq!(parsed["take_count"], 17);
+        assert_eq!(parsed["lock_wait_ns"], 19);
+        assert_eq!(parsed["put_duration_ns"], 23);
+    }
+
+    #[test]
+    fn metrics_response_decoder_handles_chunked_bodies() {
+        let response = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let body = decode_http_response_body(response).expect("chunked body should decode");
+
+        assert_eq!(body, "hello world");
     }
 
     #[test]

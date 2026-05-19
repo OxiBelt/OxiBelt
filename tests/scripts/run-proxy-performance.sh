@@ -327,7 +327,7 @@ run_probe_json() {
 append_result() {
   local json="$1"
   printf '%s\n' "${json}" >>"${results_jsonl}"
-  local label type protocol skipped requests rps p99 errors
+  local label type protocol skipped requests rps p95 p99 errors
   label="$(jq -r '.label // "unknown"' <<<"${json}")"
   type="$(jq -r '.type // "unknown"' <<<"${json}")"
   protocol="$(jq -r '.protocol // .mode // "-"' <<<"${json}")"
@@ -339,10 +339,11 @@ append_result() {
   fi
   requests="$(jq -r '.requests // .handshakes // 0' <<<"${json}")"
   rps="$(jq -r '.rps // .handshake_per_sec // 0' <<<"${json}")"
+  p95="$(jq -r '.p95_ms // 0' <<<"${json}")"
   p99="$(jq -r '.p99_ms // 0' <<<"${json}")"
   errors="$(jq -r '.errors // 0' <<<"${json}")"
-  printf '| `%s` | `%s` | `%s` | %s req, %.2f/sec, p99 %.2f ms | errors=%s |\n' \
-    "${label}" "${type}" "${protocol}" "${requests}" "${rps}" "${p99}" "${errors}" >>"${summary_md}"
+  printf '| `%s` | `%s` | `%s` | %s req, %.2f/sec, p95 %.2f ms, p99 %.2f ms | errors=%s |\n' \
+    "${label}" "${type}" "${protocol}" "${requests}" "${rps}" "${p95}" "${p99}" "${errors}" >>"${summary_md}"
 }
 
 assert_result() {
@@ -593,11 +594,15 @@ run_static_loads() {
 }
 
 run_handshake() {
-  run_handshake_with_options "$1" "$2" "$3" fresh 0 strict
+  run_handshake_with_options "$1" "$2" "$3" fresh 0 strict none
 }
 
 run_handshake_resumption_diagnostic() {
-  run_handshake_with_options "$1" "$2" "$3" worker 25 diagnostic
+  run_handshake_with_options "$1" "$2" "$3" worker 25 diagnostic none
+}
+
+run_handshake_with_storage_diagnostics() {
+  run_handshake_with_options "$1" "$2" "$3" fresh 0 strict tls-storage
 }
 
 run_handshake_with_options() {
@@ -607,7 +612,11 @@ run_handshake_with_options() {
   local client_resumption="$4"
   local post_handshake_observe_ms="$5"
   local result_mode="$6"
-  local json
+  local diagnostics="$7"
+  local before_metrics after_metrics storage_delta json
+  if [[ "${diagnostics}" == "tls-storage" ]]; then
+    before_metrics="$(server_session_storage_metrics "${host}" "${label}-metrics-before")"
+  fi
   json="$(run_probe_json handshake \
     --label "${label}" \
     --protocol "${protocol}" \
@@ -619,6 +628,11 @@ run_handshake_with_options() {
     --concurrency "${concurrency}" \
     --client-resumption "${client_resumption}" \
     --post-handshake-observe-ms "${post_handshake_observe_ms}")"
+  if [[ "${diagnostics}" == "tls-storage" ]]; then
+    after_metrics="$(server_session_storage_metrics "${host}" "${label}-metrics-after")"
+    storage_delta="$(server_session_storage_delta "${before_metrics}" "${after_metrics}")"
+    json="$(jq -c --argjson storage "${storage_delta}" '. + {server_session_storage: $storage}' <<<"${json}")"
+  fi
   append_result "${json}"
   if [[ "${result_mode}" == "strict" ]]; then
     assert_result "${json}"
@@ -626,6 +640,49 @@ run_handshake_with_options() {
     assert_diagnostic_result "${json}"
   fi
   sample_stats "${label}"
+}
+
+server_session_storage_metrics() {
+  local host="$1"
+  local label="$2"
+  local attempt json
+  for attempt in $(seq 1 10); do
+    if json="$(run_probe_json metrics \
+      --label "${label}-${attempt}" \
+      --host "${host}" \
+      --port 9090 \
+      --authority ops.test \
+      --path /metrics)"; then
+      jq -c '.server_session_storage // {
+        put_count: 0,
+        get_count: 0,
+        take_count: 0,
+        lock_wait_ns: 0,
+        put_duration_ns: 0
+      }' <<<"${json}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
+server_session_storage_delta() {
+  local before="$1"
+  local after="$2"
+  jq -n -c \
+    --argjson before "${before}" \
+    --argjson after "${after}" \
+    'def diff($name):
+       (($after[$name] // 0) - ($before[$name] // 0)) as $value
+       | if $value < 0 then 0 else $value end;
+     {
+       put_count: diff("put_count"),
+       get_count: diff("get_count"),
+       take_count: diff("take_count"),
+       lock_wait_ns: diff("lock_wait_ns"),
+       put_duration_ns: diff("put_duration_ns")
+     }'
 }
 
 run_stress() {
@@ -855,6 +912,20 @@ run_accept_multiplier_profile() {
   run_load "${label_prefix}-crs-enforcing" h2 oxibelt "/perf/crs?body=ok" "${duration_seconds}" "${concurrency}"
 }
 
+run_oxibelt_tls_resumption_handshake_rows() {
+  start_oxibelt tls-resumption-off oxibelt
+  run_handshake_with_storage_diagnostics "oxibelt-tls-handshake-h2-resumption-off" h2 oxibelt
+
+  start_oxibelt tls-resumption-stateless-tickets-2 oxibelt
+  run_handshake_with_storage_diagnostics "oxibelt-tls-handshake-h2-resumption-stateless-tickets-2" h2 oxibelt
+
+  start_oxibelt tls-resumption-stateful-tickets-1 oxibelt
+  run_handshake_with_storage_diagnostics "oxibelt-tls-handshake-h2-resumption-stateful-tickets-1" h2 oxibelt
+
+  start_oxibelt tls-resumption-stateful-tickets-2 oxibelt
+  run_handshake_with_storage_diagnostics "oxibelt-tls-handshake-h2-resumption-stateful-tickets-2" h2 oxibelt
+}
+
 run_oxibelt_specific_benchmarks() {
   start_oxibelt waf-monitor oxibelt
   run_load "oxibelt-waf-monitor" h2 oxibelt "/perf/waf?body=ok" "${duration_seconds}" "${concurrency}"
@@ -916,6 +987,7 @@ run_reverse_proxy_group() {
     start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
     run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
     run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt
+    run_oxibelt_tls_resumption_handshake_rows
   fi
 
   if has_comparator nginx; then
@@ -996,6 +1068,7 @@ run_all_serving_types() {
     start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
     run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
     run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt
+    run_oxibelt_tls_resumption_handshake_rows
     if [[ "${profile}" == "smoke" ]]; then
       run_load "oxibelt-smoke-soak" h1 oxibelt "/perf/smoke-soak?body=ok" "${soak_seconds}" "${concurrency}"
     fi

@@ -118,6 +118,7 @@ struct BenchmarkRow {
     rps: Option<f64>,
     p50_ms: Option<f64>,
     p90_ms: Option<f64>,
+    p95_ms: Option<f64>,
     p99_ms: Option<f64>,
     errors: u64,
     skipped: bool,
@@ -135,6 +136,7 @@ struct AggregateBuilder {
     rps_values: Vec<f64>,
     p50_values: Vec<f64>,
     p90_values: Vec<f64>,
+    p95_values: Vec<f64>,
     p99_values: Vec<f64>,
     total_errors: u64,
     skipped_count: u64,
@@ -158,6 +160,7 @@ struct AggregateStats {
     p75_rps: Option<f64>,
     median_p50_ms: Option<f64>,
     median_p90_ms: Option<f64>,
+    median_p95_ms: Option<f64>,
     median_p99_ms: Option<f64>,
     total_errors: u64,
     skipped_count: u64,
@@ -283,6 +286,9 @@ impl AggregateBuilder {
         if let Some(p90) = row.p90_ms {
             self.p90_values.push(p90);
         }
+        if let Some(p95) = row.p95_ms {
+            self.p95_values.push(p95);
+        }
         if let Some(p99) = row.p99_ms {
             self.p99_values.push(p99);
         }
@@ -300,6 +306,7 @@ impl AggregateBuilder {
         let mut rps_values = self.rps_values;
         let mut p50_values = self.p50_values;
         let mut p90_values = self.p90_values;
+        let mut p95_values = self.p95_values;
         let mut p99_values = self.p99_values;
         let comparator = self
             .comparator
@@ -322,6 +329,7 @@ impl AggregateBuilder {
             p75_rps: percentile(&mut rps_values, 75.0),
             median_p50_ms: percentile(&mut p50_values, 50.0),
             median_p90_ms: percentile(&mut p90_values, 50.0),
+            median_p95_ms: percentile(&mut p95_values, 50.0),
             median_p99_ms: percentile(&mut p99_values, 50.0),
             total_errors: self.total_errors,
             skipped_count: self.skipped_count,
@@ -700,6 +708,7 @@ fn parse_result_value(
         rps,
         p50_ms: numeric_field(object, &["p50_ms"], source_file, row_index, label, warnings),
         p90_ms: numeric_field(object, &["p90_ms"], source_file, row_index, label, warnings),
+        p95_ms: numeric_field(object, &["p95_ms"], source_file, row_index, label, warnings),
         p99_ms: numeric_field(object, &["p99_ms"], source_file, row_index, label, warnings),
         errors,
         skipped,
@@ -1201,21 +1210,26 @@ fn write_comparison_table(markdown: &mut String, title: &str, comparisons: &[Sce
 
     writeln!(
         markdown,
-        "| Scenario | OxiBelt median RPS | nginx median RPS | OxiBelt vs nginx | Caddy median RPS | OxiBelt vs Caddy | OxiBelt median p99 ms |"
+        "| Scenario | OxiBelt median RPS | nginx median RPS | OxiBelt vs nginx | Caddy median RPS | OxiBelt vs Caddy | OxiBelt median p95 ms | OxiBelt median p99 ms |"
     )
     .unwrap();
-    writeln!(markdown, "| --- | ---: | ---: | --- | ---: | --- | ---: |").unwrap();
+    writeln!(
+        markdown,
+        "| --- | ---: | ---: | --- | ---: | --- | ---: | ---: |"
+    )
+    .unwrap();
     for comparison in comparisons {
         let oxibelt = comparison.oxibelt.as_ref();
         writeln!(
             markdown,
-            "| `{}` | {} | {} | {} | {} | {} | {} |",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} |",
             comparison.scenario,
             format_number(oxibelt.and_then(|stats| stats.median_rps)),
             format_number(comparison.nginx.as_ref().and_then(|stats| stats.median_rps)),
             comparison.oxibelt_vs_nginx.text,
             format_number(comparison.caddy.as_ref().and_then(|stats| stats.median_rps)),
             comparison.oxibelt_vs_caddy.text,
+            format_number(oxibelt.and_then(|stats| stats.median_p95_ms)),
             format_number(oxibelt.and_then(|stats| stats.median_p99_ms)),
         )
         .unwrap();
@@ -1235,20 +1249,26 @@ fn write_accept_multiplier_table(
 
     writeln!(
         markdown,
-        "| Scenario | accept = 0.5 median RPS | accept = 1.0 median RPS | 1.0 / 0.5 | accept = 0.5 median p99 ms | accept = 1.0 median p99 ms |"
+        "| Scenario | accept = 0.5 median RPS | accept = 1.0 median RPS | 1.0 / 0.5 | accept = 0.5 median p95 ms | accept = 1.0 median p95 ms | accept = 0.5 median p99 ms | accept = 1.0 median p99 ms |"
     )
     .unwrap();
-    writeln!(markdown, "| --- | ---: | ---: | --- | ---: | ---: |").unwrap();
+    writeln!(
+        markdown,
+        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |"
+    )
+    .unwrap();
     for comparison in comparisons {
         let accept_0_5 = comparison.accept_0_5.as_ref();
         let accept_1_0 = comparison.accept_1_0.as_ref();
         writeln!(
             markdown,
-            "| `{}` | {} | {} | {} | {} | {} |",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} |",
             comparison.scenario,
             format_number(accept_0_5.and_then(|stats| stats.median_rps)),
             format_number(accept_1_0.and_then(|stats| stats.median_rps)),
             comparison.accept_1_0_vs_0_5.text,
+            format_number(accept_0_5.and_then(|stats| stats.median_p95_ms)),
+            format_number(accept_1_0.and_then(|stats| stats.median_p95_ms)),
             format_number(accept_0_5.and_then(|stats| stats.median_p99_ms)),
             format_number(accept_1_0.and_then(|stats| stats.median_p99_ms)),
         )
@@ -1266,23 +1286,24 @@ fn write_oxibelt_only_table(markdown: &mut String, rows: &[AggregateStats]) {
 
     writeln!(
         markdown,
-        "| Label | Type | Protocol/mode | Samples | Median RPS | Median p99 ms | Errors | Skipped |"
+        "| Label | Type | Protocol/mode | Samples | Median RPS | Median p95 ms | Median p99 ms | Errors | Skipped |"
     )
     .unwrap();
     writeln!(
         markdown,
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
     )
     .unwrap();
     for row in rows {
         writeln!(
             markdown,
-            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} |",
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} |",
             row.label,
             row.result_type.as_deref().unwrap_or("-"),
             row.protocol_or_mode.as_deref().unwrap_or("-"),
             row.sample_count,
             format_number(row.median_rps),
+            format_number(row.median_p95_ms),
             format_number(row.median_p99_ms),
             row.total_errors,
             row.skipped_count,

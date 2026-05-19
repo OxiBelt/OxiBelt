@@ -620,6 +620,10 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
         ("baseline-accept-1", 1.0),
         ("baseline-classical-kx", 1.0),
         ("crs-enforcing-accept-1", 1.0),
+        ("tls-resumption-off", 1.0),
+        ("tls-resumption-stateless-tickets-2", 1.0),
+        ("tls-resumption-stateful-tickets-1", 1.0),
+        ("tls-resumption-stateful-tickets-2", 1.0),
         ("waf-enforcing-accept-1", 1.0),
     ] {
         let path = oxibelt_performance_fixture_root()
@@ -663,6 +667,54 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
                 .and_then(toml::Value::as_float),
             Some(1.0),
             "{} should pin QUIC socket worker multiplier",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn oxibelt_tls_resumption_performance_fixtures_pin_modes_and_metrics() {
+    for (scenario, mode, ticket_count) in [
+        ("tls-resumption-off", "off", 2),
+        ("tls-resumption-stateless-tickets-2", "stateless", 2),
+        ("tls-resumption-stateful-tickets-1", "stateful", 1),
+        ("tls-resumption-stateful-tickets-2", "stateful", 2),
+    ] {
+        let path = oxibelt_performance_fixture_root()
+            .join(scenario)
+            .join("config/oxibelt.toml");
+        let config_text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let value: toml::Value = toml::from_str(&config_text)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+        let resumption = value
+            .get("tls")
+            .and_then(toml::Value::as_table)
+            .and_then(|tls| tls.get("resumption"))
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("{} should contain tls.resumption", path.display()));
+        assert_eq!(
+            resumption.get("mode").and_then(toml::Value::as_str),
+            Some(mode),
+            "{} should pin the expected TLS resumption mode",
+            path.display()
+        );
+        assert_eq!(
+            resumption
+                .get("tls13_ticket_count")
+                .and_then(toml::Value::as_integer),
+            Some(ticket_count),
+            "{} should pin the expected TLS 1.3 ticket count",
+            path.display()
+        );
+        assert_eq!(
+            value
+                .get("metrics")
+                .and_then(toml::Value::as_table)
+                .and_then(|metrics| metrics.get("enabled"))
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "{} should enable metrics for server-session-storage diagnostics",
             path.display()
         );
     }
@@ -1078,16 +1130,51 @@ fn handshake_resumption_diagnostic_runs_without_replacing_cold_row() {
         "reverse-proxy and all serving types should add the resumption diagnostic row"
     );
     assert!(
-        script.contains("run_handshake_with_options \"$1\" \"$2\" \"$3\" fresh 0 strict"),
+        script.contains("run_handshake_with_options \"$1\" \"$2\" \"$3\" fresh 0 strict none"),
         "default handshake wrapper should preserve fresh cold-handshake behavior"
     );
     assert!(
-        script.contains("run_handshake_with_options \"$1\" \"$2\" \"$3\" worker 25 diagnostic"),
+        script
+            .contains("run_handshake_with_options \"$1\" \"$2\" \"$3\" worker 25 diagnostic none"),
         "diagnostic handshake wrapper should reuse worker TLS state and observe tickets without replacing the strict cold row"
     );
     assert!(
         script.contains("assert_diagnostic_result"),
         "diagnostic rows should require useful output without turning client-side port pressure into a hard gate"
+    );
+}
+
+#[test]
+fn tls_resumption_mode_handshake_rows_run_as_fresh_oxibelt_only_smoke_rows() {
+    let script = performance_script_text();
+
+    assert_eq!(
+        script
+            .matches("run_oxibelt_tls_resumption_handshake_rows")
+            .count(),
+        3,
+        "function definition plus reverse-proxy and all serving types should run resumption rows"
+    );
+    assert!(
+        script
+            .contains("run_handshake_with_options \"$1\" \"$2\" \"$3\" fresh 0 strict tls-storage"),
+        "storage diagnostic wrapper should preserve fresh cold-handshake behavior"
+    );
+    for label in [
+        "oxibelt-tls-handshake-h2-resumption-off",
+        "oxibelt-tls-handshake-h2-resumption-stateless-tickets-2",
+        "oxibelt-tls-handshake-h2-resumption-stateful-tickets-1",
+        "oxibelt-tls-handshake-h2-resumption-stateful-tickets-2",
+    ] {
+        let call = format!("run_handshake_with_storage_diagnostics \"{label}\" h2 oxibelt");
+        assert!(
+            script.contains(&call),
+            "missing fresh H2 resumption diagnostic row call for {label}"
+        );
+    }
+    assert!(
+        script.contains("server_session_storage_delta"),
+        "resumption rows should attach server-side session storage counter deltas"
     );
 }
 

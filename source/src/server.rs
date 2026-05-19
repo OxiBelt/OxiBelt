@@ -218,7 +218,10 @@ fn ops_response(
   match kind {
     OpsKind::Metrics => {
       let snapshot = state.snapshot();
-      let body = snapshot.metrics.prometheus(snapshot.cache.stats());
+      let body = snapshot.metrics.prometheus(
+        snapshot.cache.stats(),
+        snapshot.tls_resumption.server_session_storage_stats(),
+      );
       text_response(StatusCode::OK, &body)
     }
     OpsKind::Health => {
