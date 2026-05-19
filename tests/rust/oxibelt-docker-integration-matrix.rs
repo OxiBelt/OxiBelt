@@ -1195,6 +1195,27 @@ run_case_checks() {
         ),
         docker_case(
             "security",
+            "external-auth-response-body-timeout",
+            "external auth timeout covers response body collection",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local timed_out allowed
+  timed_out="$(client_request "slow-auth.example.test" "/app/protected" 503)"
+  assert_response_jq "${timed_out}" '.body == "external authorization failed"'
+
+  allowed="$(client_request "quick-auth.example.test" "/app/protected" 200)"
+  assert_body_jq "${allowed}" '.upstream == "http-upstream" and .path == "/origin/app/protected"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "security",
             "grpc-timeout-pool-health",
             "client gRPC deadlines do not poison passive upstream pool health",
             ExpectStart::Success,

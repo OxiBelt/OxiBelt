@@ -1,0 +1,83 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[external_auth]]
+name = "slow-auth"
+provider = "authelia"
+endpoint = "http://mock-http:18080/status/200?body=ok&body_delay_ms=1200"
+timeout_ms = 200
+fail_policy = "closed"
+max_response_body_bytes = 1024
+
+[[external_auth]]
+name = "quick-auth"
+provider = "authelia"
+endpoint = "http://mock-http:18080/status/200?body=ok"
+timeout_ms = 1000
+fail_policy = "closed"
+max_response_body_bytes = 1024
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 5000
+first_byte_timeout_ms = 5000
+read_timeout_ms = 5000
+send_timeout_ms = 5000
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "slow-auth-route"
+hosts = ["slow-auth.example.test"]
+path_prefix = "/app"
+upstream = "http-upstream"
+external_auth = "slow-auth"
+
+[[routes]]
+name = "quick-auth-route"
+hosts = ["quick-auth.example.test"]
+path_prefix = "/app"
+upstream = "http-upstream"
+external_auth = "quick-auth"

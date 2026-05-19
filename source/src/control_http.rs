@@ -59,11 +59,16 @@ impl ControlHttpClient {
     timeout: Duration,
     max_body_bytes: usize,
   ) -> anyhow::Result<ControlHttpResponse> {
-    let response = tokio::time::timeout(timeout, self.client.request(request))
-      .await
-      .context("control-plane HTTP request timed out")?
-      .context("control-plane HTTP request failed")?;
-    collect_response(response, max_body_bytes).await
+    tokio::time::timeout(timeout, async {
+      let response = self
+        .client
+        .request(request)
+        .await
+        .context("control-plane HTTP request failed")?;
+      collect_response(response, max_body_bytes).await
+    })
+    .await
+    .context("control-plane HTTP request timed out")?
   }
 }
 
@@ -100,4 +105,101 @@ pub fn uri_from_url(url: &url::Url) -> anyhow::Result<Uri> {
     .as_str()
     .parse::<Uri>()
     .with_context(|| format!("invalid control-plane URL {url}"))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use http::StatusCode;
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  use tokio::net::TcpListener;
+
+  #[tokio::test]
+  async fn request_timeout_covers_response_body_collection() {
+    let uri = spawn_delayed_body_server(Duration::from_millis(600), b"ok").await;
+    let client = ControlHttpClient::new(&[]).expect("control HTTP client should build");
+    let request = Request::builder()
+      .uri(uri)
+      .body(empty_body())
+      .expect("request should build");
+
+    let error = match client
+      .request(request, Duration::from_millis(100), 1024)
+      .await
+    {
+      Ok(_) => panic!("delayed response body should hit the control HTTP timeout"),
+      Err(error) => error,
+    };
+
+    assert!(
+      format!("{error:#}").contains("control-plane HTTP request timed out"),
+      "unexpected error: {error:#}"
+    );
+  }
+
+  #[tokio::test]
+  async fn request_collects_response_body_before_timeout() {
+    let uri = spawn_delayed_body_server(Duration::ZERO, b"ok").await;
+    let client = ControlHttpClient::new(&[]).expect("control HTTP client should build");
+    let request = Request::builder()
+      .uri(uri)
+      .body(empty_body())
+      .expect("request should build");
+
+    let response = client
+      .request(request, Duration::from_secs(1), 1024)
+      .await
+      .expect("response should complete before the control HTTP timeout");
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body, Bytes::from_static(b"ok"));
+  }
+
+  async fn spawn_delayed_body_server(body_delay: Duration, body: &'static [u8]) -> Uri {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+      .await
+      .expect("test server should bind");
+    let address = listener.local_addr().expect("test server address");
+    tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.expect("test server should accept");
+      read_request_headers(&mut stream).await;
+      let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+      );
+      stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("test server should write response headers");
+      stream
+        .flush()
+        .await
+        .expect("test server should flush headers");
+      if !body_delay.is_zero() {
+        tokio::time::sleep(body_delay).await;
+      }
+      let _ = stream.write_all(body).await;
+    });
+    format!("http://{address}/")
+      .parse()
+      .expect("test server URI should parse")
+  }
+
+  async fn read_request_headers(stream: &mut tokio::net::TcpStream) {
+    let mut buffer = [0_u8; 1024];
+    let mut received = Vec::new();
+    loop {
+      let read = stream
+        .read(&mut buffer)
+        .await
+        .expect("test server should read request");
+      if read == 0 {
+        break;
+      }
+      received.extend_from_slice(&buffer[..read]);
+      if received.windows(4).any(|window| window == b"\r\n\r\n") {
+        break;
+      }
+    }
+  }
 }
