@@ -836,7 +836,7 @@ fn classify_scenario(comparator: Comparator, scenario: &str) -> ScenarioGroup {
         ScenarioGroup::StaticFiles
     } else if accept_multiplier_base_scenario(scenario).is_some() {
         ScenarioGroup::AcceptMultipliers
-    } else if matches!(scenario, "h1-keepalive" | "h2" | "h3") {
+    } else if matches!(scenario, "h1-keepalive" | "h2" | "h3" | "tls-handshake-h2") {
         ScenarioGroup::ReverseProxy
     } else if comparator == Comparator::Oxibelt {
         ScenarioGroup::OxibeltOnly
@@ -1934,7 +1934,7 @@ fn write_comparison_table(markdown: &mut String, title: &str, comparisons: &[Sce
 
     writeln!(
         markdown,
-        "| Scenario | OxiBelt median RPS | nginx median RPS | OxiBelt vs nginx | Caddy median RPS | OxiBelt vs Caddy | OxiBelt median p95 ms | OxiBelt median p99 ms |"
+        "| Scenario | OxiBelt median rate/sec | nginx median rate/sec | OxiBelt vs nginx | Caddy median rate/sec | OxiBelt vs Caddy | OxiBelt median p95 ms | OxiBelt median p99 ms |"
     )
     .unwrap();
     writeln!(
@@ -1973,7 +1973,7 @@ fn write_accept_multiplier_table(
 
     writeln!(
         markdown,
-        "| Scenario | accept = 0.5 median RPS | accept = 1.0 median RPS | 1.0 / 0.5 | accept = 0.5 median p95 ms | accept = 1.0 median p95 ms | accept = 0.5 median p99 ms | accept = 1.0 median p99 ms |"
+        "| Scenario | accept = 0.5 median rate/sec | accept = 1.0 median rate/sec | 1.0 / 0.5 | accept = 0.5 median p95 ms | accept = 1.0 median p95 ms | accept = 0.5 median p99 ms | accept = 1.0 median p99 ms |"
     )
     .unwrap();
     writeln!(
@@ -2010,7 +2010,7 @@ fn write_oxibelt_only_table(markdown: &mut String, rows: &[AggregateStats]) {
 
     writeln!(
         markdown,
-        "| Label | Type | Protocol/mode | Samples | Median RPS | Median p95 ms | Median p99 ms | Errors | Skipped |"
+        "| Label | Type | Protocol/mode | Samples | Median rate/sec | Median p95 ms | Median p99 ms | Errors | Skipped |"
     )
     .unwrap();
     writeln!(

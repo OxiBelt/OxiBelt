@@ -1020,11 +1020,13 @@ run_reverse_proxy_group() {
       nginx_h3_mode=optional
     fi
     run_common_loads nginx nginx "${nginx_h3_mode}"
+    run_handshake "nginx-tls-handshake-h2" h2 nginx
   fi
 
   if has_comparator caddy; then
     start_caddy
     run_common_loads caddy caddy required
+    run_handshake "caddy-tls-handshake-h2" h2 caddy
   fi
 }
 
@@ -1104,12 +1106,14 @@ run_all_serving_types() {
       nginx_h3_mode=optional
     fi
     run_common_loads nginx nginx "${nginx_h3_mode}"
+    run_handshake "nginx-tls-handshake-h2" h2 nginx
     run_static_loads nginx nginx "${nginx_h3_mode}"
   fi
 
   if has_comparator caddy; then
     start_caddy
     run_common_loads caddy caddy required
+    run_handshake "caddy-tls-handshake-h2" h2 caddy
     run_static_loads caddy caddy required
   fi
 

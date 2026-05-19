@@ -272,6 +272,9 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
                     load_row("oxibelt-h1-keepalive", "h1", 100.0 + sample, 1.0, 5.0),
                     load_row("nginx-h1-keepalive", "h1", 200.0 + sample, 2.0, 6.0),
                     load_row("caddy-h1-keepalive", "h1", 150.0 + sample, 3.0, 7.0),
+                    handshake_row("oxibelt-tls-handshake-h2", "h2", 1000.0 + sample, 6.0, 10.0),
+                    handshake_row("nginx-tls-handshake-h2", "h2", 1250.0 + sample, 7.0, 11.0),
+                    handshake_row("caddy-tls-handshake-h2", "h2", 900.0 + sample, 8.0, 12.0),
                     load_row("oxibelt-h3", "h3", 70.0 + sample, 4.0, 8.0),
                     skipped_row(
                         "nginx-h3",
@@ -428,6 +431,21 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
             .contains("HTTP/3 is not available")
     );
 
+    let handshake_comparison = find_comparison(&report, "reverse_proxy", "tls-handshake-h2");
+    assert_close(
+        handshake_comparison["oxibelt_vs_nginx"]["ratio"]
+            .as_f64()
+            .expect("handshake nginx ratio should exist"),
+        1013.0 / 1263.0,
+    );
+    assert_close(
+        handshake_comparison["oxibelt_vs_caddy"]["ratio"]
+            .as_f64()
+            .expect("handshake caddy ratio should exist"),
+        1013.0 / 913.0,
+    );
+    assert_eq!(handshake_comparison["oxibelt"]["result_type"], "handshake");
+
     let accept_tls = find_accept_comparison(&report, "tls-handshake-h2");
     assert_close(
         accept_tls["accept_1_0_vs_0_5"]["ratio"]
@@ -458,6 +476,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
     assert!(oxibelt_only_labels.contains(&"oxibelt-cache-hit"));
     assert!(oxibelt_only_labels.contains(&"oxibelt-cache-miss"));
     assert!(!oxibelt_only_labels.contains(&"oxibelt-h1-keepalive"));
+    assert!(!oxibelt_only_labels.contains(&"oxibelt-tls-handshake-h2"));
     assert!(!oxibelt_only_labels.contains(&"oxibelt-accept-0_5-tls-handshake-h2"));
 
     let missing_rows = report["skipped_or_missing_comparator_rows"]

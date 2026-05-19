@@ -12,14 +12,14 @@ tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,ngi
 
 Profiles:
 
-- `smoke`: short HTTP/1.1 keep-alive, HTTP/2, mandatory OxiBelt/Caddy HTTP/3, optional nginx HTTP/3 where available, TLS handshake sanity, and a short OxiBelt soak.
-- `benchmark`: longer comparator runs plus OxiBelt WAF, CRS, cache, and stress scenarios.
+- `smoke`: short HTTP/1.1 keep-alive, HTTP/2, mandatory OxiBelt/Caddy HTTP/3, optional nginx HTTP/3 where available, cold TLS handshake comparison, and a short OxiBelt soak.
+- `benchmark`: longer comparator runs, cold TLS handshake comparison, plus OxiBelt WAF, CRS, cache, and stress scenarios.
 - `soak`: long OxiBelt-focused concurrency presets and stress scenarios. This is intended for manual or scheduled runs, not every pull request.
 
 Serving type filters:
 
 - `all`: run the legacy combined local set.
-- `reverse-proxy`: common OxiBelt, nginx, and Caddy H1/H2/H3 reverse-proxy rows plus the OxiBelt TLS handshake and TLS resumption-mode diagnostic rows.
+- `reverse-proxy`: common OxiBelt, nginx, and Caddy H1/H2/H3 reverse-proxy rows plus cold TLS handshake comparison rows and OxiBelt TLS resumption-mode diagnostic rows.
 - `static-files`: static file rows for `/static/1k.bin`, `/static/16k.bin`, and `/static/1m.bin` according to the selected profile.
 - `oxibelt-features`: OxiBelt-only WAF, CRS, and cache rows.
 - `oxibelt-soak-stress`: OxiBelt smoke soak, benchmark stress, or soak concurrency rows according to the selected profile.
@@ -51,7 +51,7 @@ OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 
 For cold TLS handshake investigations where post-quantum hybrid key exchange cost should be isolated, set `OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO=baseline-classical-kx`. That fixture keeps the handshake-heavy accept-worker profile and sets `tls.key_exchange_groups = ["x25519", "secp256r1", "secp384r1"]`.
 
-The `oxibelt-tls-handshake-h2` row keeps a fresh client TLS configuration per connection, so it remains a cold-handshake measurement. The companion `oxibelt-tls-handshake-h2-resumption-diagnostic` row reuses client TLS state per probe worker and briefly observes post-handshake TLS records so `results.json` can show whether tickets were received and whether later handshakes resumed. Its handshake result includes `client_resumption`, `post_handshake_observe_ms`, `handshake_kinds`, `tls13_tickets_received`, and `negotiated_key_exchange_groups` fields. Use that non-gating row to diagnose stateful resumption behavior; use the fresh row for cold-handshake throughput comparisons.
+The `tls-handshake-h2` rows for OxiBelt, nginx, and Caddy keep a fresh client TLS configuration per connection, so they remain cold-handshake measurements. The companion `oxibelt-tls-handshake-h2-resumption-diagnostic` row reuses client TLS state per probe worker and briefly observes post-handshake TLS records so `results.json` can show whether tickets were received and whether later handshakes resumed. Its handshake result includes `client_resumption`, `post_handshake_observe_ms`, `handshake_kinds`, `tls13_tickets_received`, and `negotiated_key_exchange_groups` fields. Use that non-gating row to diagnose stateful resumption behavior; use the fresh rows for cold-handshake throughput comparisons.
 
 The OxiBelt-only resumption-mode handshake rows also use fresh client TLS state so they isolate server-side ticket issuance and storage overhead without measuring resumed handshakes. Smoke and benchmark reverse-proxy runs record `oxibelt-tls-handshake-h2-resumption-off`, `oxibelt-tls-handshake-h2-resumption-stateless-tickets-2`, `oxibelt-tls-handshake-h2-resumption-stateful-tickets-1`, and `oxibelt-tls-handshake-h2-resumption-stateful-tickets-2`. These rows include the same handshake fields plus a `server_session_storage` delta with stateful `StoresServerSessions` `put_count`, `get_count`, `take_count`, `lock_wait_ns`, and `put_duration_ns` counters. Per-run summaries and aggregate reports retain p95 and p99 latency columns for these rows.
 
@@ -99,18 +99,18 @@ CI thresholds are sanity gates, not competitive claims. The job fails when the p
 
 Targeted regression gates pin known-sensitive paths. The static file group checks whether `oxibelt-static-16k-h1c` falls below `OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO` of the matching Caddy row. The `oxibelt-features` group checks whether WAF enforcing RPS is below `OXIBELT_PERF_WAF_ENFORCING_MIN_RPS`, CRS enforcing RPS is below `OXIBELT_PERF_CRS_ENFORCING_MIN_RPS`, or either WAF/CRS enforcing p99 exceeds its monitor p99 by more than `OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO`. Local runs use `OXIBELT_PERF_REGRESSION_GATE_MODE=fail` by default and fail as soon as one of these targeted gates is crossed. CI sets that mode to `warn` for shard iterations, then the aggregate summary evaluates the same threshold variables against median RPS and median p99 ratios across the downloaded samples. The aggregate summary requires the OxiBelt/Caddy static RPS rows and the WAF/CRS monitor and enforcing rows to be present with usable median metrics; missing median RPS or p99 data is reported with `observed: null`, while non-positive comparator or p99 precondition values are reported with the invalid observed value.
 
-The comparison report is a median-based reference over the repeated shard and iteration samples, not a standalone performance claim. It normalizes labels by comparator prefix, so `oxibelt-h1-keepalive`, `nginx-h1-keepalive`, and `caddy-h1-keepalive` are compared as the same `h1-keepalive` scenario. Ratios use median RPS:
+The comparison report is a median-based reference over the repeated shard and iteration samples, not a standalone performance claim. It normalizes labels by comparator prefix, so `oxibelt-h1-keepalive`, `nginx-h1-keepalive`, and `caddy-h1-keepalive` are compared as the same `h1-keepalive` scenario. Cold handshake rows use `handshake_per_sec`; load rows use `rps`. Ratios use the normalized median throughput:
 
 ```text
-oxibelt_vs_nginx = median_rps(oxibelt scenario) / median_rps(nginx same scenario)
-oxibelt_vs_caddy = median_rps(oxibelt scenario) / median_rps(caddy same scenario)
+oxibelt_vs_nginx = median_rate(oxibelt scenario) / median_rate(nginx same scenario)
+oxibelt_vs_caddy = median_rate(oxibelt scenario) / median_rate(caddy same scenario)
 ```
 
-The report displays both percent and multiplier forms, such as `95.0% of nginx` and `0.95x nginx`. If a comparator row is skipped, missing, or has zero median RPS, the ratio is omitted and the reason is listed under skipped or missing comparator rows.
+The report displays both percent and multiplier forms, such as `95.0% of nginx` and `0.95x nginx`. If a comparator row is skipped, missing, or has zero median throughput, the ratio is omitted and the reason is listed under skipped or missing comparator rows.
 
 The accept multiplier comparison report keeps `oxibelt-accept-0_5-*` and `oxibelt-accept-1_0-*` rows out of the nginx/Caddy tables and compares them as OxiBelt-only pairs. A lower accept multiplier can improve steady-state rows by reducing accept-loop and `SO_REUSEPORT` contention, while `accept = 1.0` can recover throughput for handshake-heavy workloads that create new TCP/TLS connections continuously. Treat this as a profile tradeoff: use the default `0.5` baseline for steady-state comparisons, and use the `baseline-accept-1` fixture or `OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO` for handshake-heavy investigations.
 
-nginx and Caddy are measured as common reverse-proxy and static-file baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, TLS handshake rows without matching comparator rows, and stress scenarios is measured separately. These OxiBelt-only scenarios are not mixed into nginx/Caddy ratios because they do not measure the same behavior. nginx HTTP/3 is included only when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped. If nginx reports HTTP/3 support but the functional QUIC probe cannot complete, that comparator row is also skipped because nginx HTTP/3 availability is image-dependent. Caddy is configured with its documented `h1 h2 h3` server protocol support and is treated as a mandatory HTTP/3 comparator.
+nginx and Caddy are measured as common reverse-proxy, cold TLS handshake, and static-file baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, TLS resumption diagnostics, and stress scenarios is measured separately. These OxiBelt-only scenarios are not mixed into nginx/Caddy ratios because they do not measure the same behavior. nginx HTTP/3 is included only when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped. If nginx reports HTTP/3 support but the functional QUIC probe cannot complete, that comparator row is also skipped because nginx HTTP/3 availability is image-dependent. Caddy is configured with its documented `h1 h2 h3` server protocol support and is treated as a mandatory HTTP/3 comparator.
 
 The performance fixtures raise generic connection and per-connection request caps so benchmark and soak profiles measure proxy throughput instead of exercising OxiBelt's or nginx's default limit-enforcement safeguards. Release builds use thin LTO, one codegen unit, and stripped debuginfo; `panic = "abort"` is intentionally not set so postmortem behavior stays conservative.
 

@@ -1133,12 +1133,24 @@ fn handshake_errors_are_not_covered_by_load_error_budget() {
 fn handshake_resumption_diagnostic_runs_without_replacing_cold_row() {
     let script = performance_script_text();
     let cold_call = r#"run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt"#;
+    let nginx_cold_call = r#"run_handshake "nginx-tls-handshake-h2" h2 nginx"#;
+    let caddy_cold_call = r#"run_handshake "caddy-tls-handshake-h2" h2 caddy"#;
     let diagnostic_call = r#"run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt"#;
 
     assert_eq!(
         script.matches(cold_call).count(),
         2,
         "reverse-proxy and all serving types should keep the cold handshake row"
+    );
+    assert_eq!(
+        script.matches(nginx_cold_call).count(),
+        2,
+        "reverse-proxy and all serving types should add the nginx cold handshake comparator row"
+    );
+    assert_eq!(
+        script.matches(caddy_cold_call).count(),
+        2,
+        "reverse-proxy and all serving types should add the Caddy cold handshake comparator row"
     );
     assert_eq!(
         script.matches(diagnostic_call).count(),
