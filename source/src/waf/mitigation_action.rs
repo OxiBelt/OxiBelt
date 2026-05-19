@@ -16,8 +16,8 @@ use validation::{validate_mitigation_expression, validate_mitigation_fields};
 
 use super::{
   AccessLogJsonValue, CompiledAccessLogField, CompiledRule, EvalContext, Expr, FunctionMap,
-  HeaderMutation, Parser, WafActionConfig, WafStreamClose, WafStreamInput, WafTerminalResponse,
-  WafUpstreamError, current_unix_ms, new_access_log_id, validate_status,
+  HeaderMutation, ObjectRef, Parser, WafActionConfig, WafStreamClose, WafStreamInput,
+  WafTerminalResponse, WafUpstreamError, current_unix_ms, new_access_log_id, validate_status,
   validate_websocket_close_code,
 };
 
@@ -524,6 +524,14 @@ fn evaluate_custom_fields(
 }
 
 fn value_to_json(value: super::Value, ctx: &EvalContext<'_>) -> anyhow::Result<JsonValue> {
+  if matches!(
+    value,
+    super::Value::Object(
+      ObjectRef::RequestBody | ObjectRef::ResponseBody | ObjectRef::StreamPayload
+    )
+  ) {
+    bail!("emit_mitigation fields cannot write request, response, or stream body bytes");
+  }
   let value = AccessLogJsonValue::from_value(value, ctx)?;
   Ok(access_log_json_to_serde(value))
 }

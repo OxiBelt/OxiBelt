@@ -1,0 +1,82 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "mitigation_events"
+
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.functions]]
+name = "request_context"
+expression = "Request"
+
+[[waf.rules]]
+name = "bad-mitigation-udf-payload"
+phase = "request"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_mitigation"
+intent = "observe"
+
+[[waf.rules.actions.fields]]
+name = "payload"
+value = "request_context().Body.Text"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "http-upstream"

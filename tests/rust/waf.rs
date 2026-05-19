@@ -4656,6 +4656,256 @@ value = "{field}"
 }
 
 #[test]
+fn emit_mitigation_rejects_body_and_payload_fields_via_udfs() {
+    for (name, phase, functions, field) in [
+        (
+            "request-object-return",
+            "request",
+            r#"
+[[waf.functions]]
+name = "req"
+expression = "Request"
+"#,
+            "req().Body.Text",
+        ),
+        (
+            "request-http-object-return",
+            "request",
+            r#"
+[[waf.functions]]
+name = "req_http"
+expression = "Request.Http"
+"#,
+            "req_http().Body.Text",
+        ),
+        (
+            "response-object-return",
+            "response",
+            r#"
+[[waf.functions]]
+name = "resp"
+expression = "Response"
+"#,
+            "resp().Body.Text",
+        ),
+        (
+            "response-http-object-return",
+            "response",
+            r#"
+[[waf.functions]]
+name = "resp_http"
+expression = "Response.Http"
+"#,
+            "resp_http().Body.Text",
+        ),
+        (
+            "stream-object-return",
+            "stream",
+            r#"
+[[waf.functions]]
+name = "stream"
+expression = "Stream"
+"#,
+            "stream().Payload.Text",
+        ),
+        (
+            "request-identity-return",
+            "request",
+            r#"
+[[waf.functions]]
+name = "identity"
+params = ["value"]
+expression = "value"
+"#,
+            "identity(Request).Body.Text",
+        ),
+        (
+            "nested-body-object-return",
+            "request",
+            r#"
+[[waf.functions]]
+name = "req"
+expression = "Request"
+
+[[waf.functions]]
+name = "body_ref"
+expression = "req().Body"
+"#,
+            "body_ref().Text",
+        ),
+    ] {
+        let temp_dir = common::TempDir::new(name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let base_config = common::minimal_config_toml(&cert_path, &key_path);
+        let raw = format!(
+            r#"{base_config}
+
+[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "mitigation_events"
+
+[waf]
+enabled = true
+mode = "enforcing"
+{functions}
+
+[[waf.rules]]
+name = "bad-mitigation"
+phase = "{phase}"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_mitigation"
+intent = "observe"
+
+[[waf.rules.actions.fields]]
+name = "bad"
+value = "{field}"
+"#
+        );
+        assert_emit_mitigation_payload_rejected(name, &raw);
+    }
+}
+
+#[test]
+fn emit_mitigation_rejects_body_and_payload_fields_via_route_udfs() {
+    let temp_dir = common::TempDir::new("route-request-object-return");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-request-object-return");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "mitigation_events"
+
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[routes.waf.functions]]
+name = "route_req"
+expression = "Request"
+
+[[routes.waf.rules]]
+name = "bad-route-mitigation"
+phase = "request"
+priority = 10
+when = "true"
+
+[[routes.waf.rules.actions]]
+type = "emit_mitigation"
+intent = "observe"
+
+[[routes.waf.rules.actions.fields]]
+name = "bad"
+value = "route_req().Body.Text"
+"#
+    );
+
+    assert_emit_mitigation_payload_rejected("route-request-object-return", &raw);
+}
+
+#[test]
+fn emit_mitigation_allows_safe_udf_returned_metadata_fields() {
+    for (name, phase, functions, field) in [
+        (
+            "request-safe-metadata",
+            "request",
+            r#"
+[[waf.functions]]
+name = "req"
+expression = "Request"
+"#,
+            "req().Http.Path",
+        ),
+        (
+            "response-safe-metadata",
+            "response",
+            r#"
+[[waf.functions]]
+name = "resp"
+expression = "Response"
+"#,
+            "resp().Http.Status",
+        ),
+        (
+            "stream-safe-metadata",
+            "stream",
+            r#"
+[[waf.functions]]
+name = "stream"
+expression = "Stream"
+"#,
+            "stream().WebSocket.Opcode",
+        ),
+        (
+            "request-identity-safe-metadata",
+            "request",
+            r#"
+[[waf.functions]]
+name = "identity"
+params = ["value"]
+expression = "value"
+"#,
+            "identity(Request).Http.Path",
+        ),
+    ] {
+        let temp_dir = common::TempDir::new(name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let base_config = common::minimal_config_toml(&cert_path, &key_path);
+        let raw = format!(
+            r#"{base_config}
+
+[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "mitigation_events"
+
+[waf]
+enabled = true
+mode = "enforcing"
+{functions}
+
+[[waf.rules]]
+name = "safe-mitigation"
+phase = "{phase}"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_mitigation"
+intent = "observe"
+
+[[waf.rules.actions.fields]]
+name = "safe"
+value = "{field}"
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        config
+            .validate()
+            .unwrap_or_else(|error| panic!("safe metadata should validate for {name}: {error:#}"));
+    }
+}
+
+fn assert_emit_mitigation_payload_rejected(name: &str, raw: &str) {
+    let config: Config = toml::from_str(raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("body or payload field should fail");
+    let error_chain = format!("{error:#}");
+    assert!(
+        error_chain.contains("cannot read request, response, or stream body bytes"),
+        "unexpected error for {name}: {error_chain}"
+    );
+}
+
+#[test]
 fn request_tags_are_visible_to_later_request_rules() {
     let temp_dir = common::TempDir::new("waf-request-tag-chain");
     let (cert_path, key_path) =

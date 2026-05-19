@@ -2359,6 +2359,15 @@ for sock in sockets:
             Some("configuration contains unknown field"),
         ),
         docker_case(
+            "config-invalid",
+            "emit-mitigation-udf-payload-exclusion",
+            "mitigation field validation rejects UDF payload indirection",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some("cannot read request, response, or stream body bytes"),
+        ),
+        docker_case(
             "listener-http",
             "redirect-to-https",
             "plain HTTP listener redirects to HTTPS",
