@@ -120,6 +120,34 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
     })
 }
 
+fn load_row_without_rps(label: &str, protocol: &str, p50_ms: f64, p99_ms: f64) -> Value {
+    json!({
+        "type": "load",
+        "label": label,
+        "protocol": protocol,
+        "requests": 1000,
+        "p50_ms": p50_ms,
+        "p90_ms": p50_ms + 1.0,
+        "p95_ms": p50_ms + 2.0,
+        "p99_ms": p99_ms,
+        "errors": 0
+    })
+}
+
+fn load_row_without_p99(label: &str, protocol: &str, rps: f64, p50_ms: f64) -> Value {
+    json!({
+        "type": "load",
+        "label": label,
+        "protocol": protocol,
+        "requests": 1000,
+        "rps": rps,
+        "p50_ms": p50_ms,
+        "p90_ms": p50_ms + 1.0,
+        "p95_ms": p50_ms + 2.0,
+        "errors": 0
+    })
+}
+
 fn handshake_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> Value {
     json!({
         "type": "handshake",
@@ -472,6 +500,13 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
     let output_dir = temp_dir.path().join("output");
 
     write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-static-16k-h1c", "h1c", 90.0, 1.0, 4.0),
+            load_row("caddy-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+        ],
+    );
+    write_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
         vec![
             load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 10.0),
@@ -500,6 +535,146 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
             .expect("CRS median RPS should exist"),
         9200.0,
     );
+}
+
+#[test]
+fn regression_gates_fail_closed_when_static_comparator_is_missing() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
+        vec![load_row("oxibelt-static-16k-h1c", "h1c", 800.0, 1.0, 4.0)],
+    );
+
+    let report = run_aggregate(&input_dir, &output_dir);
+    assert_eq!(report["regression_gates"]["status"], "fail");
+
+    let static_missing =
+        find_regression_violation(&report, "static_16k_h1c_min_caddy_ratio", "static-16k-h1c");
+    assert_eq!(static_missing["metric"], "median_rps");
+    assert_eq!(static_missing["observed"], Value::Null);
+    assert_eq!(static_missing["comparator"], "caddy");
+    assert!(
+        static_missing["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("missing Caddy static-16k-h1c median RPS")
+    );
+}
+
+#[test]
+fn regression_gates_fail_closed_when_required_metrics_are_malformed() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-static-16k-h1c", "h1c", 900.0, 1.0, 4.0),
+            load_row_without_rps("caddy-static-16k-h1c", "h1c", 1.0, 4.0),
+        ],
+    );
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+        vec![
+            load_row_without_p99("oxibelt-waf-monitor", "h2", 13000.0, 1.0),
+            load_row("oxibelt-waf-enforcing", "h2", 12000.0, 1.0, 11.0),
+            load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 10.0),
+            load_row("oxibelt-crs-enforcing", "h2", 9200.0, 1.0, 11.0),
+        ],
+    );
+
+    let report = run_aggregate(&input_dir, &output_dir);
+    assert_eq!(report["regression_gates"]["status"], "fail");
+
+    let static_missing =
+        find_regression_violation(&report, "static_16k_h1c_min_caddy_ratio", "static-16k-h1c");
+    assert_eq!(static_missing["observed"], Value::Null);
+    assert_eq!(static_missing["comparator"], "caddy");
+
+    let waf_p99 = find_regression_violation(&report, "waf_enforce_p99_ratio", "waf-enforcing");
+    assert_eq!(waf_p99["metric"], "median_p99_ms");
+    assert_eq!(waf_p99["observed"], Value::Null);
+    assert_eq!(waf_p99["comparator"], "waf-monitor");
+    assert!(
+        waf_p99["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("missing OxiBelt waf-monitor median p99")
+    );
+}
+
+#[test]
+fn regression_gates_fail_closed_when_no_samples_are_available() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    fs::create_dir_all(&input_dir).expect("input directory should be created");
+
+    let report = run_aggregate(&input_dir, &output_dir);
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    assert!(
+        report["regression_gates"]["violations"]
+            .as_array()
+            .expect("violations should be an array")
+            .len()
+            >= 5,
+        "every required regression gate should fail closed when no samples exist"
+    );
+
+    let static_missing =
+        find_regression_violation(&report, "static_16k_h1c_min_caddy_ratio", "static-16k-h1c");
+    assert_eq!(static_missing["observed"], Value::Null);
+    assert_eq!(static_missing["comparator"], "oxibelt");
+}
+
+#[test]
+fn regression_gates_fail_closed_when_required_metrics_are_non_positive() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-static-16k-h1c", "h1c", 900.0, 1.0, 4.0),
+            load_row("caddy-static-16k-h1c", "h1c", 0.0, 1.0, 4.0),
+        ],
+    );
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 0.0),
+            load_row("oxibelt-waf-enforcing", "h2", 12000.0, 1.0, 11.0),
+            load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 10.0),
+            load_row("oxibelt-crs-enforcing", "h2", 9200.0, 1.0, 11.0),
+        ],
+    );
+
+    let report = run_aggregate(&input_dir, &output_dir);
+    assert_eq!(report["regression_gates"]["status"], "fail");
+
+    let static_invalid =
+        find_regression_violation(&report, "static_16k_h1c_min_caddy_ratio", "static-16k-h1c");
+    assert_close(
+        static_invalid["observed"]
+            .as_f64()
+            .expect("invalid Caddy RPS should be recorded"),
+        0.0,
+    );
+    assert_eq!(static_invalid["comparator"], "caddy");
+
+    let waf_p99 = find_regression_violation(&report, "waf_enforce_p99_ratio", "waf-enforcing");
+    assert_close(
+        waf_p99["observed"]
+            .as_f64()
+            .expect("invalid monitor p99 should be recorded"),
+        0.0,
+    );
+    assert_eq!(waf_p99["comparator"], "waf-monitor");
 }
 
 #[test]

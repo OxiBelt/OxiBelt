@@ -268,6 +268,14 @@ struct RegressionGateReport {
     violations: Vec<RegressionGateViolation>,
 }
 
+#[derive(Clone, Copy)]
+struct RegressionGateContext<'a> {
+    gate: &'a str,
+    group: &'a str,
+    scenario: &'a str,
+    threshold: f64,
+}
+
 #[derive(Serialize)]
 struct AcceptMultiplierSummary {
     scenario_count: usize,
@@ -1236,31 +1244,78 @@ fn collect_static_regression_gate(
     thresholds: RegressionGateThresholds,
     violations: &mut Vec<RegressionGateViolation>,
 ) {
-    let Some(oxibelt_rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, "static-16k-h1c")
-    else {
+    let gate = "static_16k_h1c_min_caddy_ratio";
+    let scenario = "static-16k-h1c";
+    let group = ScenarioGroup::StaticFiles.as_str();
+    let threshold = thresholds.static_16k_h1c_min_caddy_ratio;
+    let context = RegressionGateContext {
+        gate,
+        group,
+        scenario,
+        threshold,
+    };
+    let Some(oxibelt_rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, scenario) else {
+        push_missing_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            Some("oxibelt"),
+            "missing OxiBelt static-16k-h1c median RPS; cannot evaluate static regression gate",
+        );
         return;
     };
-    let Some(caddy_rps) = aggregate_median_rps(aggregates, Comparator::Caddy, "static-16k-h1c")
-    else {
+    if oxibelt_rps <= 0.0 {
+        push_invalid_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            oxibelt_rps,
+            Some("oxibelt"),
+            format!(
+                "OxiBelt static-16k-h1c median RPS must be positive; got {:.3}",
+                oxibelt_rps
+            ),
+        );
+        return;
+    }
+    let Some(caddy_rps) = aggregate_median_rps(aggregates, Comparator::Caddy, scenario) else {
+        push_missing_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            Some("caddy"),
+            "missing Caddy static-16k-h1c median RPS; cannot evaluate static regression gate",
+        );
         return;
     };
     if caddy_rps <= 0.0 {
+        push_invalid_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            caddy_rps,
+            Some("caddy"),
+            format!(
+                "Caddy static-16k-h1c median RPS must be positive; got {:.3}",
+                caddy_rps
+            ),
+        );
         return;
     }
 
     let ratio = oxibelt_rps / caddy_rps;
-    if ratio < thresholds.static_16k_h1c_min_caddy_ratio {
+    if ratio < threshold {
         violations.push(RegressionGateViolation {
-            gate: "static_16k_h1c_min_caddy_ratio".to_owned(),
-            group: ScenarioGroup::StaticFiles.as_str().to_owned(),
-            scenario: "static-16k-h1c".to_owned(),
+            gate: gate.to_owned(),
+            group: group.to_owned(),
+            scenario: scenario.to_owned(),
             metric: "median_rps_ratio".to_owned(),
             observed: Some(ratio),
-            threshold: thresholds.static_16k_h1c_min_caddy_ratio,
+            threshold,
             comparator: Some("caddy".to_owned()),
             message: format!(
                 "OxiBelt static-16k-h1c median RPS ratio {:.4} < {:.4} vs Caddy ({:.3} RPS vs {:.3} RPS)",
-                ratio, thresholds.static_16k_h1c_min_caddy_ratio, oxibelt_rps, caddy_rps
+                ratio, threshold, oxibelt_rps, caddy_rps
             ),
         });
     }
@@ -1274,6 +1329,18 @@ fn collect_min_rps_regression_gate(
     violations: &mut Vec<RegressionGateViolation>,
 ) {
     let Some(rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, scenario) else {
+        push_missing_regression_gate_metric(
+            violations,
+            RegressionGateContext {
+                gate,
+                group: ScenarioGroup::OxibeltOnly.as_str(),
+                scenario,
+                threshold,
+            },
+            "median_rps",
+            Some("oxibelt"),
+            format!("missing OxiBelt {scenario} median RPS; cannot evaluate {gate}"),
+        );
         return;
     };
     if rps < threshold {
@@ -1301,16 +1368,61 @@ fn collect_p99_ratio_regression_gate(
     threshold: f64,
     violations: &mut Vec<RegressionGateViolation>,
 ) {
+    let context = RegressionGateContext {
+        gate,
+        group: ScenarioGroup::OxibeltOnly.as_str(),
+        scenario: enforcing_scenario,
+        threshold,
+    };
     let Some(monitor_p99) = aggregate_median_p99(aggregates, Comparator::Oxibelt, monitor_scenario)
     else {
+        push_missing_regression_gate_metric(
+            violations,
+            context,
+            "median_p99_ms",
+            Some(monitor_scenario),
+            format!("missing OxiBelt {monitor_scenario} median p99; cannot evaluate {gate}"),
+        );
         return;
     };
     let Some(enforcing_p99) =
         aggregate_median_p99(aggregates, Comparator::Oxibelt, enforcing_scenario)
     else {
+        push_missing_regression_gate_metric(
+            violations,
+            context,
+            "median_p99_ms",
+            Some(enforcing_scenario),
+            format!("missing OxiBelt {enforcing_scenario} median p99; cannot evaluate {gate}"),
+        );
         return;
     };
     if monitor_p99 <= 0.0 {
+        push_invalid_regression_gate_metric(
+            violations,
+            context,
+            "median_p99_ms",
+            monitor_p99,
+            Some(monitor_scenario),
+            format!(
+                "OxiBelt {monitor_scenario} median p99 must be positive; got {:.3}ms",
+                monitor_p99
+            ),
+        );
+        return;
+    }
+    if enforcing_p99 <= 0.0 {
+        push_invalid_regression_gate_metric(
+            violations,
+            context,
+            "median_p99_ms",
+            enforcing_p99,
+            Some(enforcing_scenario),
+            format!(
+                "OxiBelt {enforcing_scenario} median p99 must be positive; got {:.3}ms",
+                enforcing_p99
+            ),
+        );
         return;
     }
 
@@ -1330,6 +1442,45 @@ fn collect_p99_ratio_regression_gate(
             ),
         });
     }
+}
+
+fn push_missing_regression_gate_metric(
+    violations: &mut Vec<RegressionGateViolation>,
+    context: RegressionGateContext<'_>,
+    metric: &str,
+    comparator: Option<&str>,
+    message: impl Into<String>,
+) {
+    violations.push(RegressionGateViolation {
+        gate: context.gate.to_owned(),
+        group: context.group.to_owned(),
+        scenario: context.scenario.to_owned(),
+        metric: metric.to_owned(),
+        observed: None,
+        threshold: context.threshold,
+        comparator: comparator.map(str::to_owned),
+        message: message.into(),
+    });
+}
+
+fn push_invalid_regression_gate_metric(
+    violations: &mut Vec<RegressionGateViolation>,
+    context: RegressionGateContext<'_>,
+    metric: &str,
+    observed: f64,
+    comparator: Option<&str>,
+    message: impl Into<String>,
+) {
+    violations.push(RegressionGateViolation {
+        gate: context.gate.to_owned(),
+        group: context.group.to_owned(),
+        scenario: context.scenario.to_owned(),
+        metric: metric.to_owned(),
+        observed: Some(observed),
+        threshold: context.threshold,
+        comparator: comparator.map(str::to_owned),
+        message: message.into(),
+    });
 }
 
 fn aggregate_median_rps(
