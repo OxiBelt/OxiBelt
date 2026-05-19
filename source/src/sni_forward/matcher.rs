@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -150,7 +151,7 @@ impl<T> PatternSet<T> {
     }
     self
       .wildcard
-      .sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+      .sort_by_key(|(suffix, _)| Reverse(suffix.len()));
     Ok(())
   }
 

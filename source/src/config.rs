@@ -11,6 +11,7 @@ use url::Url;
 use crate::waf::{AccessLogFieldConfig, WafConfig};
 
 mod admin_runtime;
+mod allowed_keys;
 mod database;
 mod dynamic_policy;
 mod external_auth;
@@ -611,8 +612,7 @@ impl Config {
     if !self.listeners.http1
       && !self.listeners.http2
       && !self.listeners.http3
-      && !self.sni_forward.has_tcp_tls()
-      && !self.sni_forward.has_quic()
+      && !self.sni_forward.has_any_protocol()
     {
       bail!("at least one downstream HTTP version or SNI forwarding protocol must be enabled");
     }
@@ -664,8 +664,7 @@ impl Config {
     if self.routes.is_empty()
       && self.stream_listeners.is_empty()
       && self.webrtc_turn_listeners.is_empty()
-      && !(self.sni_forward.enabled
-        && (self.sni_forward.default_target.is_some() || !self.sni_forward.rules.is_empty()))
+      && !self.sni_forward.has_any_target()
     {
       bail!(
         "at least one route, SNI forwarding rule/default target, stream listener, or WebRTC TURN listener must be configured"
@@ -2152,37 +2151,7 @@ fn join_key_path(parent: &str, key: &str) -> String {
 
 fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
   let keys = match path {
-    "" => &[
-      "admin",
-      "cache",
-      "compression",
-      "config",
-      "connection_limits",
-      "database",
-      "dynamic_policy",
-      "external_auth",
-      "health",
-      "limits",
-      "listeners",
-      "logging",
-      "metrics",
-      "proxy",
-      "quic",
-      "rate_limits",
-      "routes",
-      "runtime",
-      "security",
-      "shared_state",
-      "sni_forward",
-      "stream_listeners",
-      "telemetry",
-      "tls",
-      "turn_upstream_pools",
-      "upstream_pools",
-      "upstreams",
-      "waf",
-      "webrtc_turn_listeners",
-    ][..],
+    "" => allowed_keys::ROOT_CONFIG_KEYS,
     "config" => &["strict_unknown_fields", "warn_on_deprecated_fields"][..],
     "logging" => &["access_log", "level"][..],
     "logging.access_log" => &["database", "enabled", "fields", "stdout"][..],
@@ -2232,22 +2201,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "proxy_protocol",
     ][..],
     "listeners.proxy_protocol" => &["enabled", "trusted_sources", "version"][..],
-    "sni_forward" => &[
-      "client_hello_max_bytes",
-      "default_target",
-      "enabled",
-      "idle_timeout_ms",
-      "rules",
-    ][..],
-    "sni_forward.rules" => &[
-      "connect_timeout_ms",
-      "idle_timeout_ms",
-      "name",
-      "protocols",
-      "server_names",
-      "target",
-      "tcp_proxy_protocol_egress",
-    ][..],
+    "sni_forward" => sni_forward::SNI_FORWARD_CONFIG_KEYS,
+    "sni_forward.rules" => sni_forward::SNI_FORWARD_RULE_KEYS,
     "tls" => &[
       "cert_chain",
       "client_auth",

@@ -9,17 +9,36 @@ use super::{
 };
 
 const DEFAULT_CLIENT_HELLO_MAX_BYTES: usize = 64 * 1024;
+pub(super) const SNI_FORWARD_CONFIG_KEYS: &[&str] = &[
+  "client_hello_max_bytes",
+  "default_target",
+  "enabled",
+  "idle_timeout_ms",
+  "rules",
+];
+pub(super) const SNI_FORWARD_RULE_KEYS: &[&str] = &[
+  "connect_timeout_ms",
+  "idle_timeout_ms",
+  "name",
+  "protocols",
+  "server_names",
+  "target",
+  "tcp_proxy_protocol_egress",
+];
 
 impl Config {
+  pub fn needs_https_listener(&self) -> bool {
+    self.listeners.http1 || self.listeners.http2 || self.sni_forward.has_tcp_tls()
+  }
+
   pub(super) fn validate_sni_forward(&self) -> anyhow::Result<()> {
     self.sni_forward.validate()?;
     let has_explicit_quic_rule = self.sni_forward.enabled
-      && self.sni_forward.rules.iter().any(|rule| {
-        rule
-          .protocols
-          .iter()
-          .any(|protocol| *protocol == SniForwardProtocol::Quic)
-      });
+      && self
+        .sni_forward
+        .rules
+        .iter()
+        .any(|rule| rule.protocols.contains(&SniForwardProtocol::Quic));
     if has_explicit_quic_rule && !self.listeners.http3 {
       bail!("sni_forward QUIC forwarding requires listeners.http3 = true for same-port demux");
     }
@@ -70,6 +89,14 @@ impl SniForwardConfig {
           .rules
           .iter()
           .any(|rule| rule.protocols.contains(&SniForwardProtocol::Quic)))
+  }
+
+  pub fn has_any_protocol(&self) -> bool {
+    self.has_tcp_tls() || self.has_quic()
+  }
+
+  pub fn has_any_target(&self) -> bool {
+    self.enabled && (self.default_target.is_some() || !self.rules.is_empty())
   }
 
   fn validate(&self) -> anyhow::Result<()> {

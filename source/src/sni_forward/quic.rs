@@ -67,6 +67,55 @@ pub(crate) fn bind_server_endpoints(
   Ok((endpoints, demuxes))
 }
 
+pub(crate) fn bind_sni_or_plain_server_endpoints(
+  bind: SocketAddr,
+  server_config: ServerConfig,
+  snapshot: &AppSnapshot,
+) -> anyhow::Result<(Vec<Endpoint>, Vec<BoundQuicForwardSocket>)> {
+  if snapshot.config.sni_forward.has_quic() {
+    bind_server_endpoints(bind, server_config, snapshot)
+  } else {
+    Ok((
+      crate::quic::bind_server_endpoints(
+        bind,
+        server_config,
+        &snapshot.config.quic,
+        snapshot.config.source_paths.cert_dir.as_deref(),
+      )?,
+      Vec::new(),
+    ))
+  }
+}
+
+pub(crate) fn spawn_demux_tasks(
+  demuxes: Vec<BoundQuicForwardSocket>,
+  shutdown: watch::Receiver<bool>,
+  state: AppHandle,
+  error_tx: mpsc::UnboundedSender<anyhow::Error>,
+) -> Vec<JoinHandle<()>> {
+  demuxes
+    .into_iter()
+    .map(|demux| {
+      let demux_shutdown = shutdown.clone();
+      let demux_state = state.clone();
+      let demux_error_tx = error_tx.clone();
+      tokio::spawn(async move {
+        match demux.start(demux_state, demux_shutdown).await {
+          Ok(Ok(())) => {}
+          Ok(Err(error)) => {
+            let _ = demux_error_tx.send(error.context("SNI forwarding QUIC demux failed"));
+          }
+          Err(error) => {
+            let _ = demux_error_tx.send(anyhow::anyhow!(
+              "SNI forwarding QUIC demux task panicked: {error}"
+            ));
+          }
+        }
+      })
+    })
+    .collect()
+}
+
 fn bind_server_endpoint(
   bind: SocketAddr,
   server_config: ServerConfig,
@@ -233,14 +282,14 @@ impl QuicDemuxSocket {
 
   fn known_action(&self, datagram: &[u8], peer: SocketAddr) -> DatagramAction {
     let mut sessions = lock_sessions(&self.sessions);
-    if let Some(client) = sessions.client_for_upstream_response(peer, datagram) {
-      if let Some(session) = sessions.forward_by_client.get_mut(&client) {
-        session.last_seen = Instant::now();
-        session.target_to_client = session
-          .target_to_client
-          .saturating_add(datagram.len() as u64);
-        return DatagramAction::SendTo(client);
-      }
+    if let Some(client) = sessions.client_for_upstream_response(peer, datagram)
+      && let Some(session) = sessions.forward_by_client.get_mut(&client)
+    {
+      session.last_seen = Instant::now();
+      session.target_to_client = session
+        .target_to_client
+        .saturating_add(datagram.len() as u64);
+      return DatagramAction::SendTo(client);
     }
     if let Some(session) = sessions.forward_by_client.get_mut(&peer) {
       session.last_seen = Instant::now();
@@ -443,13 +492,13 @@ impl QuicForwardState {
     let first_matching_client = matching_clients.next()?;
     let has_multiple_clients = matching_clients.next().is_some();
 
-    if let Ok(header) = quic_parser::parse_initial(datagram) {
-      if let Some(client) = self.cid_to_client.get(header.dcid).copied() {
-        if !header.scid.is_empty() {
-          self.cid_to_client.insert(header.scid.to_vec(), client);
-        }
-        return Some(client);
+    if let Ok(header) = quic_parser::parse_initial(datagram)
+      && let Some(client) = self.cid_to_client.get(header.dcid).copied()
+    {
+      if !header.scid.is_empty() {
+        self.cid_to_client.insert(header.scid.to_vec(), client);
       }
+      return Some(client);
     }
     if let Some(dcid) = quic_parser::peek_long_header_dcid(datagram)
       && let Some(client) = self.cid_to_client.get(dcid).copied()

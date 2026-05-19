@@ -22,6 +22,18 @@ pub(crate) enum TcpSniForwardResult {
   Forwarded,
 }
 
+pub(crate) async fn local_stream_or_forwarded(
+  stream: TcpStream,
+  peer_addr: SocketAddr,
+  snapshot: Arc<AppSnapshot>,
+  drain: ConnectionDrain,
+) -> anyhow::Result<Option<TcpStream>> {
+  match classify_and_maybe_forward(stream, peer_addr, snapshot, drain).await? {
+    TcpSniForwardResult::Local(stream) => Ok(Some(stream)),
+    TcpSniForwardResult::Forwarded => Ok(None),
+  }
+}
+
 pub(crate) async fn classify_and_maybe_forward(
   stream: TcpStream,
   peer_addr: SocketAddr,
