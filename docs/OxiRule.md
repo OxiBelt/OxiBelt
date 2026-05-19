@@ -450,6 +450,31 @@ value = "true"
 
 Tag keys and Person proof `success_tag` values must match `[A-Za-z0-9-]{1,32}`. Header, tag, routing, and response replacement mutations count against `waf.limits.max_mutations`.
 
+Mitigation emission action:
+
+```toml
+[[waf.rules.actions]]
+type = "emit_mitigation"
+intent = "rtbh" # dots | flowspec | rtbh | blackhole | vendor | observe
+provider = "example-isp"
+reason = "login flood"
+target = "Request.Transport.RemoteIp"
+ttl_seconds = 300
+dedupe_window_ms = 60000
+min_count = 3
+failure_policy = "open" # open | closed
+
+[[waf.rules.actions.fields]]
+name = "path"
+value = "Request.Http.Path"
+```
+
+`emit_mitigation` is valid in request, response, and stream phases. It writes an aggregate PostgreSQL row through `[database.mitigation]` for an external mitigation controller to translate into DOTS, BGP FlowSpec, RTBH/blackhole, or provider-specific REST/OpenAPI calls. OxiBelt does not call those external APIs directly.
+
+The default target is `Request.Transport.RemoteIp`. `target` and `target_prefix` are OxiRule expressions and must evaluate to an IP address or CIDR string. Custom `fields` use the same expression shape as `emit_access_log`, but may not read `Request.Body`, `Response.Body`, or `Stream.Payload`. Default records include safe request, transport, TLS, response, and stream metadata, including User-Agent, Host, path without query, route, rule identity, TCP/UDP metadata, TLS fingerprint, and stream direction/unit.
+
+When `min_count` is greater than `1`, rows are written as `observing` until the deduplicated aggregate count reaches the threshold, then promoted to `pending`. Existing controller-owned statuses are preserved on later updates. `failure_policy = "open"` drops queue/write failures after logging and metrics; `closed` returns the configured fail-closed HTTP response or stream close.
+
 ## Person Proof
 
 `require_person_proof` is a request-phase anti-automation challenge. It is not authentication, identity proof, proof of biological or legal status, bot reputation, or proof of benign intent.

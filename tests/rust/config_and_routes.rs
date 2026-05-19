@@ -6,11 +6,12 @@ use std::path::Path;
 use base64::Engine;
 use oxibelt::config::{
     AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
-    ConnectionLimitIdentityMode, DatabaseTlsMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy,
-    EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ForwardedHeaderMode, GrpcRetryMode,
-    HotReloadMode, OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
-    QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
+    DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
+    ForwardedHeaderMode, GrpcRetryMode, HotReloadMode, MitigationFailurePolicy, OcspMode,
+    PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey,
+    RetryCondition, RuntimeOverrides, SharedStateBackendKind, StaticFilesSendfileMode,
+    TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
     UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
     UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
@@ -3432,6 +3433,165 @@ table = "access_log"
 
     assert!(redacted.contains("connection_url = \"<redacted>\""));
     assert!(!redacted.contains("secret@postgres.example"));
+}
+
+#[test]
+fn database_mitigation_parses_dedicated_postgres_sink() {
+    let temp_dir = common::TempDir::new("database-mitigation");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "mitigation");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.mitigation]
+enabled = true
+mode = "existing"
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "audit.mitigation_events"
+namespace = "edge"
+queue_capacity = 8192
+dedupe_window_ms = 30000
+ttl_seconds = 600
+failure_policy = "closed"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(config.database.mitigation.enabled);
+    assert_eq!(
+        config.database.mitigation.mode,
+        DatabaseMitigationMode::Existing
+    );
+    assert_eq!(
+        config.database.mitigation.connection_url_env.as_deref(),
+        Some("OXIBELT_TEST_MITIGATION_DATABASE_URL")
+    );
+    assert_eq!(config.database.mitigation.table, "audit.mitigation_events");
+    assert_eq!(config.database.mitigation.namespace, "edge");
+    assert_eq!(
+        config.database.mitigation.failure_policy,
+        MitigationFailurePolicy::Closed
+    );
+}
+
+#[test]
+fn database_mitigation_accepts_postgres_shared_state_backend() {
+    let temp_dir = common::TempDir::new("database-mitigation-backend");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "mitigation-backend");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.mitigation]
+enabled = true
+backend = "cluster"
+
+[shared_state]
+enabled = true
+namespace = "oxibelt"
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "postgres"
+connection_url_env = "OXIBELT_SHARED_STATE_URL"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(
+        config.database.mitigation.backend.as_deref(),
+        Some("cluster")
+    );
+}
+
+#[test]
+fn database_mitigation_rejects_redis_shared_state_backend() {
+    let temp_dir = common::TempDir::new("database-mitigation-redis");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "mitigation-redis");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.mitigation]
+enabled = true
+backend = "cluster"
+
+[shared_state]
+enabled = true
+namespace = "oxibelt"
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "redis"
+connection_url = "redis://127.0.0.1:6379"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("Redis backend should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("database.mitigation.backend cluster must use kind = \"postgres\""),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn effective_config_dump_redacts_database_mitigation_connection_url() {
+    let temp_dir = common::TempDir::new("effective-mitigation-redacted");
+    let config_path = write_loadable_config(&temp_dir, "effective-mitigation-redacted", |raw| {
+        raw.replace(
+            "[[upstreams]]",
+            r#"[database.mitigation]
+enabled = true
+connection_url = "postgres://user:secret@postgres.example:5432/mitigation"
+table = "mitigation_events"
+
+[[upstreams]]"#,
+        )
+    });
+
+    let redacted =
+        toml::to_string_pretty(&Config::load_effective_toml_redacted(&config_path).unwrap())
+            .expect("redacted TOML should serialize");
+
+    assert!(redacted.contains("connection_url = \"<redacted>\""));
+    assert!(!redacted.contains("secret@postgres.example"));
+}
+
+#[test]
+fn database_mitigation_rejects_unsafe_table_name() {
+    let temp_dir = common::TempDir::new("database-mitigation-table");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "mitigation-table");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[[upstreams]]",
+        r#"[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "audit.mitigation;drop"
+
+[[upstreams]]"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("unsafe mitigation table should fail");
+
+    assert!(
+        error.to_string().contains(
+            "database.mitigation.table identifier segments must contain only ASCII letters"
+        ),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

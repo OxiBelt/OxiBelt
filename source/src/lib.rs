@@ -20,6 +20,7 @@ pub mod lifecycle;
 pub mod limits;
 mod listener_socket;
 pub mod metrics;
+pub mod mitigation;
 mod pool_health;
 pub mod pools;
 pub mod proxy;

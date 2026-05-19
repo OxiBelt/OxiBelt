@@ -10,6 +10,7 @@ use url::Url;
 
 use crate::waf::{AccessLogFieldConfig, RouteWafConfig, WafConfig};
 
+mod database;
 mod dynamic_policy;
 mod http2;
 mod limits;
@@ -18,6 +19,7 @@ mod stream;
 mod tls;
 mod turn;
 mod workers;
+pub use database::*;
 pub use dynamic_policy::*;
 pub use http2::*;
 use limits::{
@@ -501,6 +503,14 @@ impl Config {
       self.source_paths.remember_runtime_file(path);
     }
     for path in self
+      .database
+      .mitigation
+      .tls
+      .resolve_relative_paths(&path_roots.cert_dir)?
+    {
+      self.source_paths.remember_runtime_file(path);
+    }
+    for path in self
       .logging
       .access_log
       .database
@@ -625,6 +635,7 @@ impl Config {
 
     self.database.validate()?;
     self.shared_state.validate()?;
+    self.validate_mitigation_database()?;
 
     let mut upstream_names = HashSet::new();
     for upstream in &self.upstreams {
@@ -1090,6 +1101,31 @@ impl Config {
     }
     if route_names.is_empty() {
       bail!("dynamic_policy requires at least one named route");
+    }
+    Ok(())
+  }
+
+  fn validate_mitigation_database(&self) -> anyhow::Result<()> {
+    let mitigation = &self.database.mitigation;
+    let Some(backend_name) = mitigation.backend.as_deref() else {
+      return Ok(());
+    };
+    if !mitigation.enabled {
+      return Ok(());
+    }
+    if !self.shared_state.enabled {
+      bail!("database.mitigation.backend requires shared_state.enabled = true");
+    }
+    let Some(backend) = self
+      .shared_state
+      .backends
+      .iter()
+      .find(|backend| backend.name == backend_name)
+    else {
+      bail!("database.mitigation.backend references unknown shared_state backend {backend_name}");
+    };
+    if backend.kind != SharedStateBackendKind::Postgres {
+      bail!("database.mitigation.backend {backend_name} must use kind = \"postgres\"");
     }
     Ok(())
   }
@@ -2475,7 +2511,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "referrer_policy",
       "x_content_type_options",
     ][..],
-    "database" => &["access_log"][..],
+    "database" => &["access_log", "mitigation"][..],
     "database.access_log" => &[
       "connect_timeout_ms",
       "connection_url",
@@ -2487,6 +2523,23 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "tls",
     ][..],
     "database.access_log.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
+    "database.mitigation" => &[
+      "backend",
+      "connect_timeout_ms",
+      "connection_url",
+      "connection_url_env",
+      "dedupe_window_ms",
+      "enabled",
+      "failure_policy",
+      "max_connections",
+      "mode",
+      "namespace",
+      "queue_capacity",
+      "table",
+      "tls",
+      "ttl_seconds",
+    ][..],
+    "database.mitigation.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "dynamic_policy" => &[
       "automation_api",
       "backend",
@@ -2705,6 +2758,13 @@ fn redact_effective_toml(value: &mut toml::Value) {
     .get_mut("database")
     .and_then(|database| database.get_mut("access_log"))
     .and_then(|access_log| access_log.get_mut("connection_url"))
+  {
+    *connection_url = toml::Value::String("<redacted>".to_string());
+  }
+  if let Some(connection_url) = value
+    .get_mut("database")
+    .and_then(|database| database.get_mut("mitigation"))
+    .and_then(|mitigation| mitigation.get_mut("connection_url"))
   {
     *connection_url = toml::Value::String("<redacted>".to_string());
   }
@@ -4427,18 +4487,6 @@ impl Default for SecurityHeadersConfig {
   }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct DatabaseConfig {
-  #[serde(default)]
-  pub access_log: DatabaseAccessLogConfig,
-}
-
-impl DatabaseConfig {
-  fn validate(&self) -> anyhow::Result<()> {
-    self.access_log.validate()
-  }
-}
-
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SharedStateConfig {
   #[serde(default)]
@@ -4653,207 +4701,6 @@ impl SharedStateBackendConfig {
 pub enum SharedStateBackendKind {
   Redis,
   Postgres,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct DatabaseAccessLogConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default)]
-  pub connection_url: Option<String>,
-  #[serde(default)]
-  pub connection_url_env: Option<String>,
-  #[serde(default)]
-  pub table: Option<String>,
-  #[serde(default = "default_database_access_log_max_connections")]
-  pub max_connections: u32,
-  #[serde(default = "default_database_access_log_connect_timeout_ms")]
-  pub connect_timeout_ms: u64,
-  #[serde(default = "default_database_access_log_queue_capacity")]
-  pub queue_capacity: usize,
-  #[serde(default)]
-  pub tls: DatabaseTlsConfig,
-}
-
-impl Default for DatabaseAccessLogConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      connection_url: None,
-      connection_url_env: None,
-      table: None,
-      max_connections: default_database_access_log_max_connections(),
-      connect_timeout_ms: default_database_access_log_connect_timeout_ms(),
-      queue_capacity: default_database_access_log_queue_capacity(),
-      tls: DatabaseTlsConfig::default(),
-    }
-  }
-}
-
-impl DatabaseAccessLogConfig {
-  fn validate(&self) -> anyhow::Result<()> {
-    self.validate_with_prefix("database.access_log")
-  }
-
-  pub(crate) fn validate_with_prefix(&self, prefix: &str) -> anyhow::Result<()> {
-    validate_optional_non_empty(
-      &format!("{prefix}.connection_url"),
-      self.connection_url.as_deref(),
-    )?;
-    validate_optional_non_empty(
-      &format!("{prefix}.connection_url_env"),
-      self.connection_url_env.as_deref(),
-    )?;
-    if let Some(table) = &self.table {
-      validate_postgres_identifier_path(&format!("{prefix}.table"), table)?;
-    }
-    if self.max_connections == 0 {
-      bail!("{prefix}.max_connections must be greater than 0");
-    }
-    if self.connect_timeout_ms == 0 {
-      bail!("{prefix}.connect_timeout_ms must be greater than 0");
-    }
-    if self.queue_capacity == 0 {
-      bail!("{prefix}.queue_capacity must be greater than 0");
-    }
-    self.tls.validate_with_prefix(&format!("{prefix}.tls"))?;
-
-    if !self.enabled {
-      return Ok(());
-    }
-
-    match (&self.connection_url, &self.connection_url_env) {
-      (Some(_), Some(_)) => {
-        bail!("{prefix} must set only one of connection_url or connection_url_env")
-      }
-      (None, None) => {
-        bail!("{prefix} requires connection_url or connection_url_env when enabled=true")
-      }
-      _ => {}
-    }
-    if self.table.is_none() {
-      bail!("{prefix}.table is required when enabled=true");
-    }
-
-    Ok(())
-  }
-
-  pub(crate) fn connection_url_with_prefix(&self, prefix: &str) -> anyhow::Result<Option<String>> {
-    if let Some(env_name) = &self.connection_url_env {
-      let value = std::env::var(env_name)
-        .with_context(|| format!("failed to read {prefix}.connection_url_env {env_name}"))?;
-      if value.trim().is_empty() {
-        bail!("{prefix}.connection_url_env {env_name} resolved to an empty value");
-      }
-      return Ok(Some(value));
-    }
-    Ok(self.connection_url.clone())
-  }
-
-  pub(crate) fn table_name_with_prefix(&self, prefix: &str) -> anyhow::Result<Option<String>> {
-    self
-      .table
-      .as_deref()
-      .map(|table| quote_postgres_identifier_path(&format!("{prefix}.table"), table))
-      .transpose()
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct DatabaseTlsConfig {
-  #[serde(default)]
-  pub mode: DatabaseTlsMode,
-  #[serde(default)]
-  pub ca_cert: Option<PathBuf>,
-  #[serde(default)]
-  pub client_cert: Option<PathBuf>,
-  #[serde(default)]
-  pub client_key: Option<PathBuf>,
-}
-
-impl Default for DatabaseTlsConfig {
-  fn default() -> Self {
-    Self {
-      mode: DatabaseTlsMode::Off,
-      ca_cert: None,
-      client_cert: None,
-      client_key: None,
-    }
-  }
-}
-
-impl DatabaseTlsConfig {
-  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut source_paths = Vec::new();
-    self.ca_cert = self
-      .ca_cert
-      .take()
-      .map(|path| {
-        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
-          "database.access_log.tls.ca_cert",
-          base_dir,
-          &path,
-        )?;
-        source_paths.push(logical);
-        Ok::<PathBuf, anyhow::Error>(resolved)
-      })
-      .transpose()?;
-    self.client_cert = self
-      .client_cert
-      .take()
-      .map(|path| {
-        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
-          "database.access_log.tls.client_cert",
-          base_dir,
-          &path,
-        )?;
-        source_paths.push(logical);
-        Ok::<PathBuf, anyhow::Error>(resolved)
-      })
-      .transpose()?;
-    self.client_key = self
-      .client_key
-      .take()
-      .map(|path| {
-        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
-          "database.access_log.tls.client_key",
-          base_dir,
-          &path,
-        )?;
-        source_paths.push(logical);
-        Ok::<PathBuf, anyhow::Error>(resolved)
-      })
-      .transpose()?;
-    Ok(source_paths)
-  }
-
-  fn validate_with_prefix(&self, prefix: &str) -> anyhow::Result<()> {
-    if self.ca_cert.is_some() && self.mode != DatabaseTlsMode::VerifyFull {
-      bail!("{prefix}.ca_cert is only valid when {prefix}.mode is \"verify_full\"");
-    }
-    match (&self.client_cert, &self.client_key) {
-      (Some(_), Some(_)) if self.mode == DatabaseTlsMode::VerifyFull => {}
-      (Some(_), Some(_)) => bail!(
-        "{prefix}.client_cert and client_key are only valid when {prefix}.mode is \"verify_full\""
-      ),
-      (Some(_), None) => {
-        bail!("{prefix}.client_key is required when client_cert is configured")
-      }
-      (None, Some(_)) => {
-        bail!("{prefix}.client_cert is required when client_key is configured")
-      }
-      (None, None) => {}
-    }
-    Ok(())
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum DatabaseTlsMode {
-  #[default]
-  Off,
-  VerifyFull,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

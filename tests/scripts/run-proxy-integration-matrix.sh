@@ -1756,6 +1756,9 @@ CREATE TABLE oxibelt_access_log (
   record jsonb NOT NULL
 );
 EOF
+  if [[ -f "${case_dir}/postgres-init.sql" ]]; then
+    cat "${case_dir}/postgres-init.sql" >>"${work_dir}/postgres-init.sql"
+  fi
 
   if [[ "${CASE_NEED_POSTGRES_MTLS}" == "1" ]]; then
     cat >"${work_dir}/pg_hba.conf" <<'EOF'

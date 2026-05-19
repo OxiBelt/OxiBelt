@@ -97,11 +97,12 @@ impl ReloadManager {
       return Ok(false);
     }
 
-    let waf = WafEngine::new_with_previous_and_limits(
+    let waf = WafEngine::new_with_previous_limits_and_mitigation(
       &config,
       Some(&active.waf),
       active.shared_state.clone(),
       Some(active.limits.clone()),
+      active.mitigation.clone(),
     )
     .context("failed to rebuild WAF engine")?;
     let route_table = RouteTable::new_with_waf(&config, &waf);
@@ -126,6 +127,7 @@ impl ReloadManager {
       quic_server_config: active.quic_server_config.clone(),
       tls_resumption: active.tls_resumption.clone(),
       waf,
+      mitigation: active.mitigation.clone(),
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
       alt_svc_header_value: active.alt_svc_header_value.clone(),
@@ -217,6 +219,7 @@ impl ReloadManager {
       quic_server_config,
       tls_resumption: active.tls_resumption.clone(),
       waf: active.waf.clone(),
+      mitigation: active.mitigation.clone(),
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
       alt_svc_header_value: active.alt_svc_header_value.clone(),

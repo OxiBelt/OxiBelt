@@ -31,6 +31,12 @@ pub struct Metrics {
   dynamic_policy_refresh_success_total: AtomicU64,
   dynamic_policy_refresh_errors_total: AtomicU64,
   dynamic_policy_active_policies: AtomicU64,
+  mitigation_queued_total: AtomicU64,
+  mitigation_dropped_total: AtomicU64,
+  mitigation_write_errors_total: AtomicU64,
+  mitigation_fail_closed_total: AtomicU64,
+  mitigation_queue_depth: AtomicU64,
+  mitigation_writer_healthy: AtomicU64,
 }
 
 const COUNTER_STRIPES: usize = 64;
@@ -209,6 +215,49 @@ impl Metrics {
       .store(count, Ordering::Relaxed);
   }
 
+  pub fn record_mitigation_queued(&self) {
+    self.mitigation_queued_total.fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_mitigation_dropped(&self) {
+    self
+      .mitigation_dropped_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_mitigation_write_error(&self) {
+    self
+      .mitigation_write_errors_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_mitigation_fail_closed(&self) {
+    self
+      .mitigation_fail_closed_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn add_mitigation_queue_depth(&self, delta: i64) {
+    if delta >= 0 {
+      self
+        .mitigation_queue_depth
+        .fetch_add(delta as u64, Ordering::Relaxed);
+    } else {
+      self
+        .mitigation_queue_depth
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+          Some(current.saturating_sub(delta.unsigned_abs()))
+        })
+        .ok();
+    }
+  }
+
+  pub fn set_mitigation_writer_healthy(&self, healthy: bool) {
+    self
+      .mitigation_writer_healthy
+      .store(u64::from(healthy), Ordering::Relaxed);
+  }
+
   pub fn prometheus(
     &self,
     cache: CacheStats,
@@ -366,6 +415,42 @@ impl Metrics {
       "oxibelt_dynamic_policy_active_policies",
       "gauge",
       self.dynamic_policy_active_policies.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_mitigation_queued_total",
+      "counter",
+      self.mitigation_queued_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_mitigation_dropped_total",
+      "counter",
+      self.mitigation_dropped_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_mitigation_write_errors_total",
+      "counter",
+      self.mitigation_write_errors_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_mitigation_fail_closed_total",
+      "counter",
+      self.mitigation_fail_closed_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_mitigation_queue_depth",
+      "gauge",
+      self.mitigation_queue_depth.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_mitigation_writer_healthy",
+      "gauge",
+      self.mitigation_writer_healthy.load(Ordering::Relaxed),
     );
     append_metric(
       &mut output,

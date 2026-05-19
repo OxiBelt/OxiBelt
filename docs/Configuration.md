@@ -996,6 +996,28 @@ CREATE TABLE audit.access_log (
 
 `table` may be unqualified, such as `oxibelt_access_log`, or schema-qualified, such as `audit.access_log`. Identifier segments must contain only ASCII letters, digits, and underscores. `ca_cert`, `client_cert`, and `client_key` are valid only with `mode = "verify_full"`; client cert and key must be configured together.
 
+## Database Mitigation Sink
+
+```toml
+[database.mitigation]
+enabled = false
+mode = "managed" # managed | existing
+connection_url_env = "OXIBELT_MITIGATION_DATABASE_URL"
+# backend = "cluster"
+table = "oxibelt_mitigation_events"
+namespace = "oxibelt"
+queue_capacity = 8192
+dedupe_window_ms = 60000
+ttl_seconds = 300
+failure_policy = "open" # open | closed
+```
+
+This optional PostgreSQL sink receives OxiRule `emit_mitigation` actions for external DOTS, BGP FlowSpec, RTBH/blackhole, or provider-specific mitigation controllers. OxiBelt only writes PostgreSQL rows; it does not call ISP or IaaS APIs directly.
+
+Set either `connection_url`/`connection_url_env` or `backend`. `backend` must name a PostgreSQL `[[shared_state.backends]]` entry. In `managed` mode OxiBelt creates `oxibelt_mitigation_events`; in `existing` mode the table must already expose compatible `namespace`, `dedupe_key`, `status`, `count`, `first_seen`, `last_seen`, `expires_at`, and `record jsonb` columns plus a unique conflict target on `(namespace, dedupe_key)`.
+
+Rows are aggregated by dedupe key and time window. OxiBelt preserves controller-owned statuses such as `processing`, `applied`, `failed`, and `withdrawn`; rows start as `observing` when an action sets `min_count > 1` and promote to `pending` when the aggregate count reaches that threshold.
+
 ## WAF Attachment
 
 ```toml

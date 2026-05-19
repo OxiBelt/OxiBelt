@@ -20,6 +20,7 @@ use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::lifecycle::LifecycleState;
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
+use crate::mitigation::MitigationSink;
 use crate::pools::PoolState;
 use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
@@ -188,6 +189,7 @@ pub struct AppSnapshot {
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub(crate) tls_resumption: tls::TlsResumptionState,
   pub waf: WafEngine,
+  pub mitigation: MitigationSink,
   pub access_logs: AccessLogSinks,
   pub system_access_log: SystemAccessLog,
   pub(crate) alt_svc_header_value: Option<HeaderValue>,
@@ -237,6 +239,9 @@ impl AppSnapshot {
     let dynamic_policy = DynamicPolicyRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build dynamic policy runtime")?;
+    let mitigation = MitigationSink::new(&config, metrics.clone())
+      .await
+      .context("failed to build mitigation sink")?;
     let lifecycle = previous
       .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
@@ -267,11 +272,12 @@ impl AppSnapshot {
     } else {
       None
     };
-    let waf = WafEngine::new_with_previous_and_limits(
+    let waf = WafEngine::new_with_previous_limits_and_mitigation(
       &config,
       previous.map(|snapshot| &snapshot.waf),
       shared_state.clone(),
       Some(limits.clone()),
+      mitigation.clone(),
     )
     .context("failed to build WAF engine")?;
     let route_table = RouteTable::new_with_waf(&config, &waf);
@@ -305,6 +311,7 @@ impl AppSnapshot {
       quic_server_config,
       tls_resumption,
       waf,
+      mitigation,
       access_logs,
       system_access_log,
       alt_svc_header_value,
@@ -354,6 +361,7 @@ impl AppSnapshot {
       quic_server_config: previous.quic_server_config.clone(),
       tls_resumption: previous.tls_resumption.clone(),
       waf: previous.waf.clone(),
+      mitigation: previous.mitigation.clone(),
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
       alt_svc_header_value,

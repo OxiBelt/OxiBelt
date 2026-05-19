@@ -49,6 +49,10 @@ pub(super) fn default_waf_rate_limit_status() -> u16 {
   429
 }
 
+pub(super) fn default_mitigation_fail_status() -> u16 {
+  503
+}
+
 pub(super) fn default_websocket_close_code() -> u16 {
   1008
 }

@@ -4442,6 +4442,220 @@ value = "Request.Body.Bytes.size()"
 }
 
 #[test]
+fn emit_mitigation_request_phase_fails_open_when_sink_unavailable() {
+    let engine = compile_waf_fragment(
+        "waf-mitigation-request-open",
+        r#"
+[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "mitigation_events"
+
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "mitigate-request"
+phase = "request"
+priority = 10
+when = "Request.Transport.RemoteIp == '203.0.113.10'"
+
+[[waf.rules.actions]]
+type = "emit_mitigation"
+intent = "rtbh"
+provider = "test-isp"
+reason = "test"
+failure_policy = "open"
+
+[[waf.rules.actions.fields]]
+name = "path"
+value = "Request.Http.Path"
+"#,
+    );
+
+    let decision = evaluate_simple_request(&engine, "/attack");
+
+    assert!(decision.terminal.is_none());
+    assert_eq!(only_rule_hit(&engine).hits, 1);
+}
+
+#[test]
+fn emit_mitigation_response_phase_can_fail_closed_with_configured_response() {
+    let engine = compile_waf_fragment(
+        "waf-mitigation-response-closed",
+        r#"
+[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "mitigation_events"
+
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "mitigate-response"
+phase = "response"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_mitigation"
+intent = "observe"
+failure_policy = "closed"
+fail_closed_status = 503
+fail_closed_body = "mitigation unavailable"
+"#,
+    );
+    let method = Method::GET;
+    let uri: Uri = "/attack".parse().unwrap();
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let request = request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    );
+
+    let decision = engine.evaluate_response(WafResponseInput {
+        request,
+        response_id: "response-id",
+        received_at_unix_ms: 1_700_000_000_100,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &headers,
+        body: None,
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "https",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: None,
+        upstream_error: None,
+    });
+
+    let terminal = decision
+        .terminal
+        .expect("fail closed should replace response");
+    assert_eq!(terminal.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(terminal.body, "mitigation unavailable");
+}
+
+#[test]
+fn emit_mitigation_stream_phase_can_fail_closed_with_configured_close() {
+    let engine = compile_waf_fragment(
+        "waf-mitigation-stream-closed",
+        r#"
+[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "mitigation_events"
+
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "mitigate-stream"
+phase = "stream"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_mitigation"
+intent = "flowspec"
+failure_policy = "closed"
+fail_closed_websocket_code = 1013
+fail_closed_webtransport_code = 7
+fail_closed_stream_reason = "mitigation unavailable"
+"#,
+    );
+    let method = Method::GET;
+    let uri: Uri = "/ws".parse().unwrap();
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let request = request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    );
+
+    let decision = engine.evaluate_stream(websocket_stream_input(
+        request,
+        WafStreamDirection::DownstreamToUpstream,
+        WafStreamUnit::WebsocketFrame,
+        b"hello",
+        false,
+        WafWebSocketStreamMetadata {
+            opcode: "text",
+            fin: true,
+            is_control: false,
+            message_opcode: Some("text"),
+            frame_payload_size: 5,
+        },
+    ));
+
+    let close = decision.close.expect("fail closed should close stream");
+    assert_eq!(close.websocket_code, 1013);
+    assert_eq!(close.webtransport_code, 7);
+    assert_eq!(close.reason, "mitigation unavailable");
+}
+
+#[test]
+fn emit_mitigation_rejects_body_and_payload_fields() {
+    for (name, phase, field) in [
+        ("request-body", "request", "Request.Body.Text"),
+        ("response-body", "response", "Response.Body.Text"),
+        ("stream-payload", "stream", "Stream.Payload.Text"),
+    ] {
+        let temp_dir = common::TempDir::new(name);
+        let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+        let base_config = common::minimal_config_toml(&cert_path, &key_path);
+        let raw = format!(
+            r#"{base_config}
+
+[database.mitigation]
+enabled = true
+connection_url_env = "OXIBELT_TEST_MITIGATION_DATABASE_URL"
+table = "mitigation_events"
+
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "bad-mitigation"
+phase = "{phase}"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_mitigation"
+intent = "observe"
+
+[[waf.rules.actions.fields]]
+name = "bad"
+value = "{field}"
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("body or payload field should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot read request, response, or stream body bytes"),
+            "unexpected error for {name}: {error}"
+        );
+    }
+}
+
+#[test]
 fn request_tags_are_visible_to_later_request_rules() {
     let temp_dir = common::TempDir::new("waf-request-tag-chain");
     let (cert_path, key_path) =
