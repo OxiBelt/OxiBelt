@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,6 +13,8 @@ use crate::config::{
   TlsClientAuthConfig, TlsServerResumptionConfig, TlsServerResumptionMode, UpstreamEchConfig,
   UpstreamTls12ResumptionMode, UpstreamTlsResumptionConfig, UpstreamTlsResumptionMode,
 };
+
+const SERVER_SESSION_CACHE_SHARDS: usize = 16;
 
 #[derive(Clone, Default)]
 pub struct TlsResumptionState {
@@ -76,9 +79,15 @@ pub(super) struct TlsClientConfigKey {
 #[derive(Debug)]
 struct TtlServerSessionCache {
   capacity: usize,
+  shard_capacity: usize,
   ttl: Duration,
-  inner: Mutex<TtlServerSessionCacheInner>,
+  shards: Vec<TtlServerSessionCacheShard>,
   stats: TtlServerSessionCacheStats,
+}
+
+#[derive(Debug)]
+struct TtlServerSessionCacheShard {
+  inner: Mutex<TtlServerSessionCacheInner>,
 }
 
 #[derive(Debug, Default)]
@@ -95,10 +104,21 @@ struct StoredServerSession {
 
 impl TtlServerSessionCache {
   fn new(capacity: usize, ttl: Duration) -> Self {
+    let shard_count = if capacity >= SERVER_SESSION_CACHE_SHARDS {
+      SERVER_SESSION_CACHE_SHARDS
+    } else {
+      1
+    };
+    let shard_capacity = (capacity / shard_count).max(1);
     Self {
       capacity,
+      shard_capacity,
       ttl,
-      inner: Mutex::new(TtlServerSessionCacheInner::default()),
+      shards: (0..shard_count)
+        .map(|_| TtlServerSessionCacheShard {
+          inner: Mutex::new(TtlServerSessionCacheInner::default()),
+        })
+        .collect(),
       stats: TtlServerSessionCacheStats::default(),
     }
   }
@@ -118,12 +138,23 @@ impl TtlServerSessionCache {
   }
 
   fn remove_over_capacity(&self, inner: &mut TtlServerSessionCacheInner) {
-    while inner.entries.len() > self.capacity {
+    while inner.entries.len() > self.shard_capacity {
       let Some(key) = inner.order.pop_front() else {
         break;
       };
       inner.entries.remove(&key);
     }
+  }
+
+  fn shard(&self, key: &[u8]) -> &TtlServerSessionCacheShard {
+    let index = if self.shards.len() == 1 {
+      0
+    } else {
+      let mut hasher = std::collections::hash_map::DefaultHasher::new();
+      key.hash(&mut hasher);
+      (hasher.finish() as usize) % self.shards.len()
+    };
+    &self.shards[index]
   }
 
   fn record_lock_wait(&self, elapsed: Duration) {
@@ -161,7 +192,11 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
     }
     let now = Instant::now();
     let lock_started = Instant::now();
-    let mut inner = self.inner.lock().expect("TLS session cache lock poisoned");
+    let mut inner = self
+      .shard(&key)
+      .inner
+      .lock()
+      .expect("TLS session cache lock poisoned");
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     if inner.entries.contains_key(&key) {
@@ -184,7 +219,11 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
     self.stats.get_count.fetch_add(1, Ordering::Relaxed);
     let now = Instant::now();
     let lock_started = Instant::now();
-    let mut inner = self.inner.lock().expect("TLS session cache lock poisoned");
+    let mut inner = self
+      .shard(key)
+      .inner
+      .lock()
+      .expect("TLS session cache lock poisoned");
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     inner.entries.get(key).map(|stored| stored.value.clone())
@@ -194,7 +233,11 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
     self.stats.take_count.fetch_add(1, Ordering::Relaxed);
     let now = Instant::now();
     let lock_started = Instant::now();
-    let mut inner = self.inner.lock().expect("TLS session cache lock poisoned");
+    let mut inner = self
+      .shard(key)
+      .inner
+      .lock()
+      .expect("TLS session cache lock poisoned");
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     let value = inner.entries.remove(key).map(|stored| stored.value);
@@ -488,6 +531,36 @@ mod tests {
   }
 
   #[test]
+  fn stateful_cache_uses_shards_for_larger_capacities() {
+    let cache = TtlServerSessionCache::new(64, Duration::from_secs(60));
+    assert!(
+      cache.shards.len() > 1,
+      "larger TLS session caches should shard lock contention"
+    );
+
+    for index in 0..128_u8 {
+      assert!(cache.put(vec![index], vec![index]));
+    }
+
+    let live_entries = cache
+      .shards
+      .iter()
+      .map(|shard| {
+        shard
+          .inner
+          .lock()
+          .expect("TLS session cache lock poisoned")
+          .entries
+          .len()
+      })
+      .sum::<usize>();
+    assert!(
+      live_entries <= cache.capacity,
+      "sharded cache should stay bounded by configured capacity"
+    );
+  }
+
+  #[test]
   fn stateful_cache_diagnostic_counters_track_operations() {
     let cache = TtlServerSessionCache::new(2, Duration::from_secs(60));
 
@@ -508,7 +581,11 @@ mod tests {
   #[test]
   fn stateful_cache_diagnostic_counters_track_lock_wait() {
     let cache = Arc::new(TtlServerSessionCache::new(2, Duration::from_secs(60)));
-    let guard = cache.inner.lock().expect("TLS session cache lock poisoned");
+    let guard = cache
+      .shard(b"missing")
+      .inner
+      .lock()
+      .expect("TLS session cache lock poisoned");
     let waiting_cache = cache.clone();
     let handle = std::thread::spawn(move || {
       assert_eq!(waiting_cache.get(b"missing"), None);
@@ -527,28 +604,46 @@ mod tests {
   }
 
   fn assert_cache_lengths(cache: &TtlServerSessionCache, entries: usize, order: usize) {
-    let inner = cache.inner.lock().expect("TLS session cache lock poisoned");
-    assert_eq!(inner.entries.len(), entries);
-    assert_eq!(inner.order.len(), order);
-    assert_eq!(
-      inner.order.len(),
-      inner.entries.len(),
-      "order must track every live entry"
-    );
+    let mut actual_entries = 0;
+    let mut actual_order = 0;
+    for shard in &cache.shards {
+      let inner = shard.inner.lock().expect("TLS session cache lock poisoned");
+      assert_eq!(
+        inner.order.len(),
+        inner.entries.len(),
+        "order must track every live entry"
+      );
+      assert!(
+        inner.order.len() <= cache.shard_capacity,
+        "shard order length must stay bounded by shard capacity"
+      );
+      for key in &inner.order {
+        assert!(
+          inner.entries.contains_key(key),
+          "order must only contain live entry keys"
+        );
+      }
+      actual_entries += inner.entries.len();
+      actual_order += inner.order.len();
+    }
+    assert_eq!(actual_entries, entries);
+    assert_eq!(actual_order, order);
     assert!(
-      inner.order.len() <= cache.capacity,
+      actual_order <= cache.capacity,
       "order length must stay bounded by capacity"
     );
-    for key in &inner.order {
-      assert!(
-        inner.entries.contains_key(key),
-        "order must only contain live entry keys"
-      );
-    }
   }
 
   fn assert_cache_order(cache: &TtlServerSessionCache, expected: &[&[u8]]) {
-    let inner = cache.inner.lock().expect("TLS session cache lock poisoned");
+    assert_eq!(
+      cache.shards.len(),
+      1,
+      "ordered assertions only apply to single-shard test caches"
+    );
+    let inner = cache.shards[0]
+      .inner
+      .lock()
+      .expect("TLS session cache lock poisoned");
     let actual = inner
       .order
       .iter()

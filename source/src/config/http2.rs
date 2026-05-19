@@ -4,6 +4,12 @@ use serde::Deserialize;
 pub struct ProxyHttp2Config {
   #[serde(default = "default_true")]
   pub adaptive_window: bool,
+  #[serde(default)]
+  pub initial_stream_window_bytes: Option<u32>,
+  #[serde(default)]
+  pub initial_connection_window_bytes: Option<u32>,
+  #[serde(default)]
+  pub max_frame_size_bytes: Option<u32>,
   #[serde(default = "default_http2_max_concurrent_streams")]
   pub max_concurrent_streams: u32,
   #[serde(default = "default_http2_max_send_buf_size")]
@@ -20,6 +26,9 @@ impl Default for ProxyHttp2Config {
   fn default() -> Self {
     Self {
       adaptive_window: true,
+      initial_stream_window_bytes: None,
+      initial_connection_window_bytes: None,
+      max_frame_size_bytes: None,
       max_concurrent_streams: default_http2_max_concurrent_streams(),
       max_send_buf_size: default_http2_max_send_buf_size(),
       keep_alive_interval_ms: 0,

@@ -385,9 +385,13 @@ async fn eligible_static_plan(
     &resolved.route.name,
     &resolved.route.path_prefix,
     static_root,
+    &snapshot.static_files,
   )
   .await;
-  if !matches!(&plan.body, StaticBodyPlan::Empty | StaticBodyPlan::File(_)) {
+  if !matches!(
+    &plan.body,
+    StaticBodyPlan::Empty | StaticBodyPlan::Bytes(_) | StaticBodyPlan::File(_)
+  ) {
     return None;
   }
   apply_security_headers(&mut plan.headers, &snapshot.config.security.headers);
@@ -453,6 +457,15 @@ async fn write_static_plan(
         message.as_bytes(),
         response_send_timeout,
         "static fast-path text response body write failed",
+      )
+      .await?;
+    }
+    StaticBodyPlan::Bytes(bytes) => {
+      write_all_tcp(
+        stream,
+        bytes.as_ref(),
+        response_send_timeout,
+        "static fast-path bytes response body write failed",
       )
       .await?;
     }

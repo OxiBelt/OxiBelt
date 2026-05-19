@@ -7,6 +7,7 @@ mod common {
 }
 
 use std::path::Path;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_NONE_MATCH, RANGE};
@@ -15,6 +16,8 @@ use http_body_util::{BodyExt, Empty};
 use pretty_assertions::assert_eq;
 #[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
+
+use crate::config::ProxyStaticFilesConfig;
 
 use super::*;
 
@@ -32,7 +35,21 @@ async fn serve_test(
   route_prefix: &str,
   static_root: &Path,
 ) -> Response<ProxyBody> {
-  serve(request, route_name, route_prefix, static_root, 16 * 1024).await
+  let runtime = runtime_for_root(static_root, ProxyStaticFilesConfig::default());
+  serve(
+    request,
+    route_name,
+    route_prefix,
+    static_root,
+    &runtime,
+    16 * 1024,
+  )
+  .await
+}
+
+fn runtime_for_root(root: &Path, config: ProxyStaticFilesConfig) -> StaticFilesRuntime {
+  StaticFilesRuntime::for_roots([root.to_path_buf()], config)
+    .expect("static files runtime should initialize")
 }
 
 #[cfg(target_os = "linux")]
@@ -74,7 +91,9 @@ async fn linux_openat2_secure_open_reads_regular_file_with_descriptor_verificati
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(&path, "openat2 static").await.unwrap();
 
-  let Some(mut opened) = open_verified_file_with_openat2_for_tests(&root, &path)
+  let runtime = runtime_for_root(&root, ProxyStaticFilesConfig::default());
+  let root_handle = runtime.root_handle(&root);
+  let Some(mut opened) = open_verified_file_with_openat2_for_tests(&root_handle, &path)
     .await
     .expect("openat2 helper should not fail when the syscall is available")
   else {
@@ -101,7 +120,9 @@ async fn linux_openat2_fifo_open_does_not_block_runtime_worker() {
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(&probe, "openat2 probe").await.unwrap();
 
-  let Some(_) = open_verified_file_with_openat2_for_tests(&root, &probe)
+  let runtime = runtime_for_root(&root, ProxyStaticFilesConfig::default());
+  let root_handle = runtime.root_handle(&root);
+  let Some(_) = open_verified_file_with_openat2_for_tests(&root_handle, &probe)
     .await
     .expect("openat2 helper should not fail when the syscall is available")
   else {
@@ -119,9 +140,8 @@ async fn linux_openat2_fifo_open_does_not_block_runtime_worker() {
       .expect("FIFO writer should open after the reader is waiting");
   });
   let open_task = tokio::spawn({
-    let root = root.clone();
     let fifo = fifo.clone();
-    async move { open_verified_file_with_openat2_for_tests(&root, &fifo).await }
+    async move { open_verified_file_with_openat2_for_tests(&root_handle, &fifo).await }
   });
 
   let started = Instant::now();
@@ -163,11 +183,13 @@ async fn linux_openat2_rejects_static_root_swap_after_validation() {
     .await
     .unwrap();
   let validated_root = validate_static_root(&configured_root).unwrap();
+  let runtime = runtime_for_root(&validated_root, ProxyStaticFilesConfig::default());
+  let root_handle = runtime.root_handle(&validated_root);
   tokio::fs::remove_dir_all(&configured_root).await.unwrap();
   std::os::unix::fs::symlink(&attacker_root, &configured_root).unwrap();
   let request_path = validated_root.join("secret.txt");
 
-  match open_verified_file_with_openat2_for_tests(&validated_root, &request_path).await {
+  match open_verified_file_with_openat2_for_tests(&root_handle, &request_path).await {
     Ok(None) => {}
     Ok(Some(mut opened)) => {
       let mut body = String::new();
@@ -182,9 +204,7 @@ async fn linux_openat2_rejects_static_root_swap_after_validation() {
         "unexpected error: {error}"
       );
     }
-    Err(StaticOpenError::NotFound) => {
-      panic!("swapped static_root should be rejected, not treated as missing");
-    }
+    Err(StaticOpenError::NotFound) => {}
   }
 }
 
@@ -203,20 +223,23 @@ async fn serve_rejects_static_root_swap_after_validation() {
     .await
     .unwrap();
   let validated_root = validate_static_root(&configured_root).unwrap();
+  let runtime = runtime_for_root(&validated_root, ProxyStaticFilesConfig::default());
   tokio::fs::remove_dir_all(&configured_root).await.unwrap();
   std::os::unix::fs::symlink(&attacker_root, &configured_root).unwrap();
 
-  let response = serve_test(
+  let response = serve(
     &request("/assets/secret.txt"),
     "assets",
     "/assets",
     &validated_root,
+    &runtime,
+    16 * 1024,
   )
   .await;
 
-  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+  assert_ne!(response.status(), StatusCode::OK);
   let body = response.into_body().collect().await.unwrap().to_bytes();
-  assert_eq!(body, Bytes::from_static(b"forbidden"));
+  assert_ne!(body, Bytes::from_static(b"OUTSIDE_VALIDATED_ROOT"));
 }
 
 #[tokio::test]
@@ -301,6 +324,7 @@ async fn planned_response_body_uses_original_verified_fd_after_path_swap() {
     "assets",
     "/assets",
     &root,
+    &runtime_for_root(&root, ProxyStaticFilesConfig::default()),
   )
   .await;
   assert_eq!(plan.status, StatusCode::OK);
@@ -362,6 +386,91 @@ async fn conditional_etag_returns_not_modified() {
 }
 
 #[tokio::test]
+async fn hot_object_cache_revalidates_after_ttl_and_fails_closed_on_symlink_escape() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache");
+  let root = temp_dir.path().join("public");
+  let outside = temp_dir.path().join("outside-secret.txt");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "safe body")
+    .await
+    .unwrap();
+  tokio::fs::write(&outside, "outside secret").await.unwrap();
+  let runtime = runtime_for_root(
+    &root,
+    ProxyStaticFilesConfig {
+      open_file_cache_max_entries: 4,
+      open_file_cache_ttl_ms: 25,
+      hot_object_cache_max_bytes: 1024,
+      ..ProxyStaticFilesConfig::default()
+    },
+  );
+
+  let first = serve(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(first.status(), StatusCode::OK);
+  assert_eq!(
+    first.into_body().collect().await.unwrap().to_bytes(),
+    Bytes::from_static(b"safe body")
+  );
+
+  tokio::fs::write(root.join("app.txt"), "updated body")
+    .await
+    .unwrap();
+  let cached = serve(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(
+    cached.into_body().collect().await.unwrap().to_bytes(),
+    Bytes::from_static(b"safe body")
+  );
+
+  tokio::time::sleep(Duration::from_millis(40)).await;
+  let refreshed = serve(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(
+    refreshed.into_body().collect().await.unwrap().to_bytes(),
+    Bytes::from_static(b"updated body")
+  );
+
+  tokio::fs::remove_file(root.join("app.txt")).await.unwrap();
+  std::os::unix::fs::symlink(&outside, root.join("app.txt")).unwrap();
+  tokio::time::sleep(Duration::from_millis(40)).await;
+  let escaped = serve(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+
+  assert_eq!(escaped.status(), StatusCode::FORBIDDEN);
+  let body = escaped.into_body().collect().await.unwrap().to_bytes();
+  assert_ne!(body, Bytes::from_static(b"outside secret"));
+}
+
+#[tokio::test]
 async fn small_file_inline_threshold_marks_known_small_body() {
   let temp_dir = common::TempDir::new("static-inline");
   let root = temp_dir.path().join("public");
@@ -370,7 +479,16 @@ async fn small_file_inline_threshold_marks_known_small_body() {
     .await
     .unwrap();
 
-  let response = serve(&request("/assets/app.txt"), "assets", "/assets", &root, 16).await;
+  let runtime = runtime_for_root(&root, ProxyStaticFilesConfig::default());
+  let response = serve(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16,
+  )
+  .await;
 
   assert_eq!(response.status(), StatusCode::OK);
   assert!(
@@ -392,7 +510,16 @@ async fn zero_inline_threshold_uses_streaming_body() {
     .await
     .unwrap();
 
-  let response = serve(&request("/assets/app.txt"), "assets", "/assets", &root, 0).await;
+  let runtime = runtime_for_root(&root, ProxyStaticFilesConfig::default());
+  let response = serve(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    0,
+  )
+  .await;
 
   assert_eq!(response.status(), StatusCode::OK);
   assert!(

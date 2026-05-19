@@ -634,6 +634,7 @@ where
       &resolved.route.name,
       &resolved.route.path_prefix,
       static_root,
+      &state.static_files,
       state.config.proxy.static_files.inline_max_bytes,
     )
     .await;

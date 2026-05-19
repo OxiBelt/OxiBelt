@@ -1537,6 +1537,43 @@ run_case_checks() {
         ),
         docker_case(
             "security",
+            "static-hot-cache-security",
+            "static hot-object cache revalidates through secure static root resolution",
+            ExpectStart::Success,
+            Needs::default(),
+            r#"
+run_case_checks() {
+  local first cached refreshed escaped body
+
+  first="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
+  assert_response_jq "${first}" '.body == "hot cache v1\n"'
+
+  docker exec --user 0 "${proxy_container}" /bin/sh -ceu \
+    'printf "hot cache v2\n" > /etc/oxibelt/config/public/hot.txt'
+  cached="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
+  assert_response_jq "${cached}" '.body == "hot cache v1\n"'
+
+  sleep 2
+  refreshed="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
+  assert_response_jq "${refreshed}" '.body == "hot cache v2\n"'
+
+  docker exec --user 0 "${proxy_container}" /bin/sh -ceu '
+    rm -f /etc/oxibelt/config/public/hot.txt
+    ln -s /etc/oxibelt/config/outside-secret.txt /etc/oxibelt/config/public/hot.txt
+  '
+  sleep 2
+  escaped="$(client_request_with_headers_to_target "proxy" 8443 "static-hot-cache.example.test" "/static/hot.txt" "403,404" "GET" "")"
+  body="$(jq -r '.body' <<<"${escaped}")"
+  if grep -F "STATIC_HOT_CACHE_SECRET" <<<"${body}" >/dev/null; then
+    echo "${escaped}" >&2
+    fail_with_diagnostics "static hot cache served an out-of-root symlink target"
+  fi
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "security",
             "static-sendfile-general-equivalence",
             "plaintext static sendfile fast path matches HTTPS static general path",
             ExpectStart::Success,
@@ -5157,6 +5194,30 @@ run_case_checks() {
   assert_body_jq "${response}" '.upstream == "http-upstream"
     and .request_version == "HTTP/1.1"
     and .path == "/origin/app/downstream-h2-upstream-h1"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "downstream-h2-adaptive-window-default",
+            "downstream HTTP/2 uses the default adaptive flow-control window",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h2" "example.test" "/app/downstream-h2-adaptive-window-default" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h2"'
+  assert_body_jq "${response}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/downstream-h2-adaptive-window-default"
     and .headers["x-forwarded-proto"] == "https"
     and .headers["x-forwarded-host"] == "example.test"'
 }

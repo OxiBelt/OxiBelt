@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow, bail};
 use tokio::fs::File;
 
+use super::runtime::StaticRootHandle;
+
 #[derive(Debug)]
 pub(crate) struct OpenedStaticFile {
   pub(crate) file: File,
@@ -25,7 +27,7 @@ impl StaticOpenError {
 }
 
 pub(crate) async fn open_verified_file(
-  root: &Path,
+  root: &StaticRootHandle,
   path: &Path,
 ) -> Result<OpenedStaticFile, StaticOpenError> {
   #[cfg(target_os = "linux")]
@@ -39,7 +41,7 @@ pub(crate) async fn open_verified_file(
 }
 
 async fn open_verified_file_with_procfs_fallback(
-  root: &Path,
+  root: &StaticRootHandle,
   path: &Path,
 ) -> Result<OpenedStaticFile, StaticOpenError> {
   let file = match File::open(path).await {
@@ -54,7 +56,7 @@ async fn open_verified_file_with_procfs_fallback(
       )));
     }
   };
-  let path = verify_opened_file(&file, root)
+  let path = verify_opened_file(&file, root.root())
     .with_context(|| format!("static file fd failed validation {}", path.display()))
     .map_err(StaticOpenError::forbidden)?;
   let metadata = file
@@ -88,23 +90,30 @@ where
 
 #[cfg(target_os = "linux")]
 async fn open_verified_file_with_openat2(
-  root: &Path,
+  root: &StaticRootHandle,
   path: &Path,
 ) -> Result<Option<OpenedStaticFile>, StaticOpenError> {
-  let root = root.to_path_buf();
+  let root_path = root.root().to_path_buf();
+  let root_fd = root.dir_fd();
   let path = path.to_path_buf();
-  tokio::task::spawn_blocking(move || open_verified_file_with_openat2_blocking(&root, &path))
-    .await
-    .context("static file openat2 worker failed")
-    .map_err(StaticOpenError::forbidden)?
+  tokio::task::spawn_blocking(move || {
+    open_verified_file_with_openat2_blocking(&root_path, root_fd, &path)
+  })
+  .await
+  .context("static file openat2 worker failed")
+  .map_err(StaticOpenError::forbidden)?
 }
 
 #[cfg(target_os = "linux")]
 fn open_verified_file_with_openat2_blocking(
   root: &Path,
+  root_fd: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
   path: &Path,
 ) -> Result<Option<OpenedStaticFile>, StaticOpenError> {
-  let opened = match open_regular_file_beneath_root(root, path)? {
+  let Some(root_fd) = root_fd else {
+    return Ok(None);
+  };
+  let opened = match open_regular_file_beneath_root(root, &root_fd, path)? {
     Some(opened) => opened,
     None => return Ok(None),
   };
@@ -114,11 +123,11 @@ fn open_verified_file_with_openat2_blocking(
 #[cfg(target_os = "linux")]
 fn open_regular_file_beneath_root(
   root: &Path,
+  root_fd: &std::os::fd::OwnedFd,
   path: &Path,
 ) -> Result<Option<OpenedStaticFile>, StaticOpenError> {
   use nix::errno::Errno;
-  use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
-  use nix::sys::stat::Mode;
+  use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
 
   fn static_open_error(path: &Path, error: Errno) -> StaticOpenError {
     if error == Errno::ENOENT {
@@ -143,14 +152,8 @@ fn open_regular_file_beneath_root(
     relative
   };
 
-  let root_fd = open(
-    root,
-    OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_DIRECTORY,
-    Mode::empty(),
-  )
-  .map_err(|error| static_open_error(root, error))?;
   let file_fd = match openat2(
-    &root_fd,
+    root_fd,
     relative,
     OpenHow::new()
       .flags(OFlag::O_RDONLY | OFlag::O_CLOEXEC)
@@ -163,9 +166,6 @@ fn open_regular_file_beneath_root(
     Err(error) => return Err(static_open_error(path, error)),
   };
   let file = std::fs::File::from(file_fd);
-  let path = verify_opened_file(&file, root)
-    .with_context(|| format!("static file fd failed validation {}", path.display()))
-    .map_err(StaticOpenError::forbidden)?;
   let metadata = file
     .metadata()
     .with_context(|| format!("failed to inspect opened static file {}", path.display()))
@@ -178,14 +178,14 @@ fn open_regular_file_beneath_root(
 
   Ok(Some(OpenedStaticFile {
     file: File::from_std(file),
-    path,
+    path: path.to_path_buf(),
     metadata,
   }))
 }
 
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) async fn open_verified_file_with_openat2_for_tests(
-  root: &Path,
+  root: &StaticRootHandle,
   path: &Path,
 ) -> Result<Option<OpenedStaticFile>, StaticOpenError> {
   open_verified_file_with_openat2(root, path).await

@@ -58,6 +58,10 @@ keep_alive_while_idle = false
 [proxy.static_files]
 sendfile = "auto"
 inline_max_bytes = 16384
+open_file_cache_max_entries = 256
+open_file_cache_ttl_ms = 1000
+hot_object_cache_max_bytes = 4194304
+hot_object_cache_max_file_bytes = 65536
 
 [compression]
 enabled = false

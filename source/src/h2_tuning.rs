@@ -9,6 +9,11 @@ pub(crate) fn apply_server_defaults(
   config: &ProxyHttp2Config,
 ) {
   builder.adaptive_window(config.adaptive_window);
+  if !config.adaptive_window {
+    builder.initial_stream_window_size(config.initial_stream_window_bytes);
+    builder.initial_connection_window_size(config.initial_connection_window_bytes);
+    builder.max_frame_size(config.max_frame_size_bytes);
+  }
   builder.max_concurrent_streams(Some(config.max_concurrent_streams));
   builder.max_send_buf_size(config.max_send_buf_size);
   apply_server_keep_alive(builder, config);
@@ -20,6 +25,11 @@ pub(crate) fn apply_legacy_client_defaults(
 ) {
   builder.timer(TokioTimer::new());
   builder.http2_adaptive_window(config.adaptive_window);
+  if !config.adaptive_window {
+    builder.http2_initial_stream_window_size(config.initial_stream_window_bytes);
+    builder.http2_initial_connection_window_size(config.initial_connection_window_bytes);
+    builder.http2_max_frame_size(config.max_frame_size_bytes);
+  }
   builder.http2_initial_max_send_streams(Some(config.max_concurrent_streams as usize));
   builder.http2_max_send_buf_size(config.max_send_buf_size);
   builder.http2_keep_alive_interval(keep_alive_interval(config));
@@ -33,6 +43,11 @@ pub(crate) fn apply_client_conn_defaults(
 ) {
   builder.timer(TokioTimer::new());
   builder.adaptive_window(config.adaptive_window);
+  if !config.adaptive_window {
+    builder.initial_stream_window_size(config.initial_stream_window_bytes);
+    builder.initial_connection_window_size(config.initial_connection_window_bytes);
+    builder.max_frame_size(config.max_frame_size_bytes);
+  }
   builder.initial_max_send_streams(Some(config.max_concurrent_streams as usize));
   builder.max_send_buf_size(config.max_send_buf_size);
   builder.keep_alive_interval(keep_alive_interval(config));

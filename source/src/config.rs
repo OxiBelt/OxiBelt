@@ -1156,10 +1156,72 @@ impl Config {
     if self.proxy.http2.max_concurrent_streams == 0
       || self.proxy.http2.max_send_buf_size == 0
       || self.proxy.http2.keep_alive_timeout_ms == 0
+      || self
+        .proxy
+        .http2
+        .initial_stream_window_bytes
+        .is_some_and(|value| value == 0)
+      || self
+        .proxy
+        .http2
+        .initial_connection_window_bytes
+        .is_some_and(|value| value == 0)
+      || self
+        .proxy
+        .http2
+        .max_frame_size_bytes
+        .is_some_and(|value| value == 0)
     {
       bail!(
         "proxy.http2 numeric values must be greater than 0, except keep_alive_interval_ms = 0 disables keep-alive pings"
       );
+    }
+    if self.proxy.http2.adaptive_window
+      && (self.proxy.http2.initial_stream_window_bytes.is_some()
+        || self.proxy.http2.initial_connection_window_bytes.is_some()
+        || self.proxy.http2.max_frame_size_bytes.is_some())
+    {
+      bail!("proxy.http2 manual window and frame-size values require adaptive_window = false");
+    }
+    const HTTP2_MAX_WINDOW_BYTES: u32 = (1 << 31) - 1;
+    if self
+      .proxy
+      .http2
+      .initial_stream_window_bytes
+      .is_some_and(|value| value > HTTP2_MAX_WINDOW_BYTES)
+      || self
+        .proxy
+        .http2
+        .initial_connection_window_bytes
+        .is_some_and(|value| value > HTTP2_MAX_WINDOW_BYTES)
+    {
+      bail!("proxy.http2 initial window values must be at most 2147483647 bytes");
+    }
+    const HTTP2_MIN_MAX_FRAME_SIZE_BYTES: u32 = 16_384;
+    const HTTP2_MAX_MAX_FRAME_SIZE_BYTES: u32 = 16_777_215;
+    if self.proxy.http2.max_frame_size_bytes.is_some_and(|value| {
+      !(HTTP2_MIN_MAX_FRAME_SIZE_BYTES..=HTTP2_MAX_MAX_FRAME_SIZE_BYTES).contains(&value)
+    }) {
+      bail!("proxy.http2.max_frame_size_bytes must be between 16384 and 16777215 bytes");
+    }
+    if self.proxy.static_files.open_file_cache_max_entries > 0
+      && self.proxy.static_files.open_file_cache_ttl_ms == 0
+    {
+      bail!(
+        "proxy.static_files.open_file_cache_ttl_ms must be greater than 0 when open_file_cache_max_entries is set"
+      );
+    }
+    if self.proxy.static_files.hot_object_cache_max_bytes > 0 {
+      if self.proxy.static_files.open_file_cache_max_entries == 0 {
+        bail!(
+          "proxy.static_files.hot_object_cache_max_bytes requires open_file_cache_max_entries greater than 0"
+        );
+      }
+      if self.proxy.static_files.hot_object_cache_max_file_bytes == 0 {
+        bail!(
+          "proxy.static_files.hot_object_cache_max_file_bytes must be greater than 0 when hot_object_cache_max_bytes is set"
+        );
+      }
     }
     self.validate_buffering()?;
     for cidr in &self.proxy.real_ip.trusted_proxies {
@@ -2321,15 +2383,25 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "proxy.http2" => &[
       "adaptive_window",
+      "initial_connection_window_bytes",
+      "initial_stream_window_bytes",
       "keep_alive_interval_ms",
       "keep_alive_timeout_ms",
       "keep_alive_while_idle",
+      "max_frame_size_bytes",
       "max_concurrent_streams",
       "max_send_buf_size",
     ][..],
     "proxy.http.grpc" => &["enabled", "respect_grpc_timeout", "retry"][..],
     "proxy.http.errors" => &["mode"][..],
-    "proxy.static_files" => &["inline_max_bytes", "sendfile"][..],
+    "proxy.static_files" => &[
+      "hot_object_cache_max_bytes",
+      "hot_object_cache_max_file_bytes",
+      "inline_max_bytes",
+      "open_file_cache_max_entries",
+      "open_file_cache_ttl_ms",
+      "sendfile",
+    ][..],
     "limits" => &[
       "client_body_timeout_ms",
       "client_header_timeout_ms",
@@ -3502,6 +3574,14 @@ pub struct ProxyStaticFilesConfig {
   pub sendfile: StaticFilesSendfileMode,
   #[serde(default = "default_static_files_inline_max_bytes")]
   pub inline_max_bytes: usize,
+  #[serde(default)]
+  pub open_file_cache_max_entries: usize,
+  #[serde(default)]
+  pub open_file_cache_ttl_ms: u64,
+  #[serde(default)]
+  pub hot_object_cache_max_bytes: usize,
+  #[serde(default = "default_static_files_hot_object_cache_max_file_bytes")]
+  pub hot_object_cache_max_file_bytes: usize,
 }
 
 impl Default for ProxyStaticFilesConfig {
@@ -3509,6 +3589,10 @@ impl Default for ProxyStaticFilesConfig {
     Self {
       sendfile: StaticFilesSendfileMode::Off,
       inline_max_bytes: default_static_files_inline_max_bytes(),
+      open_file_cache_max_entries: 0,
+      open_file_cache_ttl_ms: 0,
+      hot_object_cache_max_bytes: 0,
+      hot_object_cache_max_file_bytes: default_static_files_hot_object_cache_max_file_bytes(),
     }
   }
 }
@@ -5390,6 +5474,10 @@ fn default_retry_on() -> Vec<RetryCondition> {
 
 fn default_static_files_inline_max_bytes() -> usize {
   16 * 1024
+}
+
+fn default_static_files_hot_object_cache_max_file_bytes() -> usize {
+  64 * 1024
 }
 
 fn default_buffering_max_memory_body_bytes() -> usize {

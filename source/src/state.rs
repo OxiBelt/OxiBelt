@@ -24,6 +24,7 @@ use crate::mitigation::MitigationSink;
 use crate::pools::PoolState;
 use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
+use crate::proxy::http::static_files::StaticFilesRuntime;
 use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
@@ -180,6 +181,7 @@ pub struct AppSnapshot {
   pub turn_pools: Arc<TurnPoolState>,
   pub cache: Arc<ResponseCache>,
   pub(crate) compression: Arc<CompressionState>,
+  pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
   pub dynamic_policy: DynamicPolicyRuntime,
   pub lifecycle: Arc<LifecycleState>,
@@ -236,6 +238,8 @@ impl AppSnapshot {
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
     let compression = CompressionState::new(&config.compression);
+    let static_files =
+      StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
     let dynamic_policy = DynamicPolicyRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build dynamic policy runtime")?;
@@ -302,6 +306,7 @@ impl AppSnapshot {
       turn_pools,
       cache,
       compression,
+      static_files: Arc::new(static_files),
       metrics,
       dynamic_policy,
       lifecycle,
@@ -339,6 +344,8 @@ impl AppSnapshot {
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let alt_svc_header_value = build_alt_svc_header_value(&config)
       .context("failed to build precomputed Alt-Svc header value")?;
+    let static_files =
+      StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
 
     Ok(Self {
       config,
@@ -352,6 +359,7 @@ impl AppSnapshot {
       turn_pools,
       cache: previous.cache.clone(),
       compression: previous.compression.clone(),
+      static_files: Arc::new(static_files),
       metrics: previous.metrics.clone(),
       dynamic_policy: previous.dynamic_policy.clone(),
       lifecycle: previous.lifecycle.clone(),

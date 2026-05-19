@@ -181,6 +181,10 @@ max_temp_file_bytes = 0
 [proxy.static_files]
 sendfile = "off" # off | auto
 inline_max_bytes = 16384
+open_file_cache_max_entries = 0
+open_file_cache_ttl_ms = 0
+hot_object_cache_max_bytes = 0
+hot_object_cache_max_file_bytes = 65536
 
 [proxy.http]
 early_hints = "drop"
@@ -191,6 +195,9 @@ sse_auto_streaming = true
 
 [proxy.http2]
 adaptive_window = true
+# initial_stream_window_bytes = 1048576
+# initial_connection_window_bytes = 16777216
+# max_frame_size_bytes = 65535
 max_concurrent_streams = 1024
 max_send_buf_size = 1048576
 keep_alive_interval_ms = 0

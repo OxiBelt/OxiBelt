@@ -355,6 +355,12 @@ fn proxy_http2_tuning_defaults_and_custom_values_parse() {
     assert!(default_config.proxy.http2.adaptive_window);
     assert_eq!(default_config.proxy.http2.max_concurrent_streams, 1024);
     assert_eq!(default_config.proxy.http2.max_send_buf_size, 1024 * 1024);
+    assert_eq!(default_config.proxy.http2.initial_stream_window_bytes, None);
+    assert_eq!(
+        default_config.proxy.http2.initial_connection_window_bytes,
+        None
+    );
+    assert_eq!(default_config.proxy.http2.max_frame_size_bytes, None);
     assert_eq!(default_config.proxy.http2.keep_alive_interval_ms, 0);
     assert_eq!(default_config.proxy.http2.keep_alive_timeout_ms, 20_000);
     assert!(!default_config.proxy.http2.keep_alive_while_idle);
@@ -366,6 +372,9 @@ fn proxy_http2_tuning_defaults_and_custom_values_parse() {
 
 [proxy.http2]
 adaptive_window = false
+initial_stream_window_bytes = 1048576
+initial_connection_window_bytes = 16777216
+max_frame_size_bytes = 65535
 max_concurrent_streams = 64
 max_send_buf_size = 262144
 keep_alive_interval_ms = 10000
@@ -380,6 +389,15 @@ keep_alive_while_idle = true
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
     assert!(!config.proxy.http2.adaptive_window);
+    assert_eq!(
+        config.proxy.http2.initial_stream_window_bytes,
+        Some(1_048_576)
+    );
+    assert_eq!(
+        config.proxy.http2.initial_connection_window_bytes,
+        Some(16_777_216)
+    );
+    assert_eq!(config.proxy.http2.max_frame_size_bytes, Some(65_535));
     assert_eq!(config.proxy.http2.max_concurrent_streams, 64);
     assert_eq!(config.proxy.http2.max_send_buf_size, 262_144);
     assert_eq!(config.proxy.http2.keep_alive_interval_ms, 10_000);
@@ -399,6 +417,9 @@ fn proxy_http2_rejects_invalid_numeric_values() {
         "max_concurrent_streams = 0",
         "max_send_buf_size = 0",
         "keep_alive_timeout_ms = 0",
+        "initial_stream_window_bytes = 0",
+        "initial_connection_window_bytes = 0",
+        "max_frame_size_bytes = 0",
     ] {
         let raw = format!(
             r#"
@@ -418,6 +439,79 @@ fn proxy_http2_rejects_invalid_numeric_values() {
 }
 
 #[test]
+fn proxy_http2_rejects_out_of_range_manual_window_values() {
+    let temp_dir = common::TempDir::new("proxy-http2-invalid-ranges");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-http2-invalid-ranges");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (setting, expected) in [
+        (
+            "initial_stream_window_bytes = 2147483648",
+            "initial window values must be at most 2147483647 bytes",
+        ),
+        (
+            "initial_connection_window_bytes = 2147483648",
+            "initial window values must be at most 2147483647 bytes",
+        ),
+        (
+            "max_frame_size_bytes = 16383",
+            "max_frame_size_bytes must be between 16384 and 16777215 bytes",
+        ),
+        (
+            "max_frame_size_bytes = 16777216",
+            "max_frame_size_bytes must be between 16384 and 16777215 bytes",
+        ),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[proxy.http2]
+adaptive_window = false
+{setting}
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("out-of-range H2 setting should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn proxy_http2_rejects_manual_windows_when_adaptive_window_is_enabled() {
+    let temp_dir = common::TempDir::new("proxy-http2-adaptive-manual");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-http2-adaptive-manual");
+    let raw = format!(
+        r#"
+{}
+
+[proxy.http2]
+adaptive_window = true
+initial_stream_window_bytes = 1048576
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("manual H2 window should require disabled adaptive window");
+    assert!(
+        error
+            .to_string()
+            .contains("manual window and frame-size values require adaptive_window = false"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn proxy_static_files_defaults_and_custom_values_parse() {
     let temp_dir = common::TempDir::new("proxy-static-files");
     let (cert_path, key_path) =
@@ -434,6 +528,25 @@ fn proxy_static_files_defaults_and_custom_values_parse() {
         default_config.proxy.static_files.inline_max_bytes,
         16 * 1024
     );
+    assert_eq!(
+        default_config
+            .proxy
+            .static_files
+            .open_file_cache_max_entries,
+        0
+    );
+    assert_eq!(default_config.proxy.static_files.open_file_cache_ttl_ms, 0);
+    assert_eq!(
+        default_config.proxy.static_files.hot_object_cache_max_bytes,
+        0
+    );
+    assert_eq!(
+        default_config
+            .proxy
+            .static_files
+            .hot_object_cache_max_file_bytes,
+        64 * 1024
+    );
 
     let raw = format!(
         r#"
@@ -442,6 +555,10 @@ fn proxy_static_files_defaults_and_custom_values_parse() {
 [proxy.static_files]
 sendfile = "auto"
 inline_max_bytes = 0
+open_file_cache_max_entries = 128
+open_file_cache_ttl_ms = 250
+hot_object_cache_max_bytes = 1048576
+hot_object_cache_max_file_bytes = 32768
 "#
     );
     let config: Config = toml::from_str(&raw).expect("config should parse");
@@ -451,6 +568,56 @@ inline_max_bytes = 0
         StaticFilesSendfileMode::Auto
     );
     assert_eq!(config.proxy.static_files.inline_max_bytes, 0);
+    assert_eq!(config.proxy.static_files.open_file_cache_max_entries, 128);
+    assert_eq!(config.proxy.static_files.open_file_cache_ttl_ms, 250);
+    assert_eq!(
+        config.proxy.static_files.hot_object_cache_max_bytes,
+        1_048_576
+    );
+    assert_eq!(
+        config.proxy.static_files.hot_object_cache_max_file_bytes,
+        32_768
+    );
+}
+
+#[test]
+fn proxy_static_files_rejects_incomplete_cache_settings() {
+    let temp_dir = common::TempDir::new("proxy-static-cache-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "proxy-static-cache-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (setting, expected) in [
+        (
+            "open_file_cache_max_entries = 16",
+            "open_file_cache_ttl_ms must be greater than 0",
+        ),
+        (
+            "hot_object_cache_max_bytes = 1024",
+            "hot_object_cache_max_bytes requires open_file_cache_max_entries",
+        ),
+        (
+            "open_file_cache_max_entries = 16\nopen_file_cache_ttl_ms = 100\nhot_object_cache_max_bytes = 1024\nhot_object_cache_max_file_bytes = 0",
+            "hot_object_cache_max_file_bytes must be greater than 0",
+        ),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[proxy.static_files]
+{setting}
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid static cache settings should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
