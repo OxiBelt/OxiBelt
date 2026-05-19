@@ -186,9 +186,16 @@ fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) ->
 }
 
 fn static_16k_ratio_harness(rows: &[&str], min_ratio: &str) -> HarnessRun {
-    let function = extract_bash_function(
-        &performance_script_text(),
-        "assert_static_16k_h1c_caddy_ratio",
+    let functions = format!(
+        "{}\n\n{}",
+        extract_bash_function(
+            &performance_script_text(),
+            "handle_regression_gate_violation"
+        ),
+        extract_bash_function(
+            &performance_script_text(),
+            "assert_static_16k_h1c_caddy_ratio",
+        )
     );
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -204,7 +211,7 @@ fn static_16k_ratio_harness(rows: &[&str], min_ratio: &str) -> HarnessRun {
     let results_path = temp_dir.join("results.jsonl");
     fs::write(&results_path, format!("{}\n", rows.join("\n")))
         .expect("results fixture should be writable");
-    write_static_16k_ratio_harness(&harness_path, &function);
+    write_static_16k_ratio_harness(&harness_path, &functions);
 
     let output = Command::new("bash")
         .arg(&harness_path)
@@ -225,9 +232,16 @@ fn waf_crs_gate_harness(
     crs_min_rps: &str,
     max_p99_ratio: &str,
 ) -> HarnessRun {
-    let function = extract_bash_function(
-        &performance_script_text(),
-        "assert_waf_crs_regression_gates",
+    let functions = format!(
+        "{}\n\n{}",
+        extract_bash_function(
+            &performance_script_text(),
+            "handle_regression_gate_violation"
+        ),
+        extract_bash_function(
+            &performance_script_text(),
+            "assert_waf_crs_regression_gates",
+        )
     );
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -243,7 +257,7 @@ fn waf_crs_gate_harness(
     let results_path = temp_dir.join("results.jsonl");
     fs::write(&results_path, format!("{}\n", rows.join("\n")))
         .expect("results fixture should be writable");
-    write_waf_crs_gate_harness(&harness_path, &function);
+    write_waf_crs_gate_harness(&harness_path, &functions);
 
     let output = Command::new("bash")
         .arg(&harness_path)
@@ -376,13 +390,14 @@ run_accept_multiplier_profile accept-0_5 baseline waf-enforcing crs-enforcing
     fs::write(path, harness).expect("Bash harness should be writable");
 }
 
-fn write_static_16k_ratio_harness(path: &Path, function: &str) {
+fn write_static_16k_ratio_harness(path: &Path, functions: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
 
 events="${{EVENTS_FILE:?}}"
 results_jsonl="${{RESULTS_JSONL:?}}"
+regression_gate_mode="fail"
 static_16k_h1c_min_caddy_ratio="${{MIN_RATIO:?}}"
 
 fail_with_diagnostics() {{
@@ -391,7 +406,7 @@ fail_with_diagnostics() {{
   exit 1
 }}
 
-{function}
+{functions}
 
 assert_static_16k_h1c_caddy_ratio
 "#
@@ -399,13 +414,14 @@ assert_static_16k_h1c_caddy_ratio
     fs::write(path, harness).expect("Bash harness should be writable");
 }
 
-fn write_waf_crs_gate_harness(path: &Path, function: &str) {
+fn write_waf_crs_gate_harness(path: &Path, functions: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
 
 events="${{EVENTS_FILE:?}}"
 results_jsonl="${{RESULTS_JSONL:?}}"
+regression_gate_mode="fail"
 waf_enforcing_min_rps="${{WAF_MIN_RPS:?}}"
 crs_enforcing_min_rps="${{CRS_MIN_RPS:?}}"
 waf_crs_max_enforce_p99_ratio="${{MAX_P99_RATIO:?}}"
@@ -416,7 +432,7 @@ fail_with_diagnostics() {{
   exit 1
 }}
 
-{function}
+{functions}
 
 assert_waf_crs_regression_gates
 "#

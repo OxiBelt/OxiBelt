@@ -4512,9 +4512,7 @@ run_case_checks() {
             ExpectStart::Failure,
             Needs::default(),
             "",
-            Some(
-                "at least one downstream HTTP version or SNI forwarding protocol must be enabled",
-            ),
+            Some("at least one downstream HTTP version or SNI forwarding protocol must be enabled"),
         ),
         docker_case(
             "config-invalid",
