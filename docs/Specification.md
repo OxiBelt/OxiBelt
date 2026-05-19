@@ -52,7 +52,7 @@ Downstream protocol support:
 
 - HTTP/1.1 and HTTP/2 are served over TCP.
 - HTTP/3 is served over QUIC on the configured `https_bind` UDP address.
-- `[sni_forward]` can inspect visible TLS ClientHello SNI before OxiBelt terminates local traffic. Explicit SNI forwarding rules override local route hosts; otherwise configured route hosts remain local, and unknown SNI forwards only when `sni_forward.default_target` is configured. Missing, malformed, or unparseable SNI fails closed. Route host `"*"` does not count as a defined SNI name.
+- `[sni_forward]` can inspect visible TLS ClientHello SNI before OxiBelt terminates local traffic. Explicit SNI forwarding rules override local route hosts; otherwise configured route hosts remain local, and unknown SNI forwards only when `sni_forward.default_target` is configured. Missing, malformed, or unparseable SNI fails closed. Route host `"*"` does not count as a defined SNI name. QUIC SNI forwarding bounds pre-classification session state and local datagram queues with `[sni_forward]` limits.
 - TCP SNI forwarding uses bounded `TcpStream::peek`, preserving the original ClientHello for raw TCP passthrough targets. Local matches continue through the normal rustls HTTP/1.1 and HTTP/2 path.
 - QUIC SNI forwarding uses the same UDP address as downstream HTTP/3. OxiBelt decrypts QUIC Initial payloads, extracts CRYPTO frames, parses visible ClientHello SNI, and forwards matched sessions as UDP passthrough while local sessions are queued into Quinn. QUIC SNI forwarding requires downstream HTTP/3 to be enabled.
 - Deployments that enable HTTP/3 must expose the HTTPS bind address for both TCP and UDP.

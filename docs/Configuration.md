@@ -428,6 +428,8 @@ The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reu
 enabled = true
 client_hello_max_bytes = 65536
 idle_timeout_ms = 75000
+quic_max_sessions = 8192
+quic_local_queue_capacity = 1024
 # default_target = "10.0.10.20:443"
 
 [[sni_forward.rules]]
@@ -445,6 +447,8 @@ Matching order is explicit `[[sni_forward.rules]]` first, then local `[[routes]]
 For TCP TLS, OxiBelt peeks at a bounded ClientHello before `rustls` accepts the connection. Forwarded sessions are raw TCP tunnels, and the original ClientHello remains unread by OxiBelt because `peek` does not consume bytes. Local SNI matches continue through the normal HTTP/1.1 and HTTP/2 TLS termination path.
 
 For QUIC, `protocols = ["quic"]` uses the same UDP address as downstream HTTP/3 and therefore requires `listeners.http3 = true`. OxiBelt decrypts QUIC Initial packets, reassembles visible CRYPTO frames, extracts ClientHello SNI, and forwards matched sessions as UDP passthrough while local sessions are queued into Quinn. QUIC forwarding tracks connection IDs and expires idle sessions using the rule or global idle timeout.
+
+`quic_max_sessions` caps SNI-forwarding QUIC pre-classification state across local and forwarded clients; when the cap is exceeded, the oldest tracked client is evicted and forwarded sessions are ended with a `capacity` outcome. `quic_local_queue_capacity` caps queued local QUIC datagrams waiting for Quinn; excess local datagrams are dropped instead of growing memory without bound. Both values must be greater than zero.
 
 Prometheus metrics include aggregate SNI-forward decision, parse-failure, session, active-QUIC-session, TCP-byte, and UDP-byte counters. With `metrics.detail = "detailed"`, bounded labels add protocol, decision, rule, target, and outcome. Structured tracing events are emitted for L4 session start/end with protocol, rule, target, SNI, duration, and byte counts.
 

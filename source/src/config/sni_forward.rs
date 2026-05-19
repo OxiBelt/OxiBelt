@@ -9,11 +9,15 @@ use super::{
 };
 
 const DEFAULT_CLIENT_HELLO_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_QUIC_MAX_SESSIONS: usize = 8192;
+const DEFAULT_QUIC_LOCAL_QUEUE_CAPACITY: usize = 1024;
 pub(super) const SNI_FORWARD_CONFIG_KEYS: &[&str] = &[
   "client_hello_max_bytes",
   "default_target",
   "enabled",
   "idle_timeout_ms",
+  "quic_local_queue_capacity",
+  "quic_max_sessions",
   "rules",
 ];
 pub(super) const SNI_FORWARD_RULE_KEYS: &[&str] = &[
@@ -56,6 +60,10 @@ pub struct SniForwardConfig {
   pub client_hello_max_bytes: usize,
   #[serde(default = "default_client_idle_timeout_ms")]
   pub idle_timeout_ms: u64,
+  #[serde(default = "default_quic_max_sessions")]
+  pub quic_max_sessions: usize,
+  #[serde(default = "default_quic_local_queue_capacity")]
+  pub quic_local_queue_capacity: usize,
   #[serde(default)]
   pub rules: Vec<SniForwardRuleConfig>,
 }
@@ -67,6 +75,8 @@ impl Default for SniForwardConfig {
       default_target: None,
       client_hello_max_bytes: default_client_hello_max_bytes(),
       idle_timeout_ms: default_client_idle_timeout_ms(),
+      quic_max_sessions: default_quic_max_sessions(),
+      quic_local_queue_capacity: default_quic_local_queue_capacity(),
       rules: Vec::new(),
     }
   }
@@ -105,6 +115,12 @@ impl SniForwardConfig {
     }
     if self.idle_timeout_ms == 0 {
       bail!("sni_forward.idle_timeout_ms must be greater than 0");
+    }
+    if self.quic_max_sessions == 0 {
+      bail!("sni_forward.quic_max_sessions must be greater than 0");
+    }
+    if self.quic_local_queue_capacity == 0 {
+      bail!("sni_forward.quic_local_queue_capacity must be greater than 0");
     }
     if let Some(target) = &self.default_target {
       validate_sni_forward_target("sni_forward.default_target", target)?;
@@ -189,6 +205,14 @@ pub enum SniForwardProtocol {
 
 fn default_client_hello_max_bytes() -> usize {
   DEFAULT_CLIENT_HELLO_MAX_BYTES
+}
+
+fn default_quic_max_sessions() -> usize {
+  DEFAULT_QUIC_MAX_SESSIONS
+}
+
+fn default_quic_local_queue_capacity() -> usize {
+  DEFAULT_QUIC_LOCAL_QUEUE_CAPACITY
 }
 
 fn default_sni_forward_protocols() -> Vec<SniForwardProtocol> {

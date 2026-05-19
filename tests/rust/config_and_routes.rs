@@ -72,6 +72,8 @@ fn sni_forward_tcp_rule_parses_and_validates() {
 enabled = true
 client_hello_max_bytes = 8192
 idle_timeout_ms = 60000
+quic_max_sessions = 128
+quic_local_queue_capacity = 32
 
 [[sni_forward.rules]]
 name = "legacy-tls"
@@ -88,6 +90,8 @@ tcp_proxy_protocol_egress = "v1"
 
     assert!(config.sni_forward.enabled);
     assert_eq!(config.sni_forward.client_hello_max_bytes, 8192);
+    assert_eq!(config.sni_forward.quic_max_sessions, 128);
+    assert_eq!(config.sni_forward.quic_local_queue_capacity, 32);
     assert_eq!(
         config.sni_forward.rules[0].protocols,
         vec![SniForwardProtocol::TcpTls]
@@ -110,6 +114,45 @@ default_target = "127.0.0.1:9443"
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
     assert!(config.sni_forward.has_tcp_tls());
+    assert_eq!(config.sni_forward.quic_max_sessions, 8192);
+    assert_eq!(config.sni_forward.quic_local_queue_capacity, 1024);
+}
+
+#[test]
+fn sni_forward_rejects_zero_quic_limits() {
+    let temp_dir = common::TempDir::new("sni-forward-zero-limits");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "sni-forward-zero-limits");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (suffix, expected) in [
+        (
+            r#"
+[sni_forward]
+enabled = true
+quic_max_sessions = 0
+"#,
+            "sni_forward.quic_max_sessions must be greater than 0",
+        ),
+        (
+            r#"
+[sni_forward]
+enabled = true
+quic_local_queue_capacity = 0
+"#,
+            "sni_forward.quic_local_queue_capacity must be greater than 0",
+        ),
+    ] {
+        let config: Config = toml::from_str(&(base.clone() + suffix)).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("zero SNI forwarding QUIC limits should fail");
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains(expected),
+            "unexpected error: {error:#}"
+        );
+    }
 }
 
 #[test]

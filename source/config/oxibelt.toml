@@ -143,6 +143,8 @@ max_lifetime_ms = 600000
 # enabled = true
 # client_hello_max_bytes = 65536
 # idle_timeout_ms = 75000
+# quic_max_sessions = 8192
+# quic_local_queue_capacity = 1024
 # default_target = "10.0.10.20:443"
 #
 # [[sni_forward.rules]]

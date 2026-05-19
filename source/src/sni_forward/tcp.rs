@@ -17,6 +17,8 @@ use crate::state::AppSnapshot;
 use crate::stream::resolve_target_addr;
 use crate::telemetry::TelemetryRuntime;
 
+const INCOMPLETE_CLIENT_HELLO_RETRY_DELAY: Duration = Duration::from_millis(10);
+
 pub(crate) enum TcpSniForwardResult {
   Local(TcpStream),
   Forwarded,
@@ -89,6 +91,15 @@ async fn peek_sni(
   max_bytes: usize,
   timeout: Duration,
 ) -> anyhow::Result<Option<String>> {
+  peek_sni_with_incomplete_observer(stream, max_bytes, timeout, || {}).await
+}
+
+async fn peek_sni_with_incomplete_observer(
+  stream: &TcpStream,
+  max_bytes: usize,
+  timeout: Duration,
+  mut on_incomplete: impl FnMut(),
+) -> anyhow::Result<Option<String>> {
   tokio::time::timeout(timeout, async {
     let mut buffer = vec![0u8; max_bytes];
     loop {
@@ -104,7 +115,10 @@ async fn peek_sni(
         ClientHelloSni::Incomplete if read >= max_bytes => {
           bail!("TLS ClientHello exceeded sni_forward.client_hello_max_bytes");
         }
-        ClientHelloSni::Incomplete => tokio::task::yield_now().await,
+        ClientHelloSni::Incomplete => {
+          on_incomplete();
+          tokio::time::sleep(INCOMPLETE_CLIENT_HELLO_RETRY_DELAY).await;
+        }
       }
     }
   })
@@ -299,5 +313,50 @@ where
     let bytes = read as u64;
     copied = copied.saturating_add(bytes);
     let _ = activity.try_send((direction, bytes));
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Arc;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  use super::*;
+  use tokio::net::TcpListener;
+
+  #[tokio::test]
+  async fn partial_client_hello_retries_with_bounded_backoff() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move {
+      let mut stream = TcpStream::connect(addr).await.unwrap();
+      stream
+        .write_all(&[0x16, 0x03, 0x01, 0xff, 0xff])
+        .await
+        .unwrap();
+      tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+    let (stream, _) = listener.accept().await.unwrap();
+    let incomplete_attempts = Arc::new(AtomicUsize::new(0));
+    let observed = incomplete_attempts.clone();
+
+    let error =
+      peek_sni_with_incomplete_observer(&stream, 4096, Duration::from_millis(45), move || {
+        observed.fetch_add(1, Ordering::Relaxed);
+      })
+      .await
+      .expect_err("partial ClientHello should time out");
+
+    assert!(
+      error
+        .to_string()
+        .contains("TLS ClientHello SNI inspection timed out"),
+      "unexpected error: {error:#}"
+    );
+    assert!(
+      incomplete_attempts.load(Ordering::Relaxed) <= 5,
+      "partial ClientHello retries should be paced"
+    );
+    client.await.unwrap();
   }
 }
