@@ -898,9 +898,9 @@ HttpResponseMetadata.Body: BodyMetadata
 ```
 
 ```text
-UpstreamMetadata.Name: String
-UpstreamMetadata.Pool: String
-UpstreamMetadata.Scheme: String
+UpstreamMetadata.Name: String | Null
+UpstreamMetadata.Pool: String | Null
+UpstreamMetadata.Scheme: String | Null
 UpstreamMetadata.ConnectTimeMs: Int | Null
 UpstreamMetadata.FirstByteTimeMs: Int | Null
 UpstreamMetadata.Error: UpstreamError | Null
@@ -918,6 +918,8 @@ WebTransportStreamMetadata.StreamKind: 'bidi' | 'uni' | Null
 WebTransportStreamMetadata.StreamId: Int | Null
 WebTransportStreamMetadata.DatagramSize: Int | Null
 ```
+
+`UpstreamMetadata.Name` is `Null` when no upstream was selected or the upstream is unknown. `UpstreamMetadata.Pool` is `Null` when no upstream pool was used. `UpstreamMetadata.Scheme` is `Null` when the upstream scheme is unknown.
 
 ```text
 TlsMetadata.Enabled: Bool
