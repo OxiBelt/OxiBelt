@@ -477,7 +477,7 @@ key = "LoginRequest"
 value = "true"
 ```
 
-Tag keys and Person proof `success_tag` values must match `[A-Za-z0-9-]{1,32}`. Header, tag, routing, and response replacement mutations count against `waf.limits.max_mutations`.
+Tag keys and Person proof `success_tag` values must match `[A-Za-z0-9-]{1,32}`. `waf.limits.max_mutations` counts request/response header mutations, `set_tag`, routing overrides, `set_load_balancing_policy`, `rate_limit`, `weigh_person_proof`, `allow_person_proof`, and `emit_mitigation`. Terminal actions such as `reject`, `replace_response`, `reject_response`, `require_person_proof`, `continue_response`, and `close_stream` are validated separately and do not consume this mutation budget.
 
 Mitigation emission action:
 
@@ -738,7 +738,7 @@ If `fields` is omitted, OxiBelt emits the default access-log field set. In that 
 Top-level objects:
 
 ```text
-Context.Phase: 'request' | 'response'
+Context.Phase: 'request' | 'response' | 'stream'
 Context.RuleName: String
 Context.RuleId: String | Null
 Context.RuleTags: RuleTagSet
