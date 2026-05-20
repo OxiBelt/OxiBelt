@@ -111,7 +111,7 @@ pub(super) fn from_action(
       provider_metadata: provider_metadata.clone(),
       site_key: site_key.clone(),
       secret_env: secret_env.clone(),
-      provider_endpoint: provider_endpoint.clone(),
+      provider_endpoint: provider_endpoint.as_deref().cloned(),
       provider_timeout_ms: *provider_timeout_ms,
       provider_fail_policy: *provider_fail_policy,
       provider_max_response_body_bytes: *provider_max_response_body_bytes,

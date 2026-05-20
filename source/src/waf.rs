@@ -486,7 +486,7 @@ pub enum WafActionConfig {
     #[serde(default)]
     secret_env: Option<String>,
     #[serde(default)]
-    provider_endpoint: Option<url::Url>,
+    provider_endpoint: Option<Box<url::Url>>,
     #[serde(default = "default_person_proof_provider_timeout_ms")]
     provider_timeout_ms: u64,
     #[serde(default)]
@@ -1430,7 +1430,7 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     provider.as_deref(),
     site_key.as_deref(),
     secret_env.as_deref(),
-    provider_endpoint.as_ref(),
+    provider_endpoint.as_deref(),
     *provider_timeout_ms,
     *provider_max_response_body_bytes,
   )?;
