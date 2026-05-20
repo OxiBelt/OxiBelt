@@ -8,12 +8,13 @@ use oxibelt::config::{
     AdminPermission, AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig,
     Config, ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode,
     DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
-    ExpectContinueMode, ExternalAuthProvider, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode,
-    MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode,
-    ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides,
-    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
-    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
-    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    ExpectContinueMode, ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode,
+    GrpcRetryMode, HotReloadMode, MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode,
+    ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition,
+    RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
+    TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
+    UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -5001,14 +5002,20 @@ fn forwarded_headers_mode_defaults_to_overwrite() {
     let temp_dir = common::TempDir::new("forwarded-headers-default");
     let (cert_path, key_path) =
         common::create_self_signed_cert(temp_dir.path(), "forwarded-headers-default");
-    let raw = common::minimal_config_toml(&cert_path, &key_path)
-        .replace("\n[proxy.forwarded_headers]\nmode = \"overwrite\"\n", "\n");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "\n[proxy.forwarded_headers]\nmode = \"overwrite\"\nclient_ip_source = \"resolved\"\n",
+        "\n",
+    );
 
     let config: Config = toml::from_str(&raw).expect("config should parse");
 
     assert_eq!(
         config.proxy.forwarded_headers.mode,
         ForwardedHeaderMode::Overwrite
+    );
+    assert_eq!(
+        config.proxy.forwarded_headers.client_ip_source,
+        ForwardedClientIpSource::Resolved
     );
     config.validate().expect("config should validate");
 }
@@ -5028,6 +5035,43 @@ fn forwarded_headers_mode_parses_append() {
         ForwardedHeaderMode::Append
     );
     config.validate().expect("config should validate");
+}
+
+#[test]
+fn forwarded_headers_client_ip_source_parses_direct_peer() {
+    let temp_dir = common::TempDir::new("forwarded-headers-direct-peer");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "forwarded-headers-direct-peer");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "client_ip_source = \"resolved\"",
+        "client_ip_source = \"direct_peer\"",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert_eq!(
+        config.proxy.forwarded_headers.client_ip_source,
+        ForwardedClientIpSource::DirectPeer
+    );
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn forwarded_headers_client_ip_source_rejects_unknown_values() {
+    let temp_dir = common::TempDir::new("forwarded-headers-bad-source");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "forwarded-headers-bad-source");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "client_ip_source = \"resolved\"",
+        "client_ip_source = \"spoofed\"",
+    );
+
+    let error = toml::from_str::<Config>(&raw).expect_err("config should reject unknown source");
+
+    assert!(
+        error.to_string().contains("unknown variant"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

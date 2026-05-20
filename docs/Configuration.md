@@ -462,6 +462,7 @@ trusted_ca_certs = []
 
 [proxy.forwarded_headers]
 mode = "overwrite" # overwrite | append
+client_ip_source = "resolved" # resolved | direct_peer
 
 [proxy.real_ip]
 enabled = false
@@ -531,7 +532,7 @@ retry = "off"        # off | safe_unary
 mode = "legacy_plain" # legacy_plain | plain | json
 ```
 
-`trusted_ca_certs` adds upstream TLS trust roots from the cert directory. `forwarded_headers.mode = "overwrite"` replaces inbound forwarding metadata; `append` preserves and extends the inbound `X-Forwarded-For` chain. `real_ip` affects the client IP used by rate limiting and WAF evaluation only when the direct peer is trusted, and can also drive connection limits when `limits.connection_limit_identity` selects a Real-IP mode.
+`trusted_ca_certs` adds upstream TLS trust roots from the cert directory. `forwarded_headers.mode = "overwrite"` replaces inbound forwarding metadata; `append` preserves and extends the inbound `X-Forwarded-For` chain. `forwarded_headers.client_ip_source = "resolved"` emits the same trusted client IP used by WAF, rate limiting, external auth, and Real-IP-aware connection limits; set it to `"direct_peer"` only for legacy upstreams that expect the immediate peer address. `X-Forwarded-Port` is derived from the downstream request authority, or the scheme default when no port is present. `real_ip` resolves the client IP only when the direct peer is trusted; that identity is used by rate limiting and WAF evaluation, by forwarded headers when `client_ip_source = "resolved"`, and by connection limits when `limits.connection_limit_identity` selects a Real-IP mode.
 
 `generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
 
@@ -1616,6 +1617,7 @@ trusted_ca_certs = []
 
 [proxy.forwarded_headers]
 mode = "overwrite"
+client_ip_source = "resolved"
 
 [proxy.auto_upgrade]
 enabled = true

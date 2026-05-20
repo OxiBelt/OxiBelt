@@ -13,9 +13,10 @@ use super::version::upstream_request_version;
 pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) target_uri: Uri,
   pub(crate) compression: &'a CompressionConfig,
-  pub(crate) peer_addr: std::net::SocketAddr,
+  pub(crate) forwarded_client_addr: std::net::SocketAddr,
   pub(crate) downstream_host: &'a str,
   pub(crate) downstream_scheme: &'a str,
+  pub(crate) downstream_port: u16,
   pub(crate) forwarded_header_mode: ForwardedHeaderMode,
   pub(crate) preserve_host: bool,
   pub(crate) upstream_version: HttpVersion,
@@ -51,9 +52,10 @@ pub(crate) fn rebuild_request_parts(
 
   add_forwarded_headers(
     &mut parts.headers,
-    options.peer_addr,
+    options.forwarded_client_addr,
     options.downstream_host,
     options.downstream_scheme,
+    options.downstream_port,
     options.forwarded_header_mode,
   );
 
@@ -95,9 +97,10 @@ mod tests {
     RebuildRequestOptions {
       target_uri,
       compression,
-      peer_addr: "203.0.113.10:5443".parse().unwrap(),
+      forwarded_client_addr: "203.0.113.10:5443".parse().unwrap(),
       downstream_host,
       downstream_scheme: "https",
+      downstream_port: 443,
       forwarded_header_mode: ForwardedHeaderMode::Overwrite,
       preserve_host,
       upstream_version: HttpVersion::H1,
@@ -130,6 +133,7 @@ mod tests {
     );
     assert!(!rebuilt.headers().contains_key(HOST));
     assert_eq!(rebuilt.headers()["x-forwarded-host"], "absolute.example");
+    assert_eq!(rebuilt.headers()["x-forwarded-port"], "443");
   }
 
   #[test]

@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::config::{
-  Config, ConnectionLimitIdentityMode, ErrorResponseMode, HttpVersion, ProxyHttp2Config,
-  ProxyProtocolEgressMode, RouteConfig, UpstreamConfig,
+  Config, ConnectionLimitIdentityMode, ErrorResponseMode, ForwardedClientIpSource, HttpVersion,
+  ProxyHttp2Config, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig,
 };
 use crate::dynamic_policy::DynamicPolicyRequest;
 use crate::external_auth::{ExternalAuthOutcome, ExternalAuthTerminal};
@@ -55,8 +55,8 @@ use self::body::{
   error_is_timeout,
 };
 use self::headers::{
-  add_forwarded_headers, extract_host, is_upgrade_request, set_effective_host_header,
-  strip_hop_by_hop_headers, validate_authority_host_consistency,
+  add_forwarded_headers, extract_downstream_port, extract_host, is_upgrade_request,
+  set_effective_host_header, strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
 use self::observability::{record_request_observability, record_websocket_session_end};
 use self::request::{RebuildRequestOptions, rebuild_request};
@@ -72,6 +72,17 @@ static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::ne
 
 fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> {
   tags.as_ref().unwrap_or(&EMPTY_TAGS)
+}
+
+fn select_forwarded_client_addr(
+  peer_addr: std::net::SocketAddr,
+  client_addr: std::net::SocketAddr,
+  source: ForwardedClientIpSource,
+) -> std::net::SocketAddr {
+  match source {
+    ForwardedClientIpSource::Resolved => client_addr,
+    ForwardedClientIpSource::DirectPeer => peer_addr,
+  }
 }
 
 fn record_route_cache_event(state: &AppSnapshot, route: &RouteConfig, outcome: &str, reason: &str) {
@@ -367,6 +378,7 @@ where
   }
 
   let host = extract_host(&request).unwrap_or_default();
+  let downstream_port = extract_downstream_port(&request, downstream_scheme);
   access_log.set_downstream_host(&host);
   let path = request.uri().path();
   if let Err((status, message)) = validate_request_limits(&request, &state.config.limits) {
@@ -392,6 +404,11 @@ where
       );
     }
   };
+  let forwarded_client_addr = select_forwarded_client_addr(
+    peer_addr,
+    client_addr,
+    state.config.proxy.forwarded_headers.client_ip_source,
+  );
   access_log.client_addr = client_addr;
 
   match state.config.limits.connection_limit_identity {
@@ -469,9 +486,10 @@ where
       request,
       state.clone(),
       &resolved,
-      peer_addr,
+      forwarded_client_addr,
       client_addr,
       &host,
+      downstream_port,
       tcp_max_hop,
       tls.as_ref(),
       protocol,
@@ -517,9 +535,10 @@ where
       request,
       state.clone(),
       &resolved,
-      peer_addr,
+      forwarded_client_addr,
       client_addr,
       &host,
+      downstream_port,
       tcp_max_hop,
       tls.as_ref(),
       protocol,
@@ -765,9 +784,11 @@ where
       request,
       &state,
       &resolved,
+      forwarded_client_addr,
       client_addr,
       &host,
       downstream_scheme,
+      downstream_port,
       &request_waf,
       stream_waf,
       connection_limit_context.as_ref(),
@@ -920,9 +941,10 @@ where
   let rebuild = RebuildRequestOptions {
     target_uri,
     compression: &state.config.compression,
-    peer_addr,
+    forwarded_client_addr,
     downstream_scheme,
     downstream_host: &host,
+    downstream_port,
     forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
     preserve_host: upstream.preserve_host,
     upstream_version,
@@ -2338,9 +2360,11 @@ async fn handle_upgrade_request(
   mut request: Request<ProxyBody>,
   state: &Arc<AppSnapshot>,
   resolved: &crate::routes::ResolvedRoute<'_>,
+  forwarded_client_addr: std::net::SocketAddr,
   client_addr: std::net::SocketAddr,
   downstream_host: &str,
   downstream_scheme: &str,
+  downstream_port: u16,
   request_waf: &crate::waf::RequestWafDecision,
   stream_waf: Option<StreamWafRequestContext>,
   connection_limit_context: Option<&ConnectionLimitContext>,
@@ -2458,9 +2482,10 @@ async fn handle_upgrade_request(
   }
   add_forwarded_headers(
     &mut parts.headers,
-    client_addr,
+    forwarded_client_addr,
     downstream_host,
     downstream_scheme,
+    downstream_port,
     state.config.proxy.forwarded_headers.mode,
   );
   apply_header_mutations(&mut parts.headers, &request_waf.request_header_mutations);

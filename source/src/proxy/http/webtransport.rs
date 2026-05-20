@@ -18,8 +18,8 @@ use crate::waf::{
 
 use super::body::ProxyBody;
 use super::headers::{
-  add_forwarded_headers, extract_host, set_effective_host_header, strip_hop_by_hop_headers,
-  validate_authority_host_consistency,
+  add_forwarded_headers, extract_downstream_port, extract_host, set_effective_host_header,
+  strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
 use super::response::{text_response, waf_terminal_response};
 use super::uri::{rewrite_uri, validate_downstream_path};
@@ -55,6 +55,7 @@ pub(crate) async fn prepare_webtransport(
   }
 
   let host = extract_host(request).unwrap_or_default();
+  let downstream_port = extract_downstream_port(request, "https");
   let path = request.uri().path().to_string();
   if let Err(error) = validate_downstream_path(&path) {
     warn!(error = %error, path = %path, "rejected unsafe downstream WebTransport path");
@@ -83,6 +84,11 @@ pub(crate) async fn prepare_webtransport(
       )));
     }
   };
+  let forwarded_client_addr = super::select_forwarded_client_addr(
+    peer_addr,
+    client_addr,
+    state.config.proxy.forwarded_headers.client_ip_source,
+  );
   let Some(resolved) = state
     .route_table
     .resolve_normalized_host(&host, &path, &state.upstreams)
@@ -326,9 +332,10 @@ pub(crate) async fn prepare_webtransport(
   }
   add_forwarded_headers(
     &mut headers,
-    client_addr,
+    forwarded_client_addr,
     &host,
     "https",
+    downstream_port,
     state.config.proxy.forwarded_headers.mode,
   );
   apply_header_mutations(&mut headers, &request_waf.request_header_mutations);

@@ -2335,7 +2335,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "trusted_ca_certs",
       "upgrades",
     ][..],
-    "proxy.forwarded_headers" => &["mode"][..],
+    "proxy.forwarded_headers" => &["client_ip_source", "mode"][..],
     "proxy.auto_upgrade" => &["enabled", "max_http_version"][..],
     "proxy.real_ip" => &[
       "enabled",
@@ -3674,6 +3674,8 @@ pub enum StaticFilesSendfileMode {
 pub struct ForwardedHeadersConfig {
   #[serde(default)]
   pub mode: ForwardedHeaderMode,
+  #[serde(default)]
+  pub client_ip_source: ForwardedClientIpSource,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -3682,6 +3684,14 @@ pub enum ForwardedHeaderMode {
   #[default]
   Overwrite,
   Append,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardedClientIpSource {
+  #[default]
+  Resolved,
+  DirectPeer,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

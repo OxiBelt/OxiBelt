@@ -127,9 +127,9 @@ Host forwarding is controlled by each upstream's `preserve_host` setting:
 - `false`: use the upstream origin host.
 - `true`: forward the effective downstream request host selected for routing and WAF evaluation.
 
-Absolute-form request targets are accepted only when their URI authority matches the `Host` header after host normalization. Mismatches are rejected with `400 Bad Request` so routing, WAF policy, forwarded headers, and upstream `Host` forwarding cannot observe different downstream hosts.
+Absolute-form request targets are accepted only when their URI authority matches the `Host` header after host and effective-port normalization. Mismatches are rejected with `400 Bad Request` so routing, WAF policy, forwarded headers, and upstream `Host` forwarding cannot observe different downstream authorities.
 
-OxiBelt also manages `Forwarded` and `X-Forwarded-*` headers according to `proxy.forwarded_headers.mode`.
+OxiBelt also manages `Forwarded` and `X-Forwarded-*` headers according to `proxy.forwarded_headers.mode`. By default, `X-Forwarded-For` uses the same resolved client identity as WAF, rate limiting, and external auth; `proxy.forwarded_headers.client_ip_source = "direct_peer"` keeps legacy immediate-peer forwarding when needed.
 
 Downstream response compression is controlled by `[compression]` and optional route-level `compression` policy references. Support for `br`, `zstd`, `gzip`, and `deflate` is enabled by default, but OxiBelt only transforms responses when the downstream `Accept-Encoding`, request credential headers, response status, MIME type, size, existing response headers, and range/no-transform semantics allow it. Requests carrying `Cookie`, `Authorization`, or `Proxy-Authorization`, and responses carrying `Set-Cookie`, `Cache-Control: private`, or `Cache-Control: no-store`, are not compressed. Compressed responses set `Content-Encoding`, vary on `Accept-Encoding`, remove `Content-Length`, and weaken strong `ETag` values.
 

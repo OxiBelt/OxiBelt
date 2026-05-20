@@ -5,13 +5,14 @@ use http::header::{
   CONNECTION, FORWARDED, HOST, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHENTICATE,
   PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
+use http::uri::Authority;
 
 use crate::config::ForwardedHeaderMode;
 use crate::routes::normalize_host;
 
 pub(crate) fn extract_host<B>(request: &Request<B>) -> Option<String> {
   if let Some(authority) = request.uri().authority() {
-    return Some(normalize_host(authority.as_str()));
+    return Some(normalize_host(authority.host()));
   }
 
   request
@@ -19,6 +20,21 @@ pub(crate) fn extract_host<B>(request: &Request<B>) -> Option<String> {
     .get(HOST)
     .and_then(|value| value.to_str().ok())
     .map(normalize_host)
+}
+
+pub(crate) fn extract_downstream_port<B>(request: &Request<B>, scheme: &str) -> u16 {
+  request
+    .uri()
+    .authority()
+    .and_then(|authority| authority.port_u16())
+    .or_else(|| {
+      request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(explicit_authority_port)
+    })
+    .unwrap_or_else(|| default_port_for_scheme(scheme))
 }
 
 pub(crate) fn validate_authority_host_consistency<B>(
@@ -31,7 +47,8 @@ pub(crate) fn validate_authority_host_consistency<B>(
     return Ok(());
   };
   let host = host.to_str().map_err(|_| HostConsistencyError)?;
-  if normalize_host(authority.as_str()) == normalize_host(host) {
+  let scheme = request.uri().scheme_str();
+  if effective_authority(authority.as_str(), scheme)? == effective_authority(host, scheme)? {
     Ok(())
   } else {
     Err(HostConsistencyError)
@@ -58,13 +75,14 @@ pub(crate) fn set_effective_host_header(headers: &mut HeaderMap, host: &str) {
 
 pub(crate) fn add_forwarded_headers(
   headers: &mut HeaderMap,
-  peer_addr: std::net::SocketAddr,
+  forwarded_client_addr: std::net::SocketAddr,
   host: &str,
   scheme: &str,
+  port: u16,
   mode: ForwardedHeaderMode,
 ) {
   remove_inbound_forwarded_headers(headers, mode);
-  let forwarded_for = peer_addr.ip().to_string();
+  let forwarded_for = forwarded_client_addr.ip().to_string();
   match mode {
     ForwardedHeaderMode::Overwrite => {
       set_header(headers, "x-forwarded-for", &forwarded_for);
@@ -85,8 +103,45 @@ pub(crate) fn add_forwarded_headers(
 
   headers.insert(
     HeaderName::from_static("x-forwarded-port"),
-    port_header_value(peer_addr.port()),
+    port_header_value(port),
   );
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct EffectiveAuthority {
+  host: String,
+  port: Option<u16>,
+}
+
+fn effective_authority(
+  raw: &str,
+  scheme: Option<&str>,
+) -> Result<EffectiveAuthority, HostConsistencyError> {
+  let authority = Authority::from_str(raw.trim()).map_err(|_| HostConsistencyError)?;
+  Ok(EffectiveAuthority {
+    host: normalize_host(authority.host()),
+    port: authority
+      .port_u16()
+      .or_else(|| scheme.and_then(default_port_for_optional_scheme)),
+  })
+}
+
+fn explicit_authority_port(raw: &str) -> Option<u16> {
+  Authority::from_str(raw.trim())
+    .ok()
+    .and_then(|authority| authority.port_u16())
+}
+
+fn default_port_for_scheme(scheme: &str) -> u16 {
+  default_port_for_optional_scheme(scheme).unwrap_or(443)
+}
+
+fn default_port_for_optional_scheme(scheme: &str) -> Option<u16> {
+  match scheme {
+    "http" => Some(80),
+    "https" => Some(443),
+    _ => None,
+  }
 }
 
 fn remove_inbound_forwarded_headers(headers: &mut HeaderMap, mode: ForwardedHeaderMode) {
@@ -263,11 +318,59 @@ mod tests {
   fn authority_host_consistency_accepts_matching_normalized_hosts() {
     let request = Request::builder()
       .uri("http://example.test:8443/path")
-      .header(HOST, "Example.Test")
+      .header(HOST, "Example.Test:8443")
       .body(())
       .expect("request should build");
 
     assert!(validate_authority_host_consistency(&request).is_ok());
+  }
+
+  #[test]
+  fn authority_host_consistency_rejects_absolute_form_port_mismatch() {
+    let request = Request::builder()
+      .uri("http://example.test:8443/path")
+      .header(HOST, "example.test:9443")
+      .body(())
+      .expect("request should build");
+
+    assert_eq!(
+      validate_authority_host_consistency(&request),
+      Err(HostConsistencyError)
+    );
+  }
+
+  #[test]
+  fn authority_host_consistency_accepts_default_port_equivalence() {
+    let request = Request::builder()
+      .uri("http://example.test/path")
+      .header(HOST, "example.test:80")
+      .body(())
+      .expect("request should build");
+
+    assert!(validate_authority_host_consistency(&request).is_ok());
+  }
+
+  #[test]
+  fn downstream_port_prefers_authority_then_host_then_scheme_default() {
+    let authority = Request::builder()
+      .uri("http://absolute.example:8080/path")
+      .header(HOST, "header.example:9443")
+      .body(())
+      .expect("request should build");
+    let host = Request::builder()
+      .uri("/path")
+      .header(HOST, "header.example:9443")
+      .body(())
+      .expect("request should build");
+    let default = Request::builder()
+      .uri("/path")
+      .header(HOST, "header.example")
+      .body(())
+      .expect("request should build");
+
+    assert_eq!(extract_downstream_port(&authority, "http"), 8080);
+    assert_eq!(extract_downstream_port(&host, "https"), 9443);
+    assert_eq!(extract_downstream_port(&default, "https"), 443);
   }
 
   #[test]
@@ -287,6 +390,7 @@ mod tests {
       "203.0.113.10:5443".parse().unwrap(),
       "example.test",
       "https",
+      443,
       ForwardedHeaderMode::Overwrite,
     );
 
@@ -294,7 +398,7 @@ mod tests {
     assert_eq!(headers["x-forwarded-for"], "203.0.113.10");
     assert_eq!(headers["x-forwarded-host"], "example.test");
     assert_eq!(headers["x-forwarded-proto"], "https");
-    assert_eq!(headers["x-forwarded-port"], "5443");
+    assert_eq!(headers["x-forwarded-port"], "443");
   }
 
   #[test]
@@ -314,6 +418,7 @@ mod tests {
       "203.0.113.10:5443".parse().unwrap(),
       "example.test",
       "https",
+      8443,
       ForwardedHeaderMode::Append,
     );
 
@@ -321,7 +426,7 @@ mod tests {
     assert_eq!(headers["x-forwarded-for"], "198.51.100.1, 203.0.113.10");
     assert_eq!(headers["x-forwarded-host"], "example.test");
     assert_eq!(headers["x-forwarded-proto"], "https");
-    assert_eq!(headers["x-forwarded-port"], "5443");
+    assert_eq!(headers["x-forwarded-port"], "8443");
   }
 
   #[test]

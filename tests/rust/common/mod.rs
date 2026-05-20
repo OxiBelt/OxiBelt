@@ -241,6 +241,7 @@ trusted_ca_certs = []
 
 [proxy.forwarded_headers]
 mode = "overwrite"
+client_ip_source = "resolved"
 
 [proxy.auto_upgrade]
 enabled = true

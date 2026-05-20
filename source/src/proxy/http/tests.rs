@@ -16,6 +16,29 @@ fn parse_config(raw: &str) -> Config {
   config
 }
 
+#[test]
+fn forwarded_client_addr_source_selects_resolved_or_direct_peer() {
+  let peer_addr = "10.0.0.10:443".parse().unwrap();
+  let resolved_addr = "203.0.113.7:443".parse().unwrap();
+
+  assert_eq!(
+    select_forwarded_client_addr(
+      peer_addr,
+      resolved_addr,
+      crate::config::ForwardedClientIpSource::Resolved
+    ),
+    resolved_addr
+  );
+  assert_eq!(
+    select_forwarded_client_addr(
+      peer_addr,
+      resolved_addr,
+      crate::config::ForwardedClientIpSource::DirectPeer
+    ),
+    peer_addr
+  );
+}
+
 #[tokio::test]
 async fn app_snapshot_precomputes_alt_svc_header_value() {
   let temp_dir = common::TempDir::new("alt-svc-precompute");

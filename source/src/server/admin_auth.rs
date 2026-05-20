@@ -1,4 +1,6 @@
 use hyper::body::Incoming;
+use ring::digest;
+use subtle::ConstantTimeEq;
 
 use crate::config::{AdminConfig, AdminPermission, AdminRole};
 
@@ -19,10 +21,7 @@ pub(super) fn admin_actor(
     .get(::http::header::AUTHORIZATION)
     .and_then(|value| value.to_str().ok())
     .and_then(|value| value.strip_prefix("Bearer "))?;
-  if std::env::var(&config.bearer_token_env)
-    .ok()
-    .is_some_and(|expected| !expected.is_empty() && expected == actual)
-  {
+  if bearer_token_matches_env(&config.bearer_token_env, actual) {
     return Some(AdminActor {
       name: "admin".to_string(),
       roles: vec![AdminRole::Admin],
@@ -31,10 +30,7 @@ pub(super) fn admin_actor(
     });
   }
   for token in &config.rbac.tokens {
-    if std::env::var(&token.bearer_token_env)
-      .ok()
-      .is_some_and(|expected| !expected.is_empty() && expected == actual)
-    {
+    if bearer_token_matches_env(&token.bearer_token_env, actual) {
       return Some(AdminActor {
         name: token.name.clone(),
         roles: token.roles.clone(),
@@ -44,6 +40,24 @@ pub(super) fn admin_actor(
     }
   }
   None
+}
+
+fn bearer_token_matches_env(env_name: &str, actual: &str) -> bool {
+  std::env::var(env_name)
+    .ok()
+    .is_some_and(|expected| bearer_token_matches_expected(&expected, actual))
+}
+
+fn bearer_token_matches_expected(expected: &str, actual: &str) -> bool {
+  if expected.is_empty() {
+    return false;
+  }
+  let expected_digest = digest::digest(&digest::SHA256, expected.as_bytes());
+  let actual_digest = digest::digest(&digest::SHA256, actual.as_bytes());
+  expected_digest
+    .as_ref()
+    .ct_eq(actual_digest.as_ref())
+    .into()
 }
 
 pub(super) fn admin_actor_has_role(actor: &AdminActor, role: AdminRole) -> bool {
@@ -85,4 +99,28 @@ fn actor_role_grants_permission(actor: &AdminActor, permission: AdminPermission)
     ),
     _ => false,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn bearer_token_matches_expected_uses_digest_comparison_without_changing_semantics() {
+    assert!(bearer_token_matches_expected(
+      "secret-token",
+      "secret-token"
+    ));
+    assert!(!bearer_token_matches_expected("secret-token", "secret"));
+    assert!(!bearer_token_matches_expected(
+      "secret-token",
+      "secret-token-extra"
+    ));
+  }
+
+  #[test]
+  fn bearer_token_matches_expected_rejects_empty_expected_tokens() {
+    assert!(!bearer_token_matches_expected("", ""));
+    assert!(!bearer_token_matches_expected("", "secret-token"));
+  }
 }

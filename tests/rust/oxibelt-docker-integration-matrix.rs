@@ -1340,11 +1340,11 @@ run_case_checks() {
     and (.headers["x-forwarded-for"] | contains("198.51.100.1") | not)
     and .headers["x-forwarded-host"] == "example.test"
     and .headers["x-forwarded-proto"] == "https"
-    and .headers["x-forwarded-port"] != "80"
+    and .headers["x-forwarded-port"] == "443"
     and (.headers.host | startswith("mock-http:18080"))'
   assert_body_jq "${general}" '.headers.forwarded == null
     and (.headers["x-forwarded-for"] | contains("198.51.100.1") | not)
-    and .headers["x-forwarded-port"] != "80"'
+    and .headers["x-forwarded-port"] == "443"'
 
   fast_bad="$(chunked_body_client_request "example.test" "/fast/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
   general_bad="$(chunked_body_client_request "example.test" "/general/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
@@ -4748,7 +4748,7 @@ run_case_checks() {
     and (.headers["x-forwarded-for"] | contains("198.51.100.1") | not)
     and .headers["x-forwarded-proto"] == "https"
     and .headers["x-forwarded-host"] == "example.test"
-    and .headers["x-forwarded-port"] != "80"
+    and .headers["x-forwarded-port"] == "443"
     and (.headers.host | startswith("mock-http:18080"))'
 }
 "#,
