@@ -3390,6 +3390,8 @@ SecRule REQUEST_URI "@containsWord danger" "id:920331,phase:2,msg:'Contains word
 SecRule REQUEST_URI "@detectSQLi" "id:920332,phase:2,t:urlDecodeUni,t:lowercase,msg:'Detect SQLi',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
 SecRule REQUEST_URI "@detectXSS" "id:920333,phase:2,t:urlDecodeUni,t:lowercase,msg:'Detect XSS',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
 SecRule REQUEST_URI "@contains %{tx.dynamic_needle}" "id:920334,phase:2,msg:'Macro contains',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+SecRule REQUEST_URI "@pm safe-token Danger" "id:920335,phase:2,msg:'Literal pm',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+SecRule REQUEST_URI "@pm %{tx.dynamic_needle}" "id:920336,phase:2,msg:'Macro pm',tag:'paranoia-level/1',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
 "#,
     );
     let engine = WafEngine::new(&config).expect("WAF should compile");
@@ -3401,7 +3403,7 @@ SecRule REQUEST_URI "@contains %{tx.dynamic_needle}" "id:920334,phase:2,msg:'Mac
 
     assert!(decision.terminal.is_none());
     let snapshots = engine.rule_hit_snapshots();
-    for id in ["920331", "920332", "920333", "920334"] {
+    for id in ["920331", "920332", "920333", "920334", "920335", "920336"] {
         let hit = snapshots
             .iter()
             .find(|hit| hit.id.as_deref() == Some(id))

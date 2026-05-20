@@ -196,7 +196,9 @@ impl CrsEngine {
     self.evaluate_phase(&mut tx, 2)?;
     let score = tx.inbound_score();
     let blocking_score = tx.inbound_blocking_score();
-    self.remember_scores(score, 0, blocking_score, 0);
+    if score != 0 || blocking_score != 0 {
+      self.remember_scores(score, 0, blocking_score, 0);
+    }
     if blocking_score >= self.inbound_threshold {
       audit_crs_block(&tx, "request", score, 0, blocking_score, 0);
       return Ok(CrsDecision {
@@ -222,7 +224,9 @@ impl CrsEngine {
     self.evaluate_phase(&mut tx, 4)?;
     let outbound = tx.outbound_score();
     let outbound_blocking = tx.outbound_blocking_score();
-    self.remember_scores(0, outbound, 0, outbound_blocking);
+    if outbound != 0 || outbound_blocking != 0 {
+      self.remember_scores(0, outbound, 0, outbound_blocking);
+    }
     if outbound_blocking >= self.outbound_threshold {
       audit_crs_block(&tx, "response", 0, outbound, 0, outbound_blocking);
       return Ok(CrsDecision {

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use http::{HeaderMap, StatusCode, Version};
@@ -53,21 +54,21 @@ impl CrsRule {
   }
 
   fn variables_match(&self, tx: &mut CrsTransaction<'_>) -> anyhow::Result<bool> {
-    let values = self
-      .variables
-      .iter()
-      .flat_map(|variable| {
-        variable.values(tx, None).unwrap_or_else(|error| {
+    for variable in &self.variables {
+      let matched = variable.visit_values(tx, |value, tx| {
+        let transformed = apply_transforms(value.as_str(), &self.transforms);
+        if self.operator.matches(transformed.as_ref(), &*tx)? {
+          tx.matched_var = Some(transformed.into_owned());
+          return Ok(true);
+        }
+        Ok(false)
+      });
+      match matched {
+        Ok(true) => return Ok(true),
+        Ok(false) => {}
+        Err(error) => {
           warn!(error = %error, "failed to resolve CRS variable");
-          Vec::new()
-        })
-      })
-      .collect::<Vec<_>>();
-    for value in values {
-      let transformed = apply_transforms(value.as_str(), &self.transforms);
-      if self.operator.matches(&transformed, tx)? {
-        tx.matched_var = Some(transformed);
-        return Ok(true);
+        }
       }
     }
     Ok(false)
@@ -111,49 +112,12 @@ pub(super) struct CrsTransaction<'a> {
 
 impl<'a> CrsTransaction<'a> {
   pub(super) fn new(engine: &'a CrsEngine, request: WafRequestInput<'a>) -> Self {
-    let mut tx = HashMap::new();
-    tx.insert("critical_anomaly_score".to_string(), "5".to_string());
-    tx.insert("error_anomaly_score".to_string(), "4".to_string());
-    tx.insert("warning_anomaly_score".to_string(), "3".to_string());
-    tx.insert("notice_anomaly_score".to_string(), "2".to_string());
-    tx.insert(
-      "paranoia_level".to_string(),
-      engine.paranoia_level.to_string(),
-    );
-    tx.insert(
-      "blocking_paranoia_level".to_string(),
-      engine.paranoia_level.to_string(),
-    );
-    tx.insert(
-      "detection_paranoia_level".to_string(),
-      engine.paranoia_level.to_string(),
-    );
-    tx.insert(
-      "inbound_anomaly_score_threshold".to_string(),
-      engine.inbound_threshold.to_string(),
-    );
-    tx.insert(
-      "outbound_anomaly_score_threshold".to_string(),
-      engine.outbound_threshold.to_string(),
-    );
-    for key in [
-      "anomaly_score",
-      "anomaly_score_pl1",
-      "anomaly_score_pl2",
-      "anomaly_score_pl3",
-      "anomaly_score_pl4",
-      "inbound_anomaly_score",
-      "outbound_anomaly_score",
-    ] {
-      tx.insert(key.to_string(), "0".to_string());
-    }
-    let blocking_tx = tx.clone();
     Self {
       engine,
       request,
       response: None,
-      tx,
-      blocking_tx,
+      tx: HashMap::new(),
+      blocking_tx: HashMap::new(),
       matched_var: None,
       last_blocking_match: None,
       request_cache: CrsRequestCache::default(),
@@ -280,27 +244,62 @@ impl<'a> CrsTransaction<'a> {
   }
 
   pub(super) fn get_i64(&self, key: &str) -> i64 {
+    let key = normalize_tx_key(key);
     self
       .tx
-      .get(&key.to_ascii_lowercase())
+      .get(key.as_ref())
       .and_then(|value| value.parse::<i64>().ok())
+      .or_else(|| self.default_tx_i64(key.as_ref()))
       .unwrap_or(0)
   }
 
   pub(super) fn set_value(&mut self, key: &str, value: String) {
-    self.tx.insert(key.to_ascii_lowercase(), value);
+    self.tx.insert(normalize_tx_key(key).into_owned(), value);
   }
 
   pub(super) fn get_blocking_i64(&self, key: &str) -> i64 {
+    let key = normalize_tx_key(key);
     self
       .blocking_tx
-      .get(&key.to_ascii_lowercase())
+      .get(key.as_ref())
       .and_then(|value| value.parse::<i64>().ok())
+      .or_else(|| self.default_tx_i64(key.as_ref()))
       .unwrap_or(0)
   }
 
   pub(super) fn set_blocking_value(&mut self, key: &str, value: String) {
-    self.blocking_tx.insert(key.to_ascii_lowercase(), value);
+    self
+      .blocking_tx
+      .insert(normalize_tx_key(key).into_owned(), value);
+  }
+
+  pub(super) fn tx_value(&self, key: &str) -> Option<Cow<'_, str>> {
+    let key = normalize_tx_key(key);
+    self
+      .tx
+      .get(key.as_ref())
+      .map(|value| Cow::Borrowed(value.as_str()))
+      .or_else(|| self.default_tx_value(key.as_ref()))
+  }
+
+  pub(super) fn tx_values_matching(&self, regex: &regex::Regex) -> Vec<String> {
+    let mut values = Vec::new();
+    for key in DEFAULT_TX_KEYS {
+      if regex.is_match(key)
+        && !self.tx.contains_key(*key)
+        && let Some(value) = self.default_tx_value(key)
+      {
+        values.push(value.into_owned());
+      }
+    }
+    values.extend(
+      self
+        .tx
+        .iter()
+        .filter(|(name, _)| regex.is_match(name))
+        .map(|(_, value)| value.clone()),
+    );
+    values
   }
 
   pub(super) fn inbound_score(&self) -> i64 {
@@ -309,7 +308,7 @@ impl<'a> CrsTransaction<'a> {
       return explicit;
     }
     (1..=self.engine.paranoia_level)
-      .map(|level| self.get_i64(&format!("anomaly_score_pl{level}")))
+      .map(|level| self.get_i64(anomaly_score_key(level)))
       .sum()
   }
 
@@ -319,7 +318,7 @@ impl<'a> CrsTransaction<'a> {
       return explicit;
     }
     (1..=self.engine.paranoia_level)
-      .map(|level| self.get_blocking_i64(&format!("anomaly_score_pl{level}")))
+      .map(|level| self.get_blocking_i64(anomaly_score_key(level)))
       .sum()
   }
 
@@ -329,7 +328,7 @@ impl<'a> CrsTransaction<'a> {
       return explicit;
     }
     (1..=self.engine.paranoia_level)
-      .map(|level| self.get_i64(&format!("anomaly_score_pl{level}")))
+      .map(|level| self.get_i64(anomaly_score_key(level)))
       .sum()
   }
 
@@ -339,8 +338,93 @@ impl<'a> CrsTransaction<'a> {
       return explicit;
     }
     (1..=self.engine.paranoia_level)
-      .map(|level| self.get_blocking_i64(&format!("anomaly_score_pl{level}")))
+      .map(|level| self.get_blocking_i64(anomaly_score_key(level)))
       .sum()
+  }
+
+  fn default_tx_i64(&self, key: &str) -> Option<i64> {
+    match key {
+      "critical_anomaly_score" => Some(5),
+      "error_anomaly_score" => Some(4),
+      "warning_anomaly_score" => Some(3),
+      "notice_anomaly_score" => Some(2),
+      "paranoia_level" | "blocking_paranoia_level" | "detection_paranoia_level" => {
+        Some(i64::from(self.engine.paranoia_level))
+      }
+      "inbound_anomaly_score_threshold" => Some(self.engine.inbound_threshold),
+      "outbound_anomaly_score_threshold" => Some(self.engine.outbound_threshold),
+      "anomaly_score"
+      | "anomaly_score_pl1"
+      | "anomaly_score_pl2"
+      | "anomaly_score_pl3"
+      | "anomaly_score_pl4"
+      | "inbound_anomaly_score"
+      | "outbound_anomaly_score" => Some(0),
+      _ => None,
+    }
+  }
+
+  fn default_tx_value(&self, key: &str) -> Option<Cow<'_, str>> {
+    match key {
+      "critical_anomaly_score" => Some(Cow::Borrowed("5")),
+      "error_anomaly_score" => Some(Cow::Borrowed("4")),
+      "warning_anomaly_score" => Some(Cow::Borrowed("3")),
+      "notice_anomaly_score" => Some(Cow::Borrowed("2")),
+      "paranoia_level" | "blocking_paranoia_level" | "detection_paranoia_level" => {
+        Some(Cow::Owned(self.engine.paranoia_level.to_string()))
+      }
+      "inbound_anomaly_score_threshold" => {
+        Some(Cow::Owned(self.engine.inbound_threshold.to_string()))
+      }
+      "outbound_anomaly_score_threshold" => {
+        Some(Cow::Owned(self.engine.outbound_threshold.to_string()))
+      }
+      "anomaly_score"
+      | "anomaly_score_pl1"
+      | "anomaly_score_pl2"
+      | "anomaly_score_pl3"
+      | "anomaly_score_pl4"
+      | "inbound_anomaly_score"
+      | "outbound_anomaly_score" => Some(Cow::Borrowed("0")),
+      _ => None,
+    }
+  }
+}
+
+const DEFAULT_TX_KEYS: &[&str] = &[
+  "critical_anomaly_score",
+  "error_anomaly_score",
+  "warning_anomaly_score",
+  "notice_anomaly_score",
+  "paranoia_level",
+  "blocking_paranoia_level",
+  "detection_paranoia_level",
+  "inbound_anomaly_score_threshold",
+  "outbound_anomaly_score_threshold",
+  "anomaly_score",
+  "anomaly_score_pl1",
+  "anomaly_score_pl2",
+  "anomaly_score_pl3",
+  "anomaly_score_pl4",
+  "inbound_anomaly_score",
+  "outbound_anomaly_score",
+];
+
+fn normalize_tx_key(key: &str) -> Cow<'_, str> {
+  if key.as_bytes().iter().any(u8::is_ascii_uppercase) {
+    Cow::Owned(key.to_ascii_lowercase())
+  } else {
+    Cow::Borrowed(key)
+  }
+}
+
+fn anomaly_score_key(level: u8) -> &'static str {
+  match level {
+    1 => "anomaly_score_pl1",
+    2 => "anomaly_score_pl2",
+    3 => "anomaly_score_pl3",
+    4 => "anomaly_score_pl4",
+    _ => "anomaly_score",
   }
 }
 

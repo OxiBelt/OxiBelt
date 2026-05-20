@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -24,7 +25,7 @@ impl CrsAction {
         let blocking_current = tx.get_blocking_i64(name);
         match operation {
           SetVarOperation::Assign(raw) => {
-            let expanded = expand_macros(raw, tx);
+            let expanded = expand_macros(raw, tx).into_owned();
             tx.set_value(name, expanded.clone());
             if contribute_to_blocking_score {
               tx.set_blocking_value(name, expanded);
@@ -78,20 +79,21 @@ pub(super) fn parse_setvar(raw: &str) -> anyhow::Result<Option<CrsAction>> {
   }))
 }
 
-pub(super) fn expand_macros(value: &str, tx: &CrsTransaction<'_>) -> String {
+pub(super) fn expand_macros<'a>(value: &'a str, tx: &CrsTransaction<'_>) -> Cow<'a, str> {
   static TX_MACRO_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"%\{tx\.([A-Za-z0-9_.-]+)\}").expect("valid TX macro regex"));
 
   if !value.contains("%{tx.") {
-    return value.to_string();
+    return Cow::Borrowed(value);
   }
 
-  TX_MACRO_REGEX
-    .replace_all(value, |captures: &regex::Captures<'_>| {
-      tx.tx
-        .get(&captures[1].to_ascii_lowercase())
-        .cloned()
-        .unwrap_or_default()
-    })
-    .to_string()
+  Cow::Owned(
+    TX_MACRO_REGEX
+      .replace_all(value, |captures: &regex::Captures<'_>| {
+        tx.tx_value(&captures[1])
+          .map(Cow::into_owned)
+          .unwrap_or_default()
+      })
+      .to_string(),
+  )
 }

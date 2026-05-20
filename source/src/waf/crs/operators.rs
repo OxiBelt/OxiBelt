@@ -1,3 +1,4 @@
+use aho_corasick::AhoCorasick;
 use anyhow::bail;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -19,7 +20,7 @@ pub(super) enum CrsOperator {
   BeginsWith(String),
   EndsWith(String),
   Streq(String),
-  Pm(Vec<String>),
+  Pm(CrsPhraseMatcher),
   Eq(i64),
   Ge(i64),
   Gt(i64),
@@ -59,7 +60,7 @@ impl CrsOperator {
         "beginsWith" => Ok(Self::BeginsWith(arg.to_string())),
         "endsWith" => Ok(Self::EndsWith(arg.to_string())),
         "streq" => Ok(Self::Streq(arg.to_string())),
-        "pm" => Ok(Self::Pm(split_phrases(arg))),
+        "pm" => Ok(Self::Pm(CrsPhraseMatcher::new(split_phrases(arg))?)),
         "eq" => Ok(Self::Eq(arg.parse()?)),
         "ge" => Ok(Self::Ge(arg.parse()?)),
         "gt" => Ok(Self::Gt(arg.parse()?)),
@@ -79,7 +80,10 @@ impl CrsOperator {
   pub(super) fn matches(&self, value: &str, tx: &CrsTransaction<'_>) -> anyhow::Result<bool> {
     let result = match self {
       Self::Regex(regex) => regex.is_match(value),
-      Self::Contains(needle) => value.contains(&expand_macros(needle, tx)),
+      Self::Contains(needle) => {
+        let needle = expand_macros(needle, tx);
+        value.contains(needle.as_ref())
+      }
       Self::ContainsWord {
         needle,
         literal_regex,
@@ -88,16 +92,22 @@ impl CrsOperator {
           regex.is_match(value)
         } else {
           let needle = expand_macros(needle, tx);
-          contains_word_regex(&needle)?.is_match(value)
+          contains_word_regex(needle.as_ref())?.is_match(value)
         }
       }
-      Self::BeginsWith(needle) => value.starts_with(&expand_macros(needle, tx)),
-      Self::EndsWith(needle) => value.ends_with(&expand_macros(needle, tx)),
-      Self::Streq(expected) => value == expand_macros(expected, tx),
-      Self::Pm(phrases) => phrases
-        .iter()
-        .map(|phrase| expand_macros(phrase, tx))
-        .any(|phrase| value.contains(&phrase)),
+      Self::BeginsWith(needle) => {
+        let needle = expand_macros(needle, tx);
+        value.starts_with(needle.as_ref())
+      }
+      Self::EndsWith(needle) => {
+        let needle = expand_macros(needle, tx);
+        value.ends_with(needle.as_ref())
+      }
+      Self::Streq(expected) => {
+        let expected = expand_macros(expected, tx);
+        value == expected.as_ref()
+      }
+      Self::Pm(phrases) => phrases.is_match(value, tx),
       Self::Eq(expected) => value.parse::<i64>().unwrap_or(0) == *expected,
       Self::Ge(expected) => value.parse::<i64>().unwrap_or(0) >= *expected,
       Self::Gt(expected) => value.parse::<i64>().unwrap_or(0) > *expected,
@@ -111,6 +121,52 @@ impl CrsOperator {
       Self::Negated(inner) => !inner.matches(value, tx)?,
     };
     Ok(result)
+  }
+}
+
+#[derive(Clone)]
+pub(super) struct CrsPhraseMatcher {
+  literal_automaton: Option<AhoCorasick>,
+  literal_has_empty: bool,
+  dynamic_phrases: Vec<String>,
+}
+
+impl CrsPhraseMatcher {
+  fn new(phrases: Vec<String>) -> anyhow::Result<Self> {
+    let mut literal_phrases = Vec::new();
+    let mut literal_has_empty = false;
+    let mut dynamic_phrases = Vec::new();
+    for phrase in phrases {
+      if contains_tx_macro(&phrase) {
+        dynamic_phrases.push(phrase);
+      } else if phrase.is_empty() {
+        literal_has_empty = true;
+      } else {
+        literal_phrases.push(phrase);
+      }
+    }
+    let literal_automaton = if literal_phrases.is_empty() {
+      None
+    } else {
+      Some(AhoCorasick::new(literal_phrases)?)
+    };
+    Ok(Self {
+      literal_automaton,
+      literal_has_empty,
+      dynamic_phrases,
+    })
+  }
+
+  fn is_match(&self, value: &str, tx: &CrsTransaction<'_>) -> bool {
+    self.literal_has_empty
+      || self
+        .literal_automaton
+        .as_ref()
+        .is_some_and(|automaton| automaton.is_match(value))
+      || self.dynamic_phrases.iter().any(|phrase| {
+        let phrase = expand_macros(phrase, tx);
+        value.contains(phrase.as_ref())
+      })
   }
 }
 

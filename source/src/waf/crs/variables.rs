@@ -1,7 +1,6 @@
 use anyhow::bail;
 use regex::Regex;
 
-use super::super::WafResponseInput;
 use super::compatibility::SUPPORTED_VARIABLES;
 use super::model::CrsTransaction;
 use super::syntax::unquote_selector;
@@ -102,75 +101,128 @@ impl CrsVariable {
     matches!(self, Self::ResponseBody)
   }
 
-  pub(super) fn values(
+  pub(super) fn visit_values<F>(
     &self,
     tx: &mut CrsTransaction<'_>,
-    response: Option<WafResponseInput<'_>>,
-  ) -> anyhow::Result<Vec<String>> {
+    mut visit: F,
+  ) -> anyhow::Result<bool>
+  where
+    F: FnMut(String, &mut CrsTransaction<'_>) -> anyhow::Result<bool>,
+  {
     match self {
-      Self::RequestUri | Self::RequestUriRaw => Ok(vec![tx.request_uri()]),
-      Self::RequestFilename => Ok(vec![tx.request_path()]),
-      Self::RequestBasename => Ok(
-        tx.request
-          .uri
-          .path()
-          .rsplit('/')
-          .next()
-          .map(|value| vec![value.to_string()])
-          .unwrap_or_default(),
-      ),
-      Self::RequestMethod => Ok(vec![tx.request.method.as_str().to_string()]),
-      Self::RequestProtocol => Ok(vec![tx.request_protocol()]),
-      Self::RequestHeaders(selector) => Ok(header_values(tx.request.headers, selector)),
-      Self::RequestHeadersNames => Ok(tx.request_header_names()),
+      Self::RequestUri | Self::RequestUriRaw => visit(tx.request_uri(), tx),
+      Self::RequestFilename => visit(tx.request_path(), tx),
+      Self::RequestBasename => {
+        let Some(value) = tx.request.uri.path().rsplit('/').next() else {
+          return Ok(false);
+        };
+        visit(value.to_string(), tx)
+      }
+      Self::RequestMethod => visit(tx.request.method.as_str().to_string(), tx),
+      Self::RequestProtocol => visit(tx.request_protocol(), tx),
+      Self::RequestHeaders(selector) => {
+        for value in header_values(tx.request.headers, selector) {
+          if visit(value, tx)? {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
+      Self::RequestHeadersNames => {
+        for value in tx.request_header_names() {
+          if visit(value, tx)? {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
       Self::Args => {
         let mut pairs = tx.query_pairs();
         pairs.extend(tx.form_body_pairs());
-        Ok(pairs.into_iter().map(|(_, value)| value).collect())
+        for (_, value) in pairs {
+          if visit(value, tx)? {
+            return Ok(true);
+          }
+        }
+        Ok(false)
       }
-      Self::ArgsGet => Ok(
-        tx.query_pairs()
-          .into_iter()
-          .map(|(_, value)| value)
-          .collect(),
-      ),
+      Self::ArgsGet => {
+        for (_, value) in tx.query_pairs() {
+          if visit(value, tx)? {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
       Self::RequestCookies(selector) => {
         let pairs = tx.cookie_pairs();
-        Ok(select_pairs(pairs, selector.as_deref()))
+        for value in select_pairs(pairs, selector.as_deref()) {
+          if visit(value, tx)? {
+            return Ok(true);
+          }
+        }
+        Ok(false)
       }
-      Self::RequestBody => Ok(tx.request_body_text().into_iter().collect()),
-      Self::ResponseStatus => Ok(vec![
-        response
-          .map(|input| input.status.as_u16().to_string())
-          .or_else(|| {
-            tx.response
-              .as_ref()
-              .map(|view| view.status.as_u16().to_string())
-          })
-          .unwrap_or_default(),
-      ]),
-      Self::ResponseProtocol => Ok(vec![tx.response_protocol()]),
+      Self::RequestBody => {
+        let Some(value) = tx.request_body_text() else {
+          return Ok(false);
+        };
+        visit(value, tx)
+      }
+      Self::ResponseStatus => {
+        let value = tx
+          .response
+          .as_ref()
+          .map(|view| view.status.as_u16().to_string())
+          .unwrap_or_default();
+        visit(value, tx)
+      }
+      Self::ResponseProtocol => visit(tx.response_protocol(), tx),
       Self::ResponseHeaders(selector) => {
-        let headers = response
-          .map(|input| input.headers)
-          .or_else(|| tx.response.as_ref().map(|view| view.headers));
-        Ok(
-          headers
-            .map(|headers| header_values(headers, selector))
-            .unwrap_or_default(),
-        )
+        let Some(headers) = tx.response.as_ref().map(|view| view.headers) else {
+          return Ok(false);
+        };
+        for value in header_values(headers, selector) {
+          if visit(value, tx)? {
+            return Ok(true);
+          }
+        }
+        Ok(false)
       }
-      Self::ResponseHeadersNames => Ok(tx.response_header_names()),
-      Self::ResponseBody => Ok(tx.response_body_text().into_iter().collect()),
-      Self::Tx(name) => Ok(tx.tx.get(name).cloned().into_iter().collect()),
-      Self::TxRegex(regex) => Ok(
-        tx.tx
-          .iter()
-          .filter(|(name, _)| regex.is_match(name))
-          .map(|(_, value)| value.clone())
-          .collect(),
-      ),
-      Self::MatchedVar => Ok(tx.matched_var.clone().into_iter().collect()),
+      Self::ResponseHeadersNames => {
+        for value in tx.response_header_names() {
+          if visit(value, tx)? {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
+      Self::ResponseBody => {
+        let Some(value) = tx.response_body_text() else {
+          return Ok(false);
+        };
+        visit(value, tx)
+      }
+      Self::Tx(name) => {
+        let Some(value) = tx.tx_value(name) else {
+          return Ok(false);
+        };
+        visit(value.into_owned(), tx)
+      }
+      Self::TxRegex(regex) => {
+        for value in tx.tx_values_matching(regex) {
+          if visit(value, tx)? {
+            return Ok(true);
+          }
+        }
+        Ok(false)
+      }
+      Self::MatchedVar => {
+        let Some(value) = tx.matched_var.clone() else {
+          return Ok(false);
+        };
+        visit(value, tx)
+      }
     }
   }
 }
