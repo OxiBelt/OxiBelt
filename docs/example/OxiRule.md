@@ -574,7 +574,7 @@ cookie = "__oxibelt_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 direct_peer_ipv4_prefix_bits = 24
 direct_peer_ipv6_prefix_bits = 56
-single_use = false
+single_use = true
 success_tag = "PersonProof"
 status = 403
 ```

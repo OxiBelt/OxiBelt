@@ -5306,7 +5306,10 @@ success_tag = "PersonProof"
     ));
 
     assert!(clearance_decision.terminal.is_none());
-    assert!(clearance_decision.response_header_mutations.is_empty());
+    let rotated_clearance_cookie =
+        extract_set_cookie(&clearance_decision.response_header_mutations);
+    assert!(rotated_clearance_cookie.contains("__test_person_proof=clearance.v1."));
+    assert_ne!(rotated_clearance_cookie, clearance_cookie);
 }
 
 #[test]

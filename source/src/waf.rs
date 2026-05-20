@@ -438,7 +438,7 @@ pub enum WafActionConfig {
     direct_peer_ipv6_prefix_bits: u8,
     #[serde(default)]
     tcp_max_hop: Option<u8>,
-    #[serde(default)]
+    #[serde(default = "default_person_proof_single_use")]
     single_use: bool,
     #[serde(default)]
     success_tag: Option<String>,

@@ -149,6 +149,10 @@ pub(super) fn default_person_proof_direct_peer_ipv6_prefix_bits() -> u8 {
   56
 }
 
+pub(super) fn default_person_proof_single_use() -> bool {
+  true
+}
+
 pub(super) fn default_person_proof_status() -> u16 {
   403
 }
