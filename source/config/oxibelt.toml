@@ -607,8 +607,10 @@ unsupported_directive_policy = "fail_closed"
 #
 #[[waf.rules.actions]]
 # type = "require_person_proof"
-# method = "turnstile" # pow_sha256_v1 | turnstile | hcaptcha | friendly_captcha_v2 | custom_http
-# challenge_url = "/person-proof/index.html"
+# person_proof_mode = "third_party_provider"
+# third_party_provider = "turnstile" # turnstile | hcaptcha | friendly_captcha_v2
+# custom_frontend_url is an origin-relative URL routed by this OxiBelt instance.
+# custom_frontend_url = "/person-proof/index.html"
 # challenge_redirect_status = 303
 # site_key = "0x4AAAA..."
 # secret_env = "OXIBELT_TURNSTILE_SECRET"

@@ -58,12 +58,12 @@ when = "Request.Http.Path.startsWith('/app/provider-proof') && Request.Client.Pe
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "custom_http"
+person_proof_mode = "custom_provider"
 token_validity_seconds = 60
 clearance.cookie.key = "__matrix_provider_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 success_tag = "PersonProof"
-challenge_url = "/person-proof/index.html"
+custom_frontend_url = "/person-proof/index.html"
 challenge_redirect_status = 303
 provider = "matrix-provider"
 provider_metadata = { fixture = "provider-mock-verify" }

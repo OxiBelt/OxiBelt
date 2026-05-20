@@ -9,8 +9,8 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
-    BodyNeed, HeaderMutation, PersonProofAlgorithm, PersonProofIssuedClearance, WafBodyInput,
-    WafEngine, WafProtocol, WafRequestInput, WafResponseInput, WafStreamDirection, WafStreamInput,
+    BodyNeed, HeaderMutation, PersonProofIssuedClearance, PersonProofMode, WafBodyInput, WafEngine,
+    WafProtocol, WafRequestInput, WafResponseInput, WafStreamDirection, WafStreamInput,
     WafStreamProtocol, WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput,
     WafTransportNetwork, WafWebSocketStreamMetadata, WafWebTransportStreamKind,
     WafWebTransportStreamMetadata, compile_access_log_fields, crs_compatibility_matrix,
@@ -5685,8 +5685,9 @@ fn person_proof_external_provider_config_parses_and_validates() {
     let (_temp_dir, config) = load_person_proof_provider_config(
         "waf-person-proof-provider-config",
         r#"
-method = "turnstile"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "/person-proof/index.html"
 challenge_redirect_status = 302
 verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
@@ -5737,8 +5738,9 @@ fn person_proof_external_provider_config_validation_rejects_bad_settings() {
         (
             "waf-person-proof-bad-redirect-status",
             r#"
-method = "turnstile"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "/person-proof/index.html"
 challenge_redirect_status = 200
 verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
@@ -5749,19 +5751,21 @@ secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
         (
             "waf-person-proof-unsafe-challenge-url",
             r#"
-method = "turnstile"
-challenge_url = "https://evil.example/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "https://evil.example/person-proof/index.html"
 verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
 secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
 "#,
-            "challenge_url must be origin-relative",
+            "custom_frontend_url must be origin-relative",
         ),
         (
             "waf-person-proof-unsafe-session-path",
             r#"
-method = "turnstile"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "/person-proof/index.html"
 session_path = "https://evil.example/session"
 site_key = "site-test"
 secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
@@ -5771,8 +5775,9 @@ secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
         (
             "waf-person-proof-missing-secret-env",
             r#"
-method = "turnstile"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "/person-proof/index.html"
 verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
 "#,
@@ -5781,10 +5786,30 @@ site_key = "site-test"
         (
             "waf-person-proof-flat-cookie",
             r#"
-method = "pow_sha256_v1"
 cookie = "__legacy_person_proof"
 "#,
             "cookie is no longer supported",
+        ),
+        (
+            "waf-person-proof-old-method",
+            r#"
+method = "pow_sha256_v1"
+"#,
+            "method is no longer supported",
+        ),
+        (
+            "waf-person-proof-old-algorithm",
+            r#"
+algorithm = "pow_sha256_v1"
+"#,
+            "algorithm is no longer supported",
+        ),
+        (
+            "waf-person-proof-old-challenge-url",
+            r#"
+challenge_url = "/person-proof/index.html"
+"#,
+            "challenge_url is no longer supported",
         ),
     ] {
         let (_temp_dir, config) = load_person_proof_provider_config(name, action);
@@ -5820,8 +5845,9 @@ when = "Request.Client.PersonProof.State != 'valid'"
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "turnstile"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "/person-proof/index.html"
 verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
 secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
@@ -5834,8 +5860,9 @@ when = "Request.Client.PersonProof.State != 'valid'"
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "hcaptcha"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "hcaptcha"
+custom_frontend_url = "/person-proof/index.html"
 verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
 secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
@@ -5853,12 +5880,12 @@ secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
 }
 
 #[test]
-fn person_proof_custom_http_policy_can_override_api_paths() {
+fn person_proof_custom_provider_policy_can_override_api_paths() {
     let (_temp_dir, config) = load_person_proof_provider_config(
-        "waf-person-proof-custom-http-session",
+        "waf-person-proof-custom-provider-session",
         r#"
-method = "custom_http"
-challenge_url = "/person-proof/custom.html"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/person-proof/custom.html"
 session_path = "/custom/person-proof/session"
 verify_path = "/custom/person-proof/verify"
 openapi_path = "/custom/person-proof/openapi.json"
@@ -5909,14 +5936,14 @@ provider_metadata = { widget = "passkey" }
         )
         .expect("session should validate")
         .expect("session document should exist");
-    assert_eq!(document.method, "custom_http");
+    assert_eq!(document.person_proof_mode, "custom_provider");
     assert_eq!(document.provider, "my-provider");
     assert_eq!(
         document
             .challenge
             .get("kind")
             .and_then(serde_json::Value::as_str),
-        Some("custom")
+        Some("custom_provider")
     );
     assert_eq!(
         document
@@ -5933,8 +5960,9 @@ fn person_proof_external_provider_redirect_uses_session_api() {
     let (_temp_dir, config) = load_person_proof_provider_config(
         "waf-person-proof-provider-redirect",
         r#"
-method = "turnstile"
-challenge_url = "/person-proof/index.html?skin=dark"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "/person-proof/index.html?skin=dark"
 challenge_redirect_status = 302
 verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
@@ -6009,10 +6037,24 @@ secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
         )
         .expect("session should validate")
         .expect("session document should exist");
-    assert_eq!(document.method, "turnstile");
+    assert_eq!(document.person_proof_mode, "third_party_provider");
     assert_eq!(document.provider, "cloudflare-turnstile");
     assert_eq!(document.return_path, "/protected?next=%2Fdashboard");
     assert_eq!(document.verify_path, "/.oxibelt/person-proof/verify-login");
+    assert_eq!(
+        document
+            .challenge
+            .get("kind")
+            .and_then(serde_json::Value::as_str),
+        Some("third_party_provider")
+    );
+    assert_eq!(
+        document
+            .challenge
+            .get("third_party_provider")
+            .and_then(serde_json::Value::as_str),
+        Some("turnstile")
+    );
     assert_eq!(
         document
             .challenge
@@ -6035,8 +6077,9 @@ fn person_proof_external_provider_issues_v2_clearance_and_rejects_replay() {
     let (_temp_dir, config) = load_person_proof_provider_config(
         "waf-person-proof-provider-clearance",
         r#"
-method = "friendly_captcha_v2"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "friendly_captcha_v2"
+custom_frontend_url = "/person-proof/index.html"
 verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
 secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
@@ -6074,10 +6117,7 @@ success_tag = "PersonProof"
         )
         .expect("provider challenge should validate")
         .expect("verify_path should map to a provider challenge");
-    assert_eq!(
-        provider_challenge.method,
-        PersonProofAlgorithm::FriendlyCaptchaV2
-    );
+    assert_eq!(provider_challenge.mode, PersonProofMode::ThirdPartyProvider);
     assert_eq!(provider_challenge.site_key.as_deref(), Some("site-test"));
     assert_eq!(
         provider_challenge.secret_env.as_deref(),
@@ -6191,8 +6231,8 @@ fn person_proof_external_provider_consumes_single_use_attempt_before_completion(
     let (_temp_dir, config) = load_person_proof_provider_config(
         "waf-person-proof-provider-preconsume",
         r#"
-method = "custom_http"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/person-proof/index.html"
 verify_path = "/.oxibelt/person-proof/verify-login"
 provider = "test-provider"
 provider_endpoint = "http://127.0.0.1/siteverify"
@@ -6661,10 +6701,10 @@ when = "Request.Client.PersonProof.State != 'valid'"
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "custom_http"
+person_proof_mode = "custom_provider"
 token_validity_seconds = 60
 clearance.cookie.key = "__test_person_proof"
-challenge_url = "/person-proof/index.html"
+custom_frontend_url = "/person-proof/index.html"
 provider = "test-provider"
 provider_endpoint = "http://127.0.0.1/siteverify"
 "#
@@ -6728,10 +6768,10 @@ when = "Request.Client.PersonProof.State != 'valid'"
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "custom_http"
+person_proof_mode = "custom_provider"
 token_validity_seconds = 60
 clearance.cookie.key = "__test_person_proof"
-challenge_url = "/person-proof/index.html"
+custom_frontend_url = "/person-proof/index.html"
 verify_path = "/.oxibelt/person-proof/verify-login"
 provider = "test-provider"
 provider_endpoint = "http://127.0.0.1/siteverify"
@@ -9082,7 +9122,7 @@ fn complete_pow_person_proof_issued(
         .expect("person proof session document should validate")
         .expect("person proof session document should exist");
     assert_eq!(document.session, session);
-    assert_eq!(document.method, "pow_sha256_v1");
+    assert_eq!(document.person_proof_mode, "built_in");
     assert_eq!(
         document
             .challenge
@@ -9127,7 +9167,7 @@ fn complete_pow_person_proof_issued(
         .begin_person_proof_provider_challenge(verify_input, &verify_path, &session)
         .expect("PoW session should validate")
         .expect("verify path should map to a PoW challenge");
-    assert_eq!(provider_challenge.method, PersonProofAlgorithm::PowSha256V1);
+    assert_eq!(provider_challenge.mode, PersonProofMode::BuiltIn);
     assert_eq!(provider_challenge.difficulty, expected_difficulty);
     engine
         .consume_person_proof_provider_challenge_attempt(&provider_challenge)

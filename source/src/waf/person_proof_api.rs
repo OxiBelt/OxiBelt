@@ -7,7 +7,7 @@ use super::person_proof::{
   token_binding_payload_for_route,
 };
 use super::person_proof_v2::{PersonProofProviderChallenge, ProviderChallengeState};
-use super::{PersonProofAlgorithm, WafRequestInput};
+use super::{PersonProofMode, PersonProofThirdPartyProvider, WafRequestInput};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PersonProofApiPathRole {
@@ -19,7 +19,7 @@ pub enum PersonProofApiPathRole {
 #[derive(Debug, Clone, Serialize)]
 pub struct PersonProofSessionDocument {
   pub session: String,
-  pub method: &'static str,
+  pub person_proof_mode: &'static str,
   pub provider: String,
   pub expires_unix_ms: i64,
   pub return_path: String,
@@ -31,6 +31,7 @@ pub struct PersonProofSessionDocument {
 struct SessionFields {
   issued: i64,
   expires: i64,
+  mode: String,
   provider: String,
   method: String,
   route: String,
@@ -73,27 +74,27 @@ pub(super) fn session_document(
   else {
     return Ok(None);
   };
-  let challenge = match policy.method {
-    PersonProofAlgorithm::PowSha256V1 => serde_json::json!({
+  let challenge = match policy.mode {
+    PersonProofMode::BuiltIn | PersonProofMode::OpenApi => serde_json::json!({
       "kind": "pow_sha256_v1",
       "difficulty": policy.difficulty,
       "token": session,
     }),
-    PersonProofAlgorithm::Turnstile
-    | PersonProofAlgorithm::HCaptcha
-    | PersonProofAlgorithm::FriendlyCaptchaV2 => serde_json::json!({
-      "kind": "captcha",
+    PersonProofMode::ThirdPartyProvider => serde_json::json!({
+      "kind": "third_party_provider",
+      "third_party_provider": policy.third_party_provider.map(PersonProofThirdPartyProvider::as_str),
       "site_key": policy.provider.site_key,
       "metadata": provider_metadata(&policy),
     }),
-    PersonProofAlgorithm::CustomHttp => serde_json::json!({
-      "kind": "custom",
+    PersonProofMode::CustomProvider => serde_json::json!({
+      "kind": "custom_provider",
+      "provider": provider_name(&policy),
       "metadata": provider_metadata(&policy),
     }),
   };
   Ok(Some(PersonProofSessionDocument {
     session: session.to_string(),
-    method: policy.method.as_str(),
+    person_proof_mode: policy.mode.as_str(),
     provider: provider_name(&policy),
     expires_unix_ms: fields.expires,
     return_path: fields.return_path,
@@ -120,8 +121,9 @@ pub(super) fn begin_session_challenge(
     return Ok(None);
   };
   Ok(Some(PersonProofProviderChallenge {
-    method: policy.method,
-    endpoint: if policy.method == PersonProofAlgorithm::PowSha256V1 {
+    mode: policy.mode,
+    third_party_provider: policy.third_party_provider,
+    endpoint: if policy.mode.uses_pow() {
       None
     } else {
       Some(provider_endpoint(&policy)?)
@@ -142,6 +144,8 @@ pub(super) fn begin_session_challenge(
       token: session.to_string(),
       issued: fields.issued,
       expires: fields.expires,
+      mode: fields.mode,
+      provider: fields.provider,
       method: fields.method,
       route_name: fields.route,
       binding_hash: fields.binding_hash,
@@ -163,6 +167,7 @@ pub(super) fn sign_session_token(
   let payload = session_payload(
     input.downstream_host,
     policy,
+    &provider_identity(policy),
     input.method.as_str(),
     input.route_name,
     return_path,
@@ -176,8 +181,9 @@ pub(super) fn sign_session_token(
     payload.as_bytes(),
   );
   format!(
-    "session.v1.{issued}.{expires}.{}.{}.{}.{}.{}.{}.{}",
-    policy.method.as_str(),
+    "session.v1.{issued}.{expires}.{}.{}.{}.{}.{}.{}.{}.{}",
+    policy.mode.as_str(),
+    hex_encode(provider_identity(policy).as_bytes()),
     hex_encode(input.method.as_str().as_bytes()),
     hex_encode(input.route_name.as_bytes()),
     hex_encode(return_path.as_bytes()),
@@ -256,7 +262,7 @@ pub(super) fn openapi_document(engine: &PersonProofEngine, openapi_path: &str) -
           "type": "object",
           "required": [
             "session",
-            "method",
+            "person_proof_mode",
             "provider",
             "expires_unix_ms",
             "return_path",
@@ -266,14 +272,13 @@ pub(super) fn openapi_document(engine: &PersonProofEngine, openapi_path: &str) -
           ],
           "properties": {
             "session": { "type": "string" },
-            "method": {
+            "person_proof_mode": {
               "type": "string",
               "enum": [
-                "pow_sha256_v1",
-                "turnstile",
-                "hcaptcha",
-                "friendly_captcha_v2",
-                "custom_http"
+                "built_in",
+                "openapi",
+                "third_party_provider",
+                "custom_provider"
               ]
             },
             "provider": { "type": "string" },
@@ -370,32 +375,52 @@ pub(super) fn provider_endpoint(policy: &PersonProofPolicy) -> anyhow::Result<ur
   if let Some(endpoint) = policy.provider.provider_endpoint.clone() {
     return Ok(endpoint);
   }
-  let endpoint = match policy.method {
-    PersonProofAlgorithm::PowSha256V1 | PersonProofAlgorithm::CustomHttp => {
+  let endpoint = match policy.mode {
+    PersonProofMode::BuiltIn | PersonProofMode::OpenApi | PersonProofMode::CustomProvider => {
       bail!(
         "person proof provider_endpoint is required for {}",
-        policy.method.as_str()
+        policy.mode.as_str()
       );
     }
-    PersonProofAlgorithm::Turnstile => "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-    PersonProofAlgorithm::HCaptcha => "https://api.hcaptcha.com/siteverify",
-    PersonProofAlgorithm::FriendlyCaptchaV2 => {
-      "https://global.frcapi.com/api/v2/captcha/siteverify"
-    }
+    PersonProofMode::ThirdPartyProvider => match policy.third_party_provider {
+      Some(PersonProofThirdPartyProvider::Turnstile) => {
+        "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+      }
+      Some(PersonProofThirdPartyProvider::HCaptcha) => "https://api.hcaptcha.com/siteverify",
+      Some(PersonProofThirdPartyProvider::FriendlyCaptchaV2) => {
+        "https://global.frcapi.com/api/v2/captcha/siteverify"
+      }
+      None => bail!("person proof third_party_provider is required"),
+    },
   };
   url::Url::parse(endpoint).context("built-in provider endpoint must be valid")
+}
+
+pub(super) fn provider_identity(policy: &PersonProofPolicy) -> String {
+  match policy.mode {
+    PersonProofMode::BuiltIn | PersonProofMode::OpenApi => "oxibelt-pow".to_string(),
+    PersonProofMode::ThirdPartyProvider => policy
+      .third_party_provider
+      .map(PersonProofThirdPartyProvider::as_str)
+      .unwrap_or("unknown-third-party-provider")
+      .to_string(),
+    PersonProofMode::CustomProvider => provider_name(policy),
+  }
 }
 
 pub(super) fn provider_name(policy: &PersonProofPolicy) -> String {
   if let Some(provider) = policy.provider.provider.as_deref() {
     return provider.to_string();
   }
-  match policy.method {
-    PersonProofAlgorithm::PowSha256V1 => "oxibelt-pow",
-    PersonProofAlgorithm::Turnstile => "cloudflare-turnstile",
-    PersonProofAlgorithm::HCaptcha => "hcaptcha",
-    PersonProofAlgorithm::FriendlyCaptchaV2 => "friendly-captcha",
-    PersonProofAlgorithm::CustomHttp => "custom-http",
+  match policy.mode {
+    PersonProofMode::BuiltIn | PersonProofMode::OpenApi => "oxibelt-pow",
+    PersonProofMode::ThirdPartyProvider => match policy.third_party_provider {
+      Some(PersonProofThirdPartyProvider::Turnstile) => "cloudflare-turnstile",
+      Some(PersonProofThirdPartyProvider::HCaptcha) => "hcaptcha",
+      Some(PersonProofThirdPartyProvider::FriendlyCaptchaV2) => "friendly-captcha",
+      None => "unknown-third-party-provider",
+    },
+    PersonProofMode::CustomProvider => "custom-provider",
   }
   .to_string()
 }
@@ -424,7 +449,10 @@ fn validate_session_for_path(
     bail!("person proof session token was issued in the future");
   }
   for policy in &engine.policies {
-    if fields.provider != policy.method.as_str() || !path_matches_role(policy, path, role) {
+    if fields.mode != policy.mode.as_str()
+      || fields.provider != provider_identity(policy)
+      || !path_matches_role(policy, path, role)
+    {
       continue;
     }
     if verify_session_mac(engine, input, policy, &fields).is_err() {
@@ -456,6 +484,7 @@ fn verify_session_mac(
   let payload = session_payload(
     input.downstream_host,
     policy,
+    &fields.provider,
     &fields.method,
     &fields.route,
     &fields.return_path,
@@ -471,6 +500,7 @@ fn verify_session_mac(
 fn session_payload(
   host: &str,
   policy: &PersonProofPolicy,
+  provider: &str,
   method: &str,
   route: &str,
   return_path: &str,
@@ -480,8 +510,9 @@ fn session_payload(
   random: &str,
 ) -> String {
   format!(
-    "session.v1\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{}\n{}\n{}\n{return_path}\n{binding_hash}\n{issued}\n{expires}\n{random}",
-    policy.method.as_str(),
+    "session.v1\n{}\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{}\n{}\n{}\n{return_path}\n{binding_hash}\n{issued}\n{expires}\n{random}",
+    policy.mode.as_str(),
+    provider,
     policy.key,
     policy.clearance.signing_id(),
     policy.provider.session_path,
@@ -502,7 +533,7 @@ fn verify_mac(engine: &PersonProofEngine, payload: &str, mac: &str) -> anyhow::R
 
 fn parse_session_token(token: &str) -> anyhow::Result<SessionFields> {
   let parts = token.split('.').collect::<Vec<_>>();
-  if parts.len() != 11 || parts[0] != "session" || parts[1] != "v1" {
+  if parts.len() != 12 || parts[0] != "session" || parts[1] != "v1" {
     bail!("person proof session token has invalid shape");
   }
   Ok(SessionFields {
@@ -512,13 +543,14 @@ fn parse_session_token(token: &str) -> anyhow::Result<SessionFields> {
     expires: parts[3]
       .parse()
       .context("invalid session expiration timestamp")?,
-    provider: parts[4].to_string(),
-    method: decode_hex_string(parts[5])?,
-    route: decode_hex_string(parts[6])?,
-    return_path: decode_hex_string(parts[7])?,
-    binding_hash: validate_hex_field(parts[8], "session binding hash", 64)?,
-    random: validate_hex_field(parts[9], "session random", 32)?,
-    mac: parts[10].to_string(),
+    mode: parts[4].to_string(),
+    provider: decode_hex_string(parts[5])?,
+    method: decode_hex_string(parts[6])?,
+    route: decode_hex_string(parts[7])?,
+    return_path: decode_hex_string(parts[8])?,
+    binding_hash: validate_hex_field(parts[9], "session binding hash", 64)?,
+    random: validate_hex_field(parts[10], "session random", 32)?,
+    mac: parts[11].to_string(),
   })
 }
 

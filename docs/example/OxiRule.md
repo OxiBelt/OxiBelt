@@ -587,7 +587,7 @@ Request.Client.PersonProof.State != 'valid'
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "pow_sha256_v1"
+person_proof_mode = "built_in"
 difficulty = 18
 token_validity_seconds = 300
 clearance.cookie.key = "__oxibelt_person_proof"
@@ -615,7 +615,7 @@ Request.Client.Bot.Disposition != 'normal'
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-algorithm = "pow_sha256_v1"
+person_proof_mode = "built_in"
 difficulty = 18
 token_validity_seconds = 300
 clearance.cookie.key = "__oxibelt_person_proof"
@@ -642,7 +642,7 @@ Request.Http.Path.startsWith('/app')
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "pow_sha256_v1"
+person_proof_mode = "built_in"
 difficulty = 18
 token_validity_seconds = 300
 clearance.issue_to = "local_storage"
@@ -682,7 +682,7 @@ Request.Client.PersonProof.State != 'valid'
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-algorithm = "pow_sha256_v1"
+person_proof_mode = "built_in"
 difficulty = 22
 token_validity_seconds = 180
 clearance.cookie.key = "__oxibelt_admin_proof"

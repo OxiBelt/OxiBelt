@@ -435,8 +435,8 @@ pub enum WafActionConfig {
   RequirePersonProof {
     #[serde(default)]
     priority: i64,
-    #[serde(rename = "method", alias = "algorithm", default)]
-    method: PersonProofAlgorithm,
+    #[serde(default)]
+    person_proof_mode: PersonProofMode,
     #[serde(default = "default_person_proof_difficulty")]
     difficulty: u8,
     #[serde(
@@ -465,7 +465,7 @@ pub enum WafActionConfig {
     #[serde(default = "default_person_proof_status")]
     status: u16,
     #[serde(default)]
-    challenge_url: Option<String>,
+    custom_frontend_url: Option<String>,
     #[serde(default = "default_person_proof_challenge_redirect_status")]
     challenge_redirect_status: u16,
     #[serde(default)]
@@ -474,6 +474,8 @@ pub enum WafActionConfig {
     verify_path: Option<String>,
     #[serde(default)]
     openapi_path: Option<String>,
+    #[serde(default)]
+    third_party_provider: Option<PersonProofThirdPartyProvider>,
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
@@ -492,6 +494,12 @@ pub enum WafActionConfig {
     provider_max_response_body_bytes: usize,
     #[serde(default = "default_true")]
     send_remote_ip: bool,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    algorithm: Option<String>,
+    #[serde(default)]
+    challenge_url: Option<String>,
   },
   CloseStream {
     #[serde(default)]
@@ -540,32 +548,49 @@ pub struct AccessLogFieldConfig {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum PersonProofAlgorithm {
+pub enum PersonProofMode {
   #[default]
-  PowSha256V1,
+  BuiltIn,
+  OpenApi,
+  ThirdPartyProvider,
+  CustomProvider,
+}
+
+impl PersonProofMode {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::BuiltIn => "built_in",
+      Self::OpenApi => "openapi",
+      Self::ThirdPartyProvider => "third_party_provider",
+      Self::CustomProvider => "custom_provider",
+    }
+  }
+
+  pub(crate) fn uses_pow(self) -> bool {
+    matches!(self, Self::BuiltIn | Self::OpenApi)
+  }
+
+  pub(crate) fn uses_provider(self) -> bool {
+    matches!(self, Self::ThirdPartyProvider | Self::CustomProvider)
+  }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonProofThirdPartyProvider {
   Turnstile,
   #[serde(rename = "hcaptcha")]
   HCaptcha,
   FriendlyCaptchaV2,
-  CustomHttp,
 }
 
-impl PersonProofAlgorithm {
+impl PersonProofThirdPartyProvider {
   pub(crate) fn as_str(self) -> &'static str {
     match self {
-      Self::PowSha256V1 => "pow_sha256_v1",
       Self::Turnstile => "turnstile",
       Self::HCaptcha => "hcaptcha",
       Self::FriendlyCaptchaV2 => "friendly_captcha_v2",
-      Self::CustomHttp => "custom_http",
     }
-  }
-
-  pub(crate) fn is_provider(self) -> bool {
-    matches!(
-      self,
-      Self::Turnstile | Self::HCaptcha | Self::FriendlyCaptchaV2 | Self::CustomHttp
-    )
   }
 }
 
@@ -1348,7 +1373,7 @@ fn validate_access_log_field_name(label: &str, field_name: &str) -> anyhow::Resu
 
 fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> anyhow::Result<()> {
   let WafActionConfig::RequirePersonProof {
-    method,
+    person_proof_mode,
     difficulty,
     ttl_seconds,
     cookie,
@@ -1358,24 +1383,43 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     direct_peer_ipv6_prefix_bits,
     tcp_max_hop,
     success_tag,
-    challenge_url,
+    custom_frontend_url,
     challenge_redirect_status,
     session_path,
     verify_path,
     openapi_path,
+    third_party_provider,
     provider,
     site_key,
     secret_env,
     provider_endpoint,
     provider_timeout_ms,
     provider_max_response_body_bytes,
+    method,
+    algorithm,
+    challenge_url,
     ..
   } = action
   else {
     unreachable!("validate_person_proof_settings requires require_person_proof action");
   };
 
-  if *method == PersonProofAlgorithm::PowSha256V1 && !(1..=30).contains(difficulty) {
+  if method.is_some() {
+    bail!(
+      "WAF rule {rule_name} require_person_proof method is no longer supported; use person_proof_mode instead"
+    );
+  }
+  if algorithm.is_some() {
+    bail!(
+      "WAF rule {rule_name} require_person_proof algorithm is no longer supported; use person_proof_mode instead"
+    );
+  }
+  if challenge_url.is_some() {
+    bail!(
+      "WAF rule {rule_name} require_person_proof challenge_url is no longer supported; use custom_frontend_url instead"
+    );
+  }
+  if person_proof_mode.uses_pow() && !(1..=30).contains(difficulty) {
     bail!("WAF rule {rule_name} require_person_proof difficulty must be between 1 and 30");
   }
   if !(1..=86_400).contains(ttl_seconds) {
@@ -1423,12 +1467,13 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
   }
   person_proof_config::validate_redirect_settings(
     rule_name,
-    *method,
-    challenge_url.as_deref(),
+    *person_proof_mode,
+    custom_frontend_url.as_deref(),
     *challenge_redirect_status,
     session_path.as_deref(),
     verify_path.as_deref(),
     openapi_path.as_deref(),
+    *third_party_provider,
     provider.as_deref(),
     site_key.as_deref(),
     secret_env.as_deref(),
@@ -3956,11 +4001,11 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestClientPersonProof, "State") => {
       Ok(Value::String(ctx.person_proof.state.as_str().to_string()))
     }
-    (ObjectRef::RequestClientPersonProof, "Method") => Ok(
+    (ObjectRef::RequestClientPersonProof, "Mode") => Ok(
       ctx
         .person_proof
-        .method
-        .map(|method| Value::String(method.to_string()))
+        .mode
+        .map(|mode| Value::String(mode.to_string()))
         .unwrap_or(Value::Null),
     ),
     (ObjectRef::RequestClientPersonProof, "Difficulty") => Ok(

@@ -126,8 +126,8 @@ noscript {
   <p>This request must complete a bounded proof-of-work challenge before OxiBelt forwards it upstream.</p>
   <p data-status>Loading challenge...</p>
   <dl>
-    <dt>Method</dt>
-    <dd>__ALGORITHM__</dd>
+    <dt>Mode</dt>
+    <dd>__MODE__</dd>
     <dt>Difficulty</dt>
     <dd>__DIFFICULTY__ leading zero bits</dd>
     <dt>Clearance storage</dt>
@@ -327,6 +327,9 @@ const SafeOriginRelativePath = (Path) => {
 const SolveChallenge = async () => {
     SetStatus('Preparing challenge...');
     const Document = await GetJson(SessionPath);
+    if (Document.person_proof_mode !== 'built_in') {
+        throw new Error(`unsupported person proof mode ${Document.person_proof_mode}`);
+    }
     if (Document.challenge.kind !== 'pow_sha256_v1') {
         throw new Error(`unsupported challenge kind ${Document.challenge.kind}`);
     }

@@ -13,9 +13,9 @@ use crate::control_http::{full_body as control_full_body, uri_from_url};
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::state::AppSnapshot;
 use crate::waf::{
-  PersonProofAlgorithm, PersonProofApiPathRole, PersonProofProviderChallenge,
-  PersonProofProviderFailPolicy, WafProtocol, WafRequestInput, WafTlsMetadata,
-  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
+  PersonProofApiPathRole, PersonProofMode, PersonProofProviderChallenge,
+  PersonProofProviderFailPolicy, PersonProofThirdPartyProvider, WafProtocol, WafRequestInput,
+  WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
 };
 
 use super::body::{self, BodyTimeoutKind, ProxyBody, error_is_body_length_limit, error_is_timeout};
@@ -239,11 +239,10 @@ fn parse_person_proof_verify_payload(
 ) -> anyhow::Result<PersonProofVerifyPayload> {
   let is_json = content_type.map(|value| value.split(';').next().unwrap_or_default().trim())
     == Some("application/json");
-  let (session, response) = if is_json {
-    parse_json_payload(body)?
-  } else {
-    parse_form_payload(body)?
-  };
+  if !is_json {
+    anyhow::bail!("person proof verify payload must use application/json");
+  }
+  let (session, response) = parse_json_payload(body)?;
   let session = session
     .filter(|value| !value.trim().is_empty())
     .context("person proof verify payload is missing session")?;
@@ -255,18 +254,12 @@ fn parse_person_proof_verify_payload(
 
 fn parse_json_payload(body: &[u8]) -> anyhow::Result<(Option<String>, PersonProofClientResponse)> {
   let value: Value = serde_json::from_slice(body)?;
-  let session =
-    json_string_field(&value, "session").or_else(|| json_string_field(&value, "challenge"));
+  let session = json_string_field(&value, "session");
   let response_value = value.get("response").and_then(Value::as_object);
   let token = response_value
     .and_then(|response| response.get("token"))
     .and_then(Value::as_str)
     .map(str::to_string)
-    .or_else(|| json_string_field(&value, "provider_response"))
-    .or_else(|| json_string_field(&value, "cf-turnstile-response"))
-    .or_else(|| json_string_field(&value, "h-captcha-response"))
-    .or_else(|| json_string_field(&value, "frc-captcha-response"))
-    .or_else(|| json_string_field(&value, "token"))
     .unwrap_or_default();
   let fields = response_value
     .and_then(|response| response.get("fields"))
@@ -274,49 +267,6 @@ fn parse_json_payload(body: &[u8]) -> anyhow::Result<(Option<String>, PersonProo
     .cloned()
     .unwrap_or_default();
   Ok((session, PersonProofClientResponse { token, fields }))
-}
-
-fn parse_form_payload(body: &[u8]) -> anyhow::Result<(Option<String>, PersonProofClientResponse)> {
-  let fields = url::form_urlencoded::parse(body)
-    .into_owned()
-    .collect::<HashMap<_, _>>();
-  let session = fields
-    .get("session")
-    .or_else(|| fields.get("challenge"))
-    .cloned();
-  let token = fields
-    .get("response")
-    .or_else(|| fields.get("token"))
-    .or_else(|| fields.get("provider_response"))
-    .or_else(|| fields.get("cf-turnstile-response"))
-    .or_else(|| fields.get("h-captcha-response"))
-    .or_else(|| fields.get("frc-captcha-response"))
-    .cloned()
-    .unwrap_or_default();
-  let passthrough = fields
-    .into_iter()
-    .filter(|(key, _)| {
-      !matches!(
-        key.as_str(),
-        "session"
-          | "challenge"
-          | "response"
-          | "token"
-          | "provider_response"
-          | "cf-turnstile-response"
-          | "h-captcha-response"
-          | "frc-captcha-response"
-      )
-    })
-    .map(|(key, value)| (key, Value::String(value)))
-    .collect::<Map<_, _>>();
-  Ok((
-    session,
-    PersonProofClientResponse {
-      token,
-      fields: passthrough,
-    },
-  ))
 }
 
 fn json_string_field(value: &Value, field: &str) -> Option<String> {
@@ -329,16 +279,13 @@ async fn verify_person_proof_response(
   response: &PersonProofClientResponse,
   remote_ip: std::net::IpAddr,
 ) -> anyhow::Result<bool> {
-  match challenge.method {
-    PersonProofAlgorithm::PowSha256V1 => Ok(pow_response_is_valid(
+  match challenge.mode {
+    PersonProofMode::BuiltIn | PersonProofMode::OpenApi => Ok(pow_response_is_valid(
       &challenge.session,
       &response.token,
       challenge.difficulty,
     )),
-    PersonProofAlgorithm::Turnstile
-    | PersonProofAlgorithm::HCaptcha
-    | PersonProofAlgorithm::FriendlyCaptchaV2
-    | PersonProofAlgorithm::CustomHttp => {
+    PersonProofMode::ThirdPartyProvider | PersonProofMode::CustomProvider => {
       verify_person_proof_provider(state, challenge, response, remote_ip).await
     }
   }
@@ -358,42 +305,46 @@ async fn verify_person_proof_provider(
     .method(Method::POST)
     .uri(uri_from_url(endpoint)?)
     .header(http::header::ACCEPT, "application/json");
-  let body = match challenge.method {
-    PersonProofAlgorithm::PowSha256V1 => {
+  let body = match challenge.mode {
+    PersonProofMode::BuiltIn | PersonProofMode::OpenApi => {
       anyhow::bail!("pow person proof does not use provider verification");
     }
-    PersonProofAlgorithm::Turnstile | PersonProofAlgorithm::HCaptcha => {
-      let secret = provider_secret(challenge)?;
-      builder = builder.header(
-        http::header::CONTENT_TYPE,
-        "application/x-www-form-urlencoded",
-      );
-      let mut form = url::form_urlencoded::Serializer::new(String::new());
-      form.append_pair("secret", &secret);
-      form.append_pair("response", &response.token);
-      if challenge.method == PersonProofAlgorithm::HCaptcha {
-        form.append_pair("sitekey", provider_site_key(challenge)?);
+    PersonProofMode::ThirdPartyProvider => match challenge.third_party_provider {
+      Some(PersonProofThirdPartyProvider::Turnstile)
+      | Some(PersonProofThirdPartyProvider::HCaptcha) => {
+        let secret = provider_secret(challenge)?;
+        builder = builder.header(
+          http::header::CONTENT_TYPE,
+          "application/x-www-form-urlencoded",
+        );
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        form.append_pair("secret", &secret);
+        form.append_pair("response", &response.token);
+        if challenge.third_party_provider == Some(PersonProofThirdPartyProvider::HCaptcha) {
+          form.append_pair("sitekey", provider_site_key(challenge)?);
+        }
+        if challenge.send_remote_ip {
+          form.append_pair("remoteip", &remote_ip.to_string());
+        }
+        bytes::Bytes::from(form.finish())
       }
-      if challenge.send_remote_ip {
-        form.append_pair("remoteip", &remote_ip.to_string());
+      Some(PersonProofThirdPartyProvider::FriendlyCaptchaV2) => {
+        let secret = provider_secret(challenge)?;
+        builder = builder
+          .header(http::header::CONTENT_TYPE, "application/json")
+          .header("x-api-key", secret);
+        bytes::Bytes::from(serde_json::to_vec(&serde_json::json!({
+          "response": response.token,
+          "sitekey": provider_site_key(challenge)?,
+        }))?)
       }
-      bytes::Bytes::from(form.finish())
-    }
-    PersonProofAlgorithm::FriendlyCaptchaV2 => {
-      let secret = provider_secret(challenge)?;
-      builder = builder
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header("x-api-key", secret);
-      bytes::Bytes::from(serde_json::to_vec(&serde_json::json!({
-        "response": response.token,
-        "sitekey": provider_site_key(challenge)?,
-      }))?)
-    }
-    PersonProofAlgorithm::CustomHttp => {
+      None => anyhow::bail!("third_party_provider mode requires a provider"),
+    },
+    PersonProofMode::CustomProvider => {
       builder = builder.header(http::header::CONTENT_TYPE, "application/json");
       bytes::Bytes::from(serde_json::to_vec(&serde_json::json!({
         "session": challenge.session.clone(),
-        "method": challenge.method.as_str(),
+        "person_proof_mode": challenge.mode.as_str(),
         "provider": challenge.provider.clone(),
         "response": {
           "token": response.token.clone(),
@@ -570,29 +521,16 @@ mod tests {
   }
 
   #[test]
-  fn parse_verify_payload_accepts_legacy_json_and_form_fields() {
+  fn parse_verify_payload_rejects_legacy_json_and_form_fields() {
     let json = br#"{
       "challenge": "session.v1.test",
       "cf-turnstile-response": "provider-token"
     }"#;
-    let payload = parse_person_proof_verify_payload(json, Some("application/json"))
-      .expect("legacy JSON payload should parse");
-    assert_eq!(payload.session, "session.v1.test");
-    assert_eq!(payload.response.token, "provider-token");
+    assert!(parse_person_proof_verify_payload(json, Some("application/json")).is_err());
 
     let body = b"challenge=session.v1.test&h-captcha-response=provider-token&tenant=a";
-    let payload =
-      parse_person_proof_verify_payload(body, Some("application/x-www-form-urlencoded"))
-        .expect("form payload should parse");
-    assert_eq!(payload.session, "session.v1.test");
-    assert_eq!(payload.response.token, "provider-token");
-    assert_eq!(
-      payload
-        .response
-        .fields
-        .get("tenant")
-        .and_then(Value::as_str),
-      Some("a")
+    assert!(
+      parse_person_proof_verify_payload(body, Some("application/x-www-form-urlencoded")).is_err()
     );
   }
 

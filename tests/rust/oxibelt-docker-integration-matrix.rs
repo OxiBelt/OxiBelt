@@ -5491,9 +5491,10 @@ print(query["session"][0], query["session_path"][0], query["verify_path"][0], qu
 ')
 
   session_doc="$(client_request "example.test" "${session_path}?session=${session}" 200)"
-  assert_body_jq "${session_doc}" '.method == "custom_http"'
+  assert_body_jq "${session_doc}" '.person_proof_mode == "custom_provider"'
   assert_body_jq "${session_doc}" '.provider == "matrix-provider"'
-  assert_body_jq "${session_doc}" '.challenge.kind == "custom"'
+  assert_body_jq "${session_doc}" '.challenge.kind == "custom_provider"'
+  assert_body_jq "${session_doc}" '.challenge.provider == "matrix-provider"'
   assert_body_jq "${session_doc}" '.challenge.metadata.fixture == "provider-mock-verify"'
   assert_body_jq "${session_doc}" '.verify_path == "/.oxibelt/person-proof/verify"'
   assert_body_jq "${session_doc}" '.clearance.issue_to == "cookie"'

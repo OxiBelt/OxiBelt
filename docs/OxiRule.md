@@ -357,7 +357,7 @@ type = "allow_person_proof"
 ```toml
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "pow_sha256_v1"
+person_proof_mode = "built_in"
 difficulty = 18
 token_validity_seconds = 300
 clearance.cookie.key = "__oxibelt_person_proof"
@@ -377,8 +377,9 @@ openapi_path = "/.oxibelt/person-proof/openapi.json"
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "turnstile" # turnstile | hcaptcha | friendly_captcha_v2 | custom_http
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile" # turnstile | hcaptcha | friendly_captcha_v2
+custom_frontend_url = "/person-proof/index.html"
 challenge_redirect_status = 303
 site_key = "0x4AAAA..."
 secret_env = "OXIBELT_TURNSTILE_SECRET"
@@ -508,11 +509,16 @@ When `min_count` is greater than `1`, rows are written as `observing` until the 
 
 `require_person_proof` is a request-phase anti-automation challenge. It is not authentication, identity proof, proof of biological or legal status, bot reputation, or proof of benign intent.
 
-Supported methods are `pow_sha256_v1`, `turnstile`, `hcaptcha`, `friendly_captcha_v2`, and `custom_http`. The legacy `algorithm` field is accepted as an alias for `method`.
+Public Person proof behavior is selected with `person_proof_mode`:
 
-`pow_sha256_v1` is the built-in proof-of-work method: the client computes a nonce such that `SHA-256(session || "." || nonce)` has the configured number of leading zero bits. Built-in PoW always uses OxiBelt's Person proof session and verify API. If `challenge_url` is not set, OxiBelt serves its built-in API-backed challenge page directly; if `challenge_url` is set, OxiBelt redirects to the configured static frontend. Successful verification issues the same signed `clearance.v2` token through the configured clearance target. Later requests validate the configured clearance sources and, when `single_use = true`, rotate the signed clearance credential instead of recomputing proof.
+- `built_in`: OxiBelt built-in proof-of-work plus the built-in challenge frontend. This is the default and does not use `custom_frontend_url`.
+- `openapi`: OxiBelt built-in proof-of-work session/verify/OpenAPI endpoints plus a custom challenge frontend. This requires `custom_frontend_url`.
+- `third_party_provider`: OxiBelt built-in adapters for `third_party_provider = "turnstile" | "hcaptcha" | "friendly_captcha_v2"`. This requires `custom_frontend_url`, `third_party_provider`, `site_key`, and `secret_env`.
+- `custom_provider`: custom JSON HTTP provider verification. This preserves the former custom provider capability under the new mode name, requires `custom_frontend_url` and `provider_endpoint`, and keeps `provider` as the custom provider identifier.
 
-Custom challenge pages are served by normal OxiBelt static routes, for example a route whose `static_root` contains `/person-proof/index.html`; OxiBelt does not create a separate asset server. When `challenge_url` is set, OxiBelt redirects the protected request to that page and exposes only the general Person proof API paths in the redirect query. Browser-visible challenge code should call OxiBelt's `session`, `verify`, and optional `openapi` endpoints, not provider-native server APIs. Provider methods require `challenge_url`; built-in PoW may use either the built-in page or a custom frontend.
+The PoW modes compute a nonce such that `SHA-256(session || "." || nonce)` has the configured number of leading zero bits. Successful verification issues the same signed `clearance.v2` token through the configured clearance target. Later requests validate the configured clearance sources and, when `single_use = true`, rotate the signed clearance credential instead of recomputing proof.
+
+`custom_frontend_url` is not a filesystem path. It is an origin-relative URL routed by the same OxiBelt instance as the protected request. It can point at a static route asset, such as a route whose `static_root` contains `/person-proof/index.html`, or at a separate challenge frontend backend proxied by OxiBelt. When set, OxiBelt redirects the protected request to that URL and exposes only the general Person proof API paths in the redirect query. Browser-visible challenge code should call OxiBelt's `session`, `verify`, and optional `openapi` endpoints, not provider-native server APIs.
 
 Global API path defaults are configured under `[waf.person_proof]`:
 
@@ -523,7 +529,7 @@ verify_path = "/.oxibelt/person-proof/verify"
 openapi_path = "/.oxibelt/person-proof/openapi.json"
 ```
 
-Each `require_person_proof` action may override `session_path`, `verify_path`, and `openapi_path`. API paths must be origin-relative paths without query strings or fragments. `challenge_url` may include a query string but not a fragment. If the same runtime path is used for different API roles, configuration fails closed; explicitly duplicated per-policy API paths are also rejected.
+Each `require_person_proof` action may override `session_path`, `verify_path`, and `openapi_path`. API paths must be origin-relative paths without query strings or fragments. `custom_frontend_url` may include a query string but not a fragment. If the same runtime path is used for different API roles, configuration fails closed; explicitly duplicated per-policy API paths are also rejected.
 
 `GET openapi_path` returns a static OpenAPI 3.1 JSON document with the configured paths reflected in `paths` and `Cache-Control: no-store`.
 
@@ -564,7 +570,7 @@ request_header = "X-OxiBelt-Person-Proof"
 ```json
 {
   "session": "session.v1...",
-  "method": "turnstile",
+  "person_proof_mode": "third_party_provider",
   "provider": "cloudflare-turnstile",
   "expires_unix_ms": 1700000000000,
   "return_path": "/protected",
@@ -587,16 +593,17 @@ request_header = "X-OxiBelt-Person-Proof"
     ]
   },
   "challenge": {
-    "kind": "captcha",
+    "kind": "third_party_provider",
+    "third_party_provider": "turnstile",
     "site_key": "0x4AAAA...",
     "metadata": {}
   }
 }
 ```
 
-PoW sessions use `challenge.kind = "pow_sha256_v1"` and include `difficulty` and `token`. The `token` is the signed session string that the client hashes with the nonce and submits to `verify_path`. Clearance delivery metadata is top-level `clearance`, not a token-internal field. `custom_http` sessions use `challenge.kind = "custom"` and return configured `provider_metadata`.
+PoW sessions for `built_in` and `openapi` use `challenge.kind = "pow_sha256_v1"` and include `difficulty` and `token`. The `token` is the signed session string that the client hashes with the nonce and submits to `verify_path`. Clearance delivery metadata is top-level `clearance`, not a token-internal field. `third_party_provider` sessions use `challenge.kind = "third_party_provider"` and include `third_party_provider`, `site_key`, and configured `provider_metadata`. `custom_provider` sessions use `challenge.kind = "custom_provider"` and return configured `provider_metadata`.
 
-`POST verify_path` primarily accepts JSON:
+`POST verify_path` accepts `application/json`:
 
 ```json
 {
@@ -608,7 +615,7 @@ PoW sessions use `challenge.kind = "pow_sha256_v1"` and include `difficulty` and
 }
 ```
 
-Compatibility payloads using `challenge`, `provider_response`, `cf-turnstile-response`, `h-captcha-response`, or `frc-captcha-response` are still accepted for existing frontends. Successful verification returns `200 application/json` with `{ "ok": true, "return_path": "...", "clearance": { ... } }`. Cookie mode also sends a `Set-Cookie` header with the configured cookie key and attributes. LocalStorage and response-JSON modes include the `clearance.token`; localStorage mode also includes `clearance.local_storage.key` and `clearance.local_storage.request_header`. The frontend should store the token when required, then navigate to the signed `return_path`. Invalid or missing sessions return `403`, expired sessions return `410`, invalid responses return `403`, provider transport/API failure returns `503` unless `provider_fail_policy = "open"`, non-POST verify requests return `405`, and oversized verify bodies return `413`.
+Successful verification returns `200 application/json` with `{ "ok": true, "return_path": "...", "clearance": { ... } }`. Cookie mode also sends a `Set-Cookie` header with the configured cookie key and attributes. LocalStorage and response-JSON modes include the `clearance.token`; localStorage mode also includes `clearance.local_storage.key` and `clearance.local_storage.request_header`. The frontend should store the token when required, then navigate to the signed `return_path`. Invalid or missing sessions return `403`, expired sessions return `410`, invalid responses return `403`, provider transport/API failure returns `503` unless `provider_fail_policy = "open"`, non-POST verify requests return `405`, non-JSON verify requests return `415`, and oversized verify bodies return `413`.
 
 Default provider endpoints are:
 
@@ -618,9 +625,9 @@ Default provider endpoints are:
 
 Use `provider_endpoint` to override the default endpoint for EU, private, or test deployments. OxiBelt sends the secret from `secret_env`, the browser token as `response`, the configured `site_key` where the provider supports it, and the direct remote IP when `send_remote_ip = true`. Provider transport errors, timeouts, invalid JSON, or non-success HTTP status codes fail closed with `503` by default; set `provider_fail_policy = "open"` only when availability is more important than this anti-automation control.
 
-`custom_http` sends a JSON verification request to `provider_endpoint` and expects `{ "success": true }` or `{ "success": false, "error_codes": [] }`. The request includes the OxiBelt session, method, provider name, response token/fields, optional remote IP, optional site key, and configured metadata. Built-in Turnstile, hCaptcha, and Friendly Captcha HTTP shapes are adapter-internal and are not exposed to the browser-facing API.
+`custom_provider` sends a JSON verification request to `provider_endpoint` and expects `{ "success": true }` or `{ "success": false, "error_codes": [] }`. The request includes the OxiBelt session, `person_proof_mode`, provider name, response token/fields, optional remote IP, optional site key, and configured metadata. Built-in Turnstile, hCaptcha, and Friendly Captcha HTTP shapes are adapter-internal and are not exposed to the browser-facing API.
 
-Tokens are signed with a startup-local secret by default, or a shared cluster secret when `[shared_state].person_proof_backend` is configured. Session and clearance tokens bind the original host, method, route, policy key, return path, selected method/provider, API paths, and token-binding hash.
+Tokens are signed with a startup-local secret by default, or a shared cluster secret when `[shared_state].person_proof_backend` is configured. Session and clearance tokens bind the original host, mode, selected third-party or custom provider identity, request method, route, policy key, return path, API paths, clearance signing id, and token-binding hash.
 
 Supported token bindings:
 
@@ -673,8 +680,9 @@ clearance.cookie.key = "__oxibelt_person_proof"
 
 Validation constraints:
 
-- `method` must be `pow_sha256_v1`, `turnstile`, `hcaptcha`, `friendly_captcha_v2`, or `custom_http`; `algorithm` is a compatibility alias.
-- `difficulty` must be between `1` and `30` for `pow_sha256_v1`.
+- `person_proof_mode` must be `built_in`, `openapi`, `third_party_provider`, or `custom_provider`.
+- `method`, `algorithm`, and `challenge_url` are no longer supported; use `person_proof_mode` and `custom_frontend_url`.
+- `difficulty` must be between `1` and `30` for `built_in` and `openapi`.
 - `token_validity_seconds` must be between `1` and `86400`.
 - `ttl_seconds` and `token_ttl_seconds` are compatibility aliases.
 - Flat `cookie` is no longer supported; use `clearance.cookie.key` and `clearance.sources`.
@@ -688,11 +696,12 @@ Validation constraints:
 - `tcp_max_hop`, when set, must be `0..255`.
 - `token_bindings` containing `tcp_max_hop` must also set `tcp_max_hop`.
 - `status` must be a valid HTTP status code.
-- `challenge_url`, when set, must be origin-relative and may include a query string but not a fragment.
+- `custom_frontend_url`, when set, must be origin-relative and may include a query string but not a fragment.
 - `challenge_redirect_status` must be `301`, `302`, `303`, `307`, or `308`; the default is `303`.
-- Provider methods require `challenge_url`.
-- Built-in CAPTCHA methods require `site_key` and `secret_env`.
-- `custom_http` requires `provider_endpoint`.
+- `built_in` forbids `custom_frontend_url` and `third_party_provider`.
+- `openapi` requires `custom_frontend_url` and forbids `third_party_provider`.
+- `third_party_provider` requires `custom_frontend_url`, `third_party_provider`, `site_key`, and `secret_env`, and forbids `provider`.
+- `custom_provider` requires `custom_frontend_url` and `provider_endpoint`.
 - `session_path`, `verify_path`, and `openapi_path` must be origin-relative paths without query strings or fragments.
 - `provider_endpoint`, when set, must use `http://` or `https://`.
 - `provider_timeout_ms` and `provider_max_response_body_bytes` must be greater than zero.
@@ -814,7 +823,7 @@ ClientMetadata.GeoCountry: String | Null
 ClientMetadata.Asn: Int | Null
 
 PersonProofMetadata.State: 'absent' | 'valid' | 'failed' | 'expired'
-PersonProofMetadata.Method: String | Null
+PersonProofMetadata.Mode: String | Null
 PersonProofMetadata.Difficulty: Int | Null
 PersonProofMetadata.IssuedAtUnixMs: Int | Null
 PersonProofMetadata.ExpiresAtUnixMs: Int | Null

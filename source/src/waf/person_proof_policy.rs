@@ -44,7 +44,7 @@ pub(super) fn from_action(
 ) -> PersonProofPolicy {
   let WafActionConfig::RequirePersonProof {
     priority: _,
-    method,
+    person_proof_mode,
     difficulty,
     ttl_seconds,
     cookie: _,
@@ -56,11 +56,12 @@ pub(super) fn from_action(
     single_use,
     success_tag,
     status,
-    challenge_url,
+    custom_frontend_url,
     challenge_redirect_status,
     session_path,
     verify_path,
     openapi_path,
+    third_party_provider,
     provider,
     provider_metadata,
     site_key,
@@ -70,6 +71,7 @@ pub(super) fn from_action(
     provider_fail_policy,
     provider_max_response_body_bytes,
     send_remote_ip,
+    ..
   } = action
   else {
     unreachable!("person_proof_policy::from_action requires require_person_proof action");
@@ -81,7 +83,8 @@ pub(super) fn from_action(
     .unwrap_or(&rule.name);
   PersonProofPolicy {
     key: format!("{scope}:{rule_key}:{action_index}"),
-    method: *method,
+    mode: *person_proof_mode,
+    third_party_provider: *third_party_provider,
     difficulty: *difficulty,
     ttl_seconds: *ttl_seconds,
     clearance: PersonProofClearancePolicy::from_config(clearance),
@@ -93,7 +96,7 @@ pub(super) fn from_action(
     success_tag: success_tag.clone(),
     status: *status,
     provider: person_proof_v2::PersonProofProviderConfig {
-      challenge_url: challenge_url.clone(),
+      custom_frontend_url: custom_frontend_url.clone(),
       challenge_redirect_status: *challenge_redirect_status,
       session_path: session_path
         .clone()

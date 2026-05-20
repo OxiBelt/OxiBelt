@@ -1223,7 +1223,9 @@ Response body CRS inspection uses the same bounded prefix behavior as OxiRule re
 
 Rule syntax, actions, helpers, and Person proof settings are documented in [OxiRule.md](OxiRule.md).
 
-Person proof can use the built-in API-backed `pow_sha256_v1` challenge page or redirect to a custom static frontend that talks to OxiBelt's general Person proof API. Custom frontends are ordinary route assets: configure a static route with `static_root`, point `require_person_proof.challenge_url` at that origin-relative page, then have the browser call OxiBelt's `session_path` and `verify_path`. Built-in adapters support `turnstile`, `hcaptcha`, and `friendly_captcha_v2`; `custom_http` lets OxiBelt call an OpenAPI-compatible provider that returns `{ "success": true|false }`. Clearance tokens can be issued to a cookie, localStorage, or JSON response, and protected requests can read them from configured cookie keys, `Authorization: Bearer`, or configured header keys.
+Person proof uses `person_proof_mode` to select one of four public modes. `built_in` is OxiBelt built-in PoW plus the built-in challenge frontend. `openapi` uses OxiBelt built-in PoW session/verify/OpenAPI endpoints with a custom challenge frontend. `third_party_provider` uses OxiBelt's built-in Turnstile, hCaptcha, or Friendly Captcha v2 adapters. `custom_provider` calls a configured JSON HTTP provider that returns `{ "success": true|false }`.
+
+`custom_frontend_url` is not a filesystem path. It is an origin-relative URL routed by the same OxiBelt instance, either to a static route asset or to a proxied challenge frontend backend. Custom frontends call OxiBelt's `session_path` and `verify_path`; browser code should not call provider-native server APIs directly. Clearance tokens can be issued to a cookie, localStorage, or JSON response, and protected requests can read them from configured cookie keys, `Authorization: Bearer`, or configured header keys.
 
 ```toml
 [waf.person_proof]
@@ -1233,8 +1235,9 @@ openapi_path = "/.oxibelt/person-proof/openapi.json"
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "turnstile"
-challenge_url = "/person-proof/index.html"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "/person-proof/index.html"
 site_key = "0x4AAAA..."
 secret_env = "OXIBELT_TURNSTILE_SECRET"
 provider_fail_policy = "closed"
@@ -1246,7 +1249,7 @@ type = "cookie"
 key = "__oxibelt_person_proof"
 ```
 
-The built-in PoW page embeds a signed `session` and uses the same `session_path` and `verify_path` as custom frontends; the old direct `token.nonce` proof cookie flow is not used. A challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Challenge issuance does not reserve replay state. Provider-specific values such as `site_key` and clearance storage metadata are returned by `GET session_path?session=...`. Verification should use JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`; legacy form payloads and provider-native response field names remain accepted for compatibility. `single_use` defaults to `true`; with it enabled, the session is consumed before PoW/provider verification, including failed provider responses. In localStorage mode, the browser must send the stored token on later protected requests using `clearance.local_storage.request_header` because servers cannot read localStorage directly.
+The built-in PoW page embeds a signed `session` and uses the same `session_path` and `verify_path` as custom frontends; the old direct `token.nonce` proof cookie flow is not used. A challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Challenge issuance does not reserve replay state. Provider-specific values such as `site_key` and clearance storage metadata are returned by `GET session_path?session=...`. Verification accepts only JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`. `single_use` defaults to `true`; with it enabled, the session is consumed before PoW/provider verification, including failed provider responses. In localStorage mode, the browser must send the stored token on later protected requests using `clearance.local_storage.request_header` because servers cannot read localStorage directly.
 
 ## Upstreams
 
@@ -1477,7 +1480,7 @@ Route path values must start with `/` and must not contain control characters, b
 
 `static_root` enables the built-in static file server for the route. The value must resolve to an existing directory; absolute paths are accepted, and relative paths loaded through `Config::load` resolve under the configuration directory. OxiBelt strips the matched `path_prefix`, percent-decodes each remaining path segment, and serves only regular files whose resolved path stays under `static_root`. Directory listing is forbidden, and symlinks are allowed only when secure resolution can prove they remain inside the static root. On Linux kernels with `openat2(2)`, OxiBelt opens static files relative to a read-only `static_root` directory file descriptor with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS`; this path does not require `/proc/self/fd` and is compatible with read-only root filesystems. On kernels without `openat2`, and on non-Linux platforms, OxiBelt falls back to opening the file and rechecking the opened descriptor through `/proc/self/fd`; if that verification is unavailable, the request fails closed instead of serving an unverified file. Response metadata, validators, ranges, and bytes are all derived from the same verified descriptor. Static routes accept `GET` and `HEAD`, emit `ETag`, `Last-Modified`, and `Accept-Ranges`, support a single `Range: bytes=...` request, and honor `If-None-Match` and `If-Modified-Since`. Request WAF, response WAF, rate limits, dynamic policy, security headers, compression, and Alt-Svc still apply on the general path. Static routes reject upstream-only options such as `replace_prefix_with`, `cache`, `upstream_http_version`, `generic_http_upgrade`, `connect_tunneling`, and `grpc_web`.
 
-Static routes are also the supported deployment path for custom Person proof challenge pages. Place the frontend files under a configured `static_root` and use the route-relative asset path as the WAF action's `challenge_url`.
+Static routes are one supported deployment path for custom Person proof challenge pages. Place frontend files under a configured `static_root` and use the origin-relative asset URL as the WAF action's `custom_frontend_url`. `custom_frontend_url` may also point to a separate frontend backend proxied by the same OxiBelt instance.
 
 ## TCP Stream Listeners
 

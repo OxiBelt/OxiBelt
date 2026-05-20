@@ -9,7 +9,7 @@ type SessionDocument = {
   // eslint-disable-next-line @typescript-eslint/naming-convention
   session: string
   // eslint-disable-next-line @typescript-eslint/naming-convention
-  method: string
+  person_proof_mode: string
   // eslint-disable-next-line @typescript-eslint/naming-convention
   expires_unix_ms: number
   // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -247,6 +247,9 @@ const SafeOriginRelativePath = (Path: string): string => {
 const SolveChallenge = async (): Promise<void> => {
   SetStatus('Preparing challenge...')
   const Document = await GetJson<SessionDocument>(SessionPath)
+  if (Document.person_proof_mode !== 'built_in') {
+    throw new Error(`unsupported person proof mode ${Document.person_proof_mode}`)
+  }
   if (Document.challenge.kind !== 'pow_sha256_v1') {
     throw new Error(`unsupported challenge kind ${Document.challenge.kind}`)
   }

@@ -9,9 +9,9 @@ use http::{HeaderName, HeaderValue, StatusCode};
 use ring::rand::{SecureRandom, SystemRandom};
 
 use super::{
-  HeaderMutation, PersonProofAlgorithm, PersonProofClearanceConfig,
-  PersonProofClearanceIssueTarget, PersonProofClearanceSameSite, PersonProofClearanceSourceConfig,
-  PersonProofTokenBinding, WafRequestInput, WafTerminalResponse,
+  HeaderMutation, PersonProofClearanceConfig, PersonProofClearanceIssueTarget,
+  PersonProofClearanceSameSite, PersonProofClearanceSourceConfig, PersonProofMode,
+  PersonProofThirdPartyProvider, PersonProofTokenBinding, WafRequestInput, WafTerminalResponse,
 };
 use crate::shared_state::SharedState;
 
@@ -27,7 +27,8 @@ pub(super) struct PersonProofEngine {
 #[derive(Debug, Clone)]
 pub(super) struct PersonProofPolicy {
   pub key: String,
-  pub method: PersonProofAlgorithm,
+  pub mode: PersonProofMode,
+  pub third_party_provider: Option<PersonProofThirdPartyProvider>,
   pub difficulty: u8,
   pub ttl_seconds: u64,
   pub clearance: PersonProofClearancePolicy,
@@ -63,7 +64,7 @@ impl PersonProofState {
 #[derive(Debug, Clone)]
 pub(super) struct PersonProofRequestStatus {
   pub state: PersonProofState,
-  pub method: Option<&'static str>,
+  pub mode: Option<&'static str>,
   pub difficulty: Option<u8>,
   pub issued_at_unix_ms: Option<i64>,
   pub expires_at_unix_ms: Option<i64>,
@@ -118,7 +119,7 @@ impl Default for PersonProofRequestStatus {
   fn default() -> Self {
     Self {
       state: PersonProofState::Absent,
-      method: None,
+      mode: None,
       difficulty: None,
       issued_at_unix_ms: None,
       expires_at_unix_ms: None,
@@ -414,7 +415,7 @@ impl PersonProofEngine {
         Err(error) => {
           failed = Some(PersonProofRequestStatus {
             state: PersonProofState::Failed,
-            method: Some(policy.method.as_str()),
+            mode: Some(policy.mode.as_str()),
             difficulty: Some(policy.difficulty),
             issued_at_unix_ms: None,
             expires_at_unix_ms: None,
@@ -461,7 +462,7 @@ impl PersonProofEngine {
     input: WafRequestInput<'_>,
     policy: PersonProofPolicy,
   ) -> anyhow::Result<WafTerminalResponse> {
-    if policy.provider.challenge_url.is_some() {
+    if policy.provider.custom_frontend_url.is_some() {
       return super::person_proof_v2::redirect_challenge(self, input, &policy);
     }
 
@@ -505,7 +506,7 @@ impl PersonProofEngine {
     });
     response.headers.push(HeaderMutation::Set {
       name: HeaderName::from_static("x-oxibelt-person-proof"),
-      value: HeaderValue::from_static("pow_sha256_v1"),
+      value: HeaderValue::from_static("built_in"),
     });
     response
       .headers
@@ -712,7 +713,7 @@ fn challenge_html(
   let verify_path_js = js_escape(&policy.provider.verify_path);
   let return_path_js = js_escape(return_path);
   let clearance_label = policy.clearance.storage_label();
-  let algorithm = html_escape(policy.method.as_str());
+  let mode = html_escape(policy.mode.as_str());
   let session_html = html_escape(session);
   let session_path_html = html_escape(&policy.provider.session_path);
   let verify_path_html = html_escape(&policy.provider.verify_path);
@@ -727,7 +728,7 @@ fn challenge_html(
     .replace("__VERIFY_PATH_JS__", &verify_path_js)
     .replace("__RETURN_PATH_JS__", &return_path_js)
     .replace("__CLEARANCE_STORAGE_HTML__", &clearance_html)
-    .replace("__ALGORITHM__", &algorithm)
+    .replace("__MODE__", &mode)
     .replace("__DIFFICULTY__", &policy.difficulty.to_string())
     .replace("__TTL_SECONDS__", &policy.ttl_seconds.to_string())
     .replace("__EXPIRES_UNIX_MS__", &expires.to_string())

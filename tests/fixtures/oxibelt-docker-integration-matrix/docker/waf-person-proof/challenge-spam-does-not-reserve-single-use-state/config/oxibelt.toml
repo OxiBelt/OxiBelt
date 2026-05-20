@@ -61,6 +61,7 @@ when = "Request.Http.Path.endsWith('/proof') && Request.Client.PersonProof.State
 
 [[waf.rules.actions]]
 type = "require_person_proof"
+person_proof_mode = "built_in"
 difficulty = 4
 token_validity_seconds = 60
 clearance.cookie.key = "__matrix_person_proof"
@@ -75,12 +76,12 @@ when = "Request.Http.Path.startsWith('/app/provider-proof') && Request.Client.Pe
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "custom_http"
+person_proof_mode = "custom_provider"
 token_validity_seconds = 60
 clearance.cookie.key = "__matrix_provider_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 success_tag = "PersonProof"
-challenge_url = "/person-proof/index.html"
+custom_frontend_url = "/person-proof/index.html"
 provider = "matrix-provider"
 provider_metadata = { fixture = "challenge-spam-does-not-reserve-single-use-state" }
 provider_endpoint = "http://mock-http:18080/status/200?body=%7B%22success%22%3Afalse%7D&content_type=application/json"

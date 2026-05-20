@@ -401,6 +401,7 @@ when = "Request.Http.Path.startsWith('/app/person-proof') && Request.Client.Pers
 
 [[waf.rules.actions]]
 type = "require_person_proof"
+person_proof_mode = "built_in"
 difficulty = 4
 token_validity_seconds = 60
 clearance.cookie.key = "__webdriver_person_proof"

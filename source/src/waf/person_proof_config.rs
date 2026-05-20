@@ -11,7 +11,10 @@ use super::defaults::{
   default_person_proof_local_storage_request_header, default_person_proof_openapi_path,
   default_person_proof_session_path, default_person_proof_verify_path, default_true,
 };
-use super::{PersonProofAlgorithm, WafActionConfig, WafRuleConfig, WafRuleGroupConfig};
+use super::{
+  PersonProofMode, PersonProofThirdPartyProvider, WafActionConfig, WafRuleConfig,
+  WafRuleGroupConfig,
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafPersonProofConfig {
@@ -233,12 +236,13 @@ pub(super) fn validate_clearance_settings(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn validate_redirect_settings(
   rule_name: &str,
-  method: PersonProofAlgorithm,
-  challenge_url: Option<&str>,
+  person_proof_mode: PersonProofMode,
+  custom_frontend_url: Option<&str>,
   challenge_redirect_status: u16,
   session_path: Option<&str>,
   verify_path: Option<&str>,
   openapi_path: Option<&str>,
+  third_party_provider: Option<PersonProofThirdPartyProvider>,
   provider: Option<&str>,
   site_key: Option<&str>,
   secret_env: Option<&str>,
@@ -246,10 +250,10 @@ pub(super) fn validate_redirect_settings(
   provider_timeout_ms: u64,
   provider_max_response_body_bytes: usize,
 ) -> anyhow::Result<()> {
-  if let Some(challenge_url) = challenge_url
-    && !is_origin_relative_url(challenge_url, true)
+  if let Some(custom_frontend_url) = custom_frontend_url
+    && !is_origin_relative_url(custom_frontend_url, true)
   {
-    bail!("WAF rule {rule_name} require_person_proof challenge_url must be origin-relative");
+    bail!("WAF rule {rule_name} require_person_proof custom_frontend_url must be origin-relative");
   }
   if !matches!(challenge_redirect_status, 301 | 302 | 303 | 307 | 308) {
     bail!(
@@ -276,31 +280,76 @@ pub(super) fn validate_redirect_settings(
   {
     bail!("WAF rule {rule_name} require_person_proof provider must not be empty");
   }
-  if method.is_provider() {
-    if challenge_url.is_none() {
-      bail!(
-        "WAF rule {rule_name} require_person_proof challenge_url is required for external providers"
-      );
-    }
-    if method == PersonProofAlgorithm::CustomHttp {
-      if provider_endpoint.is_none() {
+  match person_proof_mode {
+    PersonProofMode::BuiltIn => {
+      if custom_frontend_url.is_some() {
         bail!(
-          "WAF rule {rule_name} require_person_proof provider_endpoint is required for custom_http"
+          "WAF rule {rule_name} require_person_proof custom_frontend_url is not allowed for built_in mode"
         );
       }
-    } else {
+      if third_party_provider.is_some() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof third_party_provider is only valid for third_party_provider mode"
+        );
+      }
+    }
+    PersonProofMode::OpenApi => {
+      if custom_frontend_url.is_none() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof custom_frontend_url is required for openapi mode"
+        );
+      }
+      if third_party_provider.is_some() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof third_party_provider is only valid for third_party_provider mode"
+        );
+      }
+    }
+    PersonProofMode::ThirdPartyProvider => {
+      if custom_frontend_url.is_none() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof custom_frontend_url is required for third_party_provider mode"
+        );
+      }
+      if third_party_provider.is_none() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof third_party_provider is required for third_party_provider mode"
+        );
+      }
+      if provider.is_some() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof provider is only valid for custom_provider mode"
+        );
+      }
       validate_non_empty(
         rule_name,
         "site_key",
         site_key,
-        "is required for external providers",
+        "is required for third_party_provider mode",
       )?;
       validate_non_empty(
         rule_name,
         "secret_env",
         secret_env,
-        "is required for external providers",
+        "is required for third_party_provider mode",
       )?;
+    }
+    PersonProofMode::CustomProvider => {
+      if custom_frontend_url.is_none() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof custom_frontend_url is required for custom_provider mode"
+        );
+      }
+      if third_party_provider.is_some() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof third_party_provider is only valid for third_party_provider mode"
+        );
+      }
+      if provider_endpoint.is_none() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof provider_endpoint is required for custom_provider mode"
+        );
+      }
     }
   }
   if let Some(endpoint) = provider_endpoint

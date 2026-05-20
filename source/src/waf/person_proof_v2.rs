@@ -10,16 +10,17 @@ use super::person_proof::{
   random_hex, remaining_seconds, token_binding_payload_for_route,
 };
 use super::person_proof_api::{
-  begin_session_challenge, provider_endpoint, provider_metadata, provider_name, sign_session_token,
+  begin_session_challenge, provider_endpoint, provider_identity, provider_metadata, provider_name,
+  sign_session_token,
 };
 use super::{
-  HeaderMutation, PersonProofAlgorithm, PersonProofProviderFailPolicy, WafRequestInput,
-  WafTerminalResponse,
+  HeaderMutation, PersonProofMode, PersonProofProviderFailPolicy, PersonProofThirdPartyProvider,
+  WafRequestInput, WafTerminalResponse,
 };
 
 #[derive(Debug, Clone)]
 pub(super) struct PersonProofProviderConfig {
-  pub challenge_url: Option<String>,
+  pub custom_frontend_url: Option<String>,
   pub challenge_redirect_status: u16,
   pub session_path: String,
   pub verify_path: String,
@@ -37,7 +38,8 @@ pub(super) struct PersonProofProviderConfig {
 
 #[derive(Debug, Clone)]
 pub struct PersonProofProviderChallenge {
-  pub method: PersonProofAlgorithm,
+  pub mode: PersonProofMode,
+  pub third_party_provider: Option<PersonProofThirdPartyProvider>,
   pub endpoint: Option<url::Url>,
   pub site_key: Option<String>,
   pub secret_env: Option<String>,
@@ -59,6 +61,8 @@ pub(super) struct ProviderChallengeState {
   pub(super) token: String,
   pub(super) issued: i64,
   pub(super) expires: i64,
+  pub(super) mode: String,
+  pub(super) provider: String,
   pub(super) method: String,
   pub(super) route_name: String,
   pub(super) binding_hash: String,
@@ -68,6 +72,7 @@ pub(super) struct ProviderChallengeState {
 struct ChallengeFields {
   issued: i64,
   expires: i64,
+  mode: String,
   provider: String,
   method: String,
   route: String,
@@ -80,6 +85,7 @@ struct ChallengeFields {
 struct ClearanceFields {
   issued: i64,
   expires: i64,
+  mode: String,
   provider: String,
   method: String,
   route: String,
@@ -118,9 +124,9 @@ pub(super) fn redirect_challenge(
   let location = append_query(
     policy
       .provider
-      .challenge_url
+      .custom_frontend_url
       .as_deref()
-      .context("person proof redirect requires challenge_url")?,
+      .context("person proof redirect requires custom_frontend_url")?,
     pairs,
   );
   let mut response = WafTerminalResponse::new(
@@ -141,8 +147,8 @@ pub(super) fn redirect_challenge(
   });
   response.headers.push(HeaderMutation::Set {
     name: HeaderName::from_static("x-oxibelt-person-proof"),
-    value: HeaderValue::from_str(policy.method.as_str())
-      .context("invalid person proof method header")?,
+    value: HeaderValue::from_str(policy.mode.as_str())
+      .context("invalid person proof mode header")?,
   });
   Ok(response)
 }
@@ -159,14 +165,18 @@ pub(super) fn begin_provider_challenge(
   let Some(policy) = engine
     .policies
     .iter()
-    .find(|policy| policy.provider.verify_path == verify_path && policy.method.is_provider())
+    .find(|policy| policy.provider.verify_path == verify_path && policy.mode.uses_provider())
     .cloned()
   else {
     return Ok(None);
   };
 
   let fields = parse_challenge_token(challenge)?;
-  if fields.provider != policy.method.as_str() {
+  let expected_provider = provider_identity(&policy);
+  if fields.mode != policy.mode.as_str() {
+    bail!("person proof challenge mode does not match policy");
+  }
+  if fields.provider != expected_provider {
     bail!("person proof challenge provider does not match policy");
   }
   verify_challenge_mac(engine, input, &policy, &fields, verify_path)?;
@@ -183,7 +193,8 @@ pub(super) fn begin_provider_challenge(
   }
 
   Ok(Some(PersonProofProviderChallenge {
-    method: policy.method,
+    mode: policy.mode,
+    third_party_provider: policy.third_party_provider,
     endpoint: Some(provider_endpoint(&policy)?),
     site_key: policy.provider.site_key.clone(),
     secret_env: policy.provider.secret_env.clone(),
@@ -201,6 +212,8 @@ pub(super) fn begin_provider_challenge(
       token: challenge.to_string(),
       issued: fields.issued,
       expires: fields.expires,
+      mode: fields.mode,
+      provider: fields.provider,
       method: fields.method,
       route_name: fields.route,
       binding_hash: fields.binding_hash,
@@ -257,7 +270,10 @@ pub(super) fn verify_clearance(
   proof: &str,
 ) -> anyhow::Result<PersonProofRequestStatus> {
   let fields = parse_clearance_token(proof)?;
-  if fields.provider != policy.method.as_str() {
+  if fields.mode != policy.mode.as_str() {
+    bail!("person proof clearance mode does not match policy");
+  }
+  if fields.provider != provider_identity(policy) {
     bail!("person proof clearance provider does not match policy");
   }
   if fields.method != input.method.as_str() || fields.route != input.route_name {
@@ -276,7 +292,7 @@ pub(super) fn verify_clearance(
     } else {
       PersonProofState::Valid
     },
-    method: Some(policy.method.as_str()),
+    mode: Some(policy.mode.as_str()),
     difficulty: None,
     issued_at_unix_ms: Some(fields.issued),
     expires_at_unix_ms: Some(fields.expires),
@@ -298,6 +314,8 @@ pub(super) fn verify_clearance(
       token: proof.to_string(),
       issued: now,
       expires: fields.expires,
+      mode: fields.mode,
+      provider: fields.provider,
       method: fields.method,
       route_name: fields.route,
       binding_hash: fields.binding_hash,
@@ -338,6 +356,7 @@ fn sign_clearance_token(
   let payload = clearance_payload(
     input.downstream_host,
     &state.policy,
+    &state.provider,
     &state.method,
     &state.route_name,
     &state.binding_hash,
@@ -350,10 +369,11 @@ fn sign_clearance_token(
     payload.as_bytes(),
   );
   format!(
-    "clearance.v2.{}.{}.{}.{}.{}.{}.{}.{}",
+    "clearance.v2.{}.{}.{}.{}.{}.{}.{}.{}.{}",
     state.issued,
     state.expires,
-    state.policy.method.as_str(),
+    state.mode,
+    hex_encode(state.provider.as_bytes()),
     hex_encode(state.method.as_bytes()),
     hex_encode(state.route_name.as_bytes()),
     state.binding_hash,
@@ -372,6 +392,7 @@ fn verify_challenge_mac(
   let payload = challenge_payload(
     input.downstream_host,
     policy,
+    &fields.provider,
     &fields.method,
     &fields.route,
     verify_path,
@@ -393,6 +414,7 @@ fn verify_clearance_mac(
   let payload = clearance_payload(
     input.downstream_host,
     policy,
+    &fields.provider,
     &fields.method,
     &fields.route,
     &fields.binding_hash,
@@ -407,6 +429,7 @@ fn verify_clearance_mac(
 fn challenge_payload(
   host: &str,
   policy: &PersonProofPolicy,
+  provider: &str,
   method: &str,
   route: &str,
   verify_path: &str,
@@ -417,8 +440,9 @@ fn challenge_payload(
   random: &str,
 ) -> String {
   format!(
-    "challenge.v2\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{verify_path}\n{return_path}\n{binding_hash}\n{issued}\n{expires}\n{random}",
-    policy.method.as_str(),
+    "challenge.v2\n{}\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{verify_path}\n{return_path}\n{binding_hash}\n{issued}\n{expires}\n{random}",
+    policy.mode.as_str(),
+    provider,
     policy.key,
     policy.clearance.signing_id()
   )
@@ -428,6 +452,7 @@ fn challenge_payload(
 fn clearance_payload(
   host: &str,
   policy: &PersonProofPolicy,
+  provider: &str,
   method: &str,
   route: &str,
   binding_hash: &str,
@@ -436,8 +461,9 @@ fn clearance_payload(
   random: &str,
 ) -> String {
   format!(
-    "clearance.v2\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{binding_hash}\n{issued}\n{expires}\n{random}",
-    policy.method.as_str(),
+    "clearance.v2\n{}\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{binding_hash}\n{issued}\n{expires}\n{random}",
+    policy.mode.as_str(),
+    provider,
     policy.key,
     policy.clearance.signing_id()
   )
@@ -455,7 +481,7 @@ fn verify_mac(engine: &PersonProofEngine, payload: &str, mac: &str) -> anyhow::R
 
 fn parse_challenge_token(token: &str) -> anyhow::Result<ChallengeFields> {
   let parts = token.split('.').collect::<Vec<_>>();
-  if parts.len() != 11 || parts[0] != "challenge" || parts[1] != "v2" {
+  if parts.len() != 12 || parts[0] != "challenge" || parts[1] != "v2" {
     bail!("person proof challenge token has invalid shape");
   }
   Ok(ChallengeFields {
@@ -465,19 +491,20 @@ fn parse_challenge_token(token: &str) -> anyhow::Result<ChallengeFields> {
     expires: parts[3]
       .parse()
       .context("invalid challenge expiration timestamp")?,
-    provider: parts[4].to_string(),
-    method: decode_hex_string(parts[5])?,
-    route: decode_hex_string(parts[6])?,
-    return_path: decode_hex_string(parts[7])?,
-    binding_hash: validate_hex_field(parts[8], "challenge binding hash", 64)?,
-    random: validate_hex_field(parts[9], "challenge random", 32)?,
-    mac: parts[10].to_string(),
+    mode: parts[4].to_string(),
+    provider: decode_hex_string(parts[5])?,
+    method: decode_hex_string(parts[6])?,
+    route: decode_hex_string(parts[7])?,
+    return_path: decode_hex_string(parts[8])?,
+    binding_hash: validate_hex_field(parts[9], "challenge binding hash", 64)?,
+    random: validate_hex_field(parts[10], "challenge random", 32)?,
+    mac: parts[11].to_string(),
   })
 }
 
 fn parse_clearance_token(token: &str) -> anyhow::Result<ClearanceFields> {
   let parts = token.split('.').collect::<Vec<_>>();
-  if parts.len() != 10 || parts[0] != "clearance" || parts[1] != "v2" {
+  if parts.len() != 11 || parts[0] != "clearance" || parts[1] != "v2" {
     bail!("person proof clearance token has invalid shape");
   }
   Ok(ClearanceFields {
@@ -487,12 +514,13 @@ fn parse_clearance_token(token: &str) -> anyhow::Result<ClearanceFields> {
     expires: parts[3]
       .parse()
       .context("invalid clearance expiration timestamp")?,
-    provider: parts[4].to_string(),
-    method: decode_hex_string(parts[5])?,
-    route: decode_hex_string(parts[6])?,
-    binding_hash: validate_hex_field(parts[7], "clearance binding hash", 64)?,
-    random: validate_hex_field(parts[8], "clearance random", 32)?,
-    mac: parts[9].to_string(),
+    mode: parts[4].to_string(),
+    provider: decode_hex_string(parts[5])?,
+    method: decode_hex_string(parts[6])?,
+    route: decode_hex_string(parts[7])?,
+    binding_hash: validate_hex_field(parts[8], "clearance binding hash", 64)?,
+    random: validate_hex_field(parts[9], "clearance random", 32)?,
+    mac: parts[10].to_string(),
   })
 }
 
