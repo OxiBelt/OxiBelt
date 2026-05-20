@@ -1240,7 +1240,7 @@ secret_env = "OXIBELT_TURNSTILE_SECRET"
 provider_fail_policy = "closed"
 ```
 
-The challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Provider-specific values such as `site_key` are returned by `GET session_path?session=...`. Verification should use JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`; legacy form payloads and provider-native response field names remain accepted for compatibility.
+The challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Provider-specific values such as `site_key` are returned by `GET session_path?session=...`. Verification should use JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`; legacy form payloads and provider-native response field names remain accepted for compatibility. With `single_use = true`, the session is consumed before provider verification, including failed provider responses.
 
 ## Upstreams
 

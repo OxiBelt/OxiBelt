@@ -576,7 +576,7 @@ Defaults are `["user_agent", "route", "direct_peer_ip_network_prefix"]`, `/24` f
 
 When any policy sets `tcp_max_hop`, OxiBelt applies the strictest configured value listener-wide at accept time using Linux `IP_MINTTL` for IPv4 and `IPV6_MINHOPCOUNT` for IPv6. This is not route-local because the route is not known until after TLS and request parsing.
 
-`single_use = true` tracks challenge and clearance reuse in memory by default, or in the configured Person proof shared backend when shared state is enabled. It rotates the clearance cookie after each valid request. Local in-memory state is bounded by `waf.limits.max_person_proof_reuse_tokens`; exhaustion fails closed with `429 Too Many Requests`.
+`single_use = true` tracks challenge and clearance reuse in memory by default, or in the configured Person proof shared backend when shared state is enabled. For Person proof API verification, the signed session is consumed before provider verification so a failed CAPTCHA/provider response cannot replay the same session into another provider call. It rotates the clearance cookie after each valid request. Local in-memory state is bounded by `waf.limits.max_person_proof_reuse_tokens`; exhaustion fails closed with `429 Too Many Requests`.
 
 Validation constraints:
 

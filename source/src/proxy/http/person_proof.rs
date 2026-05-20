@@ -192,6 +192,16 @@ where
         return text_response(StatusCode::FORBIDDEN, "person proof session is invalid");
       }
     };
+  if let Err(error) = state
+    .waf
+    .consume_person_proof_provider_challenge_attempt(&challenge)
+  {
+    if error.to_string().contains("expired") {
+      return text_response(StatusCode::GONE, "person proof session expired");
+    }
+    warn!(error = %error, "invalid person proof session");
+    return text_response(StatusCode::FORBIDDEN, "person proof session is invalid");
+  }
 
   match verify_person_proof_response(state, &challenge, &payload.response, client_ip).await {
     Ok(true) => complete_person_proof_verify(state, input, challenge),

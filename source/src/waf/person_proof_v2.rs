@@ -233,12 +233,32 @@ pub(super) fn complete_provider_challenge(
   if now > challenge.state.expires {
     bail!("person proof challenge token expired");
   }
+  issue_clearance(engine, input, &challenge.state, now)
+}
+
+pub(super) fn consume_provider_challenge_attempt(
+  engine: &PersonProofEngine,
+  challenge: &PersonProofProviderChallenge,
+) -> anyhow::Result<()> {
+  let now = now_unix_ms()?;
+  if now > challenge.state.expires {
+    bail!("person proof challenge token expired");
+  }
   if challenge.state.policy.single_use
     && !engine.consume_reuse_token(&challenge_reuse_key(&challenge.state.token), now)?
   {
     bail!("person proof challenge token was already used");
   }
-  issue_clearance(engine, input, &challenge.state, now)
+  Ok(())
+}
+
+impl super::WafEngine {
+  pub fn consume_person_proof_provider_challenge_attempt(
+    &self,
+    challenge: &PersonProofProviderChallenge,
+  ) -> anyhow::Result<()> {
+    consume_provider_challenge_attempt(&self.person_proof, challenge)
+  }
 }
 
 pub(super) fn verify_clearance(

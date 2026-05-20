@@ -5702,6 +5702,9 @@ success_tag = "PersonProof"
         provider_challenge.secret_env.as_deref(),
         Some("OXIBELT_TEST_CAPTCHA_SECRET")
     );
+    engine
+        .consume_person_proof_provider_challenge_attempt(&provider_challenge)
+        .expect("provider challenge attempt should be consumed");
 
     let clearance_mutation = engine
         .complete_person_proof_provider_challenge(
@@ -5722,12 +5725,13 @@ success_tag = "PersonProof"
                 "/.oxibelt/person-proof/verify-login",
                 &session_token,
             )
-            .and_then(|challenge| engine.complete_person_proof_provider_challenge(
-                request_input(&verify_method, &verify_uri, &headers, &tags, client_addr,),
-                challenge.expect("challenge should still parse"),
-            ))
+            .and_then(
+                |challenge| engine.consume_person_proof_provider_challenge_attempt(
+                    &challenge.expect("challenge should still parse"),
+                ),
+            )
             .is_err(),
-        "single-use v2 challenge should not complete twice"
+        "single-use v2 challenge should not verify twice"
     );
 
     let clearance_value = extract_cookie_value(&clearance_cookie);
@@ -5787,6 +5791,70 @@ success_tag = "PersonProof"
             .as_ref()
             .map(|terminal| terminal.status),
         Some(StatusCode::SEE_OTHER)
+    );
+}
+
+#[test]
+fn person_proof_external_provider_consumes_single_use_attempt_before_completion() {
+    let (_temp_dir, config) = load_person_proof_provider_config(
+        "waf-person-proof-provider-preconsume",
+        r#"
+method = "custom_http"
+challenge_url = "/person-proof/index.html"
+verify_path = "/.oxibelt/person-proof/verify-login"
+provider = "test-provider"
+provider_endpoint = "http://127.0.0.1/siteverify"
+single_use = true
+"#,
+    );
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let location = extract_response_header(
+        &challenge_decision.terminal.unwrap().headers,
+        http::header::LOCATION,
+    );
+    let session_token = parse_origin_relative_location_query(&location)
+        .remove("session")
+        .expect("redirect should include session");
+
+    let verify_method = Method::POST;
+    let verify_uri: Uri = "/.oxibelt/person-proof/verify-login"
+        .parse()
+        .expect("URI should parse");
+    let provider_challenge = engine
+        .begin_person_proof_provider_challenge(
+            request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
+            "/.oxibelt/person-proof/verify-login",
+            &session_token,
+        )
+        .expect("provider challenge should validate")
+        .expect("verify_path should map to a provider challenge");
+
+    engine
+        .consume_person_proof_provider_challenge_attempt(&provider_challenge)
+        .expect("first provider challenge attempt should be consumed");
+    assert!(
+        engine
+            .begin_person_proof_provider_challenge(
+                request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
+                "/.oxibelt/person-proof/verify-login",
+                &session_token,
+            )
+            .and_then(
+                |challenge| engine.consume_person_proof_provider_challenge_attempt(
+                    &challenge.expect("challenge should still parse"),
+                ),
+            )
+            .is_err(),
+        "single-use provider challenge should be consumed before provider verification completes"
     );
 }
 
