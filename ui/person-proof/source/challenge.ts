@@ -17,6 +17,8 @@ type SessionDocument = {
   // eslint-disable-next-line @typescript-eslint/naming-convention
   verify_path: string
   // eslint-disable-next-line @typescript-eslint/naming-convention
+  clearance?: ClearanceMetadata
+  // eslint-disable-next-line @typescript-eslint/naming-convention
   challenge: {
     // eslint-disable-next-line @typescript-eslint/naming-convention
     kind: string
@@ -24,6 +26,18 @@ type SessionDocument = {
     difficulty?: number
     // eslint-disable-next-line @typescript-eslint/naming-convention
     token?: string
+  }
+}
+
+type ClearanceMetadata = {
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  issue_to?: string
+  token?: string
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  local_storage?: {
+    key?: string
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    request_header?: string
   }
 }
 
@@ -183,6 +197,19 @@ const SolveOnMainThread = async (Token: string, Difficulty: number): Promise<num
   }
 }
 
+const StoreClearance = (Clearance?: ClearanceMetadata): void => {
+  if (Clearance?.issue_to !== 'local_storage') {
+    return
+  }
+
+  const Key = Clearance.local_storage?.key
+  if (!Key || !Clearance.token) {
+    throw new Error('local storage clearance metadata is incomplete')
+  }
+
+  localStorage.setItem(Key, Clearance.token)
+}
+
 const SubmitProof = async (SessionToken: string, Nonce: number): Promise<string> => {
   const Response = await fetch(VerifyPath, {
     method: 'POST',
@@ -205,7 +232,8 @@ const SubmitProof = async (SessionToken: string, Nonce: number): Promise<string>
     throw new Error(`verify endpoint returned ${Response.status}`)
   }
 
-  const Body = (await Response.json()) as { return_path?: string }
+  const Body = (await Response.json()) as { return_path?: string; clearance?: ClearanceMetadata }
+  StoreClearance(Body.clearance)
   return Body.return_path || ReturnPath || '/'
 }
 

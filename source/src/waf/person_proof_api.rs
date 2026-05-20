@@ -24,6 +24,7 @@ pub struct PersonProofSessionDocument {
   pub expires_unix_ms: i64,
   pub return_path: String,
   pub verify_path: String,
+  pub clearance: serde_json::Value,
   pub challenge: serde_json::Value,
 }
 
@@ -77,7 +78,6 @@ pub(super) fn session_document(
       "kind": "pow_sha256_v1",
       "difficulty": policy.difficulty,
       "token": session,
-      "cookie": policy.cookie,
     }),
     PersonProofAlgorithm::Turnstile
     | PersonProofAlgorithm::HCaptcha
@@ -98,6 +98,7 @@ pub(super) fn session_document(
     expires_unix_ms: fields.expires,
     return_path: fields.return_path,
     verify_path: policy.provider.verify_path,
+    clearance: policy.clearance.session_metadata(),
     challenge,
   }))
 }
@@ -207,20 +208,157 @@ pub(super) fn openapi_document(engine: &PersonProofEngine, openapi_path: &str) -
             "required": true,
             "schema": { "type": "string" }
           }],
-          "responses": { "200": { "description": "Person-proof session" } }
+          "responses": {
+            "200": {
+              "description": "Person-proof session",
+              "content": {
+                "application/json": {
+                  "schema": { "$ref": "#/components/schemas/SessionDocument" }
+                }
+              }
+            }
+          }
         }
       },
       policy.provider.verify_path.clone(): {
         "post": {
           "operationId": "verifyPersonProofSession",
-          "requestBody": { "required": true },
-          "responses": { "200": { "description": "Verification result" } }
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/VerifyRequest" }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Verification result with clearance metadata and token",
+              "content": {
+                "application/json": {
+                  "schema": { "$ref": "#/components/schemas/VerifyResponse" }
+                }
+              }
+            }
+          }
         }
       },
       policy.provider.openapi_path.clone(): {
         "get": {
           "operationId": "getPersonProofOpenApi",
           "responses": { "200": { "description": "OpenAPI document" } }
+        }
+      }
+    },
+    "components": {
+      "schemas": {
+        "SessionDocument": {
+          "type": "object",
+          "required": [
+            "session",
+            "method",
+            "provider",
+            "expires_unix_ms",
+            "return_path",
+            "verify_path",
+            "clearance",
+            "challenge"
+          ],
+          "properties": {
+            "session": { "type": "string" },
+            "method": {
+              "type": "string",
+              "enum": [
+                "pow_sha256_v1",
+                "turnstile",
+                "hcaptcha",
+                "friendly_captcha_v2",
+                "custom_http"
+              ]
+            },
+            "provider": { "type": "string" },
+            "expires_unix_ms": { "type": "integer", "format": "int64" },
+            "return_path": { "type": "string" },
+            "verify_path": { "type": "string" },
+            "clearance": { "$ref": "#/components/schemas/ClearanceMetadata" },
+            "challenge": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "VerifyRequest": {
+          "type": "object",
+          "required": ["session", "response"],
+          "properties": {
+            "session": { "type": "string" },
+            "response": {
+              "type": "object",
+              "required": ["token"],
+              "properties": {
+                "token": { "type": "string" },
+                "fields": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "VerifyResponse": {
+          "type": "object",
+          "required": ["ok", "return_path", "clearance"],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "return_path": { "type": "string" },
+            "clearance": { "$ref": "#/components/schemas/ClearanceMetadata" }
+          }
+        },
+        "ClearanceMetadata": {
+          "type": "object",
+          "required": ["issue_to", "cookie", "local_storage", "sources"],
+          "properties": {
+            "issue_to": {
+              "type": "string",
+              "enum": ["cookie", "local_storage", "response_json"]
+            },
+            "token": { "type": "string" },
+            "expires_unix_ms": { "type": "integer", "format": "int64" },
+            "max_age_seconds": { "type": "integer", "format": "int64" },
+            "cookie": {
+              "type": "object",
+              "required": ["key", "path", "same_site", "secure", "http_only"],
+              "properties": {
+                "key": { "type": "string" },
+                "path": { "type": "string" },
+                "same_site": { "type": "string", "enum": ["Strict", "Lax", "None"] },
+                "secure": { "type": "boolean" },
+                "http_only": { "type": "boolean" }
+              }
+            },
+            "local_storage": {
+              "type": "object",
+              "required": ["key", "request_header"],
+              "properties": {
+                "key": { "type": "string" },
+                "request_header": { "type": "string" }
+              }
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": ["cookie", "authorization_bearer", "header"]
+                  },
+                  "key": { "type": "string" }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -345,7 +483,7 @@ fn session_payload(
     "session.v1\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{}\n{}\n{}\n{return_path}\n{binding_hash}\n{issued}\n{expires}\n{random}",
     policy.method.as_str(),
     policy.key,
-    policy.cookie,
+    policy.clearance.signing_id(),
     policy.provider.session_path,
     policy.provider.verify_path,
     policy.provider.openapi_path

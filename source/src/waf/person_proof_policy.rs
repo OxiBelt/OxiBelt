@@ -1,5 +1,5 @@
 use super::person_proof::PersonProofPolicy;
-use super::person_proof::{PersonProofRequestStatus, PersonProofState};
+use super::person_proof::{PersonProofClearancePolicy, PersonProofRequestStatus, PersonProofState};
 use super::person_proof_v2;
 use super::{WafActionConfig, WafPersonProofConfig, WafRuleConfig};
 
@@ -47,7 +47,8 @@ pub(super) fn from_action(
     method,
     difficulty,
     ttl_seconds,
-    cookie,
+    cookie: _,
+    clearance,
     token_bindings,
     direct_peer_ipv4_prefix_bits,
     direct_peer_ipv6_prefix_bits,
@@ -83,7 +84,7 @@ pub(super) fn from_action(
     method: *method,
     difficulty: *difficulty,
     ttl_seconds: *ttl_seconds,
-    cookie: cookie.clone(),
+    clearance: PersonProofClearancePolicy::from_config(clearance),
     token_bindings: token_bindings.clone(),
     direct_peer_ipv4_prefix_bits: *direct_peer_ipv4_prefix_bits,
     direct_peer_ipv6_prefix_bits: *direct_peer_ipv6_prefix_bits,

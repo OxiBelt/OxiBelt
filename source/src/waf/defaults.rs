@@ -133,6 +133,18 @@ pub(super) fn default_person_proof_cookie() -> String {
   "__oxibelt_person_proof".to_string()
 }
 
+pub(super) fn default_cookie_path() -> String {
+  "/".to_string()
+}
+
+pub(super) fn default_person_proof_local_storage_key() -> String {
+  "oxibelt.personProof".to_string()
+}
+
+pub(super) fn default_person_proof_local_storage_request_header() -> String {
+  "X-OxiBelt-Person-Proof".to_string()
+}
+
 pub(super) fn default_person_proof_token_bindings() -> Vec<PersonProofTokenBinding> {
   vec![
     PersonProofTokenBinding::UserAgent,

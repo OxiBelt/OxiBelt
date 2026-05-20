@@ -590,7 +590,7 @@ type = "require_person_proof"
 method = "pow_sha256_v1"
 difficulty = 18
 token_validity_seconds = 300
-cookie = "__oxibelt_person_proof"
+clearance.cookie.key = "__oxibelt_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 direct_peer_ipv4_prefix_bits = 24
 direct_peer_ipv6_prefix_bits = 56
@@ -618,13 +618,37 @@ type = "require_person_proof"
 algorithm = "pow_sha256_v1"
 difficulty = 18
 token_validity_seconds = 300
-cookie = "__oxibelt_person_proof"
+clearance.cookie.key = "__oxibelt_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 direct_peer_ipv4_prefix_bits = 24
 direct_peer_ipv6_prefix_bits = 56
 single_use = true
 success_tag = "PersonProof"
 status = 403
+```
+
+### Store Clearance in localStorage and Send a Header
+
+```toml
+[[waf.rules]]
+name = "person-proof-local-storage"
+tags = ["person-proof", "challenge"]
+phase = "request"
+priority = 605
+when = """
+Request.Client.PersonProof.State != 'valid' &&
+Request.Http.Path.startsWith('/app')
+"""
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+method = "pow_sha256_v1"
+difficulty = 18
+token_validity_seconds = 300
+clearance.issue_to = "local_storage"
+clearance.local_storage.key = "oxibelt.personProof"
+clearance.local_storage.request_header = "X-OxiBelt-Person-Proof"
+success_tag = "PersonProof"
 ```
 
 ### Chain Person Proof Success into Request Headers
@@ -661,7 +685,7 @@ type = "require_person_proof"
 algorithm = "pow_sha256_v1"
 difficulty = 22
 token_validity_seconds = 180
-cookie = "__oxibelt_admin_proof"
+clearance.cookie.key = "__oxibelt_admin_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix", "tls_fingerprint"]
 direct_peer_ipv4_prefix_bits = 32
 direct_peer_ipv6_prefix_bits = 128

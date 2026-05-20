@@ -1,13 +1,13 @@
 use anyhow::{Context, anyhow, bail};
-use http::header::{CACHE_CONTROL, LOCATION, SET_COOKIE};
+use http::header::{CACHE_CONTROL, LOCATION};
 use http::{HeaderName, HeaderValue, StatusCode};
 use ring::{digest, hmac};
 use url::form_urlencoded;
 
 use super::person_proof::{
-  PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
-  challenge_reuse_key, clearance_reuse_key, hex_decode, hex_encode, now_unix_ms, random_hex,
-  remaining_seconds, token_binding_payload_for_route,
+  PersonProofEngine, PersonProofIssuedClearance, PersonProofPolicy, PersonProofRequestStatus,
+  PersonProofState, challenge_reuse_key, clearance_reuse_key, hex_decode, hex_encode, now_unix_ms,
+  random_hex, remaining_seconds, token_binding_payload_for_route,
 };
 use super::person_proof_api::{
   begin_session_challenge, provider_endpoint, provider_metadata, provider_name, sign_session_token,
@@ -213,7 +213,7 @@ pub(super) fn complete_provider_challenge(
   engine: &PersonProofEngine,
   input: WafRequestInput<'_>,
   challenge: PersonProofProviderChallenge,
-) -> anyhow::Result<HeaderMutation> {
+) -> anyhow::Result<PersonProofIssuedClearance> {
   let now = now_unix_ms()?;
   if now > challenge.state.expires {
     bail!("person proof challenge token expired");
@@ -305,11 +305,11 @@ pub(super) fn verify_clearance(
     };
     let value = sign_clearance_token(engine, input, &state);
     engine.remember_reuse_token(&clearance_reuse_key(&value), fields.expires, now)?;
-    status.clearance = Some(super::person_proof::PersonProofClearance {
-      cookie: policy.cookie.clone(),
+    status.clearance = Some(policy.clearance.issue(
       value,
-      max_age_seconds: remaining_seconds(now, fields.expires),
-    });
+      fields.expires,
+      remaining_seconds(now, fields.expires),
+    )?);
   }
   Ok(status)
 }
@@ -319,21 +319,15 @@ fn issue_clearance(
   input: WafRequestInput<'_>,
   state: &ProviderChallengeState,
   now: i64,
-) -> anyhow::Result<HeaderMutation> {
+) -> anyhow::Result<PersonProofIssuedClearance> {
   let value = sign_clearance_token(engine, input, state);
   if state.policy.single_use {
     engine.remember_reuse_token(&clearance_reuse_key(&value), state.expires, now)?;
   }
-  let cookie = format!(
-    "{}={}; Max-Age={}; Path=/; SameSite=Lax; Secure; HttpOnly",
-    state.policy.cookie,
-    value,
-    remaining_seconds(now, state.expires)
-  );
-  Ok(HeaderMutation::Append {
-    name: SET_COOKIE,
-    value: HeaderValue::from_str(&cookie).context("invalid person proof clearance cookie")?,
-  })
+  state
+    .policy
+    .clearance
+    .issue(value, state.expires, remaining_seconds(now, state.expires))
 }
 
 fn sign_clearance_token(
@@ -426,7 +420,7 @@ fn challenge_payload(
     "challenge.v2\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{verify_path}\n{return_path}\n{binding_hash}\n{issued}\n{expires}\n{random}",
     policy.method.as_str(),
     policy.key,
-    policy.cookie
+    policy.clearance.signing_id()
   )
 }
 
@@ -445,7 +439,7 @@ fn clearance_payload(
     "clearance.v2\n{}\n{}\n{}\n{host}\n{method}\n{route}\n{binding_hash}\n{issued}\n{expires}\n{random}",
     policy.method.as_str(),
     policy.key,
-    policy.cookie
+    policy.clearance.signing_id()
   )
 }
 

@@ -130,8 +130,8 @@ noscript {
     <dd>__ALGORITHM__</dd>
     <dt>Difficulty</dt>
     <dd>__DIFFICULTY__ leading zero bits</dd>
-    <dt>Cookie</dt>
-    <dd><code>__COOKIE_HTML__</code></dd>
+    <dt>Clearance storage</dt>
+    <dd><code>__CLEARANCE_STORAGE_HTML__</code></dd>
     <dt>Session API</dt>
     <dd><code>__SESSION_PATH_HTML__</code></dd>
     <dt>Verify API</dt>
@@ -284,6 +284,16 @@ const SolveOnMainThread = async (Token, Difficulty) => {
         }
     }
 };
+const StoreClearance = (Clearance) => {
+    if (Clearance?.issue_to !== 'local_storage') {
+        return;
+    }
+    const Key = Clearance.local_storage?.key;
+    if (!Key || !Clearance.token) {
+        throw new Error('local storage clearance metadata is incomplete');
+    }
+    localStorage.setItem(Key, Clearance.token);
+};
 const SubmitProof = async (SessionToken, Nonce) => {
     const Response = await fetch(VerifyPath, {
         method: 'POST',
@@ -305,6 +315,7 @@ const SubmitProof = async (SessionToken, Nonce) => {
         throw new Error(`verify endpoint returned ${Response.status}`);
     }
     const Body = (await Response.json());
+    StoreClearance(Body.clearance);
     return Body.return_path || ReturnPath || '/';
 };
 const SafeOriginRelativePath = (Path) => {

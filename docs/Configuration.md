@@ -1223,7 +1223,7 @@ Response body CRS inspection uses the same bounded prefix behavior as OxiRule re
 
 Rule syntax, actions, helpers, and Person proof settings are documented in [OxiRule.md](OxiRule.md).
 
-Person proof can use the built-in API-backed `pow_sha256_v1` challenge page or redirect to a custom static frontend that talks to OxiBelt's general Person proof API. Custom frontends are ordinary route assets: configure a static route with `static_root`, point `require_person_proof.challenge_url` at that origin-relative page, then have the browser call OxiBelt's `session_path` and `verify_path`. Built-in adapters support `turnstile`, `hcaptcha`, and `friendly_captcha_v2`; `custom_http` lets OxiBelt call an OpenAPI-compatible provider that returns `{ "success": true|false }`.
+Person proof can use the built-in API-backed `pow_sha256_v1` challenge page or redirect to a custom static frontend that talks to OxiBelt's general Person proof API. Custom frontends are ordinary route assets: configure a static route with `static_root`, point `require_person_proof.challenge_url` at that origin-relative page, then have the browser call OxiBelt's `session_path` and `verify_path`. Built-in adapters support `turnstile`, `hcaptcha`, and `friendly_captcha_v2`; `custom_http` lets OxiBelt call an OpenAPI-compatible provider that returns `{ "success": true|false }`. Clearance tokens can be issued to a cookie, localStorage, or JSON response, and protected requests can read them from configured cookie keys, `Authorization: Bearer`, or configured header keys.
 
 ```toml
 [waf.person_proof]
@@ -1238,9 +1238,15 @@ challenge_url = "/person-proof/index.html"
 site_key = "0x4AAAA..."
 secret_env = "OXIBELT_TURNSTILE_SECRET"
 provider_fail_policy = "closed"
+clearance.issue_to = "cookie"
+clearance.cookie.key = "__oxibelt_person_proof"
+
+[[waf.rules.actions.clearance.sources]]
+type = "cookie"
+key = "__oxibelt_person_proof"
 ```
 
-The built-in PoW page embeds a signed `session` and uses the same `session_path` and `verify_path` as custom frontends; the old direct `token.nonce` proof cookie flow is not used. A challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Challenge issuance does not reserve replay state. Provider-specific values such as `site_key` are returned by `GET session_path?session=...`. Verification should use JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`; legacy form payloads and provider-native response field names remain accepted for compatibility. `single_use` defaults to `true`; with it enabled, the session is consumed before PoW/provider verification, including failed provider responses.
+The built-in PoW page embeds a signed `session` and uses the same `session_path` and `verify_path` as custom frontends; the old direct `token.nonce` proof cookie flow is not used. A challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Challenge issuance does not reserve replay state. Provider-specific values such as `site_key` and clearance storage metadata are returned by `GET session_path?session=...`. Verification should use JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`; legacy form payloads and provider-native response field names remain accepted for compatibility. `single_use` defaults to `true`; with it enabled, the session is consumed before PoW/provider verification, including failed provider responses. In localStorage mode, the browser must send the stored token on later protected requests using `clearance.local_storage.request_header` because servers cannot read localStorage directly.
 
 ## Upstreams
 

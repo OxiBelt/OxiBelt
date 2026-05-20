@@ -5475,15 +5475,23 @@ print(query["session"][0], query["session_path"][0], query["verify_path"][0], qu
   assert_body_jq "${session_doc}" '.challenge.kind == "custom"'
   assert_body_jq "${session_doc}" '.challenge.metadata.fixture == "provider-mock-verify"'
   assert_body_jq "${session_doc}" '.verify_path == "/.oxibelt/person-proof/verify"'
+  assert_body_jq "${session_doc}" '.clearance.issue_to == "cookie"'
+  assert_body_jq "${session_doc}" '.clearance.cookie.key == "__matrix_provider_person_proof"'
+  assert_body_jq "${session_doc}" '.clearance.sources[0].type == "cookie"'
+  assert_body_jq "${session_doc}" '.clearance.sources[0].key == "__matrix_provider_person_proof"'
 
   openapi="$(client_request "example.test" "${openapi_path}" 200)"
   assert_response_jq "${openapi}" '.headers["cache-control"] == "no-store"'
   assert_response_jq "${openapi}" '.body | contains("/.oxibelt/person-proof/session")'
+  assert_response_jq "${openapi}" '.body | contains("ClearanceMetadata")'
 
   verify_body="$(printf '{"session":"%s","response":{"token":"mock-token","fields":{"fixture":"matrix"}}}' "${session}")"
   verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "Content-Type: application/json")"
   assert_body_jq "${verify}" '.ok == true'
   assert_body_jq "${verify}" '.return_path == "/app/provider-proof?next=%2Fapp%2Fdone"'
+  assert_body_jq "${verify}" '.clearance.issue_to == "cookie"'
+  assert_body_jq "${verify}" '.clearance.cookie.key == "__matrix_provider_person_proof"'
+  assert_body_jq "${verify}" '.clearance.token | startswith("clearance.v2.")'
   assert_response_jq "${verify}" '.headers["set-cookie"] | contains("__matrix_provider_person_proof=clearance.v2.")'
   cookie="$(jq -r '.headers["set-cookie"]' <<<"${verify}" | cut -d';' -f1)"
 

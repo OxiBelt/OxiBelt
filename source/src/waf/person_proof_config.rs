@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
+use http::HeaderName;
 use serde::Deserialize;
 
 use crate::config::Config;
 
 use super::defaults::{
-  default_person_proof_openapi_path, default_person_proof_session_path,
-  default_person_proof_verify_path,
+  default_cookie_path, default_person_proof_cookie, default_person_proof_local_storage_key,
+  default_person_proof_local_storage_request_header, default_person_proof_openapi_path,
+  default_person_proof_session_path, default_person_proof_verify_path, default_true,
 };
 use super::{PersonProofAlgorithm, WafActionConfig, WafRuleConfig, WafRuleGroupConfig};
 
@@ -27,6 +29,118 @@ impl Default for WafPersonProofConfig {
       session_path: default_person_proof_session_path(),
       verify_path: default_person_proof_verify_path(),
       openapi_path: default_person_proof_openapi_path(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PersonProofClearanceConfig {
+  #[serde(default)]
+  pub issue_to: PersonProofClearanceIssueTarget,
+  #[serde(default)]
+  pub sources: Vec<PersonProofClearanceSourceConfig>,
+  #[serde(default)]
+  pub cookie: PersonProofClearanceCookieConfig,
+  #[serde(default)]
+  pub local_storage: PersonProofClearanceLocalStorageConfig,
+}
+
+impl Default for PersonProofClearanceConfig {
+  fn default() -> Self {
+    Self {
+      issue_to: PersonProofClearanceIssueTarget::Cookie,
+      sources: Vec::new(),
+      cookie: PersonProofClearanceCookieConfig::default(),
+      local_storage: PersonProofClearanceLocalStorageConfig::default(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonProofClearanceIssueTarget {
+  #[default]
+  Cookie,
+  LocalStorage,
+  ResponseJson,
+}
+
+impl PersonProofClearanceIssueTarget {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::Cookie => "cookie",
+      Self::LocalStorage => "local_storage",
+      Self::ResponseJson => "response_json",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PersonProofClearanceSourceConfig {
+  Cookie { key: String },
+  AuthorizationBearer,
+  Header { key: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+pub struct PersonProofClearanceCookieConfig {
+  #[serde(default = "default_person_proof_cookie")]
+  pub key: String,
+  #[serde(default = "default_cookie_path")]
+  pub path: String,
+  #[serde(default)]
+  pub same_site: PersonProofClearanceSameSite,
+  #[serde(default = "default_true")]
+  pub secure: bool,
+  #[serde(default = "default_true")]
+  pub http_only: bool,
+}
+
+impl Default for PersonProofClearanceCookieConfig {
+  fn default() -> Self {
+    Self {
+      key: default_person_proof_cookie(),
+      path: default_cookie_path(),
+      same_site: PersonProofClearanceSameSite::default(),
+      secure: true,
+      http_only: true,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonProofClearanceSameSite {
+  Strict,
+  #[default]
+  Lax,
+  None,
+}
+
+impl PersonProofClearanceSameSite {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::Strict => "Strict",
+      Self::Lax => "Lax",
+      Self::None => "None",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+pub struct PersonProofClearanceLocalStorageConfig {
+  #[serde(default = "default_person_proof_local_storage_key")]
+  pub key: String,
+  #[serde(default = "default_person_proof_local_storage_request_header")]
+  pub request_header: String,
+}
+
+impl Default for PersonProofClearanceLocalStorageConfig {
+  fn default() -> Self {
+    Self {
+      key: default_person_proof_local_storage_key(),
+      request_header: default_person_proof_local_storage_request_header(),
     }
   }
 }
@@ -59,6 +173,59 @@ pub(super) fn validate_api_paths(config: &Config) -> anyhow::Result<()> {
       &config.waf.person_proof,
       &route.waf.rule_groups,
     )?;
+  }
+  Ok(())
+}
+
+pub(super) fn validate_clearance_settings(
+  rule_name: &str,
+  clearance: &PersonProofClearanceConfig,
+) -> anyhow::Result<()> {
+  if !is_valid_cookie_name(&clearance.cookie.key) {
+    bail!(
+      "WAF rule {rule_name} require_person_proof clearance.cookie.key must be a safe cookie name"
+    );
+  }
+  if !is_valid_cookie_path(&clearance.cookie.path) {
+    bail!(
+      "WAF rule {rule_name} require_person_proof clearance.cookie.path must be a safe cookie path"
+    );
+  }
+  if !is_valid_local_storage_key(&clearance.local_storage.key) {
+    bail!(
+      "WAF rule {rule_name} require_person_proof clearance.local_storage.key must not be empty or contain control characters"
+    );
+  }
+  validate_header_name(&clearance.local_storage.request_header).with_context(|| {
+    format!(
+      "WAF rule {rule_name} require_person_proof clearance.local_storage.request_header is invalid"
+    )
+  })?;
+  if clearance.sources.is_empty()
+    && clearance.issue_to == PersonProofClearanceIssueTarget::ResponseJson
+  {
+    bail!(
+      "WAF rule {rule_name} require_person_proof clearance.sources must not be empty when issue_to is response_json"
+    );
+  }
+  for source in &clearance.sources {
+    match source {
+      PersonProofClearanceSourceConfig::Cookie { key } => {
+        if !is_valid_cookie_name(key) {
+          bail!(
+            "WAF rule {rule_name} require_person_proof clearance source cookie key must be a safe cookie name"
+          );
+        }
+      }
+      PersonProofClearanceSourceConfig::AuthorizationBearer => {}
+      PersonProofClearanceSourceConfig::Header { key } => {
+        validate_header_name(key).with_context(|| {
+          format!(
+            "WAF rule {rule_name} require_person_proof clearance source header key is invalid"
+          )
+        })?;
+      }
+    }
   }
   Ok(())
 }
@@ -311,6 +478,32 @@ fn validate_non_empty(
     Some(_) => bail!("WAF rule {rule_name} require_person_proof {field} must not be empty"),
     None => bail!("WAF rule {rule_name} require_person_proof {field} {missing_message}"),
   }
+}
+
+fn validate_header_name(name: &str) -> anyhow::Result<()> {
+  HeaderName::from_bytes(name.as_bytes()).context("invalid WAF header name")?;
+  Ok(())
+}
+
+fn is_valid_cookie_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.len() <= 64
+    && !name.starts_with('$')
+    && name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn is_valid_cookie_path(path: &str) -> bool {
+  !path.is_empty()
+    && path.starts_with('/')
+    && path
+      .bytes()
+      .all(|byte| byte.is_ascii() && !byte.is_ascii_control() && byte != b';')
+}
+
+fn is_valid_local_storage_key(key: &str) -> bool {
+  !key.is_empty() && key.len() <= 256 && key.chars().all(|character| !character.is_control())
 }
 
 fn is_origin_relative_url(value: &str, allow_query: bool) -> bool {

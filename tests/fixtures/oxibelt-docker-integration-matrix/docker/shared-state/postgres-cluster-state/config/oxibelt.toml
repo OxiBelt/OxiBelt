@@ -101,7 +101,7 @@ when = "Request.Http.Path.endsWith('/proof') && Request.Client.PersonProof.State
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__matrix_person_proof"
+clearance.cookie.key = "__matrix_person_proof"
 token_bindings = ["route"]
 single_use = true
 

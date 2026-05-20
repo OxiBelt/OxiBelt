@@ -615,6 +615,12 @@ unsupported_directive_policy = "fail_closed"
 # provider_timeout_ms = 3000
 # provider_fail_policy = "closed" # closed | open
 # send_remote_ip = true
+# clearance.issue_to = "cookie" # cookie | local_storage | response_json
+# clearance.cookie.key = "__oxibelt_person_proof"
+#
+#[[waf.rules.actions.clearance.sources]]
+# type = "cookie"
+# key = "__oxibelt_person_proof"
 
 [[upstreams]]
 name = "app"

@@ -63,7 +63,7 @@ when = "Request.Http.Path.endsWith('/proof') && Request.Client.PersonProof.State
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__matrix_person_proof"
+clearance.cookie.key = "__matrix_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 success_tag = "PersonProof"
 
@@ -77,7 +77,7 @@ when = "Request.Http.Path.startsWith('/app/provider-proof') && Request.Client.Pe
 type = "require_person_proof"
 method = "custom_http"
 token_validity_seconds = 60
-cookie = "__matrix_provider_person_proof"
+clearance.cookie.key = "__matrix_provider_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 success_tag = "PersonProof"
 challenge_url = "/person-proof/index.html"

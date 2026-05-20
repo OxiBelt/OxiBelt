@@ -9,11 +9,11 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
-    BodyNeed, HeaderMutation, PersonProofAlgorithm, WafBodyInput, WafEngine, WafProtocol,
-    WafRequestInput, WafResponseInput, WafStreamDirection, WafStreamInput, WafStreamProtocol,
-    WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
-    WafWebSocketStreamMetadata, WafWebTransportStreamKind, WafWebTransportStreamMetadata,
-    compile_access_log_fields, crs_compatibility_matrix,
+    BodyNeed, HeaderMutation, PersonProofAlgorithm, PersonProofIssuedClearance, WafBodyInput,
+    WafEngine, WafProtocol, WafRequestInput, WafResponseInput, WafStreamDirection, WafStreamInput,
+    WafStreamProtocol, WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput,
+    WafTransportNetwork, WafWebSocketStreamMetadata, WafWebTransportStreamKind,
+    WafWebTransportStreamMetadata, compile_access_log_fields, crs_compatibility_matrix,
 };
 use ring::digest;
 
@@ -5206,7 +5206,7 @@ when = "Request.Client.PersonProof.State != 'valid' && Request.Client.Agent.Veri
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 success_tag = "PersonProof"
 "#
     );
@@ -5332,6 +5332,249 @@ success_tag = "PersonProof"
 }
 
 #[test]
+fn person_proof_accepts_configured_header_and_bearer_sources_in_order() {
+    let temp_dir = common::TempDir::new("waf-person-proof-source-list");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-source-list");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+single_use = false
+success_tag = "PersonProof"
+clearance.issue_to = "response_json"
+
+[[waf.rules.actions.clearance.sources]]
+type = "header"
+key = "X-OxiBelt-Person-Proof"
+
+[[waf.rules.actions.clearance.sources]]
+type = "authorization_bearer"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let challenge = challenge_decision
+        .terminal
+        .as_ref()
+        .expect("missing person proof challenge");
+    let clearance = complete_pow_person_proof_issued(
+        &engine,
+        request_input(&method, &uri, &headers, &tags, client_addr),
+        &challenge.body,
+        4,
+    );
+
+    assert!(clearance.response_header.is_none());
+    assert_eq!(
+        clearance
+            .metadata
+            .get("issue_to")
+            .and_then(serde_json::Value::as_str),
+        Some("response_json")
+    );
+
+    let mut header_headers = HeaderMap::new();
+    header_headers.insert(
+        http::header::HeaderName::from_static("x-oxibelt-person-proof"),
+        HeaderValue::from_str(&clearance.token).unwrap(),
+    );
+    let header_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &header_headers,
+        &tags,
+        client_addr,
+    ));
+    assert!(header_decision.terminal.is_none());
+    assert_eq!(
+        header_decision.tags,
+        vec![("PersonProof".to_string(), "valid".to_string())]
+    );
+
+    let mut bearer_headers = HeaderMap::new();
+    bearer_headers.insert(
+        http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", clearance.token)).unwrap(),
+    );
+    let bearer_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &bearer_headers,
+        &tags,
+        client_addr,
+    ));
+    assert!(bearer_decision.terminal.is_none());
+
+    let mut ordered_headers = bearer_headers;
+    ordered_headers.insert(
+        http::header::HeaderName::from_static("x-oxibelt-person-proof"),
+        HeaderValue::from_static("clearance.v2.invalid"),
+    );
+    let ordered_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &ordered_headers,
+        &tags,
+        client_addr,
+    ));
+    assert_eq!(
+        ordered_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn person_proof_local_storage_issue_target_returns_metadata_and_bridge_header() {
+    let temp_dir = common::TempDir::new("waf-person-proof-local-storage");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-local-storage");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+success_tag = "PersonProof"
+clearance.issue_to = "local_storage"
+clearance.local_storage.key = "app.personProof"
+clearance.local_storage.request_header = "X-App-Person-Proof"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let challenge = challenge_decision
+        .terminal
+        .as_ref()
+        .expect("missing person proof challenge");
+    let clearance = complete_pow_person_proof_issued(
+        &engine,
+        request_input(&method, &uri, &headers, &tags, client_addr),
+        &challenge.body,
+        4,
+    );
+
+    assert_eq!(
+        clearance
+            .metadata
+            .get("issue_to")
+            .and_then(serde_json::Value::as_str),
+        Some("local_storage")
+    );
+    assert_eq!(
+        clearance
+            .metadata
+            .pointer("/local_storage/key")
+            .and_then(serde_json::Value::as_str),
+        Some("app.personProof")
+    );
+    assert_eq!(
+        clearance
+            .metadata
+            .pointer("/local_storage/request_header")
+            .and_then(serde_json::Value::as_str),
+        Some("X-App-Person-Proof")
+    );
+    assert_eq!(
+        clearance
+            .metadata
+            .get("token")
+            .and_then(serde_json::Value::as_str),
+        Some(clearance.token.as_str())
+    );
+    assert!(matches!(
+        clearance.response_header.as_ref(),
+        Some(HeaderMutation::Set { name, value })
+            if name.as_str() == "x-app-person-proof"
+                && value.to_str().ok() == Some(clearance.token.as_str())
+    ));
+
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::HeaderName::from_static("x-app-person-proof"),
+        HeaderValue::from_str(&clearance.token).unwrap(),
+    );
+    let solved_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+    ));
+
+    assert!(solved_decision.terminal.is_none());
+    assert_eq!(
+        solved_decision.tags,
+        vec![("PersonProof".to_string(), "valid".to_string())]
+    );
+    assert!(
+        solved_decision
+            .response_header_mutations
+            .iter()
+            .any(|mutation| matches!(
+                mutation,
+                HeaderMutation::Set { name, value }
+                    if name.as_str() == "x-app-person-proof"
+                        && value
+                            .to_str()
+                            .map(|token| token.starts_with("clearance.v2."))
+                            .unwrap_or(false)
+            ))
+    );
+}
+
+#[test]
 fn person_proof_external_provider_config_parses_and_validates() {
     let (_temp_dir, config) = load_person_proof_provider_config(
         "waf-person-proof-provider-config",
@@ -5428,6 +5671,14 @@ verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "site-test"
 "#,
             "secret_env is required",
+        ),
+        (
+            "waf-person-proof-flat-cookie",
+            r#"
+method = "pow_sha256_v1"
+cookie = "__legacy_person_proof"
+"#,
+            "cookie is no longer supported",
         ),
     ] {
         let (_temp_dir, config) = load_person_proof_provider_config(name, action);
@@ -5669,6 +5920,8 @@ secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
         .expect("OpenAPI document should be registered");
     assert!(openapi.contains("/.oxibelt/person-proof/session"));
     assert!(openapi.contains("/.oxibelt/person-proof/verify-login"));
+    assert!(openapi.contains("ClearanceMetadata"));
+    assert!(openapi.contains("\"clearance\""));
 }
 
 #[test]
@@ -5728,13 +5981,16 @@ success_tag = "PersonProof"
         .consume_person_proof_provider_challenge_attempt(&provider_challenge)
         .expect("provider challenge attempt should be consumed");
 
-    let clearance_mutation = engine
+    let clearance = engine
         .complete_person_proof_provider_challenge(
             request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
             provider_challenge,
         )
         .expect("provider challenge should complete");
-    let clearance_cookie = extract_set_cookie(&[clearance_mutation]);
+    let clearance_cookie = extract_set_cookie(&[clearance
+        .response_header
+        .clone()
+        .expect("cookie clearance should set a response header")]);
     assert!(clearance_cookie.contains("__test_person_proof=clearance.v2."));
     assert!(clearance_cookie.contains("HttpOnly"));
     assert!(clearance_cookie.contains("Secure"));
@@ -5911,7 +6167,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 success_tag = "PersonProof"
 
 [[waf.rules]]
@@ -6014,7 +6270,7 @@ when = "Request.Http.Path.startsWith('/public') && Request.Client.PersonProof.St
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 success_tag = "WeakProof"
 
 [[waf.rules]]
@@ -6027,7 +6283,7 @@ when = "Request.Http.Path.startsWith('/admin') && Request.Client.PersonProof.Sta
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 success_tag = "AdminProof"
 "#
     );
@@ -6109,7 +6365,7 @@ when = "Request.Http.Path.startsWith('/low') && Request.Client.PersonProof.State
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 success_tag = "LowProof"
 
 [[waf.rules]]
@@ -6122,7 +6378,7 @@ when = "Request.Http.Path.startsWith('/admin') && Request.Client.PersonProof.Sta
 type = "require_person_proof"
 difficulty = 6
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 success_tag = "AdminProof"
 "#
     );
@@ -6218,7 +6474,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 "#
     );
 
@@ -6300,7 +6556,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 method = "custom_http"
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 challenge_url = "/person-proof/index.html"
 provider = "test-provider"
 provider_endpoint = "http://127.0.0.1/siteverify"
@@ -6367,7 +6623,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 method = "custom_http"
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 challenge_url = "/person-proof/index.html"
 verify_path = "/.oxibelt/person-proof/verify-login"
 provider = "test-provider"
@@ -6466,7 +6722,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 "#
     );
 
@@ -6546,7 +6802,7 @@ when = "Request.Client.PersonProof.Weight >= 100 && Request.Client.PersonProof.S
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 "#
     );
 
@@ -6618,7 +6874,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 
 [[waf.rules]]
 name = "reject-blocked-public"
@@ -6721,7 +6977,7 @@ when = "Request.Client.PersonProof.Weight >= 100 && Request.Client.PersonProof.S
 type = "require_person_proof"
 difficulty = 6
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 
 [[waf.rules]]
 name = "login-proof"
@@ -6733,7 +6989,7 @@ when = "Request.Client.PersonProof.Weight >= 50 && Request.Client.PersonProof.We
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 "#
     );
 
@@ -6803,7 +7059,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 direct_peer_ipv4_prefix_bits = 24
 "#
@@ -6898,7 +7154,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 token_bindings = ["tls_fingerprint"]
 "#
     );
@@ -6990,7 +7246,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 token_bindings = ["tcp_max_hop"]
 tcp_max_hop = 16
 "#
@@ -7114,7 +7370,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 direct_peer_ipv4_prefix_bits = 32
 single_use = true
@@ -7254,7 +7510,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 direct_peer_ipv4_prefix_bits = 32
 single_use = true
@@ -8687,6 +8943,19 @@ fn complete_pow_person_proof(
     challenge_body: &str,
     expected_difficulty: u8,
 ) -> String {
+    let clearance =
+        complete_pow_person_proof_issued(engine, request, challenge_body, expected_difficulty);
+    extract_set_cookie(&[clearance
+        .response_header
+        .expect("cookie clearance should set a response header")])
+}
+
+fn complete_pow_person_proof_issued(
+    engine: &WafEngine,
+    request: WafRequestInput<'_>,
+    challenge_body: &str,
+    expected_difficulty: u8,
+) -> PersonProofIssuedClearance {
     let session = extract_person_proof_session(challenge_body);
     let session_path = extract_person_proof_js_const(challenge_body, "SessionPath");
     let verify_path = extract_person_proof_js_const(challenge_body, "VerifyPath");
@@ -8713,6 +8982,13 @@ fn complete_pow_person_proof(
             .get("kind")
             .and_then(serde_json::Value::as_str),
         Some("pow_sha256_v1")
+    );
+    assert!(
+        document
+            .clearance
+            .get("issue_to")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
     );
     assert_eq!(
         document
@@ -8749,10 +9025,9 @@ fn complete_pow_person_proof(
     engine
         .consume_person_proof_provider_challenge_attempt(&provider_challenge)
         .expect("PoW challenge attempt should be consumed");
-    let mutation = engine
+    engine
         .complete_person_proof_provider_challenge(verify_input, provider_challenge)
-        .expect("PoW challenge should complete");
-    extract_set_cookie(&[mutation])
+        .expect("PoW challenge should complete")
 }
 
 fn solve_pow_nonce(token: &str, difficulty: u8) -> u64 {
@@ -8810,7 +9085,7 @@ when = "Request.Client.PersonProof.State != 'valid'"
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-cookie = "__test_person_proof"
+clearance.cookie.key = "__test_person_proof"
 token_validity_seconds = 60
 {action}
 "#

@@ -360,7 +360,7 @@ type = "require_person_proof"
 method = "pow_sha256_v1"
 difficulty = 18
 token_validity_seconds = 300
-cookie = "__oxibelt_person_proof"
+clearance.cookie.key = "__oxibelt_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 direct_peer_ipv4_prefix_bits = 24
 direct_peer_ipv6_prefix_bits = 56
@@ -510,7 +510,7 @@ When `min_count` is greater than `1`, rows are written as `observing` until the 
 
 Supported methods are `pow_sha256_v1`, `turnstile`, `hcaptcha`, `friendly_captcha_v2`, and `custom_http`. The legacy `algorithm` field is accepted as an alias for `method`.
 
-`pow_sha256_v1` is the built-in proof-of-work method: the client computes a nonce such that `SHA-256(session || "." || nonce)` has the configured number of leading zero bits. Built-in PoW always uses OxiBelt's Person proof session and verify API. If `challenge_url` is not set, OxiBelt serves its built-in API-backed challenge page directly; if `challenge_url` is set, OxiBelt redirects to the configured static frontend. Successful verification appends an `HttpOnly` clearance cookie and forwards the request. Later requests validate and, when `single_use = true`, rotate the signed clearance cookie instead of recomputing proof.
+`pow_sha256_v1` is the built-in proof-of-work method: the client computes a nonce such that `SHA-256(session || "." || nonce)` has the configured number of leading zero bits. Built-in PoW always uses OxiBelt's Person proof session and verify API. If `challenge_url` is not set, OxiBelt serves its built-in API-backed challenge page directly; if `challenge_url` is set, OxiBelt redirects to the configured static frontend. Successful verification issues the same signed `clearance.v2` token through the configured clearance target. Later requests validate the configured clearance sources and, when `single_use = true`, rotate the signed clearance credential instead of recomputing proof.
 
 Custom challenge pages are served by normal OxiBelt static routes, for example a route whose `static_root` contains `/person-proof/index.html`; OxiBelt does not create a separate asset server. When `challenge_url` is set, OxiBelt redirects the protected request to that page and exposes only the general Person proof API paths in the redirect query. Browser-visible challenge code should call OxiBelt's `session`, `verify`, and optional `openapi` endpoints, not provider-native server APIs. Provider methods require `challenge_url`; built-in PoW may use either the built-in page or a custom frontend.
 
@@ -529,6 +529,36 @@ Each `require_person_proof` action may override `session_path`, `verify_path`, a
 
 When a protected request needs a custom challenge, OxiBelt responds with `challenge_redirect_status` and a `Location` that includes signed `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms` query parameters. Provider details such as CAPTCHA site keys are intentionally returned by `GET session_path?session=...` instead of being placed on the redirect URL.
 
+Clearance storage and lookup are configured under each `require_person_proof` action. `clearance.sources` is the ordered list OxiBelt checks on protected requests. Source `type = "cookie"` reads the named cookie key from the `Cookie` header, `type = "authorization_bearer"` reads `Authorization: Bearer <token>`, and `type = "header"` reads the configured header key as the raw token. `clearance.issue_to = "cookie"` sends `Set-Cookie` after verification, `issue_to = "local_storage"` returns the token and localStorage metadata in the verify JSON so the browser can store it, and `issue_to = "response_json"` only returns the token in JSON for custom clients. OxiBelt cannot read browser localStorage directly, so localStorage mode uses `clearance.local_storage.request_header` as the follow-up request bridge; clients should also update the stored token from that response header when `single_use = true` rotates the clearance.
+
+```toml
+[[waf.rules.actions]]
+type = "require_person_proof"
+clearance.issue_to = "cookie" # cookie | local_storage | response_json
+
+[[waf.rules.actions.clearance.sources]]
+type = "cookie"
+key = "__oxibelt_person_proof"
+
+[[waf.rules.actions.clearance.sources]]
+type = "authorization_bearer"
+
+[[waf.rules.actions.clearance.sources]]
+type = "header"
+key = "X-OxiBelt-Person-Proof"
+
+[waf.rules.actions.clearance.cookie]
+key = "__oxibelt_person_proof"
+path = "/"
+same_site = "lax"
+secure = true
+http_only = true
+
+[waf.rules.actions.clearance.local_storage]
+key = "oxibelt.personProof"
+request_header = "X-OxiBelt-Person-Proof"
+```
+
 `GET session_path?session=<signed-session>` returns JSON describing the challenge:
 
 ```json
@@ -539,6 +569,23 @@ When a protected request needs a custom challenge, OxiBelt responds with `challe
   "expires_unix_ms": 1700000000000,
   "return_path": "/protected",
   "verify_path": "/.oxibelt/person-proof/verify",
+  "clearance": {
+    "issue_to": "cookie",
+    "cookie": {
+      "key": "__oxibelt_person_proof",
+      "path": "/",
+      "same_site": "Lax",
+      "secure": true,
+      "http_only": true
+    },
+    "local_storage": {
+      "key": "oxibelt.personProof",
+      "request_header": "X-OxiBelt-Person-Proof"
+    },
+    "sources": [
+      { "type": "cookie", "key": "__oxibelt_person_proof" }
+    ]
+  },
   "challenge": {
     "kind": "captcha",
     "site_key": "0x4AAAA...",
@@ -547,7 +594,7 @@ When a protected request needs a custom challenge, OxiBelt responds with `challe
 }
 ```
 
-PoW sessions use `challenge.kind = "pow_sha256_v1"` and include `difficulty`, `token`, and `cookie`. The `token` is the signed session string that the client hashes with the nonce and submits to `verify_path`. `custom_http` sessions use `challenge.kind = "custom"` and return configured `provider_metadata`.
+PoW sessions use `challenge.kind = "pow_sha256_v1"` and include `difficulty` and `token`. The `token` is the signed session string that the client hashes with the nonce and submits to `verify_path`. Clearance delivery metadata is top-level `clearance`, not a token-internal field. `custom_http` sessions use `challenge.kind = "custom"` and return configured `provider_metadata`.
 
 `POST verify_path` primarily accepts JSON:
 
@@ -561,7 +608,7 @@ PoW sessions use `challenge.kind = "pow_sha256_v1"` and include `difficulty`, `t
 }
 ```
 
-Compatibility payloads using `challenge`, `provider_response`, `cf-turnstile-response`, `h-captcha-response`, or `frc-captcha-response` are still accepted for existing frontends. Successful verification returns `200 application/json` with `{ "ok": true, "return_path": "..." }` and a `HttpOnly; Secure; SameSite=Lax` clearance cookie. The frontend should then navigate to the signed `return_path`. Invalid or missing sessions return `403`, expired sessions return `410`, invalid responses return `403`, provider transport/API failure returns `503` unless `provider_fail_policy = "open"`, non-POST verify requests return `405`, and oversized verify bodies return `413`.
+Compatibility payloads using `challenge`, `provider_response`, `cf-turnstile-response`, `h-captcha-response`, or `frc-captcha-response` are still accepted for existing frontends. Successful verification returns `200 application/json` with `{ "ok": true, "return_path": "...", "clearance": { ... } }`. Cookie mode also sends a `Set-Cookie` header with the configured cookie key and attributes. LocalStorage and response-JSON modes include the `clearance.token`; localStorage mode also includes `clearance.local_storage.key` and `clearance.local_storage.request_header`. The frontend should store the token when required, then navigate to the signed `return_path`. Invalid or missing sessions return `403`, expired sessions return `410`, invalid responses return `403`, provider transport/API failure returns `503` unless `provider_fail_policy = "open"`, non-POST verify requests return `405`, and oversized verify bodies return `413`.
 
 Default provider endpoints are:
 
@@ -587,7 +634,7 @@ Defaults are `["user_agent", "route", "direct_peer_ip_network_prefix"]`, `/24` f
 
 When any policy sets `tcp_max_hop`, OxiBelt applies the strictest configured value listener-wide at accept time using Linux `IP_MINTTL` for IPv4 and `IPV6_MINHOPCOUNT` for IPv6. This is not route-local because the route is not known until after TLS and request parsing.
 
-`single_use` defaults to `true`. When enabled, OxiBelt tracks verification-attempt and clearance reuse in memory by default, or in the configured Person proof shared backend when shared state is enabled. Challenge issuance itself does not reserve replay state. For Person proof API verification, the signed session is consumed before provider verification so a failed CAPTCHA/provider response cannot replay the same session into another provider call. It rotates the clearance cookie after each valid request. Local in-memory state is bounded by `waf.limits.max_person_proof_reuse_tokens`; exhaustion fails closed with `429 Too Many Requests`.
+`single_use` defaults to `true`. When enabled, OxiBelt tracks verification-attempt and clearance reuse in memory by default, or in the configured Person proof shared backend when shared state is enabled. Challenge issuance itself does not reserve replay state. For Person proof API verification, the signed session is consumed before provider verification so a failed CAPTCHA/provider response cannot replay the same session into another provider call. It rotates the configured clearance credential after each valid request. LocalStorage clients should persist the rotated token from the configured request-header name in the protected response. Local in-memory state is bounded by `waf.limits.max_person_proof_reuse_tokens`; exhaustion fails closed with `429 Too Many Requests`.
 
 `weigh_person_proof` and `allow_person_proof` are request-phase policy helpers for Anubis-style explicit rule sets. `weigh_person_proof` adds its integer `weight` to `Request.Client.PersonProof.Weight` for later request rules in the same transaction. `allow_person_proof` sets `Request.Client.PersonProof.Allowed = true`; later `require_person_proof` actions no-op while other actions, including `reject`, still run normally. OxiBelt does not challenge generic browser traffic by default: define the weights and terminal challenge rules you want explicitly.
 
@@ -621,7 +668,7 @@ when = "Request.Client.PersonProof.Weight >= 50 && Request.Client.PersonProof.St
 type = "require_person_proof"
 difficulty = 18
 token_validity_seconds = 300
-cookie = "__oxibelt_person_proof"
+clearance.cookie.key = "__oxibelt_person_proof"
 ```
 
 Validation constraints:
@@ -630,7 +677,12 @@ Validation constraints:
 - `difficulty` must be between `1` and `30` for `pow_sha256_v1`.
 - `token_validity_seconds` must be between `1` and `86400`.
 - `ttl_seconds` and `token_ttl_seconds` are compatibility aliases.
-- `cookie` may contain only ASCII letters, digits, `_`, `-`, or `.`.
+- Flat `cookie` is no longer supported; use `clearance.cookie.key` and `clearance.sources`.
+- `clearance.cookie.key` and cookie sources may contain only ASCII letters, digits, `_`, `-`, or `.`.
+- `clearance.cookie.path` must be an origin path without control characters or `;`.
+- Header sources and `clearance.local_storage.request_header` must be valid HTTP header names.
+- `clearance.local_storage.key` must not be empty or contain control characters.
+- `clearance.sources` must not be empty when `clearance.issue_to = "response_json"`.
 - `token_bindings` must not be empty and may not contain duplicates.
 - IPv4 prefix bits must be `0..32`; IPv6 prefix bits must be `0..128`.
 - `tcp_max_hop`, when set, must be `0..255`.

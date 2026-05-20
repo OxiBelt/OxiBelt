@@ -69,11 +69,16 @@ use normalization::{
 };
 pub(crate) use pattern_set::CompiledPatternSet;
 use pattern_set::{compile_pattern_sets, validate_pattern_sets};
+pub use person_proof::PersonProofIssuedClearance;
 use person_proof::{
   PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
 };
 pub use person_proof_api::{PersonProofApiPathRole, PersonProofSessionDocument};
-pub use person_proof_config::WafPersonProofConfig;
+pub use person_proof_config::{
+  PersonProofClearanceConfig, PersonProofClearanceCookieConfig, PersonProofClearanceIssueTarget,
+  PersonProofClearanceLocalStorageConfig, PersonProofClearanceSameSite,
+  PersonProofClearanceSourceConfig, WafPersonProofConfig,
+};
 use person_proof_policy::PersonProofPolicyState;
 pub use person_proof_v2::PersonProofProviderChallenge;
 pub use plan::BodyNeed;
@@ -439,8 +444,10 @@ pub enum WafActionConfig {
       alias = "token_ttl_seconds"
     )]
     ttl_seconds: u64,
-    #[serde(default = "default_person_proof_cookie")]
-    cookie: String,
+    #[serde(default)]
+    cookie: Option<String>,
+    #[serde(default)]
+    clearance: PersonProofClearanceConfig,
     #[serde(default = "default_person_proof_token_bindings")]
     token_bindings: Vec<PersonProofTokenBinding>,
     #[serde(default = "default_person_proof_direct_peer_ipv4_prefix_bits")]
@@ -1343,6 +1350,7 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     difficulty,
     ttl_seconds,
     cookie,
+    clearance,
     token_bindings,
     direct_peer_ipv4_prefix_bits,
     direct_peer_ipv6_prefix_bits,
@@ -1373,9 +1381,12 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
       "WAF rule {rule_name} require_person_proof token_validity_seconds must be between 1 and 86400"
     );
   }
-  if !is_valid_cookie_name(cookie) {
-    bail!("WAF rule {rule_name} require_person_proof cookie must be a safe cookie name");
+  if cookie.is_some() {
+    bail!(
+      "WAF rule {rule_name} require_person_proof cookie is no longer supported; use clearance.cookie.key and clearance.sources instead"
+    );
   }
+  person_proof_config::validate_clearance_settings(rule_name, clearance)?;
   if token_bindings.is_empty() {
     bail!("WAF rule {rule_name} require_person_proof token_bindings must not be empty");
   }
@@ -1431,15 +1442,6 @@ fn is_valid_rule_label(value: &str) -> bool {
     && value
       .bytes()
       .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
-fn is_valid_cookie_name(name: &str) -> bool {
-  !name.is_empty()
-    && name.len() <= 64
-    && !name.starts_with('$')
-    && name
-      .bytes()
-      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 #[derive(Clone)]
@@ -1710,7 +1712,7 @@ impl WafEngine {
     &self,
     input: WafRequestInput<'_>,
     challenge: PersonProofProviderChallenge,
-  ) -> anyhow::Result<HeaderMutation> {
+  ) -> anyhow::Result<PersonProofIssuedClearance> {
     person_proof_v2::complete_provider_challenge(&self.person_proof, input, challenge)
   }
 
@@ -1889,7 +1891,10 @@ impl WafEngine {
         "valid".to_string(),
       );
     }
-    if let Some(mutation) = self.person_proof.clearance_cookie_mutation(&person_proof)? {
+    if let Some(mutation) = self
+      .person_proof
+      .clearance_response_mutation(&person_proof)?
+    {
       decision.response_header_mutations.push(mutation);
     }
 

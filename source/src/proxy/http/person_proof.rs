@@ -460,11 +460,11 @@ fn complete_person_proof_verify(
   challenge: PersonProofProviderChallenge,
 ) -> Response<ProxyBody> {
   let return_path = challenge.return_path.clone();
-  let mutation = match state
+  let clearance = match state
     .waf
     .complete_person_proof_provider_challenge(input, challenge)
   {
-    Ok(mutation) => mutation,
+    Ok(clearance) => clearance,
     Err(error) => {
       if is_person_proof_reuse_capacity_error(&error) {
         return person_proof_rate_limited_response();
@@ -478,9 +478,12 @@ fn complete_person_proof_verify(
     &serde_json::json!({
       "ok": true,
       "return_path": return_path,
+      "clearance": clearance.metadata.clone(),
     }),
   );
-  apply_header_mutations(response.headers_mut(), &[mutation]);
+  if let Some(mutation) = clearance.response_header {
+    apply_header_mutations(response.headers_mut(), &[mutation]);
+  }
   response
 }
 

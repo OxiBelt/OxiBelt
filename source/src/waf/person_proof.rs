@@ -4,13 +4,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use http::header::{CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE, VARY};
+use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE, VARY};
 use http::{HeaderName, HeaderValue, StatusCode};
 use ring::rand::{SecureRandom, SystemRandom};
 
 use super::{
-  HeaderMutation, PersonProofAlgorithm, PersonProofTokenBinding, WafRequestInput,
-  WafTerminalResponse,
+  HeaderMutation, PersonProofAlgorithm, PersonProofClearanceConfig,
+  PersonProofClearanceIssueTarget, PersonProofClearanceSameSite, PersonProofClearanceSourceConfig,
+  PersonProofTokenBinding, WafRequestInput, WafTerminalResponse,
 };
 use crate::shared_state::SharedState;
 
@@ -29,7 +30,7 @@ pub(super) struct PersonProofPolicy {
   pub method: PersonProofAlgorithm,
   pub difficulty: u8,
   pub ttl_seconds: u64,
-  pub cookie: String,
+  pub clearance: PersonProofClearancePolicy,
   pub token_bindings: Vec<PersonProofTokenBinding>,
   pub direct_peer_ipv4_prefix_bits: u8,
   pub direct_peer_ipv6_prefix_bits: u8,
@@ -70,14 +71,47 @@ pub(super) struct PersonProofRequestStatus {
   pub rate_limited: bool,
   pub weight: i64,
   pub allowed: bool,
-  pub(super) clearance: Option<PersonProofClearance>,
+  pub(super) clearance: Option<PersonProofIssuedClearance>,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PersonProofClearance {
-  pub(super) cookie: String,
-  pub(super) value: String,
-  pub(super) max_age_seconds: u64,
+pub struct PersonProofIssuedClearance {
+  pub token: String,
+  pub expires_unix_ms: i64,
+  pub max_age_seconds: u64,
+  pub response_header: Option<HeaderMutation>,
+  pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PersonProofClearancePolicy {
+  pub(super) issue_to: PersonProofClearanceIssueTarget,
+  pub(super) sources: Vec<PersonProofClearanceSource>,
+  pub(super) cookie: PersonProofCookieClearance,
+  pub(super) local_storage: PersonProofLocalStorageClearance,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum PersonProofClearanceSource {
+  Cookie { key: String },
+  AuthorizationBearer,
+  Header { key: String, name: HeaderName },
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PersonProofCookieClearance {
+  pub(super) key: String,
+  pub(super) path: String,
+  pub(super) same_site: PersonProofClearanceSameSite,
+  pub(super) secure: bool,
+  pub(super) http_only: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PersonProofLocalStorageClearance {
+  pub(super) key: String,
+  pub(super) request_header: String,
+  pub(super) request_header_name: HeaderName,
 }
 
 impl Default for PersonProofRequestStatus {
@@ -94,6 +128,232 @@ impl Default for PersonProofRequestStatus {
       allowed: false,
       clearance: None,
     }
+  }
+}
+
+impl PersonProofClearancePolicy {
+  pub(super) fn from_config(config: &PersonProofClearanceConfig) -> Self {
+    let cookie = PersonProofCookieClearance {
+      key: config.cookie.key.clone(),
+      path: config.cookie.path.clone(),
+      same_site: config.cookie.same_site,
+      secure: config.cookie.secure,
+      http_only: config.cookie.http_only,
+    };
+    let local_storage = PersonProofLocalStorageClearance {
+      key: config.local_storage.key.clone(),
+      request_header: config.local_storage.request_header.clone(),
+      request_header_name: header_name(&config.local_storage.request_header),
+    };
+    let sources = if config.sources.is_empty() {
+      match config.issue_to {
+        PersonProofClearanceIssueTarget::Cookie => vec![PersonProofClearanceSource::Cookie {
+          key: cookie.key.clone(),
+        }],
+        PersonProofClearanceIssueTarget::LocalStorage => {
+          vec![PersonProofClearanceSource::Header {
+            key: local_storage.request_header.clone(),
+            name: local_storage.request_header_name.clone(),
+          }]
+        }
+        PersonProofClearanceIssueTarget::ResponseJson => Vec::new(),
+      }
+    } else {
+      config
+        .sources
+        .iter()
+        .map(PersonProofClearanceSource::from_config)
+        .collect()
+    };
+    Self {
+      issue_to: config.issue_to,
+      sources,
+      cookie,
+      local_storage,
+    }
+  }
+
+  pub(super) fn extract_token<'a>(&self, headers: &'a http::HeaderMap) -> Option<&'a str> {
+    self
+      .sources
+      .iter()
+      .find_map(|source| source.extract_token(headers))
+  }
+
+  pub(super) fn signing_id(&self) -> String {
+    let sources = self
+      .sources
+      .iter()
+      .map(PersonProofClearanceSource::signing_id)
+      .collect::<Vec<_>>()
+      .join(",");
+    format!(
+      "issue_to={};cookie={}:{}:{}:{}:{};local_storage={}:{};sources={sources}",
+      self.issue_to.as_str(),
+      self.cookie.key,
+      self.cookie.path,
+      self.cookie.same_site.as_str(),
+      self.cookie.secure,
+      self.cookie.http_only,
+      self.local_storage.key,
+      self.local_storage.request_header,
+    )
+  }
+
+  pub(super) fn session_metadata(&self) -> serde_json::Value {
+    serde_json::json!({
+      "issue_to": self.issue_to.as_str(),
+      "cookie": {
+        "key": self.cookie.key,
+        "path": self.cookie.path,
+        "same_site": self.cookie.same_site.as_str(),
+        "secure": self.cookie.secure,
+        "http_only": self.cookie.http_only,
+      },
+      "local_storage": {
+        "key": self.local_storage.key,
+        "request_header": self.local_storage.request_header,
+      },
+      "sources": self.sources.iter().map(PersonProofClearanceSource::metadata).collect::<Vec<_>>(),
+    })
+  }
+
+  pub(super) fn storage_label(&self) -> String {
+    match self.issue_to {
+      PersonProofClearanceIssueTarget::Cookie => format!("cookie:{}", self.cookie.key),
+      PersonProofClearanceIssueTarget::LocalStorage => {
+        format!(
+          "localStorage:{} via {}",
+          self.local_storage.key, self.local_storage.request_header
+        )
+      }
+      PersonProofClearanceIssueTarget::ResponseJson => "response_json".to_string(),
+    }
+  }
+
+  pub(super) fn issue(
+    &self,
+    token: String,
+    expires_unix_ms: i64,
+    max_age_seconds: u64,
+  ) -> anyhow::Result<PersonProofIssuedClearance> {
+    let response_header = self.response_header(&token, max_age_seconds)?;
+    Ok(PersonProofIssuedClearance {
+      metadata: self.issued_metadata(&token, expires_unix_ms, max_age_seconds),
+      token,
+      expires_unix_ms,
+      max_age_seconds,
+      response_header,
+    })
+  }
+
+  fn response_header(
+    &self,
+    token: &str,
+    max_age_seconds: u64,
+  ) -> anyhow::Result<Option<HeaderMutation>> {
+    match self.issue_to {
+      PersonProofClearanceIssueTarget::Cookie => {
+        let mut cookie = format!(
+          "{}={token}; Max-Age={max_age_seconds}; Path={}; SameSite={}",
+          self.cookie.key,
+          self.cookie.path,
+          self.cookie.same_site.as_str()
+        );
+        if self.cookie.secure {
+          cookie.push_str("; Secure");
+        }
+        if self.cookie.http_only {
+          cookie.push_str("; HttpOnly");
+        }
+        Ok(Some(HeaderMutation::Append {
+          name: SET_COOKIE,
+          value: HeaderValue::from_str(&cookie).context("invalid person proof clearance cookie")?,
+        }))
+      }
+      PersonProofClearanceIssueTarget::LocalStorage => Ok(Some(HeaderMutation::Set {
+        name: self.local_storage.request_header_name.clone(),
+        value: HeaderValue::from_str(token).context("invalid person proof clearance header")?,
+      })),
+      PersonProofClearanceIssueTarget::ResponseJson => Ok(None),
+    }
+  }
+
+  fn issued_metadata(
+    &self,
+    token: &str,
+    expires_unix_ms: i64,
+    max_age_seconds: u64,
+  ) -> serde_json::Value {
+    let mut metadata = self.session_metadata();
+    if let serde_json::Value::Object(object) = &mut metadata {
+      object.insert(
+        "token".to_string(),
+        serde_json::Value::String(token.to_string()),
+      );
+      object.insert(
+        "expires_unix_ms".to_string(),
+        serde_json::Value::Number(expires_unix_ms.into()),
+      );
+      object.insert(
+        "max_age_seconds".to_string(),
+        serde_json::Value::Number(max_age_seconds.into()),
+      );
+    }
+    metadata
+  }
+}
+
+impl PersonProofClearanceSource {
+  fn from_config(config: &PersonProofClearanceSourceConfig) -> Self {
+    match config {
+      PersonProofClearanceSourceConfig::Cookie { key } => Self::Cookie { key: key.clone() },
+      PersonProofClearanceSourceConfig::AuthorizationBearer => Self::AuthorizationBearer,
+      PersonProofClearanceSourceConfig::Header { key } => Self::Header {
+        key: key.clone(),
+        name: header_name(key),
+      },
+    }
+  }
+
+  fn extract_token<'a>(&self, headers: &'a http::HeaderMap) -> Option<&'a str> {
+    match self {
+      Self::Cookie { key } => find_cookie(headers, key),
+      Self::AuthorizationBearer => headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(bearer_token),
+      Self::Header { name, .. } => headers.get(name).and_then(|value| value.to_str().ok()),
+    }
+  }
+
+  fn signing_id(&self) -> String {
+    match self {
+      Self::Cookie { key } => format!("cookie:{key}"),
+      Self::AuthorizationBearer => "authorization_bearer".to_string(),
+      Self::Header { key, .. } => format!("header:{key}"),
+    }
+  }
+
+  fn metadata(&self) -> serde_json::Value {
+    match self {
+      Self::Cookie { key } => serde_json::json!({ "type": "cookie", "key": key }),
+      Self::AuthorizationBearer => serde_json::json!({ "type": "authorization_bearer" }),
+      Self::Header { key, .. } => serde_json::json!({ "type": "header", "key": key }),
+    }
+  }
+}
+
+fn header_name(value: &str) -> HeaderName {
+  HeaderName::from_bytes(value.as_bytes()).expect("person proof header name should be validated")
+}
+
+fn bearer_token(value: &str) -> Option<&str> {
+  let (scheme, token) = value.trim().split_once(' ')?;
+  if scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty() {
+    Some(token.trim())
+  } else {
+    None
   }
 }
 
@@ -142,10 +402,10 @@ impl PersonProofEngine {
     let mut expired = None;
 
     for policy in &self.policies {
-      let Some(cookie_value) = find_cookie(input.headers, &policy.cookie) else {
+      let Some(proof) = policy.clearance.extract_token(input.headers) else {
         continue;
       };
-      match self.verify_proof(input, policy, cookie_value) {
+      match self.verify_proof(input, policy, proof) {
         Ok(status) if status.state == PersonProofState::Valid => return status,
         Ok(status) if status.state == PersonProofState::Expired => expired = Some(status),
         Ok(status) => failed = Some(status),
@@ -184,21 +444,14 @@ impl PersonProofEngine {
       .and_then(|policy| policy.success_tag.as_deref())
   }
 
-  pub(super) fn clearance_cookie_mutation(
+  pub(super) fn clearance_response_mutation(
     &self,
     status: &PersonProofRequestStatus,
   ) -> anyhow::Result<Option<HeaderMutation>> {
     let Some(clearance) = status.clearance.as_ref() else {
       return Ok(None);
     };
-    let cookie = format!(
-      "{}={}; Max-Age={}; Path=/; SameSite=Lax; Secure; HttpOnly",
-      clearance.cookie, clearance.value, clearance.max_age_seconds
-    );
-    Ok(Some(HeaderMutation::Append {
-      name: SET_COOKIE,
-      value: HeaderValue::from_str(&cookie).context("invalid person proof clearance cookie")?,
-    }))
+    Ok(clearance.response_header.clone())
   }
 
   pub(super) fn issue_challenge(
@@ -270,7 +523,7 @@ impl PersonProofEngine {
     if proof.starts_with("clearance.") {
       bail!("person proof clearance token has unsupported version");
     }
-    bail!("person proof cookie must contain an API-issued clearance token")
+    bail!("person proof credential must contain an API-issued clearance token")
   }
 
   pub(super) fn remember_reuse_token(
@@ -456,12 +709,12 @@ fn challenge_html(
   let session_path_js = js_escape(&policy.provider.session_path);
   let verify_path_js = js_escape(&policy.provider.verify_path);
   let return_path_js = js_escape(return_path);
-  let cookie_js = js_escape(&policy.cookie);
+  let clearance_label = policy.clearance.storage_label();
   let algorithm = html_escape(policy.method.as_str());
   let session_html = html_escape(session);
   let session_path_html = html_escape(&policy.provider.session_path);
   let verify_path_html = html_escape(&policy.provider.verify_path);
-  let cookie_html = html_escape(&policy.cookie);
+  let clearance_html = html_escape(&clearance_label);
   let csp_nonce_html = html_escape(csp_nonce);
   include_str!("../../assets/person-proof-challenge.html")
     .replace("__SESSION_HTML__", &session_html)
@@ -471,8 +724,7 @@ fn challenge_html(
     .replace("__VERIFY_PATH_HTML__", &verify_path_html)
     .replace("__VERIFY_PATH_JS__", &verify_path_js)
     .replace("__RETURN_PATH_JS__", &return_path_js)
-    .replace("__COOKIE_HTML__", &cookie_html)
-    .replace("__COOKIE_JS__", &cookie_js)
+    .replace("__CLEARANCE_STORAGE_HTML__", &clearance_html)
     .replace("__ALGORITHM__", &algorithm)
     .replace("__DIFFICULTY__", &policy.difficulty.to_string())
     .replace("__TTL_SECONDS__", &policy.ttl_seconds.to_string())
