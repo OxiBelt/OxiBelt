@@ -1574,7 +1574,9 @@ run_case_checks() {
   cached="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
   assert_response_jq "${cached}" '.body == "hot cache v1\n"'
 
-  sleep 2
+  # Keep this longer than the fixture's open_file_cache_ttl_ms to absorb
+  # hosted-runner Docker scheduling latency before revalidating the file.
+  sleep 6
   refreshed="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
   assert_response_jq "${refreshed}" '.body == "hot cache v2\n"'
 
@@ -1582,7 +1584,7 @@ run_case_checks() {
     rm -f /etc/oxibelt/config/public/hot.txt
     ln -s /etc/oxibelt/config/outside-secret.txt /etc/oxibelt/config/public/hot.txt
   '
-  sleep 2
+  sleep 6
   escaped="$(client_request_with_headers_to_target "proxy" 8443 "static-hot-cache.example.test" "/static/hot.txt" "403,404" "GET" "")"
   body="$(jq -r '.body' <<<"${escaped}")"
   if grep -F "STATIC_HOT_CACHE_SECRET" <<<"${body}" >/dev/null; then

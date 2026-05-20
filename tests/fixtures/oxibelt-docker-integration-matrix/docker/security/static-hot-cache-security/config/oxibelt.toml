@@ -39,7 +39,7 @@ enabled = false
 sendfile = "auto"
 inline_max_bytes = 16384
 open_file_cache_max_entries = 8
-open_file_cache_ttl_ms = 1000
+open_file_cache_ttl_ms = 5000
 hot_object_cache_max_bytes = 65536
 hot_object_cache_max_file_bytes = 16384
 
