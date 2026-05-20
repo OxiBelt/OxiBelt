@@ -6101,6 +6101,7 @@ success_tag = "PersonProof"
     assert!(clearance_cookie.contains("HttpOnly"));
     assert!(clearance_cookie.contains("Secure"));
     assert!(clearance_cookie.contains("SameSite=Lax"));
+    assert!(clearance.metadata.get("token").is_none());
 
     assert!(
         engine

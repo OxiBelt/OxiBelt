@@ -5512,8 +5512,10 @@ print(query["session"][0], query["session_path"][0], query["verify_path"][0], qu
   assert_body_jq "${verify}" '.return_path == "/app/provider-proof?next=%2Fapp%2Fdone"'
   assert_body_jq "${verify}" '.clearance.issue_to == "cookie"'
   assert_body_jq "${verify}" '.clearance.cookie.key == "__matrix_provider_person_proof"'
-  assert_body_jq "${verify}" '.clearance.token | startswith("clearance.v2.")'
-  assert_response_jq "${verify}" '.headers["set-cookie"] | contains("__matrix_provider_person_proof=clearance.v2.")'
+  assert_body_jq "${verify}" '.clearance | has("token") | not'
+  assert_response_jq "${verify}" '.headers["set-cookie"] | contains("__matrix_provider_person_proof=clearance.v2.")
+    and contains("Secure")
+    and contains("HttpOnly")'
   cookie="$(jq -r '.headers["set-cookie"]' <<<"${verify}" | cut -d';' -f1)"
 
   allowed="$(client_request_with_headers "example.test" "/app/provider-proof?next=%2Fapp%2Fdone" 200 "GET" "" "Cookie: ${cookie}")"

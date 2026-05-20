@@ -287,10 +287,12 @@ impl PersonProofClearancePolicy {
   ) -> serde_json::Value {
     let mut metadata = self.session_metadata();
     if let serde_json::Value::Object(object) = &mut metadata {
-      object.insert(
-        "token".to_string(),
-        serde_json::Value::String(token.to_string()),
-      );
+      if self.issue_to != PersonProofClearanceIssueTarget::Cookie {
+        object.insert(
+          "token".to_string(),
+          serde_json::Value::String(token.to_string()),
+        );
+      }
       object.insert(
         "expires_unix_ms".to_string(),
         serde_json::Value::Number(expires_unix_ms.into()),
