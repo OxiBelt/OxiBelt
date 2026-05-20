@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use http::header::{COOKIE, HeaderName, HeaderValue, SET_COOKIE, USER_AGENT};
+use http::header::{HeaderName, HeaderValue, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use regex::{Regex, RegexBuilder};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -33,6 +33,7 @@ mod functions;
 mod metadata;
 mod mitigation_action;
 pub(crate) mod normalization;
+mod object_model;
 mod pattern_set;
 mod person_proof;
 mod person_proof_api;
@@ -67,6 +68,7 @@ use normalization::{
   normalize_cookie_pairs, normalize_header_pairs, normalize_query_pairs, normalized_http_path,
   normalized_http_query, normalized_http_uri,
 };
+use object_model::{eval_request_cookie_call, eval_response_cookie_call};
 pub(crate) use pattern_set::CompiledPatternSet;
 use pattern_set::{compile_pattern_sets, validate_pattern_sets};
 pub use person_proof::PersonProofIssuedClearance;
@@ -447,7 +449,7 @@ pub enum WafActionConfig {
     #[serde(default)]
     cookie: Option<String>,
     #[serde(default)]
-    clearance: PersonProofClearanceConfig,
+    clearance: Box<PersonProofClearanceConfig>,
     #[serde(default = "default_person_proof_token_bindings")]
     token_bindings: Vec<PersonProofTokenBinding>,
     #[serde(default = "default_person_proof_direct_peer_ipv4_prefix_bits")]
@@ -4393,66 +4395,8 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     | (ObjectRef::ResponseTls, "Fingerprint")
     | (ObjectRef::ResponseTls, "FingerprintScheme") => Ok(Value::Null),
     (ObjectRef::ResponseTls, "ClientCertificatePresent") => Ok(Value::Bool(false)),
-    (ObjectRef::ResponseTransport, "Network") => Ok(Value::String(
-      ctx
-        .response
-        .context("missing response context")?
-        .request
-        .transport_network
-        .as_str()
-        .to_string(),
-    )),
-    (ObjectRef::ResponseTransport, "RemoteIp") => Ok(Value::String(
-      ctx
-        .response
-        .context("missing response context")?
-        .request
-        .peer_addr
-        .ip()
-        .to_string(),
-    )),
-    (ObjectRef::ResponseTransport, "RemotePort") => Ok(Value::Int(
-      ctx
-        .response
-        .context("missing response context")?
-        .request
-        .peer_addr
-        .port()
-        .into(),
-    )),
-    (ObjectRef::ResponseTransport, "IsEncrypted") => Ok(Value::Bool(
-      ctx
-        .response
-        .context("missing response context")?
-        .request
-        .tls
-        .enabled,
-    )),
-    (ObjectRef::ResponseTransport, "Tcp") => {
-      if ctx
-        .response
-        .context("missing response context")?
-        .request
-        .transport_network
-        == WafTransportNetwork::Tcp
-      {
-        Ok(Value::Object(ObjectRef::RequestTransportTcp))
-      } else {
-        Ok(Value::Null)
-      }
-    }
-    (ObjectRef::ResponseTransport, "Udp") => {
-      if ctx
-        .response
-        .context("missing response context")?
-        .request
-        .transport_network
-        == WafTransportNetwork::Udp
-      {
-        Ok(Value::Object(ObjectRef::RequestTransportUdp))
-      } else {
-        Ok(Value::Null)
-      }
+    (ObjectRef::ResponseTransport, field) => {
+      object_model::eval_response_transport_member(ctx, field)
     }
     _ => bail!("unknown WAF object property {:?}.{field}", object),
   }
@@ -4704,53 +4648,6 @@ fn eval_query_call(
     .map(|(name, value)| (name.into_owned(), value.into_owned()))
     .collect::<Vec<_>>();
   eval_pair_map_call(&pairs, method, args, ctx, regex_args)
-}
-
-fn eval_request_cookie_call(
-  ctx: &EvalContext<'_>,
-  method: &str,
-  args: &[Value],
-  regex_args: CachedRegexArgs<'_>,
-) -> anyhow::Result<Value> {
-  let pairs = request_cookie_pairs(ctx.request.headers, ctx.limits.max_helper_items);
-  eval_pair_map_call(&pairs, method, args, ctx, regex_args)
-}
-
-fn eval_response_cookie_call(
-  ctx: &EvalContext<'_>,
-  method: &str,
-  args: &[Value],
-  regex_args: CachedRegexArgs<'_>,
-) -> anyhow::Result<Value> {
-  let pairs = response_cookie_pairs(
-    ctx.response.context("missing response context")?.headers,
-    ctx.limits.max_helper_items,
-  );
-  eval_pair_map_call(&pairs, method, args, ctx, regex_args)
-}
-
-fn request_cookie_pairs(headers: &HeaderMap, max_items: usize) -> Vec<(String, String)> {
-  headers
-    .get_all(COOKIE)
-    .iter()
-    .filter_map(|value| value.to_str().ok())
-    .flat_map(|value| value.split(';'))
-    .filter_map(|part| part.trim().split_once('='))
-    .take(max_items)
-    .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
-    .collect()
-}
-
-fn response_cookie_pairs(headers: &HeaderMap, max_items: usize) -> Vec<(String, String)> {
-  headers
-    .get_all(SET_COOKIE)
-    .iter()
-    .filter_map(|value| value.to_str().ok())
-    .filter_map(|value| value.split(';').next())
-    .filter_map(|part| part.trim().split_once('='))
-    .take(max_items)
-    .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
-    .collect()
 }
 
 fn eval_tag_call(

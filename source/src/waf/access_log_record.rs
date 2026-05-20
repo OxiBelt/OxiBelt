@@ -7,10 +7,11 @@ use http::header::COOKIE;
 use http::{HeaderMap, Uri};
 use tracing::warn;
 
+use super::object_model::response_cookie_pairs;
 use super::{
   BoundedStringList, CompiledAccessLogField, EvalContext, ObjectRef, TransactionBudget, Value,
   WafLimits, current_unix_ms, eval_member, normalize_cookie_pairs, normalize_header_pairs,
-  normalize_query_pairs, response_cookie_pairs,
+  normalize_query_pairs,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
