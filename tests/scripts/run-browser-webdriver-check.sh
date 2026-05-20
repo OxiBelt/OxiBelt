@@ -601,8 +601,8 @@ case "${scenario}" in
     )"
 
     if ! jq -e \
-      '.headers.cookie | contains("__webdriver_person_proof=v1.")' <<<"${protected_result}" >/dev/null; then
-      echo "Expected ${browser} person proof request to submit a solved proof cookie:" >&2
+      '.headers.cookie | contains("__webdriver_person_proof=clearance.v2.")' <<<"${protected_result}" >/dev/null; then
+      echo "Expected ${browser} person proof request to submit an API-issued clearance cookie:" >&2
       echo "${protected_result}" >&2
       show_diagnostics
       exit 1
@@ -611,7 +611,7 @@ case "${scenario}" in
     clearance_cookie="$(webdriver_cookie "__webdriver_person_proof")"
     if ! jq -e \
       '.value.name == "__webdriver_person_proof"
-        and (.value.value | startswith("clearance.v1."))
+        and (.value.value | startswith("clearance.v2."))
         and .value.secure == true' <<<"${clearance_cookie}" >/dev/null; then
       echo "Expected ${browser} to receive a secure person proof clearance cookie:" >&2
       echo "${clearance_cookie}" >&2
@@ -628,7 +628,7 @@ case "${scenario}" in
     )"
 
     if ! jq -e \
-      '.headers.cookie | contains("__webdriver_person_proof=clearance.v1.")' <<<"${clearance_result}" >/dev/null; then
+      '.headers.cookie | contains("__webdriver_person_proof=clearance.v2.")' <<<"${clearance_result}" >/dev/null; then
       echo "Expected ${browser} person proof clearance request to reuse the clearance cookie:" >&2
       echo "${clearance_result}" >&2
       show_diagnostics

@@ -49,6 +49,15 @@ p {
   line-height: 1.55;
 }
 
+[data-status] {
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  color: var(--muted-text);
+  background: color-mix(in srgb, var(--panel-bg) 84%, var(--divider));
+}
+
 dl {
   display: grid;
   grid-template-columns: max-content 1fr;

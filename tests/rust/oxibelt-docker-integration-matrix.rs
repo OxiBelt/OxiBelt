@@ -473,13 +473,17 @@ assert_shared_person_proof() {
 
 solve_person_proof_cookie() {
   local response="$1"
-  jq -r '.body' <<<"${response}" | python3 -c '
+  local parsed session session_path verify_path difficulty nonce verify_body verify
+  parsed="$(jq -r '.body' <<<"${response}" | python3 -c '
 import hashlib
 import re
 import sys
 
 body = sys.stdin.read()
-token = re.search(r"name=\"oxibelt-person-proof-token\" content=\"([^\"]+)\"", body).group(1)
+session = re.search(r"name=\"oxibelt-person-proof-session\" content=\"([^\"]+)\"", body).group(1)
+quote = chr(39)
+session_path = re.search("const SessionPath = " + quote + "([^" + quote + "]+)" + quote, body).group(1)
+verify_path = re.search("const VerifyPath = " + quote + "([^" + quote + "]+)" + quote, body).group(1)
 difficulty = int(re.search(r"(\d+) leading zero bits", body).group(1))
 
 def leading_zero_bits(data):
@@ -493,11 +497,23 @@ def leading_zero_bits(data):
 
 nonce = 0
 while True:
-    if leading_zero_bits(f"{token}.{nonce}".encode("utf-8")) >= difficulty:
-        print(f"__matrix_person_proof={token}.{nonce}")
+    if leading_zero_bits(f"{session}.{nonce}".encode("utf-8")) >= difficulty:
+        print(session)
+        print(session_path)
+        print(verify_path)
+        print(nonce)
         break
     nonce += 1
-'
+')"
+  session="$(sed -n '1p' <<<"${parsed}")"
+  session_path="$(sed -n '2p' <<<"${parsed}")"
+  verify_path="$(sed -n '3p' <<<"${parsed}")"
+  nonce="$(sed -n '4p' <<<"${parsed}")"
+
+  client_request_with_headers "example.test" "${session_path}?session=${session}" 200 "GET" "" "X-Forwarded-For: 203.0.113.20" >/dev/null
+  verify_body="$(python3 -c 'import json, sys; print(json.dumps({"session": sys.argv[1], "response": {"token": sys.argv[2], "fields": {}}}))' "${session}" "${nonce}")"
+  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "X-Forwarded-For: 203.0.113.20" "Content-Type: application/json")"
+  jq -r '.headers["set-cookie"]' <<<"${verify}" | cut -d';' -f1
 }
 
 assert_shared_pool_health() {
@@ -636,13 +652,17 @@ assert_shared_person_proof() {
 
 solve_person_proof_cookie() {
   local response="$1"
-  jq -r '.body' <<<"${response}" | python3 -c '
+  local parsed session session_path verify_path difficulty nonce verify_body verify
+  parsed="$(jq -r '.body' <<<"${response}" | python3 -c '
 import hashlib
 import re
 import sys
 
 body = sys.stdin.read()
-token = re.search(r"name=\"oxibelt-person-proof-token\" content=\"([^\"]+)\"", body).group(1)
+session = re.search(r"name=\"oxibelt-person-proof-session\" content=\"([^\"]+)\"", body).group(1)
+quote = chr(39)
+session_path = re.search("const SessionPath = " + quote + "([^" + quote + "]+)" + quote, body).group(1)
+verify_path = re.search("const VerifyPath = " + quote + "([^" + quote + "]+)" + quote, body).group(1)
 difficulty = int(re.search(r"(\d+) leading zero bits", body).group(1))
 
 def leading_zero_bits(data):
@@ -656,11 +676,23 @@ def leading_zero_bits(data):
 
 nonce = 0
 while True:
-    if leading_zero_bits(f"{token}.{nonce}".encode("utf-8")) >= difficulty:
-        print(f"__matrix_person_proof={token}.{nonce}")
+    if leading_zero_bits(f"{session}.{nonce}".encode("utf-8")) >= difficulty:
+        print(session)
+        print(session_path)
+        print(verify_path)
+        print(nonce)
         break
     nonce += 1
-'
+')"
+  session="$(sed -n '1p' <<<"${parsed}")"
+  session_path="$(sed -n '2p' <<<"${parsed}")"
+  verify_path="$(sed -n '3p' <<<"${parsed}")"
+  nonce="$(sed -n '4p' <<<"${parsed}")"
+
+  client_request_with_headers "example.test" "${session_path}?session=${session}" 200 "GET" "" "X-Forwarded-For: 203.0.113.20" >/dev/null
+  verify_body="$(python3 -c 'import json, sys; print(json.dumps({"session": sys.argv[1], "response": {"token": sys.argv[2], "fields": {}}}))' "${session}" "${nonce}")"
+  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "X-Forwarded-For: 203.0.113.20" "Content-Type: application/json")"
+  jq -r '.headers["set-cookie"]' <<<"${verify}" | cut -d';' -f1
 }
 
 assert_shared_pool_health() {

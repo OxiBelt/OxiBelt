@@ -105,7 +105,7 @@ Upstream TLS behavior:
 - Upstream TLS 1.3 ECH can be disabled, sent as GREASE, or sent from a configured TLS-encoded `ECHConfigList`.
 - Downstream ECH termination is not configured by OxiBelt today; it depends on server-side ECH support in the TLS provider.
 
-Person proof challenges in OxiRule are anti-automation controls. They are not authentication, identity proof, proof of legal personhood, or proof of benign intent. The built-in proof-of-work challenge remains available as `pow_sha256_v1`; provider-backed methods can redirect to a custom static frontend and verify Cloudflare Turnstile, hCaptcha, or Friendly Captcha v2 tokens server-side before issuing the same signed clearance cookie model.
+Person proof challenges in OxiRule are anti-automation controls. They are not authentication, identity proof, proof of legal personhood, or proof of benign intent. The built-in proof-of-work challenge remains available as `pow_sha256_v1` and uses the same session/verify API as custom frontends; provider-backed methods can redirect to a custom static frontend and verify Cloudflare Turnstile, hCaptcha, or Friendly Captcha v2 tokens server-side before issuing the same signed clearance cookie model.
 
 ## Routing and Upstreams
 

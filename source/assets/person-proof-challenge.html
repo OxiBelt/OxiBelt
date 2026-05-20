@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="oxibelt-person-proof-token" content="__TOKEN_HTML__">
+<meta name="oxibelt-person-proof-session" content="__SESSION_HTML__">
 <title>OxiBelt Person Proof</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css">
 <style nonce="__CSP_NONCE__">
@@ -56,6 +56,15 @@ h1 {
 p {
   margin: 0 0 1rem;
   line-height: 1.55;
+}
+
+[data-status] {
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  color: var(--muted-text);
+  background: color-mix(in srgb, var(--panel-bg) 84%, var(--divider));
 }
 
 dl {
@@ -115,7 +124,7 @@ noscript {
 <main>
   <h1>Person proof required</h1>
   <p>This request must complete a bounded proof-of-work challenge before OxiBelt forwards it upstream.</p>
-  <p>The challenge runs locally in this browser and submits only the resulting proof token.</p>
+  <p data-status>Loading challenge...</p>
   <dl>
     <dt>Method</dt>
     <dd>__ALGORITHM__</dd>
@@ -123,15 +132,26 @@ noscript {
     <dd>__DIFFICULTY__ leading zero bits</dd>
     <dt>Cookie</dt>
     <dd><code>__COOKIE_HTML__</code></dd>
+    <dt>Session API</dt>
+    <dd><code>__SESSION_PATH_HTML__</code></dd>
+    <dt>Verify API</dt>
+    <dd><code>__VERIFY_PATH_HTML__</code></dd>
   </dl>
-  <noscript>This challenge requires JavaScript or a compatible client that can compute the proof and return it in the configured cookie.</noscript>
+  <noscript>This challenge requires JavaScript or a compatible client that can use the configured session and verify API.</noscript>
 </main>
 <script type="module" nonce="__CSP_NONCE__">
-const Token = '__TOKEN_JS__';
-const CookieName = '__COOKIE_JS__';
-const Difficulty = Number('__DIFFICULTY__');
-const MaxAge = Number('__TTL_SECONDS__');
+const Session = '__SESSION_JS__';
+const SessionPath = '__SESSION_PATH_JS__';
+const VerifyPath = '__VERIFY_PATH_JS__';
+const ReturnPath = '__RETURN_PATH_JS__';
+const EmbeddedDifficulty = Number('__DIFFICULTY__');
 const Encoder = new TextEncoder();
+const StatusElement = document.querySelector('[data-status]');
+const SetStatus = (Message) => {
+    if (StatusElement) {
+        StatusElement.textContent = Message;
+    }
+};
 const CountLeadingZeroBits = (Bytes) => {
     let Total = 0;
     for (const Byte of Bytes) {
@@ -153,20 +173,166 @@ const CountLeadingZeroBits = (Bytes) => {
 const YieldToBrowser = async () => {
     await new Promise((Resolve) => setTimeout(Resolve, 0));
 };
-const SolveChallenge = async () => {
+const GetJson = async (Path) => {
+    const Url = new URL(Path, window.location.origin);
+    Url.searchParams.set('session', Session);
+    const Response = await fetch(Url, {
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers: { accept: 'application/json' },
+    });
+    if (!Response.ok) {
+        throw new Error(`session endpoint returned ${Response.status}`);
+    }
+    return (await Response.json());
+};
+const WorkerSource = String.raw `
+const Encoder = new TextEncoder()
+const CountLeadingZeroBits = (Bytes) => {
+  let Total = 0
+  for (const Byte of Bytes) {
+    if (Byte === 0) {
+      Total += 8
+      continue
+    }
+    for (let Bit = 7; Bit >= 0; Bit -= 1) {
+      if ((Byte & (1 << Bit)) === 0) {
+        Total += 1
+      } else {
+        return Total
+      }
+    }
+  }
+  return Total
+}
+self.onmessage = async (Event) => {
+  const { token, difficulty, start, step } = Event.data
+  if (!globalThis.crypto?.subtle) {
+    self.postMessage({ type: 'error', error: 'Web Crypto is unavailable' })
+    return
+  }
+  for (let Nonce = start; ; Nonce += step) {
+    const Hash = await crypto.subtle.digest('SHA-256', Encoder.encode(token + '.' + Nonce))
+    if (CountLeadingZeroBits(new Uint8Array(Hash)) >= difficulty) {
+      self.postMessage({ type: 'found', nonce: Nonce })
+      return
+    }
+  }
+}
+`;
+const SolveWithWorkers = async (Token, Difficulty) => {
+    if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || !globalThis.crypto?.subtle) {
+        return undefined;
+    }
+    const WorkerCount = Math.min(Math.max(1, Math.floor((navigator.hardwareConcurrency || 2) / 2)), 4);
+    const BlobUrl = URL.createObjectURL(new Blob([WorkerSource], { type: 'text/javascript' }));
+    const Workers = [];
+    return await new Promise((Resolve) => {
+        let Finished = false;
+        let Failures = 0;
+        const Finish = (Nonce) => {
+            if (Finished) {
+                return;
+            }
+            Finished = true;
+            for (const WorkerInstance of Workers) {
+                WorkerInstance.terminate();
+            }
+            URL.revokeObjectURL(BlobUrl);
+            Resolve(Nonce);
+        };
+        for (let Index = 0; Index < WorkerCount; Index += 1) {
+            const WorkerInstance = new Worker(BlobUrl);
+            Workers.push(WorkerInstance);
+            WorkerInstance.onmessage = (Event) => {
+                if (Event.data.type === 'found' && typeof Event.data.nonce === 'number') {
+                    Finish(Event.data.nonce);
+                }
+                else {
+                    Failures += 1;
+                    if (Failures === WorkerCount) {
+                        Finish(undefined);
+                    }
+                }
+            };
+            WorkerInstance.onerror = () => {
+                Failures += 1;
+                if (Failures === WorkerCount) {
+                    Finish(undefined);
+                }
+            };
+            WorkerInstance.postMessage({
+                token: Token,
+                difficulty: Difficulty,
+                start: Index,
+                step: WorkerCount,
+            });
+        }
+    });
+};
+const SolveOnMainThread = async (Token, Difficulty) => {
+    if (!globalThis.crypto?.subtle) {
+        throw new Error('Web Crypto is unavailable');
+    }
     for (let Nonce = 0;; Nonce += 1) {
         const Hash = await crypto.subtle.digest('SHA-256', Encoder.encode(`${Token}.${Nonce}`));
         if (CountLeadingZeroBits(new Uint8Array(Hash)) >= Difficulty) {
-            document.cookie = `${CookieName}=${Token}.${Nonce}; Max-Age=${MaxAge}; Path=/; SameSite=Lax; Secure`;
-            window.location.reload();
-            return;
+            return Nonce;
         }
         if (Nonce % 512 === 0) {
             await YieldToBrowser();
         }
     }
 };
-void SolveChallenge();
+const SubmitProof = async (SessionToken, Nonce) => {
+    const Response = await fetch(VerifyPath, {
+        method: 'POST',
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers: {
+            accept: 'application/json',
+            'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+            session: SessionToken,
+            response: {
+                token: String(Nonce),
+                fields: {},
+            },
+        }),
+    });
+    if (!Response.ok) {
+        throw new Error(`verify endpoint returned ${Response.status}`);
+    }
+    const Body = (await Response.json());
+    return Body.return_path || ReturnPath || '/';
+};
+const SafeOriginRelativePath = (Path) => {
+    if (Path.startsWith('/') && !Path.startsWith('//')) {
+        return Path;
+    }
+    return '/';
+};
+const SolveChallenge = async () => {
+    SetStatus('Preparing challenge...');
+    const Document = await GetJson(SessionPath);
+    if (Document.challenge.kind !== 'pow_sha256_v1') {
+        throw new Error(`unsupported challenge kind ${Document.challenge.kind}`);
+    }
+    const Token = Document.challenge.token || Document.session || Session;
+    const Difficulty = Document.challenge.difficulty ?? EmbeddedDifficulty;
+    SetStatus('Solving proof-of-work...');
+    const WorkerNonce = await SolveWithWorkers(Token, Difficulty);
+    const Nonce = WorkerNonce ?? (await SolveOnMainThread(Token, Difficulty));
+    SetStatus('Verifying proof...');
+    const NextPath = await SubmitProof(Document.session || Session, Nonce);
+    SetStatus('Proof accepted. Continuing...');
+    window.location.assign(SafeOriginRelativePath(NextPath));
+};
+void SolveChallenge().catch((ErrorValue) => {
+    const Message = ErrorValue instanceof Error ? ErrorValue.message : 'unknown error';
+    SetStatus(`Challenge failed: ${Message}`);
+});
 export {};
 
 </script>

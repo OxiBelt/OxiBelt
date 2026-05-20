@@ -551,6 +551,54 @@ policy = "least_conn"
 
 ## Person Proof Policy
 
+### Weight-Based Explicit Challenge
+
+```toml
+[[waf.rules]]
+name = "weigh-headless-automation"
+tags = ["person-proof", "weight"]
+phase = "request"
+priority = 580
+when = "Request.Client.UserAgent.contains('Headless')"
+
+[[waf.rules.actions]]
+type = "weigh_person_proof"
+weight = 50
+
+[[waf.rules]]
+name = "allow-health-person-proof"
+tags = ["person-proof", "allow"]
+phase = "request"
+priority = 590
+when = "Request.Http.Path == '/healthz'"
+
+[[waf.rules.actions]]
+type = "allow_person_proof"
+
+[[waf.rules]]
+name = "challenge-high-person-proof-weight"
+tags = ["person-proof", "challenge"]
+phase = "request"
+priority = 600
+when = """
+Request.Client.PersonProof.Weight >= 50 &&
+Request.Client.PersonProof.State != 'valid'
+"""
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+method = "pow_sha256_v1"
+difficulty = 18
+token_validity_seconds = 300
+cookie = "__oxibelt_person_proof"
+token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
+direct_peer_ipv4_prefix_bits = 24
+direct_peer_ipv6_prefix_bits = 56
+single_use = true
+success_tag = "PersonProof"
+status = 403
+```
+
 ### Challenge Unknown Browser Traffic
 
 ```toml

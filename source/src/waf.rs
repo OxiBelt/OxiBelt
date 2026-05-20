@@ -414,6 +414,15 @@ pub enum WafActionConfig {
     #[serde(default)]
     body: Option<String>,
   },
+  WeighPersonProof {
+    #[serde(default)]
+    priority: i64,
+    weight: i64,
+  },
+  AllowPersonProof {
+    #[serde(default)]
+    priority: i64,
+  },
   RequirePersonProof {
     #[serde(default)]
     priority: i64,
@@ -503,6 +512,8 @@ impl WafActionConfig {
       | Self::RemoveResponseHeader { priority, .. }
       | Self::SetTag { priority, .. }
       | Self::RateLimit { priority, .. }
+      | Self::WeighPersonProof { priority, .. }
+      | Self::AllowPersonProof { priority }
       | Self::RequirePersonProof { priority, .. }
       | Self::CloseStream { priority, .. } => *priority,
     }
@@ -1186,6 +1197,20 @@ fn validate_actions(
         }
         mutations += 1;
       }
+      WafActionConfig::WeighPersonProof { weight, .. } => {
+        require_phase(rule, WafPhase::Request, "weigh_person_proof")?;
+        if !(-1_000_000..=1_000_000).contains(weight) {
+          bail!(
+            "WAF rule {} weigh_person_proof weight must be between -1000000 and 1000000",
+            rule.name
+          );
+        }
+        mutations += 1;
+      }
+      WafActionConfig::AllowPersonProof { .. } => {
+        require_phase(rule, WafPhase::Request, "allow_person_proof")?;
+        mutations += 1;
+      }
       WafActionConfig::RequirePersonProof { status, .. } => {
         require_phase(rule, WafPhase::Request, "require_person_proof")?;
         validate_status(*status, &rule.name)?;
@@ -1866,11 +1891,15 @@ impl WafEngine {
       decision.response_header_mutations.push(mutation);
     }
 
+    let mut active_person_proof_weight = 0;
+    let mut active_person_proof_allowed = false;
     let mut tx = TransactionBudget::new(&self.limits);
     let body_text_caches = BodyTextCaches::default();
     for rule in self.route_plan(input.route_name).request().rules() {
       tx.check_total()?;
-      let rule_person_proof = self.person_proof_status_for_rule(&person_proof, rule);
+      let mut rule_person_proof = self.person_proof_status_for_rule(&person_proof, rule);
+      rule_person_proof.weight = active_person_proof_weight;
+      rule_person_proof.allowed = active_person_proof_allowed;
       let matched = {
         let request = WafRequestInput {
           tags: &active_tags,
@@ -1937,7 +1966,7 @@ impl WafEngine {
           duplicate_metadata_policy: self.duplicate_metadata_policy,
           body_text_caches: &body_text_caches,
         };
-        apply_request_actions(
+        let updated_person_proof = apply_request_actions(
           rule,
           RequestActionContext {
             input: request,
@@ -1949,6 +1978,8 @@ impl WafEngine {
           &mut decision,
           &mut tx,
         )?;
+        active_person_proof_weight = updated_person_proof.weight;
+        active_person_proof_allowed = updated_person_proof.allowed;
       }
       for (key, value) in &decision.tags[previous_tag_count..] {
         active_tags.insert(key.clone(), value.clone());
@@ -2929,12 +2960,13 @@ fn apply_request_actions(
   action_ctx: RequestActionContext<'_, '_>,
   decision: &mut RequestWafDecision,
   tx: &mut TransactionBudget,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PersonProofRequestStatus> {
   let input = action_ctx.input;
   let ctx = action_ctx.eval;
   let person_proof = action_ctx.person_proof;
   let rate_limits = action_ctx.rate_limits;
   let mitigation = action_ctx.mitigation;
+  let mut person_proof_status = ctx.person_proof.clone();
   for action in &rule.actions {
     tx.count_mutation()?;
     match action {
@@ -2943,7 +2975,7 @@ fn apply_request_actions(
           StatusCode::from_u16(*status)?,
           body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
         ));
-        return Ok(());
+        return Ok(person_proof_status);
       }
       CompiledAction::Config(WafActionConfig::SetRequestHeader { name, value, .. }) => {
         decision.request_header_mutations.push(HeaderMutation::Set {
@@ -3004,19 +3036,28 @@ fn apply_request_actions(
               .clone()
               .unwrap_or_else(|| "rate limit exceeded".to_string()),
           ));
-          return Ok(());
+          return Ok(person_proof_status);
         }
       }
+      CompiledAction::Config(WafActionConfig::WeighPersonProof { weight, .. }) => {
+        person_proof_status.weight = person_proof_status.weight.saturating_add(*weight);
+      }
+      CompiledAction::Config(WafActionConfig::AllowPersonProof { .. }) => {
+        person_proof_status.allowed = true;
+      }
       CompiledAction::RequirePersonProof(policy) => {
+        if person_proof_status.state == PersonProofState::Valid || person_proof_status.allowed {
+          continue;
+        }
         decision.terminal = Some(person_proof.issue_challenge(input, policy.clone())?);
-        return Ok(());
+        return Ok(person_proof_status);
       }
       CompiledAction::EmitMitigation(action) => {
         if let Some(terminal) =
           apply_mitigation_http_action(action, rule, ctx, None, mitigation, tx)?
         {
           decision.terminal = Some(terminal);
-          return Ok(());
+          return Ok(person_proof_status);
         }
       }
       CompiledAction::Config(WafActionConfig::ContinueResponse { .. })
@@ -3033,7 +3074,7 @@ fn apply_request_actions(
       }
     }
   }
-  Ok(())
+  Ok(person_proof_status)
 }
 
 fn apply_response_actions(
@@ -3105,6 +3146,8 @@ fn apply_response_actions(
       | CompiledAction::Config(WafActionConfig::RemoveRequestHeader { .. })
       | CompiledAction::Config(WafActionConfig::SetTag { .. })
       | CompiledAction::Config(WafActionConfig::RateLimit { .. })
+      | CompiledAction::Config(WafActionConfig::WeighPersonProof { .. })
+      | CompiledAction::Config(WafActionConfig::AllowPersonProof { .. })
       | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
       | CompiledAction::Config(WafActionConfig::CloseStream { .. })
       | CompiledAction::RequirePersonProof(_)
@@ -3164,6 +3207,8 @@ fn apply_stream_actions(
       | CompiledAction::Config(WafActionConfig::RemoveResponseHeader { .. })
       | CompiledAction::Config(WafActionConfig::SetTag { .. })
       | CompiledAction::Config(WafActionConfig::RateLimit { .. })
+      | CompiledAction::Config(WafActionConfig::WeighPersonProof { .. })
+      | CompiledAction::Config(WafActionConfig::AllowPersonProof { .. })
       | CompiledAction::Config(WafActionConfig::RequirePersonProof { .. })
       | CompiledAction::RequirePersonProof(_)
       | CompiledAction::EmitAccessLog { .. } => {
@@ -4015,6 +4060,8 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         .map(Value::Int)
         .unwrap_or(Value::Null),
     ),
+    (ObjectRef::RequestClientPersonProof, "Weight") => Ok(Value::Int(ctx.person_proof.weight)),
+    (ObjectRef::RequestClientPersonProof, "Allowed") => Ok(Value::Bool(ctx.person_proof.allowed)),
     (ObjectRef::RequestClientAgent, "Verified") => Ok(Value::Bool(false)),
     (ObjectRef::RequestClientAgent, "Kind")
     | (ObjectRef::RequestClientAgent, "Provider")

@@ -231,8 +231,6 @@ fn remember_action_api_paths(
 ) -> anyhow::Result<()> {
   for action in actions {
     let WafActionConfig::RequirePersonProof {
-      method,
-      challenge_url,
       session_path,
       verify_path,
       openapi_path,
@@ -241,9 +239,6 @@ fn remember_action_api_paths(
     else {
       continue;
     };
-    if challenge_url.is_none() && !method.is_provider() {
-      continue;
-    }
     remember_api_path(
       paths,
       label,

@@ -345,6 +345,17 @@ body = "rate limit exceeded"
 
 ```toml
 [[waf.rules.actions]]
+type = "weigh_person_proof"
+weight = 25
+```
+
+```toml
+[[waf.rules.actions]]
+type = "allow_person_proof"
+```
+
+```toml
+[[waf.rules.actions]]
 type = "require_person_proof"
 method = "pow_sha256_v1"
 difficulty = 18
@@ -499,9 +510,9 @@ When `min_count` is greater than `1`, rows are written as `observing` until the 
 
 Supported methods are `pow_sha256_v1`, `turnstile`, `hcaptcha`, `friendly_captcha_v2`, and `custom_http`. The legacy `algorithm` field is accepted as an alias for `method`.
 
-`pow_sha256_v1` is the built-in proof-of-work method: the client computes a nonce such that `SHA-256(challenge || "." || nonce)` has the configured number of leading zero bits. If the proof is valid and unexpired, OxiBelt appends an `HttpOnly` clearance cookie and forwards the request. Later requests validate the signed clearance cookie instead of recomputing proof. Existing PoW behavior is unchanged when `method = "pow_sha256_v1"` and `challenge_url` is not set.
+`pow_sha256_v1` is the built-in proof-of-work method: the client computes a nonce such that `SHA-256(session || "." || nonce)` has the configured number of leading zero bits. Built-in PoW always uses OxiBelt's Person proof session and verify API. If `challenge_url` is not set, OxiBelt serves its built-in API-backed challenge page directly; if `challenge_url` is set, OxiBelt redirects to the configured static frontend. Successful verification appends an `HttpOnly` clearance cookie and forwards the request. Later requests validate and, when `single_use = true`, rotate the signed clearance cookie instead of recomputing proof.
 
-Custom challenge pages are served by normal OxiBelt static routes, for example a route whose `static_root` contains `/person-proof/index.html`; OxiBelt does not create a separate asset server. When `challenge_url` is set, OxiBelt redirects the protected request to that page and exposes only the general Person proof API paths in the redirect query. Browser-visible challenge code should call OxiBelt's `session`, `verify`, and optional `openapi` endpoints, not provider-native server APIs.
+Custom challenge pages are served by normal OxiBelt static routes, for example a route whose `static_root` contains `/person-proof/index.html`; OxiBelt does not create a separate asset server. When `challenge_url` is set, OxiBelt redirects the protected request to that page and exposes only the general Person proof API paths in the redirect query. Browser-visible challenge code should call OxiBelt's `session`, `verify`, and optional `openapi` endpoints, not provider-native server APIs. Provider methods require `challenge_url`; built-in PoW may use either the built-in page or a custom frontend.
 
 Global API path defaults are configured under `[waf.person_proof]`:
 
@@ -536,7 +547,7 @@ When a protected request needs a custom challenge, OxiBelt responds with `challe
 }
 ```
 
-PoW sessions use `challenge.kind = "pow_sha256_v1"` and include `difficulty`, `token`, and `cookie`. `custom_http` sessions use `challenge.kind = "custom"` and return configured `provider_metadata`.
+PoW sessions use `challenge.kind = "pow_sha256_v1"` and include `difficulty`, `token`, and `cookie`. The `token` is the signed session string that the client hashes with the nonce and submits to `verify_path`. `custom_http` sessions use `challenge.kind = "custom"` and return configured `provider_metadata`.
 
 `POST verify_path` primarily accepts JSON:
 
@@ -562,7 +573,7 @@ Use `provider_endpoint` to override the default endpoint for EU, private, or tes
 
 `custom_http` sends a JSON verification request to `provider_endpoint` and expects `{ "success": true }` or `{ "success": false, "error_codes": [] }`. The request includes the OxiBelt session, method, provider name, response token/fields, optional remote IP, optional site key, and configured metadata. Built-in Turnstile, hCaptcha, and Friendly Captcha HTTP shapes are adapter-internal and are not exposed to the browser-facing API.
 
-Tokens are signed with a startup-local secret by default, or a shared cluster secret when `[shared_state].person_proof_backend` is configured. PoW tokens are bound to the cookie name, issuing policy, downstream host, HTTP method, challenge value, difficulty, issue time, expiration time, and configured `token_bindings`. Session and clearance tokens bind the original host, method, route, policy key, return path, selected method/provider, API paths, and token-binding hash.
+Tokens are signed with a startup-local secret by default, or a shared cluster secret when `[shared_state].person_proof_backend` is configured. Session and clearance tokens bind the original host, method, route, policy key, return path, selected method/provider, API paths, and token-binding hash.
 
 Supported token bindings:
 
@@ -577,6 +588,41 @@ Defaults are `["user_agent", "route", "direct_peer_ip_network_prefix"]`, `/24` f
 When any policy sets `tcp_max_hop`, OxiBelt applies the strictest configured value listener-wide at accept time using Linux `IP_MINTTL` for IPv4 and `IPV6_MINHOPCOUNT` for IPv6. This is not route-local because the route is not known until after TLS and request parsing.
 
 `single_use` defaults to `true`. When enabled, OxiBelt tracks challenge and clearance reuse in memory by default, or in the configured Person proof shared backend when shared state is enabled. For Person proof API verification, the signed session is consumed before provider verification so a failed CAPTCHA/provider response cannot replay the same session into another provider call. It rotates the clearance cookie after each valid request. Local in-memory state is bounded by `waf.limits.max_person_proof_reuse_tokens`; exhaustion fails closed with `429 Too Many Requests`.
+
+`weigh_person_proof` and `allow_person_proof` are request-phase policy helpers for Anubis-style explicit rule sets. `weigh_person_proof` adds its integer `weight` to `Request.Client.PersonProof.Weight` for later request rules in the same transaction. `allow_person_proof` sets `Request.Client.PersonProof.Allowed = true`; later `require_person_proof` actions no-op while other actions, including `reject`, still run normally. OxiBelt does not challenge generic browser traffic by default: define the weights and terminal challenge rules you want explicitly.
+
+```toml
+[[waf.rules]]
+name = "weigh-suspicious-automation"
+phase = "request"
+priority = 100
+when = "Request.Client.UserAgent.contains('Headless')"
+
+[[waf.rules.actions]]
+type = "weigh_person_proof"
+weight = 50
+
+[[waf.rules]]
+name = "allow-static-health"
+phase = "request"
+priority = 110
+when = "Request.Http.Path == '/healthz'"
+
+[[waf.rules.actions]]
+type = "allow_person_proof"
+
+[[waf.rules]]
+name = "challenge-high-person-proof-weight"
+phase = "request"
+priority = 120
+when = "Request.Client.PersonProof.Weight >= 50 && Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 18
+token_validity_seconds = 300
+cookie = "__oxibelt_person_proof"
+```
 
 Validation constraints:
 
@@ -598,6 +644,7 @@ Validation constraints:
 - `session_path`, `verify_path`, and `openapi_path` must be origin-relative paths without query strings or fragments.
 - `provider_endpoint`, when set, must use `http://` or `https://`.
 - `provider_timeout_ms` and `provider_max_response_body_bytes` must be greater than zero.
+- `weigh_person_proof.weight` must be between `-1000000` and `1000000`.
 
 `Request.TokenBindings` exposes the normalized binding values to expressions.
 
@@ -719,6 +766,8 @@ PersonProofMetadata.Method: String | Null
 PersonProofMetadata.Difficulty: Int | Null
 PersonProofMetadata.IssuedAtUnixMs: Int | Null
 PersonProofMetadata.ExpiresAtUnixMs: Int | Null
+PersonProofMetadata.Weight: Int
+PersonProofMetadata.Allowed: Bool
 
 AgentMetadata.Verified: Bool
 AgentMetadata.Kind: String | Null

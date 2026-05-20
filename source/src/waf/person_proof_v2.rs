@@ -293,6 +293,8 @@ pub(super) fn verify_clearance(
     expires_at_unix_ms: Some(fields.expires),
     policy_key: Some(policy.key.clone()),
     rate_limited: false,
+    weight: 0,
+    allowed: false,
     clearance: None,
   };
   if status.state != PersonProofState::Valid {
@@ -312,9 +314,11 @@ pub(super) fn verify_clearance(
       binding_hash: fields.binding_hash,
       random: random_hex(16)?,
     };
+    let value = sign_clearance_token(engine, input, &state);
+    engine.remember_reuse_token(&clearance_reuse_key(&value), fields.expires, now)?;
     status.clearance = Some(super::person_proof::PersonProofClearance {
       cookie: policy.cookie.clone(),
-      value: sign_clearance_token(engine, input, &state),
+      value,
       max_age_seconds: remaining_seconds(now, fields.expires),
     });
   }
@@ -545,7 +549,7 @@ fn append_query(base: &str, pairs: Vec<(&str, &str)>) -> String {
   format!("{base}{separator}{query}")
 }
 
-fn request_return_path(input: WafRequestInput<'_>) -> String {
+pub(super) fn request_return_path(input: WafRequestInput<'_>) -> String {
   input
     .uri
     .path_and_query()

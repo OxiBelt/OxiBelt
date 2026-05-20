@@ -6,8 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow, bail};
 use http::header::{CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE, VARY};
 use http::{HeaderName, HeaderValue, StatusCode};
-use ring::digest;
-use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
 
 use super::{
@@ -70,6 +68,8 @@ pub(super) struct PersonProofRequestStatus {
   pub expires_at_unix_ms: Option<i64>,
   pub policy_key: Option<String>,
   pub rate_limited: bool,
+  pub weight: i64,
+  pub allowed: bool,
   pub(super) clearance: Option<PersonProofClearance>,
 }
 
@@ -78,14 +78,6 @@ pub(super) struct PersonProofClearance {
   pub(super) cookie: String,
   pub(super) value: String,
   pub(super) max_age_seconds: u64,
-}
-
-struct TokenFields<'a> {
-  issued: i64,
-  expires: i64,
-  difficulty: u8,
-  random: &'a str,
-  mac: &'a str,
 }
 
 impl Default for PersonProofRequestStatus {
@@ -98,6 +90,8 @@ impl Default for PersonProofRequestStatus {
       expires_at_unix_ms: None,
       policy_key: None,
       rate_limited: false,
+      weight: 0,
+      allowed: false,
       clearance: None,
     }
   }
@@ -164,6 +158,8 @@ impl PersonProofEngine {
             expires_at_unix_ms: None,
             policy_key: Some(policy.key.clone()),
             rate_limited: is_reuse_capacity_error(&error),
+            weight: 0,
+            allowed: false,
             clearance: None,
           });
         }
@@ -223,9 +219,18 @@ impl PersonProofEngine {
       )
       .context("person proof expiration overflow")?;
     let random = random_hex(16)?;
-    let token = self.sign_token(input, &policy, now, expires, &random);
+    let return_path = super::person_proof_v2::request_return_path(input);
+    let session = super::person_proof_api::sign_session_token(
+      self,
+      input,
+      &policy,
+      now,
+      expires,
+      &return_path,
+      &random,
+    );
     if policy.single_use
-      && let Err(error) = self.remember_reuse_token(&challenge_reuse_key(&token), expires, now)
+      && let Err(error) = self.remember_reuse_token(&challenge_reuse_key(&session), expires, now)
     {
       if is_reuse_capacity_error(&error) {
         return Ok(person_proof_rate_limited_response());
@@ -233,7 +238,7 @@ impl PersonProofEngine {
       return Err(error);
     }
     let csp_nonce = random_hex(16)?;
-    let body = challenge_html(&policy, &token, expires, &csp_nonce);
+    let body = challenge_html(&policy, &session, &return_path, expires, &csp_nonce);
     let mut response = WafTerminalResponse {
       status: StatusCode::from_u16(policy.status)?,
       body,
@@ -267,232 +272,13 @@ impl PersonProofEngine {
     policy: &PersonProofPolicy,
     proof: &str,
   ) -> anyhow::Result<PersonProofRequestStatus> {
+    if proof.starts_with("clearance.v2.") {
+      return super::person_proof_v2::verify_clearance(self, input, policy, proof);
+    }
     if proof.starts_with("clearance.") {
-      if proof.starts_with("clearance.v2.") {
-        return super::person_proof_v2::verify_clearance(self, input, policy, proof);
-      }
-      return self.verify_clearance(input, policy, proof);
+      bail!("person proof clearance token has unsupported version");
     }
-
-    let (token, nonce) = proof
-      .rsplit_once('.')
-      .ok_or_else(|| anyhow!("person proof is missing nonce"))?;
-    if nonce.is_empty() || nonce.len() > 20 || !nonce.bytes().all(|byte| byte.is_ascii_digit()) {
-      bail!("person proof nonce is invalid");
-    }
-
-    let parts = token.split('.').collect::<Vec<_>>();
-    if parts.len() != 6 {
-      bail!("person proof token has invalid shape");
-    }
-    if parts[0] != "v1" {
-      bail!("person proof token has unsupported version");
-    }
-
-    let fields = TokenFields {
-      issued: parts[1]
-        .parse::<i64>()
-        .context("invalid issued timestamp")?,
-      expires: parts[2]
-        .parse::<i64>()
-        .context("invalid expiration timestamp")?,
-      difficulty: parts[3].parse::<u8>().context("invalid difficulty")?,
-      random: parts[4],
-      mac: parts[5],
-    };
-
-    if fields.difficulty != policy.difficulty {
-      bail!("person proof difficulty does not match policy");
-    }
-    if fields.random.len() != 32 || !fields.random.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-      bail!("person proof random field is invalid");
-    }
-
-    self.verify_token_mac(input, policy, &fields)?;
-
-    let now = now_unix_ms()?;
-    let mut status = PersonProofRequestStatus {
-      state: PersonProofState::Failed,
-      method: Some(policy.method.as_str()),
-      difficulty: Some(fields.difficulty),
-      issued_at_unix_ms: Some(fields.issued),
-      expires_at_unix_ms: Some(fields.expires),
-      policy_key: Some(policy.key.clone()),
-      rate_limited: false,
-      clearance: None,
-    };
-
-    if now > fields.expires {
-      status.state = PersonProofState::Expired;
-      return Ok(status);
-    }
-    if fields.issued > now.saturating_add(60_000) {
-      bail!("person proof token was issued in the future");
-    }
-
-    if hash_meets_difficulty(format!("{token}.{nonce}").as_bytes(), fields.difficulty) {
-      if policy.single_use && !self.consume_reuse_token(&challenge_reuse_key(token), now)? {
-        bail!("person proof challenge token was already used");
-      }
-      status.state = PersonProofState::Valid;
-      status.clearance = Some(self.issue_clearance(input, policy, &fields, now)?);
-    }
-    Ok(status)
-  }
-
-  fn issue_clearance(
-    &self,
-    input: WafRequestInput<'_>,
-    policy: &PersonProofPolicy,
-    fields: &TokenFields<'_>,
-    now: i64,
-  ) -> anyhow::Result<PersonProofClearance> {
-    let value = self.sign_clearance_token(input, policy, fields);
-
-    if policy.single_use {
-      self.remember_reuse_token(&clearance_reuse_key(&value), fields.expires, now)?;
-    }
-
-    Ok(PersonProofClearance {
-      cookie: policy.cookie.clone(),
-      value,
-      max_age_seconds: remaining_seconds(now, fields.expires),
-    })
-  }
-
-  pub(super) fn sign_token(
-    &self,
-    input: WafRequestInput<'_>,
-    policy: &PersonProofPolicy,
-    issued: i64,
-    expires: i64,
-    random: &str,
-  ) -> String {
-    let payload = token_payload(input, policy, issued, expires, policy.difficulty, random);
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &self.secret);
-    let mac = hmac::sign(&key, payload.as_bytes());
-    format!(
-      "v1.{issued}.{expires}.{}.{}.{}",
-      policy.difficulty,
-      random,
-      hex_encode(mac.as_ref())
-    )
-  }
-
-  fn verify_token_mac(
-    &self,
-    input: WafRequestInput<'_>,
-    policy: &PersonProofPolicy,
-    fields: &TokenFields<'_>,
-  ) -> anyhow::Result<()> {
-    let mac = hex_decode(fields.mac)?;
-    let payload = token_payload(
-      input,
-      policy,
-      fields.issued,
-      fields.expires,
-      fields.difficulty,
-      fields.random,
-    );
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &self.secret);
-    hmac::verify(&key, payload.as_bytes(), &mac)
-      .map_err(|_| anyhow!("person proof token signature is invalid"))
-  }
-
-  fn sign_clearance_token(
-    &self,
-    input: WafRequestInput<'_>,
-    policy: &PersonProofPolicy,
-    fields: &TokenFields<'_>,
-  ) -> String {
-    let payload = clearance_payload(input, policy, fields);
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &self.secret);
-    let mac = hmac::sign(&key, payload.as_bytes());
-    format!(
-      "clearance.v1.{}.{}.{}.{}.{}",
-      fields.issued,
-      fields.expires,
-      fields.difficulty,
-      fields.random,
-      hex_encode(mac.as_ref())
-    )
-  }
-
-  fn verify_clearance(
-    &self,
-    input: WafRequestInput<'_>,
-    policy: &PersonProofPolicy,
-    proof: &str,
-  ) -> anyhow::Result<PersonProofRequestStatus> {
-    let parts = proof.split('.').collect::<Vec<_>>();
-    if parts.len() != 7 || parts[0] != "clearance" || parts[1] != "v1" {
-      bail!("person proof clearance token has invalid shape");
-    }
-
-    let fields = TokenFields {
-      issued: parts[2]
-        .parse::<i64>()
-        .context("invalid clearance issued timestamp")?,
-      expires: parts[3]
-        .parse::<i64>()
-        .context("invalid clearance expiration timestamp")?,
-      difficulty: parts[4]
-        .parse::<u8>()
-        .context("invalid clearance difficulty")?,
-      random: parts[5],
-      mac: parts[6],
-    };
-
-    if fields.difficulty != policy.difficulty {
-      bail!("person proof clearance difficulty does not match policy");
-    }
-    if fields.random.len() != 32 || !fields.random.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-      bail!("person proof clearance random field is invalid");
-    }
-
-    let mac = hex_decode(fields.mac)?;
-    let payload = clearance_payload(input, policy, &fields);
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &self.secret);
-    hmac::verify(&key, payload.as_bytes(), &mac)
-      .map_err(|_| anyhow!("person proof clearance signature is invalid"))?;
-
-    let now = now_unix_ms()?;
-    let mut status = PersonProofRequestStatus {
-      state: if now > fields.expires {
-        PersonProofState::Expired
-      } else {
-        PersonProofState::Valid
-      },
-      method: Some(policy.method.as_str()),
-      difficulty: Some(fields.difficulty),
-      issued_at_unix_ms: Some(fields.issued),
-      expires_at_unix_ms: Some(fields.expires),
-      policy_key: Some(policy.key.clone()),
-      rate_limited: false,
-      clearance: None,
-    };
-
-    if status.state != PersonProofState::Valid {
-      return Ok(status);
-    }
-
-    if policy.single_use {
-      if !self.consume_reuse_token(&clearance_reuse_key(proof), now)? {
-        bail!("person proof clearance token was already used");
-      }
-
-      let random = random_hex(16)?;
-      let rotated_fields = TokenFields {
-        issued: now,
-        expires: fields.expires,
-        difficulty: fields.difficulty,
-        random: &random,
-        mac: "",
-      };
-      status.clearance = Some(self.issue_clearance(input, policy, &rotated_fields, now)?);
-    }
-
-    Ok(status)
+    bail!("person proof cookie must contain an API-issued clearance token")
   }
 
   pub(super) fn remember_reuse_token(
@@ -545,52 +331,6 @@ fn person_proof_rate_limited_response() -> WafTerminalResponse {
     StatusCode::TOO_MANY_REQUESTS,
     "person proof token capacity exhausted".to_string(),
   )
-}
-
-fn token_payload(
-  input: WafRequestInput<'_>,
-  policy: &PersonProofPolicy,
-  issued: i64,
-  expires: i64,
-  difficulty: u8,
-  random: &str,
-) -> String {
-  let token_bindings = token_binding_payload(input, policy);
-  format!(
-    "v1\n{}\n{}\n{issued}\n{expires}\n{difficulty}\n{}\n{}\n{}\n{token_bindings}\n{random}",
-    policy.method.as_str(),
-    policy.key,
-    policy.cookie,
-    input.downstream_host,
-    input.method.as_str()
-  )
-}
-
-fn clearance_payload(
-  input: WafRequestInput<'_>,
-  policy: &PersonProofPolicy,
-  fields: &TokenFields<'_>,
-) -> String {
-  let token_bindings = token_binding_payload(input, policy);
-  format!(
-    "clearance\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{token_bindings}\n{}",
-    policy.method.as_str(),
-    policy.key,
-    policy.cookie,
-    input.downstream_host,
-    input.method.as_str(),
-    fields.issued,
-    fields.expires,
-    fields.difficulty,
-    fields.random
-  )
-}
-
-pub(super) fn token_binding_payload(
-  input: WafRequestInput<'_>,
-  policy: &PersonProofPolicy,
-) -> String {
-  token_binding_payload_for_route(input, policy, input.route_name)
 }
 
 pub(super) fn token_binding_payload_for_route(
@@ -710,19 +450,30 @@ fn find_cookie<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> 
 
 fn challenge_html(
   policy: &PersonProofPolicy,
-  token: &str,
+  session: &str,
+  return_path: &str,
   expires: i64,
   csp_nonce: &str,
 ) -> String {
-  let token_js = js_escape(token);
+  let session_js = js_escape(session);
+  let session_path_js = js_escape(&policy.provider.session_path);
+  let verify_path_js = js_escape(&policy.provider.verify_path);
+  let return_path_js = js_escape(return_path);
   let cookie_js = js_escape(&policy.cookie);
   let algorithm = html_escape(policy.method.as_str());
-  let token_html = html_escape(token);
+  let session_html = html_escape(session);
+  let session_path_html = html_escape(&policy.provider.session_path);
+  let verify_path_html = html_escape(&policy.provider.verify_path);
   let cookie_html = html_escape(&policy.cookie);
   let csp_nonce_html = html_escape(csp_nonce);
   include_str!("../../assets/person-proof-challenge.html")
-    .replace("__TOKEN_HTML__", &token_html)
-    .replace("__TOKEN_JS__", &token_js)
+    .replace("__SESSION_HTML__", &session_html)
+    .replace("__SESSION_JS__", &session_js)
+    .replace("__SESSION_PATH_HTML__", &session_path_html)
+    .replace("__SESSION_PATH_JS__", &session_path_js)
+    .replace("__VERIFY_PATH_HTML__", &verify_path_html)
+    .replace("__VERIFY_PATH_JS__", &verify_path_js)
+    .replace("__RETURN_PATH_JS__", &return_path_js)
     .replace("__COOKIE_HTML__", &cookie_html)
     .replace("__COOKIE_JS__", &cookie_js)
     .replace("__ALGORITHM__", &algorithm)
@@ -738,13 +489,13 @@ fn challenge_security_headers(
 ) -> anyhow::Result<Vec<HeaderMutation>> {
   let protected_origin = format!("https://{}", input.downstream_host);
   let csp = format!(
-    "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'none'; connect-src 'none'; script-src 'nonce-{csp_nonce}'; style-src 'nonce-{csp_nonce}' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net; upgrade-insecure-requests"
+    "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'none'; connect-src 'self'; worker-src blob:; script-src 'nonce-{csp_nonce}'; style-src 'nonce-{csp_nonce}' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net; upgrade-insecure-requests"
   );
 
   Ok(vec![
     header_set("access-control-allow-origin", &protected_origin)?,
     header_set("access-control-allow-credentials", "true")?,
-    header_set("access-control-allow-methods", "GET, HEAD, OPTIONS")?,
+    header_set("access-control-allow-methods", "GET, HEAD, OPTIONS, POST")?,
     header_set(
       "access-control-allow-headers",
       "accept, accept-language, content-type, cookie, user-agent",
@@ -764,24 +515,6 @@ fn header_set(name: &'static str, value: &str) -> anyhow::Result<HeaderMutation>
     name: HeaderName::from_static(name),
     value: HeaderValue::from_str(value).with_context(|| format!("invalid {name} header value"))?,
   })
-}
-
-fn hash_meets_difficulty(input: &[u8], difficulty: u8) -> bool {
-  let digest = digest::digest(&digest::SHA256, input);
-  leading_zero_bits(digest.as_ref()) >= u32::from(difficulty)
-}
-
-fn leading_zero_bits(bytes: &[u8]) -> u32 {
-  let mut total = 0u32;
-  for byte in bytes {
-    if *byte == 0 {
-      total += 8;
-    } else {
-      total += byte.leading_zeros();
-      break;
-    }
-  }
-  total
 }
 
 pub(super) fn random_hex(bytes: usize) -> anyhow::Result<String> {

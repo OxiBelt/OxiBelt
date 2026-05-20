@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="oxibelt-person-proof-token" content="__TOKEN_HTML__">
+<meta name="oxibelt-person-proof-session" content="__SESSION_HTML__">
 <title>OxiBelt Person Proof</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css">
 <!-- OXIBELT_STYLE -->
@@ -12,7 +12,7 @@
 <main>
   <h1>Person proof required</h1>
   <p>This request must complete a bounded proof-of-work challenge before OxiBelt forwards it upstream.</p>
-  <p>The challenge runs locally in this browser and submits only the resulting proof token.</p>
+  <p data-status>Loading challenge...</p>
   <dl>
     <dt>Method</dt>
     <dd>__ALGORITHM__</dd>
@@ -20,8 +20,12 @@
     <dd>__DIFFICULTY__ leading zero bits</dd>
     <dt>Cookie</dt>
     <dd><code>__COOKIE_HTML__</code></dd>
+    <dt>Session API</dt>
+    <dd><code>__SESSION_PATH_HTML__</code></dd>
+    <dt>Verify API</dt>
+    <dd><code>__VERIFY_PATH_HTML__</code></dd>
   </dl>
-  <noscript>This challenge requires JavaScript or a compatible client that can compute the proof and return it in the configured cookie.</noscript>
+  <noscript>This challenge requires JavaScript or a compatible client that can use the configured session and verify API.</noscript>
 </main>
 <!-- OXIBELT_SCRIPT -->
 <!-- expires_unix_ms=__EXPIRES_UNIX_MS__ -->
