@@ -79,7 +79,8 @@ pub use person_proof_api::{PersonProofApiPathRole, PersonProofSessionDocument};
 pub use person_proof_config::{
   PersonProofClearanceConfig, PersonProofClearanceCookieConfig, PersonProofClearanceIssueTarget,
   PersonProofClearanceLocalStorageConfig, PersonProofClearanceSameSite,
-  PersonProofClearanceSourceConfig, WafPersonProofConfig,
+  PersonProofClearanceSourceConfig, PersonProofMode, PersonProofThirdPartyProvider,
+  WafPersonProofConfig,
 };
 use person_proof_policy::PersonProofPolicyState;
 pub use person_proof_v2::PersonProofProviderChallenge;
@@ -544,54 +545,6 @@ pub struct AccessLogFieldConfig {
   pub name: String,
   #[serde(alias = "expression")]
   pub value: String,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum PersonProofMode {
-  #[default]
-  BuiltIn,
-  OpenApi,
-  ThirdPartyProvider,
-  CustomProvider,
-}
-
-impl PersonProofMode {
-  pub(crate) fn as_str(self) -> &'static str {
-    match self {
-      Self::BuiltIn => "built_in",
-      Self::OpenApi => "openapi",
-      Self::ThirdPartyProvider => "third_party_provider",
-      Self::CustomProvider => "custom_provider",
-    }
-  }
-
-  pub(crate) fn uses_pow(self) -> bool {
-    matches!(self, Self::BuiltIn | Self::OpenApi)
-  }
-
-  pub(crate) fn uses_provider(self) -> bool {
-    matches!(self, Self::ThirdPartyProvider | Self::CustomProvider)
-  }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum PersonProofThirdPartyProvider {
-  Turnstile,
-  #[serde(rename = "hcaptcha")]
-  HCaptcha,
-  FriendlyCaptchaV2,
-}
-
-impl PersonProofThirdPartyProvider {
-  pub(crate) fn as_str(self) -> &'static str {
-    match self {
-      Self::Turnstile => "turnstile",
-      Self::HCaptcha => "hcaptcha",
-      Self::FriendlyCaptchaV2 => "friendly_captcha_v2",
-    }
-  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]

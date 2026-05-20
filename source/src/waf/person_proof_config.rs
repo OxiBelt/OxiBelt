@@ -11,10 +11,7 @@ use super::defaults::{
   default_person_proof_local_storage_request_header, default_person_proof_openapi_path,
   default_person_proof_session_path, default_person_proof_verify_path, default_true,
 };
-use super::{
-  PersonProofMode, PersonProofThirdPartyProvider, WafActionConfig, WafRuleConfig,
-  WafRuleGroupConfig,
-};
+use super::{WafActionConfig, WafRuleConfig, WafRuleGroupConfig};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafPersonProofConfig {
@@ -32,6 +29,54 @@ impl Default for WafPersonProofConfig {
       session_path: default_person_proof_session_path(),
       verify_path: default_person_proof_verify_path(),
       openapi_path: default_person_proof_openapi_path(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonProofMode {
+  #[default]
+  BuiltIn,
+  OpenApi,
+  ThirdPartyProvider,
+  CustomProvider,
+}
+
+impl PersonProofMode {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::BuiltIn => "built_in",
+      Self::OpenApi => "openapi",
+      Self::ThirdPartyProvider => "third_party_provider",
+      Self::CustomProvider => "custom_provider",
+    }
+  }
+
+  pub(crate) fn uses_pow(self) -> bool {
+    matches!(self, Self::BuiltIn | Self::OpenApi)
+  }
+
+  pub(crate) fn uses_provider(self) -> bool {
+    matches!(self, Self::ThirdPartyProvider | Self::CustomProvider)
+  }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonProofThirdPartyProvider {
+  Turnstile,
+  #[serde(rename = "hcaptcha")]
+  HCaptcha,
+  FriendlyCaptchaV2,
+}
+
+impl PersonProofThirdPartyProvider {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::Turnstile => "turnstile",
+      Self::HCaptcha => "hcaptcha",
+      Self::FriendlyCaptchaV2 => "friendly_captcha_v2",
     }
   }
 }
