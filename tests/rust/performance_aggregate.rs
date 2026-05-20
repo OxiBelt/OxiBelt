@@ -354,9 +354,20 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
         .to_string(),
         json!({
             "type": "load",
-            "label": "oxibelt-cache-miss",
+            "label": "oxibelt-cache-noncacheable-miss",
             "protocol": "h2",
             "requests": 100,
+            "p50_ms": 1.0,
+            "p99_ms": 3.0,
+            "errors": 0
+        })
+        .to_string(),
+        json!({
+            "type": "load",
+            "label": "oxibelt-cache-cold-fill",
+            "protocol": "h2",
+            "requests": 100,
+            "rps": 250.0,
             "p50_ms": 1.0,
             "p99_ms": 3.0,
             "errors": 0
@@ -474,7 +485,8 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
         .collect::<Vec<_>>();
     assert!(oxibelt_only_labels.contains(&"oxibelt-waf-monitor"));
     assert!(oxibelt_only_labels.contains(&"oxibelt-cache-hit"));
-    assert!(oxibelt_only_labels.contains(&"oxibelt-cache-miss"));
+    assert!(oxibelt_only_labels.contains(&"oxibelt-cache-noncacheable-miss"));
+    assert!(oxibelt_only_labels.contains(&"oxibelt-cache-cold-fill"));
     assert!(!oxibelt_only_labels.contains(&"oxibelt-h1-keepalive"));
     assert!(!oxibelt_only_labels.contains(&"oxibelt-tls-handshake-h2"));
     assert!(!oxibelt_only_labels.contains(&"oxibelt-accept-0_5-tls-handshake-h2"));

@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -102,6 +103,8 @@ struct LoadArgs {
     warmup: Duration,
     concurrency: usize,
     expect_status: u16,
+    unique_query_param: Option<String>,
+    request_serial: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -358,7 +361,7 @@ fn usage() {
     eprintln!(
         "usage:
   perf-probe upstream --listen <addr:port> [--name <name>] [--protocol <h1|h2c|h2>] [--cert <pem> --key <pem>]
-  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>]
+  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
   perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>]
   perf-probe metrics --host <host> --port <port> --authority <authority> --path <path> [--label <label>]"
@@ -394,6 +397,10 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
         .get("--authority")
         .cloned()
         .unwrap_or_else(|| host.clone());
+    let unique_query_param = values
+        .get("--unique-query-param")
+        .map(|value| validate_unique_query_param(value))
+        .transpose()?;
     Ok(LoadArgs {
         label: values
             .get("--label")
@@ -414,6 +421,8 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
             .map(|value| value.parse().context("invalid --expect-status value"))
             .transpose()?
             .unwrap_or(200),
+        unique_query_param,
+        request_serial: Arc::new(AtomicU64::new(0)),
     })
 }
 
@@ -534,6 +543,17 @@ fn parse_usize(values: &BTreeMap<String, String>, flag: &str) -> anyhow::Result<
         bail!("{flag} must be greater than zero");
     }
     Ok(value)
+}
+
+fn validate_unique_query_param(value: &str) -> anyhow::Result<String> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        bail!("--unique-query-param must be a non-empty ASCII query parameter name");
+    }
+    Ok(value.to_owned())
 }
 
 async fn serve_upstream(args: UpstreamArgs) -> anyhow::Result<()> {
@@ -779,6 +799,7 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
             "p99_ms": snapshot.p99_ms,
             "statuses": status_json(snapshot.statuses),
             "error_samples": snapshot.error_samples,
+            "unique_query_param": args.unique_query_param,
         })
     );
     Ok(())
@@ -1062,10 +1083,11 @@ async fn h3_connection_loop(
 }
 
 fn request<B>(args: &LoadArgs, version: Version, body: B) -> anyhow::Result<Request<B>> {
+    let path = request_path(args);
     let uri: Uri = if version == Version::HTTP_11 {
-        args.path.parse().context("failed to build HTTP/1.1 URI")?
+        path.parse().context("failed to build HTTP/1.1 URI")?
     } else {
-        format!("https://{}{}", args.authority, args.path)
+        format!("https://{}{}", args.authority, path)
             .parse()
             .context("failed to build request URI")?
     };
@@ -1077,6 +1099,15 @@ fn request<B>(args: &LoadArgs, version: Version, body: B) -> anyhow::Result<Requ
         request = request.header(HOST, args.authority.as_str());
     }
     request.body(body).map_err(Into::into)
+}
+
+fn request_path(args: &LoadArgs) -> String {
+    let Some(param) = &args.unique_query_param else {
+        return args.path.clone();
+    };
+    let serial = args.request_serial.fetch_add(1, Ordering::Relaxed);
+    let separator = if args.path.contains('?') { '&' } else { '?' };
+    format!("{}{separator}{param}={serial}", args.path)
 }
 
 async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
@@ -1816,6 +1847,55 @@ mod tests {
         assert_eq!(args.port, 9090);
         assert_eq!(args.authority, "ops.test");
         assert_eq!(args.path, "/metrics");
+    }
+
+    #[test]
+    fn load_args_accept_unique_query_param() {
+        let args = parse_load_args(
+            [
+                "--label",
+                "cold-fill",
+                "--protocol",
+                "h2",
+                "--host",
+                "oxibelt",
+                "--port",
+                "8443",
+                "--server-name",
+                "proxy",
+                "--authority",
+                "example.test",
+                "--path",
+                "/perf/cache-cold-fill?cache_control=public",
+                "--ca-cert",
+                "/tls/proxy-ca.pem",
+                "--duration-seconds",
+                "1",
+                "--warmup-seconds",
+                "0",
+                "--concurrency",
+                "1",
+                "--unique-query-param",
+                "fill_id",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("load args should parse");
+
+        assert_eq!(args.unique_query_param.as_deref(), Some("fill_id"));
+        let first = request(&args, Version::HTTP_2, Full::new(Bytes::new()))
+            .expect("first request should build");
+        let second = request(&args, Version::HTTP_2, Full::new(Bytes::new()))
+            .expect("second request should build");
+        assert_eq!(
+            first.uri().to_string(),
+            "https://example.test/perf/cache-cold-fill?cache_control=public&fill_id=0"
+        );
+        assert_eq!(
+            second.uri().to_string(),
+            "https://example.test/perf/cache-cold-fill?cache_control=public&fill_id=1"
+        );
     }
 
     #[test]

@@ -642,7 +642,8 @@ mod tests {
   fn detailed_prometheus_output_includes_cache_reasons() {
     let metrics = Metrics::new();
     let config = MetricsConfig::default();
-    metrics.record_cache_event("app", Some("edge"), "miss", "lock_timeout");
+    metrics.record_cache_event("app", Some("edge"), "miss", "fill_lock_timeout");
+    metrics.record_cache_event("app", Some("edge"), "miss", "fill_not_stored");
 
     let body = metrics.prometheus(
       &config,
@@ -651,7 +652,8 @@ mod tests {
     );
 
     assert!(body.contains("oxibelt_cache_events_total"));
-    assert!(body.contains("reason=\"lock_timeout\""));
+    assert!(body.contains("reason=\"fill_lock_timeout\""));
+    assert!(body.contains("reason=\"fill_not_stored\""));
     assert!(!body.contains("rule_name"));
     assert!(!body.contains("rule_id"));
   }

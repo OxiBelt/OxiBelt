@@ -583,6 +583,8 @@ run_load() {
   local path="$4"
   local duration="$5"
   local conc="$6"
+  shift 6
+  local extra_args=("$@")
   local port="8443"
   local json
   if [[ "${protocol}" == "h1c" ]]; then
@@ -600,7 +602,8 @@ run_load() {
     --duration-seconds "${duration}" \
     --warmup-seconds "${warmup_seconds}" \
     --concurrency "${conc}" \
-    --expect-status 200)"
+    --expect-status 200 \
+    "${extra_args[@]}")"
   append_result "${json}"
   assert_result "${json}"
   sample_stats "${label}"
@@ -1019,7 +1022,8 @@ run_oxibelt_specific_benchmarks() {
   assert_waf_crs_regression_gates
 
   start_oxibelt cache oxibelt
-  run_load "oxibelt-cache-miss" h2 oxibelt "/perf/cache-miss?body_repeat=4096&cache_control=no-store" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-cache-noncacheable-miss" h2 oxibelt "/perf/cache-noncacheable-miss?body_repeat=4096&cache_control=no-store" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-cache-cold-fill" h2 oxibelt "/perf/cache-cold-fill?body_repeat=4096&cache_control=public" "${duration_seconds}" "${concurrency}" --unique-query-param fill_id
   run_load "oxibelt-cache-hit" h2 oxibelt "/perf/cache-hit?body_repeat=4096&cache_control=public" "${duration_seconds}" "${concurrency}"
   sleep 2
   run_load "oxibelt-cache-revalidate" h2 oxibelt "/perf/cache-revalidate?body_repeat=4096&cache_control=public-max-age-1&etag=perf" "${duration_seconds}" "${concurrency}"

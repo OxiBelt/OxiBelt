@@ -74,6 +74,12 @@ fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> 
   tags.as_ref().unwrap_or(&EMPTY_TAGS)
 }
 
+fn record_route_cache_event(state: &AppSnapshot, route: &RouteConfig, outcome: &str, reason: &str) {
+  state
+    .metrics
+    .record_cache_event(&route.name, route.cache.as_deref(), outcome, reason);
+}
+
 fn emit_system_access_log(
   state: &AppSnapshot,
   context: &mut SystemAccessLogContext<'_>,
@@ -968,12 +974,7 @@ where
     match lookup {
       crate::cache::CacheLookup::Fresh(entry) => {
         state.metrics.record_cache_hit();
-        state.metrics.record_cache_event(
-          &resolved.route.name,
-          resolved.route.cache.as_deref(),
-          "hit",
-          "fresh",
-        );
+        record_route_cache_event(&state, resolved.route, "hit", "fresh");
         let response = cached_entry_response(entry, &request_method, &request_headers);
         let response = compression::maybe_compress_response(
           response,
@@ -1009,12 +1010,7 @@ where
           )
         {
           state.metrics.record_cache_stale();
-          state.metrics.record_cache_event(
-            &resolved.route.name,
-            resolved.route.cache.as_deref(),
-            "stale",
-            "background_refresh",
-          );
+          record_route_cache_event(&state, resolved.route, "stale", "background_refresh");
           let response = cached_entry_response(stale.entry, &request_method, &request_headers);
           let response = compression::maybe_compress_response(
             response,
@@ -1032,12 +1028,7 @@ where
         }
         if !stale.request_headers.is_empty() {
           state.metrics.record_cache_revalidation();
-          state.metrics.record_cache_event(
-            &resolved.route.name,
-            resolved.route.cache.as_deref(),
-            "revalidate",
-            "stale_validators",
-          );
+          record_route_cache_event(&state, resolved.route, "revalidate", "stale_validators");
           for (name, value) in &stale.request_headers {
             outbound.headers_mut().insert(name.clone(), value.clone());
           }
@@ -1047,12 +1038,7 @@ where
           revalidation_entry = Some(stale.entry);
         } else {
           state.metrics.record_cache_hit();
-          state.metrics.record_cache_event(
-            &resolved.route.name,
-            resolved.route.cache.as_deref(),
-            "hit",
-            "stale_without_validators",
-          );
+          record_route_cache_event(&state, resolved.route, "hit", "stale_without_validators");
           let response = cached_entry_response(stale.entry, &request_method, &request_headers);
           let response = compression::maybe_compress_response(
             response,
@@ -1071,12 +1057,7 @@ where
       }
       crate::cache::CacheLookup::Revalidate(revalidation) => {
         state.metrics.record_cache_revalidation();
-        state.metrics.record_cache_event(
-          &resolved.route.name,
-          resolved.route.cache.as_deref(),
-          "revalidate",
-          "explicit",
-        );
+        record_route_cache_event(&state, resolved.route, "revalidate", "explicit");
         for (name, value) in &revalidation.request_headers {
           outbound.headers_mut().insert(name.clone(), value.clone());
         }
@@ -1088,12 +1069,7 @@ where
     }
   } else if cache_enabled_for_route {
     state.metrics.record_cache_miss();
-    state.metrics.record_cache_event(
-      &resolved.route.name,
-      resolved.route.cache.as_deref(),
-      "miss",
-      "lookup",
-    );
+    record_route_cache_event(&state, resolved.route, "miss", "lookup");
   }
 
   if cache_enabled_for_route {
@@ -1231,6 +1207,7 @@ where
             .await
           {
             state.metrics.record_cache_fill_lock_timeout();
+            record_route_cache_event(&state, resolved.route, "miss", "fill_lock_timeout");
             break;
           }
           if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
@@ -1341,10 +1318,13 @@ where
             }
           } else {
             state.metrics.record_cache_miss();
+            record_route_cache_event(&state, resolved.route, "miss", "fill_not_stored");
+            break;
           }
         }
         crate::cache::CacheFillPermit::SharedConflict => {
           state.metrics.record_cache_fill_lock_conflict();
+          record_route_cache_event(&state, resolved.route, "miss", "shared_lock_conflict");
           break;
         }
       }
