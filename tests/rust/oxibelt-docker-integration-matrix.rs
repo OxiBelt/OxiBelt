@@ -459,9 +459,16 @@ assert_shared_rate_limit() {
 }
 
 assert_shared_person_proof() {
-  local challenge cookie allowed replay
+  local challenge cookie allowed replay keys
   challenge="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.20")"
   assert_response_jq "${challenge}" '.body | contains("person-proof")'
+
+  keys="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli KEYS "matrix-shared:person-proof:reuse:challenge:*"; else redis-cli KEYS "matrix-shared:person-proof:reuse:challenge:*"; fi')"
+  if [[ -n "${keys}" ]]; then
+    echo "${keys}" >&2
+    fail_with_diagnostics "challenge issuance should not reserve shared person-proof replay state in Redis"
+  fi
+
   cookie="$(solve_person_proof_cookie "${challenge}")"
 
   allowed="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/proof" 200 "GET" "" "X-Forwarded-For: 203.0.113.21" "Cookie: ${cookie}")"
@@ -510,9 +517,9 @@ while True:
   verify_path="$(sed -n '3p' <<<"${parsed}")"
   nonce="$(sed -n '4p' <<<"${parsed}")"
 
-  client_request_with_headers "example.test" "${session_path}?session=${session}" 200 "GET" "" "X-Forwarded-For: 203.0.113.20" >/dev/null
+  client_request_with_headers "example.test" "${session_path}?session=${session}" 200 "GET" "" "X-Forwarded-For: 203.0.113.23" >/dev/null
   verify_body="$(python3 -c 'import json, sys; print(json.dumps({"session": sys.argv[1], "response": {"token": sys.argv[2], "fields": {}}}))' "${session}" "${nonce}")"
-  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "X-Forwarded-For: 203.0.113.20" "Content-Type: application/json")"
+  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "X-Forwarded-For: 203.0.113.24" "Content-Type: application/json")"
   jq -r '.headers["set-cookie"]' <<<"${verify}" | cut -d';' -f1
 }
 
@@ -638,9 +645,15 @@ assert_shared_waf_access_token_rate_limit() {
 }
 
 assert_shared_person_proof() {
-  local challenge cookie allowed replay
+  local challenge cookie allowed replay count
   challenge="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.20")"
   assert_response_jq "${challenge}" '.body | contains("person-proof")'
+
+  count="$(postgres_query "SELECT count(*) FROM oxibelt_shared_state WHERE key LIKE 'matrix-shared:person-proof:reuse:challenge:%';")"
+  if [[ "${count}" != "0" ]]; then
+    fail_with_diagnostics "challenge issuance should not reserve shared person-proof replay rows in PostgreSQL, got ${count}"
+  fi
+
   cookie="$(solve_person_proof_cookie "${challenge}")"
 
   allowed="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/proof" 200 "GET" "" "X-Forwarded-For: 203.0.113.21" "Cookie: ${cookie}")"
@@ -689,9 +702,9 @@ while True:
   verify_path="$(sed -n '3p' <<<"${parsed}")"
   nonce="$(sed -n '4p' <<<"${parsed}")"
 
-  client_request_with_headers "example.test" "${session_path}?session=${session}" 200 "GET" "" "X-Forwarded-For: 203.0.113.20" >/dev/null
+  client_request_with_headers "example.test" "${session_path}?session=${session}" 200 "GET" "" "X-Forwarded-For: 203.0.113.23" >/dev/null
   verify_body="$(python3 -c 'import json, sys; print(json.dumps({"session": sys.argv[1], "response": {"token": sys.argv[2], "fields": {}}}))' "${session}" "${nonce}")"
-  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "X-Forwarded-For: 203.0.113.20" "Content-Type: application/json")"
+  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "X-Forwarded-For: 203.0.113.24" "Content-Type: application/json")"
   jq -r '.headers["set-cookie"]' <<<"${verify}" | cut -d';' -f1
 }
 
@@ -5373,6 +5386,55 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/proof" 403)"
   assert_response_jq "${response}" '.body | contains("person-proof")'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "waf-person-proof",
+            "challenge-spam-does-not-reserve-single-use-state",
+            "default single-use challenge spam does not reserve replay state",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local pow_one pow_two redirect_one redirect_two redirect_three session verify_path verify_body first_verify second_verify
+
+  pow_one="$(client_request "example.test" "/app/proof" 403)"
+  assert_response_jq "${pow_one}" '.body | contains("person-proof")'
+
+  pow_two="$(client_request "example.test" "/app/proof" 403)"
+  assert_response_jq "${pow_two}" '.body | contains("person-proof")'
+
+  redirect_one="$(client_request "example.test" "/app/provider-proof?next=%2Fapp%2Fdone" 303)"
+  assert_response_jq "${redirect_one}" '.headers.location | startswith("/person-proof/index.html?")'
+
+  redirect_two="$(client_request "example.test" "/app/provider-proof?next=%2Fapp%2Fdone" 303)"
+  assert_response_jq "${redirect_two}" '.headers.location | startswith("/person-proof/index.html?")'
+
+  read -r session verify_path < <(jq -r '.headers.location' <<<"${redirect_one}" | python3 -c '
+import sys
+from urllib.parse import parse_qs, urlsplit
+query = parse_qs(urlsplit(sys.stdin.read().strip()).query)
+print(query["session"][0], query["verify_path"][0])
+')
+  verify_body="$(printf '{"session":"%s","response":{"token":"mock-token","fields":{"fixture":"capacity"}}}' "${session}")"
+  first_verify="$(client_request_with_headers "example.test" "${verify_path}" 403 "POST" "${verify_body}" "Content-Type: application/json")"
+  assert_response_jq "${first_verify}" '.body == "person proof verification failed"'
+
+  redirect_three="$(client_request "example.test" "/app/provider-proof?next=%2Fapp%2Fdone" 303)"
+  read -r session verify_path < <(jq -r '.headers.location' <<<"${redirect_three}" | python3 -c '
+import sys
+from urllib.parse import parse_qs, urlsplit
+query = parse_qs(urlsplit(sys.stdin.read().strip()).query)
+print(query["session"][0], query["verify_path"][0])
+')
+  verify_body="$(printf '{"session":"%s","response":{"token":"mock-token","fields":{"fixture":"capacity"}}}' "${session}")"
+  second_verify="$(client_request_with_headers "example.test" "${verify_path}" 429 "POST" "${verify_body}" "Content-Type: application/json")"
+  assert_response_jq "${second_verify}" '.body == "person proof token capacity exhausted"'
 }
 "#,
             None,

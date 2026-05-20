@@ -229,14 +229,6 @@ impl PersonProofEngine {
       &return_path,
       &random,
     );
-    if policy.single_use
-      && let Err(error) = self.remember_reuse_token(&challenge_reuse_key(&session), expires, now)
-    {
-      if is_reuse_capacity_error(&error) {
-        return Ok(person_proof_rate_limited_response());
-      }
-      return Err(error);
-    }
     let csp_nonce = random_hex(16)?;
     let body = challenge_html(&policy, &session, &return_path, expires, &csp_nonce);
     let mut response = WafTerminalResponse {
@@ -287,22 +279,34 @@ impl PersonProofEngine {
     expires: i64,
     now: i64,
   ) -> anyhow::Result<()> {
+    if !self.mark_reuse_token_used(key, expires, now)? {
+      bail!("person proof token is already active");
+    }
+    Ok(())
+  }
+
+  pub(super) fn mark_reuse_token_used(
+    &self,
+    key: &str,
+    expires: i64,
+    now: i64,
+  ) -> anyhow::Result<bool> {
     if let Some(shared) = &self.shared_state {
-      if !shared.person_proof_remember(key, expires)? {
-        bail!("person proof token is already active");
-      }
-      return Ok(());
+      return shared.person_proof_remember(key, expires);
     }
     let mut active = self
       .active_reuse_tokens
       .lock()
       .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
     purge_expired_reuse_tokens(&mut active, now);
-    if !active.contains_key(key) && active.len() >= self.max_reuse_tokens {
+    if active.contains_key(key) {
+      return Ok(false);
+    }
+    if active.len() >= self.max_reuse_tokens {
       bail!("{PERSON_PROOF_REUSE_CAPACITY_ERROR}");
     }
     active.insert(key.to_string(), expires);
-    Ok(())
+    Ok(true)
   }
 
   pub(super) fn consume_reuse_token(&self, key: &str, now: i64) -> anyhow::Result<bool> {
@@ -324,13 +328,6 @@ fn is_reuse_capacity_error(error: &anyhow::Error) -> bool {
   error
     .to_string()
     .contains(PERSON_PROOF_REUSE_CAPACITY_ERROR)
-}
-
-fn person_proof_rate_limited_response() -> WafTerminalResponse {
-  WafTerminalResponse::new(
-    StatusCode::TOO_MANY_REQUESTS,
-    "person proof token capacity exhausted".to_string(),
-  )
 }
 
 pub(super) fn token_binding_payload_for_route(

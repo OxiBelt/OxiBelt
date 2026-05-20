@@ -151,6 +151,12 @@ upstream = "http-upstream"
 cache = "path-only"
 
 [[routes]]
+name = "person-proof-api-route"
+hosts = ["example.test"]
+path_prefix = "/.oxibelt"
+upstream = "http-upstream"
+
+[[routes]]
 name = "app-route"
 hosts = ["example.test"]
 path_prefix = "/app"

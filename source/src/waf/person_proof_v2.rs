@@ -105,21 +105,6 @@ pub(super) fn redirect_challenge(
   let return_path = request_return_path(input);
   let session = sign_session_token(engine, input, policy, now, expires, &return_path, &random);
 
-  if policy.single_use
-    && let Err(error) = engine.remember_reuse_token(&challenge_reuse_key(&session), expires, now)
-  {
-    if error
-      .to_string()
-      .contains("person proof reuse token capacity exhausted")
-    {
-      return Ok(WafTerminalResponse::new(
-        StatusCode::TOO_MANY_REQUESTS,
-        "person proof token capacity exhausted".to_string(),
-      ));
-    }
-    return Err(error);
-  }
-
   let expires_string = expires.to_string();
   let pairs = vec![
     ("session", session.as_str()),
@@ -245,7 +230,11 @@ pub(super) fn consume_provider_challenge_attempt(
     bail!("person proof challenge token expired");
   }
   if challenge.state.policy.single_use
-    && !engine.consume_reuse_token(&challenge_reuse_key(&challenge.state.token), now)?
+    && !engine.mark_reuse_token_used(
+      &challenge_reuse_key(&challenge.state.token),
+      challenge.state.expires,
+      now,
+    )?
   {
     bail!("person proof challenge token was already used");
   }

@@ -6192,10 +6192,10 @@ success_tag = "AdminProof"
 }
 
 #[test]
-fn person_proof_single_use_challenge_state_is_capped() {
-    let temp_dir = common::TempDir::new("waf-person-proof-reuse-cap");
+fn person_proof_default_single_use_pow_challenge_spam_does_not_exhaust_capacity() {
+    let temp_dir = common::TempDir::new("waf-person-proof-pow-challenge-spam");
     let (cert_path, key_path) =
-        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-reuse-cap");
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-pow-challenge-spam");
     let raw = format!(
         "{}\n{}",
         common::minimal_config_toml(&cert_path, &key_path),
@@ -6209,7 +6209,7 @@ fail_policy = "closed"
 max_person_proof_reuse_tokens = 1
 
 [[waf.rules]]
-name = "single-use-proof"
+name = "default-single-use-proof"
 phase = "request"
 priority = 10
 when = "Request.Client.PersonProof.State != 'valid'"
@@ -6219,7 +6219,6 @@ type = "require_person_proof"
 difficulty = 4
 token_validity_seconds = 60
 cookie = "__test_person_proof"
-single_use = true
 "#
     );
 
@@ -6242,6 +6241,14 @@ single_use = true
         first.terminal.as_ref().map(|terminal| terminal.status),
         Some(StatusCode::FORBIDDEN)
     );
+    assert!(
+        first
+            .terminal
+            .as_ref()
+            .expect("first challenge should exist")
+            .body
+            .contains("person-proof")
+    );
 
     let second = engine.evaluate_request(request_input(
         &method,
@@ -6252,7 +6259,186 @@ single_use = true
     ));
     assert_eq!(
         second.terminal.as_ref().map(|terminal| terminal.status),
-        Some(StatusCode::TOO_MANY_REQUESTS)
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert!(
+        second
+            .terminal
+            .as_ref()
+            .expect("second challenge should exist")
+            .body
+            .contains("person-proof")
+    );
+}
+
+#[test]
+fn person_proof_default_single_use_provider_challenge_spam_does_not_exhaust_capacity() {
+    let temp_dir = common::TempDir::new("waf-person-proof-provider-challenge-spam");
+    let (cert_path, key_path) = common::create_self_signed_cert(
+        temp_dir.path(),
+        "waf-person-proof-provider-challenge-spam",
+    );
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[waf.limits]
+max_person_proof_reuse_tokens = 1
+
+[[waf.rules]]
+name = "default-single-use-provider-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+method = "custom_http"
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+challenge_url = "/person-proof/index.html"
+provider = "test-provider"
+provider_endpoint = "http://127.0.0.1/siteverify"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let first = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        first.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::SEE_OTHER)
+    );
+
+    let second = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        second.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::SEE_OTHER)
+    );
+}
+
+#[test]
+fn person_proof_single_use_verify_attempt_state_is_capped() {
+    let temp_dir = common::TempDir::new("waf-person-proof-verify-cap");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-verify-cap");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[waf.limits]
+max_person_proof_reuse_tokens = 1
+
+[[waf.rules]]
+name = "single-use-provider-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+method = "custom_http"
+token_validity_seconds = 60
+cookie = "__test_person_proof"
+challenge_url = "/person-proof/index.html"
+verify_path = "/.oxibelt/person-proof/verify-login"
+provider = "test-provider"
+provider_endpoint = "http://127.0.0.1/siteverify"
+single_use = true
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+    let verify_method = Method::POST;
+    let verify_uri: Uri = "/.oxibelt/person-proof/verify-login"
+        .parse()
+        .expect("URI should parse");
+
+    let first = engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    assert_eq!(
+        first.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::SEE_OTHER)
+    );
+    let first_location =
+        extract_response_header(&first.terminal.unwrap().headers, http::header::LOCATION);
+    let first_session = parse_origin_relative_location_query(&first_location)
+        .remove("session")
+        .expect("redirect should include session");
+    let first_challenge = engine
+        .begin_person_proof_provider_challenge(
+            request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
+            "/.oxibelt/person-proof/verify-login",
+            &first_session,
+        )
+        .expect("provider challenge should validate")
+        .expect("verify_path should map to a provider challenge");
+    engine
+        .consume_person_proof_provider_challenge_attempt(&first_challenge)
+        .expect("first provider challenge attempt should be consumed");
+
+    let second =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    assert_eq!(
+        second.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::SEE_OTHER)
+    );
+    let second_location =
+        extract_response_header(&second.terminal.unwrap().headers, http::header::LOCATION);
+    let second_session = parse_origin_relative_location_query(&second_location)
+        .remove("session")
+        .expect("redirect should include session");
+    let second_challenge = engine
+        .begin_person_proof_provider_challenge(
+            request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
+            "/.oxibelt/person-proof/verify-login",
+            &second_session,
+        )
+        .expect("provider challenge should validate")
+        .expect("verify_path should map to a provider challenge");
+    let error = engine
+        .consume_person_proof_provider_challenge_attempt(&second_challenge)
+        .expect_err("second provider challenge attempt should hit reuse-token capacity");
+    assert!(
+        error
+            .to_string()
+            .contains("person proof reuse token capacity exhausted"),
+        "unexpected error: {error:#}"
     );
 }
 

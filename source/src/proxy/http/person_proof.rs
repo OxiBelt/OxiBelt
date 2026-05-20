@@ -199,6 +199,9 @@ where
     if error.to_string().contains("expired") {
       return text_response(StatusCode::GONE, "person proof session expired");
     }
+    if is_person_proof_reuse_capacity_error(&error) {
+      return person_proof_rate_limited_response();
+    }
     warn!(error = %error, "invalid person proof session");
     return text_response(StatusCode::FORBIDDEN, "person proof session is invalid");
   }
@@ -463,6 +466,9 @@ fn complete_person_proof_verify(
   {
     Ok(mutation) => mutation,
     Err(error) => {
+      if is_person_proof_reuse_capacity_error(&error) {
+        return person_proof_rate_limited_response();
+      }
       warn!(error = %error, "failed to complete person proof challenge");
       return text_response(StatusCode::FORBIDDEN, "person proof session is invalid");
     }
@@ -476,6 +482,19 @@ fn complete_person_proof_verify(
   );
   apply_header_mutations(response.headers_mut(), &[mutation]);
   response
+}
+
+fn is_person_proof_reuse_capacity_error(error: &anyhow::Error) -> bool {
+  error
+    .to_string()
+    .contains("person proof reuse token capacity exhausted")
+}
+
+fn person_proof_rate_limited_response() -> Response<ProxyBody> {
+  text_response(
+    StatusCode::TOO_MANY_REQUESTS,
+    "person proof token capacity exhausted",
+  )
 }
 
 fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<ProxyBody> {
