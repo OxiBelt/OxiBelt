@@ -1223,18 +1223,24 @@ Response body CRS inspection uses the same bounded prefix behavior as OxiRule re
 
 Rule syntax, actions, helpers, and Person proof settings are documented in [OxiRule.md](OxiRule.md).
 
-Person proof can either use the built-in `pow_sha256_v1` challenge or redirect to a custom static frontend that verifies `turnstile`, `hcaptcha`, or `friendly_captcha_v2` tokens through OxiBelt. Custom frontends are ordinary route assets: configure a static route with `static_root`, point `require_person_proof.challenge_url` at that origin-relative page, and configure a unique origin-relative `verify_path` for the provider callback. External provider methods require `site_key` and `secret_env`; `provider_endpoint` may override the default Siteverify endpoint for regional, self-hosted, or local mock deployments.
+Person proof can either use the built-in `pow_sha256_v1` challenge or redirect to a custom static frontend that talks to OxiBelt's general Person proof API. Custom frontends are ordinary route assets: configure a static route with `static_root`, point `require_person_proof.challenge_url` at that origin-relative page, then have the browser call OxiBelt's `session_path` and `verify_path`. Built-in adapters support `turnstile`, `hcaptcha`, and `friendly_captcha_v2`; `custom_http` lets OxiBelt call an OpenAPI-compatible provider that returns `{ "success": true|false }`.
 
 ```toml
+[waf.person_proof]
+session_path = "/.oxibelt/person-proof/session"
+verify_path = "/.oxibelt/person-proof/verify"
+openapi_path = "/.oxibelt/person-proof/openapi.json"
+
 [[waf.rules.actions]]
 type = "require_person_proof"
 method = "turnstile"
 challenge_url = "/person-proof/index.html"
-verify_path = "/.oxibelt/person-proof/verify-login"
 site_key = "0x4AAAA..."
 secret_env = "OXIBELT_TURNSTILE_SECRET"
 provider_fail_policy = "closed"
 ```
+
+The challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Provider-specific values such as `site_key` are returned by `GET session_path?session=...`. Verification should use JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`; legacy form payloads and provider-native response field names remain accepted for compatibility.
 
 ## Upstreams
 

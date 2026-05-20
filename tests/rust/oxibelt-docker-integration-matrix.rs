@@ -5348,7 +5348,7 @@ run_case_checks() {
         docker_case(
             "waf-person-proof",
             "provider-mock-verify",
-            "external CAPTCHA provider verification uses a local mock siteverify endpoint",
+            "Person proof session API verifies through a local custom HTTP provider",
             ExpectStart::Success,
             Needs {
                 http_upstream: true,
@@ -5356,23 +5356,40 @@ run_case_checks() {
             },
             r#"
 run_case_checks() {
-  local ui redirect challenge verify cookie allowed
+  local ui redirect session session_doc openapi verify cookie allowed session_path verify_path openapi_path verify_body
 
   ui="$(client_request "example.test" "/person-proof/index.html" 200)"
   assert_response_jq "${ui}" '.body | contains("provider challenge fixture")'
 
   redirect="$(client_request "example.test" "/app/provider-proof?next=%2Fapp%2Fdone" 303)"
   assert_response_jq "${redirect}" '.headers.location | startswith("/person-proof/index.html?")'
-  assert_response_jq "${redirect}" '.headers.location | contains("method=turnstile")'
-  assert_response_jq "${redirect}" '.headers.location | contains("site_key=matrix-site-key")'
-  assert_response_jq "${redirect}" '.headers.location | contains("verify_path=%2F.oxibelt%2Fperson-proof%2Fverify-provider")'
-  challenge="$(jq -r '.headers.location' <<<"${redirect}" | python3 -c '
+  assert_response_jq "${redirect}" '.headers.location | contains("session=")'
+  assert_response_jq "${redirect}" '.headers.location | contains("session_path=%2F.oxibelt%2Fperson-proof%2Fsession")'
+  assert_response_jq "${redirect}" '.headers.location | contains("verify_path=%2F.oxibelt%2Fperson-proof%2Fverify")'
+  assert_response_jq "${redirect}" '.headers.location | contains("openapi_path=%2F.oxibelt%2Fperson-proof%2Fopenapi.json")'
+  assert_response_jq "${redirect}" '.headers.location | contains("site_key") | not'
+  read -r session session_path verify_path openapi_path < <(jq -r '.headers.location' <<<"${redirect}" | python3 -c '
 import sys
 from urllib.parse import parse_qs, urlsplit
-print(parse_qs(urlsplit(sys.stdin.read().strip()).query)["challenge"][0])
-')"
+query = parse_qs(urlsplit(sys.stdin.read().strip()).query)
+print(query["session"][0], query["session_path"][0], query["verify_path"][0], query["openapi_path"][0])
+')
 
-  verify="$(client_request_with_headers "example.test" "/.oxibelt/person-proof/verify-provider" 204 "POST" "challenge=${challenge}&cf-turnstile-response=mock-token" "Content-Type: application/x-www-form-urlencoded")"
+  session_doc="$(client_request "example.test" "${session_path}?session=${session}" 200)"
+  assert_body_jq "${session_doc}" '.method == "custom_http"'
+  assert_body_jq "${session_doc}" '.provider == "matrix-provider"'
+  assert_body_jq "${session_doc}" '.challenge.kind == "custom"'
+  assert_body_jq "${session_doc}" '.challenge.metadata.fixture == "provider-mock-verify"'
+  assert_body_jq "${session_doc}" '.verify_path == "/.oxibelt/person-proof/verify"'
+
+  openapi="$(client_request "example.test" "${openapi_path}" 200)"
+  assert_response_jq "${openapi}" '.headers["cache-control"] == "no-store"'
+  assert_response_jq "${openapi}" '.body | contains("/.oxibelt/person-proof/session")'
+
+  verify_body="$(printf '{"session":"%s","response":{"token":"mock-token","fields":{"fixture":"matrix"}}}' "${session}")"
+  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "Content-Type: application/json")"
+  assert_body_jq "${verify}" '.ok == true'
+  assert_body_jq "${verify}" '.return_path == "/app/provider-proof?next=%2Fapp%2Fdone"'
   assert_response_jq "${verify}" '.headers["set-cookie"] | contains("__matrix_provider_person_proof=clearance.v2.")'
   cookie="$(jq -r '.headers["set-cookie"]' <<<"${verify}" | cut -d';' -f1)"
 

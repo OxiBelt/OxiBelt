@@ -600,12 +600,16 @@ unsupported_directive_policy = "fail_closed"
 # priority = 110
 # when = "Request.Http.Path.startsWith('/login') && Request.Client.PersonProof.State != 'valid'"
 #
+#[waf.person_proof]
+# session_path = "/.oxibelt/person-proof/session"
+# verify_path = "/.oxibelt/person-proof/verify"
+# openapi_path = "/.oxibelt/person-proof/openapi.json"
+#
 #[[waf.rules.actions]]
 # type = "require_person_proof"
-# method = "turnstile" # pow_sha256_v1 | turnstile | hcaptcha | friendly_captcha_v2
+# method = "turnstile" # pow_sha256_v1 | turnstile | hcaptcha | friendly_captcha_v2 | custom_http
 # challenge_url = "/person-proof/index.html"
 # challenge_redirect_status = 303
-# verify_path = "/.oxibelt/person-proof/verify-login"
 # site_key = "0x4AAAA..."
 # secret_env = "OXIBELT_TURNSTILE_SECRET"
 # provider_timeout_ms = 3000

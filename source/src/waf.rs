@@ -35,6 +35,7 @@ mod mitigation_action;
 pub(crate) mod normalization;
 mod pattern_set;
 mod person_proof;
+mod person_proof_api;
 mod person_proof_config;
 mod person_proof_v2;
 mod plan;
@@ -70,6 +71,8 @@ use pattern_set::{compile_pattern_sets, validate_pattern_sets};
 use person_proof::{
   PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
 };
+pub use person_proof_api::{PersonProofApiPathRole, PersonProofSessionDocument};
+pub use person_proof_config::WafPersonProofConfig;
 pub use person_proof_v2::PersonProofProviderChallenge;
 pub use plan::BodyNeed;
 use plan::{WafRoutePlan, phase_plan};
@@ -95,6 +98,8 @@ pub struct WafConfig {
   #[serde(default)]
   pub crs: WafCrsConfig,
   #[serde(default)]
+  pub person_proof: WafPersonProofConfig,
+  #[serde(default)]
   pub functions: Vec<WafFunctionConfig>,
   #[serde(default)]
   pub rule_group_files: Vec<PathBuf>,
@@ -119,6 +124,7 @@ impl Default for WafConfig {
       duplicate_metadata_policy: WafDuplicateMetadataPolicy::FailClosed,
       limits: WafLimits::default(),
       crs: WafCrsConfig::default(),
+      person_proof: WafPersonProofConfig::default(),
       functions: Vec::new(),
       rule_group_files: Vec::new(),
       rule_groups: Vec::new(),
@@ -443,7 +449,15 @@ pub enum WafActionConfig {
     #[serde(default = "default_person_proof_challenge_redirect_status")]
     challenge_redirect_status: u16,
     #[serde(default)]
+    session_path: Option<String>,
+    #[serde(default)]
     verify_path: Option<String>,
+    #[serde(default)]
+    openapi_path: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    provider_metadata: serde_json::Value,
     #[serde(default)]
     site_key: Option<String>,
     #[serde(default)]
@@ -511,6 +525,7 @@ pub enum PersonProofAlgorithm {
   #[serde(rename = "hcaptcha")]
   HCaptcha,
   FriendlyCaptchaV2,
+  CustomHttp,
 }
 
 impl PersonProofAlgorithm {
@@ -520,13 +535,14 @@ impl PersonProofAlgorithm {
       Self::Turnstile => "turnstile",
       Self::HCaptcha => "hcaptcha",
       Self::FriendlyCaptchaV2 => "friendly_captcha_v2",
+      Self::CustomHttp => "custom_http",
     }
   }
 
   pub(crate) fn is_provider(self) -> bool {
     matches!(
       self,
-      Self::Turnstile | Self::HCaptcha | Self::FriendlyCaptchaV2
+      Self::Turnstile | Self::HCaptcha | Self::FriendlyCaptchaV2 | Self::CustomHttp
     )
   }
 }
@@ -872,7 +888,7 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
     )?;
   }
   validate_unique_rule_ids(config)?;
-  person_proof_config::validate_unique_verify_paths(config)?;
+  person_proof_config::validate_api_paths(config)?;
 
   Ok(())
 }
@@ -1307,7 +1323,10 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     success_tag,
     challenge_url,
     challenge_redirect_status,
+    session_path,
     verify_path,
+    openapi_path,
+    provider,
     site_key,
     secret_env,
     provider_endpoint,
@@ -1367,7 +1386,10 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     *method,
     challenge_url.as_deref(),
     *challenge_redirect_status,
+    session_path.as_deref(),
     verify_path.as_deref(),
+    openapi_path.as_deref(),
+    provider.as_deref(),
     site_key.as_deref(),
     secret_env.as_deref(),
     provider_endpoint.as_ref(),
@@ -1481,6 +1503,7 @@ impl WafEngine {
       &previous_counters,
       global_functions.clone(),
       None,
+      &config.waf.person_proof,
     )?;
     let mut route_rules = HashMap::new();
     for route in &config.routes {
@@ -1502,6 +1525,7 @@ impl WafEngine {
           &previous_counters,
           global_functions.clone(),
           Some(functions.clone()),
+          &config.waf.person_proof,
         )?,
       );
     }
@@ -1612,10 +1636,38 @@ impl WafEngine {
     self.route_plan(route_name).request().enabled()
   }
 
+  pub fn person_proof_api_path_role(&self, path: &str) -> Option<PersonProofApiPathRole> {
+    person_proof_api::api_path_role(&self.person_proof, path)
+  }
+
+  pub fn has_person_proof_api_path(&self, path: &str) -> bool {
+    self.person_proof_api_path_role(path).is_some()
+  }
+
   pub fn has_person_proof_verify_path(&self, path: &str) -> bool {
-    self.person_proof.policies.iter().any(|policy| {
-      policy.provider.verify_path.as_deref() == Some(path) && policy.method.is_provider()
-    })
+    self.person_proof_api_path_role(path) == Some(PersonProofApiPathRole::Verify)
+  }
+
+  pub fn person_proof_session_document(
+    &self,
+    input: WafRequestInput<'_>,
+    session_path: &str,
+    session: &str,
+  ) -> anyhow::Result<Option<PersonProofSessionDocument>> {
+    person_proof_api::session_document(&self.person_proof, input, session_path, session)
+  }
+
+  pub fn person_proof_openapi_document(&self, openapi_path: &str) -> Option<String> {
+    person_proof_api::openapi_document(&self.person_proof, openapi_path)
+  }
+
+  pub fn begin_person_proof_session_challenge(
+    &self,
+    input: WafRequestInput<'_>,
+    verify_path: &str,
+    session: &str,
+  ) -> anyhow::Result<Option<PersonProofProviderChallenge>> {
+    person_proof_api::begin_session_challenge(&self.person_proof, input, verify_path, session)
   }
 
   pub fn begin_person_proof_provider_challenge(
@@ -2085,6 +2137,7 @@ impl WafEngine {
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_rules(
   configs: &[WafRuleConfig],
   groups: RuleGroupScope<'_>,
@@ -2093,6 +2146,7 @@ fn compile_rules(
   previous_counters: &HashMap<WafRuleHitKey, Arc<AtomicU64>>,
   global_functions: Arc<FunctionMap>,
   route_functions: Option<Arc<FunctionMap>>,
+  person_proof_defaults: &WafPersonProofConfig,
 ) -> anyhow::Result<Vec<CompiledRule>> {
   configs
     .iter()
@@ -2102,8 +2156,13 @@ fn compile_rules(
       let expression = Parser::new(&resolved.when)
         .parse()
         .with_context(|| format!("failed to compile WAF rule {}", rule.name))?;
-      let actions = compile_actions(rule, &resolved.actions, scope.person_proof_scope())
-        .with_context(|| format!("failed to compile WAF rule {} actions", rule.name))?;
+      let actions = compile_actions(
+        rule,
+        &resolved.actions,
+        scope.person_proof_scope(),
+        person_proof_defaults,
+      )
+      .with_context(|| format!("failed to compile WAF rule {} actions", rule.name))?;
       let person_proof_policies = actions
         .iter()
         .filter_map(|action| match action {
@@ -2247,6 +2306,7 @@ fn compile_actions(
   rule: &WafRuleConfig,
   actions: &[WafActionConfig],
   scope: &str,
+  person_proof_defaults: &WafPersonProofConfig,
 ) -> anyhow::Result<Vec<CompiledAction>> {
   actions
     .iter()
@@ -2266,7 +2326,7 @@ fn compile_actions(
           .collect::<anyhow::Result<Vec<_>>>()?,
       }),
       WafActionConfig::RequirePersonProof { .. } => Ok(CompiledAction::RequirePersonProof(
-        person_proof_policy_from_action(rule, scope, action_index, action),
+        person_proof_policy_from_action(rule, scope, action_index, action, person_proof_defaults),
       )),
       WafActionConfig::EmitMitigation { .. } => Ok(CompiledAction::EmitMitigation(
         compile_mitigation_action(rule, action)?,
@@ -2305,6 +2365,7 @@ fn person_proof_policy_from_action(
   scope: &str,
   action_index: usize,
   action: &WafActionConfig,
+  defaults: &WafPersonProofConfig,
 ) -> PersonProofPolicy {
   let WafActionConfig::RequirePersonProof {
     priority: _,
@@ -2321,7 +2382,11 @@ fn person_proof_policy_from_action(
     status,
     challenge_url,
     challenge_redirect_status,
+    session_path,
     verify_path,
+    openapi_path,
+    provider,
+    provider_metadata,
     site_key,
     secret_env,
     provider_endpoint,
@@ -2354,7 +2419,17 @@ fn person_proof_policy_from_action(
     provider: person_proof_v2::PersonProofProviderConfig {
       challenge_url: challenge_url.clone(),
       challenge_redirect_status: *challenge_redirect_status,
-      verify_path: verify_path.clone(),
+      session_path: session_path
+        .clone()
+        .unwrap_or_else(|| defaults.session_path.clone()),
+      verify_path: verify_path
+        .clone()
+        .unwrap_or_else(|| defaults.verify_path.clone()),
+      openapi_path: openapi_path
+        .clone()
+        .unwrap_or_else(|| defaults.openapi_path.clone()),
+      provider: provider.clone(),
+      provider_metadata: provider_metadata.clone(),
       site_key: site_key.clone(),
       secret_env: secret_env.clone(),
       provider_endpoint: provider_endpoint.clone(),

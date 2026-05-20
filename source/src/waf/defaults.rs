@@ -157,6 +157,18 @@ pub(super) fn default_person_proof_challenge_redirect_status() -> u16 {
   303
 }
 
+pub(super) fn default_person_proof_session_path() -> String {
+  "/.oxibelt/person-proof/session".to_string()
+}
+
+pub(super) fn default_person_proof_verify_path() -> String {
+  "/.oxibelt/person-proof/verify".to_string()
+}
+
+pub(super) fn default_person_proof_openapi_path() -> String {
+  "/.oxibelt/person-proof/openapi.json".to_string()
+}
+
 pub(super) fn default_person_proof_provider_timeout_ms() -> u64 {
   3_000
 }

@@ -60,7 +60,7 @@ use self::headers::{
   set_effective_host_header, strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
 use self::observability::{record_request_observability, record_websocket_session_end};
-use self::person_proof::handle_person_proof_verify;
+use self::person_proof::handle_person_proof_api;
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::response::{
   apply_security_headers, apply_sticky_cookie, draining_response, text_response,
@@ -599,9 +599,9 @@ where
     return text_response(terminal.status, &terminal.body);
   }
 
-  if state.waf.has_person_proof_verify_path(request_uri.path()) {
+  if state.waf.has_person_proof_api_path(request_uri.path()) {
     access_log.ensure_request_ids();
-    return handle_person_proof_verify(
+    return handle_person_proof_api(
       request,
       state.as_ref(),
       request_method,

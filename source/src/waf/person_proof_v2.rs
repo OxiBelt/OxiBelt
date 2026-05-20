@@ -9,6 +9,9 @@ use super::person_proof::{
   challenge_reuse_key, clearance_reuse_key, hex_decode, hex_encode, now_unix_ms, random_hex,
   remaining_seconds, token_binding_payload_for_route,
 };
+use super::person_proof_api::{
+  begin_session_challenge, provider_endpoint, provider_metadata, provider_name, sign_session_token,
+};
 use super::{
   HeaderMutation, PersonProofAlgorithm, PersonProofProviderFailPolicy, WafRequestInput,
   WafTerminalResponse,
@@ -18,7 +21,11 @@ use super::{
 pub(super) struct PersonProofProviderConfig {
   pub challenge_url: Option<String>,
   pub challenge_redirect_status: u16,
-  pub verify_path: Option<String>,
+  pub session_path: String,
+  pub verify_path: String,
+  pub openapi_path: String,
+  pub provider: Option<String>,
+  pub provider_metadata: serde_json::Value,
   pub site_key: Option<String>,
   pub secret_env: Option<String>,
   pub provider_endpoint: Option<url::Url>,
@@ -31,26 +38,31 @@ pub(super) struct PersonProofProviderConfig {
 #[derive(Debug, Clone)]
 pub struct PersonProofProviderChallenge {
   pub method: PersonProofAlgorithm,
-  pub endpoint: url::Url,
-  pub site_key: String,
-  pub secret_env: String,
+  pub endpoint: Option<url::Url>,
+  pub site_key: Option<String>,
+  pub secret_env: Option<String>,
+  pub provider: String,
+  pub metadata: serde_json::Value,
+  pub session: String,
+  pub return_path: String,
+  pub difficulty: u8,
   pub provider_timeout_ms: u64,
   pub provider_fail_policy: PersonProofProviderFailPolicy,
   pub provider_max_response_body_bytes: usize,
   pub send_remote_ip: bool,
-  state: ProviderChallengeState,
+  pub(super) state: ProviderChallengeState,
 }
 
 #[derive(Debug, Clone)]
-struct ProviderChallengeState {
-  policy: PersonProofPolicy,
-  token: String,
-  issued: i64,
-  expires: i64,
-  method: String,
-  route_name: String,
-  binding_hash: String,
-  random: String,
+pub(super) struct ProviderChallengeState {
+  pub(super) policy: PersonProofPolicy,
+  pub(super) token: String,
+  pub(super) issued: i64,
+  pub(super) expires: i64,
+  pub(super) method: String,
+  pub(super) route_name: String,
+  pub(super) binding_hash: String,
+  pub(super) random: String,
 }
 
 struct ChallengeFields {
@@ -91,14 +103,10 @@ pub(super) fn redirect_challenge(
     .context("person proof expiration overflow")?;
   let random = random_hex(16)?;
   let return_path = request_return_path(input);
-  let challenge = if policy.method == PersonProofAlgorithm::PowSha256V1 {
-    engine.sign_token(input, policy, now, expires, &random)
-  } else {
-    sign_challenge_token(engine, input, policy, now, expires, &return_path, &random)
-  };
+  let session = sign_session_token(engine, input, policy, now, expires, &return_path, &random);
 
   if policy.single_use
-    && let Err(error) = engine.remember_reuse_token(&challenge_reuse_key(&challenge), expires, now)
+    && let Err(error) = engine.remember_reuse_token(&challenge_reuse_key(&session), expires, now)
   {
     if error
       .to_string()
@@ -113,23 +121,14 @@ pub(super) fn redirect_challenge(
   }
 
   let expires_string = expires.to_string();
-  let difficulty_string = policy.difficulty.to_string();
-  let mut pairs = vec![
-    ("challenge", challenge.as_str()),
+  let pairs = vec![
+    ("session", session.as_str()),
+    ("session_path", policy.provider.session_path.as_str()),
+    ("verify_path", policy.provider.verify_path.as_str()),
+    ("openapi_path", policy.provider.openapi_path.as_str()),
     ("return_path", return_path.as_str()),
-    ("method", policy.method.as_str()),
     ("expires_unix_ms", expires_string.as_str()),
   ];
-  if let Some(verify_path) = policy.provider.verify_path.as_deref() {
-    pairs.push(("verify_path", verify_path));
-  }
-  if let Some(site_key) = policy.provider.site_key.as_deref() {
-    pairs.push(("site_key", site_key));
-  }
-  if policy.method == PersonProofAlgorithm::PowSha256V1 {
-    pairs.push(("cookie", policy.cookie.as_str()));
-    pairs.push(("difficulty", difficulty_string.as_str()));
-  }
 
   let location = append_query(
     policy
@@ -169,12 +168,13 @@ pub(super) fn begin_provider_challenge(
   verify_path: &str,
   challenge: &str,
 ) -> anyhow::Result<Option<PersonProofProviderChallenge>> {
+  if challenge.starts_with("session.v1.") {
+    return begin_session_challenge(engine, input, verify_path, challenge);
+  }
   let Some(policy) = engine
     .policies
     .iter()
-    .find(|policy| {
-      policy.provider.verify_path.as_deref() == Some(verify_path) && policy.method.is_provider()
-    })
+    .find(|policy| policy.provider.verify_path == verify_path && policy.method.is_provider())
     .cloned()
   else {
     return Ok(None);
@@ -199,17 +199,14 @@ pub(super) fn begin_provider_challenge(
 
   Ok(Some(PersonProofProviderChallenge {
     method: policy.method,
-    endpoint: provider_endpoint(&policy),
-    site_key: policy
-      .provider
-      .site_key
-      .clone()
-      .context("person proof provider challenge requires site_key")?,
-    secret_env: policy
-      .provider
-      .secret_env
-      .clone()
-      .context("person proof provider challenge requires secret_env")?,
+    endpoint: Some(provider_endpoint(&policy)?),
+    site_key: policy.provider.site_key.clone(),
+    secret_env: policy.provider.secret_env.clone(),
+    provider: provider_name(&policy),
+    metadata: provider_metadata(&policy),
+    session: challenge.to_string(),
+    return_path: fields.return_path.clone(),
+    difficulty: policy.difficulty,
     provider_timeout_ms: policy.provider.provider_timeout_ms,
     provider_fail_policy: policy.provider.provider_fail_policy,
     provider_max_response_body_bytes: policy.provider.provider_max_response_body_bytes,
@@ -324,44 +321,6 @@ fn issue_clearance(
     name: SET_COOKIE,
     value: HeaderValue::from_str(&cookie).context("invalid person proof clearance cookie")?,
   })
-}
-
-fn sign_challenge_token(
-  engine: &PersonProofEngine,
-  input: WafRequestInput<'_>,
-  policy: &PersonProofPolicy,
-  issued: i64,
-  expires: i64,
-  return_path: &str,
-  random: &str,
-) -> String {
-  let binding_hash = token_binding_hash(input, policy, input.route_name);
-  let payload = challenge_payload(
-    input.downstream_host,
-    policy,
-    input.method.as_str(),
-    input.route_name,
-    policy.provider.verify_path.as_deref().unwrap_or_default(),
-    return_path,
-    &binding_hash,
-    issued,
-    expires,
-    random,
-  );
-  let mac = hmac::sign(
-    &hmac::Key::new(hmac::HMAC_SHA256, &engine.secret),
-    payload.as_bytes(),
-  );
-  format!(
-    "challenge.v2.{issued}.{expires}.{}.{}.{}.{}.{}.{}.{}",
-    policy.method.as_str(),
-    hex_encode(input.method.as_str().as_bytes()),
-    hex_encode(input.route_name.as_bytes()),
-    hex_encode(return_path.as_bytes()),
-    binding_hash,
-    random,
-    hex_encode(mac.as_ref())
-  )
 }
 
 fn sign_clearance_token(
@@ -573,24 +532,4 @@ fn request_return_path(input: WafRequestInput<'_>) -> String {
     .map(|path| path.as_str().to_string())
     .filter(|path| path.starts_with('/'))
     .unwrap_or_else(|| "/".to_string())
-}
-
-fn provider_endpoint(policy: &PersonProofPolicy) -> url::Url {
-  policy
-    .provider
-    .provider_endpoint
-    .clone()
-    .unwrap_or_else(|| {
-      url::Url::parse(match policy.method {
-        PersonProofAlgorithm::PowSha256V1 => "https://invalid.example/",
-        PersonProofAlgorithm::Turnstile => {
-          "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-        }
-        PersonProofAlgorithm::HCaptcha => "https://api.hcaptcha.com/siteverify",
-        PersonProofAlgorithm::FriendlyCaptchaV2 => {
-          "https://global.frcapi.com/api/v2/captcha/siteverify"
-        }
-      })
-      .expect("built-in provider endpoint must be valid")
-    })
 }

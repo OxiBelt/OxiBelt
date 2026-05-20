@@ -5331,6 +5331,33 @@ send_remote_ip = false
     config.validate().expect("config should validate");
     let engine = WafEngine::new(&config).expect("WAF should compile");
     assert!(engine.has_person_proof_verify_path("/.oxibelt/person-proof/verify-login"));
+    assert!(engine.has_person_proof_api_path("/.oxibelt/person-proof/session"));
+    assert!(engine.has_person_proof_api_path("/.oxibelt/person-proof/openapi.json"));
+}
+
+#[test]
+fn person_proof_global_api_path_defaults_parse_and_validate() {
+    let temp_dir = common::TempDir::new("waf-person-proof-global-api-paths");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-global-api-paths");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[waf.person_proof]
+session_path = "/proof/session"
+verify_path = "/proof/verify"
+openapi_path = "/proof/openapi.json"
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.waf.person_proof.session_path, "/proof/session");
+    assert_eq!(config.waf.person_proof.verify_path, "/proof/verify");
+    assert_eq!(config.waf.person_proof.openapi_path, "/proof/openapi.json");
 }
 
 #[test]
@@ -5360,14 +5387,15 @@ secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
             "challenge_url must be origin-relative",
         ),
         (
-            "waf-person-proof-missing-verify-path",
+            "waf-person-proof-unsafe-session-path",
             r#"
 method = "turnstile"
 challenge_url = "/person-proof/index.html"
+session_path = "https://evil.example/session"
 site_key = "site-test"
 secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
 "#,
-            "verify_path is required",
+            "session_path must be an origin-relative path",
         ),
         (
             "waf-person-proof-missing-secret-env",
@@ -5446,7 +5474,83 @@ secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
 }
 
 #[test]
-fn person_proof_external_provider_redirect_includes_signed_challenge_context() {
+fn person_proof_custom_http_policy_can_override_api_paths() {
+    let (_temp_dir, config) = load_person_proof_provider_config(
+        "waf-person-proof-custom-http-session",
+        r#"
+method = "custom_http"
+challenge_url = "/person-proof/custom.html"
+session_path = "/custom/person-proof/session"
+verify_path = "/custom/person-proof/verify"
+openapi_path = "/custom/person-proof/openapi.json"
+provider = "my-provider"
+provider_endpoint = "http://127.0.0.1:18080/siteverify"
+provider_metadata = { widget = "passkey" }
+"#,
+    );
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+    let decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let location = extract_response_header(
+        &decision
+            .terminal
+            .expect("challenge should be issued")
+            .headers,
+        http::header::LOCATION,
+    );
+    let query = parse_origin_relative_location_query(&location);
+    assert_eq!(
+        query.get("session_path").map(String::as_str),
+        Some("/custom/person-proof/session")
+    );
+    assert_eq!(
+        query.get("verify_path").map(String::as_str),
+        Some("/custom/person-proof/verify")
+    );
+    assert_eq!(
+        query.get("openapi_path").map(String::as_str),
+        Some("/custom/person-proof/openapi.json")
+    );
+    let session = query.get("session").expect("session should exist");
+    let session_uri: Uri = format!("/custom/person-proof/session?session={session}")
+        .parse()
+        .expect("session URI should parse");
+    let document = engine
+        .person_proof_session_document(
+            request_input(&method, &session_uri, &headers, &tags, client_addr),
+            "/custom/person-proof/session",
+            session,
+        )
+        .expect("session should validate")
+        .expect("session document should exist");
+    assert_eq!(document.method, "custom_http");
+    assert_eq!(document.provider, "my-provider");
+    assert_eq!(
+        document
+            .challenge
+            .get("kind")
+            .and_then(serde_json::Value::as_str),
+        Some("custom")
+    );
+    assert_eq!(
+        document
+            .challenge
+            .get("metadata")
+            .and_then(|metadata| metadata.get("widget"))
+            .and_then(serde_json::Value::as_str),
+        Some("passkey")
+    );
+}
+
+#[test]
+fn person_proof_external_provider_redirect_uses_session_api() {
     let (_temp_dir, config) = load_person_proof_provider_config(
         "waf-person-proof-provider-redirect",
         r#"
@@ -5483,22 +5587,66 @@ secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
     let location = extract_response_header(&challenge.headers, http::header::LOCATION);
     let query = parse_origin_relative_location_query(&location);
     assert_eq!(query.get("skin").map(String::as_str), Some("dark"));
-    assert_eq!(query.get("method").map(String::as_str), Some("turnstile"));
+    assert!(!query.contains_key("method"));
+    assert!(!query.contains_key("site_key"));
+    assert!(!query.contains_key("challenge"));
+    assert_eq!(
+        query.get("session_path").map(String::as_str),
+        Some("/.oxibelt/person-proof/session")
+    );
     assert_eq!(
         query.get("verify_path").map(String::as_str),
         Some("/.oxibelt/person-proof/verify-login")
     );
-    assert_eq!(query.get("site_key").map(String::as_str), Some("site-test"));
+    assert_eq!(
+        query.get("openapi_path").map(String::as_str),
+        Some("/.oxibelt/person-proof/openapi.json")
+    );
     assert_eq!(
         query.get("return_path").map(String::as_str),
         Some("/protected?next=%2Fdashboard")
     );
-    assert!(
-        query
-            .get("challenge")
-            .is_some_and(|value| value.starts_with("challenge.v2."))
-    );
+    let session = query
+        .get("session")
+        .expect("redirect should include a session token");
+    assert!(session.starts_with("session.v1."));
     assert!(query.contains_key("expires_unix_ms"));
+
+    let session_method = Method::GET;
+    let session_uri: Uri = format!("/.oxibelt/person-proof/session?session={session}")
+        .parse()
+        .expect("session URI should parse");
+    let document = engine
+        .person_proof_session_document(
+            request_input(
+                &session_method,
+                &session_uri,
+                &headers,
+                &tags,
+                "203.0.113.10:49152".parse().unwrap(),
+            ),
+            "/.oxibelt/person-proof/session",
+            session,
+        )
+        .expect("session should validate")
+        .expect("session document should exist");
+    assert_eq!(document.method, "turnstile");
+    assert_eq!(document.provider, "cloudflare-turnstile");
+    assert_eq!(document.return_path, "/protected?next=%2Fdashboard");
+    assert_eq!(document.verify_path, "/.oxibelt/person-proof/verify-login");
+    assert_eq!(
+        document
+            .challenge
+            .get("site_key")
+            .and_then(serde_json::Value::as_str),
+        Some("site-test")
+    );
+
+    let openapi = engine
+        .person_proof_openapi_document("/.oxibelt/person-proof/openapi.json")
+        .expect("OpenAPI document should be registered");
+    assert!(openapi.contains("/.oxibelt/person-proof/session"));
+    assert!(openapi.contains("/.oxibelt/person-proof/verify-login"));
 }
 
 #[test]
@@ -5529,9 +5677,9 @@ success_tag = "PersonProof"
         &challenge_decision.terminal.unwrap().headers,
         http::header::LOCATION,
     );
-    let challenge_token = parse_origin_relative_location_query(&location)
-        .remove("challenge")
-        .expect("redirect should include challenge");
+    let session_token = parse_origin_relative_location_query(&location)
+        .remove("session")
+        .expect("redirect should include session");
 
     let verify_method = Method::POST;
     let verify_uri: Uri = "/.oxibelt/person-proof/verify-login"
@@ -5541,7 +5689,7 @@ success_tag = "PersonProof"
         .begin_person_proof_provider_challenge(
             request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
             "/.oxibelt/person-proof/verify-login",
-            &challenge_token,
+            &session_token,
         )
         .expect("provider challenge should validate")
         .expect("verify_path should map to a provider challenge");
@@ -5549,8 +5697,11 @@ success_tag = "PersonProof"
         provider_challenge.method,
         PersonProofAlgorithm::FriendlyCaptchaV2
     );
-    assert_eq!(provider_challenge.site_key, "site-test");
-    assert_eq!(provider_challenge.secret_env, "OXIBELT_TEST_CAPTCHA_SECRET");
+    assert_eq!(provider_challenge.site_key.as_deref(), Some("site-test"));
+    assert_eq!(
+        provider_challenge.secret_env.as_deref(),
+        Some("OXIBELT_TEST_CAPTCHA_SECRET")
+    );
 
     let clearance_mutation = engine
         .complete_person_proof_provider_challenge(
@@ -5569,7 +5720,7 @@ success_tag = "PersonProof"
             .begin_person_proof_provider_challenge(
                 request_input(&verify_method, &verify_uri, &headers, &tags, client_addr,),
                 "/.oxibelt/person-proof/verify-login",
-                &challenge_token,
+                &session_token,
             )
             .and_then(|challenge| engine.complete_person_proof_provider_challenge(
                 request_input(&verify_method, &verify_uri, &headers, &tags, client_addr,),

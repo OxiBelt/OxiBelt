@@ -1,24 +1,62 @@
 use std::collections::HashMap;
 
 use anyhow::bail;
+use serde::Deserialize;
 
 use crate::config::Config;
 
+use super::defaults::{
+  default_person_proof_openapi_path, default_person_proof_session_path,
+  default_person_proof_verify_path,
+};
 use super::{PersonProofAlgorithm, WafActionConfig, WafRuleConfig, WafRuleGroupConfig};
 
-pub(super) fn validate_unique_verify_paths(config: &Config) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WafPersonProofConfig {
+  #[serde(default = "default_person_proof_session_path")]
+  pub session_path: String,
+  #[serde(default = "default_person_proof_verify_path")]
+  pub verify_path: String,
+  #[serde(default = "default_person_proof_openapi_path")]
+  pub openapi_path: String,
+}
+
+impl Default for WafPersonProofConfig {
+  fn default() -> Self {
+    Self {
+      session_path: default_person_proof_session_path(),
+      verify_path: default_person_proof_verify_path(),
+      openapi_path: default_person_proof_openapi_path(),
+    }
+  }
+}
+
+pub(super) fn validate_api_paths(config: &Config) -> anyhow::Result<()> {
+  validate_global_paths(&config.waf.person_proof)?;
   let mut paths = HashMap::new();
-  remember_scope_verify_paths(&mut paths, "global WAF", &config.waf.rules)?;
-  remember_group_verify_paths(&mut paths, "global WAF", &config.waf.rule_groups)?;
+  remember_scope_api_paths(
+    &mut paths,
+    "global WAF",
+    &config.waf.person_proof,
+    &config.waf.rules,
+  )?;
+  remember_group_api_paths(
+    &mut paths,
+    "global WAF",
+    &config.waf.person_proof,
+    &config.waf.rule_groups,
+  )?;
   for route in &config.routes {
-    remember_scope_verify_paths(
+    remember_scope_api_paths(
       &mut paths,
       &format!("route {} WAF", route.name),
+      &config.waf.person_proof,
       &route.waf.rules,
     )?;
-    remember_group_verify_paths(
+    remember_group_api_paths(
       &mut paths,
       &format!("route {} WAF", route.name),
+      &config.waf.person_proof,
       &route.waf.rule_groups,
     )?;
   }
@@ -31,7 +69,10 @@ pub(super) fn validate_redirect_settings(
   method: PersonProofAlgorithm,
   challenge_url: Option<&str>,
   challenge_redirect_status: u16,
+  session_path: Option<&str>,
   verify_path: Option<&str>,
+  openapi_path: Option<&str>,
+  provider: Option<&str>,
   site_key: Option<&str>,
   secret_env: Option<&str>,
   provider_endpoint: Option<&url::Url>,
@@ -53,29 +94,47 @@ pub(super) fn validate_redirect_settings(
   {
     bail!("WAF rule {rule_name} require_person_proof verify_path must be an origin-relative path");
   }
+  if let Some(session_path) = session_path
+    && !is_origin_relative_url(session_path, false)
+  {
+    bail!("WAF rule {rule_name} require_person_proof session_path must be an origin-relative path");
+  }
+  if let Some(openapi_path) = openapi_path
+    && !is_origin_relative_url(openapi_path, false)
+  {
+    bail!("WAF rule {rule_name} require_person_proof openapi_path must be an origin-relative path");
+  }
+  if let Some(provider) = provider
+    && provider.trim().is_empty()
+  {
+    bail!("WAF rule {rule_name} require_person_proof provider must not be empty");
+  }
   if method.is_provider() {
     if challenge_url.is_none() {
       bail!(
         "WAF rule {rule_name} require_person_proof challenge_url is required for external providers"
       );
     }
-    if verify_path.is_none() {
-      bail!(
-        "WAF rule {rule_name} require_person_proof verify_path is required for external providers"
-      );
+    if method == PersonProofAlgorithm::CustomHttp {
+      if provider_endpoint.is_none() {
+        bail!(
+          "WAF rule {rule_name} require_person_proof provider_endpoint is required for custom_http"
+        );
+      }
+    } else {
+      validate_non_empty(
+        rule_name,
+        "site_key",
+        site_key,
+        "is required for external providers",
+      )?;
+      validate_non_empty(
+        rule_name,
+        "secret_env",
+        secret_env,
+        "is required for external providers",
+      )?;
     }
-    validate_non_empty(
-      rule_name,
-      "site_key",
-      site_key,
-      "is required for external providers",
-    )?;
-    validate_non_empty(
-      rule_name,
-      "secret_env",
-      secret_env,
-      "is required for external providers",
-    )?;
   }
   if let Some(endpoint) = provider_endpoint
     && endpoint.scheme() != "http"
@@ -96,61 +155,154 @@ pub(super) fn validate_redirect_settings(
   Ok(())
 }
 
-fn remember_scope_verify_paths(
-  paths: &mut HashMap<String, String>,
+fn validate_global_paths(defaults: &WafPersonProofConfig) -> anyhow::Result<()> {
+  for (field, value) in [
+    (
+      "waf.person_proof.session_path",
+      defaults.session_path.as_str(),
+    ),
+    (
+      "waf.person_proof.verify_path",
+      defaults.verify_path.as_str(),
+    ),
+    (
+      "waf.person_proof.openapi_path",
+      defaults.openapi_path.as_str(),
+    ),
+  ] {
+    if !is_origin_relative_url(value, false) {
+      bail!("{field} must be an origin-relative path");
+    }
+  }
+  if defaults.session_path == defaults.verify_path
+    || defaults.session_path == defaults.openapi_path
+    || defaults.verify_path == defaults.openapi_path
+  {
+    bail!("waf.person_proof API paths must be distinct");
+  }
+  Ok(())
+}
+
+fn remember_scope_api_paths(
+  paths: &mut HashMap<String, ApiPathUse>,
   scope: &str,
+  defaults: &WafPersonProofConfig,
   rules: &[WafRuleConfig],
 ) -> anyhow::Result<()> {
   for rule in rules {
-    remember_action_verify_paths(paths, &format!("{scope} rule {}", rule.name), &rule.actions)?;
-    remember_group_verify_paths(
+    remember_action_api_paths(
       paths,
       &format!("{scope} rule {}", rule.name),
+      defaults,
+      &rule.actions,
+    )?;
+    remember_group_api_paths(
+      paths,
+      &format!("{scope} rule {}", rule.name),
+      defaults,
       &rule.local_rule_groups,
     )?;
   }
   Ok(())
 }
 
-fn remember_group_verify_paths(
-  paths: &mut HashMap<String, String>,
+fn remember_group_api_paths(
+  paths: &mut HashMap<String, ApiPathUse>,
   scope: &str,
+  defaults: &WafPersonProofConfig,
   groups: &[WafRuleGroupConfig],
 ) -> anyhow::Result<()> {
   for group in groups {
-    remember_action_verify_paths(
+    remember_action_api_paths(
       paths,
       &format!("{scope} group {}", group.name),
+      defaults,
       &group.actions,
     )?;
   }
   Ok(())
 }
 
-fn remember_action_verify_paths(
-  paths: &mut HashMap<String, String>,
+fn remember_action_api_paths(
+  paths: &mut HashMap<String, ApiPathUse>,
   label: &str,
+  defaults: &WafPersonProofConfig,
   actions: &[WafActionConfig],
 ) -> anyhow::Result<()> {
   for action in actions {
     let WafActionConfig::RequirePersonProof {
       method,
-      verify_path: Some(verify_path),
+      challenge_url,
+      session_path,
+      verify_path,
+      openapi_path,
       ..
     } = action
     else {
       continue;
     };
-    if !method.is_provider() {
+    if challenge_url.is_none() && !method.is_provider() {
       continue;
     }
-    if let Some(previous) = paths.insert(verify_path.clone(), label.to_string()) {
-      bail!(
-        "duplicate require_person_proof verify_path {verify_path} in {label}; already used by {previous}"
-      );
-    }
+    remember_api_path(
+      paths,
+      label,
+      "session",
+      session_path,
+      &defaults.session_path,
+    )?;
+    remember_api_path(paths, label, "verify", verify_path, &defaults.verify_path)?;
+    remember_api_path(
+      paths,
+      label,
+      "openapi",
+      openapi_path,
+      &defaults.openapi_path,
+    )?;
   }
   Ok(())
+}
+
+fn remember_api_path(
+  paths: &mut HashMap<String, ApiPathUse>,
+  label: &str,
+  role: &'static str,
+  configured: &Option<String>,
+  fallback: &str,
+) -> anyhow::Result<()> {
+  let value = configured.as_deref().unwrap_or(fallback);
+  let explicit = configured.is_some();
+  if let Some(previous) = paths.get(value) {
+    if previous.role != role {
+      bail!(
+        "duplicate require_person_proof API path {value} in {label}; already used as {} by {}",
+        previous.role,
+        previous.label
+      );
+    }
+    if previous.explicit && explicit {
+      bail!(
+        "duplicate require_person_proof {role}_path {value} in {label}; already used by {}",
+        previous.label
+      );
+    }
+    return Ok(());
+  }
+  paths.insert(
+    value.to_string(),
+    ApiPathUse {
+      role,
+      label: label.to_string(),
+      explicit,
+    },
+  );
+  Ok(())
+}
+
+struct ApiPathUse {
+  role: &'static str,
+  label: String,
+  explicit: bool,
 }
 
 fn validate_non_empty(

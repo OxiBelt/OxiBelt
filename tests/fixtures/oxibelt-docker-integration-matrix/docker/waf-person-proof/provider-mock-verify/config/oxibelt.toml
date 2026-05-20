@@ -45,6 +45,11 @@ enabled = true
 mode = "enforcing"
 fail_policy = "closed"
 
+[waf.person_proof]
+session_path = "/.oxibelt/person-proof/session"
+verify_path = "/.oxibelt/person-proof/verify"
+openapi_path = "/.oxibelt/person-proof/openapi.json"
+
 [[waf.rules]]
 name = "provider-person-proof"
 phase = "request"
@@ -53,16 +58,15 @@ when = "Request.Http.Path.startsWith('/app/provider-proof') && Request.Client.Pe
 
 [[waf.rules.actions]]
 type = "require_person_proof"
-method = "turnstile"
+method = "custom_http"
 token_validity_seconds = 60
 cookie = "__matrix_provider_person_proof"
 token_bindings = ["user_agent", "route", "direct_peer_ip_network_prefix"]
 success_tag = "PersonProof"
 challenge_url = "/person-proof/index.html"
 challenge_redirect_status = 303
-verify_path = "/.oxibelt/person-proof/verify-provider"
-site_key = "matrix-site-key"
-secret_env = "OXIBELT_CACHE_PURGE_HMAC_KEY"
+provider = "matrix-provider"
+provider_metadata = { fixture = "provider-mock-verify" }
 provider_endpoint = "http://mock-http:18080/status/200?body=%7B%22success%22%3Atrue%7D&content_type=application/json"
 provider_timeout_ms = 1000
 provider_fail_policy = "closed"
