@@ -468,6 +468,12 @@ webtransport = true
 mode = "disabled"
 
 [[routes]]
+name = "person-proof-api-route"
+hosts = ["localhost"]
+path_prefix = "/.oxibelt"
+upstream = "browser-upstream"
+
+[[routes]]
 name = "browser-route"
 hosts = ["localhost"]
 path_prefix = "/app"
