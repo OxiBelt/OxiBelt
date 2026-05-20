@@ -18,8 +18,8 @@ use crate::shared_state::SharedState;
 
 #[derive(Clone)]
 pub(super) struct PersonProofEngine {
-  secret: [u8; 32],
-  policies: Vec<PersonProofPolicy>,
+  pub(super) secret: [u8; 32],
+  pub(super) policies: Vec<PersonProofPolicy>,
   active_reuse_tokens: Arc<Mutex<HashMap<String, i64>>>,
   max_reuse_tokens: usize,
   shared_state: Option<Arc<SharedState>>,
@@ -28,7 +28,7 @@ pub(super) struct PersonProofEngine {
 #[derive(Debug, Clone)]
 pub(super) struct PersonProofPolicy {
   pub key: String,
-  pub algorithm: PersonProofAlgorithm,
+  pub method: PersonProofAlgorithm,
   pub difficulty: u8,
   pub ttl_seconds: u64,
   pub cookie: String,
@@ -39,6 +39,7 @@ pub(super) struct PersonProofPolicy {
   pub single_use: bool,
   pub success_tag: Option<String>,
   pub status: u16,
+  pub provider: super::person_proof_v2::PersonProofProviderConfig,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -69,14 +70,14 @@ pub(super) struct PersonProofRequestStatus {
   pub expires_at_unix_ms: Option<i64>,
   pub policy_key: Option<String>,
   pub rate_limited: bool,
-  clearance: Option<PersonProofClearance>,
+  pub(super) clearance: Option<PersonProofClearance>,
 }
 
 #[derive(Debug, Clone)]
-struct PersonProofClearance {
-  cookie: String,
-  value: String,
-  max_age_seconds: u64,
+pub(super) struct PersonProofClearance {
+  pub(super) cookie: String,
+  pub(super) value: String,
+  pub(super) max_age_seconds: u64,
 }
 
 struct TokenFields<'a> {
@@ -157,7 +158,7 @@ impl PersonProofEngine {
         Err(error) => {
           failed = Some(PersonProofRequestStatus {
             state: PersonProofState::Failed,
-            method: Some(policy.algorithm.as_str()),
+            method: Some(policy.method.as_str()),
             difficulty: Some(policy.difficulty),
             issued_at_unix_ms: None,
             expires_at_unix_ms: None,
@@ -209,6 +210,10 @@ impl PersonProofEngine {
     input: WafRequestInput<'_>,
     policy: PersonProofPolicy,
   ) -> anyhow::Result<WafTerminalResponse> {
+    if policy.provider.challenge_url.is_some() {
+      return super::person_proof_v2::redirect_challenge(self, input, &policy);
+    }
+
     let now = now_unix_ms()?;
     let expires = now
       .checked_add(
@@ -263,6 +268,9 @@ impl PersonProofEngine {
     proof: &str,
   ) -> anyhow::Result<PersonProofRequestStatus> {
     if proof.starts_with("clearance.") {
+      if proof.starts_with("clearance.v2.") {
+        return super::person_proof_v2::verify_clearance(self, input, policy, proof);
+      }
       return self.verify_clearance(input, policy, proof);
     }
 
@@ -305,7 +313,7 @@ impl PersonProofEngine {
     let now = now_unix_ms()?;
     let mut status = PersonProofRequestStatus {
       state: PersonProofState::Failed,
-      method: Some(policy.algorithm.as_str()),
+      method: Some(policy.method.as_str()),
       difficulty: Some(fields.difficulty),
       issued_at_unix_ms: Some(fields.issued),
       expires_at_unix_ms: Some(fields.expires),
@@ -352,7 +360,7 @@ impl PersonProofEngine {
     })
   }
 
-  fn sign_token(
+  pub(super) fn sign_token(
     &self,
     input: WafRequestInput<'_>,
     policy: &PersonProofPolicy,
@@ -455,7 +463,7 @@ impl PersonProofEngine {
       } else {
         PersonProofState::Valid
       },
-      method: Some(policy.algorithm.as_str()),
+      method: Some(policy.method.as_str()),
       difficulty: Some(fields.difficulty),
       issued_at_unix_ms: Some(fields.issued),
       expires_at_unix_ms: Some(fields.expires),
@@ -487,7 +495,12 @@ impl PersonProofEngine {
     Ok(status)
   }
 
-  fn remember_reuse_token(&self, key: &str, expires: i64, now: i64) -> anyhow::Result<()> {
+  pub(super) fn remember_reuse_token(
+    &self,
+    key: &str,
+    expires: i64,
+    now: i64,
+  ) -> anyhow::Result<()> {
     if let Some(shared) = &self.shared_state {
       if !shared.person_proof_remember(key, expires)? {
         bail!("person proof token is already active");
@@ -506,7 +519,7 @@ impl PersonProofEngine {
     Ok(())
   }
 
-  fn consume_reuse_token(&self, key: &str, now: i64) -> anyhow::Result<bool> {
+  pub(super) fn consume_reuse_token(&self, key: &str, now: i64) -> anyhow::Result<bool> {
     if let Some(shared) = &self.shared_state {
       return shared.person_proof_consume(key);
     }
@@ -545,7 +558,7 @@ fn token_payload(
   let token_bindings = token_binding_payload(input, policy);
   format!(
     "v1\n{}\n{}\n{issued}\n{expires}\n{difficulty}\n{}\n{}\n{}\n{token_bindings}\n{random}",
-    policy.algorithm.as_str(),
+    policy.method.as_str(),
     policy.key,
     policy.cookie,
     input.downstream_host,
@@ -561,7 +574,7 @@ fn clearance_payload(
   let token_bindings = token_binding_payload(input, policy);
   format!(
     "clearance\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{token_bindings}\n{}",
-    policy.algorithm.as_str(),
+    policy.method.as_str(),
     policy.key,
     policy.cookie,
     input.downstream_host,
@@ -573,7 +586,18 @@ fn clearance_payload(
   )
 }
 
-fn token_binding_payload(input: WafRequestInput<'_>, policy: &PersonProofPolicy) -> String {
+pub(super) fn token_binding_payload(
+  input: WafRequestInput<'_>,
+  policy: &PersonProofPolicy,
+) -> String {
+  token_binding_payload_for_route(input, policy, input.route_name)
+}
+
+pub(super) fn token_binding_payload_for_route(
+  input: WafRequestInput<'_>,
+  policy: &PersonProofPolicy,
+  route_name: &str,
+) -> String {
   policy
     .token_bindings
     .iter()
@@ -581,7 +605,7 @@ fn token_binding_payload(input: WafRequestInput<'_>, policy: &PersonProofPolicy)
       format!(
         "{}={}",
         binding.as_str(),
-        token_binding_value(input, policy, *binding)
+        token_binding_value(input, policy, *binding, route_name)
       )
     })
     .collect::<Vec<_>>()
@@ -592,6 +616,7 @@ fn token_binding_value(
   input: WafRequestInput<'_>,
   policy: &PersonProofPolicy,
   binding: PersonProofTokenBinding,
+  route_name: &str,
 ) -> String {
   match binding {
     PersonProofTokenBinding::UserAgent => input
@@ -606,7 +631,7 @@ fn token_binding_value(
       .as_deref()
       .unwrap_or("unavailable")
       .to_string(),
-    PersonProofTokenBinding::Route => input.route_name.to_string(),
+    PersonProofTokenBinding::Route => route_name.to_string(),
     PersonProofTokenBinding::DirectPeerIpNetworkPrefix => direct_peer_ip_network_prefix(
       input.peer_addr.ip(),
       policy.direct_peer_ipv4_prefix_bits,
@@ -659,11 +684,11 @@ pub(super) fn tcp_max_hop_binding_value(configured: Option<u8>, applied: Option<
   )
 }
 
-fn challenge_reuse_key(token: &str) -> String {
+pub(super) fn challenge_reuse_key(token: &str) -> String {
   format!("challenge:{token}")
 }
 
-fn clearance_reuse_key(token: &str) -> String {
+pub(super) fn clearance_reuse_key(token: &str) -> String {
   format!("clearance:{token}")
 }
 
@@ -691,7 +716,7 @@ fn challenge_html(
 ) -> String {
   let token_js = js_escape(token);
   let cookie_js = js_escape(&policy.cookie);
-  let algorithm = html_escape(policy.algorithm.as_str());
+  let algorithm = html_escape(policy.method.as_str());
   let token_html = html_escape(token);
   let cookie_html = html_escape(&policy.cookie);
   let csp_nonce_html = html_escape(csp_nonce);
@@ -759,7 +784,7 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
   total
 }
 
-fn random_hex(bytes: usize) -> anyhow::Result<String> {
+pub(super) fn random_hex(bytes: usize) -> anyhow::Result<String> {
   let mut value = vec![0u8; bytes];
   SystemRandom::new()
     .fill(&mut value)
@@ -767,7 +792,7 @@ fn random_hex(bytes: usize) -> anyhow::Result<String> {
   Ok(hex_encode(&value))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(super) fn hex_encode(bytes: &[u8]) -> String {
   const HEX: &[u8; 16] = b"0123456789abcdef";
   let mut out = String::with_capacity(bytes.len() * 2);
   for byte in bytes {
@@ -777,7 +802,7 @@ fn hex_encode(bytes: &[u8]) -> String {
   out
 }
 
-fn hex_decode(value: &str) -> anyhow::Result<Vec<u8>> {
+pub(super) fn hex_decode(value: &str) -> anyhow::Result<Vec<u8>> {
   if !value.len().is_multiple_of(2) {
     bail!("hex value has odd length");
   }
@@ -820,14 +845,14 @@ fn js_escape(value: &str) -> String {
     .replace('\r', "\\r")
 }
 
-fn now_unix_ms() -> anyhow::Result<i64> {
+pub(super) fn now_unix_ms() -> anyhow::Result<i64> {
   let duration = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .context("system clock is before Unix epoch")?;
   i64::try_from(duration.as_millis()).context("Unix timestamp does not fit in i64")
 }
 
-fn remaining_seconds(now_unix_ms: i64, expires_unix_ms: i64) -> u64 {
+pub(super) fn remaining_seconds(now_unix_ms: i64, expires_unix_ms: i64) -> u64 {
   expires_unix_ms
     .saturating_sub(now_unix_ms)
     .try_into()
@@ -836,33 +861,4 @@ fn remaining_seconds(now_unix_ms: i64, expires_unix_ms: i64) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn shared_state_shares_secret_and_single_use_replay_state() {
-    let shared = SharedState::test_memory("person-proof-test");
-    let first =
-      PersonProofEngine::from_policies_with_previous(Vec::new(), 16, None, Some(shared.clone()))
-        .unwrap();
-    let second =
-      PersonProofEngine::from_policies_with_previous(Vec::new(), 16, None, Some(shared)).unwrap();
-
-    assert_eq!(first.secret, second.secret);
-
-    let now = now_unix_ms().unwrap();
-    first
-      .remember_reuse_token("challenge:test-token", now + 60_000, now)
-      .unwrap();
-    assert!(
-      second
-        .consume_reuse_token("challenge:test-token", now)
-        .unwrap()
-    );
-    assert!(
-      !first
-        .consume_reuse_token("challenge:test-token", now)
-        .unwrap()
-    );
-  }
-}
+mod tests;

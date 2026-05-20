@@ -593,6 +593,24 @@ unsupported_directive_policy = "fail_closed"
 #[[waf.rules.actions]]
 # type = "reject"
 # status = 403
+#
+#[[waf.rules]]
+# name = "login-person-proof"
+# phase = "request"
+# priority = 110
+# when = "Request.Http.Path.startsWith('/login') && Request.Client.PersonProof.State != 'valid'"
+#
+#[[waf.rules.actions]]
+# type = "require_person_proof"
+# method = "turnstile" # pow_sha256_v1 | turnstile | hcaptcha | friendly_captcha_v2
+# challenge_url = "/person-proof/index.html"
+# challenge_redirect_status = 303
+# verify_path = "/.oxibelt/person-proof/verify-login"
+# site_key = "0x4AAAA..."
+# secret_env = "OXIBELT_TURNSTILE_SECRET"
+# provider_timeout_ms = 3000
+# provider_fail_policy = "closed" # closed | open
+# send_remote_ip = true
 
 [[upstreams]]
 name = "app"
@@ -750,6 +768,15 @@ grpc_web = false
 #hosts = ["assets.example.com"]
 #path_prefix = "/assets"
 #static_root = "public"
+#generic_http_upgrade = false
+#connect_tunneling = false
+#grpc_web = false
+
+#[[routes]]
+#name = "person-proof-ui"
+#hosts = ["example.com", "www.example.com"]
+#path_prefix = "/person-proof"
+#static_root = "person-proof"
 #generic_http_upgrade = false
 #connect_tunneling = false
 #grpc_web = false

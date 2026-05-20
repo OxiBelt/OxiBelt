@@ -35,6 +35,8 @@ mod mitigation_action;
 pub(crate) mod normalization;
 mod pattern_set;
 mod person_proof;
+mod person_proof_config;
+mod person_proof_v2;
 mod plan;
 mod rule_groups;
 mod runtime_helpers;
@@ -68,6 +70,7 @@ use pattern_set::{compile_pattern_sets, validate_pattern_sets};
 use person_proof::{
   PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
 };
+pub use person_proof_v2::PersonProofProviderChallenge;
 pub use plan::BodyNeed;
 use plan::{WafRoutePlan, phase_plan};
 use rule_groups::{RuleGroupScope, resolve_rule, validate_rule_group_scope};
@@ -408,8 +411,8 @@ pub enum WafActionConfig {
   RequirePersonProof {
     #[serde(default)]
     priority: i64,
-    #[serde(default)]
-    algorithm: PersonProofAlgorithm,
+    #[serde(rename = "method", alias = "algorithm", default)]
+    method: PersonProofAlgorithm,
     #[serde(default = "default_person_proof_difficulty")]
     difficulty: u8,
     #[serde(
@@ -435,6 +438,26 @@ pub enum WafActionConfig {
     success_tag: Option<String>,
     #[serde(default = "default_person_proof_status")]
     status: u16,
+    #[serde(default)]
+    challenge_url: Option<String>,
+    #[serde(default = "default_person_proof_challenge_redirect_status")]
+    challenge_redirect_status: u16,
+    #[serde(default)]
+    verify_path: Option<String>,
+    #[serde(default)]
+    site_key: Option<String>,
+    #[serde(default)]
+    secret_env: Option<String>,
+    #[serde(default)]
+    provider_endpoint: Option<url::Url>,
+    #[serde(default = "default_person_proof_provider_timeout_ms")]
+    provider_timeout_ms: u64,
+    #[serde(default)]
+    provider_fail_policy: PersonProofProviderFailPolicy,
+    #[serde(default = "default_person_proof_provider_max_response_body_bytes")]
+    provider_max_response_body_bytes: usize,
+    #[serde(default = "default_true")]
+    send_remote_ip: bool,
   },
   CloseStream {
     #[serde(default)]
@@ -484,14 +507,36 @@ pub struct AccessLogFieldConfig {
 pub enum PersonProofAlgorithm {
   #[default]
   PowSha256V1,
+  Turnstile,
+  #[serde(rename = "hcaptcha")]
+  HCaptcha,
+  FriendlyCaptchaV2,
 }
 
 impl PersonProofAlgorithm {
   pub(crate) fn as_str(self) -> &'static str {
     match self {
       Self::PowSha256V1 => "pow_sha256_v1",
+      Self::Turnstile => "turnstile",
+      Self::HCaptcha => "hcaptcha",
+      Self::FriendlyCaptchaV2 => "friendly_captcha_v2",
     }
   }
+
+  pub(crate) fn is_provider(self) -> bool {
+    matches!(
+      self,
+      Self::Turnstile | Self::HCaptcha | Self::FriendlyCaptchaV2
+    )
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonProofProviderFailPolicy {
+  #[default]
+  Closed,
+  Open,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
@@ -827,6 +872,7 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
     )?;
   }
   validate_unique_rule_ids(config)?;
+  person_proof_config::validate_unique_verify_paths(config)?;
 
   Ok(())
 }
@@ -1250,6 +1296,7 @@ fn validate_access_log_field_name(label: &str, field_name: &str) -> anyhow::Resu
 
 fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> anyhow::Result<()> {
   let WafActionConfig::RequirePersonProof {
+    method,
     difficulty,
     ttl_seconds,
     cookie,
@@ -1258,13 +1305,21 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     direct_peer_ipv6_prefix_bits,
     tcp_max_hop,
     success_tag,
+    challenge_url,
+    challenge_redirect_status,
+    verify_path,
+    site_key,
+    secret_env,
+    provider_endpoint,
+    provider_timeout_ms,
+    provider_max_response_body_bytes,
     ..
   } = action
   else {
     unreachable!("validate_person_proof_settings requires require_person_proof action");
   };
 
-  if !(1..=30).contains(difficulty) {
+  if *method == PersonProofAlgorithm::PowSha256V1 && !(1..=30).contains(difficulty) {
     bail!("WAF rule {rule_name} require_person_proof difficulty must be between 1 and 30");
   }
   if !(1..=86_400).contains(ttl_seconds) {
@@ -1307,6 +1362,18 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
   {
     bail!("WAF rule {rule_name} require_person_proof success_tag exceeds tag size limits");
   }
+  person_proof_config::validate_redirect_settings(
+    rule_name,
+    *method,
+    challenge_url.as_deref(),
+    *challenge_redirect_status,
+    verify_path.as_deref(),
+    site_key.as_deref(),
+    secret_env.as_deref(),
+    provider_endpoint.as_ref(),
+    *provider_timeout_ms,
+    *provider_max_response_body_bytes,
+  )?;
   Ok(())
 }
 
@@ -1543,6 +1610,29 @@ impl WafEngine {
 
   pub fn has_request_rules(&self, route_name: &str) -> bool {
     self.route_plan(route_name).request().enabled()
+  }
+
+  pub fn has_person_proof_verify_path(&self, path: &str) -> bool {
+    self.person_proof.policies.iter().any(|policy| {
+      policy.provider.verify_path.as_deref() == Some(path) && policy.method.is_provider()
+    })
+  }
+
+  pub fn begin_person_proof_provider_challenge(
+    &self,
+    input: WafRequestInput<'_>,
+    verify_path: &str,
+    challenge: &str,
+  ) -> anyhow::Result<Option<PersonProofProviderChallenge>> {
+    person_proof_v2::begin_provider_challenge(&self.person_proof, input, verify_path, challenge)
+  }
+
+  pub fn complete_person_proof_provider_challenge(
+    &self,
+    input: WafRequestInput<'_>,
+    challenge: PersonProofProviderChallenge,
+  ) -> anyhow::Result<HeaderMutation> {
+    person_proof_v2::complete_provider_challenge(&self.person_proof, input, challenge)
   }
 
   pub fn requires_request_body_inspection(&self, route_name: &str) -> bool {
@@ -2218,7 +2308,7 @@ fn person_proof_policy_from_action(
 ) -> PersonProofPolicy {
   let WafActionConfig::RequirePersonProof {
     priority: _,
-    algorithm,
+    method,
     difficulty,
     ttl_seconds,
     cookie,
@@ -2229,6 +2319,16 @@ fn person_proof_policy_from_action(
     single_use,
     success_tag,
     status,
+    challenge_url,
+    challenge_redirect_status,
+    verify_path,
+    site_key,
+    secret_env,
+    provider_endpoint,
+    provider_timeout_ms,
+    provider_fail_policy,
+    provider_max_response_body_bytes,
+    send_remote_ip,
   } = action
   else {
     unreachable!("person_proof_policy_from_action requires require_person_proof action");
@@ -2240,7 +2340,7 @@ fn person_proof_policy_from_action(
     .unwrap_or(&rule.name);
   PersonProofPolicy {
     key: format!("{scope}:{rule_key}:{action_index}"),
-    algorithm: *algorithm,
+    method: *method,
     difficulty: *difficulty,
     ttl_seconds: *ttl_seconds,
     cookie: cookie.clone(),
@@ -2251,6 +2351,18 @@ fn person_proof_policy_from_action(
     single_use: *single_use,
     success_tag: success_tag.clone(),
     status: *status,
+    provider: person_proof_v2::PersonProofProviderConfig {
+      challenge_url: challenge_url.clone(),
+      challenge_redirect_status: *challenge_redirect_status,
+      verify_path: verify_path.clone(),
+      site_key: site_key.clone(),
+      secret_env: secret_env.clone(),
+      provider_endpoint: provider_endpoint.clone(),
+      provider_timeout_ms: *provider_timeout_ms,
+      provider_fail_policy: *provider_fail_policy,
+      provider_max_response_body_bytes: *provider_max_response_body_bytes,
+      send_remote_ip: *send_remote_ip,
+    },
   }
 }
 

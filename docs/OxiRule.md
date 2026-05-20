@@ -346,7 +346,7 @@ body = "rate limit exceeded"
 ```toml
 [[waf.rules.actions]]
 type = "require_person_proof"
-algorithm = "pow_sha256_v1"
+method = "pow_sha256_v1"
 difficulty = 18
 token_validity_seconds = 300
 cookie = "__oxibelt_person_proof"
@@ -356,6 +356,20 @@ direct_peer_ipv6_prefix_bits = 56
 single_use = false
 success_tag = "PersonProof"
 status = 403
+```
+
+```toml
+[[waf.rules.actions]]
+type = "require_person_proof"
+method = "turnstile" # turnstile | hcaptcha | friendly_captcha_v2
+challenge_url = "/person-proof/index.html"
+challenge_redirect_status = 303
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "0x4AAAA..."
+secret_env = "OXIBELT_TURNSTILE_SECRET"
+provider_timeout_ms = 3000
+provider_fail_policy = "closed" # closed | open
+send_remote_ip = true
 ```
 
 `rate_limit` is request-phase only. Supported keys are `global`, `route`, `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, and `access_token_path`; `client-ip` style aliases are accepted for the client-IP keys. `global` uses one bucket shared by all matching requests, and `route` uses one bucket per resolved route. Access-token limits read `Authorization: Bearer <token>` first and then optional `token_header`. Token values are hashed before storage, and requests without a token fall back to the client IP bucket. `max_buckets` defaults to `16384` and caps process-local buckets for a single WAF rate-limit action; in enforcing mode, new identities are rejected after the cap until a fully refilled bucket can be reclaimed. When shared state maps rate limits to a backend, WAF `rate_limit` actions use the same Redis-compatible or PostgreSQL token-bucket storage as route rate limits. Monitor-mode rules count matches without consuming rate-limit tokens.
@@ -479,9 +493,23 @@ When `min_count` is greater than `1`, rows are written as `observing` until the 
 
 `require_person_proof` is a request-phase anti-automation challenge. It is not authentication, identity proof, proof of biological or legal status, bot reputation, or proof of benign intent.
 
-The supported algorithm is `pow_sha256_v1`: the client computes a nonce such that `SHA-256(challenge || "." || nonce)` has the configured number of leading zero bits. If the proof is valid and unexpired, OxiBelt appends an `HttpOnly` clearance cookie and forwards the request. Later requests validate the signed clearance cookie instead of recomputing proof.
+Supported methods are `pow_sha256_v1`, `turnstile`, `hcaptcha`, and `friendly_captcha_v2`. The legacy `algorithm` field is accepted as an alias for `method`.
 
-Tokens are signed with a startup-local secret by default, or a shared cluster secret when `[shared_state].person_proof_backend` is configured. They are bound to the cookie name, issuing policy, downstream host, HTTP method, challenge value, difficulty, issue time, expiration time, and configured `token_bindings`.
+`pow_sha256_v1` is the built-in proof-of-work method: the client computes a nonce such that `SHA-256(challenge || "." || nonce)` has the configured number of leading zero bits. If the proof is valid and unexpired, OxiBelt appends an `HttpOnly` clearance cookie and forwards the request. Later requests validate the signed clearance cookie instead of recomputing proof. Existing PoW behavior is unchanged when `method = "pow_sha256_v1"` and `challenge_url` is not set.
+
+External provider methods redirect the protected request to a custom challenge page. The page itself is served by a normal OxiBelt static route, for example a route whose `static_root` contains `/person-proof/index.html`; OxiBelt does not create a separate asset server. For these methods, `challenge_url` must be an origin-relative URL, `verify_path` must be an origin-relative path, and `site_key` plus `secret_env` are required. `verify_path` values must be unique across all configured provider-backed Person proof policies.
+
+When a protected request needs an external challenge, OxiBelt responds with `challenge_redirect_status` and a `Location` that includes signed `challenge`, `verify_path`, `return_path`, `method`, `site_key`, and `expires_unix_ms` query parameters. The custom frontend posts `challenge` and `provider_response` to `verify_path` as JSON or `application/x-www-form-urlencoded`; provider-native field names such as `cf-turnstile-response`, `h-captcha-response`, and `frc-captcha-response` are also accepted. Successful verification returns `204 No Content` with a `HttpOnly; Secure; SameSite=Lax` clearance cookie, after which the frontend should navigate to the signed `return_path`.
+
+Default provider endpoints are:
+
+- `turnstile`: `https://challenges.cloudflare.com/turnstile/v0/siteverify`
+- `hcaptcha`: `https://api.hcaptcha.com/siteverify`
+- `friendly_captcha_v2`: `https://global.frcapi.com/api/v2/captcha/siteverify`
+
+Use `provider_endpoint` to override the default endpoint for EU, private, or test deployments. OxiBelt sends the secret from `secret_env`, the browser token as `response`, the configured `site_key` where the provider supports it, and the direct remote IP when `send_remote_ip = true`. Provider transport errors, timeouts, invalid JSON, or non-success HTTP status codes fail closed with `503` by default; set `provider_fail_policy = "open"` only when availability is more important than this anti-automation control.
+
+Tokens are signed with a startup-local secret by default, or a shared cluster secret when `[shared_state].person_proof_backend` is configured. PoW tokens are bound to the cookie name, issuing policy, downstream host, HTTP method, challenge value, difficulty, issue time, expiration time, and configured `token_bindings`. Provider-backed v2 challenge and clearance tokens additionally bind the original route, provider method, return path, verifier path, and token-binding hash.
 
 Supported token bindings:
 
@@ -499,8 +527,8 @@ When any policy sets `tcp_max_hop`, OxiBelt applies the strictest configured val
 
 Validation constraints:
 
-- `algorithm` must be `pow_sha256_v1`.
-- `difficulty` must be between `1` and `30`.
+- `method` must be `pow_sha256_v1`, `turnstile`, `hcaptcha`, or `friendly_captcha_v2`; `algorithm` is a compatibility alias.
+- `difficulty` must be between `1` and `30` for `pow_sha256_v1`.
 - `token_validity_seconds` must be between `1` and `86400`.
 - `ttl_seconds` and `token_ttl_seconds` are compatibility aliases.
 - `cookie` may contain only ASCII letters, digits, `_`, `-`, or `.`.
@@ -509,6 +537,12 @@ Validation constraints:
 - `tcp_max_hop`, when set, must be `0..255`.
 - `token_bindings` containing `tcp_max_hop` must also set `tcp_max_hop`.
 - `status` must be a valid HTTP status code.
+- `challenge_url`, when set, must be origin-relative and may include a query string but not a fragment.
+- `challenge_redirect_status` must be `301`, `302`, `303`, `307`, or `308`; the default is `303`.
+- External provider methods require `challenge_url`, `verify_path`, `site_key`, and `secret_env`.
+- `verify_path` must be origin-relative, must not include a query string or fragment, and may not be reused by another external Person proof policy.
+- `provider_endpoint`, when set, must use `http://` or `https://`.
+- `provider_timeout_ms` and `provider_max_response_body_bytes` must be greater than zero.
 
 `Request.TokenBindings` exposes the normalized binding values to expressions.
 

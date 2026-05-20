@@ -9,11 +9,11 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
-    BodyNeed, HeaderMutation, WafBodyInput, WafEngine, WafProtocol, WafRequestInput,
-    WafResponseInput, WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit,
-    WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, WafWebSocketStreamMetadata,
-    WafWebTransportStreamKind, WafWebTransportStreamMetadata, compile_access_log_fields,
-    crs_compatibility_matrix,
+    BodyNeed, HeaderMutation, PersonProofAlgorithm, WafBodyInput, WafEngine, WafProtocol,
+    WafRequestInput, WafResponseInput, WafStreamDirection, WafStreamInput, WafStreamProtocol,
+    WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
+    WafWebSocketStreamMetadata, WafWebTransportStreamKind, WafWebTransportStreamMetadata,
+    compile_access_log_fields, crs_compatibility_matrix,
 };
 use ring::digest;
 
@@ -5310,6 +5310,336 @@ success_tag = "PersonProof"
 }
 
 #[test]
+fn person_proof_external_provider_config_parses_and_validates() {
+    let (_temp_dir, config) = load_person_proof_provider_config(
+        "waf-person-proof-provider-config",
+        r#"
+method = "turnstile"
+challenge_url = "/person-proof/index.html"
+challenge_redirect_status = 302
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+provider_endpoint = "http://127.0.0.1/siteverify"
+provider_timeout_ms = 500
+provider_fail_policy = "open"
+provider_max_response_body_bytes = 2048
+send_remote_ip = false
+"#,
+    );
+
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    assert!(engine.has_person_proof_verify_path("/.oxibelt/person-proof/verify-login"));
+}
+
+#[test]
+fn person_proof_external_provider_config_validation_rejects_bad_settings() {
+    for (name, action, expected) in [
+        (
+            "waf-person-proof-bad-redirect-status",
+            r#"
+method = "turnstile"
+challenge_url = "/person-proof/index.html"
+challenge_redirect_status = 200
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+"#,
+            "challenge_redirect_status",
+        ),
+        (
+            "waf-person-proof-unsafe-challenge-url",
+            r#"
+method = "turnstile"
+challenge_url = "https://evil.example/person-proof/index.html"
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+"#,
+            "challenge_url must be origin-relative",
+        ),
+        (
+            "waf-person-proof-missing-verify-path",
+            r#"
+method = "turnstile"
+challenge_url = "/person-proof/index.html"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+"#,
+            "verify_path is required",
+        ),
+        (
+            "waf-person-proof-missing-secret-env",
+            r#"
+method = "turnstile"
+challenge_url = "/person-proof/index.html"
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "site-test"
+"#,
+            "secret_env is required",
+        ),
+    ] {
+        let (_temp_dir, config) = load_person_proof_provider_config(name, action);
+        let error = config
+            .validate()
+            .expect_err("config validation should fail");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(expected),
+            "unexpected error for {name}: {message}"
+        );
+    }
+}
+
+#[test]
+fn person_proof_external_provider_config_rejects_duplicate_verify_path() {
+    let temp_dir = common::TempDir::new("waf-person-proof-duplicate-verify");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-duplicate-verify");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "turnstile-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+method = "turnstile"
+challenge_url = "/person-proof/index.html"
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+
+[[waf.rules]]
+name = "hcaptcha-proof"
+phase = "request"
+priority = 20
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+method = "hcaptcha"
+challenge_url = "/person-proof/index.html"
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("config validation should reject duplicate verify_path");
+    assert!(
+        format!("{error:#}").contains("duplicate require_person_proof verify_path"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn person_proof_external_provider_redirect_includes_signed_challenge_context() {
+    let (_temp_dir, config) = load_person_proof_provider_config(
+        "waf-person-proof-provider-redirect",
+        r#"
+method = "turnstile"
+challenge_url = "/person-proof/index.html?skin=dark"
+challenge_redirect_status = 302
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+"#,
+    );
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected?next=%2Fdashboard"
+        .parse()
+        .expect("URI should parse");
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    let challenge = decision
+        .terminal
+        .as_ref()
+        .expect("missing person proof challenge");
+
+    assert_eq!(challenge.status, StatusCode::FOUND);
+    let location = extract_response_header(&challenge.headers, http::header::LOCATION);
+    let query = parse_origin_relative_location_query(&location);
+    assert_eq!(query.get("skin").map(String::as_str), Some("dark"));
+    assert_eq!(query.get("method").map(String::as_str), Some("turnstile"));
+    assert_eq!(
+        query.get("verify_path").map(String::as_str),
+        Some("/.oxibelt/person-proof/verify-login")
+    );
+    assert_eq!(query.get("site_key").map(String::as_str), Some("site-test"));
+    assert_eq!(
+        query.get("return_path").map(String::as_str),
+        Some("/protected?next=%2Fdashboard")
+    );
+    assert!(
+        query
+            .get("challenge")
+            .is_some_and(|value| value.starts_with("challenge.v2."))
+    );
+    assert!(query.contains_key("expires_unix_ms"));
+}
+
+#[test]
+fn person_proof_external_provider_issues_v2_clearance_and_rejects_replay() {
+    let (_temp_dir, config) = load_person_proof_provider_config(
+        "waf-person-proof-provider-clearance",
+        r#"
+method = "friendly_captcha_v2"
+challenge_url = "/person-proof/index.html"
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+single_use = true
+success_tag = "PersonProof"
+"#,
+    );
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let location = extract_response_header(
+        &challenge_decision.terminal.unwrap().headers,
+        http::header::LOCATION,
+    );
+    let challenge_token = parse_origin_relative_location_query(&location)
+        .remove("challenge")
+        .expect("redirect should include challenge");
+
+    let verify_method = Method::POST;
+    let verify_uri: Uri = "/.oxibelt/person-proof/verify-login"
+        .parse()
+        .expect("URI should parse");
+    let provider_challenge = engine
+        .begin_person_proof_provider_challenge(
+            request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
+            "/.oxibelt/person-proof/verify-login",
+            &challenge_token,
+        )
+        .expect("provider challenge should validate")
+        .expect("verify_path should map to a provider challenge");
+    assert_eq!(
+        provider_challenge.method,
+        PersonProofAlgorithm::FriendlyCaptchaV2
+    );
+    assert_eq!(provider_challenge.site_key, "site-test");
+    assert_eq!(provider_challenge.secret_env, "OXIBELT_TEST_CAPTCHA_SECRET");
+
+    let clearance_mutation = engine
+        .complete_person_proof_provider_challenge(
+            request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
+            provider_challenge,
+        )
+        .expect("provider challenge should complete");
+    let clearance_cookie = extract_set_cookie(&[clearance_mutation]);
+    assert!(clearance_cookie.contains("__test_person_proof=clearance.v2."));
+    assert!(clearance_cookie.contains("HttpOnly"));
+    assert!(clearance_cookie.contains("Secure"));
+    assert!(clearance_cookie.contains("SameSite=Lax"));
+
+    assert!(
+        engine
+            .begin_person_proof_provider_challenge(
+                request_input(&verify_method, &verify_uri, &headers, &tags, client_addr,),
+                "/.oxibelt/person-proof/verify-login",
+                &challenge_token,
+            )
+            .and_then(|challenge| engine.complete_person_proof_provider_challenge(
+                request_input(&verify_method, &verify_uri, &headers, &tags, client_addr,),
+                challenge.expect("challenge should still parse"),
+            ))
+            .is_err(),
+        "single-use v2 challenge should not complete twice"
+    );
+
+    let clearance_value = extract_cookie_value(&clearance_cookie);
+    let mut clearance_headers = HeaderMap::new();
+    clearance_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={clearance_value}")).unwrap(),
+    );
+    let clearance_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert!(clearance_decision.terminal.is_none());
+    assert_eq!(
+        clearance_decision.tags,
+        vec![("PersonProof".to_string(), "valid".to_string())]
+    );
+    let rotated_clearance_cookie =
+        extract_set_cookie(&clearance_decision.response_header_mutations);
+    assert!(rotated_clearance_cookie.contains("clearance.v2."));
+    let rotated_clearance_value = extract_cookie_value(&rotated_clearance_cookie);
+
+    let replay_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert_eq!(
+        replay_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::SEE_OTHER)
+    );
+
+    let mut rotated_clearance_headers = HeaderMap::new();
+    rotated_clearance_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={rotated_clearance_value}")).unwrap(),
+    );
+    let post_method = Method::POST;
+    let post_decision = engine.evaluate_request(request_input(
+        &post_method,
+        &uri,
+        &rotated_clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert_eq!(
+        post_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::SEE_OTHER)
+    );
+}
+
+#[test]
 fn person_proof_success_tag_can_chain_to_later_request_rule() {
     let temp_dir = common::TempDir::new("waf-person-proof-chain");
     let (cert_path, key_path) =
@@ -7593,6 +7923,41 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
         }
     }
     total
+}
+
+fn load_person_proof_provider_config(prefix: &str, action: &str) -> (common::TempDir, Config) {
+    let temp_dir = common::TempDir::new(prefix);
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), prefix);
+    let base_config = common::minimal_config_toml(&cert_path, &key_path);
+    let raw = format!(
+        r#"{base_config}
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-provider-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+cookie = "__test_person_proof"
+token_validity_seconds = 60
+{action}
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    (temp_dir, config)
+}
+
+fn parse_origin_relative_location_query(location: &str) -> HashMap<String, String> {
+    let url = url::Url::parse(&format!("https://example.com{location}"))
+        .expect("Location should be origin-relative");
+    url.query_pairs().into_owned().collect()
 }
 
 fn extract_set_cookie(mutations: &[HeaderMutation]) -> String {

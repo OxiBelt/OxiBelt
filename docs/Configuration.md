@@ -1223,6 +1223,19 @@ Response body CRS inspection uses the same bounded prefix behavior as OxiRule re
 
 Rule syntax, actions, helpers, and Person proof settings are documented in [OxiRule.md](OxiRule.md).
 
+Person proof can either use the built-in `pow_sha256_v1` challenge or redirect to a custom static frontend that verifies `turnstile`, `hcaptcha`, or `friendly_captcha_v2` tokens through OxiBelt. Custom frontends are ordinary route assets: configure a static route with `static_root`, point `require_person_proof.challenge_url` at that origin-relative page, and configure a unique origin-relative `verify_path` for the provider callback. External provider methods require `site_key` and `secret_env`; `provider_endpoint` may override the default Siteverify endpoint for regional, self-hosted, or local mock deployments.
+
+```toml
+[[waf.rules.actions]]
+type = "require_person_proof"
+method = "turnstile"
+challenge_url = "/person-proof/index.html"
+verify_path = "/.oxibelt/person-proof/verify-login"
+site_key = "0x4AAAA..."
+secret_env = "OXIBELT_TURNSTILE_SECRET"
+provider_fail_policy = "closed"
+```
+
 ## Upstreams
 
 ```toml
@@ -1451,6 +1464,8 @@ Fields:
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
 
 `static_root` enables the built-in static file server for the route. The value must resolve to an existing directory; absolute paths are accepted, and relative paths loaded through `Config::load` resolve under the configuration directory. OxiBelt strips the matched `path_prefix`, percent-decodes each remaining path segment, and serves only regular files whose resolved path stays under `static_root`. Directory listing is forbidden, and symlinks are allowed only when secure resolution can prove they remain inside the static root. On Linux kernels with `openat2(2)`, OxiBelt opens static files relative to a read-only `static_root` directory file descriptor with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS`; this path does not require `/proc/self/fd` and is compatible with read-only root filesystems. On kernels without `openat2`, and on non-Linux platforms, OxiBelt falls back to opening the file and rechecking the opened descriptor through `/proc/self/fd`; if that verification is unavailable, the request fails closed instead of serving an unverified file. Response metadata, validators, ranges, and bytes are all derived from the same verified descriptor. Static routes accept `GET` and `HEAD`, emit `ETag`, `Last-Modified`, and `Accept-Ranges`, support a single `Range: bytes=...` request, and honor `If-None-Match` and `If-Modified-Since`. Request WAF, response WAF, rate limits, dynamic policy, security headers, compression, and Alt-Svc still apply on the general path. Static routes reject upstream-only options such as `replace_prefix_with`, `cache`, `upstream_http_version`, `generic_http_upgrade`, `connect_tunneling`, and `grpc_web`.
+
+Static routes are also the supported deployment path for custom Person proof challenge pages. Place the frontend files under a configured `static_root` and use the route-relative asset path as the WAF action's `challenge_url`.
 
 ## TCP Stream Listeners
 

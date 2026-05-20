@@ -38,6 +38,7 @@ pub(crate) mod fast_path;
 pub(crate) mod grpc_web;
 pub(crate) mod headers;
 pub(crate) mod observability;
+pub(crate) mod person_proof;
 pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod semantics;
@@ -52,16 +53,18 @@ pub(crate) use warm::warm_cache_request;
 pub(crate) use self::access_log::SystemAccessLogContext;
 use self::body::{
   BodyTimeoutKind, CapturedBody, ProxyBody, boxed_error, capture_body_prefix, capture_prefix,
-  error_is_timeout,
+  error_indicates_body_timeout, error_is_body_length_limit, error_is_timeout,
 };
 use self::headers::{
   add_forwarded_headers, extract_downstream_port, extract_host, is_upgrade_request,
   set_effective_host_header, strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
 use self::observability::{record_request_observability, record_websocket_session_end};
+use self::person_proof::handle_person_proof_verify;
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::response::{
-  apply_security_headers, text_response, upstream_error_response, waf_terminal_response,
+  apply_security_headers, apply_sticky_cookie, draining_response, text_response,
+  upstream_error_response, waf_terminal_response,
 };
 use self::semantics::{configured_error_response, filter_trailers};
 use self::uri::{rewrite_uri, validate_downstream_path};
@@ -594,6 +597,33 @@ where
   access_log.dynamic_policy = dynamic_policy.context;
   if let Some(terminal) = dynamic_policy.terminal {
     return text_response(terminal.status, &terminal.body);
+  }
+
+  if state.waf.has_person_proof_verify_path(request_uri.path()) {
+    access_log.ensure_request_ids();
+    return handle_person_proof_verify(
+      request,
+      state.as_ref(),
+      request_method,
+      request_uri,
+      client_body_timeout,
+      request_version,
+      client_addr,
+      &host,
+      downstream_scheme,
+      &resolved.route.name,
+      tcp_max_hop,
+      tls.as_ref(),
+      protocol,
+      transport_network,
+      transport_metadata,
+      tags_ref(&tags),
+      &access_log.dynamic_policy,
+      access_log.request_id().to_string(),
+      access_log.transaction_id().to_string(),
+      access_log.request_received_at_unix_ms,
+    )
+    .await;
   }
 
   if let Some(provider) = resolved.route.external_auth.as_deref() {
@@ -1774,23 +1804,6 @@ fn external_auth_response(terminal: ExternalAuthTerminal) -> Response<ProxyBody>
   response
 }
 
-fn apply_sticky_cookie(response: &mut Response<ProxyBody>, sticky_cookie: Option<&HeaderValue>) {
-  if let Some(value) = sticky_cookie {
-    response
-      .headers_mut()
-      .append(http::header::SET_COOKIE, value.clone());
-  }
-}
-
-fn draining_response() -> Response<ProxyBody> {
-  let mut response = text_response(StatusCode::SERVICE_UNAVAILABLE, "draining");
-  response.headers_mut().insert(
-    http::header::CONNECTION,
-    http::HeaderValue::from_static("close"),
-  );
-  response
-}
-
 pub(super) fn apply_alt_svc_header(
   headers: &mut HeaderMap,
   status: StatusCode,
@@ -1939,21 +1952,6 @@ fn response_buffering_error_response(error: buffering::BufferingError) -> Respon
   }
 }
 
-fn error_is_body_length_limit(error: &body::BoxError) -> bool {
-  let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error.as_ref());
-  while let Some(error) = current {
-    let message = error.to_string();
-    if message.contains("length limit")
-      || message.contains("body length")
-      || message.contains("body is too large")
-    {
-      return true;
-    }
-    current = error.source();
-  }
-  false
-}
-
 fn with_connection_permit(
   response: Response<ProxyBody>,
   permit: ConnectionPermit,
@@ -1977,15 +1975,6 @@ impl TunnelConnectionLimitHold {
       _first_request_context: first_request_context.cloned(),
     }
   }
-}
-
-pub(super) fn error_indicates_body_timeout(error: &anyhow::Error, kind: BodyTimeoutKind) -> bool {
-  error.chain().any(|cause| {
-    cause
-      .downcast_ref::<body::BodyTimeoutError>()
-      .is_some_and(|timeout| timeout.kind() == kind)
-      || cause.to_string().contains(body::timeout_message(kind))
-  })
 }
 
 struct SelectedUpstream<'a> {

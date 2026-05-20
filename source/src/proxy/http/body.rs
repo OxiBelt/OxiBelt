@@ -137,6 +137,30 @@ where
   .boxed()
 }
 
+pub(crate) fn error_is_body_length_limit(error: &BoxError) -> bool {
+  let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error.as_ref());
+  while let Some(error) = current {
+    let message = error.to_string();
+    if message.contains("length limit")
+      || message.contains("body length")
+      || message.contains("body is too large")
+    {
+      return true;
+    }
+    current = error.source();
+  }
+  false
+}
+
+pub(crate) fn error_indicates_body_timeout(error: &anyhow::Error, kind: BodyTimeoutKind) -> bool {
+  error.chain().any(|cause| {
+    cause
+      .downcast_ref::<BodyTimeoutError>()
+      .is_some_and(|timeout| timeout.kind() == kind)
+      || cause.to_string().contains(timeout_message(kind))
+  })
+}
+
 pub(crate) fn with_send_timeout(
   mut body: ProxyBody,
   timeout: Duration,

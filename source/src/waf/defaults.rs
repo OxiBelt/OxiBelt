@@ -152,3 +152,19 @@ pub(super) fn default_person_proof_direct_peer_ipv6_prefix_bits() -> u8 {
 pub(super) fn default_person_proof_status() -> u16 {
   403
 }
+
+pub(super) fn default_person_proof_challenge_redirect_status() -> u16 {
+  303
+}
+
+pub(super) fn default_person_proof_provider_timeout_ms() -> u64 {
+  3_000
+}
+
+pub(super) fn default_person_proof_provider_max_response_body_bytes() -> usize {
+  16_384
+}
+
+pub(super) fn default_true() -> bool {
+  true
+}

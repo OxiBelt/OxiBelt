@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::header::HeaderMap;
-use http::{Method, Response, StatusCode, Uri};
+use http::{HeaderValue, Method, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full};
 
 use crate::config::{ErrorResponseMode, SecurityHeadersConfig};
@@ -35,6 +35,26 @@ pub(crate) fn waf_terminal_response(
   let mut response = text_response(terminal.status, &terminal.body);
   apply_header_mutations(response.headers_mut(), &terminal.headers);
   apply_header_mutations(response.headers_mut(), mutations);
+  response
+}
+
+pub(crate) fn apply_sticky_cookie(
+  response: &mut Response<ProxyBody>,
+  sticky_cookie: Option<&HeaderValue>,
+) {
+  if let Some(value) = sticky_cookie {
+    response
+      .headers_mut()
+      .append(http::header::SET_COOKIE, value.clone());
+  }
+}
+
+pub(crate) fn draining_response() -> Response<ProxyBody> {
+  let mut response = text_response(StatusCode::SERVICE_UNAVAILABLE, "draining");
+  response.headers_mut().insert(
+    http::header::CONNECTION,
+    http::HeaderValue::from_static("close"),
+  );
   response
 }
 

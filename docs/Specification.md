@@ -105,7 +105,7 @@ Upstream TLS behavior:
 - Upstream TLS 1.3 ECH can be disabled, sent as GREASE, or sent from a configured TLS-encoded `ECHConfigList`.
 - Downstream ECH termination is not configured by OxiBelt today; it depends on server-side ECH support in the TLS provider.
 
-Person proof challenges in OxiRule are anti-automation controls. They are not authentication, identity proof, proof of legal personhood, or proof of benign intent.
+Person proof challenges in OxiRule are anti-automation controls. They are not authentication, identity proof, proof of legal personhood, or proof of benign intent. The built-in proof-of-work challenge remains available as `pow_sha256_v1`; provider-backed methods can redirect to a custom static frontend and verify Cloudflare Turnstile, hCaptcha, or Friendly Captcha v2 tokens server-side before issuing the same signed clearance cookie model.
 
 ## Routing and Upstreams
 
@@ -146,7 +146,7 @@ Bounded user-defined functions can be attached globally under `[[waf.functions]]
 
 OxiRule `emit_mitigation` actions enqueue aggregate PostgreSQL mitigation intents for external DOTS, BGP FlowSpec, RTBH/blackhole, or provider-specific controllers. OxiBelt only writes the configured `[database.mitigation]` table, never calls ISP or IaaS APIs directly, and excludes request/response/stream payload bytes from mitigation records.
 
-Request-phase rules can reject, rate-limit, mutate request headers, set transaction tags, require Person proof, or choose an upstream/pool before forwarding. Response-phase rules can continue, replace, or reject responses, mutate response headers, and emit structured access logs.
+Request-phase rules can reject, rate-limit, mutate request headers, set transaction tags, require Person proof, or choose an upstream/pool before forwarding. Person proof provider `verify_path` requests are intercepted after route matching, route rate limits, and dynamic policy, but before external auth, WAF forwarding, static files, or upstream selection. Response-phase rules can continue, replace, or reject responses, mutate response headers, and emit structured access logs.
 
 The optional CRS compatibility layer loads ModSecurity-style CRS setup/rule files from the OxiRule directory. It supports request/response phases 1 through 4, bounded request/response body prefix inspection with replay, normalized CRS transforms, `tx` variables, chained rules, macro expansion, `setvar`, paranoia-level tags, and anomaly scoring. CRS defaults to `monitor`; `enforcing` mode blocks at configured inbound/outbound anomaly thresholds. Unsupported CRS syntax fails closed during configuration load/compile.
 

@@ -13,7 +13,9 @@ use crate::config::{
   HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode, UpstreamConfig,
 };
 use crate::proxy::http::SystemAccessLogContext;
-use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, boxed_error};
+use crate::proxy::http::body::{
+  self, BodyTimeoutKind, ProxyBody, boxed_error, error_indicates_body_timeout,
+};
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
 use crate::proxy::http::request::{RebuildRequestOptions, proxy_body, rebuild_request_parts};
 use crate::proxy::http::response::{apply_security_headers, text_response, waf_terminal_response};
@@ -29,8 +31,8 @@ use crate::waf::{
 };
 
 use super::{
-  EffectiveTimeouts, apply_alt_svc_header, error_indicates_body_timeout, is_idempotent,
-  send_with_retry, with_downstream_response_timeout,
+  EffectiveTimeouts, apply_alt_svc_header, is_idempotent, send_with_retry,
+  with_downstream_response_timeout,
 };
 
 mod small_response;
