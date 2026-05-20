@@ -64,12 +64,13 @@ pub(crate) fn add_forwarded_headers(
   mode: ForwardedHeaderMode,
 ) {
   remove_inbound_forwarded_headers(headers, mode);
+  let forwarded_for = peer_addr.ip().to_string();
   match mode {
     ForwardedHeaderMode::Overwrite => {
-      set_header(headers, "x-forwarded-for", &peer_addr.ip().to_string());
+      set_header(headers, "x-forwarded-for", &forwarded_for);
     }
     ForwardedHeaderMode::Append => {
-      append_csv_header(headers, "x-forwarded-for", &peer_addr.ip().to_string());
+      append_csv_header(headers, "x-forwarded-for", &forwarded_for);
     }
   }
 
@@ -82,9 +83,10 @@ pub(crate) fn add_forwarded_headers(
     headers.insert(HeaderName::from_static("x-forwarded-host"), value);
   }
 
-  if let Ok(value) = HeaderValue::from_str(&peer_addr.port().to_string()) {
-    headers.insert(HeaderName::from_static("x-forwarded-port"), value);
-  }
+  headers.insert(
+    HeaderName::from_static("x-forwarded-port"),
+    port_header_value(peer_addr.port()),
+  );
 }
 
 fn remove_inbound_forwarded_headers(headers: &mut HeaderMap, mode: ForwardedHeaderMode) {
@@ -117,6 +119,21 @@ fn append_csv_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
   if let Ok(header_value) = HeaderValue::from_str(&next_value) {
     headers.insert(header_name, header_value);
   }
+}
+
+fn port_header_value(port: u16) -> HeaderValue {
+  let mut buf = [0u8; 5];
+  let mut value = port;
+  let mut index = buf.len();
+  loop {
+    index -= 1;
+    buf[index] = b'0' + (value % 10) as u8;
+    value /= 10;
+    if value == 0 {
+      break;
+    }
+  }
+  HeaderValue::from_bytes(&buf[index..]).expect("u16 decimal port is a valid header value")
 }
 
 pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {

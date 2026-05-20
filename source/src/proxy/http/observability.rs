@@ -33,38 +33,42 @@ pub(super) fn record_request_observability(
       access_log.upstream_outcome_for_metrics(),
       upstream_duration_ms,
     );
-    state.telemetry.record_child_span(
+    if telemetry_span_enabled(state, trace_context) {
+      state.telemetry.record_child_span(
+        trace_context,
+        "http.client",
+        SpanKind::Client,
+        TelemetryStart::elapsed_ago(upstream_duration_ms),
+        vec![
+          TraceAttribute::string("http.route", access_log.route_name_for_metrics()),
+          TraceAttribute::string("upstream.name", access_log.upstream_name_for_metrics()),
+          TraceAttribute::string(
+            "upstream.protocol",
+            access_log.upstream_protocol_for_metrics(),
+          ),
+          TraceAttribute::string("outcome", access_log.upstream_outcome_for_metrics()),
+        ],
+      );
+    }
+  }
+  if telemetry_span_enabled(state, trace_context) {
+    state.telemetry.record_span(
       trace_context,
-      "http.client",
-      SpanKind::Client,
-      TelemetryStart::elapsed_ago(upstream_duration_ms),
+      "http.server",
+      SpanKind::Server,
+      telemetry_start,
       vec![
+        TraceAttribute::string("http.request.method", access_log.method().as_str()),
         TraceAttribute::string("http.route", access_log.route_name_for_metrics()),
-        TraceAttribute::string("upstream.name", access_log.upstream_name_for_metrics()),
+        TraceAttribute::string("network.protocol.name", access_log.protocol_label()),
         TraceAttribute::string(
-          "upstream.protocol",
-          access_log.upstream_protocol_for_metrics(),
+          "http.response.status_code",
+          response.status().as_u16().to_string(),
         ),
-        TraceAttribute::string("outcome", access_log.upstream_outcome_for_metrics()),
+        TraceAttribute::string("upstream.name", access_log.upstream_name_for_metrics()),
       ],
     );
   }
-  state.telemetry.record_span(
-    trace_context,
-    "http.server",
-    SpanKind::Server,
-    telemetry_start,
-    vec![
-      TraceAttribute::string("http.request.method", access_log.method().as_str()),
-      TraceAttribute::string("http.route", access_log.route_name_for_metrics()),
-      TraceAttribute::string("network.protocol.name", access_log.protocol_label()),
-      TraceAttribute::string(
-        "http.response.status_code",
-        response.status().as_u16().to_string(),
-      ),
-      TraceAttribute::string("upstream.name", access_log.upstream_name_for_metrics()),
-    ],
-  );
 }
 
 pub(super) fn record_websocket_session_end(
@@ -82,15 +86,21 @@ pub(super) fn record_websocket_session_end(
     outcome,
     started_at.elapsed_ms(),
   );
-  state.telemetry.record_span(
-    trace_context,
-    "websocket.session",
-    SpanKind::Server,
-    started_at,
-    vec![
-      TraceAttribute::string("http.route", route_name),
-      TraceAttribute::string("upstream.name", upstream_name),
-      TraceAttribute::string("outcome", outcome),
-    ],
-  );
+  if telemetry_span_enabled(state, trace_context) {
+    state.telemetry.record_span(
+      trace_context,
+      "websocket.session",
+      SpanKind::Server,
+      started_at,
+      vec![
+        TraceAttribute::string("http.route", route_name),
+        TraceAttribute::string("upstream.name", upstream_name),
+        TraceAttribute::string("outcome", outcome),
+      ],
+    );
+  }
+}
+
+fn telemetry_span_enabled(state: &Arc<AppSnapshot>, trace_context: Option<TraceContext>) -> bool {
+  trace_context.is_some() && state.telemetry.enabled()
 }

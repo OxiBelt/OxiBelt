@@ -233,6 +233,7 @@ DNS.2 = oxibelt
 DNS.3 = nginx
 DNS.4 = caddy
 DNS.5 = localhost
+DNS.6 = perf-upstream-h2
 IP.1 = 127.0.0.1
 EOF
 
@@ -345,6 +346,46 @@ run_probe_json() {
     return 1
   fi
   printf '%s\n' "${json}"
+}
+
+start_perf_upstreams() {
+  docker run -d \
+    --name "perf-upstream-${run_id}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias perf-upstream \
+    "${perf_probe_image}" \
+    upstream \
+    --listen 0.0.0.0:18080 \
+    --name perf-upstream \
+    --protocol h1 >/dev/null
+
+  docker run -d \
+    --name "perf-upstream-h2c-${run_id}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias perf-upstream-h2c \
+    "${perf_probe_image}" \
+    upstream \
+    --listen 0.0.0.0:18082 \
+    --name perf-upstream-h2c \
+    --protocol h2c >/dev/null
+
+  local h2_container="perf-upstream-h2-${run_id}"
+  docker create \
+    --name "${h2_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias perf-upstream-h2 \
+    "${perf_probe_image}" \
+    upstream \
+    --listen 0.0.0.0:18444 \
+    --name perf-upstream-h2 \
+    --protocol h2 \
+    --cert /tls/fullchain.pem \
+    --key /tls/privkey.pem >/dev/null
+  docker cp "${tls_dir}/." "${h2_container}:/tls"
+  docker start "${h2_container}" >/dev/null
 }
 
 append_result() {
@@ -905,6 +946,19 @@ run_common_loads() {
   esac
 }
 
+run_oxibelt_h2_split_loads() {
+  start_oxibelt baseline-upstream-h2c oxibelt
+  run_load "oxibelt-h2-upstream-h2c" h2 oxibelt "/perf/h2c?body=ok" "${duration_seconds}" "${concurrency}"
+
+  start_oxibelt baseline-upstream-h2 oxibelt
+  run_load "oxibelt-h2-upstream-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+
+  if [[ "${profile}" == "benchmark" ]]; then
+    start_oxibelt baseline-h2-manual-window oxibelt
+    run_load "oxibelt-h2-manual-http2-tuning" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+  fi
+}
+
 run_accept_multiplier_common_loads() {
   local label_prefix="$1"
   run_load "${label_prefix}-h1-keepalive" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
@@ -1007,6 +1061,7 @@ run_reverse_proxy_group() {
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_common_loads oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
+    run_oxibelt_h2_split_loads
     start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
     run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
     run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt
@@ -1187,15 +1242,7 @@ if has_comparator nginx; then
   detect_nginx_h3
 fi
 
-docker run -d \
-  --name "perf-upstream-${run_id}" \
-  --label "${test_label}" \
-  --network "${network_name}" \
-  --network-alias perf-upstream \
-  "${perf_probe_image}" \
-  upstream \
-  --listen 0.0.0.0:18080 \
-  --name perf-upstream >/dev/null
+start_perf_upstreams
 
 sleep 1
 

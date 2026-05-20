@@ -19,12 +19,12 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, HandshakeKind, RootCertStore};
+use rustls::{ClientConfig, HandshakeKind, RootCertStore, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::time::Instant;
 use tokio_rustls::client::TlsStream;
-use tokio_rustls::TlsConnector;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 const MAX_ERROR_SAMPLES: usize = 8;
 
@@ -142,6 +142,27 @@ struct MetricsArgs {
 struct UpstreamArgs {
     listen: SocketAddr,
     name: String,
+    protocol: UpstreamProtocol,
+    cert: Option<String>,
+    key: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpstreamProtocol {
+    H1,
+    H2c,
+    H2,
+}
+
+impl UpstreamProtocol {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "h1" | "http1" | "http/1.1" => Ok(Self::H1),
+            "h2c" | "http2-cleartext" | "http/2-cleartext" => Ok(Self::H2c),
+            "h2" | "http2" | "http/2" => Ok(Self::H2),
+            _ => bail!("unsupported upstream protocol: {raw}"),
+        }
+    }
 }
 
 struct H3ClientConnection {
@@ -336,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
 fn usage() {
     eprintln!(
         "usage:
-  perf-probe upstream --listen <addr:port> [--name <name>]
+  perf-probe upstream --listen <addr:port> [--name <name>] [--protocol <h1|h2c|h2>] [--cert <pem> --key <pem>]
   perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
   perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>]
@@ -354,6 +375,13 @@ fn parse_upstream_args(args: impl Iterator<Item = String>) -> anyhow::Result<Ups
             .get("--name")
             .cloned()
             .unwrap_or_else(|| "perf-upstream".to_owned()),
+        protocol: values
+            .get("--protocol")
+            .map(|value| UpstreamProtocol::parse(value))
+            .transpose()?
+            .unwrap_or(UpstreamProtocol::H1),
+        cert: values.get("--cert").cloned(),
+        key: values.get("--key").cloned(),
     })
 }
 
@@ -513,23 +541,91 @@ async fn serve_upstream(args: UpstreamArgs) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind upstream to {}", args.listen))?;
     let name = Arc::<str>::from(args.name);
+    let tls_acceptor = match args.protocol {
+        UpstreamProtocol::H1 | UpstreamProtocol::H2c => None,
+        UpstreamProtocol::H2 => Some(upstream_tls_acceptor(
+            args.cert
+                .as_deref()
+                .ok_or_else(|| anyhow!("--cert is required for h2 upstream"))?,
+            args.key
+                .as_deref()
+                .ok_or_else(|| anyhow!("--key is required for h2 upstream"))?,
+        )?),
+    };
 
     loop {
         let (stream, peer_addr) = listener.accept().await.context("failed to accept TCP")?;
         let name = name.clone();
-        tokio::spawn(async move {
-            let service = service_fn(move |request| {
-                let name = name.clone();
-                async move { Ok::<_, Infallible>(upstream_response(request, name).await) }
-            });
-            if let Err(error) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
-                .await
-            {
-                eprintln!("upstream connection from {peer_addr} failed: {error}");
+        match (args.protocol, tls_acceptor.clone()) {
+            (UpstreamProtocol::H1, _) => {
+                tokio::spawn(async move {
+                    let service = service_fn(move |request| {
+                        let name = name.clone();
+                        async move { Ok::<_, Infallible>(upstream_response(request, name).await) }
+                    });
+                    if let Err(error) = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await
+                    {
+                        eprintln!("upstream HTTP/1.1 connection from {peer_addr} failed: {error}");
+                    }
+                });
             }
-        });
+            (UpstreamProtocol::H2c, _) => {
+                tokio::spawn(async move {
+                    let service = service_fn(move |request| {
+                        let name = name.clone();
+                        async move { Ok::<_, Infallible>(upstream_response(request, name).await) }
+                    });
+                    if let Err(error) =
+                        hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await
+                    {
+                        eprintln!("upstream h2c connection from {peer_addr} failed: {error}");
+                    }
+                });
+            }
+            (UpstreamProtocol::H2, Some(acceptor)) => {
+                tokio::spawn(async move {
+                    let service = service_fn(move |request| {
+                        let name = name.clone();
+                        async move { Ok::<_, Infallible>(upstream_response(request, name).await) }
+                    });
+                    let stream = match acceptor.accept(stream).await {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            eprintln!("upstream TLS handshake from {peer_addr} failed: {error}");
+                            return;
+                        }
+                    };
+                    if let Err(error) =
+                        hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await
+                    {
+                        eprintln!("upstream HTTP/2 connection from {peer_addr} failed: {error}");
+                    }
+                });
+            }
+            (UpstreamProtocol::H2, None) => {
+                eprintln!(
+                    "upstream HTTP/2 connection from {peer_addr} skipped: TLS is not configured"
+                );
+            }
+        }
     }
+}
+
+fn upstream_tls_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<TlsAcceptor> {
+    let certs = load_certs(Path::new(cert_path))?;
+    let key = load_private_key(Path::new(key_path))?;
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("failed to build upstream TLS server config")?;
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 async fn upstream_response(request: Request<Incoming>, name: Arc<str>) -> Response<Full<Bytes>> {
@@ -1265,7 +1361,9 @@ fn decode_chunked_body(mut input: &[u8]) -> anyhow::Result<Vec<u8>> {
         let line_end = find_crlf(input).ok_or_else(|| anyhow!("invalid chunk header"))?;
         let size_text =
             std::str::from_utf8(&input[..line_end]).context("chunk size was not valid UTF-8")?;
-        let size_hex = size_text.split_once(';').map_or(size_text, |(size, _)| size);
+        let size_hex = size_text
+            .split_once(';')
+            .map_or(size_text, |(size, _)| size);
         let size = usize::from_str_radix(size_hex.trim(), 16)
             .context("chunk size was not valid hexadecimal")?;
         input = &input[(line_end + 2)..];

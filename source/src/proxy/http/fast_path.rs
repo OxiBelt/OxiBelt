@@ -9,7 +9,9 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Body;
 use tracing::warn;
 
-use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
+use crate::config::{
+  HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode, UpstreamConfig,
+};
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, boxed_error};
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
@@ -155,7 +157,7 @@ impl PlainProxyFastPath {
     };
     rebuild_request_parts(&mut parts, rebuild);
     semantics::strip_accepted_expect(&mut parts.headers);
-    semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
+    apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
     state
       .telemetry
       .inject_trace_context(&mut parts.headers, trace_context);
@@ -165,13 +167,11 @@ impl PlainProxyFastPath {
       client_body_timeout,
       request_body_definitely_empty,
     );
-    let outbound = Request::from_parts(parts, body)
-      .map(|body| filter_trailers(body, state.config.proxy.http.trailers, false));
-    let outbound = outbound.map(|body| {
-      body::with_send_timeout(
+    let outbound = Request::from_parts(parts, body).map(|body| {
+      fast_path_outbound_request_body(
         body,
+        state.config.proxy.http.trailers,
         timeouts.upstream_send,
-        BodyTimeoutKind::UpstreamRequestSend,
       )
     });
 
@@ -251,10 +251,10 @@ impl PlainProxyFastPath {
         }
       };
     strip_hop_by_hop_headers(&mut parts.headers);
-    if state.config.proxy.http.trailers == crate::config::TrailerMode::Drop {
+    if state.config.proxy.http.trailers == TrailerMode::Drop {
       parts.headers.remove(http::header::TRAILER);
     }
-    semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
+    apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
     apply_security_headers(&mut parts.headers, &state.config.security.headers);
     apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
     if response_waf_enabled {
@@ -331,7 +331,7 @@ impl PlainProxyFastPath {
     let response_body = if trailers_handled {
       response_body
     } else {
-      filter_trailers(response_body, state.config.proxy.http.trailers, false)
+      fast_path_filter_trailers(response_body, state.config.proxy.http.trailers)
     };
     let mut response = Response::from_parts(parts, response_body);
     if known_small_response_body {
@@ -357,6 +357,28 @@ fn plain_proxy_fast_path_enabled_for_version<B>(
     http::Version::HTTP_2 => resolved.execution_plan.fast_path.plain_proxy_h2,
     _ => false,
   }
+}
+
+fn apply_fast_path_priority_policy(headers: &mut HeaderMap, mode: PriorityMode) {
+  if mode != PriorityMode::Pass {
+    semantics::apply_priority_policy(headers, mode);
+  }
+}
+
+fn fast_path_outbound_request_body(
+  body: ProxyBody,
+  trailer_mode: TrailerMode,
+  timeout: std::time::Duration,
+) -> ProxyBody {
+  let body = fast_path_filter_trailers(body, trailer_mode);
+  body::with_send_timeout(body, timeout, BodyTimeoutKind::UpstreamRequestSend)
+}
+
+fn fast_path_filter_trailers(body: ProxyBody, mode: TrailerMode) -> ProxyBody {
+  if mode == TrailerMode::Pass {
+    return body;
+  }
+  filter_trailers(body, mode, false)
 }
 
 fn fast_path_request_body<B>(
