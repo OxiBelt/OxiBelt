@@ -37,6 +37,7 @@ mod pattern_set;
 mod person_proof;
 mod person_proof_api;
 mod person_proof_config;
+mod person_proof_policy;
 mod person_proof_v2;
 mod plan;
 mod rule_groups;
@@ -73,6 +74,7 @@ use person_proof::{
 };
 pub use person_proof_api::{PersonProofApiPathRole, PersonProofSessionDocument};
 pub use person_proof_config::WafPersonProofConfig;
+use person_proof_policy::PersonProofPolicyState;
 pub use person_proof_v2::PersonProofProviderChallenge;
 pub use plan::BodyNeed;
 use plan::{WafRoutePlan, phase_plan};
@@ -1891,15 +1893,13 @@ impl WafEngine {
       decision.response_header_mutations.push(mutation);
     }
 
-    let mut active_person_proof_weight = 0;
-    let mut active_person_proof_allowed = false;
+    let mut active_person_proof = PersonProofPolicyState::default();
     let mut tx = TransactionBudget::new(&self.limits);
     let body_text_caches = BodyTextCaches::default();
     for rule in self.route_plan(input.route_name).request().rules() {
       tx.check_total()?;
       let mut rule_person_proof = self.person_proof_status_for_rule(&person_proof, rule);
-      rule_person_proof.weight = active_person_proof_weight;
-      rule_person_proof.allowed = active_person_proof_allowed;
+      active_person_proof.apply_to(&mut rule_person_proof);
       let matched = {
         let request = WafRequestInput {
           tags: &active_tags,
@@ -1966,7 +1966,7 @@ impl WafEngine {
           duplicate_metadata_policy: self.duplicate_metadata_policy,
           body_text_caches: &body_text_caches,
         };
-        let updated_person_proof = apply_request_actions(
+        active_person_proof = apply_request_actions(
           rule,
           RequestActionContext {
             input: request,
@@ -1978,8 +1978,6 @@ impl WafEngine {
           &mut decision,
           &mut tx,
         )?;
-        active_person_proof_weight = updated_person_proof.weight;
-        active_person_proof_allowed = updated_person_proof.allowed;
       }
       for (key, value) in &decision.tags[previous_tag_count..] {
         active_tags.insert(key.clone(), value.clone());
@@ -2357,7 +2355,7 @@ fn compile_actions(
           .collect::<anyhow::Result<Vec<_>>>()?,
       }),
       WafActionConfig::RequirePersonProof { .. } => Ok(CompiledAction::RequirePersonProof(
-        person_proof_policy_from_action(rule, scope, action_index, action, person_proof_defaults),
+        person_proof_policy::from_action(rule, scope, action_index, action, person_proof_defaults),
       )),
       WafActionConfig::EmitMitigation { .. } => Ok(CompiledAction::EmitMitigation(
         compile_mitigation_action(rule, action)?,
@@ -2389,87 +2387,6 @@ pub fn compile_access_log_fields(
     })
     .collect::<anyhow::Result<Vec<_>>>()?;
   Ok(CompiledAccessLogFields { fields })
-}
-
-fn person_proof_policy_from_action(
-  rule: &WafRuleConfig,
-  scope: &str,
-  action_index: usize,
-  action: &WafActionConfig,
-  defaults: &WafPersonProofConfig,
-) -> PersonProofPolicy {
-  let WafActionConfig::RequirePersonProof {
-    priority: _,
-    method,
-    difficulty,
-    ttl_seconds,
-    cookie,
-    token_bindings,
-    direct_peer_ipv4_prefix_bits,
-    direct_peer_ipv6_prefix_bits,
-    tcp_max_hop,
-    single_use,
-    success_tag,
-    status,
-    challenge_url,
-    challenge_redirect_status,
-    session_path,
-    verify_path,
-    openapi_path,
-    provider,
-    provider_metadata,
-    site_key,
-    secret_env,
-    provider_endpoint,
-    provider_timeout_ms,
-    provider_fail_policy,
-    provider_max_response_body_bytes,
-    send_remote_ip,
-  } = action
-  else {
-    unreachable!("person_proof_policy_from_action requires require_person_proof action");
-  };
-  let rule_key = rule
-    .id
-    .as_deref()
-    .filter(|id| !id.is_empty())
-    .unwrap_or(&rule.name);
-  PersonProofPolicy {
-    key: format!("{scope}:{rule_key}:{action_index}"),
-    method: *method,
-    difficulty: *difficulty,
-    ttl_seconds: *ttl_seconds,
-    cookie: cookie.clone(),
-    token_bindings: token_bindings.clone(),
-    direct_peer_ipv4_prefix_bits: *direct_peer_ipv4_prefix_bits,
-    direct_peer_ipv6_prefix_bits: *direct_peer_ipv6_prefix_bits,
-    tcp_max_hop: *tcp_max_hop,
-    single_use: *single_use,
-    success_tag: success_tag.clone(),
-    status: *status,
-    provider: person_proof_v2::PersonProofProviderConfig {
-      challenge_url: challenge_url.clone(),
-      challenge_redirect_status: *challenge_redirect_status,
-      session_path: session_path
-        .clone()
-        .unwrap_or_else(|| defaults.session_path.clone()),
-      verify_path: verify_path
-        .clone()
-        .unwrap_or_else(|| defaults.verify_path.clone()),
-      openapi_path: openapi_path
-        .clone()
-        .unwrap_or_else(|| defaults.openapi_path.clone()),
-      provider: provider.clone(),
-      provider_metadata: provider_metadata.clone(),
-      site_key: site_key.clone(),
-      secret_env: secret_env.clone(),
-      provider_endpoint: provider_endpoint.clone(),
-      provider_timeout_ms: *provider_timeout_ms,
-      provider_fail_policy: *provider_fail_policy,
-      provider_max_response_body_bytes: *provider_max_response_body_bytes,
-      send_remote_ip: *send_remote_ip,
-    },
-  }
 }
 
 fn new_internal_rule_id() -> anyhow::Result<String> {
@@ -2960,13 +2877,13 @@ fn apply_request_actions(
   action_ctx: RequestActionContext<'_, '_>,
   decision: &mut RequestWafDecision,
   tx: &mut TransactionBudget,
-) -> anyhow::Result<PersonProofRequestStatus> {
+) -> anyhow::Result<PersonProofPolicyState> {
   let input = action_ctx.input;
   let ctx = action_ctx.eval;
   let person_proof = action_ctx.person_proof;
   let rate_limits = action_ctx.rate_limits;
   let mitigation = action_ctx.mitigation;
-  let mut person_proof_status = ctx.person_proof.clone();
+  let mut person_proof_policy = PersonProofPolicyState::from_status(ctx.person_proof);
   for action in &rule.actions {
     tx.count_mutation()?;
     match action {
@@ -2975,7 +2892,7 @@ fn apply_request_actions(
           StatusCode::from_u16(*status)?,
           body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
         ));
-        return Ok(person_proof_status);
+        return Ok(person_proof_policy);
       }
       CompiledAction::Config(WafActionConfig::SetRequestHeader { name, value, .. }) => {
         decision.request_header_mutations.push(HeaderMutation::Set {
@@ -3036,28 +2953,28 @@ fn apply_request_actions(
               .clone()
               .unwrap_or_else(|| "rate limit exceeded".to_string()),
           ));
-          return Ok(person_proof_status);
+          return Ok(person_proof_policy);
         }
       }
       CompiledAction::Config(WafActionConfig::WeighPersonProof { weight, .. }) => {
-        person_proof_status.weight = person_proof_status.weight.saturating_add(*weight);
+        person_proof_policy.add_weight(*weight);
       }
       CompiledAction::Config(WafActionConfig::AllowPersonProof { .. }) => {
-        person_proof_status.allowed = true;
+        person_proof_policy.allow();
       }
       CompiledAction::RequirePersonProof(policy) => {
-        if person_proof_status.state == PersonProofState::Valid || person_proof_status.allowed {
+        if person_proof_policy.challenge_suppressed(ctx.person_proof) {
           continue;
         }
         decision.terminal = Some(person_proof.issue_challenge(input, policy.clone())?);
-        return Ok(person_proof_status);
+        return Ok(person_proof_policy);
       }
       CompiledAction::EmitMitigation(action) => {
         if let Some(terminal) =
           apply_mitigation_http_action(action, rule, ctx, None, mitigation, tx)?
         {
           decision.terminal = Some(terminal);
-          return Ok(person_proof_status);
+          return Ok(person_proof_policy);
         }
       }
       CompiledAction::Config(WafActionConfig::ContinueResponse { .. })
@@ -3074,7 +2991,7 @@ fn apply_request_actions(
       }
     }
   }
-  Ok(person_proof_status)
+  Ok(person_proof_policy)
 }
 
 fn apply_response_actions(
