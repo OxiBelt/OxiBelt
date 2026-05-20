@@ -4036,6 +4036,92 @@ value = "no-store"
 }
 
 #[test]
+fn response_rules_can_match_response_cookies_tags_and_transport() {
+    let temp_dir = common::TempDir::new("waf-response-object-model");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-response-object-model");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "response-object-model"
+phase = "response"
+priority = 10
+when = """
+Response.Cookies.has('session') &&
+Response.Cookies.get('session') == 'abc123' &&
+Response.Cookies.getAll('session').Count == 1 &&
+Response.Tags.get('LoginRequest') == 'true' &&
+Response.Transport.Network == 'tcp' &&
+Response.Transport.RemoteIp == '203.0.113.10' &&
+Response.Transport.RemotePort == 49152 &&
+Response.Transport.IsEncrypted &&
+Response.Transport.Tcp != null &&
+Response.Transport.Tcp.Mss == 1460 &&
+Response.Transport.Tcp.RttMs == 12 &&
+Response.Transport.Udp == null
+"""
+
+[[waf.rules.actions]]
+type = "set_response_header"
+name = "X-Response-Object-Model"
+value = "matched"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let request_headers = HeaderMap::new();
+    let mut response_headers = HeaderMap::new();
+    response_headers.append(
+        http::header::SET_COOKIE,
+        HeaderValue::from_static("session=abc123; Path=/; HttpOnly"),
+    );
+    let mut tags = HashMap::new();
+    tags.insert("LoginRequest".to_string(), "true".to_string());
+    let method = Method::GET;
+    let uri: Uri = "/login".parse().expect("URI should parse");
+    let mut request = request_input(
+        &method,
+        &uri,
+        &request_headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    );
+    request.transport_metadata = WafTransportMetadataInput {
+        tcp_mss: Some(1460),
+        tcp_rtt_ms: Some(12),
+        ..WafTransportMetadataInput::default()
+    };
+
+    let response_decision = engine.evaluate_response(WafResponseInput {
+        request,
+        response_id: "test-response-id",
+        received_at_unix_ms: 1_700_000_000_123,
+        version: http::Version::HTTP_11,
+        status: StatusCode::OK,
+        headers: &response_headers,
+        body: None,
+        upstream_name: "app",
+        upstream_pool: None,
+        upstream_scheme: "http",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: Some(7),
+        upstream_error: None,
+    });
+
+    assert_eq!(response_decision.response_header_mutations.len(), 1);
+}
+
+#[test]
 fn response_rule_can_emit_structured_access_log() {
     let temp_dir = common::TempDir::new("waf-access-log");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-access-log");
@@ -4084,6 +4170,18 @@ name = "transport"
 value = "Request.Transport"
 
 [[waf.rules.actions.fields]]
+name = "response_transport"
+value = "Response.Transport"
+
+[[waf.rules.actions.fields]]
+name = "response_cookies"
+value = "Response.Cookies"
+
+[[waf.rules.actions.fields]]
+name = "response_tags"
+value = "Response.Tags"
+
+[[waf.rules.actions.fields]]
 name = "upstream_name"
 value = "Response.Upstream.Name"
 
@@ -4102,11 +4200,16 @@ value = "Context.RuleName"
         http::header::USER_AGENT,
         HeaderValue::from_static("curl/8.0 \"quoted\""),
     );
-    let tags = HashMap::new();
+    let mut tags = HashMap::new();
+    tags.insert("LoginRequest".to_string(), "true".to_string());
     let method = Method::GET;
     let uri: Uri = "/search?q=one%20two".parse().expect("URI should parse");
     let mut response_headers = HeaderMap::new();
     response_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("12"));
+    response_headers.append(
+        http::header::SET_COOKIE,
+        HeaderValue::from_static("session=abc123; Path=/; HttpOnly"),
+    );
     let mut request = request_input(
         &method,
         &uri,
@@ -4146,6 +4249,9 @@ value = "Context.RuleName"
     assert!(line.contains("\"status_code\":201"));
     assert!(line.contains("\"body_bytes\":12"));
     assert!(line.contains("\"transport\":{\"network\":\"tcp\",\"remoteip\":\"203.0.113.10\",\"remoteport\":49152,\"isencrypted\":true,\"tcp\":{\"sni\":null,\"alpn\":null,\"maxhop\":null,\"mss\":1460,\"rttms\":12},\"udp\":null}"));
+    assert!(line.contains("\"response_transport\":{\"network\":\"tcp\",\"remoteip\":\"203.0.113.10\",\"remoteport\":49152,\"isencrypted\":true,\"tcp\":{\"sni\":null,\"alpn\":null,\"maxhop\":null,\"mss\":1460,\"rttms\":12},\"udp\":null}"));
+    assert!(line.contains("\"response_cookies\":{\"session\":\"abc123\"}"));
+    assert!(line.contains("\"response_tags\":{\"LoginRequest\":\"true\"}"));
     assert!(line.contains("\"upstream_name\":\"app\""));
     assert!(line.contains("\"matched_rule\":\"stdout-access\""));
     assert!(!line.contains("\"client_ip\":"));

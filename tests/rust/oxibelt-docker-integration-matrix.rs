@@ -5167,6 +5167,27 @@ run_case_checks() {
         ),
         docker_case(
             "waf-response",
+            "response-object-model",
+            "response rules can match response cookies, request tags, and transport metadata",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/response-object?set_cookie=1" 200)"
+  assert_response_jq "${response}" '.headers["x-waf-response-object"] == "matched"
+    and (.headers["set-cookie"] | contains("upstream_session=present"))'
+  assert_body_jq "${response}" '.upstream == "http-upstream"
+    and .path == "/origin/app/response-object?set_cookie=1"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "waf-response",
             "replace-5xx",
             "response rules can replace upstream 5xx responses",
             ExpectStart::Success,

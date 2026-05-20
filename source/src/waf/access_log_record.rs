@@ -3,14 +3,14 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 
 use anyhow::{Context, bail};
-use http::header::{COOKIE, SET_COOKIE};
+use http::header::COOKIE;
 use http::{HeaderMap, Uri};
 use tracing::warn;
 
 use super::{
   BoundedStringList, CompiledAccessLogField, EvalContext, ObjectRef, TransactionBudget, Value,
-  WafLimits, bounded_string_list, current_unix_ms, eval_member, normalize_cookie_pairs,
-  normalize_header_pairs, normalize_query_pairs, truncate_to_bytes,
+  WafLimits, current_unix_ms, eval_member, normalize_cookie_pairs, normalize_header_pairs,
+  normalize_query_pairs, response_cookie_pairs,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -295,7 +295,18 @@ impl AccessLogJsonValue {
         ctx,
       ),
       ObjectRef::ResponseHttp => object_members_json(object, &["Version", "Status", "Reason"], ctx),
-      ObjectRef::ResponseTransport => object_members_json(object, &["Network", "IsEncrypted"], ctx),
+      ObjectRef::ResponseTransport => object_members_json(
+        object,
+        &[
+          "Network",
+          "RemoteIp",
+          "RemotePort",
+          "IsEncrypted",
+          "Tcp",
+          "Udp",
+        ],
+        ctx,
+      ),
       ObjectRef::ResponseUpstream => object_members_json(
         object,
         &[
@@ -309,11 +320,21 @@ impl AccessLogJsonValue {
         ctx,
       ),
       ObjectRef::ResponseUpstreamError => object_members_json(object, &["Code", "Message"], ctx),
-      ObjectRef::ResponseCookies => Ok(header_cookie_json(
-        ctx.response.context("missing response context")?.headers,
+      ObjectRef::ResponseCookies => Ok(pair_map_json(
+        response_cookie_pairs(
+          ctx.response.context("missing response context")?.headers,
+          ctx.limits.max_helper_items,
+        ),
         ctx.limits,
       )),
-      ObjectRef::ResponseTags => Ok(Self::Object(Vec::new())),
+      ObjectRef::ResponseTags => Ok(string_map_json(
+        ctx
+          .response
+          .context("missing response context")?
+          .request
+          .tags,
+        ctx.limits,
+      )),
       ObjectRef::RequestTokenBindings => object_members_json(
         object,
         &[
@@ -428,20 +449,6 @@ fn cookie_pairs(headers: &HeaderMap, limits: &WafLimits) -> Vec<(String, String)
     .take(limits.max_helper_items)
     .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
     .collect()
-}
-
-fn header_cookie_json(headers: &HeaderMap, limits: &WafLimits) -> AccessLogJsonValue {
-  AccessLogJsonValue::bounded_string_list(
-    bounded_string_list(
-      headers
-        .get_all(SET_COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .map(|value| truncate_to_bytes(value, limits.max_header_value_bytes)),
-      limits,
-    ),
-    limits,
-  )
 }
 
 fn truncate_log_string(value: &str, max_bytes: usize) -> String {

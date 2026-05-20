@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use http::header::{COOKIE, HeaderName, HeaderValue, USER_AGENT};
+use http::header::{COOKIE, HeaderName, HeaderValue, SET_COOKIE, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use regex::{Regex, RegexBuilder};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -4002,7 +4002,7 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     (ObjectRef::RequestTransport, "RemotePort") => {
       Ok(Value::Int(ctx.request.peer_addr.port().into()))
     }
-    (ObjectRef::RequestTransport, "IsEncrypted") => Ok(Value::Bool(true)),
+    (ObjectRef::RequestTransport, "IsEncrypted") => Ok(Value::Bool(ctx.request.tls.enabled)),
     (ObjectRef::RequestTransport, "Tcp") => {
       if ctx.request.transport_network == WafTransportNetwork::Tcp {
         Ok(Value::Object(ObjectRef::RequestTransportTcp))
@@ -4393,9 +4393,67 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     | (ObjectRef::ResponseTls, "Fingerprint")
     | (ObjectRef::ResponseTls, "FingerprintScheme") => Ok(Value::Null),
     (ObjectRef::ResponseTls, "ClientCertificatePresent") => Ok(Value::Bool(false)),
-    (ObjectRef::ResponseTransport, "Network") => Ok(Value::String("tcp".to_string())),
-    (ObjectRef::ResponseTransport, "IsEncrypted") => Ok(Value::Bool(false)),
-    (ObjectRef::ResponseTags, _) => Ok(Value::Null),
+    (ObjectRef::ResponseTransport, "Network") => Ok(Value::String(
+      ctx
+        .response
+        .context("missing response context")?
+        .request
+        .transport_network
+        .as_str()
+        .to_string(),
+    )),
+    (ObjectRef::ResponseTransport, "RemoteIp") => Ok(Value::String(
+      ctx
+        .response
+        .context("missing response context")?
+        .request
+        .peer_addr
+        .ip()
+        .to_string(),
+    )),
+    (ObjectRef::ResponseTransport, "RemotePort") => Ok(Value::Int(
+      ctx
+        .response
+        .context("missing response context")?
+        .request
+        .peer_addr
+        .port()
+        .into(),
+    )),
+    (ObjectRef::ResponseTransport, "IsEncrypted") => Ok(Value::Bool(
+      ctx
+        .response
+        .context("missing response context")?
+        .request
+        .tls
+        .enabled,
+    )),
+    (ObjectRef::ResponseTransport, "Tcp") => {
+      if ctx
+        .response
+        .context("missing response context")?
+        .request
+        .transport_network
+        == WafTransportNetwork::Tcp
+      {
+        Ok(Value::Object(ObjectRef::RequestTransportTcp))
+      } else {
+        Ok(Value::Null)
+      }
+    }
+    (ObjectRef::ResponseTransport, "Udp") => {
+      if ctx
+        .response
+        .context("missing response context")?
+        .request
+        .transport_network
+        == WafTransportNetwork::Udp
+      {
+        Ok(Value::Object(ObjectRef::RequestTransportUdp))
+      } else {
+        Ok(Value::Null)
+      }
+    }
     _ => bail!("unknown WAF object property {:?}.{field}", object),
   }
 }
@@ -4447,7 +4505,12 @@ fn eval_call(
       ctx,
       regex_args,
     ),
-    Value::Object(ObjectRef::RequestCookies) => eval_cookie_call(ctx, method, args, regex_args),
+    Value::Object(ObjectRef::RequestCookies) => {
+      eval_request_cookie_call(ctx, method, args, regex_args)
+    }
+    Value::Object(ObjectRef::ResponseCookies) => {
+      eval_response_cookie_call(ctx, method, args, regex_args)
+    }
     Value::Object(ObjectRef::RequestNormalizedCookies) => eval_pair_map_call(
       &normalize_cookie_pairs(ctx.request.headers),
       method,
@@ -4458,6 +4521,17 @@ fn eval_call(
     Value::Object(ObjectRef::RequestTags) => {
       eval_tag_call(ctx.request.tags, method, args, ctx, regex_args)
     }
+    Value::Object(ObjectRef::ResponseTags) => eval_tag_call(
+      ctx
+        .response
+        .context("missing response context")?
+        .request
+        .tags,
+      method,
+      args,
+      ctx,
+      regex_args,
+    ),
     Value::Object(ObjectRef::RequestTokenBindings) => eval_token_binding_call(ctx, method, args),
     Value::Object(ObjectRef::RequestBody) => eval_body_call(
       ctx.request.body,
@@ -4632,24 +4706,51 @@ fn eval_query_call(
   eval_pair_map_call(&pairs, method, args, ctx, regex_args)
 }
 
-fn eval_cookie_call(
+fn eval_request_cookie_call(
   ctx: &EvalContext<'_>,
   method: &str,
   args: &[Value],
   regex_args: CachedRegexArgs<'_>,
 ) -> anyhow::Result<Value> {
-  let pairs = ctx
-    .request
-    .headers
+  let pairs = request_cookie_pairs(ctx.request.headers, ctx.limits.max_helper_items);
+  eval_pair_map_call(&pairs, method, args, ctx, regex_args)
+}
+
+fn eval_response_cookie_call(
+  ctx: &EvalContext<'_>,
+  method: &str,
+  args: &[Value],
+  regex_args: CachedRegexArgs<'_>,
+) -> anyhow::Result<Value> {
+  let pairs = response_cookie_pairs(
+    ctx.response.context("missing response context")?.headers,
+    ctx.limits.max_helper_items,
+  );
+  eval_pair_map_call(&pairs, method, args, ctx, regex_args)
+}
+
+fn request_cookie_pairs(headers: &HeaderMap, max_items: usize) -> Vec<(String, String)> {
+  headers
     .get_all(COOKIE)
     .iter()
     .filter_map(|value| value.to_str().ok())
     .flat_map(|value| value.split(';'))
     .filter_map(|part| part.trim().split_once('='))
-    .take(ctx.limits.max_helper_items)
+    .take(max_items)
     .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
-    .collect::<Vec<_>>();
-  eval_pair_map_call(&pairs, method, args, ctx, regex_args)
+    .collect()
+}
+
+fn response_cookie_pairs(headers: &HeaderMap, max_items: usize) -> Vec<(String, String)> {
+  headers
+    .get_all(SET_COOKIE)
+    .iter()
+    .filter_map(|value| value.to_str().ok())
+    .filter_map(|value| value.split(';').next())
+    .filter_map(|part| part.trim().split_once('='))
+    .take(max_items)
+    .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
+    .collect()
 }
 
 fn eval_tag_call(
