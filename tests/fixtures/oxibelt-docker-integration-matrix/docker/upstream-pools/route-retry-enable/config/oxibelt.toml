@@ -41,7 +41,7 @@ on = ["503"]
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "power_of_two_choices"
+algorithm = "weighted_least_conn"
 
 [[upstream_pools.servers]]
 id = "bad"

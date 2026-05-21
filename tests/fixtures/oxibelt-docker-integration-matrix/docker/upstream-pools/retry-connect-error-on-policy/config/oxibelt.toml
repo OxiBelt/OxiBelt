@@ -50,7 +50,7 @@ plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.1
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "power_of_two_choices"
+algorithm = "weighted_least_conn"
 
 [upstream_pools.health_check]
 enabled = true
@@ -58,8 +58,8 @@ unhealthy_threshold = 1
 healthy_threshold = 1
 
 [[upstream_pools.servers]]
-id = "missing"
-origin = "http://mock-missing:18082/origin"
+id = "bad"
+origin = "http://127.0.0.1:18082/origin"
 
 [[upstream_pools.servers]]
 id = "good"
