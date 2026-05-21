@@ -38,6 +38,7 @@ RUN if command -v apk >/dev/null 2>&1; then \
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
 COPY source ./source
+COPY fuzz ./fuzz
 COPY --from=person-proof-ui /repo/source/assets/person-proof-challenge.html ./source/assets/person-proof-challenge.html
 RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
       rustup target add "${OXIBELT_RUST_TARGET}" && \

@@ -26,6 +26,29 @@ fn workflow_text() -> String {
         .expect("check-oxibelt workflow should be readable")
 }
 
+fn dockerfile_text() -> String {
+    fs::read_to_string(repo_root().join("source/ops/Dockerfile.alpine"))
+        .expect("Alpine Dockerfile should be readable")
+}
+
+fn workspace_members() -> Vec<String> {
+    let manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
+        .expect("root Cargo.toml should be readable");
+    let manifest: toml::Value =
+        toml::from_str(&manifest).expect("root Cargo.toml should parse as TOML");
+    manifest["workspace"]["members"]
+        .as_array()
+        .expect("root workspace should declare members")
+        .iter()
+        .map(|member| {
+            member
+                .as_str()
+                .expect("workspace member should be a string")
+                .to_owned()
+        })
+        .collect()
+}
+
 fn parse_jobs(workflow: &str) -> BTreeMap<String, Job> {
     let mut jobs = BTreeMap::new();
     let mut in_jobs = false;
@@ -182,6 +205,19 @@ fn simulate_source_structure_failure(jobs: &BTreeMap<String, Job>, job_id: &str)
     }
 
     visit(jobs, job_id, &mut BTreeMap::new(), &mut BTreeSet::new())
+}
+
+#[test]
+fn alpine_dockerfile_builder_copies_workspace_members() {
+    let dockerfile = dockerfile_text();
+
+    for member in workspace_members() {
+        let copy_instruction = format!("COPY {member} ./{member}");
+        assert!(
+            dockerfile.contains(&copy_instruction),
+            "source/ops/Dockerfile.alpine should copy workspace member {member:?} before cargo build"
+        );
+    }
 }
 
 #[test]
