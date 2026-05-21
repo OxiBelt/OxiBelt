@@ -34,6 +34,13 @@ trusted_ca_certs = []
 enabled = true
 max_http_version = "h2"
 
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "plaintext_allowlist"
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
 [[upstream_pools]]
 name = "app-pool"
 algorithm = "power_of_two_choices"

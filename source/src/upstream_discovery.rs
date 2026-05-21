@@ -20,6 +20,9 @@ use crate::upstream_control;
 mod dns;
 mod enterprise;
 
+#[cfg(test)]
+mod runtime_tests;
+
 pub(crate) async fn run_dynamic_upstream_discovery(
   state: AppHandle,
   mut shutdown: watch::Receiver<bool>,

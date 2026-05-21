@@ -95,6 +95,35 @@ fn default_power_of_two_choices_respects_capacity() {
 }
 
 #[test]
+fn power_of_two_choices_ties_preserve_sample_distribution() {
+  let state = PoolState::new(
+    &[test_pool(LoadBalancingAlgorithm::PowerOfTwoChoices)],
+    None,
+  );
+  let first = synthetic_upstream_name("app-pool", 0);
+  let second = synthetic_upstream_name("app-pool", 1);
+  let mut first_seen = false;
+  let mut second_seen = false;
+
+  for index in 0..16 {
+    let selection = state
+      .select(
+        "app-pool",
+        "203.0.113.10".parse().unwrap(),
+        &format!("/request-{index}"),
+        None,
+      )
+      .unwrap();
+    first_seen |= selection.upstream_name == first;
+    second_seen |= selection.upstream_name == second;
+    drop(selection);
+  }
+
+  assert!(first_seen);
+  assert!(second_seen);
+}
+
+#[test]
 fn weighted_least_conn_excludes_busy_pool_server() {
   let mut pool = test_pool(LoadBalancingAlgorithm::WeightedLeastConn);
   pool.servers[0].max_conns = 1;

@@ -525,9 +525,7 @@ fn select_lower_active_score(
   let second_index = server_index(pool, &second).unwrap_or(first_index);
   let first_score = normalized_active_score(pool, first_index, &first);
   let second_score = normalized_active_score(pool, second_index, &second);
-  if (first_score, stable_hash64(&first.server_id))
-    <= (second_score, stable_hash64(&second.server_id))
-  {
+  if first_score <= second_score {
     first
   } else {
     second

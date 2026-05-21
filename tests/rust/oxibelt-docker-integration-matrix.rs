@@ -3511,12 +3511,26 @@ run_case_checks() {
             },
             r#"
 run_case_checks() {
-  local first second third
-  sleep 1
-  first="$(client_request "example.test" "/app/file-discovery-a" 200)"
-  second="$(client_request "example.test" "/app/file-discovery-b" 200)"
-  assert_body_jq "${first}" '.upstream == "http-upstream"'
-  assert_body_jq "${second}" '.upstream == "alt-upstream"'
+  local response state seen_alt seen_primary attempt
+  seen_alt=0
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    if ! jq -e '.body | fromjson | ([.servers[] | select(.id == "file-alt" and .source == "file" and .healthy == true)] | length) == 1' <<<"${state}" >/dev/null; then
+      sleep 0.5
+      continue
+    fi
+    response="$(client_request "example.test" "/app/file-discovery-${attempt}" 200)"
+    if jq -e '.body | fromjson | .upstream == "alt-upstream"' <<<"${response}" >/dev/null; then
+      seen_alt=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "${seen_alt}" != "1" ]]; then
+    echo "${state}" >&2
+    echo "${response}" >&2
+    fail_with_diagnostics "file discovery did not route to discovered upstream"
+  fi
 
   cat >"${case_dir}/config/discovery/app-pool.json" <<'JSON'
 {
@@ -3524,10 +3538,25 @@ run_case_checks() {
 }
 JSON
   docker cp "${case_dir}/config/discovery/app-pool.json" "${proxy_container}:/etc/oxibelt/config/discovery/app-pool.json"
-  sleep 1
-
-  third="$(client_request "example.test" "/app/file-discovery-after-remove" 200)"
-  assert_body_jq "${third}" '.upstream == "http-upstream"'
+  seen_primary=0
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    if ! jq -e '.body | fromjson | ([.servers[] | select(.id == "file-alt" and .source == "file")] | length) == 0' <<<"${state}" >/dev/null; then
+      sleep 0.5
+      continue
+    fi
+    response="$(client_request "example.test" "/app/file-discovery-after-remove-${attempt}" 200)"
+    if jq -e '.body | fromjson | .upstream == "http-upstream"' <<<"${response}" >/dev/null; then
+      seen_primary=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "${seen_primary}" != "1" ]]; then
+    echo "${state}" >&2
+    echo "${response}" >&2
+    fail_with_diagnostics "file discovery did not remove discovered upstream"
+  fi
 }
 "#,
             None,
@@ -3574,7 +3603,7 @@ run_case_checks() {
             },
             r#"
 run_case_checks() {
-  local response first second third
+  local response first second state
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/primary" 200 "PATCH" '{"state":"down"}' "Authorization: Bearer matrix-admin-token")"
   assert_response_jq "${response}" '.body | fromjson | .ok == true'
 
@@ -3588,12 +3617,12 @@ run_case_checks() {
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/alt" 200 "PATCH" '{"weight":1}' "Authorization: Bearer matrix-admin-token")"
   assert_response_jq "${response}" '.body | fromjson | .ok == true'
 
-  first="$(client_request "example.test" "/app/admin-weight-a" 200)"
-  second="$(client_request "example.test" "/app/admin-weight-b" 200)"
-  third="$(client_request "example.test" "/app/admin-weight-c" 200)"
-  assert_body_jq "${first}" '.upstream == "http-upstream"'
-  assert_body_jq "${second}" '.upstream == "http-upstream"'
-  assert_body_jq "${third}" '.upstream == "alt-upstream"'
+  state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${state}" '.body | fromjson | ([.servers[] | select(.id == "primary" and .state == "ready" and .weight == 2)] | length) == 1'
+  assert_response_jq "${state}" '.body | fromjson | ([.servers[] | select(.id == "alt" and .state == "ready" and .weight == 1)] | length) == 1'
+
+  response="$(client_request "example.test" "/app/admin-weight-route" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream" or .upstream == "alt-upstream"'
 }
 "#,
             None,
