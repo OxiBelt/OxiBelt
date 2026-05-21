@@ -3374,8 +3374,8 @@ run_case_checks() {
         ),
         docker_case(
             "upstream-pools",
-            "round-robin",
-            "routes can select upstream pools with round-robin balancing",
+            "power-of-two-choices",
+            "routes can select upstream pools with power-of-two-choices balancing",
             ExpectStart::Success,
             Needs {
                 http_upstream: true,
@@ -3387,8 +3387,8 @@ run_case_checks() {
   local first second
   first="$(client_request "example.test" "/app/pool-a" 200)"
   second="$(client_request "example.test" "/app/pool-b" 200)"
-  assert_body_jq "${first}" '.upstream == "http-upstream"'
-  assert_body_jq "${second}" '.upstream == "alt-upstream"'
+  assert_body_jq "${first}" '.upstream == "http-upstream" or .upstream == "alt-upstream"'
+  assert_body_jq "${second}" '.upstream == "http-upstream" or .upstream == "alt-upstream"'
 }
 "#,
             None,
@@ -4871,6 +4871,15 @@ run_case_checks() {
             Needs::default(),
             "",
             Some("header_equals is not supported because request headers are client-controlled"),
+        ),
+        docker_case(
+            "config-invalid",
+            "legacy-load-balancing-algorithm",
+            "legacy upstream pool load-balancing algorithms are rejected",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some("round_robin"),
         ),
         docker_case(
             "proxy-routing",

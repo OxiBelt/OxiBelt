@@ -659,12 +659,12 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 
 #[[upstream_pools]]
 # name = "app-pool"
-# algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash | sticky_cookie
+# algorithm = "power_of_two_choices" # power_of_two_choices | weighted_least_conn | rendezvous_hash | rendezvous_ip_hash | ewma | least_time | sticky_cookie
 #
 #[upstream_pools.sticky_cookie]
 # cookie_name = "oxibelt_sticky"
 # ttl_seconds = 3600
-# fallback_algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash
+# fallback_algorithm = "power_of_two_choices" # power_of_two_choices | weighted_least_conn | rendezvous_hash | rendezvous_ip_hash | ewma | least_time
 # secret_env = "OXIBELT_STICKY_COOKIE_SECRET"
 # secure = true
 # http_only = true
@@ -719,7 +719,7 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 
 #[[turn_upstream_pools]]
 # name = "turn-udp"
-# algorithm = "round_robin"
+# algorithm = "power_of_two_choices" # power_of_two_choices | weighted_least_conn | rendezvous_hash | rendezvous_ip_hash
 #
 #[[turn_upstream_pools.servers]]
 # id = "turn-udp-1"
@@ -731,7 +731,7 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 #
 #[[turn_upstream_pools]]
 # name = "turn-tcp"
-# algorithm = "round_robin"
+# algorithm = "power_of_two_choices"
 #
 #[[turn_upstream_pools.servers]]
 # id = "turn-tcp-1"
@@ -740,7 +740,7 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 #
 #[[turn_upstream_pools]]
 # name = "turn-tls"
-# algorithm = "round_robin"
+# algorithm = "power_of_two_choices"
 #
 #[[turn_upstream_pools.servers]]
 # id = "turn-tls-1"

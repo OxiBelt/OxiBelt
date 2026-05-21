@@ -47,7 +47,7 @@ when = "Request.Headers.get('X-Use-Pool') == 'yes'"
 
 [[waf.rules.actions]]
 type = "set_load_balancing_policy"
-policy = "least_conn"
+policy = "weighted_least_conn"
 
 [[waf.rules.actions]]
 type = "route_to_pool"
@@ -66,7 +66,7 @@ webtransport = true
 
 [[upstream_pools]]
 name = "canary-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 origin = "http://mock-alt:18081/alt"

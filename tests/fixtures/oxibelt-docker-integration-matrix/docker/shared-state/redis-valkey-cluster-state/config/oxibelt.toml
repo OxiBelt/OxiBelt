@@ -124,7 +124,7 @@ webtransport = true
 
 [[upstream_pools]]
 name = "shared-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [upstream_pools.health_check]
 enabled = true

@@ -9,10 +9,10 @@ use oxibelt::config::{
     Config, ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode,
     DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
     ExpectContinueMode, ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode,
-    GrpcRetryMode, HotReloadMode, MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode,
-    ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition,
-    RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
-    TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    GrpcRetryMode, HotReloadMode, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy,
+    OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
+    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol,
+    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
     UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
     UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
@@ -59,6 +59,163 @@ fn protocol_operations_defaults_are_disabled() {
     assert!(config.stream_listeners.is_empty());
     assert!(!config.sni_forward.enabled);
     assert!(config.sni_forward.rules.is_empty());
+}
+
+#[test]
+fn upstream_pool_default_algorithm_is_power_of_two_choices() {
+    let temp_dir = common::TempDir::new("pool-default-algorithm");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "pool-default-algorithm");
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(
+        config.upstream_pools[0].algorithm,
+        LoadBalancingAlgorithm::PowerOfTwoChoices
+    );
+}
+
+#[test]
+fn legacy_upstream_pool_algorithms_are_rejected_without_aliases() {
+    let temp_dir = common::TempDir::new("legacy-pool-algorithm");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "legacy-pool-algorithm");
+
+    for algorithm in [
+        "round_robin",
+        "least_conn",
+        "least_connections",
+        "random",
+        "hash",
+        "ip_hash",
+    ] {
+        let raw = format!(
+            r#"
+{}
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "{algorithm}"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+"#,
+            common::minimal_config_toml(&cert_path, &key_path)
+        );
+        toml::from_str::<Config>(&raw)
+            .expect_err("legacy upstream pool algorithm should not parse");
+    }
+}
+
+#[test]
+fn legacy_sticky_cookie_fallback_algorithms_are_rejected_without_aliases() {
+    let temp_dir = common::TempDir::new("legacy-sticky-fallback");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "legacy-sticky-fallback");
+
+    for fallback_algorithm in [
+        "round_robin",
+        "least_conn",
+        "least_connections",
+        "random",
+        "hash",
+        "ip_hash",
+    ] {
+        let raw = format!(
+            r#"
+{}
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "sticky_cookie"
+
+[upstream_pools.sticky_cookie]
+fallback_algorithm = "{fallback_algorithm}"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+"#,
+            common::minimal_config_toml(&cert_path, &key_path)
+        );
+        toml::from_str::<Config>(&raw)
+            .expect_err("legacy sticky fallback algorithm should not parse");
+    }
+}
+
+#[test]
+fn turn_pool_default_algorithm_is_power_of_two_choices() {
+    let temp_dir = common::TempDir::new("turn-default-algorithm");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-default-algorithm");
+    let raw = format!(
+        r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-udp"
+
+[[turn_upstream_pools.servers]]
+id = "turn-a"
+origin = "turn://turn.internal.example:3478"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(
+        config.turn_upstream_pools[0].algorithm,
+        LoadBalancingAlgorithm::PowerOfTwoChoices
+    );
+}
+
+#[test]
+fn turn_pool_rejects_http_only_algorithms() {
+    let temp_dir = common::TempDir::new("turn-http-only-algorithm");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-http-only-algorithm");
+
+    for algorithm in ["ewma", "least_time", "sticky_cookie"] {
+        let raw = format!(
+            r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-udp"
+algorithm = "{algorithm}"
+
+[[turn_upstream_pools.servers]]
+id = "turn-a"
+origin = "turn://turn.internal.example:3478"
+"#,
+            common::minimal_config_toml(&cert_path, &key_path)
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("HTTP-only TURN algorithm should fail validation");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported load-balancing algorithm"),
+            "unexpected error for {algorithm}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -3020,7 +3177,7 @@ fn upstream_pool_discovery_config_parses_dns_and_file_providers() {
 
 [[upstream_pools]]
 name = "dynamic-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 id = "static-a"
@@ -3093,7 +3250,7 @@ algorithm = "sticky_cookie"
 [upstream_pools.sticky_cookie]
 cookie_name = "oxibelt_affinity"
 ttl_seconds = 60
-fallback_algorithm = "round_robin"
+fallback_algorithm = "power_of_two_choices"
 same_site = "strict"
 
 [[upstream_pools.servers]]
@@ -3156,7 +3313,7 @@ fn upstream_pool_discovery_rejects_bad_values() {
 
 [[upstream_pools]]
 name = "dynamic-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.discovery]]
 provider = "consul"
@@ -3903,7 +4060,7 @@ fn webrtc_turn_proxy_pool_listener_validates() {
 
 [[turn_upstream_pools]]
 name = "turn-udp"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[turn_upstream_pools.servers]]
 id = "turn-a"
@@ -3912,7 +4069,7 @@ weight = 1
 
 [[turn_upstream_pools]]
 name = "turn-tcp"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[turn_upstream_pools.servers]]
 id = "turn-tcp-a"
@@ -3921,7 +4078,7 @@ weight = 1
 
 [[turn_upstream_pools]]
 name = "turn-tls"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[turn_upstream_pools.servers]]
 id = "turn-tls-a"
@@ -5814,7 +5971,7 @@ mode = "disabled"
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 origin = "http://app-a.example/origin"

@@ -1601,7 +1601,13 @@ where
     }
   };
   if report_pool_success {
-    state.pools.report_success(&upstream.name);
+    if let Some(latency_ms) = access_log.upstream_first_byte_time_ms {
+      state
+        .pools
+        .report_success_latency(&upstream.name, latency_ms);
+    } else {
+      state.pools.report_success(&upstream.name);
+    }
   }
   drop(pool_selection);
 

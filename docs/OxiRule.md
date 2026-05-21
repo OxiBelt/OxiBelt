@@ -440,10 +440,10 @@ upstream = "api-primary"
 ```toml
 [[waf.rules.actions]]
 type = "set_load_balancing_policy"
-policy = "least_conn"
+policy = "weighted_least_conn"
 ```
 
-Supported load-balancing policies are `round_robin`, `least_conn`, `least_connections`, `random`, `hash`, and `ip_hash`.
+Supported load-balancing policies are `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, `rendezvous_ip_hash`, `ewma`, and `least_time`. `sticky_cookie` is configured on the upstream pool itself, not through WAF policy overrides. Legacy policy names such as `round_robin`, `least_conn`, `least_connections`, `random`, `hash`, and `ip_hash` are rejected.
 
 Header mutation actions:
 

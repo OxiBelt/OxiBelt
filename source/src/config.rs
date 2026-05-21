@@ -733,12 +733,6 @@ impl Config {
       if !pool_names.insert(pool.name.clone()) {
         bail!("duplicate upstream pool name: {}", pool.name);
       }
-      if matches!(pool.algorithm, LoadBalancingAlgorithm::Hash) && pool.hash_key.is_none() {
-        bail!(
-          "upstream pool {} requires hash_key when algorithm = \"hash\"",
-          pool.name
-        );
-      }
       if pool.algorithm == LoadBalancingAlgorithm::StickyCookie {
         upstream_pool::validate_sticky_cookie_pool(pool)?;
       }
@@ -5128,11 +5122,12 @@ impl DiscoveryUpstreamScheme {
 #[serde(rename_all = "snake_case")]
 pub enum LoadBalancingAlgorithm {
   #[default]
-  RoundRobin,
-  LeastConn,
-  Random,
-  Hash,
-  IpHash,
+  PowerOfTwoChoices,
+  WeightedLeastConn,
+  RendezvousHash,
+  RendezvousIpHash,
+  Ewma,
+  LeastTime,
   StickyCookie,
 }
 

@@ -1116,7 +1116,12 @@ fn validate_actions(
         require_phase(rule, WafPhase::Request, "set_load_balancing_policy")?;
         if !matches!(
           policy.as_str(),
-          "round_robin" | "least_conn" | "least_connections" | "random" | "hash" | "ip_hash"
+          "power_of_two_choices"
+            | "weighted_least_conn"
+            | "rendezvous_hash"
+            | "rendezvous_ip_hash"
+            | "ewma"
+            | "least_time"
         ) {
           bail!(
             "WAF rule {} set_load_balancing_policy uses unsupported policy {}",

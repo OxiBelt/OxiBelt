@@ -78,7 +78,7 @@ mode = "disabled"
 
 [[upstream_pools]]
 name = "general-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 origin = "http://mock-http:18080/origin"

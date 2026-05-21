@@ -538,7 +538,7 @@ pool = "api-v1-pool"
 
 ```toml
 [[waf.rules]]
-name = "low-priority-least-conn"
+name = "low-priority-weighted-least-conn"
 tags = ["routing", "load-balancing"]
 phase = "request"
 priority = 520
@@ -546,7 +546,7 @@ when = "Request.Headers.get('X-Priority') == 'low'"
 
 [[waf.rules.actions]]
 type = "set_load_balancing_policy"
-policy = "least_conn"
+policy = "weighted_least_conn"
 ```
 
 ## Person Proof Policy

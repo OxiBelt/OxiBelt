@@ -48,21 +48,23 @@ impl Default for UpstreamPoolStickyCookieConfig {
 #[serde(rename_all = "snake_case")]
 pub enum StickyCookieFallbackAlgorithm {
   #[default]
-  RoundRobin,
-  LeastConn,
-  Random,
-  Hash,
-  IpHash,
+  PowerOfTwoChoices,
+  WeightedLeastConn,
+  RendezvousHash,
+  RendezvousIpHash,
+  Ewma,
+  LeastTime,
 }
 
 impl From<StickyCookieFallbackAlgorithm> for LoadBalancingAlgorithm {
   fn from(value: StickyCookieFallbackAlgorithm) -> Self {
     match value {
-      StickyCookieFallbackAlgorithm::RoundRobin => Self::RoundRobin,
-      StickyCookieFallbackAlgorithm::LeastConn => Self::LeastConn,
-      StickyCookieFallbackAlgorithm::Random => Self::Random,
-      StickyCookieFallbackAlgorithm::Hash => Self::Hash,
-      StickyCookieFallbackAlgorithm::IpHash => Self::IpHash,
+      StickyCookieFallbackAlgorithm::PowerOfTwoChoices => Self::PowerOfTwoChoices,
+      StickyCookieFallbackAlgorithm::WeightedLeastConn => Self::WeightedLeastConn,
+      StickyCookieFallbackAlgorithm::RendezvousHash => Self::RendezvousHash,
+      StickyCookieFallbackAlgorithm::RendezvousIpHash => Self::RendezvousIpHash,
+      StickyCookieFallbackAlgorithm::Ewma => Self::Ewma,
+      StickyCookieFallbackAlgorithm::LeastTime => Self::LeastTime,
     }
   }
 }
@@ -256,12 +258,6 @@ pub(super) fn validate_sticky_cookie_pool(pool: &UpstreamPoolConfig) -> anyhow::
   if !cookie.path.starts_with('/') {
     bail!(
       "upstream pool {} sticky_cookie.path must start with '/'",
-      pool.name
-    );
-  }
-  if cookie.fallback_algorithm == StickyCookieFallbackAlgorithm::Hash && pool.hash_key.is_none() {
-    bail!(
-      "upstream pool {} requires hash_key when sticky_cookie.fallback_algorithm = \"hash\"",
       pool.name
     );
   }

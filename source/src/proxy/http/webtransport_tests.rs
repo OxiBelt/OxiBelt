@@ -129,7 +129,7 @@ mode = "disabled"
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 origin = "https://app-a.example/origin"

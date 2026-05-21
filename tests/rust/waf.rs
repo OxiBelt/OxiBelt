@@ -571,6 +571,78 @@ fields = [
 }
 
 #[test]
+fn set_load_balancing_policy_accepts_only_new_non_sticky_algorithms() {
+    let temp_dir = common::TempDir::new("waf-lb-policy");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-lb-policy");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for policy in [
+        "power_of_two_choices",
+        "weighted_least_conn",
+        "rendezvous_hash",
+        "rendezvous_ip_hash",
+        "ewma",
+        "least_time",
+    ] {
+        let raw = format!(
+            r#"{base}
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "lb-policy"
+phase = "request"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "set_load_balancing_policy"
+policy = "{policy}"
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        config.validate().expect("new policy should validate");
+    }
+
+    for policy in [
+        "round_robin",
+        "least_conn",
+        "least_connections",
+        "random",
+        "hash",
+        "ip_hash",
+        "sticky_cookie",
+    ] {
+        let raw = format!(
+            r#"{base}
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "lb-policy"
+phase = "request"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "set_load_balancing_policy"
+policy = "{policy}"
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("unsupported load-balancing policy should fail");
+        assert!(
+            error.to_string().contains("unsupported policy"),
+            "unexpected error for {policy}: {error}"
+        );
+    }
+}
+
+#[test]
 fn external_rule_files_cannot_define_udfs() {
     let temp_dir = common::TempDir::new("external-rule-udf-reject");
     let config_dir = temp_dir.path().join("config");

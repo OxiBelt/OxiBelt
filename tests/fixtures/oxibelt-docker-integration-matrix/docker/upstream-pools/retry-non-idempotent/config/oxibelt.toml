@@ -41,7 +41,7 @@ on = ["503"]
 
 [[upstream_pools]]
 name = "default-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 id = "bad"
@@ -53,7 +53,7 @@ origin = "http://mock-alt:18081/alt"
 
 [[upstream_pools]]
 name = "retry-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 id = "bad"

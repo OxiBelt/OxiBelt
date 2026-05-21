@@ -36,7 +36,7 @@ max_http_version = "h2"
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 origin = "http://mock-http:18080/origin"

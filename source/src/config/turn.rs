@@ -27,16 +27,16 @@ impl Config {
       if names.contains_key(&pool.name) {
         bail!("duplicate TURN upstream pool name: {}", pool.name);
       }
-      if pool.algorithm == LoadBalancingAlgorithm::StickyCookie {
+      if matches!(
+        pool.algorithm,
+        LoadBalancingAlgorithm::Ewma
+          | LoadBalancingAlgorithm::LeastTime
+          | LoadBalancingAlgorithm::StickyCookie
+      ) {
         bail!(
-          "TURN upstream pool {} uses sticky_cookie, but sticky sessions are reserved and not implemented yet",
-          pool.name
-        );
-      }
-      if matches!(pool.algorithm, LoadBalancingAlgorithm::Hash) && pool.hash_key.is_none() {
-        bail!(
-          "TURN upstream pool {} requires hash_key when algorithm = \"hash\"",
-          pool.name
+          "TURN upstream pool {} uses unsupported load-balancing algorithm {:?}",
+          pool.name,
+          pool.algorithm
         );
       }
       if pool.servers.is_empty() {

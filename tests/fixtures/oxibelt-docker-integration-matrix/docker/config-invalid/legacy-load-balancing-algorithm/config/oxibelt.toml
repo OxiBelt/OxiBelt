@@ -8,12 +8,12 @@ memory_only_state = true
 unprivileged_mode = true
 worker_threads = "auto"
 
-
 [runtime.accept]
 workers = "auto"
 reuse_port = true
 backlog = 8192
 accept_error_backoff_ms = 10
+
 [listeners]
 https_bind = "0.0.0.0:8443"
 http1 = true
@@ -36,16 +36,10 @@ max_http_version = "h2"
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "power_of_two_choices"
+algorithm = "round_robin"
 
 [[upstream_pools.servers]]
-id = "primary"
 origin = "http://mock-http:18080/origin"
-
-[[upstream_pools.discovery]]
-provider = "file"
-file = "discovery/app-pool.json"
-refresh_interval_ms = 500
 
 [[routes]]
 name = "main-route"

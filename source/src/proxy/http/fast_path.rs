@@ -281,7 +281,13 @@ impl PlainProxyFastPath {
       }
     };
     if report_pool_success {
-      state.pools.report_success(&upstream.name);
+      let latency_ms = upstream_started_at
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+      state
+        .pools
+        .report_success_latency(&upstream.name, latency_ms);
     }
 
     let upstream_first_byte_time_ms = upstream_started_at

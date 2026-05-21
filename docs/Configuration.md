@@ -1329,13 +1329,12 @@ Before forwarding upstream, OxiBelt strips configured `identity_headers` from th
 ```toml
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash | sticky_cookie
-# hash_key = "Request.Http.Path"
+algorithm = "power_of_two_choices" # power_of_two_choices | weighted_least_conn | rendezvous_hash | rendezvous_ip_hash | ewma | least_time | sticky_cookie
 
 [upstream_pools.sticky_cookie]
 cookie_name = "oxibelt_sticky"
 ttl_seconds = 3600
-fallback_algorithm = "round_robin" # round_robin | least_conn | random | hash | ip_hash
+fallback_algorithm = "power_of_two_choices" # power_of_two_choices | weighted_least_conn | rendezvous_hash | rendezvous_ip_hash | ewma | least_time
 secret_env = "OXIBELT_STICKY_COOKIE_SECRET"
 secure = true
 http_only = true
@@ -1409,7 +1408,7 @@ grpc_service = ""
 grpc_expected_statuses = ["SERVING"]
 ```
 
-Pool names and upstream names are separate namespaces. `algorithm = "hash"` requires `hash_key`. `algorithm = "sticky_cookie"` selects an upstream by a signed affinity cookie when present, otherwise it uses `sticky_cookie.fallback_algorithm` and emits `Set-Cookie`. `fallback_algorithm = "hash"` also requires `hash_key`. The cookie HMAC secret comes from `sticky_cookie.secret_env` when set, from `[shared_state].sticky_sessions_backend` when configured, or from a process-local generated secret. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
+Pool names and upstream names are separate namespaces. `algorithm` defaults to `power_of_two_choices`. HTTP pools support `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, `rendezvous_ip_hash`, `ewma`, `least_time`, and `sticky_cookie`. `algorithm = "sticky_cookie"` selects an upstream by a signed affinity cookie when present, otherwise it uses `sticky_cookie.fallback_algorithm` and emits `Set-Cookie`; the fallback must be one of the non-sticky modern algorithms. Legacy names such as `round_robin`, `least_conn`, `random`, `hash`, and `ip_hash` are rejected during parsing or validation and must be migrated explicitly. The cookie HMAC secret comes from `sticky_cookie.secret_env` when set, from `[shared_state].sticky_sessions_backend` when configured, or from a process-local generated secret. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
 
 Pool server `state` controls new request selection. `ready` accepts traffic. `drain`, `down`, and `maintenance` stop new selection while already selected in-flight requests finish naturally.
 
@@ -1527,7 +1526,7 @@ Stream listeners proxy raw TCP from a dedicated bind address to a single `host:p
 ```toml
 [[turn_upstream_pools]]
 name = "turn-udp"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[turn_upstream_pools.servers]]
 id = "turn-a"
@@ -1536,7 +1535,7 @@ weight = 1
 
 [[turn_upstream_pools]]
 name = "turn-tcp"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[turn_upstream_pools.servers]]
 id = "turn-tcp-a"
@@ -1545,7 +1544,7 @@ weight = 1
 
 [[turn_upstream_pools]]
 name = "turn-tls"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[turn_upstream_pools.servers]]
 id = "turn-tls-a"
@@ -1569,7 +1568,7 @@ mode = "validate" # pass_through | validate | enforce
 rest_shared_secret_env = "OXIBELT_TURN_REST_SECRET"
 ```
 
-`mode = "proxy_pool"` forwards TURN UDP, TCP, and TLS traffic to `[[turn_upstream_pools]]`. Upstream servers use `turn://`, `turn+tcp://`, or `turns://` origins and advertise their own relay addresses. Listener pool fields are transport-specific: `udp_pool` must reference `turn://` servers, `tcp_pool` must reference `turn+tcp://` servers, and `tls_pool` must reference `turns://` servers. `auth.mode = "validate"` checks authenticated TURN messages when credentials are present, but lets the upstream TURN server issue nonce challenges and remain authoritative.
+`mode = "proxy_pool"` forwards TURN UDP, TCP, and TLS traffic to `[[turn_upstream_pools]]`. Upstream servers use `turn://`, `turn+tcp://`, or `turns://` origins and advertise their own relay addresses. TURN pools default to `power_of_two_choices` and support `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, and `rendezvous_ip_hash`; HTTP-only algorithms `ewma`, `least_time`, and `sticky_cookie` are rejected. Listener pool fields are transport-specific: `udp_pool` must reference `turn://` servers, `tcp_pool` must reference `turn+tcp://` servers, and `tls_pool` must reference `turns://` servers. `auth.mode = "validate"` checks authenticated TURN messages when credentials are present, but lets the upstream TURN server issue nonce challenges and remain authoritative.
 
 ```toml
 [[webrtc_turn_listeners]]

@@ -370,7 +370,7 @@ async fn safe_upstream_pool_route_keeps_h2_plain_proxy_fast_path() {
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 origin = "https://app.internal.example"

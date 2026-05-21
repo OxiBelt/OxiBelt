@@ -50,7 +50,7 @@ plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.1
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [upstream_pools.health_check]
 enabled = true

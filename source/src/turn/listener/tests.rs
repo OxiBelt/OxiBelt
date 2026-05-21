@@ -63,7 +63,7 @@ async fn udp_proxy_session(
 fn turn_pool_selection() -> TurnPoolSelection {
   let pools = TurnPoolState::new(&[TurnUpstreamPoolConfig {
     name: "turn-udp".to_string(),
-    algorithm: LoadBalancingAlgorithm::RoundRobin,
+    algorithm: LoadBalancingAlgorithm::PowerOfTwoChoices,
     hash_key: None,
     servers: vec![TurnUpstreamPoolServerConfig {
       id: Some("turn-a".to_string()),

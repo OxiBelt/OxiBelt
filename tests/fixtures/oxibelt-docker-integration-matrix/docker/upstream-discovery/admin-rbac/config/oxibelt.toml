@@ -53,7 +53,7 @@ roles = ["upstream_operator"]
 
 [[upstream_pools]]
 name = "app-pool"
-algorithm = "round_robin"
+algorithm = "power_of_two_choices"
 
 [[upstream_pools.servers]]
 id = "primary"
