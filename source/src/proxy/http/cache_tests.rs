@@ -285,3 +285,78 @@ stream_large_objects = true
     other => panic!("expected fresh cache hit, got {other:?}"),
   }
 }
+
+#[tokio::test]
+async fn cache_fill_preserves_single_chunk_bytes_without_copy() {
+  let temp_dir = common::TempDir::new("cache-fill-single-chunk");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "cache-fill-single-chunk");
+  let raw = format!(
+    r#"
+{}
+
+[proxy.buffering]
+max_memory_body_bytes = 128
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1024
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+respect_cache_control = true
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  let method = Method::GET;
+  let uri: http::Uri = "/single-chunk?item=1".parse().expect("URI should parse");
+  let request_headers = HeaderMap::new();
+  let body = bytes::Bytes::from(vec![b'S'; 32]);
+  let body_ptr = body.as_ptr();
+  let mut response = Response::new(full_body(body.clone()));
+  response.headers_mut().insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+  response
+    .headers_mut()
+    .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+
+  let response = maybe_cache_response(
+    response,
+    &state,
+    Some("default"),
+    "https",
+    "example.com",
+    &method,
+    &uri,
+    &request_headers,
+  )
+  .await;
+
+  let delivered = response
+    .into_body()
+    .collect()
+    .await
+    .expect("response body should collect")
+    .to_bytes();
+  assert_eq!(delivered, body);
+  assert_eq!(delivered.as_ptr(), body_ptr);
+  match state.cache.lookup(crate::cache::CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.com",
+    method: &method,
+    uri: &uri,
+    request_headers: &request_headers,
+  }) {
+    Some(crate::cache::CacheLookup::Fresh(entry)) => {
+      assert_eq!(entry.body, body);
+      assert_eq!(entry.body.as_ptr(), body_ptr);
+    }
+    other => panic!("expected fresh cache hit, got {other:?}"),
+  }
+}

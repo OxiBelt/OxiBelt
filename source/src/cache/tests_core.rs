@@ -374,6 +374,42 @@ async fn fill_waiter_times_out_without_leader_drop() {
 }
 
 #[test]
+fn not_stored_fill_suppression_skips_short_lived_locks() {
+  let config = CacheConfig {
+    enabled: true,
+    ..CacheConfig::default()
+  };
+  let cache = ResponseCache::new(&config, None).unwrap();
+  let uri = "/asset/no-store.css".parse::<Uri>().unwrap();
+  let headers = HeaderMap::new();
+  let insert_ctx = CacheInsertContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &headers,
+  };
+  let lookup_ctx = CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &headers,
+  };
+
+  cache.note_fill_not_stored(insert_ctx.clone());
+  assert!(cache.begin_fill(lookup_ctx.clone()).is_none());
+
+  std::thread::sleep(FILL_NOT_STORED_SUPPRESSION_TTL + Duration::from_millis(25));
+  match cache.begin_fill(lookup_ctx).unwrap() {
+    CacheFillPermit::Leader(_) => {}
+    other => panic!("expected fill suppression to expire, got {other:?}"),
+  }
+}
+
+#[test]
 fn cache_tag_purge_removes_matching_entries_only() {
   let config = CacheConfig {
     enabled: true,

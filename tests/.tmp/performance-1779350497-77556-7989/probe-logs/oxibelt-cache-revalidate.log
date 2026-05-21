@@ -1,0 +1,3 @@
+Command: perf-probe load --label oxibelt-cache-revalidate --protocol h2 --host oxibelt --port 8443 --server-name proxy --authority example.test --path /perf/cache-revalidate\?body_repeat=4096\&cache_control=public-max-age-1\&etag=perf --ca-cert /tls/proxy-ca.pem --duration-seconds 30 --warmup-seconds 5 --concurrency 64 --expect-status 200
+
+{"concurrency":64,"duration_seconds":30,"error_samples":[],"errors":0,"label":"oxibelt-cache-revalidate","p50_ms":2.337,"p95_ms":3.891,"p99_ms":4.691,"protocol":"h2","requests":801543,"rps":26718.1,"statuses":{"200":801543},"type":"load","unique_query_param":null,"warmup_seconds":5}

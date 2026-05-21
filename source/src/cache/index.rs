@@ -30,25 +30,55 @@ impl LookupKey {
   }
 }
 
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub(crate) struct VariantGroupKey {
+  policy: String,
+  partition: String,
+  base_key: String,
+}
+
+impl VariantGroupKey {
+  pub(crate) fn new(policy: &str, partition: &str, base_key: &str) -> Self {
+    Self {
+      policy: policy.to_string(),
+      partition: partition.to_string(),
+      base_key: base_key.to_string(),
+    }
+  }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct CacheIndex {
   variants_by_lookup: HashMap<LookupKey, HashSet<String>>,
+  variant_counts_by_group: HashMap<VariantGroupKey, usize>,
 }
 
 impl CacheIndex {
   pub(crate) fn insert(&mut self, lookup: LookupKey, variant_key: &str) {
-    self
+    let group = lookup.group_key();
+    let inserted = self
       .variants_by_lookup
       .entry(lookup)
       .or_default()
       .insert(variant_key.to_string());
+    if inserted {
+      *self.variant_counts_by_group.entry(group).or_default() += 1;
+    }
   }
 
   pub(crate) fn remove(&mut self, lookup: &LookupKey, variant_key: &str) {
+    let group = lookup.group_key();
     let Some(variants) = self.variants_by_lookup.get_mut(lookup) else {
       return;
     };
-    variants.remove(variant_key);
+    if variants.remove(variant_key)
+      && let Some(count) = self.variant_counts_by_group.get_mut(&group)
+    {
+      *count = count.saturating_sub(1);
+      if *count == 0 {
+        self.variant_counts_by_group.remove(&group);
+      }
+    }
     if variants.is_empty() {
       self.variants_by_lookup.remove(lookup);
     }
@@ -61,7 +91,22 @@ impl CacheIndex {
       .map(|variants| variants.iter().cloned().collect())
   }
 
+  pub(crate) fn variant_count(&self, group: &VariantGroupKey) -> usize {
+    self
+      .variant_counts_by_group
+      .get(group)
+      .copied()
+      .unwrap_or(0)
+  }
+
   pub(crate) fn clear(&mut self) {
     self.variants_by_lookup.clear();
+    self.variant_counts_by_group.clear();
+  }
+}
+
+impl LookupKey {
+  fn group_key(&self) -> VariantGroupKey {
+    VariantGroupKey::new(&self.policy, &self.partition, &self.base_key)
   }
 }

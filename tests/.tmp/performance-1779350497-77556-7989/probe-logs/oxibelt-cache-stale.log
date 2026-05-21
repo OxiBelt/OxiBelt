@@ -1,0 +1,3 @@
+Command: perf-probe load --label oxibelt-cache-stale --protocol h2 --host oxibelt --port 8443 --server-name proxy --authority example.test --path /perf/cache-stale\?body_repeat=4096\&cache_control=public-stale-revalidate --ca-cert /tls/proxy-ca.pem --duration-seconds 30 --warmup-seconds 5 --concurrency 64 --expect-status 200
+
+{"concurrency":64,"duration_seconds":30,"error_samples":[],"errors":0,"label":"oxibelt-cache-stale","p50_ms":2.119,"p95_ms":3.567,"p99_ms":4.331,"protocol":"h2","requests":881419,"rps":29380.633333333335,"statuses":{"200":881419},"type":"load","unique_query_param":null,"warmup_seconds":5}

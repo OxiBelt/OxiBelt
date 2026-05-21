@@ -3175,40 +3175,43 @@ async fn maybe_cache_response(
   }
   let (mut parts, body) = response.into_parts();
   let content_length = exact_response_content_length(&parts.headers);
-  match state.cache.response_head_decision(
-    crate::cache::CacheInsertContext {
-      policy_name: route_cache,
-      scheme,
-      host,
-      method,
-      uri,
-      request_headers,
-    },
-    parts.status,
-    &parts.headers,
-    content_length,
-  ) {
-    crate::cache::CacheResponseHeadDecision::Cacheable => {}
-    crate::cache::CacheResponseHeadDecision::Rejected => {
-      state.metrics.record_cache_admission_rejection();
-      if state.cache.strip_surrogate_control(route_cache) {
-        parts.headers.remove("surrogate-control");
+  let insert_ctx = || crate::cache::CacheInsertContext {
+    policy_name: route_cache,
+    scheme,
+    host,
+    method,
+    uri,
+    request_headers,
+  };
+  let prepared =
+    match state
+      .cache
+      .prepare_insert(insert_ctx(), parts.status, &parts.headers, content_length)
+    {
+      crate::cache::CachePreparedInsertDecision::Cacheable(prepared) => prepared,
+      crate::cache::CachePreparedInsertDecision::Rejected => {
+        state.metrics.record_cache_admission_rejection();
+        state.cache.note_fill_not_stored(insert_ctx());
+        if state.cache.strip_surrogate_control(route_cache) {
+          parts.headers.remove("surrogate-control");
+        }
+        return Response::from_parts(parts, body);
       }
-      return Response::from_parts(parts, body);
-    }
-    crate::cache::CacheResponseHeadDecision::NotCacheable => {
-      if state.cache.strip_surrogate_control(route_cache) {
-        parts.headers.remove("surrogate-control");
+      crate::cache::CachePreparedInsertDecision::NotCacheable => {
+        state.cache.note_fill_not_stored(insert_ctx());
+        if state.cache.strip_surrogate_control(route_cache) {
+          parts.headers.remove("surrogate-control");
+        }
+        return Response::from_parts(parts, body);
       }
-      return Response::from_parts(parts, body);
-    }
-  }
+    };
   let collect_limit = cache_response_collect_limit(&state.config);
   if body
     .size_hint()
     .upper()
     .is_none_or(|upper| upper as usize > collect_limit)
   {
+    state.cache.note_fill_not_stored(insert_ctx());
     if state.cache.strip_surrogate_control(route_cache) {
       parts.headers.remove("surrogate-control");
     }
@@ -3216,33 +3219,29 @@ async fn maybe_cache_response(
   }
   match collect_cache_response_body(body, collect_limit).await {
     Ok(bytes) => {
-      let cache_headers = parts.headers.clone();
       if state.cache.strip_surrogate_control(route_cache) {
         parts.headers.remove("surrogate-control");
       }
-      match state.cache.insert(
-        crate::cache::CacheInsertContext {
-          policy_name: route_cache,
-          scheme,
-          host,
-          method,
-          uri,
-          request_headers,
-        },
+      match state.cache.insert_prepared(
+        *prepared,
         crate::cache::CacheEntry {
           status: parts.status,
-          headers: cache_headers,
+          headers: parts.headers.clone(),
           body: bytes.clone(),
         },
       ) {
         crate::cache::CacheInsertOutcome::Rejected => {
           state.metrics.record_cache_admission_rejection();
+          state.cache.note_fill_not_stored(insert_ctx());
         }
         crate::cache::CacheInsertOutcome::StoreFailed => {
           state.metrics.record_cache_fill_error();
+          state.cache.note_fill_not_stored(insert_ctx());
         }
-        crate::cache::CacheInsertOutcome::Stored
-        | crate::cache::CacheInsertOutcome::NotCacheable => {}
+        crate::cache::CacheInsertOutcome::NotCacheable => {
+          state.cache.note_fill_not_stored(insert_ctx());
+        }
+        crate::cache::CacheInsertOutcome::Stored => {}
       }
       let body_len = bytes.len();
       let mut response = Response::from_parts(parts, full_body(bytes));
@@ -3308,6 +3307,9 @@ async fn collect_cache_response_body(
     chunks.push(data);
   }
 
+  if chunks.len() == 1 {
+    return Ok(chunks.pop().unwrap_or_default());
+  }
   let mut bytes = bytes::BytesMut::with_capacity(total);
   for chunk in chunks {
     bytes.extend_from_slice(&chunk);

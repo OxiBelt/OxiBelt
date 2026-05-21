@@ -28,6 +28,8 @@ pub mod signing;
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
 const SURROGATE_CONTROL_HEADER: &str = "surrogate-control";
 const MAX_VARY_VALUE_BYTES: usize = 8_192;
+const FILL_NOT_STORED_SUPPRESSION_TTL: Duration = Duration::from_secs(1);
+const MAX_FILL_NOT_STORED_SUPPRESSIONS: usize = 8_192;
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
@@ -135,6 +137,13 @@ pub enum CacheResponseHeadDecision {
   Rejected,
 }
 
+#[derive(Debug)]
+pub(crate) enum CachePreparedInsertDecision {
+  Cacheable(Box<CachePreparedInsert>),
+  NotCacheable,
+  Rejected,
+}
+
 #[derive(Debug, Clone)]
 pub struct CacheInsertContext<'a> {
   pub policy_name: Option<&'a str>,
@@ -166,6 +175,21 @@ pub struct CacheKeyExplain {
   pub variant_key: Option<String>,
   pub vary_fields: Vec<String>,
   pub reasons: Vec<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CachePreparedInsert {
+  policy: CachePolicyRuntime,
+  partition: String,
+  base_key: String,
+  variant_key: String,
+  scheme: String,
+  host: String,
+  uri: String,
+  status: StatusCode,
+  stored_headers: HeaderMap,
+  metadata: ResponseMetadata,
+  header_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -226,6 +250,8 @@ struct CacheInner {
   entries: HashMap<String, StoredEntry>,
   index: index::CacheIndex,
   inflight: HashMap<String, Arc<Notify>>,
+  fill_not_stored_until: HashMap<String, SystemTime>,
+  fill_not_stored_order: VecDeque<String>,
   order: VecDeque<String>,
   purge_nonces: HashMap<String, SystemTime>,
   purge_nonce_order: VecDeque<String>,
@@ -564,6 +590,9 @@ impl ResponseCache {
       return None;
     }
     let key = self.fill_key(ctx)?;
+    if self.fill_recently_not_stored(&key) {
+      return None;
+    }
     let shared_lock = self
       .shared_state
       .as_ref()
@@ -578,6 +607,9 @@ impl ResponseCache {
       return Some(CacheFillPermit::SharedConflict);
     }
     let mut inner = self.inner.lock().expect("cache lock poisoned");
+    if fill_not_stored_suppressed(&mut inner, &key, SystemTime::now()) {
+      return None;
+    }
     if let Some(notify) = inner.inflight.get(&key) {
       return Some(CacheFillPermit::Follower(CacheFillWaiter {
         notify: notify.clone(),
@@ -593,82 +625,107 @@ impl ResponseCache {
     }))
   }
 
-  pub fn insert(&self, ctx: CacheInsertContext<'_>, entry: CacheEntry) -> CacheInsertOutcome {
+  pub fn note_fill_not_stored(&self, ctx: CacheInsertContext<'_>) {
+    if !self.config.lock {
+      return;
+    }
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
-      return CacheInsertOutcome::NotCacheable;
+      return;
     }
-    let Some(policy) = self.policy(ctx.policy_name).cloned() else {
-      return CacheInsertOutcome::NotCacheable;
-    };
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
-      return CacheInsertOutcome::NotCacheable;
+      return;
     }
-    let Some(metadata) = cache_metadata(
-      &self.config,
-      &policy,
+    let Some(key) = self.fill_key_parts(
+      ctx.policy_name,
+      ctx.scheme,
+      ctx.host,
+      ctx.method,
+      ctx.uri,
       ctx.request_headers,
-      entry.status,
-      &entry.headers,
     ) else {
-      return CacheInsertOutcome::NotCacheable;
+      return;
     };
-    let base_key = expanded_cache_key(
-      &policy.cache_key,
-      ctx.scheme,
-      ctx.host,
-      ctx.uri,
-      ctx.request_headers,
-    );
-    let partition = expanded_cache_key(
-      &policy.partition_key,
-      ctx.scheme,
-      ctx.host,
-      ctx.uri,
-      ctx.request_headers,
-    );
-    let variant_key = variant_key(&partition, &base_key, &metadata.vary);
-    let stored_headers = stored_response_headers(&entry.headers, &self.config);
-    let size = entry.body.len() + header_size(&stored_headers);
-    if size > self.config.max_size_bytes {
-      return CacheInsertOutcome::Rejected;
-    }
-
+    let now = SystemTime::now();
     let mut inner = self.inner.lock().expect("cache lock poisoned");
-    if variant_count_exceeded(&inner, &policy, &partition, &base_key, &variant_key) {
+    prune_fill_not_stored_suppressions(&mut inner, now);
+    if !inner.fill_not_stored_until.contains_key(&key) {
+      inner.fill_not_stored_order.push_back(key.clone());
+    }
+    inner
+      .fill_not_stored_until
+      .insert(key, now + FILL_NOT_STORED_SUPPRESSION_TTL);
+    while inner.fill_not_stored_until.len() > MAX_FILL_NOT_STORED_SUPPRESSIONS {
+      let Some(oldest) = inner.fill_not_stored_order.pop_front() else {
+        break;
+      };
+      inner.fill_not_stored_until.remove(&oldest);
+    }
+  }
+
+  pub fn insert(&self, ctx: CacheInsertContext<'_>, entry: CacheEntry) -> CacheInsertOutcome {
+    match self.prepare_insert(ctx, entry.status, &entry.headers, Some(entry.body.len())) {
+      CachePreparedInsertDecision::Cacheable(prepared) => self.insert_prepared(*prepared, entry),
+      CachePreparedInsertDecision::NotCacheable => CacheInsertOutcome::NotCacheable,
+      CachePreparedInsertDecision::Rejected => CacheInsertOutcome::Rejected,
+    }
+  }
+
+  pub(crate) fn insert_prepared(
+    &self,
+    prepared: CachePreparedInsert,
+    entry: CacheEntry,
+  ) -> CacheInsertOutcome {
+    let size = match entry.body.len().checked_add(prepared.header_bytes) {
+      Some(size) if size <= self.config.max_size_bytes => size,
+      _ => return CacheInsertOutcome::Rejected,
+    };
+    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    if variant_count_exceeded(
+      &inner,
+      &prepared.policy,
+      &prepared.partition,
+      &prepared.base_key,
+      &prepared.variant_key,
+    ) {
       return CacheInsertOutcome::Rejected;
     }
-    if !admit_entry(&mut inner, &policy, &variant_key, &entry) {
+    if !admit_prepared_body(
+      &mut inner,
+      &prepared.policy,
+      &prepared.variant_key,
+      entry.body.len(),
+    ) {
       return CacheInsertOutcome::Rejected;
     }
-    remove_entry(&mut inner, &variant_key);
-    let selected_store = select_store(&policy, &entry.headers);
+    remove_entry(&mut inner, &prepared.variant_key);
+    let selected_store = select_store(&prepared.policy, &entry.headers);
     let Some(body) = self.store_body(
       &mut inner,
-      &policy,
+      &prepared.policy,
       selected_store,
-      &variant_key,
+      &prepared.variant_key,
       &entry.body,
       size,
     ) else {
       return CacheInsertOutcome::StoreFailed;
     };
-    let tags = extract_tags(&entry.headers, &policy);
+    let tags = extract_tags(&entry.headers, &prepared.policy);
     let stored = StoredEntry {
-      policy: policy.name.clone(),
-      partition,
-      base_key,
-      variant_key: variant_key.clone(),
-      scheme: ctx.scheme.to_string(),
-      host: ctx.host.to_string(),
-      uri: ctx.uri.to_string(),
-      status: entry.status,
-      headers: stored_headers,
+      policy: prepared.policy.name.clone(),
+      partition: prepared.partition,
+      base_key: prepared.base_key,
+      variant_key: prepared.variant_key.clone(),
+      scheme: prepared.scheme,
+      host: prepared.host,
+      uri: prepared.uri,
+      status: prepared.status,
+      headers: prepared.stored_headers,
       body,
-      expires_at: metadata.expires_at,
-      stale_if_error_until: metadata.stale_if_error_until,
-      stale_while_revalidate_until: metadata.stale_while_revalidate_until,
-      must_revalidate: metadata.must_revalidate,
-      vary: metadata.vary,
+      expires_at: prepared.metadata.expires_at,
+      stale_if_error_until: prepared.metadata.stale_if_error_until,
+      stale_while_revalidate_until: prepared.metadata.stale_while_revalidate_until,
+      must_revalidate: prepared.metadata.must_revalidate,
+      vary: prepared.metadata.vary,
       tags,
       size,
     };
@@ -686,10 +743,10 @@ impl ResponseCache {
       shared.cache_put(&shared_entry);
     }
     add_size(&mut inner, &stored);
-    inner.order.push_back(variant_key.clone());
+    inner.order.push_back(prepared.variant_key.clone());
     index_entry(&mut inner, &stored);
-    inner.entries.insert(variant_key, stored);
-    self.evict_if_needed(&mut inner, &policy);
+    inner.entries.insert(prepared.variant_key, stored);
+    self.evict_if_needed(&mut inner, &prepared.policy);
     CacheInsertOutcome::Stored
   }
 
@@ -725,38 +782,78 @@ impl ResponseCache {
     response_headers: &HeaderMap,
     content_length: Option<usize>,
   ) -> CacheResponseHeadDecision {
-    if !self.policy_enabled(ctx.policy_name, ctx.method) {
-      return CacheResponseHeadDecision::NotCacheable;
+    match self.prepare_insert(ctx, status, response_headers, content_length) {
+      CachePreparedInsertDecision::Cacheable(_) => CacheResponseHeadDecision::Cacheable,
+      CachePreparedInsertDecision::NotCacheable => CacheResponseHeadDecision::NotCacheable,
+      CachePreparedInsertDecision::Rejected => CacheResponseHeadDecision::Rejected,
     }
-    let Some(policy) = self.policy(ctx.policy_name) else {
-      return CacheResponseHeadDecision::NotCacheable;
+  }
+
+  pub(crate) fn prepare_insert(
+    &self,
+    ctx: CacheInsertContext<'_>,
+    status: StatusCode,
+    response_headers: &HeaderMap,
+    content_length: Option<usize>,
+  ) -> CachePreparedInsertDecision {
+    if !self.policy_enabled(ctx.policy_name, ctx.method) {
+      return CachePreparedInsertDecision::NotCacheable;
+    }
+    let Some(policy) = self.policy(ctx.policy_name).cloned() else {
+      return CachePreparedInsertDecision::NotCacheable;
     };
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
-      return CacheResponseHeadDecision::NotCacheable;
+      return CachePreparedInsertDecision::NotCacheable;
     }
-    if cache_metadata(
+    let Some(metadata) = cache_metadata(
       &self.config,
-      policy,
+      &policy,
       ctx.request_headers,
       status,
       response_headers,
-    )
-    .is_none()
-    {
-      return CacheResponseHeadDecision::NotCacheable;
-    }
+    ) else {
+      return CachePreparedInsertDecision::NotCacheable;
+    };
     let stored_headers = stored_response_headers(response_headers, &self.config);
+    let header_bytes = header_size(&stored_headers);
     if content_length.is_some_and(|body_len| {
       body_len
-        .checked_add(header_size(&stored_headers))
+        .checked_add(header_bytes)
         .is_none_or(|size| size > self.config.max_size_bytes)
     }) {
-      return CacheResponseHeadDecision::Rejected;
+      return CachePreparedInsertDecision::Rejected;
     }
-    if !admit_response_head(policy, status, response_headers, content_length) {
-      return CacheResponseHeadDecision::Rejected;
+    if !admit_response_head(&policy, status, response_headers, content_length) {
+      return CachePreparedInsertDecision::Rejected;
     }
-    CacheResponseHeadDecision::Cacheable
+    let base_key = expanded_cache_key(
+      &policy.cache_key,
+      ctx.scheme,
+      ctx.host,
+      ctx.uri,
+      ctx.request_headers,
+    );
+    let partition = expanded_cache_key(
+      &policy.partition_key,
+      ctx.scheme,
+      ctx.host,
+      ctx.uri,
+      ctx.request_headers,
+    );
+    let variant_key = variant_key(&partition, &base_key, &metadata.vary);
+    CachePreparedInsertDecision::Cacheable(Box::new(CachePreparedInsert {
+      policy,
+      partition,
+      base_key,
+      variant_key,
+      scheme: ctx.scheme.to_string(),
+      host: ctx.host.to_string(),
+      uri: ctx.uri.to_string(),
+      status,
+      stored_headers,
+      metadata,
+      header_bytes,
+    }))
   }
 
   pub fn purge_exact(&self, policy: &str, scheme: &str, host: &str, uri: &str) -> usize {
@@ -1084,29 +1181,41 @@ impl ResponseCache {
     })
   }
 
+  fn fill_recently_not_stored(&self, key: &str) -> bool {
+    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    fill_not_stored_suppressed(&mut inner, key, SystemTime::now())
+  }
+
   fn fill_key(&self, ctx: CacheLookupContext<'_>) -> Option<String> {
-    let policy = self.policy(ctx.policy_name)?;
-    let base_key = expanded_cache_key(
-      &policy.cache_key,
+    self.fill_key_parts(
+      ctx.policy_name,
       ctx.scheme,
       ctx.host,
+      ctx.method,
       ctx.uri,
       ctx.request_headers,
-    );
-    let partition = expanded_cache_key(
-      &policy.partition_key,
-      ctx.scheme,
-      ctx.host,
-      ctx.uri,
-      ctx.request_headers,
-    );
+    )
+  }
+
+  fn fill_key_parts(
+    &self,
+    policy_name: Option<&str>,
+    scheme: &str,
+    host: &str,
+    method: &Method,
+    uri: &Uri,
+    request_headers: &HeaderMap,
+  ) -> Option<String> {
+    let policy = self.policy(policy_name)?;
+    let base_key = expanded_cache_key(&policy.cache_key, scheme, host, uri, request_headers);
+    let partition = expanded_cache_key(&policy.partition_key, scheme, host, uri, request_headers);
     Some(format!(
       "{}\n{}\n{}\n{}\n{}\n{}",
       policy.name,
       partition,
-      ctx.method.as_str(),
-      ctx.scheme,
-      ctx.host,
+      method.as_str(),
+      scheme,
+      host,
       base_key
     ))
   }
@@ -1340,6 +1449,7 @@ pub fn range_entry(entry: CacheEntry, method: &Method, request_headers: &HeaderM
   }
 }
 
+#[derive(Debug)]
 struct ResponseMetadata {
   expires_at: SystemTime,
   stale_if_error_until: Option<SystemTime>,
@@ -1828,28 +1938,26 @@ fn variant_count_exceeded(
   if inner.entries.contains_key(variant_key) {
     return false;
   }
-  let count = inner
-    .entries
-    .values()
-    .filter(|entry| {
-      entry.policy == policy.name && entry.partition == partition && entry.base_key == base_key
-    })
-    .count();
-  count >= policy.max_vary_variants_per_key
+  let group = index::VariantGroupKey::new(&policy.name, partition, base_key);
+  inner.index.variant_count(&group) >= policy.max_vary_variants_per_key
 }
 
-fn admit_entry(
+fn admit_prepared_body(
   inner: &mut CacheInner,
   policy: &CachePolicyRuntime,
   variant_key: &str,
-  entry: &CacheEntry,
+  body_len: usize,
 ) -> bool {
-  if !admit_response_head(policy, entry.status, &entry.headers, Some(entry.body.len())) {
+  if policy.admission.max_body_bytes > 0 && body_len > policy.admission.max_body_bytes {
     return false;
   }
   if policy.admission.min_hits <= 1 {
     return true;
   }
+  admit_frequency(inner, policy, variant_key)
+}
+
+fn admit_frequency(inner: &mut CacheInner, policy: &CachePolicyRuntime, variant_key: &str) -> bool {
   let key = format!("{}\n{variant_key}", policy.name);
   let count = {
     let count = inner
@@ -2124,6 +2232,29 @@ fn validate_writable_dir(field_name: &str, path: &Path) -> anyhow::Result<()> {
     .with_context(|| format!("{field_name} {} must be writable", path.display()))?;
   let _ = std::fs::remove_file(probe);
   Ok(())
+}
+
+fn fill_not_stored_suppressed(inner: &mut CacheInner, key: &str, now: SystemTime) -> bool {
+  prune_fill_not_stored_suppressions(inner, now);
+  inner
+    .fill_not_stored_until
+    .get(key)
+    .is_some_and(|until| *until > now)
+}
+
+fn prune_fill_not_stored_suppressions(inner: &mut CacheInner, now: SystemTime) {
+  while let Some(oldest) = inner.fill_not_stored_order.front() {
+    let expired = inner
+      .fill_not_stored_until
+      .get(oldest)
+      .is_none_or(|until| *until <= now);
+    if !expired {
+      break;
+    }
+    if let Some(oldest) = inner.fill_not_stored_order.pop_front() {
+      inner.fill_not_stored_until.remove(&oldest);
+    }
+  }
 }
 
 fn remove_entry(inner: &mut CacheInner, key: &str) {
