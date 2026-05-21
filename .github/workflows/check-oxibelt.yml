@@ -114,10 +114,15 @@ jobs:
         run: cargo test --all-features --locked
 
   fuzz-smoke:
-    name: Fuzz smoke (TURN/STUN)
+    name: Fuzz smoke (${{ matrix.fuzz_target }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        fuzz_target:
+          - turn_protocol
 
     steps:
       - name: Checkout
@@ -125,23 +130,23 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
+          rustup toolchain install stable --profile minimal
           rustup toolchain install nightly --profile minimal
-          rustup default nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo +stable install cargo-fuzz --locked
 
-      - name: Run TURN/STUN fuzz smoke
+      - name: Run fuzz smoke (${{ matrix.fuzz_target }})
         env:
           LSAN_OPTIONS: detect_leaks=0
-        run: cargo +nightly fuzz run turn_protocol -- -runs=256
+        run: cargo +nightly fuzz run ${{ matrix.fuzz_target }} -- -runs=256
 
       - name: Upload fuzz artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: oxibelt-turn-protocol-fuzz-artifacts
-          path: fuzz/artifacts/turn_protocol
+          name: oxibelt-${{ matrix.fuzz_target }}-fuzz-artifacts
+          path: fuzz/artifacts/${{ matrix.fuzz_target }}
           if-no-files-found: ignore
           retention-days: 0
 
