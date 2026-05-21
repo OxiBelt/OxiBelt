@@ -1,0 +1,19 @@
+[package]
+name = "oxibelt-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxibelt = { path = "../source" }
+
+[[bin]]
+name = "turn_protocol"
+path = "fuzz_targets/turn_protocol.rs"
+test = false
+doc = false
+bench = false

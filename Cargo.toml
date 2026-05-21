@@ -1,5 +1,5 @@
 [workspace]
-members = ["source"]
+members = ["source", "fuzz"]
 default-members = ["source"]
 resolver = "3"
 
