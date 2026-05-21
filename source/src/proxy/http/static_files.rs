@@ -41,7 +41,7 @@ use self::response_plan::{
   file_plan, not_modified_plan, parse_range, range_not_satisfiable_plan, read_file_bytes_for_cache,
 };
 pub(crate) use self::response_plan::{response_from_plan, text_plan};
-pub(crate) use self::runtime::{CachedStaticObject, StaticFilesRuntime};
+pub(crate) use self::runtime::{CachedStaticObject, StaticFilesRuntime, StaticRootPathStatus};
 
 #[derive(Debug)]
 pub(crate) struct StaticResponsePlan {
@@ -131,6 +131,17 @@ pub(crate) async fn plan_response(
   };
 
   if let Some(cached) = runtime.cached_object(root, &path) {
+    match runtime.root_handle(root).path_status() {
+      StaticRootPathStatus::Replaced => {
+        warn!(route = %route_name, root = %root.display(), "static_root was replaced after validation");
+        return text_plan(StatusCode::FORBIDDEN, "forbidden");
+      }
+      StaticRootPathStatus::Unavailable => {
+        warn!(route = %route_name, root = %root.display(), "static_root is not usable");
+        return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
+      }
+      StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
+    }
     return cached_object_plan(method, headers, cached);
   }
 
@@ -138,6 +149,17 @@ pub(crate) async fn plan_response(
   let opened = match open_verified_file(&root_handle, &path).await {
     Ok(opened) => opened,
     Err(StaticOpenError::NotFound) => {
+      match root_handle.path_status() {
+        StaticRootPathStatus::Replaced => {
+          warn!(route = %route_name, root = %root.display(), "static_root was replaced after validation");
+          return text_plan(StatusCode::FORBIDDEN, "forbidden");
+        }
+        StaticRootPathStatus::Unavailable => {
+          warn!(route = %route_name, root = %root.display(), "static_root is not usable");
+          return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
+        }
+        StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
+      }
       if !root.is_dir() {
         warn!(route = %route_name, root = %root.display(), "static_root is not usable");
         return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");

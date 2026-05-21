@@ -51,6 +51,32 @@ impl Body for PanicBody {
   }
 }
 
+struct TrailerOnlyBody {
+  yielded: bool,
+}
+
+impl Body for TrailerOnlyBody {
+  type Data = Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    _cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    if self.yielded {
+      return Poll::Ready(None);
+    }
+    self.yielded = true;
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("x-trailer", "kept".parse().unwrap());
+    Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::with_exact(0)
+  }
+}
+
 fn resolved_route(state: &AppSnapshot) -> ResolvedRoute<'_> {
   state
     .route_table
@@ -132,7 +158,13 @@ async fn h1_definitely_empty_request_body_shortcut_does_not_poll_body() {
       request.version(),
       request.headers()
     ));
-    let body = fast_path_request_body(request.into_body(), 1024, Duration::from_millis(100), true);
+    let body = fast_path_request_body(
+      request.into_body(),
+      1024,
+      Duration::from_millis(100),
+      true,
+      true,
+    );
     let bytes = body
       .collect()
       .await
@@ -140,6 +172,34 @@ async fn h1_definitely_empty_request_body_shortcut_does_not_poll_body() {
       .to_bytes();
     assert!(bytes.is_empty());
   }
+}
+
+#[tokio::test]
+async fn h2_zero_size_hint_is_empty_only_when_trailers_are_dropped() {
+  let dropped = fast_path_request_body(
+    TrailerOnlyBody { yielded: false },
+    1024,
+    Duration::from_millis(100),
+    false,
+    true,
+  )
+  .collect()
+  .await
+  .expect("dropped trailer-only body should collect");
+  assert!(dropped.trailers().is_none());
+  assert!(dropped.to_bytes().is_empty());
+
+  let passed = fast_path_request_body(
+    TrailerOnlyBody { yielded: false },
+    1024,
+    Duration::from_millis(100),
+    false,
+    false,
+  )
+  .collect()
+  .await
+  .expect("passed trailer-only body should collect");
+  assert_eq!(passed.trailers().unwrap()["x-trailer"], "kept");
 }
 
 #[tokio::test]
@@ -293,6 +353,47 @@ status = 403
   assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
 }
 
+#[tokio::test]
+async fn safe_upstream_pool_route_keeps_h2_plain_proxy_fast_path() {
+  let temp_dir = common::TempDir::new("plain-fast-path-pool");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-pool");
+  let raw = format!(
+    "{}{}",
+    common::minimal_config_toml(&cert_path, &key_path)
+      .replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false"
+      )
+      .replace("upstream = \"app\"\n", "upstream_pool = \"app-pool\"\n"),
+    r#"
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "round_robin"
+
+[[upstream_pools.servers]]
+origin = "https://app.internal.example"
+"#
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  let resolved = resolved_route(&state);
+  let request = Request::builder()
+    .version(http::Version::HTTP_2)
+    .uri("https://example.com/perf/h2?body=ok")
+    .body(
+      Full::new(Bytes::new())
+        .map_err(|never| -> body::BoxError { match never {} })
+        .boxed(),
+    )
+    .expect("request should build");
+
+  assert!(resolved.execution_plan.fast_path.plain_proxy_h2);
+  assert!(PlainProxyFastPath::eligible(&request, &state, &resolved));
+}
+
 #[test]
 fn enabled_compression_policies_force_general_proxy_plan() {
   let temp_dir = common::TempDir::new("plain-fast-path-compression-enabled");
@@ -327,10 +428,6 @@ async fn route_capabilities_force_general_proxy_path() {
   );
   let mut config = parse_config(&base);
   assert!(plain_fast_path_plan(&config));
-
-  config.routes[0].upstream_pool = Some("app-pool".to_string());
-  assert!(!plain_fast_path_plan(&config));
-  config.routes[0].upstream_pool = None;
 
   let static_root = temp_dir.path().join("public");
   std::fs::create_dir_all(&static_root).expect("static root should be created");

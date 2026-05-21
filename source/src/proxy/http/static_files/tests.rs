@@ -251,8 +251,60 @@ async fn serve_rejects_static_root_swap_after_validation() {
   )
   .await;
 
-  assert_ne!(response.status(), StatusCode::OK);
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
   let body = response.into_body().collect().await.unwrap().to_bytes();
+  assert_eq!(body, Bytes::from_static(b"forbidden"));
+  assert_ne!(body, Bytes::from_static(b"OUTSIDE_VALIDATED_ROOT"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn serve_rejects_cached_static_root_swap_after_validation() {
+  let temp_dir = common::TempDir::new("static-serve-cached-root-swap");
+  let configured_root = temp_dir.path().join("public");
+  let attacker_root = temp_dir.path().join("attacker-controlled");
+  tokio::fs::create_dir_all(&configured_root).await.unwrap();
+  tokio::fs::create_dir_all(&attacker_root).await.unwrap();
+  tokio::fs::write(configured_root.join("secret.txt"), "INSIDE_VALIDATED_ROOT")
+    .await
+    .unwrap();
+  tokio::fs::write(attacker_root.join("secret.txt"), "OUTSIDE_VALIDATED_ROOT")
+    .await
+    .unwrap();
+  let validated_root = validate_static_root(&configured_root).unwrap();
+  let runtime = runtime_for_root(&validated_root, hot_object_cache_config(4, 10_000, 1024));
+
+  let first = serve(
+    &request("/assets/secret.txt"),
+    "assets",
+    "/assets",
+    &validated_root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(first.status(), StatusCode::OK);
+  assert_eq!(
+    first.into_body().collect().await.unwrap().to_bytes(),
+    Bytes::from_static(b"INSIDE_VALIDATED_ROOT")
+  );
+
+  tokio::fs::remove_dir_all(&configured_root).await.unwrap();
+  std::os::unix::fs::symlink(&attacker_root, &configured_root).unwrap();
+  let swapped = serve(
+    &request("/assets/secret.txt"),
+    "assets",
+    "/assets",
+    &validated_root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+
+  assert_eq!(swapped.status(), StatusCode::FORBIDDEN);
+  let body = swapped.into_body().collect().await.unwrap().to_bytes();
+  assert_eq!(body, Bytes::from_static(b"forbidden"));
+  assert_ne!(body, Bytes::from_static(b"INSIDE_VALIDATED_ROOT"));
   assert_ne!(body, Bytes::from_static(b"OUTSIDE_VALIDATED_ROOT"));
 }
 

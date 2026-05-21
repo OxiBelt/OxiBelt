@@ -97,7 +97,6 @@ fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
     && route.external_auth.is_none()
     && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
     && route.static_root.is_none()
-    && route.upstream_pool.is_none()
     && !route.grpc_web
     && !route.generic_http_upgrade
     && !route.connect_tunneling

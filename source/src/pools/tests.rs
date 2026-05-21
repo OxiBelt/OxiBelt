@@ -85,6 +85,35 @@ fn max_conns_excludes_busy_pool_server() {
 }
 
 #[test]
+fn retry_style_failure_releases_active_count_before_reselection() {
+  let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
+  pool.health_check.enabled = true;
+  pool.health_check.unhealthy_threshold = 1;
+  let state = PoolState::new(&[pool], None);
+
+  let first = state
+    .select("app-pool", "203.0.113.10".parse().unwrap(), "/retry", None)
+    .unwrap();
+  assert_eq!(first.upstream_name, synthetic_upstream_name("app-pool", 0));
+  assert_eq!(state.snapshot("app-pool").unwrap().servers[0].active, 1);
+
+  state.report_failure(&first.upstream_name);
+  drop(first);
+
+  let after_failure = state.snapshot("app-pool").unwrap();
+  assert_eq!(after_failure.servers[0].active, 0);
+  assert!(!after_failure.servers[0].healthy);
+
+  let second = state
+    .select("app-pool", "203.0.113.10".parse().unwrap(), "/retry", None)
+    .unwrap();
+  assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 1));
+  let after_reselect = state.snapshot("app-pool").unwrap();
+  assert_eq!(after_reselect.servers[0].active, 0);
+  assert_eq!(after_reselect.servers[1].active, 1);
+}
+
+#[test]
 fn runtime_state_excludes_servers_from_new_selection() {
   let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
   pool.servers[0].state = UpstreamPoolServerState::Drain;

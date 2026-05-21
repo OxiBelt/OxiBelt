@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Either, Full, Limited};
 use hyper::body::{Body, Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -21,9 +21,8 @@ use crate::dynamic_policy::DynamicPolicyRequest;
 use crate::external_auth::{ExternalAuthOutcome, ExternalAuthTerminal};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
-use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
-use crate::state::{AppSnapshot, UpstreamClientRef};
+use crate::state::AppSnapshot;
 use crate::telemetry::{TelemetryRuntime, TraceContext};
 use crate::waf::{
   BodyNeed, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
@@ -41,8 +40,10 @@ pub(crate) mod observability;
 pub(crate) mod person_proof;
 pub(crate) mod request;
 pub(crate) mod response;
+mod retry;
 pub(crate) mod semantics;
 pub(crate) mod static_files;
+pub(crate) mod upstream;
 pub(crate) mod uri;
 pub(crate) mod version;
 pub(crate) mod webtransport;
@@ -68,7 +69,9 @@ use self::response::{
   apply_security_headers, apply_sticky_cookie, draining_response, text_response,
   upstream_error_response, waf_terminal_response,
 };
+use self::retry::{send_pool_with_retry, send_with_retry};
 use self::semantics::{configured_error_response, filter_trailers};
+use self::upstream::{UpstreamSelectionError, select_request_upstream};
 use self::uri::{rewrite_uri, validate_downstream_path};
 use self::version::select_upstream_http_version;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
@@ -127,6 +130,27 @@ fn proxy_error_response(
     )
   } else {
     configured_error_response(&state.config, "", status, message, code)
+  }
+}
+
+fn upstream_selection_error_response(error: UpstreamSelectionError) -> Response<ProxyBody> {
+  match error {
+    UpstreamSelectionError::UnknownWafUpstream(upstream) => {
+      warn!(upstream, "WAF selected an unknown upstream");
+      text_response(StatusCode::BAD_GATEWAY, "WAF selected an unknown upstream")
+    }
+    UpstreamSelectionError::PoolUnavailable { pool_name, message } => {
+      warn!(error = %message, pool = %pool_name, "failed to select upstream pool server");
+      text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server")
+    }
+    UpstreamSelectionError::MissingRouteUpstream => {
+      warn!("route resolved without an upstream");
+      text_response(StatusCode::BAD_GATEWAY, "upstream is not configured")
+    }
+    UpstreamSelectionError::MissingSyntheticUpstream(upstream) => {
+      warn!(upstream, "pool selected an unknown synthetic upstream");
+      text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server")
+    }
   }
 }
 
@@ -803,56 +827,30 @@ where
     );
   }
 
-  let mut pool_selection = None;
-  let upstream = if let Some(upstream_name) = request_waf.upstream_override.as_deref() {
-    match state
-      .upstreams
-      .iter()
-      .find(|upstream| upstream.name == upstream_name)
-    {
-      Some(upstream) => upstream,
-      None => {
-        warn!(upstream = upstream_name, "WAF selected an unknown upstream");
-        return text_response(StatusCode::BAD_GATEWAY, "WAF selected an unknown upstream");
-      }
-    }
-  } else if let Some(pool_name) = request_waf
-    .upstream_pool_override
-    .as_deref()
-    .or(resolved.route.upstream_pool.as_deref())
-  {
-    match state.pools.select_with_cookie_header(
-      pool_name,
-      client_addr.ip(),
-      &format!("{host}{}", request.uri()),
-      request_waf.load_balancing_policy.as_deref(),
-      request.headers().get(http::header::COOKIE),
-    ) {
-      Ok(selection) => {
-        let name = selection.upstream_name.clone();
-        if response_waf_enabled {
-          access_log.upstream_pool = Some(selection.pool_name.clone());
-        } else {
-          access_log.set_upstream_pool(selection.pool_name.clone());
-        }
-        pool_selection = Some(selection);
-        state
-          .upstreams
-          .iter()
-          .find(|upstream| upstream.name == name)
-          .expect("pool selected synthetic upstream")
-      }
-      Err(error) => {
-        warn!(error = %error, pool = %pool_name, "failed to select upstream pool server");
-        return text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server");
-      }
-    }
-  } else {
-    resolved.upstream.expect("validated route upstream")
+  let selected = match select_request_upstream(
+    state.as_ref(),
+    &resolved,
+    client_addr,
+    &host,
+    request.uri(),
+    request.headers().get(http::header::COOKIE),
+    &request_waf,
+  ) {
+    Ok(selected) => selected,
+    Err(error) => return upstream_selection_error_response(error),
   };
-  let sticky_cookie = pool_selection
-    .as_ref()
-    .and_then(PoolSelection::sticky_cookie);
+  let mut upstream = selected.upstream;
+  let mut upstream_index = selected.upstream_index;
+  let pool_retry_cookie = request.headers().get(http::header::COOKIE).cloned();
+  if let Some(pool_name) = selected.pool_name() {
+    if response_waf_enabled {
+      access_log.upstream_pool = Some(pool_name.to_string());
+    } else {
+      access_log.set_upstream_pool(pool_name.to_string());
+    }
+  }
+  let mut sticky_cookie = selected.sticky_cookie();
+  let mut pool_selection = selected.into_pool_selection();
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
   let native_grpc_request = semantics::is_native_grpc_request(request.headers(), &state.config);
   let mut timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
@@ -1455,6 +1453,7 @@ where
       }
     }
   } else {
+    let mut pool_failures_reported = false;
     let result = if upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off {
       let Some(client) = state.clients.for_upstream_version(
         &upstream.name,
@@ -1469,24 +1468,50 @@ where
       };
       let early_hints_capture =
         semantics::attach_early_hints_capture(&mut outbound, state.config.proxy.http.early_hints);
-      send_with_retry(
-        client,
-        outbound,
-        timeouts,
-        &state,
-        if native_grpc_request {
-          semantics::should_retry_grpc(&state.config)
-        } else {
-          state.config.proxy.retry.enabled && is_idempotent(&request_method)
-        },
-      )
-      .await
-      .map(|mut response| {
-        if let Some(capture) = early_hints_capture {
-          semantics::attach_interim_responses(&mut response, capture.take());
-        }
-        response
-      })
+      let retry_enabled = if native_grpc_request {
+        semantics::should_retry_grpc(&state.config)
+      } else {
+        state.config.proxy.retry.enabled && is_idempotent(&request_method)
+      };
+      if let Some(selection) = pool_selection.take() {
+        pool_failures_reported = true;
+        send_pool_with_retry(
+          state.as_ref(),
+          outbound,
+          upstream_index,
+          selection,
+          resolved.route,
+          &request_uri,
+          client_addr,
+          &host,
+          pool_retry_cookie.as_ref(),
+          &request_waf,
+          timeouts,
+          retry_enabled,
+        )
+        .await
+        .map(|success| {
+          upstream_index = success.upstream_index;
+          upstream = &state.upstreams[upstream_index];
+          access_log.set_upstream(&upstream.name, upstream.origin.scheme());
+          sticky_cookie = success.pool_selection.sticky_cookie();
+          pool_selection = Some(success.pool_selection);
+          let mut response = success.response;
+          if let Some(capture) = early_hints_capture {
+            semantics::attach_interim_responses(&mut response, capture.take());
+          }
+          response
+        })
+      } else {
+        send_with_retry(client, outbound, timeouts, &state, retry_enabled)
+          .await
+          .map(|mut response| {
+            if let Some(capture) = early_hints_capture {
+              semantics::attach_interim_responses(&mut response, capture.take());
+            }
+            response
+          })
+      }
     } else {
       send_one_shot_with_proxy_protocol(
         outbound,
@@ -1508,7 +1533,9 @@ where
           return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
         }
         let upstream_first_byte_timeout = error_is_upstream_first_byte_timeout(&error);
-        if should_report_upstream_request_failure(upstream_first_byte_timeout, grpc_timeout_caps) {
+        if !pool_failures_reported
+          && should_report_upstream_request_failure(upstream_first_byte_timeout, grpc_timeout_caps)
+        {
           state.pools.report_failure(&upstream.name);
         }
         warn!(
@@ -1943,75 +1970,6 @@ impl TunnelConnectionLimitHold {
   }
 }
 
-struct SelectedUpstream<'a> {
-  upstream: &'a UpstreamConfig,
-  pool_selection: Option<PoolSelection>,
-}
-
-fn select_request_upstream<'a>(
-  state: &'a AppSnapshot,
-  resolved: &crate::routes::ResolvedRoute<'a>,
-  client_addr: std::net::SocketAddr,
-  downstream_host: &str,
-  uri: &http::Uri,
-  cookie_header: Option<&HeaderValue>,
-  request_waf: &crate::waf::RequestWafDecision,
-) -> Result<SelectedUpstream<'a>, Box<Response<ProxyBody>>> {
-  if let Some(upstream_name) = request_waf.upstream_override.as_deref() {
-    return state
-      .upstreams
-      .iter()
-      .find(|upstream| upstream.name == upstream_name)
-      .map(|upstream| SelectedUpstream {
-        upstream,
-        pool_selection: None,
-      })
-      .ok_or_else(|| {
-        Box::new(text_response(
-          StatusCode::BAD_GATEWAY,
-          "WAF selected an unknown upstream",
-        ))
-      });
-  }
-
-  if let Some(pool_name) = request_waf
-    .upstream_pool_override
-    .as_deref()
-    .or(resolved.route.upstream_pool.as_deref())
-  {
-    let selection = state
-      .pools
-      .select_with_cookie_header(
-        pool_name,
-        client_addr.ip(),
-        &format!("{downstream_host}{uri}"),
-        request_waf.load_balancing_policy.as_deref(),
-        cookie_header,
-      )
-      .map_err(|_| {
-        Box::new(text_response(
-          StatusCode::BAD_GATEWAY,
-          "no available upstream pool server",
-        ))
-      })?;
-    let name = selection.upstream_name.clone();
-    let upstream = state
-      .upstreams
-      .iter()
-      .find(|upstream| upstream.name == name)
-      .expect("pool selected synthetic upstream");
-    return Ok(SelectedUpstream {
-      upstream,
-      pool_selection: Some(selection),
-    });
-  }
-
-  Ok(SelectedUpstream {
-    upstream: resolved.upstream.expect("validated route upstream"),
-    pool_selection: None,
-  })
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_connect_request(
   mut request: Request<ProxyBody>,
@@ -2044,20 +2002,17 @@ async fn handle_connect_request(
     request_waf,
   ) {
     Ok(selected) => selected,
-    Err(response) => return *response,
+    Err(error) => return upstream_selection_error_response(error),
   };
   let upstream = selected.upstream.clone();
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, &upstream);
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
-  if let Some(selection) = selected.pool_selection.as_ref() {
-    access_log.set_upstream_pool(selection.pool_name.clone());
+  if let Some(pool_name) = selected.pool_name() {
+    access_log.set_upstream_pool(pool_name.to_string());
   }
-  let sticky_cookie = selected
-    .pool_selection
-    .as_ref()
-    .and_then(PoolSelection::sticky_cookie);
+  let sticky_cookie = selected.sticky_cookie();
   let pool_report = state.pools.clone();
-  let pool_selection = selected.pool_selection;
+  let pool_selection = selected.into_pool_selection();
 
   if request_version == http::Version::HTTP_11 || request_version == http::Version::HTTP_10 {
     let downstream_upgrade = hyper::upgrade::on(&mut request);
@@ -2346,56 +2301,24 @@ async fn handle_upgrade_request(
     return None;
   }
 
-  let mut pool_selection = None;
-  let upstream = if let Some(upstream_name) = request_waf.upstream_override.as_deref() {
-    match state
-      .upstreams
-      .iter()
-      .find(|upstream| upstream.name == upstream_name)
-    {
-      Some(upstream) => upstream,
-      None => {
-        return Some(text_response(
-          StatusCode::BAD_GATEWAY,
-          "WAF selected an unknown upstream",
-        ));
-      }
-    }
-  } else if let Some(pool_name) = request_waf
-    .upstream_pool_override
-    .as_deref()
-    .or(resolved.route.upstream_pool.as_deref())
-  {
-    match state.pools.select_with_cookie_header(
-      pool_name,
-      client_addr.ip(),
-      &format!("{downstream_host}{}", request.uri()),
-      request_waf.load_balancing_policy.as_deref(),
-      request.headers().get(http::header::COOKIE),
-    ) {
-      Ok(selection) => {
-        let name = selection.upstream_name.clone();
-        access_log.set_upstream_pool(selection.pool_name.clone());
-        pool_selection = Some(selection);
-        state
-          .upstreams
-          .iter()
-          .find(|upstream| upstream.name == name)
-          .expect("pool selected synthetic upstream")
-      }
-      Err(_) => {
-        return Some(text_response(
-          StatusCode::BAD_GATEWAY,
-          "no available upstream pool server",
-        ));
-      }
-    }
-  } else {
-    resolved.upstream.expect("validated route upstream")
+  let selected = match select_request_upstream(
+    state.as_ref(),
+    resolved,
+    client_addr,
+    downstream_host,
+    request.uri(),
+    request.headers().get(http::header::COOKIE),
+    request_waf,
+  ) {
+    Ok(selected) => selected,
+    Err(error) => return Some(upstream_selection_error_response(error)),
   };
-  let sticky_cookie = pool_selection
-    .as_ref()
-    .and_then(PoolSelection::sticky_cookie);
+  let upstream = selected.upstream;
+  if let Some(pool_name) = selected.pool_name() {
+    access_log.set_upstream_pool(pool_name.to_string());
+  }
+  let sticky_cookie = selected.sticky_cookie();
+  let pool_selection = selected.into_pool_selection();
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
 
@@ -2569,52 +2492,6 @@ fn is_websocket_upgrade<B>(request: &Request<B>) -> bool {
     .and_then(|value| value.to_str().ok())
     .map(|value| value.eq_ignore_ascii_case("websocket"))
     .unwrap_or(false)
-}
-
-pub(super) async fn send_with_retry(
-  client: UpstreamClientRef<'_>,
-  request: Request<ProxyBody>,
-  timeouts: EffectiveTimeouts,
-  state: &AppSnapshot,
-  retry_enabled: bool,
-) -> anyhow::Result<Response<Incoming>> {
-  if retry_enabled
-    && request
-      .body()
-      .size_hint()
-      .upper()
-      .is_some_and(|upper| upper <= state.config.proxy.buffering.max_memory_body_bytes as u64)
-  {
-    let (parts, body) = request.into_parts();
-    let body = body
-      .collect()
-      .await
-      .map_err(|error| anyhow::anyhow!("failed to buffer retryable request body: {error}"))?
-      .to_bytes();
-    let tries = state.config.proxy.retry.tries.max(1);
-    let mut last_error = None;
-    for _ in 0..tries {
-      let outbound = Request::from_parts(parts_clone(&parts), full_body(body.clone()));
-      match tokio::time::timeout(timeouts.upstream_first_byte, client.request(outbound)).await {
-        Ok(Ok(response)) if retryable_status(response.status(), state) => {
-          last_error = Some(anyhow::anyhow!(
-            "upstream returned retryable status {}",
-            response.status()
-          ));
-        }
-        Ok(Ok(response)) => return Ok(response),
-        Ok(Err(error)) => last_error = Some(error.into()),
-        Err(_) => {
-          last_error = Some(UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte).into());
-        }
-      }
-    }
-    return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry failed")));
-  }
-  match tokio::time::timeout(timeouts.upstream_first_byte, client.request(request)).await {
-    Ok(result) => Ok(result?),
-    Err(_) => Err(UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte).into()),
-  }
 }
 
 async fn send_one_shot_with_proxy_protocol(

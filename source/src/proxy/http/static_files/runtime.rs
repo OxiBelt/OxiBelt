@@ -1,6 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "linux")]
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -108,10 +110,45 @@ impl StaticRootHandle {
     &self.root
   }
 
+  pub(crate) fn path_status(&self) -> StaticRootPathStatus {
+    #[cfg(target_os = "linux")]
+    {
+      let Some(dir_fd) = self.dir_fd.as_ref() else {
+        return StaticRootPathStatus::Uncached;
+      };
+      let Ok(opened_metadata) = std::fs::metadata(format!("/proc/self/fd/{}", dir_fd.as_raw_fd()))
+      else {
+        return StaticRootPathStatus::Unavailable;
+      };
+      let Ok(current_metadata) = std::fs::metadata(&self.root) else {
+        return StaticRootPathStatus::Unavailable;
+      };
+      if opened_metadata.dev() == current_metadata.dev()
+        && opened_metadata.ino() == current_metadata.ino()
+      {
+        StaticRootPathStatus::Matches
+      } else {
+        StaticRootPathStatus::Replaced
+      }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+      StaticRootPathStatus::Uncached
+    }
+  }
+
   #[cfg(target_os = "linux")]
   pub(crate) fn dir_fd(&self) -> Option<Arc<OwnedFd>> {
     self.dir_fd.clone()
   }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum StaticRootPathStatus {
+  Matches,
+  Replaced,
+  Unavailable,
+  Uncached,
 }
 
 #[cfg(target_os = "linux")]
