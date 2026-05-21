@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::waf::RouteWafConfig;
 
-use super::{BufferingMode, HttpVersion, default_hosts, default_path_prefix};
+use super::{BufferingMode, HttpVersion, RetryCondition, default_hosts, default_path_prefix};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RouteConfig {
@@ -40,6 +40,8 @@ pub struct RouteConfig {
   pub buffering: RouteBufferingConfig,
   #[serde(default)]
   pub timeouts: RouteTimeoutConfig,
+  #[serde(default)]
+  pub retry: Option<RouteRetryConfig>,
   #[serde(default)]
   pub waf: RouteWafConfig,
 }
@@ -106,6 +108,59 @@ impl RouteTimeoutConfig {
       if value == Some(0) {
         bail!("route {route_name} timeouts.{field} must be greater than 0");
       }
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteRetryConfig {
+  #[serde(default)]
+  pub enabled: Option<bool>,
+  #[serde(default)]
+  pub tries: Option<usize>,
+  #[serde(default)]
+  pub total_budget_ms: Option<u64>,
+  #[serde(default)]
+  pub per_attempt_timeout_ms: Option<u64>,
+  #[serde(default)]
+  pub on: Option<Vec<RetryCondition>>,
+  #[serde(default)]
+  pub retry_non_idempotent: Option<bool>,
+  #[serde(default)]
+  pub backoff_base_ms: Option<u64>,
+  #[serde(default)]
+  pub backoff_max_ms: Option<u64>,
+  #[serde(default)]
+  pub jitter: Option<bool>,
+  #[serde(default)]
+  pub reselect_pool_on_retry: Option<bool>,
+  #[serde(default)]
+  pub exclude_failed_pool_upstreams: Option<bool>,
+  #[serde(default)]
+  pub report_passive_health: Option<bool>,
+}
+
+impl RouteRetryConfig {
+  pub(super) fn validate(&self, route_name: &str) -> anyhow::Result<()> {
+    if self.tries == Some(0) {
+      bail!("route {route_name} retry.tries must be greater than 0");
+    }
+    for (field, value) in [
+      ("total_budget_ms", self.total_budget_ms),
+      ("per_attempt_timeout_ms", self.per_attempt_timeout_ms),
+    ] {
+      if value == Some(0) {
+        bail!("route {route_name} retry.{field} must be greater than 0");
+      }
+    }
+    if let (Some(base), Some(max)) = (self.backoff_base_ms, self.backoff_max_ms)
+      && max > 0
+      && base > max
+    {
+      bail!(
+        "route {route_name} retry.backoff_max_ms must be 0 or greater than or equal to retry.backoff_base_ms"
+      );
     }
     Ok(())
   }

@@ -32,8 +32,8 @@ use crate::waf::{
 };
 
 use super::{
-  EffectiveTimeouts, apply_alt_svc_header, is_idempotent, send_pool_with_retry, send_with_retry,
-  with_downstream_response_timeout,
+  EffectiveRetryPolicy, EffectiveTimeouts, apply_alt_svc_header, send_pool_with_retry,
+  send_with_retry, with_downstream_response_timeout,
 };
 
 mod small_response;
@@ -147,7 +147,8 @@ impl PlainProxyFastPath {
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
     let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-    let retry_enabled = state.config.proxy.retry.enabled && is_idempotent(request.method());
+    let retry_policy =
+      EffectiveRetryPolicy::for_http_request(&state.config, resolved.route, request.method());
     let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
     let request_context =
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
@@ -217,6 +218,7 @@ impl PlainProxyFastPath {
     };
     let upstream_started_at = Instant::now();
     let mut pool_failures_reported = false;
+    let mut report_pool_success = true;
     let upstream_response = match if let Some(selection) = pool_selection.take() {
       pool_failures_reported = true;
       send_pool_with_retry(
@@ -231,19 +233,20 @@ impl PlainProxyFastPath {
         pool_retry_cookie.as_ref(),
         &request_waf,
         timeouts,
-        retry_enabled,
+        &retry_policy,
       )
       .await
       .map(|success| {
         upstream_index = success.upstream_index;
         upstream = &state.upstreams[upstream_index];
         access_log.set_upstream(&upstream.name, upstream.origin.scheme());
+        report_pool_success = success.report_success;
         sticky_cookie = success.pool_selection.sticky_cookie();
         pool_selection = Some(success.pool_selection);
         success.response
       })
     } else {
-      send_with_retry(client, outbound, timeouts, &state, retry_enabled).await
+      send_with_retry(client, outbound, timeouts, &state, &retry_policy).await
     } {
       Ok(response) => response,
       Err(error) => {
@@ -277,7 +280,9 @@ impl PlainProxyFastPath {
         return response;
       }
     };
-    state.pools.report_success(&upstream.name);
+    if report_pool_success {
+      state.pools.report_success(&upstream.name);
+    }
 
     let upstream_first_byte_time_ms = upstream_started_at
       .elapsed()

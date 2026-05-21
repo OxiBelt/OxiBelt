@@ -590,6 +590,8 @@ fn proxy_retry_defaults_and_custom_values_are_parsed() {
     assert!(!default_config.proxy.retry.enabled);
     assert_eq!(default_config.proxy.retry.tries, 2);
     assert_eq!(default_config.proxy.retry.timeout_ms, 5_000);
+    assert_eq!(default_config.proxy.retry.total_budget_ms, None);
+    assert_eq!(default_config.proxy.retry.per_attempt_timeout_ms, None);
     assert_eq!(
         default_config.proxy.retry.on,
         vec![
@@ -601,6 +603,12 @@ fn proxy_retry_defaults_and_custom_values_are_parsed() {
         ]
     );
     assert!(!default_config.proxy.retry.retry_non_idempotent);
+    assert_eq!(default_config.proxy.retry.backoff_base_ms, 0);
+    assert_eq!(default_config.proxy.retry.backoff_max_ms, 0);
+    assert!(!default_config.proxy.retry.jitter);
+    assert!(default_config.proxy.retry.reselect_pool_on_retry);
+    assert!(default_config.proxy.retry.exclude_failed_pool_upstreams);
+    assert!(default_config.proxy.retry.report_passive_health);
 
     let raw = format!(
         r#"
@@ -610,8 +618,16 @@ fn proxy_retry_defaults_and_custom_values_are_parsed() {
 enabled = true
 tries = 4
 timeout_ms = 750
+total_budget_ms = 1250
+per_attempt_timeout_ms = 300
 on = ["connect_error", "read_timeout", "502", "503", "504"]
 retry_non_idempotent = true
+backoff_base_ms = 25
+backoff_max_ms = 100
+jitter = true
+reselect_pool_on_retry = false
+exclude_failed_pool_upstreams = false
+report_passive_health = false
 "#
     );
 
@@ -620,6 +636,8 @@ retry_non_idempotent = true
     assert!(config.proxy.retry.enabled);
     assert_eq!(config.proxy.retry.tries, 4);
     assert_eq!(config.proxy.retry.timeout_ms, 750);
+    assert_eq!(config.proxy.retry.total_budget_ms, Some(1250));
+    assert_eq!(config.proxy.retry.per_attempt_timeout_ms, Some(300));
     assert_eq!(
         config.proxy.retry.on,
         vec![
@@ -631,6 +649,62 @@ retry_non_idempotent = true
         ]
     );
     assert!(config.proxy.retry.retry_non_idempotent);
+    assert_eq!(config.proxy.retry.backoff_base_ms, 25);
+    assert_eq!(config.proxy.retry.backoff_max_ms, 100);
+    assert!(config.proxy.retry.jitter);
+    assert!(!config.proxy.retry.reselect_pool_on_retry);
+    assert!(!config.proxy.retry.exclude_failed_pool_upstreams);
+    assert!(!config.proxy.retry.report_passive_health);
+}
+
+#[test]
+fn route_retry_overrides_are_parsed() {
+    let temp_dir = common::TempDir::new("route-retry");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "route-retry");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let raw = format!(
+        r#"
+{base}
+
+[proxy.retry]
+enabled = false
+tries = 2
+total_budget_ms = 1000
+
+[routes.retry]
+enabled = true
+tries = 3
+total_budget_ms = 900
+per_attempt_timeout_ms = 250
+on = ["503"]
+retry_non_idempotent = true
+backoff_base_ms = 10
+backoff_max_ms = 50
+jitter = true
+reselect_pool_on_retry = true
+exclude_failed_pool_upstreams = true
+report_passive_health = false
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let retry = config.routes[0]
+        .retry
+        .as_ref()
+        .expect("route retry should parse");
+    assert_eq!(retry.enabled, Some(true));
+    assert_eq!(retry.tries, Some(3));
+    assert_eq!(retry.total_budget_ms, Some(900));
+    assert_eq!(retry.per_attempt_timeout_ms, Some(250));
+    assert_eq!(retry.on, Some(vec![RetryCondition::Status503]));
+    assert_eq!(retry.retry_non_idempotent, Some(true));
+    assert_eq!(retry.backoff_base_ms, Some(10));
+    assert_eq!(retry.backoff_max_ms, Some(50));
+    assert_eq!(retry.jitter, Some(true));
+    assert_eq!(retry.reselect_pool_on_retry, Some(true));
+    assert_eq!(retry.exclude_failed_pool_upstreams, Some(true));
+    assert_eq!(retry.report_passive_health, Some(false));
 }
 
 #[test]
@@ -646,6 +720,18 @@ fn proxy_retry_rejects_zero_numeric_values() {
             "timeout_ms = 0",
             "proxy.retry.timeout_ms must be greater than 0",
         ),
+        (
+            "total_budget_ms = 0",
+            "proxy.retry.total_budget_ms must be greater than 0",
+        ),
+        (
+            "per_attempt_timeout_ms = 0",
+            "proxy.retry.per_attempt_timeout_ms must be greater than 0",
+        ),
+        (
+            "backoff_base_ms = 200\nbackoff_max_ms = 100",
+            "proxy.retry.backoff_max_ms",
+        ),
     ] {
         let raw = format!(
             r#"
@@ -660,6 +746,48 @@ fn proxy_retry_rejects_zero_numeric_values() {
         assert!(
             error.to_string().contains(expected),
             "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn route_retry_rejects_invalid_numeric_values() {
+    let temp_dir = common::TempDir::new("route-retry-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-retry-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (setting, expected) in [
+        (
+            "tries = 0",
+            "route app-root retry.tries must be greater than 0",
+        ),
+        (
+            "total_budget_ms = 0",
+            "route app-root retry.total_budget_ms must be greater than 0",
+        ),
+        (
+            "per_attempt_timeout_ms = 0",
+            "route app-root retry.per_attempt_timeout_ms must be greater than 0",
+        ),
+        (
+            "backoff_base_ms = 200\nbackoff_max_ms = 100",
+            "route app-root retry.backoff_max_ms",
+        ),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[routes.retry]
+{setting}
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("validation should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
         );
     }
 }

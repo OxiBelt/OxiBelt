@@ -18,6 +18,7 @@ mod external_auth;
 mod http2;
 mod limits;
 mod quic;
+mod retry;
 mod route;
 mod sni_forward;
 mod stream;
@@ -36,6 +37,7 @@ use limits::{
 };
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
+pub use retry::*;
 pub use route::*;
 pub use sni_forward::*;
 pub use stream::*;
@@ -989,6 +991,21 @@ impl Config {
         }
       }
       route.timeouts.validate(&route.name)?;
+      if let Some(retry) = &route.retry {
+        retry.validate(&route.name)?;
+        let backoff_base = retry
+          .backoff_base_ms
+          .unwrap_or(self.proxy.retry.backoff_base_ms);
+        let backoff_max = retry
+          .backoff_max_ms
+          .unwrap_or(self.proxy.retry.backoff_max_ms);
+        if backoff_max > 0 && backoff_base > backoff_max {
+          bail!(
+            "route {} retry.backoff_max_ms must be 0 or greater than or equal to effective retry.backoff_base_ms",
+            route.name
+          );
+        }
+      }
     }
 
     self.validate_dynamic_policy(&route_names)?;
@@ -1200,6 +1217,19 @@ impl Config {
     }
     if self.proxy.retry.timeout_ms == 0 {
       bail!("proxy.retry.timeout_ms must be greater than 0");
+    }
+    if self.proxy.retry.total_budget_ms == Some(0) {
+      bail!("proxy.retry.total_budget_ms must be greater than 0");
+    }
+    if self.proxy.retry.per_attempt_timeout_ms == Some(0) {
+      bail!("proxy.retry.per_attempt_timeout_ms must be greater than 0");
+    }
+    if self.proxy.retry.backoff_max_ms > 0
+      && self.proxy.retry.backoff_base_ms > self.proxy.retry.backoff_max_ms
+    {
+      bail!(
+        "proxy.retry.backoff_max_ms must be 0 or greater than or equal to proxy.retry.backoff_base_ms"
+      );
     }
     if self.proxy.http2.max_concurrent_streams == 0
       || self.proxy.http2.max_send_buf_size == 0
@@ -2347,10 +2377,18 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "proxy.upgrades" => &["connect_tunneling", "generic_http_upgrade", "websocket"][..],
     "proxy.grpc_web" => &["enabled"][..],
     "proxy.retry" => &[
+      "backoff_base_ms",
+      "backoff_max_ms",
       "enabled",
+      "exclude_failed_pool_upstreams",
+      "jitter",
       "on",
+      "per_attempt_timeout_ms",
+      "report_passive_health",
+      "reselect_pool_on_retry",
       "retry_non_idempotent",
       "timeout_ms",
+      "total_budget_ms",
       "tries",
     ][..],
     "proxy.buffering" => &[
@@ -2769,6 +2807,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "name",
       "path_prefix",
       "replace_prefix_with",
+      "retry",
       "connect_tunneling",
       "generic_http_upgrade",
       "grpc_web",
@@ -2796,6 +2835,20 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "upstream_send_timeout_ms",
       "websocket_idle_timeout_ms",
       "webtransport_idle_timeout_ms",
+    ][..],
+    "routes.retry" => &[
+      "backoff_base_ms",
+      "backoff_max_ms",
+      "enabled",
+      "exclude_failed_pool_upstreams",
+      "jitter",
+      "on",
+      "per_attempt_timeout_ms",
+      "report_passive_health",
+      "reselect_pool_on_retry",
+      "retry_non_idempotent",
+      "total_budget_ms",
+      "tries",
     ][..],
     "stream_listeners" => &[
       "bind",
@@ -3765,45 +3818,6 @@ impl Default for ProxyUpgradesConfig {
       connect_tunneling: false,
     }
   }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct ProxyRetryConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default = "default_retry_tries")]
-  pub tries: usize,
-  #[serde(default = "default_retry_timeout_ms")]
-  pub timeout_ms: u64,
-  #[serde(default = "default_retry_on")]
-  pub on: Vec<RetryCondition>,
-  #[serde(default)]
-  pub retry_non_idempotent: bool,
-}
-
-impl Default for ProxyRetryConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      tries: default_retry_tries(),
-      timeout_ms: default_retry_timeout_ms(),
-      on: default_retry_on(),
-      retry_non_idempotent: false,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum RetryCondition {
-  ConnectError,
-  ReadTimeout,
-  #[serde(rename = "502")]
-  Status502,
-  #[serde(rename = "503")]
-  Status503,
-  #[serde(rename = "504")]
-  Status504,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -5541,24 +5555,6 @@ fn default_max_uri_bytes() -> usize {
 
 fn default_max_request_body_bytes() -> u64 {
   10_485_760
-}
-
-fn default_retry_tries() -> usize {
-  2
-}
-
-fn default_retry_timeout_ms() -> u64 {
-  5_000
-}
-
-fn default_retry_on() -> Vec<RetryCondition> {
-  vec![
-    RetryCondition::ConnectError,
-    RetryCondition::ReadTimeout,
-    RetryCondition::Status502,
-    RetryCondition::Status503,
-    RetryCondition::Status504,
-  ]
 }
 
 fn default_static_files_inline_max_bytes() -> usize {

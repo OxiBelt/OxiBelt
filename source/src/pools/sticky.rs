@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,18 +21,19 @@ pub(super) fn select_sticky_cookie(
   client_ip: IpAddr,
   hash_key: &str,
   cookie_header: Option<&HeaderValue>,
+  excluded_upstreams: &HashSet<&str>,
 ) -> (Option<Arc<PoolServerRuntime>>, Option<HeaderValue>) {
   if let Some(server) = cookie_header
     .and_then(|value| value.to_str().ok())
     .and_then(|raw| cookie_value(raw, &pool.config.sticky_cookie.cookie_name))
     .and_then(|value| verify_sticky_cookie(pool, value))
-    .and_then(|server_id| sticky_server(pool, &server_id))
+    .and_then(|server_id| sticky_server(pool, &server_id, excluded_upstreams))
   {
     return (Some(server), None);
   }
 
   let fallback: LoadBalancingAlgorithm = pool.config.sticky_cookie.fallback_algorithm.into();
-  let server = build_sticky_fallback(pool, fallback, client_ip, hash_key);
+  let server = build_sticky_fallback(pool, fallback, client_ip, hash_key, excluded_upstreams);
   let sticky_cookie = server
     .as_ref()
     .and_then(|server| build_sticky_cookie(pool, &server.server_id));
@@ -82,13 +84,18 @@ pub(super) fn sticky_secret_for_pool(
   secret
 }
 
-fn sticky_server(pool: &Arc<PoolRuntime>, server_id: &str) -> Option<Arc<PoolServerRuntime>> {
+fn sticky_server(
+  pool: &Arc<PoolRuntime>,
+  server_id: &str,
+  excluded_upstreams: &HashSet<&str>,
+) -> Option<Arc<PoolServerRuntime>> {
   pool
     .servers
     .iter()
     .enumerate()
     .find(|(index, server)| {
       server.server_id == server_id
+        && !excluded_upstreams.contains(server.upstream_name.as_str())
         && server_config(pool, *index).state.accepts_new_requests()
         && server_healthy(pool, server)
         && server_capacity_available(pool, *index, server)

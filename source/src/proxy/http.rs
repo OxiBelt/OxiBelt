@@ -69,7 +69,7 @@ use self::response::{
   apply_security_headers, apply_sticky_cookie, draining_response, text_response,
   upstream_error_response, waf_terminal_response,
 };
-use self::retry::{send_pool_with_retry, send_with_retry};
+use self::retry::{EffectiveRetryPolicy, send_pool_with_retry, send_with_retry};
 use self::semantics::{configured_error_response, filter_trailers};
 use self::upstream::{UpstreamSelectionError, select_request_upstream};
 use self::uri::{rewrite_uri, validate_downstream_path};
@@ -1356,6 +1356,7 @@ where
   );
 
   let upstream_started_at = Instant::now();
+  let mut report_pool_success = true;
   let upstream_response = if upstream_version == HttpVersion::H3 {
     match tokio::time::timeout(
       timeouts.upstream_first_byte,
@@ -1468,10 +1469,14 @@ where
       };
       let early_hints_capture =
         semantics::attach_early_hints_capture(&mut outbound, state.config.proxy.http.early_hints);
-      let retry_enabled = if native_grpc_request {
-        semantics::should_retry_grpc(&state.config)
+      let retry_policy = if native_grpc_request {
+        EffectiveRetryPolicy::for_grpc_request(
+          &state.config,
+          resolved.route,
+          semantics::should_retry_grpc(&state.config),
+        )
       } else {
-        state.config.proxy.retry.enabled && is_idempotent(&request_method)
+        EffectiveRetryPolicy::for_http_request(&state.config, resolved.route, &request_method)
       };
       if let Some(selection) = pool_selection.take() {
         pool_failures_reported = true;
@@ -1487,13 +1492,14 @@ where
           pool_retry_cookie.as_ref(),
           &request_waf,
           timeouts,
-          retry_enabled,
+          &retry_policy,
         )
         .await
         .map(|success| {
           upstream_index = success.upstream_index;
           upstream = &state.upstreams[upstream_index];
           access_log.set_upstream(&upstream.name, upstream.origin.scheme());
+          report_pool_success = success.report_success;
           sticky_cookie = success.pool_selection.sticky_cookie();
           pool_selection = Some(success.pool_selection);
           let mut response = success.response;
@@ -1503,7 +1509,7 @@ where
           response
         })
       } else {
-        send_with_retry(client, outbound, timeouts, &state, retry_enabled)
+        send_with_retry(client, outbound, timeouts, &state, &retry_policy)
           .await
           .map(|mut response| {
             if let Some(capture) = early_hints_capture {
@@ -1594,7 +1600,9 @@ where
       }
     }
   };
-  state.pools.report_success(&upstream.name);
+  if report_pool_success {
+    state.pools.report_success(&upstream.name);
+  }
   drop(pool_selection);
 
   let upstream_response = if let Some(mode) = grpc_web_mode {
@@ -2687,17 +2695,6 @@ fn parts_clone(parts: &http::request::Parts) -> http::request::Parts {
     .0
 }
 
-fn retryable_status(status: StatusCode, state: &AppSnapshot) -> bool {
-  state.config.proxy.retry.on.iter().any(|condition| {
-    matches!(
-      (condition, status.as_u16()),
-      (crate::config::RetryCondition::Status502, 502)
-        | (crate::config::RetryCondition::Status503, 503)
-        | (crate::config::RetryCondition::Status504, 504)
-    )
-  })
-}
-
 pub(super) fn is_idempotent(method: &Method) -> bool {
   matches!(
     *method,
@@ -2946,7 +2943,8 @@ async fn background_refresh(
     state.metrics.record_cache_background_refresh_skip();
     return Ok(());
   };
-  let response = send_with_retry(client, outbound, timeouts, &state, false).await?;
+  let retry_policy = EffectiveRetryPolicy::disabled(&state.config);
+  let response = send_with_retry(client, outbound, timeouts, &state, &retry_policy).await?;
   let (mut parts, body) = response.into_parts();
   if parts.status == StatusCode::NOT_MODIFIED {
     state.cache.update_from_not_modified(

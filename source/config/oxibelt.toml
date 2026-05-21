@@ -186,8 +186,16 @@ enabled = false
 enabled = false
 tries = 2
 timeout_ms = 5000
+total_budget_ms = 5000
+per_attempt_timeout_ms = 1000
 on = ["connect_error", "read_timeout", "502", "503", "504"]
 retry_non_idempotent = false
+backoff_base_ms = 0
+backoff_max_ms = 0
+jitter = false
+reselect_pool_on_retry = true
+exclude_failed_pool_upstreams = true
+report_passive_health = true
 
 [proxy.buffering]
 request = "streaming"  # streaming | memory | spool | reject_if_too_large

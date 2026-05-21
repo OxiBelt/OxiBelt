@@ -487,8 +487,16 @@ enabled = false
 enabled = false
 tries = 2
 timeout_ms = 5000
+total_budget_ms = 5000
+per_attempt_timeout_ms = 1000
 on = ["connect_error", "read_timeout", "502", "503", "504"]
 retry_non_idempotent = false
+backoff_base_ms = 0
+backoff_max_ms = 0
+jitter = false
+reselect_pool_on_retry = true
+exclude_failed_pool_upstreams = true
+report_passive_health = true
 
 [proxy.buffering]
 request = "streaming"  # streaming | memory | spool | reject_if_too_large
@@ -537,6 +545,8 @@ mode = "legacy_plain" # legacy_plain | plain | json
 `generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
 
 `proxy.buffering` controls ordinary HTTP request and response body buffering. `streaming` keeps the previous streaming behavior. `memory` reads the full body into memory up to `max_memory_body_bytes`. `spool` keeps up to `max_memory_body_bytes` in memory and spills the remainder to `temp_dir`, capped by `max_temp_file_bytes` per body. `reject_if_too_large` is memory-only and rejects bodies that exceed `max_memory_body_bytes`. `spool` requires `max_temp_file_bytes > 0` and a writable `temp_dir`; OxiBelt removes `oxibelt-buffer-*` temp files when the buffered body is dropped, when spooled buffering fails before ownership is transferred, and when cleaning stale matching files on initial startup.
+
+`proxy.retry` controls ordinary HTTP retry behavior. `tries` is the maximum number of attempts including the first attempt. `timeout_ms` remains supported as the legacy total retry-loop budget; `total_budget_ms` is preferred and takes precedence when both are set. `per_attempt_timeout_ms` caps the first-byte wait for each upstream attempt. `on` accepts `connect_error`, `read_timeout`, and retryable response statuses such as `502`, `503`, and `504`. Backoff is disabled when `backoff_base_ms` or `backoff_max_ms` is `0`; otherwise OxiBelt sleeps between retryable failures up to the configured maximum, optionally applying jitter. For upstream pools, `reselect_pool_on_retry` picks a fresh backend on each retry, `exclude_failed_pool_upstreams` avoids retrying an upstream that already failed in the same request, and `report_passive_health` records retryable failures in passive health. Set `retry_non_idempotent = true` only when the upstream can tolerate duplicate write-side effects from retried POST, PATCH, or other non-idempotent requests.
 
 `proxy.static_files` controls built-in static file transfer behavior. `inline_max_bytes` reads static response bodies at or below the configured size into a single response frame; `0` disables this small-file inline path. `sendfile = "auto"` enables a guarded Linux `sendfile(2)` fast path only for plaintext HTTP/1.1 `GET` and `HEAD` requests that can be proven equivalent to the normal static route path. OxiBelt opens each configured static root directory once per active configuration generation and uses that directory file descriptor for Linux `openat2(2)` resolution, reducing per-request root-open cost while keeping path resolution anchored to the validated root. OxiBelt probes the real kernel `sendfile(2)` path once at runtime; when the probe fails or the platform is not Linux, static routes fall back to the general path, including the small-file inline path. Sendfile responses honor the route or global `response_send_timeout_ms` while waiting on downstream write backpressure. Configured security response headers and request-wide system access logs are preserved on the sendfile path. Header-only and size-only WAF rules may run on the sendfile fast path and use the same resolved Real-IP client identity as the general path. HTTPS, HTTP/2, HTTP/3, WAF rules that require request or response body bytes, dynamic policy, rate limits, compression, Real-IP connection-limit modes, request bodies, upgrades, CONNECT, ambiguous `Content-Length`, and `Transfer-Encoding` all use the general Hyper path instead.
 
@@ -1458,6 +1468,20 @@ upstream = "app"
 # response = "streaming"
 # max_memory_body_bytes = 1048576
 # max_temp_file_bytes = 0
+
+[routes.retry]
+# enabled = true
+# tries = 2
+# total_budget_ms = 5000
+# per_attempt_timeout_ms = 1000
+# on = ["connect_error", "read_timeout", "502", "503", "504"]
+# retry_non_idempotent = false
+# backoff_base_ms = 0
+# backoff_max_ms = 0
+# jitter = false
+# reselect_pool_on_retry = true
+# exclude_failed_pool_upstreams = true
+# report_passive_health = true
 ```
 
 `upstream_http_version` is a route-level backend protocol override and must not exceed the selected upstream capability. HTTP/3 overrides are rejected for upstream-pool routes and for upstreams with PROXY protocol egress enabled.
@@ -1465,6 +1489,8 @@ upstream = "app"
 Route timeout overrides are optional. Omitted values inherit from `[limits]` for downstream behavior and from the selected `[[upstreams]]` entry for upstream behavior. TLS handshake and downstream header read timeouts are not route-level because route matching has not happened yet.
 
 Route buffering overrides are optional. Omitted values inherit from `[proxy.buffering]`; `temp_dir` is always global. CONNECT tunnels, HTTP Upgrade, and WebTransport forwarding remain streaming even when buffering is enabled.
+
+Route retry overrides are optional. Omitted values inherit from `[proxy.retry]`, while each configured `[routes.retry]` field replaces only that global field. A route can set `enabled = true` to opt into retry when global retry is disabled, or `enabled = false` to opt out when global retry is enabled. The same duplicate-write warning for global `retry_non_idempotent = true` applies to route-level retry.
 
 Fields:
 

@@ -371,6 +371,7 @@ mod tests {
       compression: None,
       buffering: Default::default(),
       timeouts: Default::default(),
+      retry: None,
       waf: Default::default(),
     }
   }
@@ -395,6 +396,7 @@ mod tests {
         compression: None,
         buffering: Default::default(),
         timeouts: Default::default(),
+        retry: None,
         waf: Default::default(),
       },
       RouteConfig {
@@ -414,6 +416,7 @@ mod tests {
         compression: None,
         buffering: Default::default(),
         timeouts: Default::default(),
+        retry: None,
         waf: Default::default(),
       },
     ];
@@ -468,6 +471,7 @@ mod tests {
         compression: None,
         buffering: Default::default(),
         timeouts: Default::default(),
+        retry: None,
         waf: Default::default(),
       },
       RouteConfig {
@@ -487,6 +491,7 @@ mod tests {
         compression: None,
         buffering: Default::default(),
         timeouts: Default::default(),
+        retry: None,
         waf: Default::default(),
       },
     ];

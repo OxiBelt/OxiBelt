@@ -114,6 +114,52 @@ fn retry_style_failure_releases_active_count_before_reselection() {
 }
 
 #[test]
+fn retry_reselection_excludes_failed_upstreams() {
+  let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::RoundRobin)], None);
+
+  let first = state
+    .select("app-pool", "203.0.113.10".parse().unwrap(), "/retry", None)
+    .unwrap();
+  assert_eq!(first.upstream_name, synthetic_upstream_name("app-pool", 0));
+  let excluded = vec![first.upstream_name.clone()];
+  drop(first);
+
+  let second = state
+    .select_with_cookie_header_excluding(
+      "app-pool",
+      "203.0.113.10".parse().unwrap(),
+      "/retry",
+      None,
+      None,
+      &excluded,
+    )
+    .unwrap();
+  assert_eq!(second.upstream_name, synthetic_upstream_name("app-pool", 1));
+}
+
+#[test]
+fn retry_reselection_excludes_hash_target() {
+  let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::Hash)], None);
+  let first = state
+    .select("app-pool", "203.0.113.10".parse().unwrap(), "stable", None)
+    .unwrap();
+  let excluded = vec![first.upstream_name.clone()];
+  drop(first);
+
+  let second = state
+    .select_with_cookie_header_excluding(
+      "app-pool",
+      "203.0.113.10".parse().unwrap(),
+      "stable",
+      None,
+      None,
+      &excluded,
+    )
+    .unwrap();
+  assert!(!excluded.contains(&second.upstream_name));
+}
+
+#[test]
 fn runtime_state_excludes_servers_from_new_selection() {
   let mut pool = test_pool(LoadBalancingAlgorithm::RoundRobin);
   pool.servers[0].state = UpstreamPoolServerState::Drain;
@@ -292,6 +338,42 @@ fn sticky_cookie_reuses_valid_server_cookie() {
     .unwrap();
   assert_eq!(second.upstream_name, expected);
   assert!(second.sticky_cookie().is_none());
+}
+
+#[test]
+fn sticky_cookie_falls_back_when_cookie_target_is_excluded() {
+  let state = PoolState::new(&[test_pool(LoadBalancingAlgorithm::StickyCookie)], None);
+
+  let first = state
+    .select_with_cookie_header("app-pool", "203.0.113.10".parse().unwrap(), "/", None, None)
+    .unwrap();
+  let excluded = vec![first.upstream_name.clone()];
+  let set_cookie = first
+    .sticky_cookie()
+    .expect("first sticky selection should issue cookie");
+  let cookie_pair = set_cookie
+    .to_str()
+    .unwrap()
+    .split(';')
+    .next()
+    .unwrap()
+    .to_string();
+  drop(first);
+
+  let cookie_header = HeaderValue::from_str(&cookie_pair).unwrap();
+  let second = state
+    .select_with_cookie_header_excluding(
+      "app-pool",
+      "203.0.113.10".parse().unwrap(),
+      "/",
+      None,
+      Some(&cookie_header),
+      &excluded,
+    )
+    .unwrap();
+
+  assert!(!excluded.contains(&second.upstream_name));
+  assert!(second.sticky_cookie().is_some());
 }
 
 #[test]

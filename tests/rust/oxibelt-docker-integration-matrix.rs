@@ -3394,6 +3394,112 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "upstream-pools",
+            "retry-failover",
+            "pool retry reselects a healthy backend and reports passive health",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response state
+  response="$(client_request "example.test" "/lb-retry" 200)"
+  assert_body_jq "${response}" '.upstream == "alt-upstream"'
+
+  state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${state}" '.body | fromjson | ([.servers[] | select(.id == "bad" and .healthy == false)] | length) == 1'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-pools",
+            "retry-connect-error-on-policy",
+            "retry.on excludes connect errors from pool retry",
+            ExpectStart::Success,
+            Needs {
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response state
+  response="$(client_request "example.test" "/connect-policy" 502)"
+  assert_response_jq "${response}" '.status == 502'
+
+  state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${state}" '.body | fromjson | ([.servers[] | select(.id == "missing" and .healthy == true)] | length) == 1'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-pools",
+            "route-retry-enable",
+            "route retry override can enable failover when global retry is disabled",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/route-enable" 200)"
+  assert_body_jq "${response}" '.upstream == "alt-upstream"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-pools",
+            "route-retry-disable",
+            "route retry override can disable failover when global retry is enabled",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response state
+  response="$(client_request "example.test" "/route-disable" 503)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+
+  state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${state}" '.body | fromjson | ([.servers[] | select(.id == "bad" and .healthy == true)] | length) == 1'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-pools",
+            "retry-non-idempotent",
+            "retry_non_idempotent enables POST retry only when configured",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local default_response retry_response
+  default_response="$(client_request_with_headers "default.example.test" "/write" 503 "POST" "payload")"
+  assert_body_jq "${default_response}" '.upstream == "http-upstream" and .method == "POST"'
+
+  retry_response="$(client_request_with_headers "retry.example.test" "/write" 200 "POST" "payload")"
+  assert_body_jq "${retry_response}" '.upstream == "alt-upstream" and .method == "POST"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "upstream-discovery",
             "file-provider",
             "file discovery adds and removes upstream pool servers without full reload",

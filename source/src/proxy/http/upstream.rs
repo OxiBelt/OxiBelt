@@ -101,14 +101,35 @@ pub(crate) fn select_pool_upstream<'a>(
   policy_override: Option<&str>,
   cookie_header: Option<&HeaderValue>,
 ) -> Result<SelectedUpstream<'a>, UpstreamSelectionError> {
+  select_pool_upstream_excluding(
+    state,
+    pool_name,
+    client_addr,
+    hash_key,
+    policy_override,
+    cookie_header,
+    &[],
+  )
+}
+
+pub(crate) fn select_pool_upstream_excluding<'a>(
+  state: &'a AppSnapshot,
+  pool_name: &str,
+  client_addr: std::net::SocketAddr,
+  hash_key: &str,
+  policy_override: Option<&str>,
+  cookie_header: Option<&HeaderValue>,
+  excluded_upstreams: &[String],
+) -> Result<SelectedUpstream<'a>, UpstreamSelectionError> {
   let selection = state
     .pools
-    .select_with_cookie_header(
+    .select_with_cookie_header_excluding(
       pool_name,
       client_addr.ip(),
       hash_key,
       policy_override,
       cookie_header,
+      excluded_upstreams,
     )
     .map_err(|error| UpstreamSelectionError::PoolUnavailable {
       pool_name: pool_name.to_string(),

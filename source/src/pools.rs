@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -180,18 +180,47 @@ impl PoolState {
     policy_override: Option<&str>,
     cookie_header: Option<&HeaderValue>,
   ) -> anyhow::Result<PoolSelection> {
+    self.select_with_cookie_header_excluding(
+      pool_name,
+      client_ip,
+      hash_key,
+      policy_override,
+      cookie_header,
+      &[],
+    )
+  }
+
+  pub fn select_with_cookie_header_excluding(
+    &self,
+    pool_name: &str,
+    client_ip: IpAddr,
+    hash_key: &str,
+    policy_override: Option<&str>,
+    cookie_header: Option<&HeaderValue>,
+    excluded_upstreams: &[String],
+  ) -> anyhow::Result<PoolSelection> {
     let Some(pool) = self.pools.get(pool_name).cloned() else {
       bail!("unknown upstream pool {pool_name}");
     };
     let algorithm = policy_override
       .and_then(parse_policy_override)
       .unwrap_or(pool.config.algorithm);
+    let excluded_upstreams = excluded_upstreams
+      .iter()
+      .map(String::as_str)
+      .collect::<HashSet<_>>();
 
     let (server, sticky_cookie) = if algorithm == LoadBalancingAlgorithm::StickyCookie {
-      sticky::select_sticky_cookie(&pool, client_ip, hash_key, cookie_header)
+      sticky::select_sticky_cookie(
+        &pool,
+        client_ip,
+        hash_key,
+        cookie_header,
+        &excluded_upstreams,
+      )
     } else {
       (
-        select_by_algorithm(&pool, algorithm, client_ip, hash_key),
+        select_by_algorithm(&pool, algorithm, client_ip, hash_key, &excluded_upstreams),
         None,
       )
     };
@@ -323,13 +352,14 @@ fn select_by_algorithm(
   algorithm: LoadBalancingAlgorithm,
   client_ip: IpAddr,
   hash_key: &str,
+  excluded_upstreams: &HashSet<&str>,
 ) -> Option<Arc<PoolServerRuntime>> {
   match algorithm {
-    LoadBalancingAlgorithm::RoundRobin => select_round_robin(pool),
-    LoadBalancingAlgorithm::LeastConn => select_least_conn(pool),
-    LoadBalancingAlgorithm::Random => select_random(pool),
-    LoadBalancingAlgorithm::Hash => select_hash(pool, hash_key),
-    LoadBalancingAlgorithm::IpHash => select_hash(pool, &client_ip.to_string()),
+    LoadBalancingAlgorithm::RoundRobin => select_round_robin(pool, excluded_upstreams),
+    LoadBalancingAlgorithm::LeastConn => select_least_conn(pool, excluded_upstreams),
+    LoadBalancingAlgorithm::Random => select_random(pool, excluded_upstreams),
+    LoadBalancingAlgorithm::Hash => select_hash(pool, hash_key, excluded_upstreams),
+    LoadBalancingAlgorithm::IpHash => select_hash(pool, &client_ip.to_string(), excluded_upstreams),
     LoadBalancingAlgorithm::StickyCookie => None,
   }
 }
@@ -339,12 +369,16 @@ fn build_sticky_fallback(
   algorithm: LoadBalancingAlgorithm,
   client_ip: IpAddr,
   hash_key: &str,
+  excluded_upstreams: &HashSet<&str>,
 ) -> Option<Arc<PoolServerRuntime>> {
-  select_by_algorithm(pool, algorithm, client_ip, hash_key)
+  select_by_algorithm(pool, algorithm, client_ip, hash_key, excluded_upstreams)
 }
 
-fn select_round_robin(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>> {
-  let weighted = weighted_available(pool);
+fn select_round_robin(
+  pool: &Arc<PoolRuntime>,
+  excluded_upstreams: &HashSet<&str>,
+) -> Option<Arc<PoolServerRuntime>> {
+  let weighted = weighted_available(pool, excluded_upstreams);
   if weighted.is_empty() {
     return None;
   }
@@ -352,14 +386,20 @@ fn select_round_robin(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>>
   weighted.get(next % weighted.len()).cloned()
 }
 
-fn select_least_conn(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>> {
-  available_servers(pool)
+fn select_least_conn(
+  pool: &Arc<PoolRuntime>,
+  excluded_upstreams: &HashSet<&str>,
+) -> Option<Arc<PoolServerRuntime>> {
+  available_servers(pool, excluded_upstreams)
     .into_iter()
     .min_by_key(|server| active_count(pool, server))
 }
 
-fn select_random(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>> {
-  let available = weighted_available(pool);
+fn select_random(
+  pool: &Arc<PoolRuntime>,
+  excluded_upstreams: &HashSet<&str>,
+) -> Option<Arc<PoolServerRuntime>> {
+  let available = weighted_available(pool, excluded_upstreams);
   if available.is_empty() {
     return None;
   }
@@ -369,8 +409,12 @@ fn select_random(pool: &Arc<PoolRuntime>) -> Option<Arc<PoolServerRuntime>> {
   available.get(next % available.len()).cloned()
 }
 
-fn select_hash(pool: &Arc<PoolRuntime>, key: &str) -> Option<Arc<PoolServerRuntime>> {
-  let available = weighted_available(pool);
+fn select_hash(
+  pool: &Arc<PoolRuntime>,
+  key: &str,
+  excluded_upstreams: &HashSet<&str>,
+) -> Option<Arc<PoolServerRuntime>> {
+  let available = weighted_available(pool, excluded_upstreams);
   if available.is_empty() {
     return None;
   }
@@ -381,10 +425,13 @@ fn select_hash(pool: &Arc<PoolRuntime>, key: &str) -> Option<Arc<PoolServerRunti
     .cloned()
 }
 
-fn weighted_available(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
+fn weighted_available(
+  pool: &Arc<PoolRuntime>,
+  excluded_upstreams: &HashSet<&str>,
+) -> Vec<Arc<PoolServerRuntime>> {
   let mut result = Vec::new();
   for (index, server) in pool.servers.iter().enumerate() {
-    if !server_available(pool, index, server) {
+    if !server_available(pool, index, server, excluded_upstreams) {
       continue;
     }
     let weight = server_config(pool, index).weight;
@@ -396,6 +443,7 @@ fn weighted_available(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
     for (index, server) in pool.servers.iter().enumerate() {
       let config = server_config(pool, index);
       if config.backup
+        && !excluded_upstreams.contains(server.upstream_name.as_str())
         && config.state.accepts_new_requests()
         && server_capacity_available(pool, index, server)
       {
@@ -406,12 +454,15 @@ fn weighted_available(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
   result
 }
 
-fn available_servers(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
+fn available_servers(
+  pool: &Arc<PoolRuntime>,
+  excluded_upstreams: &HashSet<&str>,
+) -> Vec<Arc<PoolServerRuntime>> {
   let primary = pool
     .servers
     .iter()
     .enumerate()
-    .filter(|(index, server)| server_available(pool, *index, server))
+    .filter(|(index, server)| server_available(pool, *index, server, excluded_upstreams))
     .map(|(_, server)| server.clone())
     .collect::<Vec<_>>();
   if !primary.is_empty() {
@@ -424,6 +475,7 @@ fn available_servers(pool: &Arc<PoolRuntime>) -> Vec<Arc<PoolServerRuntime>> {
     .filter(|(index, server)| {
       let config = server_config(pool, *index);
       config.backup
+        && !excluded_upstreams.contains(server.upstream_name.as_str())
         && config.state.accepts_new_requests()
         && server_capacity_available(pool, *index, server)
     })
@@ -435,9 +487,11 @@ fn server_available(
   pool: &Arc<PoolRuntime>,
   index: usize,
   server: &Arc<PoolServerRuntime>,
+  excluded_upstreams: &HashSet<&str>,
 ) -> bool {
   let config = server_config(pool, index);
   !config.backup
+    && !excluded_upstreams.contains(server.upstream_name.as_str())
     && config.state.accepts_new_requests()
     && server_healthy(pool, server)
     && server_capacity_available(pool, index, server)
