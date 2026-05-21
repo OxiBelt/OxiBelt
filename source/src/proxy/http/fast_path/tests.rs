@@ -87,7 +87,7 @@ async fn plain_route_is_eligible_when_optional_features_are_off() {
 }
 
 #[tokio::test]
-async fn h2_request_without_content_length_zero_keeps_fast_path_without_guard_drain() {
+async fn h2_request_without_content_length_zero_is_fast_path_eligible_before_guard() {
   let temp_dir = common::TempDir::new("plain-fast-path-h2-no-cl0");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-h2-no-cl0");
@@ -105,16 +105,12 @@ async fn h2_request_without_content_length_zero_keeps_fast_path_without_guard_dr
     .body(PanicBody)
     .expect("request should build");
 
-  let guarded = super::super::reject_content_length_zero_data(
-    request,
-    Duration::from_secs(1),
-    http::Version::HTTP_2,
-  )
-  .await
-  .expect("non-CL0 H2 request should pass guard");
-
+  assert!(!super::super::content_length_zero_guard_required(
+    request.headers(),
+    request.version()
+  ));
   assert!(resolved.execution_plan.fast_path.plain_proxy_h2);
-  assert!(PlainProxyFastPath::eligible(&guarded, &state, &resolved));
+  assert!(PlainProxyFastPath::eligible(&request, &state, &resolved));
 }
 
 #[tokio::test]

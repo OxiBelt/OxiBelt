@@ -59,7 +59,9 @@ use self::headers::{
   add_forwarded_headers, extract_downstream_port, extract_host, is_upgrade_request,
   set_effective_host_header, strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
-use self::observability::{record_request_observability, record_websocket_session_end};
+use self::observability::{
+  record_request_observability, record_websocket_session_end, request_observability_start,
+};
 use self::person_proof::handle_person_proof_api;
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::response::{
@@ -287,8 +289,8 @@ where
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
   let system_access_log_enabled = state.system_access_log.enabled();
-  let telemetry_start = TelemetryRuntime::start();
   let trace_context = state.telemetry.context_from_headers(request.headers());
+  let telemetry_start = request_observability_start(&state, trace_context);
   let mut access_log = SystemAccessLogContext::new(
     &request,
     peer_addr,
@@ -463,29 +465,8 @@ where
   };
   access_log.set_route_name(&resolved.route.name);
 
-  if matches!(
-    request_version,
-    http::Version::HTTP_10 | http::Version::HTTP_11
-  ) && fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved)
-  {
-    let fast_path_waf = match fast_path::prepare_plain_fast_path_waf(
-      &request,
-      state.as_ref(),
-      &resolved,
-      client_addr,
-      &host,
-      tcp_max_hop,
-      tls.as_ref(),
-      protocol,
-      transport_network,
-      transport_metadata,
-      downstream_scheme,
-      access_log,
-    ) {
-      Ok(waf) => waf,
-      Err(response) => return *response,
-    };
-    return fast_path::PlainProxyFastPath::handle(
+  let request = if !content_length_zero_guard_required(request.headers(), request_version) {
+    match fast_path::try_handle_plain_proxy(
       request,
       state.clone(),
       &resolved,
@@ -500,63 +481,48 @@ where
       request_version,
       transport_network,
       transport_metadata,
-      fast_path_waf.request,
-      fast_path_waf.request_headers,
-      fast_path_waf.tags,
       access_log,
       trace_context,
     )
-    .await;
-  }
+    .await
+    {
+      Ok(response) => return response,
+      Err(request) => request,
+    }
+  } else {
+    request
+  };
 
   let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-  let mut request =
+  let request =
     match reject_content_length_zero_data(request, client_body_timeout, request_version).await {
       Ok(request) => request,
       Err(response) => return response,
     };
 
-  if fast_path::PlainProxyFastPath::eligible(&request, &state, &resolved) {
-    let fast_path_waf = match fast_path::prepare_plain_fast_path_waf(
-      &request,
-      state.as_ref(),
-      &resolved,
-      client_addr,
-      &host,
-      tcp_max_hop,
-      tls.as_ref(),
-      protocol,
-      transport_network,
-      transport_metadata,
-      downstream_scheme,
-      access_log,
-    ) {
-      Ok(waf) => waf,
-      Err(response) => return *response,
-    };
-    return fast_path::PlainProxyFastPath::handle(
-      request,
-      state.clone(),
-      &resolved,
-      forwarded_client_addr,
-      client_addr,
-      &host,
-      downstream_port,
-      tcp_max_hop,
-      tls.as_ref(),
-      protocol,
-      downstream_scheme,
-      request_version,
-      transport_network,
-      transport_metadata,
-      fast_path_waf.request,
-      fast_path_waf.request_headers,
-      fast_path_waf.tags,
-      access_log,
-      trace_context,
-    )
-    .await;
-  }
+  let mut request = match fast_path::try_handle_plain_proxy(
+    request,
+    state.clone(),
+    &resolved,
+    forwarded_client_addr,
+    client_addr,
+    &host,
+    downstream_port,
+    tcp_max_hop,
+    tls.as_ref(),
+    protocol,
+    downstream_scheme,
+    request_version,
+    transport_network,
+    transport_metadata,
+    access_log,
+    trace_context,
+  )
+  .await
+  {
+    Ok(response) => return response,
+    Err(request) => request,
+  };
 
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();

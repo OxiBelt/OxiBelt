@@ -350,6 +350,75 @@ impl PlainProxyFastPath {
   }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn try_handle_plain_proxy<B>(
+  request: Request<B>,
+  state: Arc<AppSnapshot>,
+  resolved: &ResolvedRoute<'_>,
+  forwarded_client_addr: SocketAddr,
+  client_addr: SocketAddr,
+  host: &str,
+  downstream_port: u16,
+  tcp_max_hop: Option<u8>,
+  tls: &WafTlsMetadata,
+  protocol: WafProtocol,
+  downstream_scheme: &'static str,
+  request_version: http::Version,
+  transport_network: WafTransportNetwork,
+  transport_metadata: WafTransportMetadataInput<'_>,
+  access_log: &mut SystemAccessLogContext<'_>,
+  trace_context: Option<TraceContext>,
+) -> Result<Response<ProxyBody>, Request<B>>
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+{
+  if !PlainProxyFastPath::eligible(&request, &state, resolved) {
+    return Err(request);
+  }
+  let fast_path_waf = match prepare_plain_fast_path_waf(
+    &request,
+    state.as_ref(),
+    resolved,
+    client_addr,
+    host,
+    tcp_max_hop,
+    tls,
+    protocol,
+    transport_network,
+    transport_metadata,
+    downstream_scheme,
+    access_log,
+  ) {
+    Ok(waf) => waf,
+    Err(response) => return Ok(*response),
+  };
+  Ok(
+    PlainProxyFastPath::handle(
+      request,
+      state,
+      resolved,
+      forwarded_client_addr,
+      client_addr,
+      host,
+      downstream_port,
+      tcp_max_hop,
+      tls,
+      protocol,
+      downstream_scheme,
+      request_version,
+      transport_network,
+      transport_metadata,
+      fast_path_waf.request,
+      fast_path_waf.request_headers,
+      fast_path_waf.tags,
+      access_log,
+      trace_context,
+    )
+    .await,
+  )
+}
+
 fn plain_proxy_fast_path_enabled_for_version<B>(
   request: &Request<B>,
   resolved: &ResolvedRoute<'_>,
