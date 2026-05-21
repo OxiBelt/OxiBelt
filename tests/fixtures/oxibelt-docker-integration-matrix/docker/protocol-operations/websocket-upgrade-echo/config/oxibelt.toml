@@ -1,0 +1,82 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = false
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = false
+
+[proxy.upgrades]
+websocket = true
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "ws-upstream"
+origin = "http://mock-websocket:18081"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
+name = "ws-disabled"
+origin = "http://mock-websocket:18081"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = false
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "ws-route"
+hosts = ["ws.example.test"]
+path_prefix = "/ws"
+upstream = "ws-upstream"
+
+[[routes]]
+name = "ws-disabled-route"
+hosts = ["ws-disabled.example.test"]
+path_prefix = "/ws"
+upstream = "ws-disabled"

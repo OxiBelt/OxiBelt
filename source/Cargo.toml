@@ -6,6 +6,10 @@ rust-version = "1.95"
 license = "Apache-2.0"
 publish = false
 
+[features]
+default = []
+fuzzing = []
+
 [dependencies]
 anyhow = "1"
 aho-corasick = "1.1.4"

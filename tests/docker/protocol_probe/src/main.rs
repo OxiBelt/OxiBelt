@@ -13,6 +13,7 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
+use base64::Engine;
 use bytes::{Buf, Bytes, BytesMut};
 use h3_quinn::quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use h3_quinn::quinn::{
@@ -25,6 +26,8 @@ use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use md5::{Digest, Md5};
+use ring::hmac;
 use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, HandshakeKind, RootCertStore, ServerConfig};
@@ -143,6 +146,101 @@ struct WebTransportReloadGatedArgs {
     expect_drained_status: u16,
 }
 
+struct WebSocketEchoArgs {
+    listen: SocketAddr,
+}
+
+struct WebSocketClientArgs {
+    host: String,
+    port: u16,
+    server_name: String,
+    authority: String,
+    path: String,
+    ca_cert: String,
+    payload: Vec<u8>,
+    expect_status: u16,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TurnTransport {
+    Udp,
+    Tcp,
+    Tls,
+}
+
+impl TurnTransport {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "udp" => Ok(Self::Udp),
+            "tcp" => Ok(Self::Tcp),
+            "tls" => Ok(Self::Tls),
+            _ => bail!("unsupported TURN transport: {raw}"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::Tcp => "tcp",
+            Self::Tls => "tls",
+        }
+    }
+}
+
+struct TurnUpstreamArgs {
+    transport: TurnTransport,
+    listen: SocketAddr,
+    cert: Option<String>,
+    key: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum TurnClientAuth {
+    Valid,
+    Invalid,
+    Missing,
+}
+
+impl TurnClientAuth {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "valid" => Ok(Self::Valid),
+            "invalid" => Ok(Self::Invalid),
+            "missing" => Ok(Self::Missing),
+            _ => bail!("unsupported TURN auth mode: {raw}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TurnClientExpect {
+    Echo,
+    NoResponse,
+}
+
+impl TurnClientExpect {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "echo" => Ok(Self::Echo),
+            "no-response" => Ok(Self::NoResponse),
+            _ => bail!("unsupported TURN expectation: {raw}"),
+        }
+    }
+}
+
+struct TurnClientArgs {
+    transport: TurnTransport,
+    host: String,
+    port: u16,
+    server_name: String,
+    ca_cert: Option<String>,
+    username: String,
+    realm: String,
+    password: String,
+    auth: TurnClientAuth,
+    expect: TurnClientExpect,
+}
+
 impl DownstreamArgs {
     fn body_len(&self) -> usize {
         if self.zero_length_body_end_delay_ms.is_some() {
@@ -168,6 +266,12 @@ async fn main() -> anyhow::Result<()> {
         "webtransport-upstream" => {
             serve_webtransport_upstream(parse_webtransport_upstream_args(args)?).await
         }
+        "websocket-echo-upstream" => {
+            serve_websocket_echo_upstream(parse_websocket_echo_args(args)?).await
+        }
+        "websocket-client" => run_websocket_client(parse_websocket_client_args(args)?).await,
+        "turn-upstream" => serve_turn_upstream(parse_turn_upstream_args(args)?).await,
+        "turn-client" => run_turn_client(parse_turn_client_args(args)?).await,
         "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
         "tls-resumption-load" => {
             run_tls_resumption_load(parse_tls_resumption_load_args(args)?).await
@@ -187,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-    "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]"
   );
 }
 
@@ -290,6 +394,152 @@ fn parse_webtransport_upstream_args(
         cert: parsed.cert,
         key: parsed.key,
         name: parsed.name,
+    })
+}
+
+fn parse_websocket_echo_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<WebSocketEchoArgs> {
+    let mut listen = None;
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--listen" => listen = Some(value.parse().context("invalid --listen value")?),
+            _ => bail!("unknown websocket-echo-upstream flag: {flag}"),
+        }
+    }
+    Ok(WebSocketEchoArgs {
+        listen: listen.ok_or_else(|| anyhow!("--listen is required"))?,
+    })
+}
+
+fn parse_websocket_client_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<WebSocketClientArgs> {
+    let mut host = None;
+    let mut port = None;
+    let mut server_name = None;
+    let mut authority = None;
+    let mut path = None;
+    let mut ca_cert = None;
+    let mut payload = None;
+    let mut expect_status = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--host" => host = Some(value),
+            "--port" => port = Some(value.parse().context("invalid --port value")?),
+            "--server-name" => server_name = Some(value),
+            "--authority" => authority = Some(value),
+            "--path" => path = Some(validate_origin_form_path(&value)?),
+            "--ca-cert" => ca_cert = Some(value),
+            "--payload" => payload = Some(value.into_bytes()),
+            "--expect-status" => {
+                expect_status = Some(value.parse().context("invalid --expect-status value")?);
+            }
+            _ => bail!("unknown websocket-client flag: {flag}"),
+        }
+    }
+
+    let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+    Ok(WebSocketClientArgs {
+        host: host.ok_or_else(|| anyhow!("--host is required"))?,
+        port: port.ok_or_else(|| anyhow!("--port is required"))?,
+        authority: authority.unwrap_or_else(|| server_name.clone()),
+        server_name,
+        path: path.ok_or_else(|| anyhow!("--path is required"))?,
+        ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+        payload: payload.ok_or_else(|| anyhow!("--payload is required"))?,
+        expect_status: expect_status.ok_or_else(|| anyhow!("--expect-status is required"))?,
+    })
+}
+
+fn parse_turn_upstream_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<TurnUpstreamArgs> {
+    let mut transport = None;
+    let mut listen = None;
+    let mut cert = None;
+    let mut key = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--transport" => transport = Some(TurnTransport::parse(&value)?),
+            "--listen" => listen = Some(value.parse().context("invalid --listen value")?),
+            "--cert" => cert = Some(value),
+            "--key" => key = Some(value),
+            _ => bail!("unknown turn-upstream flag: {flag}"),
+        }
+    }
+
+    let transport = transport.ok_or_else(|| anyhow!("--transport is required"))?;
+    if transport == TurnTransport::Tls && (cert.is_none() || key.is_none()) {
+        bail!("TURN TLS upstream requires --cert and --key");
+    }
+    Ok(TurnUpstreamArgs {
+        transport,
+        listen: listen.ok_or_else(|| anyhow!("--listen is required"))?,
+        cert,
+        key,
+    })
+}
+
+fn parse_turn_client_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<TurnClientArgs> {
+    let mut transport = None;
+    let mut host = None;
+    let mut port = None;
+    let mut server_name = None;
+    let mut ca_cert = None;
+    let mut username = None;
+    let mut realm = None;
+    let mut password = None;
+    let mut auth = None;
+    let mut expect = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--transport" => transport = Some(TurnTransport::parse(&value)?),
+            "--host" => host = Some(value),
+            "--port" => port = Some(value.parse().context("invalid --port value")?),
+            "--server-name" => server_name = Some(value),
+            "--ca-cert" => ca_cert = Some(value),
+            "--username" => username = Some(value),
+            "--realm" => realm = Some(value),
+            "--password" => password = Some(value),
+            "--auth" => auth = Some(TurnClientAuth::parse(&value)?),
+            "--expect" => expect = Some(TurnClientExpect::parse(&value)?),
+            _ => bail!("unknown turn-client flag: {flag}"),
+        }
+    }
+
+    let transport = transport.ok_or_else(|| anyhow!("--transport is required"))?;
+    if transport == TurnTransport::Tls && ca_cert.is_none() {
+        bail!("TURN TLS client requires --ca-cert");
+    }
+    Ok(TurnClientArgs {
+        transport,
+        host: host.ok_or_else(|| anyhow!("--host is required"))?,
+        port: port.ok_or_else(|| anyhow!("--port is required"))?,
+        server_name: server_name.unwrap_or_else(|| "proxy".to_string()),
+        ca_cert,
+        username: username.ok_or_else(|| anyhow!("--username is required"))?,
+        realm: realm.ok_or_else(|| anyhow!("--realm is required"))?,
+        password: password.ok_or_else(|| anyhow!("--password is required"))?,
+        auth: auth.ok_or_else(|| anyhow!("--auth is required"))?,
+        expect: expect.ok_or_else(|| anyhow!("--expect is required"))?,
     })
 }
 
@@ -750,6 +1000,13 @@ async fn handle_h1_stall_upstream_connection(
 }
 
 async fn read_http1_request_head(stream: &mut TcpStream) -> anyhow::Result<String> {
+    read_http1_head_from_io(stream).await
+}
+
+async fn read_http1_head_from_io<S>(stream: &mut S) -> anyhow::Result<String>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while head.len() < 64 * 1024 {
@@ -766,6 +1023,125 @@ async fn read_http1_request_head(stream: &mut TcpStream) -> anyhow::Result<Strin
         }
     }
     bail!("HTTP/1 request head exceeded 64KiB")
+}
+
+fn parse_http1_headers(head: &str) -> BTreeMap<String, String> {
+    head.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn parse_http_status(head: &str) -> anyhow::Result<u16> {
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| anyhow!("HTTP response is missing status line"))?;
+    status.parse().context("invalid HTTP response status")
+}
+
+fn websocket_accept_key(key: &str) -> String {
+    let mut context = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
+    context.update(key.as_bytes());
+    context.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64::engine::general_purpose::STANDARD.encode(context.finish().as_ref())
+}
+
+struct WebSocketFrame {
+    opcode: u8,
+    payload: Vec<u8>,
+}
+
+async fn read_websocket_frame<S>(stream: &mut S) -> anyhow::Result<Option<WebSocketFrame>>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut header = [0u8; 2];
+    if stream.read_exact(&mut header).await.is_err() {
+        return Ok(None);
+    }
+    let opcode = header[0] & 0x0f;
+    let masked = header[1] & 0x80 != 0;
+    let mut len = u64::from(header[1] & 0x7f);
+    if len == 126 {
+        let mut extended = [0u8; 2];
+        stream
+            .read_exact(&mut extended)
+            .await
+            .context("failed to read WebSocket 16-bit length")?;
+        len = u64::from(u16::from_be_bytes(extended));
+    } else if len == 127 {
+        let mut extended = [0u8; 8];
+        stream
+            .read_exact(&mut extended)
+            .await
+            .context("failed to read WebSocket 64-bit length")?;
+        len = u64::from_be_bytes(extended);
+    }
+    if len > 1024 * 1024 {
+        bail!("WebSocket frame too large for probe: {len}");
+    }
+    let mut mask = [0u8; 4];
+    if masked {
+        stream
+            .read_exact(&mut mask)
+            .await
+            .context("failed to read WebSocket mask")?;
+    }
+    let mut payload = vec![0u8; len as usize];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .context("failed to read WebSocket payload")?;
+    if masked {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % mask.len()];
+        }
+    }
+    Ok(Some(WebSocketFrame { opcode, payload }))
+}
+
+async fn write_websocket_frame<S>(
+    stream: &mut S,
+    opcode: u8,
+    payload: &[u8],
+    masked: bool,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let mut frame = Vec::with_capacity(payload.len() + 16);
+    frame.push(0x80 | (opcode & 0x0f));
+    let mask_bit = if masked { 0x80 } else { 0 };
+    if payload.len() < 126 {
+        frame.push(mask_bit | payload.len() as u8);
+    } else if payload.len() <= u16::MAX as usize {
+        frame.push(mask_bit | 126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        frame.push(mask_bit | 127);
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    if masked {
+        let mask = [0x10, 0x20, 0x30, 0x40];
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % mask.len()]),
+        );
+    } else {
+        frame.extend_from_slice(payload);
+    }
+    stream
+        .write_all(&frame)
+        .await
+        .context("failed to write WebSocket frame")
 }
 
 async fn read_chunked_body_observation(stream: &mut TcpStream) -> anyhow::Result<(usize, bool)> {
@@ -940,6 +1316,254 @@ async fn handle_webtransport_upstream_request(
             }
         }
     }
+}
+
+async fn serve_websocket_echo_upstream(args: WebSocketEchoArgs) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("failed to bind WebSocket echo upstream to {}", args.listen))?;
+    loop {
+        let (stream, peer_addr) = listener.accept().await.context("failed to accept TCP")?;
+        tokio::spawn(async move {
+            if let Err(error) = handle_websocket_echo_connection(stream).await {
+                eprintln!("WebSocket echo connection from {peer_addr} failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn handle_websocket_echo_connection(mut stream: TcpStream) -> anyhow::Result<()> {
+    let head = read_http1_request_head(&mut stream).await?;
+    let headers = parse_http1_headers(&head);
+    let key = headers
+        .get("sec-websocket-key")
+        .ok_or_else(|| anyhow!("WebSocket request missing Sec-WebSocket-Key"))?;
+    let accept = websocket_accept_key(key);
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-accept: {accept}\r\n\r\n"
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .context("failed to write WebSocket handshake response")?;
+
+    while let Some(frame) = read_websocket_frame(&mut stream).await? {
+        if frame.opcode == 0x8 {
+            write_websocket_frame(&mut stream, 0x8, &frame.payload, false).await?;
+            return Ok(());
+        }
+        write_websocket_frame(&mut stream, frame.opcode, &frame.payload, false).await?;
+    }
+    Ok(())
+}
+
+async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
+    let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1")?;
+    client_config.enable_sni = true;
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .with_context(|| format!("failed to connect to {}:{}", args.host, args.port))?;
+    let server_name = ServerName::try_from(args.server_name.clone())
+        .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
+    let mut stream = connector
+        .connect(server_name, stream)
+        .await
+        .context("failed to establish WebSocket downstream TLS")?;
+    let key = base64::engine::general_purpose::STANDARD.encode(b"oxibelt-probe-key");
+    let request = format!(
+        "GET {} HTTP/1.1\r\nhost: {}\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-key: {}\r\nsec-websocket-version: 13\r\n\r\n",
+        args.path, args.authority, key
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("failed to write WebSocket handshake request")?;
+    let response_head = read_http1_head_from_io(&mut stream)
+        .await
+        .context("failed to read WebSocket handshake response")?;
+    let status = parse_http_status(&response_head)?;
+    if status != args.expect_status {
+        bail!(
+            "expected WebSocket status {}, got {} with response {response_head:?}",
+            args.expect_status,
+            status
+        );
+    }
+    if status != 101 {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+              "status": status,
+              "upgraded": false,
+            }))?
+        );
+        return Ok(());
+    }
+
+    write_websocket_frame(&mut stream, 0x2, &args.payload, true)
+        .await
+        .context("failed to write WebSocket payload")?;
+    let echoed = read_websocket_frame(&mut stream)
+        .await?
+        .ok_or_else(|| anyhow!("WebSocket closed before echo frame"))?;
+    if echoed.opcode != 0x2 || echoed.payload != args.payload {
+        bail!("unexpected WebSocket echo frame");
+    }
+    write_websocket_frame(&mut stream, 0x8, &[], true)
+        .await
+        .context("failed to write WebSocket close")?;
+    let _ = read_websocket_frame(&mut stream).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+          "status": status,
+          "upgraded": true,
+          "echoed_bytes": args.payload.len(),
+        }))?
+    );
+    Ok(())
+}
+
+async fn serve_turn_upstream(args: TurnUpstreamArgs) -> anyhow::Result<()> {
+    match args.transport {
+        TurnTransport::Udp => serve_turn_udp_upstream(args.listen).await,
+        TurnTransport::Tcp => serve_turn_tcp_upstream(args.listen).await,
+        TurnTransport::Tls => {
+            let cert = args.cert.ok_or_else(|| anyhow!("--cert is required"))?;
+            let key = args.key.ok_or_else(|| anyhow!("--key is required"))?;
+            serve_turn_tls_upstream(args.listen, cert, key).await
+        }
+    }
+}
+
+async fn serve_turn_udp_upstream(listen: SocketAddr) -> anyhow::Result<()> {
+    let socket = tokio::net::UdpSocket::bind(listen)
+        .await
+        .with_context(|| format!("failed to bind TURN UDP upstream to {listen}"))?;
+    let mut buffer = vec![0u8; 65_536];
+    loop {
+        let (len, peer) = socket
+            .recv_from(&mut buffer)
+            .await
+            .context("failed to receive TURN UDP datagram")?;
+        socket
+            .send_to(&buffer[..len], peer)
+            .await
+            .context("failed to echo TURN UDP datagram")?;
+    }
+}
+
+async fn serve_turn_tcp_upstream(listen: SocketAddr) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("failed to bind TURN TCP upstream to {listen}"))?;
+    loop {
+        let (stream, peer_addr) = listener.accept().await.context("failed to accept TCP")?;
+        tokio::spawn(async move {
+            if let Err(error) = handle_turn_stream_echo(stream).await {
+                eprintln!("TURN TCP upstream connection from {peer_addr} failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn serve_turn_tls_upstream(
+    listen: SocketAddr,
+    cert: String,
+    key: String,
+) -> anyhow::Result<()> {
+    let server_config = ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("failed to configure TURN TLS upstream versions")?
+    .with_no_client_auth()
+    .with_single_cert(
+        load_certs(Path::new(&cert))?,
+        load_private_key(Path::new(&key))?,
+    )
+    .context("failed to configure TURN TLS upstream certificate")?;
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+    let listener = TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("failed to bind TURN TLS upstream to {listen}"))?;
+    loop {
+        let (stream, peer_addr) = listener.accept().await.context("failed to accept TCP")?;
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let stream = acceptor
+                    .accept(stream)
+                    .await
+                    .context("failed to accept TURN TLS upstream connection")?;
+                handle_turn_stream_echo(stream).await
+            }
+            .await;
+            if let Err(error) = result {
+                eprintln!("TURN TLS upstream connection from {peer_addr} failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn handle_turn_stream_echo<S>(mut stream: S) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        let frame = match read_turn_frame(&mut stream).await {
+            Ok(frame) => frame,
+            Err(_) => return Ok(()),
+        };
+        stream
+            .write_all(&frame)
+            .await
+            .context("failed to echo TURN stream frame")?;
+        stream
+            .flush()
+            .await
+            .context("failed to flush TURN stream")?;
+    }
+}
+
+async fn run_turn_client(args: TurnClientArgs) -> anyhow::Result<()> {
+    let request = turn_request(&args);
+    let response = match args.transport {
+        TurnTransport::Udp => turn_udp_round_trip(&args, &request).await?,
+        TurnTransport::Tcp => turn_tcp_round_trip(&args, &request).await?,
+        TurnTransport::Tls => turn_tls_round_trip(&args, &request).await?,
+    };
+    match args.expect {
+        TurnClientExpect::Echo => {
+            let response = response.ok_or_else(|| anyhow!("expected TURN echo response"))?;
+            if response != request {
+                bail!(
+                    "TURN {} response did not echo request",
+                    args.transport.label()
+                );
+            }
+        }
+        TurnClientExpect::NoResponse => {
+            if response.is_some() {
+                bail!(
+                    "TURN {} unexpectedly returned a response",
+                    args.transport.label()
+                );
+            }
+        }
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+          "transport": args.transport.label(),
+          "expect": match args.expect {
+            TurnClientExpect::Echo => "echo",
+            TurnClientExpect::NoResponse => "no-response",
+          },
+        }))?
+    );
+    Ok(())
 }
 
 async fn handle_h3_upstream_connection(
@@ -1793,6 +2417,196 @@ fn client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
     } else {
         "[::]:0".parse().expect("valid IPv6 bind address")
     }
+}
+
+async fn turn_udp_round_trip(
+    args: &TurnClientArgs,
+    request: &[u8],
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let remote = resolve_remote_addr(&args.host, args.port).await?;
+    let socket = tokio::net::UdpSocket::bind(client_bind_addr(remote))
+        .await
+        .context("failed to bind TURN UDP client socket")?;
+    socket
+        .send_to(request, remote)
+        .await
+        .context("failed to send TURN UDP request")?;
+    let mut response = vec![0u8; 65_536];
+    match tokio::time::timeout(Duration::from_millis(750), socket.recv(&mut response)).await {
+        Ok(Ok(len)) => {
+            response.truncate(len);
+            Ok(Some(response))
+        }
+        Ok(Err(error)) => Err(error).context("failed to receive TURN UDP response"),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn turn_tcp_round_trip(
+    args: &TurnClientArgs,
+    request: &[u8],
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .with_context(|| format!("failed to connect TURN TCP to {}:{}", args.host, args.port))?;
+    stream
+        .write_all(request)
+        .await
+        .context("failed to write TURN TCP request")?;
+    match tokio::time::timeout(Duration::from_millis(750), read_turn_frame(&mut stream)).await {
+        Ok(Ok(response)) => Ok(Some(response)),
+        Ok(Err(_)) | Err(_) => Ok(None),
+    }
+}
+
+async fn turn_tls_round_trip(
+    args: &TurnClientArgs,
+    request: &[u8],
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let ca_cert = args
+        .ca_cert
+        .as_ref()
+        .ok_or_else(|| anyhow!("TURN TLS requires --ca-cert"))?;
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("failed to configure TURN TLS client versions")?
+    .with_root_certificates(load_root_store(Path::new(ca_cert))?)
+    .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .with_context(|| format!("failed to connect TURN TLS to {}:{}", args.host, args.port))?;
+    let server_name = ServerName::try_from(args.server_name.clone())
+        .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
+    let mut stream = connector
+        .connect(server_name, stream)
+        .await
+        .context("failed to establish TURN TLS")?;
+    stream
+        .write_all(request)
+        .await
+        .context("failed to write TURN TLS request")?;
+    match tokio::time::timeout(Duration::from_millis(750), read_turn_frame(&mut stream)).await {
+        Ok(Ok(response)) => Ok(Some(response)),
+        Ok(Err(_)) | Err(_) => Ok(None),
+    }
+}
+
+async fn read_turn_frame<S>(stream: &mut S) -> anyhow::Result<Vec<u8>>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut header = [0u8; 4];
+    stream
+        .read_exact(&mut header)
+        .await
+        .context("failed to read TURN frame header")?;
+    if header[0] & 0b1100_0000 == 0b0100_0000 {
+        let len = u16::from_be_bytes([header[2], header[3]]) as usize;
+        let padded = len + turn_padding(len);
+        let mut frame = Vec::with_capacity(4 + padded);
+        frame.extend_from_slice(&header);
+        frame.resize(4 + padded, 0);
+        stream
+            .read_exact(&mut frame[4..])
+            .await
+            .context("failed to read TURN ChannelData frame")?;
+        return Ok(frame);
+    }
+    let len = u16::from_be_bytes([header[2], header[3]]) as usize;
+    let mut frame = Vec::with_capacity(20 + len);
+    frame.extend_from_slice(&header);
+    frame.resize(20 + len, 0);
+    stream
+        .read_exact(&mut frame[4..])
+        .await
+        .context("failed to read STUN frame")?;
+    Ok(frame)
+}
+
+const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
+const STUN_HEADER_LEN: usize = 20;
+const STUN_ALLOCATE_REQUEST: u16 = 0x0003;
+const STUN_ATTR_USERNAME: u16 = 0x0006;
+const STUN_ATTR_MESSAGE_INTEGRITY: u16 = 0x0008;
+const STUN_ATTR_REALM: u16 = 0x0014;
+
+fn turn_request(args: &TurnClientArgs) -> Vec<u8> {
+    let transaction_id = *b"oxibeltprobe";
+    let mut attrs = vec![
+        (STUN_ATTR_USERNAME, args.username.as_bytes().to_vec()),
+        (STUN_ATTR_REALM, args.realm.as_bytes().to_vec()),
+    ];
+    match args.auth {
+        TurnClientAuth::Missing => {
+            encode_stun_message(STUN_ALLOCATE_REQUEST, transaction_id, &attrs)
+        }
+        TurnClientAuth::Invalid => {
+            attrs.push((STUN_ATTR_MESSAGE_INTEGRITY, vec![0u8; 20]));
+            encode_stun_message(STUN_ALLOCATE_REQUEST, transaction_id, &attrs)
+        }
+        TurnClientAuth::Valid => {
+            let key = turn_long_term_key(&args.username, &args.realm, &args.password);
+            with_turn_message_integrity(
+                encode_stun_message(STUN_ALLOCATE_REQUEST, transaction_id, &attrs),
+                &key,
+            )
+        }
+    }
+}
+
+fn encode_stun_message(
+    message_type: u16,
+    transaction_id: [u8; 12],
+    attrs: &[(u16, Vec<u8>)],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(STUN_HEADER_LEN + attrs.len() * 16);
+    out.extend_from_slice(&message_type.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+    out.extend_from_slice(&transaction_id);
+    for (kind, value) in attrs {
+        append_stun_attr(&mut out, *kind, value);
+    }
+    let len = (out.len() - STUN_HEADER_LEN) as u16;
+    out[2..4].copy_from_slice(&len.to_be_bytes());
+    out
+}
+
+fn with_turn_message_integrity(mut message: Vec<u8>, key: &[u8]) -> Vec<u8> {
+    let final_len = (message.len() + 24 - STUN_HEADER_LEN) as u16;
+    message[2..4].copy_from_slice(&final_len.to_be_bytes());
+    let integrity = hmac_sha1(key, &message);
+    append_stun_attr(&mut message, STUN_ATTR_MESSAGE_INTEGRITY, &integrity);
+    message
+}
+
+fn append_stun_attr(out: &mut Vec<u8>, kind: u16, value: &[u8]) {
+    out.extend_from_slice(&kind.to_be_bytes());
+    out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    out.extend_from_slice(value);
+    out.resize(out.len() + turn_padding(value.len()), 0);
+}
+
+fn turn_padding(len: usize) -> usize {
+    (4 - (len % 4)) % 4
+}
+
+fn hmac_sha1(key: &[u8], value: &[u8]) -> [u8; 20] {
+    let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
+    let tag = hmac::sign(&key, value);
+    let mut out = [0u8; 20];
+    out.copy_from_slice(tag.as_ref());
+    out
+}
+
+fn turn_long_term_key(username: &str, realm: &str, password: &str) -> [u8; 16] {
+    let value = format!("{username}:{realm}:{password}");
+    let mut digest = Md5::new();
+    digest.update(value.as_bytes());
+    digest.finalize().into()
 }
 
 fn response_json(

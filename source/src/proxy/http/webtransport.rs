@@ -359,7 +359,7 @@ pub(crate) async fn prepare_webtransport(
   })
 }
 
-fn parse_webtransport_protocols(headers: &http::HeaderMap) -> Vec<String> {
+pub(crate) fn parse_webtransport_protocols(headers: &http::HeaderMap) -> Vec<String> {
   headers
     .get("wt-available-protocols")
     .and_then(|value| value.to_str().ok())

@@ -719,7 +719,7 @@ async fn resolve_upstream_addr(origin: &url::Url) -> anyhow::Result<(String, Soc
   Ok((host, remote))
 }
 
-fn is_webtransport_request(request: &Request<()>) -> bool {
+pub(crate) fn is_webtransport_request(request: &Request<()>) -> bool {
   request.method() == Method::CONNECT
     && request
       .extensions()
@@ -727,7 +727,7 @@ fn is_webtransport_request(request: &Request<()>) -> bool {
       .is_some_and(|protocol| protocol == &Protocol::WEB_TRANSPORT)
 }
 
-fn rejects_unsafe_early_data(
+pub(crate) fn rejects_unsafe_early_data(
   request: &Request<()>,
   zero_rtt: crate::config::QuicZeroRttMode,
   is_early_data: bool,

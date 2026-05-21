@@ -124,6 +124,11 @@ jobs:
       matrix:
         fuzz_target:
           - turn_protocol
+          - tls_client_hello
+          - http_semantics
+          - http3_webtransport
+          - websocket_frame
+          - webrtc_turn
 
     steps:
       - name: Checkout

@@ -16,6 +16,8 @@ pub mod config;
 pub mod control_http;
 pub mod dynamic_policy;
 pub mod external_auth;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod h2_tuning;
 pub mod identity;
 pub mod lifecycle;

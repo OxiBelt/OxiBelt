@@ -36,6 +36,10 @@ struct Needs {
     h1_stall_upstream: bool,
     h3_upstream: bool,
     webtransport_upstream: bool,
+    websocket_upstream: bool,
+    turn_udp_upstream: bool,
+    turn_tcp_upstream: bool,
+    turn_tls_upstream: bool,
     dns_server: bool,
     protocol_probe: bool,
     pq_probe: bool,
@@ -204,6 +208,22 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     manifest.push_str(&format!(
         "CASE_NEED_WEBTRANSPORT_UPSTREAM={}\n",
         bool_env(case.needs.webtransport_upstream)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_WEBSOCKET_UPSTREAM={}\n",
+        bool_env(case.needs.websocket_upstream)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_TURN_UDP_UPSTREAM={}\n",
+        bool_env(case.needs.turn_udp_upstream)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_TURN_TCP_UPSTREAM={}\n",
+        bool_env(case.needs.turn_tcp_upstream)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_TURN_TLS_UPSTREAM={}\n",
+        bool_env(case.needs.turn_tls_upstream)
     ));
     manifest.push_str(&format!(
         "CASE_NEED_DNS_SERVER={}\n",
@@ -2455,6 +2475,39 @@ for sock in sockets:
             None,
         ),
         docker_case(
+            "security",
+            "webrtc-turn-auth-transports",
+            "WebRTC TURN proxy validates long-term auth over UDP, TCP, and TLS transports",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                turn_udp_upstream: true,
+                turn_tcp_upstream: true,
+                turn_tls_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local udp tcp tls
+  udp="$(protocol_probe_turn_client udp 3478 valid echo)"
+  assert_response_jq "${udp}" '.transport == "udp" and .expect == "echo"'
+  tcp="$(protocol_probe_turn_client tcp 3479 valid echo)"
+  assert_response_jq "${tcp}" '.transport == "tcp" and .expect == "echo"'
+  tls="$(protocol_probe_turn_client tls 5349 valid echo)"
+  assert_response_jq "${tls}" '.transport == "tls" and .expect == "echo"'
+
+  udp="$(protocol_probe_turn_client udp 3478 invalid no-response)"
+  assert_response_jq "${udp}" '.transport == "udp" and .expect == "no-response"'
+  tcp="$(protocol_probe_turn_client tcp 3479 invalid no-response)"
+  assert_response_jq "${tcp}" '.transport == "tcp" and .expect == "no-response"'
+  tls="$(protocol_probe_turn_client tls 5349 invalid no-response)"
+  assert_response_jq "${tls}" '.transport == "tls" and .expect == "no-response"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "config-invalid",
             "strict-unknown-field",
             "strict configuration rejects unknown merged fields by default",
@@ -3195,6 +3248,28 @@ run_case_checks() {
   response="$(upgrade_client_request "example.test" "/app/generic-upgrade" "matrix-upgrade" "hello-upgrade" 101)"
   assert_response_jq "${response}" '.body == "upgraded:hello-upgrade"'
   assert_response_jq "${response}" '.headers.upgrade == "matrix-upgrade"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-operations",
+            "websocket-upgrade-echo",
+            "WebSocket upgrade echoes binary payloads and rejects upstreams with WebSocket disabled",
+            ExpectStart::Success,
+            Needs {
+                websocket_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local success rejected
+  success="$(protocol_probe_websocket_client "ws.example.test" "/ws/echo" 101 "probe-websocket")"
+  assert_response_jq "${success}" '.status == 101 and .upgraded == true and .echoed_bytes == 15'
+
+  rejected="$(protocol_probe_websocket_client "ws-disabled.example.test" "/ws/echo" 502 "blocked-websocket")"
+  assert_response_jq "${rejected}" '.status == 502 and .upgraded == false'
 }
 "#,
             None,
@@ -5777,6 +5852,45 @@ run_case_checks() {
   assert_body_jq "${response}" '.upstream == "http-upstream"
     and .request_version == "HTTP/1.1"
     and .path == "/origin/app/downstream-h2-upstream-h1"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "downstream-tls-http-suite",
+            "one downstream TLS config proxies HTTP/1.1, HTTP/2, and HTTP/3 with stable forwarded metadata",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local h1 h2 h3
+  h1="$(client_request "example.test" "/app/h1-suite?case=forwarded" 200)"
+  assert_body_jq "${h1}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/h1-suite?case=forwarded"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+
+  h2="$(protocol_probe_client "h2" "example.test" "/app/h2-suite" 200)"
+  assert_response_jq "${h2}" '.negotiated_protocol == "h2"'
+  assert_body_jq "${h2}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/h2-suite"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+
+  h3="$(protocol_probe_client "h3" "example.test" "/app/h3-suite" 200)"
+  assert_response_jq "${h3}" '.negotiated_protocol == "h3"'
+  assert_body_jq "${h3}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/h3-suite"
     and .headers["x-forwarded-proto"] == "https"
     and .headers["x-forwarded-host"] == "example.test"'
 }

@@ -40,6 +40,10 @@ h2c_container="oxibelt-h2c-${run_id}"
 h1_stall_container="oxibelt-h1-stall-${run_id}"
 h3_container="oxibelt-h3-${run_id}"
 webtransport_container="oxibelt-webtransport-${run_id}"
+websocket_container="oxibelt-websocket-${run_id}"
+turn_udp_container="oxibelt-turn-udp-${run_id}"
+turn_tcp_container="oxibelt-turn-tcp-${run_id}"
+turn_tls_container="oxibelt-turn-tls-${run_id}"
 dns_container="oxibelt-dns-${run_id}"
 postgres_container="oxibelt-postgres-${run_id}"
 redis_container="oxibelt-redis-${run_id}"
@@ -115,6 +119,10 @@ collect_diagnostics() {
   docker logs "${h1_stall_container}" >"${logs_dir}/mock-h1-stall.log" 2>&1 || true
   docker logs "${h3_container}" >"${logs_dir}/mock-h3.log" 2>&1 || true
   docker logs "${webtransport_container}" >"${logs_dir}/mock-webtransport.log" 2>&1 || true
+  docker logs "${websocket_container}" >"${logs_dir}/mock-websocket.log" 2>&1 || true
+  docker logs "${turn_udp_container}" >"${logs_dir}/mock-turn-udp.log" 2>&1 || true
+  docker logs "${turn_tcp_container}" >"${logs_dir}/mock-turn-tcp.log" 2>&1 || true
+  docker logs "${turn_tls_container}" >"${logs_dir}/mock-turn-tls.log" 2>&1 || true
   docker logs "${dns_container}" >"${logs_dir}/mock-dns.log" 2>&1 || true
   docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
   docker logs "${redis_container}" >"${logs_dir}/redis.log" 2>&1 || true
@@ -1094,6 +1102,101 @@ protocol_probe_client_with_sni_and_ca() {
   fail_with_diagnostics "protocol probe did not reach expected status ${expect_status}"
 }
 
+protocol_probe_websocket_client() {
+  local authority="$1"
+  local path="$2"
+  local expect_status="$3"
+  local payload="$4"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 "${PROTOCOL_PROBE_ATTEMPTS:-30}"); do
+    client_container="$(unique_docker_container_name "oxibelt-websocket-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      websocket-client \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --payload "${payload}" \
+      --expect-status "${expect_status}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "WebSocket protocol probe failed after retries with status ${status}: authority=${authority} path=${path}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "WebSocket protocol probe did not reach expected status ${expect_status}"
+}
+
+protocol_probe_turn_client() {
+  local transport="$1"
+  local port="$2"
+  local auth="$3"
+  local expect="$4"
+  local output=""
+  local status=0
+  local client_container=""
+  local ca_args=()
+
+  if [[ "${transport}" == "tls" ]]; then
+    ca_args=(--ca-cert /tmp/proxy-ca.pem)
+  fi
+
+  for attempt in $(seq 1 "${PROTOCOL_PROBE_ATTEMPTS:-30}"); do
+    client_container="$(unique_docker_container_name "oxibelt-turn-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      turn-client \
+      --transport "${transport}" \
+      --host proxy \
+      --port "${port}" \
+      --server-name proxy \
+      --username turn-user \
+      --realm turn.example.test \
+      --password turn-password \
+      --auth "${auth}" \
+      --expect "${expect}" \
+      "${ca_args[@]}" >/dev/null
+    if [[ "${transport}" == "tls" ]]; then
+      docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+    fi
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "TURN protocol probe failed after retries with status ${status}: transport=${transport} auth=${auth} expect=${expect}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "TURN protocol probe did not observe expected ${expect} result"
+}
+
 protocol_probe_tls_resumption_load() {
   local authority="$1"
   local path="$2"
@@ -1473,6 +1576,7 @@ DNS.4 = mock-webtransport
 DNS.5 = sni-forward.test
 DNS.6 = sni-default.test
 DNS.7 = quic-forward.test
+DNS.8 = mock-turn-tls
 EOF
 
 cat >"${work_dir}/downstream.cnf" <<'EOF'
@@ -1633,7 +1737,7 @@ if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
     "${repo_root}/tests/docker/pq_probe" >/dev/null
 fi
 
-if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" || "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
+if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" || "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" || "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" || "${CASE_NEED_TURN_UDP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TCP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TLS_UPSTREAM}" == "1" ]]; then
   docker build \
     -t "${protocol_probe_image}" \
     -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
@@ -1788,6 +1892,58 @@ if [[ "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
   docker cp "${upstream_tls_dir}/server.pem" "${webtransport_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${webtransport_container}:/tls/server.key"
   docker start "${webtransport_container}" >/dev/null
+fi
+
+if [[ "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" ]]; then
+  docker run -d \
+    --name "${websocket_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-websocket \
+    "${protocol_probe_image}" \
+    websocket-echo-upstream \
+    --listen 0.0.0.0:18081 >/dev/null
+fi
+
+if [[ "${CASE_NEED_TURN_UDP_UPSTREAM}" == "1" ]]; then
+  docker run -d \
+    --name "${turn_udp_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-turn-udp \
+    "${protocol_probe_image}" \
+    turn-upstream \
+    --transport udp \
+    --listen 0.0.0.0:3478 >/dev/null
+fi
+
+if [[ "${CASE_NEED_TURN_TCP_UPSTREAM}" == "1" ]]; then
+  docker run -d \
+    --name "${turn_tcp_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-turn-tcp \
+    "${protocol_probe_image}" \
+    turn-upstream \
+    --transport tcp \
+    --listen 0.0.0.0:3479 >/dev/null
+fi
+
+if [[ "${CASE_NEED_TURN_TLS_UPSTREAM}" == "1" ]]; then
+  docker create \
+    --name "${turn_tls_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-turn-tls \
+    "${protocol_probe_image}" \
+    turn-upstream \
+    --transport tls \
+    --listen 0.0.0.0:5349 \
+    --cert /tls/server.pem \
+    --key /tls/server.key >/dev/null
+  docker cp "${upstream_tls_dir}/server.pem" "${turn_tls_container}:/tls/server.pem"
+  docker cp "${upstream_tls_dir}/server.key" "${turn_tls_container}:/tls/server.key"
+  docker start "${turn_tls_container}" >/dev/null
 fi
 
 proxy_dns_args=()

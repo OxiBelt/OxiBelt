@@ -9,11 +9,46 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-oxibelt = { path = "../source" }
+oxibelt = { path = "../source", features = ["fuzzing"] }
 
 [[bin]]
 name = "turn_protocol"
 path = "fuzz_targets/turn_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_client_hello"
+path = "fuzz_targets/tls_client_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_semantics"
+path = "fuzz_targets/http_semantics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http3_webtransport"
+path = "fuzz_targets/http3_webtransport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "websocket_frame"
+path = "fuzz_targets/websocket_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webrtc_turn"
+path = "fuzz_targets/webrtc_turn.rs"
 test = false
 doc = false
 bench = false

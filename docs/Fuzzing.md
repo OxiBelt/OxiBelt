@@ -15,24 +15,48 @@ cargo install cargo-fuzz
 rustup toolchain install nightly --profile minimal
 ```
 
-## TURN/STUN Protocol Target
+## Fuzz Targets
 
-The initial fuzz target covers `oxibelt::turn::protocol`, including raw STUN
-parsing, TURN ChannelData parsing, helper validation paths, and bounded
-round-trips through the protocol encoders.
+The fuzz crate depends on `oxibelt` with the `fuzzing` feature enabled. That
+feature exposes only small deterministic wrappers under `oxibelt::fuzzing`;
+the underlying proxy, TLS, HTTP, WebSocket, WebTransport, and TURN helpers stay
+private to the main crate.
 
-Run the target locally:
+- `turn_protocol`: raw STUN parsing, TURN ChannelData parsing, helper
+  validation paths, and bounded round-trips through protocol encoders.
+- `tls_client_hello`: TLS record/raw ClientHello parsing, SNI extraction, and
+  downstream SNI normalization.
+- `http_semantics`: HTTPS request metadata semantics including host/authority
+  handling, URI rewrite, hop-by-hop header stripping, forwarded headers, and
+  upgrade detection.
+- `http3_webtransport`: HTTP/3 request classification, 0-RTT policy checks,
+  and WebTransport extended CONNECT/protocol header parsing.
+- `websocket_frame`: bounded WebSocket frame ownership, parsing, and stream
+  WAF prefix inspection behavior.
+- `webrtc_turn`: TURN/STUN auth validation, nonce handling, and
+  ChannelData/STUN edge cases for the WebRTC TURN listener surface.
+
+Run a target locally:
 
 ```sh
-cargo +nightly fuzz run turn_protocol
+cargo +nightly fuzz run tls_client_hello
 ```
 
-Run the same short smoke pass used by CI:
+Run the same short smoke pass used by CI for all targets:
 
 ```sh
-cargo +nightly fuzz run turn_protocol -- -runs=256
+for target in \
+  turn_protocol \
+  tls_client_hello \
+  http_semantics \
+  http3_webtransport \
+  websocket_frame \
+  webrtc_turn
+do
+  cargo +nightly fuzz run "${target}" -- -runs=256
+done
 ```
 
 If `cargo-fuzz` finds a crash, keep the generated reproducer and minimize it
-with `cargo +nightly fuzz tmin turn_protocol <path-to-crash>` before turning it
+with `cargo +nightly fuzz tmin <target> <path-to-crash>` before turning it
 into a regression test.

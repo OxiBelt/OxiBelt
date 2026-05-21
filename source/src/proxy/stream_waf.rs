@@ -272,6 +272,24 @@ fn websocket_max_frame_size(max_payload_bytes: usize) -> usize {
   max_payload_bytes.saturating_add(1).max(1)
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) async fn fuzz_websocket_frame(raw: &[u8], max_payload_bytes: usize) {
+  use tokio::io::AsyncWriteExt;
+
+  let capacity = raw.len().saturating_add(16).max(64);
+  let (mut writer, reader) = tokio::io::duplex(capacity);
+  if writer.write_all(raw).await.is_ok() {
+    let _ = writer.shutdown().await;
+  }
+  drop(writer);
+
+  let (read, write) = tokio::io::split(reader);
+  let (mut reader, _writer) = after_handshake_split(read, write, Role::Server);
+  configure_reader(&mut reader, max_payload_bytes);
+  let _ = read_owned_frame(&mut reader).await;
+  let _ = inspect_prefix(raw, max_payload_bytes);
+}
+
 async fn read_owned_frame<R>(
   reader: &mut WebSocketRead<R>,
 ) -> Result<OwnedWebSocketFrame, WebSocketError>

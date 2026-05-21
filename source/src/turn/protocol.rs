@@ -232,6 +232,14 @@ pub fn encode_channel_data(channel: u16, payload: &[u8]) -> Vec<u8> {
   out
 }
 
+pub fn with_message_integrity(mut message: Vec<u8>, key: &[u8]) -> Vec<u8> {
+  let final_len = (message.len() + 24 - HEADER_LEN) as u16;
+  message[2..4].copy_from_slice(&final_len.to_be_bytes());
+  let integrity = hmac_sha1(key, &message);
+  append_attr(&mut message, ATTR_MESSAGE_INTEGRITY, &integrity);
+  message
+}
+
 pub fn encode_xor_address(addr: SocketAddr, transaction_id: &[u8; 12]) -> Vec<u8> {
   let mut out = Vec::new();
   out.push(0);
@@ -291,9 +299,8 @@ pub fn verify_message_integrity(message: &StunMessage<'_>, key: &[u8]) -> anyhow
   if attr.value.len() != 20 {
     return Ok(false);
   }
-  let end = attr.offset + 24;
-  let mut bytes = message.raw[..end].to_vec();
-  let len = (end - HEADER_LEN) as u16;
+  let mut bytes = message.raw[..attr.offset].to_vec();
+  let len = (attr.offset + 24 - HEADER_LEN) as u16;
   bytes[2..4].copy_from_slice(&len.to_be_bytes());
   let hmac_key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
   Ok(hmac::verify(&hmac_key, &bytes, attr.value).is_ok())
