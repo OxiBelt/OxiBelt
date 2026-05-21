@@ -78,6 +78,7 @@ jobs:
           NODE
           npm install --prefix ui/person-proof --ignore-scripts --no-audit --no-fund --package-lock=false
           npm run --prefix ui/person-proof build
+          npm run --prefix ui/person-proof check:openapi
           git diff --exit-code source/assets/person-proof-challenge.html
 
   test:

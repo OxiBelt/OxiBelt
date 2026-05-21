@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json && tsx source/build.ts",
+    "check:openapi": "tsx --tsconfig tsconfig.json ../../tests/scripts/check-person-proof-ui-openapi.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint source/**/*.ts"
   },
