@@ -12,6 +12,8 @@ use crate::config::{UpstreamDiscoveryProvider, UpstreamPoolDiscoveryConfig};
 use crate::control_http::{ControlHttpClient, empty_body, uri_from_url};
 use crate::state::AppHandle;
 
+const KUBERNETES_WATCH_MAX_EVENT_BYTES: usize = super::KUBERNETES_MAX_BODY_BYTES;
+
 pub(in crate::upstream_discovery) async fn run_kubernetes_endpoint_slice_watch(
   state: AppHandle,
   pool_name: String,
@@ -170,6 +172,8 @@ async fn process_watch_events(
   shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<WatchSessionEnd> {
   let debounce = Duration::from_millis(discovery.update_debounce_ms);
+  let stream_timeout = tokio::time::sleep(endpoint_slice_watch_stream_timeout(discovery));
+  tokio::pin!(stream_timeout);
   let mut pending_flush_at: Option<Instant> = None;
 
   loop {
@@ -181,6 +185,12 @@ async fn process_watch_events(
     tokio::select! {
       _ = shutdown.changed() => {
         return Ok(WatchSessionEnd::Shutdown);
+      }
+      _ = &mut stream_timeout => {
+        if pending_flush_at.is_some() {
+          apply_endpoint_slice_cache(state, pool_name, discovery, cache).await?;
+        }
+        return Ok(WatchSessionEnd::Reconnect);
       }
       _ = &mut flush_sleep, if pending_flush_at.is_some() => {
         apply_endpoint_slice_cache(state, pool_name, discovery, cache).await?;
@@ -227,12 +237,8 @@ async fn stream_watch_events(
     let Some(data) = frame.data_ref() else {
       continue;
     };
-    buffer.extend_from_slice(data);
-    while let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
-      let line = buffer.drain(..=index).collect::<Vec<_>>();
-      if send_watch_line(&sender, &line).await.is_err() {
-        return;
-      }
+    if !buffer_watch_data(&sender, &mut buffer, data).await {
+      return;
     }
   }
   if !buffer
@@ -241,6 +247,55 @@ async fn stream_watch_events(
   {
     let _ = send_watch_line(&sender, &buffer).await;
   }
+}
+
+async fn buffer_watch_data(
+  sender: &mpsc::Sender<anyhow::Result<KubernetesWatchEvent>>,
+  buffer: &mut Vec<u8>,
+  mut data: &[u8],
+) -> bool {
+  while !data.is_empty() {
+    let (segment, rest) = match data.iter().position(|byte| *byte == b'\n') {
+      Some(index) => data.split_at(index + 1),
+      None => (data, &[][..]),
+    };
+    if !extend_watch_line(sender, buffer, segment).await {
+      return false;
+    }
+    if segment.last() == Some(&b'\n') {
+      if send_watch_line(sender, buffer).await.is_err() {
+        return false;
+      }
+      buffer.clear();
+    }
+    data = rest;
+  }
+  true
+}
+
+async fn extend_watch_line(
+  sender: &mpsc::Sender<anyhow::Result<KubernetesWatchEvent>>,
+  buffer: &mut Vec<u8>,
+  segment: &[u8],
+) -> bool {
+  let Some(next_len) = buffer.len().checked_add(segment.len()) else {
+    send_watch_line_limit_error(sender).await;
+    return false;
+  };
+  if next_len > KUBERNETES_WATCH_MAX_EVENT_BYTES {
+    send_watch_line_limit_error(sender).await;
+    return false;
+  }
+  buffer.extend_from_slice(segment);
+  true
+}
+
+async fn send_watch_line_limit_error(sender: &mpsc::Sender<anyhow::Result<KubernetesWatchEvent>>) {
+  let _ = sender
+    .send(Err(anyhow!(
+      "Kubernetes EndpointSlice watch event exceeded {KUBERNETES_WATCH_MAX_EVENT_BYTES} bytes"
+    )))
+    .await;
 }
 
 async fn send_watch_line(
@@ -263,6 +318,11 @@ fn trim_json_line(mut line: &[u8]) -> &[u8] {
     line = &line[..line.len() - 1];
   }
   line
+}
+
+fn endpoint_slice_watch_stream_timeout(discovery: &UpstreamPoolDiscoveryConfig) -> Duration {
+  Duration::from_secs(discovery.watch_timeout_seconds)
+    .saturating_add(Duration::from_millis(discovery.refresh_interval_ms))
 }
 
 fn apply_watch_event(
@@ -372,6 +432,8 @@ enum WatchEventAction {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::time::Duration;
+
   use crate::config::{
     DiscoveryUpstreamScheme, KubernetesDiscoveryResource, UpstreamDiscoveryProvider,
   };
@@ -417,5 +479,72 @@ mod tests {
     .expect("expired watch event should be handled");
 
     assert!(matches!(action, WatchEventAction::ResourceExpired));
+  }
+
+  #[tokio::test]
+  async fn watch_line_buffer_rejects_newline_free_payload_over_limit() {
+    let (sender, mut receiver) = mpsc::channel(1);
+    let mut buffer = Vec::new();
+    let chunk = vec![b'a'; KUBERNETES_WATCH_MAX_EVENT_BYTES];
+
+    assert!(buffer_watch_data(&sender, &mut buffer, &chunk).await);
+    assert_eq!(buffer.len(), KUBERNETES_WATCH_MAX_EVENT_BYTES);
+    assert!(receiver.try_recv().is_err());
+
+    assert!(!buffer_watch_data(&sender, &mut buffer, b"a").await);
+    let error = receiver
+      .recv()
+      .await
+      .expect("limit error should be sent")
+      .expect_err("over-limit watch line should fail");
+
+    assert!(
+      format!("{error:#}").contains("Kubernetes EndpointSlice watch event exceeded 8388608 bytes"),
+      "unexpected error: {error:#}"
+    );
+  }
+
+  #[tokio::test]
+  async fn watch_line_buffer_accepts_multiple_large_events_by_line() {
+    let event = bookmark_event_with_name_len(KUBERNETES_WATCH_MAX_EVENT_BYTES / 2);
+    assert!(event.len() < KUBERNETES_WATCH_MAX_EVENT_BYTES);
+    let mut stream = Vec::with_capacity(event.len() * 2);
+    stream.extend_from_slice(&event);
+    stream.extend_from_slice(&event);
+    assert!(stream.len() > KUBERNETES_WATCH_MAX_EVENT_BYTES);
+
+    let (sender, mut receiver) = mpsc::channel(4);
+    let mut buffer = Vec::new();
+    assert!(buffer_watch_data(&sender, &mut buffer, &stream).await);
+    assert!(buffer.is_empty());
+
+    for _ in 0..2 {
+      let event = receiver
+        .recv()
+        .await
+        .expect("watch event should be sent")
+        .expect("watch event should parse");
+      assert_eq!(event.event_type, "BOOKMARK");
+    }
+    assert!(receiver.try_recv().is_err());
+  }
+
+  #[test]
+  fn endpoint_slice_watch_stream_timeout_includes_watch_timeout_and_refresh_grace() {
+    let discovery = endpoint_slice_discovery();
+
+    assert_eq!(
+      endpoint_slice_watch_stream_timeout(&discovery),
+      Duration::from_secs(330)
+    );
+  }
+
+  fn bookmark_event_with_name_len(name_len: usize) -> Vec<u8> {
+    let mut event =
+      br#"{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"1","name":""#.to_vec();
+    event.extend(std::iter::repeat(b'a').take(name_len));
+    event.extend_from_slice(br#""}}}"#);
+    event.push(b'\n');
+    event
   }
 }
