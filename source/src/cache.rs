@@ -86,6 +86,7 @@ pub enum CacheInsertOutcome {
   Stored,
   NotCacheable,
   Rejected,
+  AdmissionWarming,
   StoreFailed,
 }
 
@@ -707,13 +708,15 @@ impl ResponseCache {
       ) {
         return CacheInsertOutcome::Rejected;
       }
-      if !admit_prepared_body(
+      match admit_prepared_body(
         &mut inner,
         &prepared.policy,
         &prepared.variant_key,
         entry.body.len(),
       ) {
-        return CacheInsertOutcome::Rejected;
+        PreparedBodyAdmission::Admitted => {}
+        PreparedBodyAdmission::Warming => return CacheInsertOutcome::AdmissionWarming,
+        PreparedBodyAdmission::Rejected => return CacheInsertOutcome::Rejected,
       }
       select_store_for_insert(&inner, &prepared.policy, &entry.headers, size)
     };
@@ -1931,19 +1934,30 @@ fn variant_count_exceeded(
   inner.index.variant_count(&group) >= policy.max_vary_variants_per_key
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PreparedBodyAdmission {
+  Admitted,
+  Warming,
+  Rejected,
+}
+
 fn admit_prepared_body(
   inner: &mut CacheInner,
   policy: &CachePolicyRuntime,
   variant_key: &str,
   body_len: usize,
-) -> bool {
+) -> PreparedBodyAdmission {
   if policy.admission.max_body_bytes > 0 && body_len > policy.admission.max_body_bytes {
-    return false;
+    return PreparedBodyAdmission::Rejected;
   }
   if policy.admission.min_hits <= 1 {
-    return true;
+    return PreparedBodyAdmission::Admitted;
   }
-  admit_frequency(inner, policy, variant_key)
+  if admit_frequency(inner, policy, variant_key) {
+    PreparedBodyAdmission::Admitted
+  } else {
+    PreparedBodyAdmission::Warming
+  }
 }
 
 fn admit_frequency(inner: &mut CacheInner, policy: &CachePolicyRuntime, variant_key: &str) -> bool {

@@ -91,6 +91,78 @@ cache_methods = ["GET"]
 }
 
 #[tokio::test]
+async fn cache_fill_min_hits_warming_does_not_suppress_next_store() {
+  let temp_dir = common::TempDir::new("cache-fill-min-hits-warming");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "cache-fill-min-hits-warming");
+  let raw = format!(
+    r#"
+{}
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1024
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+
+[cache.admission]
+min_hits = 2
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  let method = Method::GET;
+  let uri: http::Uri = "/admit-after-warmup".parse().expect("URI should parse");
+  let request_headers = HeaderMap::new();
+
+  let first = maybe_cache_response(
+    Response::new(full_body(bytes::Bytes::from_static(b"admitted"))),
+    &state,
+    Some("default"),
+    "https",
+    "example.com",
+    &method,
+    &uri,
+    &request_headers,
+    None,
+  )
+  .await;
+  assert_eq!(first.status(), http::StatusCode::OK);
+  assert_eq!(state.cache.stats().memory_entries, 0);
+
+  let second = maybe_cache_response(
+    Response::new(full_body(bytes::Bytes::from_static(b"admitted"))),
+    &state,
+    Some("default"),
+    "https",
+    "example.com",
+    &method,
+    &uri,
+    &request_headers,
+    None,
+  )
+  .await;
+  assert_eq!(second.status(), http::StatusCode::OK);
+  assert_eq!(state.cache.stats().memory_entries, 1);
+  assert!(
+    state
+      .cache
+      .lookup(crate::cache::CacheLookupContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.com",
+        method: &method,
+        uri: &uri,
+        request_headers: &request_headers,
+      })
+      .is_some()
+  );
+}
+
+#[tokio::test]
 async fn cache_fill_skips_collecting_no_store_response_body() {
   let temp_dir = common::TempDir::new("cache-no-store-head-skip");
   let (cert_path, key_path) =

@@ -2975,6 +2975,10 @@ async fn background_refresh(
       state.metrics.record_cache_admission_rejection();
       state.metrics.record_cache_background_refresh_skip();
     }
+    crate::cache::CacheInsertOutcome::AdmissionWarming => {
+      state.metrics.record_cache_admission_rejection();
+      state.metrics.record_cache_background_refresh_skip();
+    }
     crate::cache::CacheInsertOutcome::StoreFailed => {
       state.metrics.record_cache_fill_error();
       state.metrics.record_cache_background_refresh_error();
@@ -3133,6 +3137,10 @@ async fn maybe_cache_response_with_store_permission(
             insert_ctx(),
             crate::cache::CacheFillSuppressionReason::AdmissionRejected,
           );
+        }
+        crate::cache::CacheInsertOutcome::AdmissionWarming => {
+          record_fill_stage("local_store", "admission_warming", store_started);
+          state.metrics.record_cache_admission_rejection();
         }
         crate::cache::CacheInsertOutcome::StoreFailed => {
           record_fill_stage("local_store", "store_failed", store_started);

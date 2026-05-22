@@ -436,7 +436,7 @@ fn admission_min_hits_rejects_until_threshold() {
   };
   assert_eq!(
     cache.insert(ctx.clone(), entry.clone()),
-    CacheInsertOutcome::Rejected
+    CacheInsertOutcome::AdmissionWarming
   );
   assert!(
     cache
