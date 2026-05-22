@@ -697,7 +697,7 @@ impl ResponseCache {
       Some(size) if size <= self.config.max_size_bytes => size,
       _ => return CacheInsertOutcome::Rejected,
     };
-    let selected_store = {
+    let shared_entry = {
       let mut inner = self.inner.lock().expect("cache lock poisoned");
       if variant_count_exceeded(
         &inner,
@@ -718,51 +718,43 @@ impl ResponseCache {
         PreparedBodyAdmission::Warming => return CacheInsertOutcome::AdmissionWarming,
         PreparedBodyAdmission::Rejected => return CacheInsertOutcome::Rejected,
       }
-      select_store_for_insert(&inner, &prepared.policy, &entry.headers, size)
-    };
-    let Some(body) = self.store_body(
-      &prepared.policy,
-      selected_store,
-      &prepared.variant_key,
-      &entry.body,
-      size,
-    ) else {
-      return CacheInsertOutcome::StoreFailed;
-    };
-    let tags = extract_tags(&entry.headers, &prepared.policy);
-    let stored = StoredEntry {
-      policy: prepared.policy.name.clone(),
-      partition: prepared.partition,
-      base_key: prepared.base_key,
-      variant_key: prepared.variant_key.clone(),
-      scheme: prepared.scheme,
-      host: prepared.host,
-      uri: prepared.uri,
-      status: prepared.status,
-      headers: prepared.stored_headers,
-      body,
-      expires_at: prepared.metadata.expires_at,
-      stale_if_error_until: prepared.metadata.stale_if_error_until,
-      stale_while_revalidate_until: prepared.metadata.stale_while_revalidate_until,
-      must_revalidate: prepared.metadata.must_revalidate,
-      vary: prepared.metadata.vary,
-      tags,
-      size,
-    };
-    if let Err(error) = self.persist_metadata(&stored) {
-      warn!(error = %error, "failed to persist cache metadata");
-      if matches!(stored.body, StoredBody::Disk(_)) {
-        stored.remove_body_files();
+      let selected_store = select_store_for_insert(&inner, &prepared.policy, &entry.headers, size);
+      let Some(body) = self.store_body(
+        &prepared.policy,
+        selected_store,
+        &prepared.variant_key,
+        &entry.body,
+        size,
+      ) else {
         return CacheInsertOutcome::StoreFailed;
+      };
+      let tags = extract_tags(&entry.headers, &prepared.policy);
+      let stored = StoredEntry {
+        policy: prepared.policy.name.clone(),
+        partition: prepared.partition,
+        base_key: prepared.base_key,
+        variant_key: prepared.variant_key.clone(),
+        scheme: prepared.scheme,
+        host: prepared.host,
+        uri: prepared.uri,
+        status: prepared.status,
+        headers: prepared.stored_headers,
+        body,
+        expires_at: prepared.metadata.expires_at,
+        stale_if_error_until: prepared.metadata.stale_if_error_until,
+        stale_while_revalidate_until: prepared.metadata.stale_while_revalidate_until,
+        must_revalidate: prepared.metadata.must_revalidate,
+        vary: prepared.metadata.vary,
+        tags,
+        size,
+      };
+      if let Err(error) = self.persist_metadata(&stored) {
+        warn!(error = %error, "failed to persist cache metadata");
+        if matches!(stored.body, StoredBody::Disk(_)) {
+          stored.remove_body_files();
+          return CacheInsertOutcome::StoreFailed;
+        }
       }
-    }
-    let shared_entry = self
-      .shared_state
-      .as_ref()
-      .filter(|shared| shared.has_cache())
-      .and_then(|_| shared_cache_entry(&stored));
-    {
-      let mut inner = self.inner.lock().expect("cache lock poisoned");
       if variant_count_exceeded(
         &inner,
         &prepared.policy,
@@ -774,13 +766,21 @@ impl ResponseCache {
         stored.remove_body_files();
         return CacheInsertOutcome::Rejected;
       }
-      remove_entry(&mut inner, &prepared.variant_key);
+      if let Some(existing) = detach_entry(&mut inner, &prepared.variant_key) {
+        remove_replaced_entry_files(existing, &stored);
+      }
       add_size(&mut inner, &stored);
       inner.order.push_back(prepared.variant_key.clone());
       index_entry(&mut inner, &stored);
+      let shared_entry = self
+        .shared_state
+        .as_ref()
+        .filter(|shared| shared.has_cache())
+        .and_then(|_| shared_cache_entry(&stored));
       inner.entries.insert(prepared.variant_key, stored);
       self.evict_if_needed(&mut inner, &prepared.policy);
-    }
+      shared_entry
+    };
     if let Some(shared) = &self.shared_state
       && shared.has_cache()
       && let Some(shared_entry) = shared_entry
@@ -2238,10 +2238,30 @@ fn validate_writable_dir(field_name: &str, path: &Path) -> anyhow::Result<()> {
 }
 
 fn remove_entry(inner: &mut CacheInner, key: &str) {
-  if let Some(existing) = inner.entries.remove(key) {
-    unindex_entry(inner, &existing);
-    subtract_size(inner, &existing);
+  if let Some(existing) = detach_entry(inner, key) {
     remove_metadata(&existing);
+    existing.remove_body();
+  }
+}
+
+fn detach_entry(inner: &mut CacheInner, key: &str) -> Option<StoredEntry> {
+  let existing = inner.entries.remove(key)?;
+  unindex_entry(inner, &existing);
+  subtract_size(inner, &existing);
+  Some(existing)
+}
+
+fn remove_replaced_entry_files(existing: StoredEntry, replacement: &StoredEntry) {
+  let shared_body_path = stored_body_path(&existing.body) == stored_body_path(&replacement.body);
+  let shared_metadata_path = shared_body_path
+    && matches!(
+      (&existing.body, &replacement.body),
+      (StoredBody::Disk(_), StoredBody::Disk(_))
+    );
+  if !shared_metadata_path {
+    remove_metadata(&existing);
+  }
+  if !shared_body_path {
     existing.remove_body();
   }
 }
@@ -2344,6 +2364,13 @@ impl StoredEntry {
       }
       StoredBody::Memory(_) => {}
     }
+  }
+}
+
+fn stored_body_path(body: &StoredBody) -> Option<&Path> {
+  match body {
+    StoredBody::Tmpfs(path) | StoredBody::Disk(path) => Some(path),
+    StoredBody::Memory(_) => None,
   }
 }
 

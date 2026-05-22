@@ -299,6 +299,87 @@ fn named_policy_can_define_negative_cache_defaults() {
 }
 
 #[test]
+fn disk_cache_replacement_preserves_new_body() {
+  let temp_dir = TestTempDir::new();
+  let config = CacheConfig {
+    enabled: true,
+    store: CacheStore::Disk,
+    disk_dir: Some(temp_dir.path.clone()),
+    disk_max_size_bytes: Some(1024 * 1024),
+    ..CacheConfig::default()
+  };
+
+  assert_file_backed_replacement_preserves_new_body(config, &temp_dir.path);
+}
+
+#[test]
+fn memory_then_disk_replacement_preserves_new_body_after_disk_fallback() {
+  let temp_dir = TestTempDir::new();
+  let config = CacheConfig {
+    enabled: true,
+    store: CacheStore::MemoryThenDisk,
+    memory_max_size_bytes: Some(1),
+    disk_dir: Some(temp_dir.path.clone()),
+    disk_max_size_bytes: Some(1024 * 1024),
+    ..CacheConfig::default()
+  };
+
+  assert_file_backed_replacement_preserves_new_body(config, &temp_dir.path);
+}
+
+fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_dir: &Path) {
+  let cache = ResponseCache::new(&config, None).unwrap();
+  let uri = "/asset/app.css".parse::<Uri>().unwrap();
+  let request_headers = HeaderMap::new();
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+
+  for body in [
+    Bytes::from_static(b"first-body"),
+    Bytes::from_static(b"second-body"),
+  ] {
+    assert_eq!(
+      cache.insert(
+        CacheInsertContext {
+          policy_name: Some("default"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri: &uri,
+          request_headers: &request_headers,
+        },
+        CacheEntry {
+          status: StatusCode::OK,
+          headers: response_headers.clone(),
+          body,
+        },
+      ),
+      CacheInsertOutcome::Stored
+    );
+  }
+
+  match cache.lookup(CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &request_headers,
+  }) {
+    Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"second-body")),
+    other => panic!("expected replacement cache hit, got {other:?}"),
+  }
+
+  let variant_key = variant_key("", "https:example.test:/asset/app.css", &[]);
+  let body_path = cache_file_path(disk_dir, &variant_key, CacheFileKind::Body).unwrap();
+  assert_eq!(std::fs::read(body_path).unwrap(), b"second-body");
+  assert_eq!(cache.stats().disk_entries, 1);
+}
+
+#[test]
 fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
   let temp_dir = TestTempDir::new();
   let config = CacheConfig {
