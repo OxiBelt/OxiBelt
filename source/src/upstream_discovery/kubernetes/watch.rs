@@ -542,7 +542,7 @@ mod tests {
   fn bookmark_event_with_name_len(name_len: usize) -> Vec<u8> {
     let mut event =
       br#"{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"1","name":""#.to_vec();
-    event.extend(std::iter::repeat(b'a').take(name_len));
+    event.extend(std::iter::repeat_n(b'a', name_len));
     event.extend_from_slice(br#""}}}"#);
     event.push(b'\n');
     event
