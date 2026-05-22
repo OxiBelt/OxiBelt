@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -13,24 +13,25 @@ use http::header::{
 use http::{HeaderMap, Method, StatusCode, Uri};
 use ring::digest;
 use serde::Serialize;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
 
 use crate::config::{
   CacheAdmissionConfig, CacheConfig, CachePolicyConfig, CacheStaleIfErrorConfig, CacheStore,
   default_cache_tmpfs_dir,
 };
-use crate::shared_state::{SharedCacheEntry, SharedCacheLock, SharedState, SharedVaryMatcher};
+use crate::shared_state::{SharedCacheEntry, SharedState, SharedVaryMatcher};
 
+mod fill;
 mod index;
 pub mod signing;
+
+pub(crate) use fill::{CacheFillDecision, CacheFillSuppressionReason};
+pub use fill::{CacheFillGuard, CacheFillWaiter};
 
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
 const SURROGATE_CONTROL_HEADER: &str = "surrogate-control";
 const MAX_VARY_VALUE_BYTES: usize = 8_192;
-const FILL_NOT_STORED_SUPPRESSION_TTL: Duration = Duration::from_secs(1);
-const MAX_FILL_NOT_STORED_SUPPRESSIONS: usize = 8_192;
-
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
   pub status: StatusCode,
@@ -67,48 +68,6 @@ pub enum CacheFillPermit {
   SharedConflict,
 }
 
-#[derive(Debug)]
-pub struct CacheFillGuard {
-  cache: Weak<ResponseCache>,
-  key: String,
-  notify: Arc<Notify>,
-  _shared_lock: Option<SharedCacheLock>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CacheFillWaiter {
-  notify: Arc<Notify>,
-}
-
-impl CacheFillWaiter {
-  pub async fn wait(self) {
-    self.notify.notified().await;
-  }
-
-  pub async fn wait_timeout(self, timeout: Duration) -> bool {
-    tokio::time::timeout(timeout, self.notify.notified())
-      .await
-      .is_ok()
-  }
-}
-
-impl Drop for CacheFillGuard {
-  fn drop(&mut self) {
-    let Some(cache) = self.cache.upgrade() else {
-      self.notify.notify_waiters();
-      return;
-    };
-    let notify = {
-      let mut inner = cache.inner.lock().expect("cache lock poisoned");
-      inner
-        .inflight
-        .remove(&self.key)
-        .unwrap_or_else(|| self.notify.clone())
-    };
-    notify.notify_waiters();
-  }
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CacheStats {
   pub memory_entries: usize,
@@ -140,8 +99,8 @@ pub enum CacheResponseHeadDecision {
 #[derive(Debug)]
 pub(crate) enum CachePreparedInsertDecision {
   Cacheable(Box<CachePreparedInsert>),
-  NotCacheable,
-  Rejected,
+  NotCacheable(CacheFillSuppressionReason),
+  Rejected(CacheFillSuppressionReason),
 }
 
 #[derive(Debug, Clone)]
@@ -192,7 +151,7 @@ pub(crate) struct CachePreparedInsert {
   header_bytes: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StoredEntry {
   policy: String,
   partition: String,
@@ -213,11 +172,23 @@ struct StoredEntry {
   size: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum StoredBody {
   Memory(Bytes),
   Tmpfs(PathBuf),
   Disk(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+struct CacheOperationContext {
+  policy: CachePolicyRuntime,
+  partition: String,
+  base_key: String,
+  lookup_key: index::LookupKey,
+  fill_key: String,
+  scheme: String,
+  host: String,
+  uri: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -249,9 +220,6 @@ struct VaryMatcher {
 struct CacheInner {
   entries: HashMap<String, StoredEntry>,
   index: index::CacheIndex,
-  inflight: HashMap<String, Arc<Notify>>,
-  fill_not_stored_until: HashMap<String, SystemTime>,
-  fill_not_stored_order: VecDeque<String>,
   order: VecDeque<String>,
   purge_nonces: HashMap<String, SystemTime>,
   purge_nonce_order: VecDeque<String>,
@@ -312,6 +280,7 @@ pub struct ResponseCache {
   refresh_limiters: HashMap<String, Arc<Semaphore>>,
   tmpfs_dir: Option<PathBuf>,
   disk_dir: Option<PathBuf>,
+  fills: Arc<fill::CacheFillCoordinator>,
   inner: Mutex<CacheInner>,
   shared_state: Option<Arc<SharedState>>,
 }
@@ -388,6 +357,7 @@ impl ResponseCache {
       refresh_limiters,
       tmpfs_dir,
       disk_dir,
+      fills: fill::CacheFillCoordinator::new(),
       inner: Mutex::new(CacheInner::default()),
       shared_state,
     });
@@ -397,6 +367,13 @@ impl ResponseCache {
 
   pub fn enabled(&self) -> bool {
     self.config.enabled
+  }
+
+  pub(crate) fn shared_cache_enabled(&self) -> bool {
+    self
+      .shared_state
+      .as_ref()
+      .is_some_and(|shared| shared.has_cache())
   }
 
   pub fn policy_enabled(&self, policy_name: Option<&str>, method: &Method) -> bool {
@@ -411,68 +388,97 @@ impl ResponseCache {
       .any(|item| item.eq_ignore_ascii_case(method.as_str()))
   }
 
+  fn operation_context(
+    &self,
+    policy_name: Option<&str>,
+    scheme: &str,
+    host: &str,
+    method: &Method,
+    uri: &Uri,
+    request_headers: &HeaderMap,
+  ) -> Option<CacheOperationContext> {
+    let policy = self.policy(policy_name)?.clone();
+    let base_key = expanded_cache_key(&policy.cache_key, scheme, host, uri, request_headers);
+    let partition = expanded_cache_key(&policy.partition_key, scheme, host, uri, request_headers);
+    let uri = uri.to_string();
+    let lookup_key = index::LookupKey::new(&policy.name, &partition, scheme, host, &uri, &base_key);
+    let fill_key = format!(
+      "{}\n{}\n{}\n{}\n{}\n{}",
+      policy.name,
+      partition,
+      method.as_str(),
+      scheme,
+      host,
+      base_key
+    );
+    Some(CacheOperationContext {
+      policy,
+      partition,
+      base_key,
+      lookup_key,
+      fill_key,
+      scheme: scheme.to_string(),
+      host: host.to_string(),
+      uri,
+    })
+  }
+
   pub fn lookup(&self, ctx: CacheLookupContext<'_>) -> Option<CacheLookup> {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
       return None;
     }
-    let policy = self.policy(ctx.policy_name)?;
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
       return None;
     }
-    let base_key = expanded_cache_key(
-      &policy.cache_key,
+    let operation = self.operation_context(
+      ctx.policy_name,
       ctx.scheme,
       ctx.host,
+      ctx.method,
       ctx.uri,
       ctx.request_headers,
-    );
-    let partition = expanded_cache_key(
-      &policy.partition_key,
-      ctx.scheme,
-      ctx.host,
-      ctx.uri,
-      ctx.request_headers,
-    );
-    let uri = ctx.uri.to_string();
-    let lookup_key = index::LookupKey::new(
-      &policy.name,
-      &partition,
-      ctx.scheme,
-      ctx.host,
-      &uri,
-      &base_key,
-    );
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    )?;
     let now = SystemTime::now();
-    let key = inner.index.candidates(&lookup_key).and_then(|candidates| {
-      candidates.into_iter().find(|key| {
-        inner
-          .entries
-          .get(key)
-          .is_some_and(|entry| vary_matches(&entry.vary, ctx.request_headers))
-      })
-    });
-    let Some(key) = key else {
-      drop(inner);
-      return self.lookup_shared(
-        &policy.name,
-        policy.background_refresh,
-        &partition,
-        &base_key,
-        ctx,
-      );
-    };
+    let (key, entry) = {
+      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      let key = inner
+        .index
+        .candidates(&operation.lookup_key)
+        .and_then(|candidates| {
+          candidates.into_iter().find(|key| {
+            inner
+              .entries
+              .get(key)
+              .is_some_and(|entry| vary_matches(&entry.vary, ctx.request_headers))
+          })
+        });
+      let Some(key) = key else {
+        drop(inner);
+        return self.lookup_shared(
+          &operation.policy.name,
+          operation.policy.background_refresh,
+          &operation.partition,
+          &operation.base_key,
+          ctx,
+        );
+      };
 
-    let expired = inner
-      .entries
-      .get(&key)
-      .is_some_and(|entry| entry.stale_if_error_until.unwrap_or(entry.expires_at) <= now);
-    if expired {
+      let expired = inner
+        .entries
+        .get(&key)
+        .is_some_and(|entry| entry.stale_if_error_until.unwrap_or(entry.expires_at) <= now);
+      if expired {
+        remove_entry(&mut inner, &key);
+        return None;
+      }
+      let entry = inner.entries.get(&key).cloned()?;
+      (key, entry)
+    };
+    let Some(cache_entry) = entry.to_cache_entry() else {
+      let mut inner = self.inner.lock().expect("cache lock poisoned");
       remove_entry(&mut inner, &key);
       return None;
-    }
-    let entry = inner.entries.get(&key)?;
-    let cache_entry = entry.to_cache_entry()?;
+    };
     if request_no_cache(ctx.request_headers) || entry.must_revalidate || entry.expires_at <= now {
       let validators = validator_headers(&entry.headers);
       if !request_no_cache(ctx.request_headers)
@@ -485,7 +491,7 @@ impl ResponseCache {
           entry: cache_entry,
           request_headers: validators,
           serve_stale_on_error: entry.stale_if_error_until.is_some_and(|until| until > now),
-          background_refresh: policy.background_refresh,
+          background_refresh: operation.policy.background_refresh,
         }));
       }
       if validators.is_empty() {
@@ -500,7 +506,7 @@ impl ResponseCache {
             background_refresh: entry
               .stale_while_revalidate_until
               .is_some_and(|until| until > now)
-              && policy.background_refresh,
+              && operation.policy.background_refresh,
           }));
         }
         if entry.stale_if_error_until.is_some_and(|until| until > now) {
@@ -580,6 +586,20 @@ impl ResponseCache {
   }
 
   pub fn begin_fill(self: &Arc<Self>, ctx: CacheLookupContext<'_>) -> Option<CacheFillPermit> {
+    self
+      .begin_fill_decision(ctx)
+      .and_then(|decision| match decision {
+        CacheFillDecision::Leader(guard) => Some(CacheFillPermit::Leader(guard)),
+        CacheFillDecision::Follower(waiter) => Some(CacheFillPermit::Follower(waiter)),
+        CacheFillDecision::SharedConflict => Some(CacheFillPermit::SharedConflict),
+        CacheFillDecision::Suppressed(_) => None,
+      })
+  }
+
+  pub(crate) fn begin_fill_decision(
+    self: &Arc<Self>,
+    ctx: CacheLookupContext<'_>,
+  ) -> Option<CacheFillDecision> {
     if !self.config.lock {
       return None;
     }
@@ -589,43 +609,51 @@ impl ResponseCache {
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
       return None;
     }
-    let key = self.fill_key(ctx)?;
-    if self.fill_recently_not_stored(&key) {
-      return None;
+    let key = self
+      .operation_context(
+        ctx.policy_name,
+        ctx.scheme,
+        ctx.host,
+        ctx.method,
+        ctx.uri,
+        ctx.request_headers,
+      )?
+      .fill_key;
+    match self.fills.begin(key.clone()) {
+      CacheFillDecision::Leader(mut guard) => {
+        if let Some(shared) = self
+          .shared_state
+          .as_ref()
+          .filter(|shared| shared.has_cache())
+        {
+          match shared.cache_try_lock_result(&key) {
+            Ok(Some(shared_lock)) => guard.set_shared_lock(shared_lock),
+            Ok(None) => {
+              drop(guard);
+              return Some(CacheFillDecision::SharedConflict);
+            }
+            Err(error) => {
+              warn!(error = %error, "shared cache fill lock failed; using local fill lock");
+            }
+          }
+        }
+        Some(CacheFillDecision::Leader(guard))
+      }
+      CacheFillDecision::Follower(waiter) => Some(CacheFillDecision::Follower(waiter)),
+      CacheFillDecision::SharedConflict => Some(CacheFillDecision::SharedConflict),
+      CacheFillDecision::Suppressed(reason) => Some(CacheFillDecision::Suppressed(reason)),
     }
-    let shared_lock = self
-      .shared_state
-      .as_ref()
-      .filter(|shared| shared.has_cache())
-      .and_then(|shared| shared.cache_try_lock(&key));
-    if self
-      .shared_state
-      .as_ref()
-      .is_some_and(|shared| shared.has_cache())
-      && shared_lock.is_none()
-    {
-      return Some(CacheFillPermit::SharedConflict);
-    }
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
-    if fill_not_stored_suppressed(&mut inner, &key, SystemTime::now()) {
-      return None;
-    }
-    if let Some(notify) = inner.inflight.get(&key) {
-      return Some(CacheFillPermit::Follower(CacheFillWaiter {
-        notify: notify.clone(),
-      }));
-    }
-    let notify = Arc::new(Notify::new());
-    inner.inflight.insert(key.clone(), notify.clone());
-    Some(CacheFillPermit::Leader(CacheFillGuard {
-      cache: Arc::downgrade(self),
-      key,
-      notify,
-      _shared_lock: shared_lock,
-    }))
   }
 
   pub fn note_fill_not_stored(&self, ctx: CacheInsertContext<'_>) {
+    self.note_fill_not_stored_reason(ctx, CacheFillSuppressionReason::Unknown);
+  }
+
+  pub(crate) fn note_fill_not_stored_reason(
+    &self,
+    ctx: CacheInsertContext<'_>,
+    reason: CacheFillSuppressionReason,
+  ) {
     if !self.config.lock {
       return;
     }
@@ -635,38 +663,27 @@ impl ResponseCache {
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
       return;
     }
-    let Some(key) = self.fill_key_parts(
-      ctx.policy_name,
-      ctx.scheme,
-      ctx.host,
-      ctx.method,
-      ctx.uri,
-      ctx.request_headers,
-    ) else {
+    let Some(key) = self
+      .operation_context(
+        ctx.policy_name,
+        ctx.scheme,
+        ctx.host,
+        ctx.method,
+        ctx.uri,
+        ctx.request_headers,
+      )
+      .map(|operation| operation.fill_key)
+    else {
       return;
     };
-    let now = SystemTime::now();
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
-    prune_fill_not_stored_suppressions(&mut inner, now);
-    if !inner.fill_not_stored_until.contains_key(&key) {
-      inner.fill_not_stored_order.push_back(key.clone());
-    }
-    inner
-      .fill_not_stored_until
-      .insert(key, now + FILL_NOT_STORED_SUPPRESSION_TTL);
-    while inner.fill_not_stored_until.len() > MAX_FILL_NOT_STORED_SUPPRESSIONS {
-      let Some(oldest) = inner.fill_not_stored_order.pop_front() else {
-        break;
-      };
-      inner.fill_not_stored_until.remove(&oldest);
-    }
+    self.fills.suppress(key, reason);
   }
 
   pub fn insert(&self, ctx: CacheInsertContext<'_>, entry: CacheEntry) -> CacheInsertOutcome {
     match self.prepare_insert(ctx, entry.status, &entry.headers, Some(entry.body.len())) {
       CachePreparedInsertDecision::Cacheable(prepared) => self.insert_prepared(*prepared, entry),
-      CachePreparedInsertDecision::NotCacheable => CacheInsertOutcome::NotCacheable,
-      CachePreparedInsertDecision::Rejected => CacheInsertOutcome::Rejected,
+      CachePreparedInsertDecision::NotCacheable(_) => CacheInsertOutcome::NotCacheable,
+      CachePreparedInsertDecision::Rejected(_) => CacheInsertOutcome::Rejected,
     }
   }
 
@@ -679,28 +696,28 @@ impl ResponseCache {
       Some(size) if size <= self.config.max_size_bytes => size,
       _ => return CacheInsertOutcome::Rejected,
     };
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
-    if variant_count_exceeded(
-      &inner,
-      &prepared.policy,
-      &prepared.partition,
-      &prepared.base_key,
-      &prepared.variant_key,
-    ) {
-      return CacheInsertOutcome::Rejected;
-    }
-    if !admit_prepared_body(
-      &mut inner,
-      &prepared.policy,
-      &prepared.variant_key,
-      entry.body.len(),
-    ) {
-      return CacheInsertOutcome::Rejected;
-    }
-    remove_entry(&mut inner, &prepared.variant_key);
-    let selected_store = select_store(&prepared.policy, &entry.headers);
+    let selected_store = {
+      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      if variant_count_exceeded(
+        &inner,
+        &prepared.policy,
+        &prepared.partition,
+        &prepared.base_key,
+        &prepared.variant_key,
+      ) {
+        return CacheInsertOutcome::Rejected;
+      }
+      if !admit_prepared_body(
+        &mut inner,
+        &prepared.policy,
+        &prepared.variant_key,
+        entry.body.len(),
+      ) {
+        return CacheInsertOutcome::Rejected;
+      }
+      select_store_for_insert(&inner, &prepared.policy, &entry.headers, size)
+    };
     let Some(body) = self.store_body(
-      &mut inner,
       &prepared.policy,
       selected_store,
       &prepared.variant_key,
@@ -732,21 +749,41 @@ impl ResponseCache {
     if let Err(error) = self.persist_metadata(&stored) {
       warn!(error = %error, "failed to persist cache metadata");
       if matches!(stored.body, StoredBody::Disk(_)) {
-        stored.remove_body();
+        stored.remove_body_files();
         return CacheInsertOutcome::StoreFailed;
       }
     }
+    let shared_entry = self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+      .and_then(|_| shared_cache_entry(&stored));
+    {
+      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      if variant_count_exceeded(
+        &inner,
+        &prepared.policy,
+        &stored.partition,
+        &stored.base_key,
+        &prepared.variant_key,
+      ) {
+        remove_metadata(&stored);
+        stored.remove_body_files();
+        return CacheInsertOutcome::Rejected;
+      }
+      remove_entry(&mut inner, &prepared.variant_key);
+      add_size(&mut inner, &stored);
+      inner.order.push_back(prepared.variant_key.clone());
+      index_entry(&mut inner, &stored);
+      inner.entries.insert(prepared.variant_key, stored);
+      self.evict_if_needed(&mut inner, &prepared.policy);
+    }
     if let Some(shared) = &self.shared_state
       && shared.has_cache()
-      && let Some(shared_entry) = shared_cache_entry(&stored)
+      && let Some(shared_entry) = shared_entry
     {
       shared.cache_put(&shared_entry);
     }
-    add_size(&mut inner, &stored);
-    inner.order.push_back(prepared.variant_key.clone());
-    index_entry(&mut inner, &stored);
-    inner.entries.insert(prepared.variant_key, stored);
-    self.evict_if_needed(&mut inner, &prepared.policy);
     CacheInsertOutcome::Stored
   }
 
@@ -784,8 +821,8 @@ impl ResponseCache {
   ) -> CacheResponseHeadDecision {
     match self.prepare_insert(ctx, status, response_headers, content_length) {
       CachePreparedInsertDecision::Cacheable(_) => CacheResponseHeadDecision::Cacheable,
-      CachePreparedInsertDecision::NotCacheable => CacheResponseHeadDecision::NotCacheable,
-      CachePreparedInsertDecision::Rejected => CacheResponseHeadDecision::Rejected,
+      CachePreparedInsertDecision::NotCacheable(_) => CacheResponseHeadDecision::NotCacheable,
+      CachePreparedInsertDecision::Rejected(_) => CacheResponseHeadDecision::Rejected,
     }
   }
 
@@ -797,22 +834,30 @@ impl ResponseCache {
     content_length: Option<usize>,
   ) -> CachePreparedInsertDecision {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
-      return CachePreparedInsertDecision::NotCacheable;
+      return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     }
-    let Some(policy) = self.policy(ctx.policy_name).cloned() else {
-      return CachePreparedInsertDecision::NotCacheable;
-    };
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
-      return CachePreparedInsertDecision::NotCacheable;
+      return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     }
-    let Some(metadata) = cache_metadata(
+    let Some(operation) = self.operation_context(
+      ctx.policy_name,
+      ctx.scheme,
+      ctx.host,
+      ctx.method,
+      ctx.uri,
+      ctx.request_headers,
+    ) else {
+      return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
+    };
+    let metadata = match cache_metadata(
       &self.config,
-      &policy,
+      &operation.policy,
       ctx.request_headers,
       status,
       response_headers,
-    ) else {
-      return CachePreparedInsertDecision::NotCacheable;
+    ) {
+      Ok(metadata) => metadata,
+      Err(reason) => return CachePreparedInsertDecision::NotCacheable(reason),
     };
     let stored_headers = stored_response_headers(response_headers, &self.config);
     let header_bytes = header_size(&stored_headers);
@@ -821,34 +866,20 @@ impl ResponseCache {
         .checked_add(header_bytes)
         .is_none_or(|size| size > self.config.max_size_bytes)
     }) {
-      return CachePreparedInsertDecision::Rejected;
+      return CachePreparedInsertDecision::Rejected(CacheFillSuppressionReason::TooLarge);
     }
-    if !admit_response_head(&policy, status, response_headers, content_length) {
-      return CachePreparedInsertDecision::Rejected;
+    if !admit_response_head(&operation.policy, status, response_headers, content_length) {
+      return CachePreparedInsertDecision::Rejected(CacheFillSuppressionReason::AdmissionRejected);
     }
-    let base_key = expanded_cache_key(
-      &policy.cache_key,
-      ctx.scheme,
-      ctx.host,
-      ctx.uri,
-      ctx.request_headers,
-    );
-    let partition = expanded_cache_key(
-      &policy.partition_key,
-      ctx.scheme,
-      ctx.host,
-      ctx.uri,
-      ctx.request_headers,
-    );
-    let variant_key = variant_key(&partition, &base_key, &metadata.vary);
+    let variant_key = variant_key(&operation.partition, &operation.base_key, &metadata.vary);
     CachePreparedInsertDecision::Cacheable(Box::new(CachePreparedInsert {
-      policy,
-      partition,
-      base_key,
+      policy: operation.policy,
+      partition: operation.partition,
+      base_key: operation.base_key,
       variant_key,
-      scheme: ctx.scheme.to_string(),
-      host: ctx.host.to_string(),
-      uri: ctx.uri.to_string(),
+      scheme: operation.scheme,
+      host: operation.host,
+      uri: operation.uri,
       status,
       stored_headers,
       metadata,
@@ -1181,48 +1212,8 @@ impl ResponseCache {
     })
   }
 
-  fn fill_recently_not_stored(&self, key: &str) -> bool {
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
-    fill_not_stored_suppressed(&mut inner, key, SystemTime::now())
-  }
-
-  fn fill_key(&self, ctx: CacheLookupContext<'_>) -> Option<String> {
-    self.fill_key_parts(
-      ctx.policy_name,
-      ctx.scheme,
-      ctx.host,
-      ctx.method,
-      ctx.uri,
-      ctx.request_headers,
-    )
-  }
-
-  fn fill_key_parts(
-    &self,
-    policy_name: Option<&str>,
-    scheme: &str,
-    host: &str,
-    method: &Method,
-    uri: &Uri,
-    request_headers: &HeaderMap,
-  ) -> Option<String> {
-    let policy = self.policy(policy_name)?;
-    let base_key = expanded_cache_key(&policy.cache_key, scheme, host, uri, request_headers);
-    let partition = expanded_cache_key(&policy.partition_key, scheme, host, uri, request_headers);
-    Some(format!(
-      "{}\n{}\n{}\n{}\n{}\n{}",
-      policy.name,
-      partition,
-      method.as_str(),
-      scheme,
-      host,
-      base_key
-    ))
-  }
-
   fn store_body(
     &self,
-    inner: &mut CacheInner,
     policy: &CachePolicyRuntime,
     store: CacheStore,
     key: &str,
@@ -1251,9 +1242,6 @@ impl ResponseCache {
         write_body_file(dir, key, body).map(StoredBody::Disk)
       }
       CacheStore::MemoryThenDisk => {
-        if inner.memory_size + size <= policy.memory_max_size_bytes {
-          return Some(StoredBody::Memory(body.clone()));
-        }
         if policy.disk_max_size_bytes.is_some_and(|limit| size > limit) {
           return None;
         }
@@ -1464,19 +1452,19 @@ fn cache_metadata(
   request_headers: &HeaderMap,
   status: StatusCode,
   response_headers: &HeaderMap,
-) -> Option<ResponseMetadata> {
+) -> Result<ResponseMetadata, CacheFillSuppressionReason> {
   if status == StatusCode::PARTIAL_CONTENT {
-    return None;
+    return Err(CacheFillSuppressionReason::Unknown);
   }
   if !cacheable_status(policy, status) {
-    return None;
+    return Err(CacheFillSuppressionReason::Unknown);
   }
   if response_has_set_cookie(response_headers) {
-    return None;
+    return Err(CacheFillSuppressionReason::SetCookie);
   }
   let request_directives = cache_control_directives(request_headers);
   if request_directives.has("no-store") {
-    return None;
+    return Err(CacheFillSuppressionReason::Unknown);
   }
   let directives = cache_control_directives(response_headers);
   let surrogate = config
@@ -1488,20 +1476,21 @@ fn cache_metadata(
     .as_ref()
     .is_some_and(|directives| directives.no_store)
   {
-    return None;
+    return Err(CacheFillSuppressionReason::ResponseNoStore);
   }
-  if surrogate.is_none()
-    && config.respect_cache_control
-    && (directives.has("no-store") || directives.has("private"))
-  {
-    return None;
+  if surrogate.is_none() && config.respect_cache_control && directives.has("no-store") {
+    return Err(CacheFillSuppressionReason::ResponseNoStore);
   }
-  let vary = vary_matchers(
+  if surrogate.is_none() && config.respect_cache_control && directives.has("private") {
+    return Err(CacheFillSuppressionReason::ResponsePrivate);
+  }
+  let vary = vary_matchers_result(
     response_headers,
     request_headers,
     policy.max_vary_fields,
     MAX_VARY_VALUE_BYTES,
-  )?;
+  )
+  .map_err(|_| CacheFillSuppressionReason::VaryRejected)?;
   let now = SystemTime::now();
   let mut ttl = surrogate
     .as_ref()
@@ -1521,7 +1510,7 @@ fn cache_metadata(
     ttl = policy.negative_ttl_seconds;
   }
   if ttl == 0 {
-    return None;
+    return Err(CacheFillSuppressionReason::Unknown);
   }
   let must_revalidate = surrogate.is_none()
     && (directives.has("no-cache")
@@ -1561,7 +1550,7 @@ fn cache_metadata(
         config.stale_while_revalidate_seconds
       }
     });
-  Some(ResponseMetadata {
+  Ok(ResponseMetadata {
     expires_at,
     stale_if_error_until: (stale_if_error_seconds > 0)
       .then_some(expires_at + Duration::from_secs(stale_if_error_seconds)),
@@ -1609,21 +1598,6 @@ fn validator_headers(headers: &HeaderMap) -> HeaderMap {
     validators.insert(IF_MODIFIED_SINCE, last_modified.clone());
   }
   validators
-}
-
-fn vary_matchers(
-  response_headers: &HeaderMap,
-  request_headers: &HeaderMap,
-  max_fields: usize,
-  max_value_bytes: usize,
-) -> Option<Vec<VaryMatcher>> {
-  vary_matchers_result(
-    response_headers,
-    request_headers,
-    max_fields,
-    max_value_bytes,
-  )
-  .ok()
 }
 
 fn vary_matchers_result(
@@ -1873,6 +1847,21 @@ fn select_store(policy: &CachePolicyRuntime, headers: &HeaderMap) -> CacheStore 
     }
   }
   policy.store
+}
+
+fn select_store_for_insert(
+  inner: &CacheInner,
+  policy: &CachePolicyRuntime,
+  headers: &HeaderMap,
+  size: usize,
+) -> CacheStore {
+  match select_store(policy, headers) {
+    CacheStore::MemoryThenDisk if inner.memory_size + size <= policy.memory_max_size_bytes => {
+      CacheStore::Memory
+    }
+    CacheStore::MemoryThenDisk => CacheStore::Disk,
+    store => store,
+  }
 }
 
 fn mime_matches(pattern: &str, mime: &str) -> bool {
@@ -2234,29 +2223,6 @@ fn validate_writable_dir(field_name: &str, path: &Path) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn fill_not_stored_suppressed(inner: &mut CacheInner, key: &str, now: SystemTime) -> bool {
-  prune_fill_not_stored_suppressions(inner, now);
-  inner
-    .fill_not_stored_until
-    .get(key)
-    .is_some_and(|until| *until > now)
-}
-
-fn prune_fill_not_stored_suppressions(inner: &mut CacheInner, now: SystemTime) {
-  while let Some(oldest) = inner.fill_not_stored_order.front() {
-    let expired = inner
-      .fill_not_stored_until
-      .get(oldest)
-      .is_none_or(|until| *until <= now);
-    if !expired {
-      break;
-    }
-    if let Some(oldest) = inner.fill_not_stored_order.pop_front() {
-      inner.fill_not_stored_until.remove(&oldest);
-    }
-  }
-}
-
 fn remove_entry(inner: &mut CacheInner, key: &str) {
   if let Some(existing) = inner.entries.remove(key) {
     unindex_entry(inner, &existing);
@@ -2350,6 +2316,15 @@ impl StoredEntry {
 
   fn remove_body(self) {
     match self.body {
+      StoredBody::Tmpfs(path) | StoredBody::Disk(path) => {
+        let _ = std::fs::remove_file(path);
+      }
+      StoredBody::Memory(_) => {}
+    }
+  }
+
+  fn remove_body_files(&self) {
+    match &self.body {
       StoredBody::Tmpfs(path) | StoredBody::Disk(path) => {
         let _ = std::fs::remove_file(path);
       }

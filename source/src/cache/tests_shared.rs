@@ -8,7 +8,7 @@ fn shared_cache_tag_purge_removes_l2_entry() {
     ..CacheConfig::default()
   };
   let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
-  let second = ResponseCache::new(&config, Some(shared)).unwrap();
+  let second = ResponseCache::new(&config, Some(shared.clone())).unwrap();
   let uri = "/asset/app.css".parse::<Uri>().unwrap();
   let request_headers = HeaderMap::new();
   let mut response_headers = HeaderMap::new();
@@ -62,7 +62,7 @@ fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
     ..CacheConfig::default()
   };
   let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
-  let second = ResponseCache::new(&config, Some(shared)).unwrap();
+  let second = ResponseCache::new(&config, Some(shared.clone())).unwrap();
   let uri = "/asset/app.css?body=shared".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheLookupContext {
@@ -89,6 +89,12 @@ fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
       body: Bytes::from_static(b"shared-cache"),
     },
   );
+  assert_eq!(first.stats().memory_entries, 1);
+  let index_keys = shared.test_cache_raw_keys("cache:index:");
+  assert!(
+    !index_keys.is_empty(),
+    "shared cache writes should maintain lookup index pointers"
+  );
 
   match second.lookup(ctx.clone()) {
     Some(CacheLookup::Fresh(entry)) => {
@@ -107,6 +113,119 @@ fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
     2
   );
   assert!(second.lookup(ctx).is_none());
+}
+
+#[test]
+fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
+  let shared = crate::shared_state::SharedState::test_memory("cache-index-backfill");
+  let config = CacheConfig {
+    enabled: true,
+    ..CacheConfig::default()
+  };
+  let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let second = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let uri = "/asset/legacy.css?body=shared".parse::<Uri>().unwrap();
+  let mut headers = HeaderMap::new();
+  headers.insert("accept-language", HeaderValue::from_static("en"));
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(
+    http::header::VARY,
+    HeaderValue::from_static("Accept-Language"),
+  );
+
+  assert_eq!(
+    first.insert(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &headers,
+      },
+      CacheEntry {
+        status: StatusCode::OK,
+        headers: response_headers,
+        body: Bytes::from_static(b"legacy-cache"),
+      },
+    ),
+    CacheInsertOutcome::Stored
+  );
+
+  for key in shared.test_cache_raw_keys("cache:index:") {
+    shared.test_delete_raw_key(&key);
+  }
+  assert!(shared.test_cache_raw_keys("cache:index:").is_empty());
+
+  match second.lookup(CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &headers,
+  }) {
+    Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"legacy-cache")),
+    other => panic!("expected legacy shared cache hit, got {other:?}"),
+  }
+  assert!(
+    !shared.test_cache_raw_keys("cache:index:").is_empty(),
+    "legacy full-scan lookup should backfill shared cache index"
+  );
+}
+
+#[test]
+fn shared_cache_vary_lookup_uses_indexed_variant() {
+  let shared = crate::shared_state::SharedState::test_memory("cache-vary-index");
+  let config = CacheConfig {
+    enabled: true,
+    ..CacheConfig::default()
+  };
+  let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let second = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let uri = "/asset/app.css".parse::<Uri>().unwrap();
+  let mut request_headers = HeaderMap::new();
+  request_headers.insert("accept-language", HeaderValue::from_static("en"));
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(
+    http::header::VARY,
+    HeaderValue::from_static("Accept-Language"),
+  );
+
+  assert_eq!(
+    first.insert(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &request_headers,
+      },
+      CacheEntry {
+        status: StatusCode::OK,
+        headers: response_headers,
+        body: Bytes::from_static(b"vary-en"),
+      },
+    ),
+    CacheInsertOutcome::Stored
+  );
+  assert!(
+    !shared.test_cache_raw_keys("cache:index:").is_empty(),
+    "vary shared cache entries should write lookup index pointers"
+  );
+
+  match second.lookup(CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &request_headers,
+  }) {
+    Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"vary-en")),
+    other => panic!("expected indexed vary shared cache hit, got {other:?}"),
+  }
 }
 
 #[test]

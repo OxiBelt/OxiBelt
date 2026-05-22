@@ -13,7 +13,7 @@ use pretty_assertions::assert_eq;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use super::{full_body, maybe_cache_response};
+use super::{full_body, maybe_cache_response, maybe_cache_response_with_store_permission};
 use crate::config::Config;
 use crate::state::AppSnapshot;
 
@@ -45,6 +45,49 @@ impl Body for PanicBody {
 
 fn panic_body() -> super::body::ProxyBody {
   PanicBody.boxed()
+}
+
+#[tokio::test]
+async fn cache_fill_store_permission_false_skips_body_collection() {
+  let temp_dir = common::TempDir::new("cache-fill-store-not-allowed");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "cache-fill-store-not-allowed");
+  let raw = format!(
+    r#"
+{}
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1024
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  let method = Method::GET;
+  let uri: http::Uri = "/suppressed-fill".parse().expect("URI should parse");
+  let request_headers = HeaderMap::new();
+
+  let response = maybe_cache_response_with_store_permission(
+    Response::new(panic_body()),
+    &state,
+    Some("default"),
+    "https",
+    "example.com",
+    &method,
+    &uri,
+    &request_headers,
+    None,
+    false,
+  )
+  .await;
+
+  assert_eq!(response.status(), http::StatusCode::OK);
+  assert_eq!(state.cache.stats().memory_entries, 0);
 }
 
 #[tokio::test]
@@ -85,6 +128,7 @@ cache_methods = ["GET"]
     &method,
     &uri,
     &request_headers,
+    None,
   )
   .await;
 
@@ -133,6 +177,7 @@ content_types = ["text/css"]
     &method,
     &uri,
     &request_headers,
+    None,
   )
   .await;
 
@@ -188,6 +233,7 @@ stream_large_objects = true
     &method,
     &uri,
     &request_headers,
+    None,
   )
   .await;
 
@@ -262,6 +308,7 @@ stream_large_objects = true
     &method,
     &uri,
     &request_headers,
+    None,
   )
   .await;
 
@@ -334,6 +381,7 @@ respect_cache_control = true
     &method,
     &uri,
     &request_headers,
+    None,
   )
   .await;
 

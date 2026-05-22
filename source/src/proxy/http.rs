@@ -99,6 +99,23 @@ fn record_route_cache_event(state: &AppSnapshot, route: &RouteConfig, outcome: &
     .record_cache_event(&route.name, route.cache.as_deref(), outcome, reason);
 }
 
+fn record_route_cache_fill_stage(
+  state: &AppSnapshot,
+  route: &RouteConfig,
+  stage: &str,
+  outcome: &str,
+  started: Instant,
+) {
+  state.metrics.record_cache_fill_stage(
+    &state.config.metrics,
+    &route.name,
+    route.cache.as_deref(),
+    stage,
+    outcome,
+    elapsed_ms(started),
+  );
+}
+
 fn emit_system_access_log(
   state: &AppSnapshot,
   context: &mut SystemAccessLogContext<'_>,
@@ -979,6 +996,7 @@ where
   let mut revalidation_entry = None;
   let mut stale_on_error = None;
   let mut _cache_fill_guard = None;
+  let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
   if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
     policy_name: resolved.route.cache.as_deref(),
     scheme: downstream_scheme,
@@ -987,101 +1005,26 @@ where
     uri: &request_uri,
     request_headers: &request_headers,
   }) {
-    match lookup {
-      crate::cache::CacheLookup::Fresh(entry) => {
-        state.metrics.record_cache_hit();
-        record_route_cache_event(&state, resolved.route, "hit", "fresh");
-        let response = cached_entry_response(entry, &request_method, &request_headers);
-        let response = compression::maybe_compress_response(
-          response,
-          &request_method,
-          &request_headers,
-          resolved.route.compression.as_deref(),
-          &state.config.compression,
-          &state.compression,
-        );
-        return with_downstream_response_timeout(
-          response,
-          timeouts.response_send,
-          transport_network,
-        );
-      }
-      crate::cache::CacheLookup::Stale(stale) => {
-        if stale.background_refresh
-          && can_background_refresh(&state, &resolved.route.name, upstream, upstream_version)
-          && spawn_background_refresh(
-            state.clone(),
-            &outbound,
-            upstream,
-            upstream_version,
-            timeouts,
-            resolved.route.cache.as_deref(),
-            downstream_scheme,
-            host.clone(),
-            request_method.clone(),
-            request_uri.clone(),
-            request_headers.clone(),
-            request_version,
-            stale.clone(),
-          )
-        {
-          state.metrics.record_cache_stale();
-          record_route_cache_event(&state, resolved.route, "stale", "background_refresh");
-          let response = cached_entry_response(stale.entry, &request_method, &request_headers);
-          let response = compression::maybe_compress_response(
-            response,
-            &request_method,
-            &request_headers,
-            resolved.route.compression.as_deref(),
-            &state.config.compression,
-            &state.compression,
-          );
-          return with_downstream_response_timeout(
-            response,
-            timeouts.response_send,
-            transport_network,
-          );
-        }
-        if !stale.request_headers.is_empty() {
-          state.metrics.record_cache_revalidation();
-          record_route_cache_event(&state, resolved.route, "revalidate", "stale_validators");
-          for (name, value) in &stale.request_headers {
-            outbound.headers_mut().insert(name.clone(), value.clone());
-          }
-          if stale.serve_stale_on_error {
-            stale_on_error = Some(stale.entry.clone());
-          }
-          revalidation_entry = Some(stale.entry);
-        } else {
-          state.metrics.record_cache_hit();
-          record_route_cache_event(&state, resolved.route, "hit", "stale_without_validators");
-          let response = cached_entry_response(stale.entry, &request_method, &request_headers);
-          let response = compression::maybe_compress_response(
-            response,
-            &request_method,
-            &request_headers,
-            resolved.route.compression.as_deref(),
-            &state.config.compression,
-            &state.compression,
-          );
-          return with_downstream_response_timeout(
-            response,
-            timeouts.response_send,
-            transport_network,
-          );
-        }
-      }
-      crate::cache::CacheLookup::Revalidate(revalidation) => {
-        state.metrics.record_cache_revalidation();
-        record_route_cache_event(&state, resolved.route, "revalidate", "explicit");
-        for (name, value) in &revalidation.request_headers {
-          outbound.headers_mut().insert(name.clone(), value.clone());
-        }
-        if revalidation.serve_stale_on_error {
-          stale_on_error = Some(revalidation.entry.clone());
-        }
-        revalidation_entry = Some(revalidation.entry);
-      }
+    if let Some(response) = handle_cache_lookup_result(
+      &state,
+      &resolved,
+      lookup,
+      &mut outbound,
+      upstream,
+      upstream_version,
+      timeouts,
+      downstream_scheme,
+      &host,
+      &request_method,
+      &request_uri,
+      &request_headers,
+      request_version,
+      transport_network,
+      &mut stale_on_error,
+      &mut revalidation_entry,
+      true,
+    ) {
+      return response;
     }
   } else if cache_enabled_for_route {
     state.metrics.record_cache_miss();
@@ -1090,130 +1033,62 @@ where
 
   if cache_enabled_for_route {
     loop {
-      let Some(permit) = state.cache.begin_fill(crate::cache::CacheLookupContext {
-        policy_name: resolved.route.cache.as_deref(),
-        scheme: downstream_scheme,
-        host: &host,
-        method: &request_method,
-        uri: &request_uri,
-        request_headers: &request_headers,
-      }) else {
+      let Some(permit) = state
+        .cache
+        .begin_fill_decision(crate::cache::CacheLookupContext {
+          policy_name: resolved.route.cache.as_deref(),
+          scheme: downstream_scheme,
+          host: &host,
+          method: &request_method,
+          uri: &request_uri,
+          request_headers: &request_headers,
+        })
+      else {
         break;
       };
       match permit {
-        crate::cache::CacheFillPermit::Leader(guard) => {
+        crate::cache::CacheFillDecision::Leader(guard) => {
           _cache_fill_guard = Some(guard);
-          if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
-            policy_name: resolved.route.cache.as_deref(),
-            scheme: downstream_scheme,
-            host: &host,
-            method: &request_method,
-            uri: &request_uri,
-            request_headers: &request_headers,
-          }) {
-            match lookup {
-              crate::cache::CacheLookup::Fresh(entry) => {
-                state.metrics.record_cache_hit();
-                let response = cached_entry_response(entry, &request_method, &request_headers);
-                let response = compression::maybe_compress_response(
-                  response,
-                  &request_method,
-                  &request_headers,
-                  resolved.route.compression.as_deref(),
-                  &state.config.compression,
-                  &state.compression,
-                );
-                return with_downstream_response_timeout(
-                  response,
-                  timeouts.response_send,
-                  transport_network,
-                );
-              }
-              crate::cache::CacheLookup::Stale(stale) => {
-                if stale.background_refresh
-                  && can_background_refresh(
-                    &state,
-                    &resolved.route.name,
-                    upstream,
-                    upstream_version,
-                  )
-                  && spawn_background_refresh(
-                    state.clone(),
-                    &outbound,
-                    upstream,
-                    upstream_version,
-                    timeouts,
-                    resolved.route.cache.as_deref(),
-                    downstream_scheme,
-                    host.clone(),
-                    request_method.clone(),
-                    request_uri.clone(),
-                    request_headers.clone(),
-                    request_version,
-                    stale.clone(),
-                  )
-                {
-                  state.metrics.record_cache_stale();
-                  let response =
-                    cached_entry_response(stale.entry, &request_method, &request_headers);
-                  let response = compression::maybe_compress_response(
-                    response,
-                    &request_method,
-                    &request_headers,
-                    resolved.route.compression.as_deref(),
-                    &state.config.compression,
-                    &state.compression,
-                  );
-                  return with_downstream_response_timeout(
-                    response,
-                    timeouts.response_send,
-                    transport_network,
-                  );
-                }
-                if !stale.request_headers.is_empty() {
-                  state.metrics.record_cache_revalidation();
-                  for (name, value) in &stale.request_headers {
-                    outbound.headers_mut().insert(name.clone(), value.clone());
-                  }
-                  if stale.serve_stale_on_error {
-                    stale_on_error = Some(stale.entry.clone());
-                  }
-                  revalidation_entry = Some(stale.entry);
-                } else {
-                  state.metrics.record_cache_hit();
-                  let response =
-                    cached_entry_response(stale.entry, &request_method, &request_headers);
-                  let response = compression::maybe_compress_response(
-                    response,
-                    &request_method,
-                    &request_headers,
-                    resolved.route.compression.as_deref(),
-                    &state.config.compression,
-                    &state.compression,
-                  );
-                  return with_downstream_response_timeout(
-                    response,
-                    timeouts.response_send,
-                    transport_network,
-                  );
-                }
-              }
-              crate::cache::CacheLookup::Revalidate(revalidation) => {
-                state.metrics.record_cache_revalidation();
-                for (name, value) in &revalidation.request_headers {
-                  outbound.headers_mut().insert(name.clone(), value.clone());
-                }
-                if revalidation.serve_stale_on_error {
-                  stale_on_error = Some(revalidation.entry.clone());
-                }
-                revalidation_entry = Some(revalidation.entry);
-              }
-            }
+          cache_store_allowed = true;
+          if let Some(response) = state
+            .cache
+            .lookup(crate::cache::CacheLookupContext {
+              policy_name: resolved.route.cache.as_deref(),
+              scheme: downstream_scheme,
+              host: &host,
+              method: &request_method,
+              uri: &request_uri,
+              request_headers: &request_headers,
+            })
+            .and_then(|lookup| {
+              handle_cache_lookup_result(
+                &state,
+                &resolved,
+                lookup,
+                &mut outbound,
+                upstream,
+                upstream_version,
+                timeouts,
+                downstream_scheme,
+                &host,
+                &request_method,
+                &request_uri,
+                &request_headers,
+                request_version,
+                transport_network,
+                &mut stale_on_error,
+                &mut revalidation_entry,
+                false,
+              )
+            })
+          {
+            return response;
           }
           break;
         }
-        crate::cache::CacheFillPermit::Follower(waiter) => {
+        crate::cache::CacheFillDecision::Follower(waiter) => {
           state.metrics.record_cache_fill_waiter();
+          let lock_wait_started = Instant::now();
           if !waiter
             .wait_timeout(
               state
@@ -1222,10 +1097,24 @@ where
             )
             .await
           {
+            record_route_cache_fill_stage(
+              &state,
+              resolved.route,
+              "lock_wait",
+              "timeout",
+              lock_wait_started,
+            );
             state.metrics.record_cache_fill_lock_timeout();
             record_route_cache_event(&state, resolved.route, "miss", "fill_lock_timeout");
             break;
           }
+          record_route_cache_fill_stage(
+            &state,
+            resolved.route,
+            "lock_wait",
+            "notified",
+            lock_wait_started,
+          );
           if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
@@ -1234,103 +1123,26 @@ where
             uri: &request_uri,
             request_headers: &request_headers,
           }) {
-            match lookup {
-              crate::cache::CacheLookup::Fresh(entry) => {
-                state.metrics.record_cache_hit();
-                let response = cached_entry_response(entry, &request_method, &request_headers);
-                let response = compression::maybe_compress_response(
-                  response,
-                  &request_method,
-                  &request_headers,
-                  resolved.route.compression.as_deref(),
-                  &state.config.compression,
-                  &state.compression,
-                );
-                return with_downstream_response_timeout(
-                  response,
-                  timeouts.response_send,
-                  transport_network,
-                );
-              }
-              crate::cache::CacheLookup::Stale(stale) => {
-                if stale.background_refresh
-                  && can_background_refresh(
-                    &state,
-                    &resolved.route.name,
-                    upstream,
-                    upstream_version,
-                  )
-                  && spawn_background_refresh(
-                    state.clone(),
-                    &outbound,
-                    upstream,
-                    upstream_version,
-                    timeouts,
-                    resolved.route.cache.as_deref(),
-                    downstream_scheme,
-                    host.clone(),
-                    request_method.clone(),
-                    request_uri.clone(),
-                    request_headers.clone(),
-                    request_version,
-                    stale.clone(),
-                  )
-                {
-                  state.metrics.record_cache_stale();
-                  let response =
-                    cached_entry_response(stale.entry, &request_method, &request_headers);
-                  let response = compression::maybe_compress_response(
-                    response,
-                    &request_method,
-                    &request_headers,
-                    resolved.route.compression.as_deref(),
-                    &state.config.compression,
-                    &state.compression,
-                  );
-                  return with_downstream_response_timeout(
-                    response,
-                    timeouts.response_send,
-                    transport_network,
-                  );
-                }
-                if !stale.request_headers.is_empty() {
-                  state.metrics.record_cache_revalidation();
-                  for (name, value) in &stale.request_headers {
-                    outbound.headers_mut().insert(name.clone(), value.clone());
-                  }
-                  if stale.serve_stale_on_error {
-                    stale_on_error = Some(stale.entry.clone());
-                  }
-                  revalidation_entry = Some(stale.entry);
-                } else {
-                  state.metrics.record_cache_hit();
-                  let response =
-                    cached_entry_response(stale.entry, &request_method, &request_headers);
-                  let response = compression::maybe_compress_response(
-                    response,
-                    &request_method,
-                    &request_headers,
-                    resolved.route.compression.as_deref(),
-                    &state.config.compression,
-                    &state.compression,
-                  );
-                  return with_downstream_response_timeout(
-                    response,
-                    timeouts.response_send,
-                    transport_network,
-                  );
-                }
-              }
-              crate::cache::CacheLookup::Revalidate(revalidation) => {
-                state.metrics.record_cache_revalidation();
-                for (name, value) in &revalidation.request_headers {
-                  outbound.headers_mut().insert(name.clone(), value.clone());
-                }
-                if revalidation.serve_stale_on_error {
-                  stale_on_error = Some(revalidation.entry.clone());
-                }
-                revalidation_entry = Some(revalidation.entry);
-              }
+            if let Some(response) = handle_cache_lookup_result(
+              &state,
+              &resolved,
+              lookup,
+              &mut outbound,
+              upstream,
+              upstream_version,
+              timeouts,
+              downstream_scheme,
+              &host,
+              &request_method,
+              &request_uri,
+              &request_headers,
+              request_version,
+              transport_network,
+              &mut stale_on_error,
+              &mut revalidation_entry,
+              false,
+            ) {
+              return response;
             }
           } else {
             state.metrics.record_cache_miss();
@@ -1338,9 +1150,13 @@ where
             break;
           }
         }
-        crate::cache::CacheFillPermit::SharedConflict => {
+        crate::cache::CacheFillDecision::SharedConflict => {
           state.metrics.record_cache_fill_lock_conflict();
           record_route_cache_event(&state, resolved.route, "miss", "shared_lock_conflict");
+          break;
+        }
+        crate::cache::CacheFillDecision::Suppressed(reason) => {
+          record_route_cache_event(&state, resolved.route, "miss", reason.as_str());
           break;
         }
       }
@@ -1628,20 +1444,22 @@ where
   if parts.status == StatusCode::NOT_MODIFIED
     && let Some(entry) = revalidation_entry.clone()
   {
+    if cache_store_allowed {
+      state.cache.update_from_not_modified(
+        crate::cache::CacheInsertContext {
+          policy_name: resolved.route.cache.as_deref(),
+          scheme: downstream_scheme,
+          host: &host,
+          method: &request_method,
+          uri: &request_uri,
+          request_headers: &request_headers,
+        },
+        &entry,
+        &parts.headers,
+      );
+    }
     let mut headers = entry.headers.clone();
     merge_not_modified_headers(&mut headers, &parts.headers);
-    state.cache.update_from_not_modified(
-      crate::cache::CacheInsertContext {
-        policy_name: resolved.route.cache.as_deref(),
-        scheme: downstream_scheme,
-        host: &host,
-        method: &request_method,
-        uri: &request_uri,
-        request_headers: &request_headers,
-      },
-      &entry,
-      &parts.headers,
-    );
     state.metrics.record_cache_hit();
     let response = cached_entry_response(
       crate::cache::CacheEntry {
@@ -1778,7 +1596,7 @@ where
     Err(error) => return response_buffering_error_response(error),
   };
 
-  let response = maybe_cache_response(
+  let response = maybe_cache_response_with_store_permission(
     Response::from_parts(parts, body),
     &state,
     resolved.route.cache.as_deref(),
@@ -1787,6 +1605,8 @@ where
     &request_method,
     &request_uri,
     &request_headers,
+    Some(resolved.route),
+    cache_store_allowed,
   )
   .await;
   let response = compression::maybe_compress_response(
@@ -2837,6 +2657,143 @@ fn cached_entry_response(
   response
 }
 
+#[allow(clippy::too_many_arguments)]
+fn cached_downstream_response(
+  state: &AppSnapshot,
+  route: &RouteConfig,
+  entry: crate::cache::CacheEntry,
+  request_method: &Method,
+  request_headers: &HeaderMap,
+  timeouts: EffectiveTimeouts,
+  transport_network: WafTransportNetwork,
+) -> Response<ProxyBody> {
+  let response = cached_entry_response(entry, request_method, request_headers);
+  let response = compression::maybe_compress_response(
+    response,
+    request_method,
+    request_headers,
+    route.compression.as_deref(),
+    &state.config.compression,
+    &state.compression,
+  );
+  with_downstream_response_timeout(response, timeouts.response_send, transport_network)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_cache_lookup_result(
+  state: &Arc<AppSnapshot>,
+  resolved: &crate::routes::ResolvedRoute<'_>,
+  lookup: crate::cache::CacheLookup,
+  outbound: &mut Request<ProxyBody>,
+  upstream: &UpstreamConfig,
+  upstream_version: HttpVersion,
+  timeouts: EffectiveTimeouts,
+  downstream_scheme: &'static str,
+  host: &str,
+  request_method: &Method,
+  request_uri: &http::Uri,
+  request_headers: &HeaderMap,
+  request_version: http::Version,
+  transport_network: WafTransportNetwork,
+  stale_on_error: &mut Option<crate::cache::CacheEntry>,
+  revalidation_entry: &mut Option<crate::cache::CacheEntry>,
+  record_events: bool,
+) -> Option<Response<ProxyBody>> {
+  match lookup {
+    crate::cache::CacheLookup::Fresh(entry) => {
+      state.metrics.record_cache_hit();
+      if record_events {
+        record_route_cache_event(state, resolved.route, "hit", "fresh");
+      }
+      Some(cached_downstream_response(
+        state,
+        resolved.route,
+        entry,
+        request_method,
+        request_headers,
+        timeouts,
+        transport_network,
+      ))
+    }
+    crate::cache::CacheLookup::Stale(stale) => {
+      if stale.background_refresh
+        && can_background_refresh(state, &resolved.route.name, upstream, upstream_version)
+        && spawn_background_refresh(
+          state.clone(),
+          outbound,
+          upstream,
+          upstream_version,
+          timeouts,
+          resolved.route.cache.as_deref(),
+          downstream_scheme,
+          host.to_string(),
+          request_method.clone(),
+          request_uri.clone(),
+          request_headers.clone(),
+          request_version,
+          stale.clone(),
+        )
+      {
+        state.metrics.record_cache_stale();
+        if record_events {
+          record_route_cache_event(state, resolved.route, "stale", "background_refresh");
+        }
+        return Some(cached_downstream_response(
+          state,
+          resolved.route,
+          stale.entry,
+          request_method,
+          request_headers,
+          timeouts,
+          transport_network,
+        ));
+      }
+      if !stale.request_headers.is_empty() {
+        state.metrics.record_cache_revalidation();
+        if record_events {
+          record_route_cache_event(state, resolved.route, "revalidate", "stale_validators");
+        }
+        for (name, value) in &stale.request_headers {
+          outbound.headers_mut().insert(name.clone(), value.clone());
+        }
+        if stale.serve_stale_on_error {
+          *stale_on_error = Some(stale.entry.clone());
+        }
+        *revalidation_entry = Some(stale.entry);
+        None
+      } else {
+        state.metrics.record_cache_hit();
+        if record_events {
+          record_route_cache_event(state, resolved.route, "hit", "stale_without_validators");
+        }
+        Some(cached_downstream_response(
+          state,
+          resolved.route,
+          stale.entry,
+          request_method,
+          request_headers,
+          timeouts,
+          transport_network,
+        ))
+      }
+    }
+    crate::cache::CacheLookup::Revalidate(revalidation) => {
+      state.metrics.record_cache_revalidation();
+      if record_events {
+        record_route_cache_event(state, resolved.route, "revalidate", "explicit");
+      }
+      for (name, value) in &revalidation.request_headers {
+        outbound.headers_mut().insert(name.clone(), value.clone());
+      }
+      if revalidation.serve_stale_on_error {
+        *stale_on_error = Some(revalidation.entry.clone());
+      }
+      *revalidation_entry = Some(revalidation.entry);
+      None
+    }
+  }
+}
+
 fn can_background_refresh(
   state: &AppSnapshot,
   route_name: &str,
@@ -3040,6 +2997,7 @@ fn empty_request_from<B>(request: &Request<B>) -> Request<ProxyBody> {
     .expect("request clone builds")
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn maybe_cache_response(
   response: Response<ProxyBody>,
@@ -3050,11 +3008,46 @@ async fn maybe_cache_response(
   method: &Method,
   uri: &http::Uri,
   request_headers: &HeaderMap,
+  route: Option<&RouteConfig>,
+) -> Response<ProxyBody> {
+  maybe_cache_response_with_store_permission(
+    response,
+    state,
+    route_cache,
+    scheme,
+    host,
+    method,
+    uri,
+    request_headers,
+    route,
+    true,
+  )
+  .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn maybe_cache_response_with_store_permission(
+  response: Response<ProxyBody>,
+  state: &AppSnapshot,
+  route_cache: Option<&str>,
+  scheme: &str,
+  host: &str,
+  method: &Method,
+  uri: &http::Uri,
+  request_headers: &HeaderMap,
+  route: Option<&RouteConfig>,
+  allow_store: bool,
 ) -> Response<ProxyBody> {
   if !state.cache.policy_enabled(route_cache, method) {
     return response;
   }
   let (mut parts, body) = response.into_parts();
+  if !allow_store {
+    if state.cache.strip_surrogate_control(route_cache) {
+      parts.headers.remove("surrogate-control");
+    }
+    return Response::from_parts(parts, body);
+  }
   let content_length = exact_response_content_length(&parts.headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
     policy_name: route_cache,
@@ -3064,22 +3057,37 @@ async fn maybe_cache_response(
     uri,
     request_headers,
   };
+  let record_fill_stage = |stage: &str, outcome: &str, started: Instant| {
+    if let Some(route) = route {
+      record_route_cache_fill_stage(state, route, stage, outcome, started);
+    }
+  };
+  let head_started = Instant::now();
   let prepared =
     match state
       .cache
       .prepare_insert(insert_ctx(), parts.status, &parts.headers, content_length)
     {
-      crate::cache::CachePreparedInsertDecision::Cacheable(prepared) => prepared,
-      crate::cache::CachePreparedInsertDecision::Rejected => {
+      crate::cache::CachePreparedInsertDecision::Cacheable(prepared) => {
+        record_fill_stage("head_decision", "cacheable", head_started);
+        prepared
+      }
+      crate::cache::CachePreparedInsertDecision::Rejected(reason) => {
+        record_fill_stage("head_decision", reason.as_str(), head_started);
         state.metrics.record_cache_admission_rejection();
-        state.cache.note_fill_not_stored(insert_ctx());
+        state
+          .cache
+          .note_fill_not_stored_reason(insert_ctx(), reason);
         if state.cache.strip_surrogate_control(route_cache) {
           parts.headers.remove("surrogate-control");
         }
         return Response::from_parts(parts, body);
       }
-      crate::cache::CachePreparedInsertDecision::NotCacheable => {
-        state.cache.note_fill_not_stored(insert_ctx());
+      crate::cache::CachePreparedInsertDecision::NotCacheable(reason) => {
+        record_fill_stage("head_decision", reason.as_str(), head_started);
+        state
+          .cache
+          .note_fill_not_stored_reason(insert_ctx(), reason);
         if state.cache.strip_surrogate_control(route_cache) {
           parts.headers.remove("surrogate-control");
         }
@@ -3092,17 +3100,24 @@ async fn maybe_cache_response(
     .upper()
     .is_none_or(|upper| upper as usize > collect_limit)
   {
-    state.cache.note_fill_not_stored(insert_ctx());
+    record_fill_stage("body_collect", "too_large", Instant::now());
+    state.cache.note_fill_not_stored_reason(
+      insert_ctx(),
+      crate::cache::CacheFillSuppressionReason::TooLarge,
+    );
     if state.cache.strip_surrogate_control(route_cache) {
       parts.headers.remove("surrogate-control");
     }
     return Response::from_parts(parts, body);
   }
+  let collect_started = Instant::now();
   match collect_cache_response_body(body, collect_limit).await {
     Ok(bytes) => {
+      record_fill_stage("body_collect", "ok", collect_started);
       if state.cache.strip_surrogate_control(route_cache) {
         parts.headers.remove("surrogate-control");
       }
+      let store_started = Instant::now();
       match state.cache.insert_prepared(
         *prepared,
         crate::cache::CacheEntry {
@@ -3112,17 +3127,31 @@ async fn maybe_cache_response(
         },
       ) {
         crate::cache::CacheInsertOutcome::Rejected => {
+          record_fill_stage("local_store", "rejected", store_started);
           state.metrics.record_cache_admission_rejection();
-          state.cache.note_fill_not_stored(insert_ctx());
+          state.cache.note_fill_not_stored_reason(
+            insert_ctx(),
+            crate::cache::CacheFillSuppressionReason::AdmissionRejected,
+          );
         }
         crate::cache::CacheInsertOutcome::StoreFailed => {
+          record_fill_stage("local_store", "store_failed", store_started);
           state.metrics.record_cache_fill_error();
-          state.cache.note_fill_not_stored(insert_ctx());
+          state.cache.note_fill_not_stored_reason(
+            insert_ctx(),
+            crate::cache::CacheFillSuppressionReason::StoreFailed,
+          );
         }
         crate::cache::CacheInsertOutcome::NotCacheable => {
+          record_fill_stage("local_store", "not_cacheable", store_started);
           state.cache.note_fill_not_stored(insert_ctx());
         }
-        crate::cache::CacheInsertOutcome::Stored => {}
+        crate::cache::CacheInsertOutcome::Stored => {
+          record_fill_stage("local_store", "stored", store_started);
+          if state.cache.shared_cache_enabled() {
+            record_fill_stage("shared_store", "submitted", Instant::now());
+          }
+        }
       }
       let body_len = bytes.len();
       let mut response = Response::from_parts(parts, full_body(bytes));
@@ -3134,6 +3163,7 @@ async fn maybe_cache_response(
       response
     }
     Err(error) if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) => {
+      record_fill_stage("body_collect", "timeout", collect_started);
       state.metrics.record_cache_fill_error();
       text_response(
         StatusCode::GATEWAY_TIMEOUT,
@@ -3141,6 +3171,7 @@ async fn maybe_cache_response(
       )
     }
     Err(error) => {
+      record_fill_stage("body_collect", "error", collect_started);
       state.metrics.record_cache_fill_error();
       text_response(
         StatusCode::BAD_GATEWAY,

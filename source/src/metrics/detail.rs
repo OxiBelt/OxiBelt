@@ -16,6 +16,7 @@ pub(super) struct DetailedMetrics {
   http: HashMap<HttpMetricKey, HistogramSeries>,
   upstream: HashMap<UpstreamMetricKey, HistogramSeries>,
   cache: HashMap<CacheMetricKey, u64>,
+  cache_fill_stage: HashMap<CacheFillStageMetricKey, HistogramSeries>,
   tls_handshake: HashMap<TlsHandshakeMetricKey, HistogramSeries>,
   quic_retries: HashMap<QuicRetryMetricKey, u64>,
   sni_forward_decisions: HashMap<sni_forward::SniForwardDecisionMetricKey, u64>,
@@ -49,6 +50,14 @@ struct CacheMetricKey {
   policy: String,
   outcome: String,
   reason: String,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct CacheFillStageMetricKey {
+  route: String,
+  policy: String,
+  stage: String,
+  outcome: String,
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -188,6 +197,30 @@ impl Metrics {
     if detailed.cache.contains_key(&key) || detailed.cache.len() < MAX_DETAILED_SERIES {
       *detailed.cache.entry(key).or_default() += 1;
     }
+  }
+
+  pub fn record_cache_fill_stage(
+    &self,
+    config: &MetricsConfig,
+    route: &str,
+    policy: Option<&str>,
+    stage: &str,
+    outcome: &str,
+    duration_ms: u64,
+  ) {
+    let key = CacheFillStageMetricKey {
+      route: sanitize_label_value(route),
+      policy: sanitize_label_value(policy.unwrap_or("default")),
+      stage: sanitize_label_value(stage),
+      outcome: sanitize_label_value(outcome),
+    };
+    let mut detailed = lock_detailed(&self.detailed);
+    observe_histogram(
+      &mut detailed.cache_fill_stage,
+      key,
+      duration_ms,
+      &config.histogram_buckets_ms,
+    );
   }
 
   pub fn record_tls_handshake(
@@ -403,6 +436,20 @@ impl Metrics {
         "counter",
         &labels,
         *value,
+      );
+    }
+    for (key, series) in &detailed.cache_fill_stage {
+      let labels = [
+        ("route", key.route.as_str()),
+        ("policy", key.policy.as_str()),
+        ("stage", key.stage.as_str()),
+        ("outcome", key.outcome.as_str()),
+      ];
+      append_histogram(
+        output,
+        "oxibelt_cache_fill_stage_duration_ms",
+        &labels,
+        series,
       );
     }
     for (key, series) in &detailed.tls_handshake {
@@ -644,6 +691,7 @@ mod tests {
     let config = MetricsConfig::default();
     metrics.record_cache_event("app", Some("edge"), "miss", "fill_lock_timeout");
     metrics.record_cache_event("app", Some("edge"), "miss", "fill_not_stored");
+    metrics.record_cache_fill_stage(&config, "app", Some("edge"), "body_collect", "ok", 7);
 
     let body = metrics.prometheus(
       &config,
@@ -652,6 +700,8 @@ mod tests {
     );
 
     assert!(body.contains("oxibelt_cache_events_total"));
+    assert!(body.contains("oxibelt_cache_fill_stage_duration_ms_bucket"));
+    assert!(body.contains("stage=\"body_collect\""));
     assert!(body.contains("reason=\"fill_lock_timeout\""));
     assert!(body.contains("reason=\"fill_not_stored\""));
     assert!(!body.contains("rule_name"));

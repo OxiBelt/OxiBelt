@@ -9,8 +9,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
-use ring::digest;
+use http::StatusCode;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
@@ -19,12 +18,14 @@ use tokio::runtime::Handle;
 use tracing::warn;
 use url::Url;
 
-use crate::cache::{CacheEntry, CacheLookup, Revalidation, StaleEntry};
 use crate::config::{Config, DatabaseTlsMode, SharedStateBackendConfig, SharedStateBackendKind};
 use crate::limits::ParsedRate;
 
+mod cache_store;
 mod feature_flags;
 mod sticky_sessions;
+
+pub use cache_store::{SharedCacheLock, shared_header_values};
 
 #[derive(Clone, Debug)]
 pub struct SharedState {
@@ -208,6 +209,26 @@ impl SharedState {
     })
   }
 
+  #[cfg(test)]
+  pub fn test_cache_raw_keys(&self, suffix_prefix: &str) -> Vec<String> {
+    let Some(backend) = &self.cache else {
+      return Vec::new();
+    };
+    backend
+      .raw_entries(&self.key(suffix_prefix))
+      .unwrap_or_default()
+      .into_iter()
+      .map(|(key, _)| key)
+      .collect()
+  }
+
+  #[cfg(test)]
+  pub fn test_delete_raw_key(&self, key: &str) {
+    if let Some(backend) = &self.cache {
+      let _ = backend.delete(key);
+    }
+  }
+
   pub fn instance_id(&self) -> &str {
     &self.instance_id
   }
@@ -355,249 +376,6 @@ impl SharedState {
     )?))
   }
 
-  #[allow(clippy::too_many_arguments)]
-  pub fn cache_lookup(
-    &self,
-    policy: &str,
-    scheme: &str,
-    host: &str,
-    partition: &str,
-    base_key: &str,
-    uri: &str,
-    method: &Method,
-    request_headers: &HeaderMap,
-    request_no_cache: bool,
-    background_refresh: bool,
-  ) -> anyhow::Result<Option<CacheLookup>> {
-    let Some(backend) = &self.cache else {
-      return Ok(None);
-    };
-    let entries = backend.cache_entries(&self.key("cache:entry:"))?;
-    let now = now_unix_ms();
-    for entry in entries {
-      if entry.policy != policy
-        || entry.scheme != scheme
-        || entry.host != host
-        || entry.partition != partition
-        || entry.base_key != base_key
-        || entry.uri != uri
-        || !shared_vary_matches(&entry.vary, request_headers)
-      {
-        continue;
-      }
-      if entry.stale_if_error_until_ms.unwrap_or(entry.expires_at_ms) <= now {
-        let _ = backend.delete(&self.key(&format!("cache:entry:{}", entry.variant_key)));
-        continue;
-      }
-      let Some(cache_entry) = self.shared_cache_entry_to_cache_entry(&entry) else {
-        continue;
-      };
-      if method == Method::HEAD {
-        return Ok(Some(CacheLookup::Fresh(CacheEntry {
-          body: bytes::Bytes::new(),
-          ..cache_entry
-        })));
-      }
-      if request_no_cache || entry.must_revalidate || entry.expires_at_ms <= now {
-        let validators = validator_headers(&cache_entry.headers);
-        if !request_no_cache
-          && !entry.must_revalidate
-          && entry
-            .stale_while_revalidate_until_ms
-            .is_some_and(|until| until > now)
-        {
-          return Ok(Some(CacheLookup::Stale(StaleEntry {
-            entry: cache_entry,
-            request_headers: validators,
-            serve_stale_on_error: entry
-              .stale_if_error_until_ms
-              .is_some_and(|until| until > now),
-            background_refresh,
-          })));
-        }
-        if validators.is_empty() {
-          if entry
-            .stale_while_revalidate_until_ms
-            .is_some_and(|until| until > now)
-          {
-            return Ok(Some(CacheLookup::Stale(StaleEntry {
-              entry: cache_entry,
-              request_headers: HeaderMap::new(),
-              serve_stale_on_error: entry
-                .stale_if_error_until_ms
-                .is_some_and(|until| until > now),
-              background_refresh,
-            })));
-          }
-          if entry
-            .stale_if_error_until_ms
-            .is_some_and(|until| until > now)
-          {
-            return Ok(Some(CacheLookup::Revalidate(Revalidation {
-              entry: cache_entry,
-              request_headers: HeaderMap::new(),
-              serve_stale_on_error: true,
-            })));
-          }
-          return Ok(None);
-        }
-        return Ok(Some(CacheLookup::Revalidate(Revalidation {
-          entry: cache_entry,
-          request_headers: validators,
-          serve_stale_on_error: entry
-            .stale_if_error_until_ms
-            .is_some_and(|until| until > now),
-        })));
-      }
-      return Ok(Some(CacheLookup::Fresh(cache_entry)));
-    }
-    Ok(None)
-  }
-
-  pub fn cache_put(&self, entry: &SharedCacheEntry) {
-    let Some(backend) = &self.cache else {
-      return;
-    };
-    let ttl = ttl_from_expires_ms(
-      entry
-        .stale_if_error_until_ms
-        .unwrap_or(entry.expires_at_ms)
-        .max(entry.expires_at_ms),
-    );
-    let key = self.key(&format!("cache:entry:{}", entry.variant_key));
-    let mut entry = entry.clone();
-    entry.body_len = entry.body.len();
-    if entry.body.len() > self.cache_chunk_bytes {
-      let chunk_ttl = ttl;
-      let stem = shared_cache_chunk_stem(&entry.variant_key);
-      let mut chunks = Vec::new();
-      for (index, chunk) in entry.body.chunks(self.cache_chunk_bytes).enumerate() {
-        let chunk_key = self.key(&format!("cache:chunk:{stem}:{index}"));
-        if let Err(error) = backend.put(&chunk_key, chunk, chunk_ttl) {
-          warn!(error = %error, "failed to write shared cache body chunk");
-          return;
-        }
-        chunks.push(chunk_key);
-      }
-      entry.body.clear();
-      entry.body_chunks = chunks;
-    }
-    match serde_json::to_vec(&entry)
-      .map_err(Into::into)
-      .and_then(|value| backend.put(&key, &value, ttl))
-    {
-      Ok(()) => {}
-      Err(error) => warn!(error = %error, "failed to write shared cache entry"),
-    }
-  }
-
-  pub fn cache_try_lock(&self, fill_key: &str) -> Option<SharedCacheLock> {
-    let backend = self.cache.as_ref()?.clone();
-    let key = self.key(&format!("cache:lock:{fill_key}"));
-    let token = random_hex(16).ok()?;
-    match backend.put_if_absent(&key, token.as_bytes(), Some(self.cache_lock)) {
-      Ok(true) => Some(SharedCacheLock {
-        backend,
-        key,
-        token,
-      }),
-      Ok(false) => None,
-      Err(error) => {
-        warn!(error = %error, "failed to acquire shared cache fill lock");
-        None
-      }
-    }
-  }
-
-  pub fn cache_purge_exact(
-    &self,
-    policy: &str,
-    scheme: &str,
-    host: &str,
-    uri: &str,
-    partition: Option<&str>,
-  ) -> usize {
-    self.cache_purge(|entry| {
-      entry.policy == policy
-        && entry.scheme == scheme
-        && entry.host == host
-        && entry.uri == uri
-        && partition.is_none_or(|partition| entry.partition == partition)
-    })
-  }
-
-  pub fn cache_purge_prefix(
-    &self,
-    policy: &str,
-    scheme: &str,
-    host: &str,
-    path_prefix: &str,
-    partition: Option<&str>,
-  ) -> usize {
-    self.cache_purge(|entry| {
-      entry.policy == policy
-        && entry.scheme == scheme
-        && entry.host == host
-        && partition.is_none_or(|partition| entry.partition == partition)
-        && entry
-          .uri
-          .parse::<Uri>()
-          .ok()
-          .is_some_and(|uri| uri.path().starts_with(path_prefix))
-    })
-  }
-
-  pub fn cache_purge_tag(
-    &self,
-    policy: &str,
-    tag: &str,
-    scheme: Option<&str>,
-    host: Option<&str>,
-    partition: Option<&str>,
-  ) -> usize {
-    self.cache_purge(|entry| {
-      entry.policy == policy
-        && partition.is_none_or(|partition| entry.partition == partition)
-        && scheme.is_none_or(|scheme| entry.scheme == scheme)
-        && host.is_none_or(|host| entry.host == host)
-        && entry.tags.iter().any(|candidate| candidate == tag)
-    })
-  }
-
-  fn cache_purge(&self, matches: impl Fn(&SharedCacheEntry) -> bool) -> usize {
-    let Some(backend) = &self.cache else {
-      return 0;
-    };
-    let Ok(entries) = backend.cache_entries_with_keys(&self.key("cache:entry:")) else {
-      return 0;
-    };
-    let mut purged = 0;
-    for (key, entry) in entries {
-      if matches(&entry) && backend.delete(&key).is_ok() {
-        for chunk_key in &entry.body_chunks {
-          let _ = backend.delete(chunk_key);
-        }
-        purged += 1;
-      }
-    }
-    purged
-  }
-
-  fn shared_cache_entry_to_cache_entry(&self, entry: &SharedCacheEntry) -> Option<CacheEntry> {
-    if entry.body_chunks.is_empty() {
-      return entry.to_cache_entry();
-    }
-    let backend = self.cache.as_ref()?;
-    let mut body = Vec::with_capacity(entry.body_len);
-    for chunk_key in &entry.body_chunks {
-      let chunk = backend.get(chunk_key).ok().flatten()?;
-      body.extend_from_slice(&chunk);
-    }
-    let mut entry = entry.clone();
-    entry.body = body;
-    entry.to_cache_entry()
-  }
-
   pub fn record_reload_generation(&self, config: &Config) {
     let Some(backend) = &self.reload else {
       return;
@@ -612,37 +390,6 @@ impl SharedState {
 
   fn key(&self, suffix: &str) -> String {
     format!("{}:{suffix}", self.namespace)
-  }
-}
-
-#[derive(Debug)]
-pub struct SharedCacheLock {
-  backend: Arc<Backend>,
-  key: String,
-  token: String,
-}
-
-impl Drop for SharedCacheLock {
-  fn drop(&mut self) {
-    if let Err(error) = self.backend.unlock(&self.key, &self.token) {
-      warn!(error = %error, "failed to release shared cache fill lock");
-    }
-  }
-}
-
-impl SharedCacheEntry {
-  pub fn to_cache_entry(&self) -> Option<CacheEntry> {
-    let mut headers = HeaderMap::new();
-    for (name, value) in &self.headers {
-      let name = HeaderName::from_bytes(name.as_bytes()).ok()?;
-      let value = HeaderValue::from_bytes(value).ok()?;
-      headers.append(name, value);
-    }
-    Some(CacheEntry {
-      status: StatusCode::from_u16(self.status).ok()?,
-      headers,
-      body: bytes::Bytes::from(self.body.clone()),
-    })
   }
 }
 
@@ -860,6 +607,15 @@ impl Backend {
       Self::Postgres(pg) => pg.cache_entries(prefix),
       #[cfg(test)]
       Self::Memory(memory) => memory.cache_entries(prefix),
+    }
+  }
+
+  fn raw_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    match self {
+      Self::Redis(redis) => redis.raw_entries(prefix),
+      Self::Postgres(pg) => pg.raw_entries(prefix),
+      #[cfg(test)]
+      Self::Memory(memory) => memory.raw_entries(prefix),
     }
   }
 }
@@ -1115,6 +871,20 @@ impl MemoryBackend {
   }
 
   fn cache_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, SharedCacheEntry)>> {
+    Ok(
+      self
+        .raw_entries(prefix)?
+        .into_iter()
+        .filter_map(|(key, value)| {
+          serde_json::from_slice(&value)
+            .ok()
+            .map(|entry| (key, entry))
+        })
+        .collect(),
+    )
+  }
+
+  fn raw_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     let mut values = self
       .values
       .lock()
@@ -1125,11 +895,7 @@ impl MemoryBackend {
       values
         .iter()
         .filter(|(key, _)| key.starts_with(prefix))
-        .filter_map(|(key, value)| {
-          serde_json::from_slice(&value.value)
-            .ok()
-            .map(|entry| (key.clone(), entry))
-        })
+        .map(|(key, value)| (key.clone(), value.value.clone()))
         .collect(),
     )
   }
@@ -1455,6 +1221,20 @@ return 1
   }
 
   fn cache_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, SharedCacheEntry)>> {
+    Ok(
+      self
+        .raw_entries(prefix)?
+        .into_iter()
+        .filter_map(|(key, value)| {
+          serde_json::from_slice(&value)
+            .ok()
+            .map(|entry| (key, entry))
+        })
+        .collect(),
+    )
+  }
+
+  fn raw_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     let pattern = format!("{prefix}*");
     let keys = match self.command(&[b"KEYS".to_vec(), pattern.as_bytes().to_vec()])? {
       Resp::Array(items) => items
@@ -1468,10 +1248,8 @@ return 1
     };
     let mut entries = Vec::new();
     for key in keys {
-      if let Resp::Bulk(Some(bytes)) = self.command(&[b"GET".to_vec(), key.as_bytes().to_vec()])?
-        && let Ok(entry) = serde_json::from_slice::<SharedCacheEntry>(&bytes)
-      {
-        entries.push((key, entry));
+      if let Resp::Bulk(Some(bytes)) = self.command(&[b"GET".to_vec(), key.as_bytes().to_vec()])? {
+        entries.push((key, bytes));
       }
     }
     Ok(entries)
@@ -1758,25 +1536,30 @@ impl PostgresBackend {
   }
 
   fn cache_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, SharedCacheEntry)>> {
+    Ok(
+      self
+        .raw_entries(prefix)?
+        .into_iter()
+        .filter_map(|(key, value)| {
+          serde_json::from_slice(&value)
+            .ok()
+            .map(|entry| (key, entry))
+        })
+        .collect(),
+    )
+  }
+
+  fn raw_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     let pattern = format!("{prefix}%");
     block_on_timeout(self.timeout, async {
-      let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+      let rows = sqlx::query_as(
         "SELECT key, value FROM oxibelt_shared_state WHERE key LIKE $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
       )
       .bind(pattern)
       .bind(now_unix_ms())
       .fetch_all(&self.pool)
       .await?;
-      Ok(
-        rows
-          .into_iter()
-          .filter_map(|(key, value)| {
-            serde_json::from_slice(&value)
-              .ok()
-              .map(|entry| (key, entry))
-          })
-          .collect(),
-      )
+      Ok(rows)
     })
   }
 }
@@ -1944,41 +1727,6 @@ fn parse_rate_bucket(raw: &[u8]) -> Option<(f64, i64)> {
   Some((tokens.parse().ok()?, last.parse().ok()?))
 }
 
-fn validator_headers(headers: &HeaderMap) -> HeaderMap {
-  let mut validators = HeaderMap::new();
-  if let Some(etag) = headers.get(http::header::ETAG) {
-    validators.insert(http::header::IF_NONE_MATCH, etag.clone());
-  }
-  if let Some(last_modified) = headers.get(http::header::LAST_MODIFIED) {
-    validators.insert(http::header::IF_MODIFIED_SINCE, last_modified.clone());
-  }
-  validators
-}
-
-fn shared_vary_matches(vary: &[SharedVaryMatcher], request_headers: &HeaderMap) -> bool {
-  vary
-    .iter()
-    .all(|item| header_values(request_headers, &item.name) == item.value)
-}
-
-pub fn shared_header_values(headers: &HeaderMap, name: &str) -> String {
-  header_values(headers, name)
-}
-
-fn header_values(headers: &HeaderMap, name: &str) -> String {
-  HeaderName::from_bytes(name.as_bytes())
-    .ok()
-    .map(|name| {
-      headers
-        .get_all(name)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .collect::<Vec<_>>()
-        .join(",")
-    })
-    .unwrap_or_default()
-}
-
 fn ttl_from_expires_ms(expires_at_ms: i64) -> Option<Duration> {
   let now = now_unix_ms();
   (expires_at_ms > now).then_some(Duration::from_millis((expires_at_ms - now) as u64))
@@ -1998,10 +1746,6 @@ fn random_hex(bytes: usize) -> anyhow::Result<String> {
     .fill(&mut value)
     .map_err(|_| anyhow!("failed to generate shared cache lock token"))?;
   Ok(hex_encode(&value))
-}
-
-fn shared_cache_chunk_stem(variant_key: &str) -> String {
-  hex_encode(digest::digest(&digest::SHA256, variant_key.as_bytes()).as_ref())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
