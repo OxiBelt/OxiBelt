@@ -1,17 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 use tokio::net::UdpSocket;
-use tokio::sync::watch;
 
 use crate::config::{
   DiscoveryUpstreamScheme, DnsDiscoveryRecordType, UpstreamDiscoveryProvider,
   UpstreamPoolDiscoveryConfig, UpstreamPoolServerConfig, UpstreamPoolServerSource,
-  UpstreamPoolServerState,
+  UpstreamPoolServerState, upstream_pool_server_id,
 };
 use crate::control_http::ControlHttpClient;
 use crate::state::AppHandle;
@@ -19,89 +18,78 @@ use crate::upstream_control;
 
 mod dns;
 mod enterprise;
+mod kubernetes;
+mod supervisor;
+pub(crate) use supervisor::run_dynamic_upstream_discovery;
 
 #[cfg(test)]
 mod runtime_tests;
-
-pub(crate) async fn run_dynamic_upstream_discovery(
-  state: AppHandle,
-  mut shutdown: watch::Receiver<bool>,
-) {
-  let mut next_checks: HashMap<(String, usize), Instant> = HashMap::new();
-
-  loop {
-    if *shutdown.borrow() {
-      break;
-    }
-
-    let snapshot = state.snapshot();
-    let now = Instant::now();
-    let mut next_sleep = Duration::from_secs(5);
-
-    for pool in &snapshot.config.upstream_pools {
-      for (index, discovery) in pool.discovery.iter().cloned().enumerate() {
-        let key = (pool.name.clone(), index);
-        let due = next_checks.entry(key).or_insert(now);
-        if *due > now {
-          next_sleep = next_sleep.min(*due - now);
-          continue;
-        }
-
-        let fallback_delay = Duration::from_millis(discovery.refresh_interval_ms);
-        let result = discover_servers(&snapshot.control_http, &discovery).await;
-        let delay = match result {
-          Ok((servers, delay)) => {
-            if let Err(error) =
-              apply_discovered_servers(&state, &pool.name, discovery.provider, servers).await
-            {
-              tracing::warn!(
-                error = %error,
-                pool = %pool.name,
-                provider = ?discovery.provider,
-                "dynamic upstream discovery update rejected; keeping previous pool state"
-              );
-            }
-            delay
-          }
-          Err(error) => {
-            tracing::warn!(
-              error = %error,
-              pool = %pool.name,
-              provider = ?discovery.provider,
-              "dynamic upstream discovery failed; keeping previous pool state"
-            );
-            fallback_delay
-          }
-        };
-        next_checks.insert((pool.name.clone(), index), Instant::now() + delay);
-        next_sleep = next_sleep.min(delay);
-      }
-    }
-
-    tokio::select! {
-      _ = shutdown.changed() => {}
-      _ = tokio::time::sleep(next_sleep) => {}
-    }
-  }
-}
 
 async fn apply_discovered_servers(
   state: &AppHandle,
   pool_name: &str,
   provider: UpstreamDiscoveryProvider,
-  servers: Vec<UpstreamPoolServerConfig>,
+  mut servers: Vec<UpstreamPoolServerConfig>,
 ) -> anyhow::Result<()> {
-  let source = match provider {
+  let source = discovery_source(provider);
+  if discovered_servers_unchanged(state, pool_name, source, &mut servers)? {
+    return Ok(());
+  }
+  upstream_control::apply_runtime_pool_update(state, |config| {
+    upstream_control::replace_discovered_servers(config, pool_name, source, servers)
+  })
+  .await
+}
+
+fn discovery_source(provider: UpstreamDiscoveryProvider) -> UpstreamPoolServerSource {
+  match provider {
     UpstreamDiscoveryProvider::Dns => UpstreamPoolServerSource::Dns,
     UpstreamDiscoveryProvider::File => UpstreamPoolServerSource::File,
     UpstreamDiscoveryProvider::Kubernetes => UpstreamPoolServerSource::Kubernetes,
     UpstreamDiscoveryProvider::Consul => UpstreamPoolServerSource::Consul,
     UpstreamDiscoveryProvider::Etcd => UpstreamPoolServerSource::Etcd,
-  };
-  upstream_control::apply_runtime_pool_update(state, |config| {
-    upstream_control::replace_discovered_servers(config, pool_name, source, servers)
-  })
-  .await
+  }
+}
+
+fn discovered_servers_unchanged(
+  state: &AppHandle,
+  pool_name: &str,
+  source: UpstreamPoolServerSource,
+  servers: &mut Vec<UpstreamPoolServerConfig>,
+) -> anyhow::Result<bool> {
+  let snapshot = state.snapshot();
+  let pool = snapshot
+    .config
+    .upstream_pools
+    .iter()
+    .find(|pool| pool.name == pool_name)
+    .ok_or_else(|| anyhow!("unknown upstream pool {pool_name}"))?;
+  let previous_states = pool
+    .servers
+    .iter()
+    .enumerate()
+    .filter(|(_, server)| server.source == source)
+    .map(|(index, server)| (upstream_pool_server_id(index, server), server.state))
+    .collect::<HashMap<_, _>>();
+
+  for (index, server) in servers.iter_mut().enumerate() {
+    let server_id = upstream_pool_server_id(index, server);
+    server.id = Some(server_id.clone());
+    server.source = source;
+    if let Some(state) = previous_states.get(&server_id) {
+      server.state = *state;
+    } else if server.state != UpstreamPoolServerState::Ready {
+      server.state = UpstreamPoolServerState::Ready;
+    }
+  }
+
+  let existing = pool
+    .servers
+    .iter()
+    .filter(|server| server.source == source)
+    .cloned()
+    .collect::<Vec<_>>();
+  Ok(existing == *servers)
 }
 
 async fn discover_servers(
@@ -112,7 +100,7 @@ async fn discover_servers(
     UpstreamDiscoveryProvider::File => discover_file_servers(discovery).await,
     UpstreamDiscoveryProvider::Dns => discover_dns_servers(discovery).await,
     UpstreamDiscoveryProvider::Kubernetes => {
-      enterprise::discover_kubernetes_servers(client, discovery).await
+      kubernetes::discover_kubernetes_servers(client, discovery).await
     }
     UpstreamDiscoveryProvider::Consul => {
       enterprise::discover_consul_servers(client, discovery).await

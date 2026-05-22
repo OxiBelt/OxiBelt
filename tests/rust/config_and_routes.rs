@@ -9,12 +9,12 @@ use oxibelt::config::{
     Config, ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode,
     DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
     ExpectContinueMode, ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode,
-    GrpcRetryMode, HotReloadMode, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy,
-    OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol,
-    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
-    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-    UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    GrpcRetryMode, HotReloadMode, KubernetesDiscoveryResource, LoadBalancingAlgorithm,
+    MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode,
+    ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides,
+    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
+    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -3293,6 +3293,11 @@ key_prefix = "/oxibelt/upstreams/api/"
         UpstreamDiscoveryProvider::Kubernetes
     );
     assert_eq!(
+        config.upstream_pools[0].discovery[0].kubernetes_resource,
+        KubernetesDiscoveryResource::Endpoints
+    );
+    assert!(!config.upstream_pools[0].discovery[0].watch);
+    assert_eq!(
         config.upstream_pools[1].discovery[0].provider,
         UpstreamDiscoveryProvider::Consul
     );
@@ -3300,6 +3305,44 @@ key_prefix = "/oxibelt/upstreams/api/"
         config.upstream_pools[2].discovery[0].provider,
         UpstreamDiscoveryProvider::Etcd
     );
+}
+
+#[test]
+fn kubernetes_endpoint_slice_watch_discovery_config_parses() {
+    let temp_dir = common::TempDir::new("kubernetes-endpoint-slice-watch");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "kubernetes-endpoint-slice-watch");
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "kubernetes-pool"
+
+[[upstream_pools.discovery]]
+provider = "kubernetes"
+endpoint = "https://kubernetes.default.svc"
+namespace = "default"
+service = "api"
+port = 8080
+kubernetes_resource = "endpoint_slice"
+watch = true
+watch_timeout_seconds = 120
+update_debounce_ms = 50
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let discovery = &config.upstream_pools[0].discovery[0];
+    assert_eq!(
+        discovery.kubernetes_resource,
+        KubernetesDiscoveryResource::EndpointSlice
+    );
+    assert!(discovery.watch);
+    assert_eq!(discovery.watch_timeout_seconds, 120);
+    assert_eq!(discovery.update_debounce_ms, 50);
 }
 
 #[test]
@@ -3342,6 +3385,81 @@ service = "app"
         .expect_err("zero discovery interval should be rejected");
     assert!(
         error.to_string().contains("must be greater than 0"),
+        "unexpected error: {error}"
+    );
+
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "dynamic-pool"
+
+[[upstream_pools.discovery]]
+provider = "kubernetes"
+endpoint = "https://kubernetes.default.svc"
+namespace = "default"
+service = "api"
+port = 8080
+watch = true
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("watching Endpoints should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("watch requires kubernetes_resource"),
+        "unexpected error: {error}"
+    );
+
+    let raw = raw
+        .replace("provider = \"kubernetes\"", "provider = \"dns\"")
+        .replace(
+            "endpoint = \"https://kubernetes.default.svc\"",
+            "name = \"app\"",
+        )
+        .replace("namespace = \"default\"\nservice = \"api\"\n", "")
+        .replace("watch = true", "kubernetes_resource = \"endpoint_slice\"");
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("EndpointSlice resource on DNS discovery should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("kubernetes_resource is only supported"),
+        "unexpected error: {error}"
+    );
+
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "dynamic-pool"
+
+[[upstream_pools.discovery]]
+provider = "kubernetes"
+endpoint = "https://kubernetes.default.svc"
+namespace = "default"
+service = "api"
+port = 8080
+kubernetes_resource = "endpoint_slice"
+watch = true
+update_debounce_ms = 0
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("zero discovery debounce should be rejected");
+    assert!(
+        error.to_string().contains("update_debounce_ms"),
         "unexpected error: {error}"
     );
 }

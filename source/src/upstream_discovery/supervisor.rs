@@ -1,0 +1,172 @@
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use crate::config::{
+  KubernetesDiscoveryResource, UpstreamDiscoveryProvider, UpstreamPoolDiscoveryConfig,
+};
+use crate::state::AppHandle;
+
+pub(crate) async fn run_dynamic_upstream_discovery(
+  state: AppHandle,
+  mut shutdown: watch::Receiver<bool>,
+) {
+  let mut workers: HashMap<DiscoveryWorkerKey, DiscoveryWorker> = HashMap::new();
+
+  loop {
+    if *shutdown.borrow() {
+      break;
+    }
+
+    let snapshot = state.snapshot();
+    let mut desired = HashSet::new();
+
+    for pool in &snapshot.config.upstream_pools {
+      for (index, discovery) in pool.discovery.iter().cloned().enumerate() {
+        let key = DiscoveryWorkerKey {
+          pool_name: pool.name.clone(),
+          index,
+        };
+        let fingerprint = discovery_fingerprint(&discovery);
+        desired.insert(key.clone());
+        let should_spawn = workers
+          .get(&key)
+          .is_none_or(|worker| worker.fingerprint != fingerprint || worker.task.is_finished());
+        if !should_spawn {
+          continue;
+        }
+        if let Some(worker) = workers.remove(&key) {
+          worker.stop();
+        }
+        workers.insert(
+          key.clone(),
+          spawn_discovery_worker(state.clone(), key.pool_name.clone(), discovery, fingerprint),
+        );
+      }
+    }
+
+    workers.retain(|key, worker| {
+      if desired.contains(key) {
+        true
+      } else {
+        worker.stop();
+        false
+      }
+    });
+
+    tokio::select! {
+      _ = shutdown.changed() => {}
+      _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+    }
+  }
+
+  for worker in workers.into_values() {
+    worker.stop();
+  }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DiscoveryWorkerKey {
+  pool_name: String,
+  index: usize,
+}
+
+struct DiscoveryWorker {
+  fingerprint: String,
+  shutdown: watch::Sender<bool>,
+  task: JoinHandle<()>,
+}
+
+impl DiscoveryWorker {
+  fn stop(&self) {
+    let _ = self.shutdown.send(true);
+    self.task.abort();
+  }
+}
+
+fn spawn_discovery_worker(
+  state: AppHandle,
+  pool_name: String,
+  discovery: UpstreamPoolDiscoveryConfig,
+  fingerprint: String,
+) -> DiscoveryWorker {
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = if is_kubernetes_endpoint_slice_watch(&discovery) {
+    tokio::spawn(super::kubernetes::run_kubernetes_endpoint_slice_watch(
+      state,
+      pool_name,
+      discovery,
+      shutdown_rx,
+    ))
+  } else {
+    tokio::spawn(run_polling_discovery_worker(
+      state,
+      pool_name,
+      discovery,
+      shutdown_rx,
+    ))
+  };
+  DiscoveryWorker {
+    fingerprint,
+    shutdown,
+    task,
+  }
+}
+
+fn is_kubernetes_endpoint_slice_watch(discovery: &UpstreamPoolDiscoveryConfig) -> bool {
+  discovery.provider == UpstreamDiscoveryProvider::Kubernetes
+    && discovery.kubernetes_resource == KubernetesDiscoveryResource::EndpointSlice
+    && discovery.watch
+}
+
+fn discovery_fingerprint(discovery: &UpstreamPoolDiscoveryConfig) -> String {
+  format!("{discovery:?}")
+}
+
+async fn run_polling_discovery_worker(
+  state: AppHandle,
+  pool_name: String,
+  discovery: UpstreamPoolDiscoveryConfig,
+  mut shutdown: watch::Receiver<bool>,
+) {
+  loop {
+    if *shutdown.borrow() {
+      break;
+    }
+
+    let snapshot = state.snapshot();
+    let fallback_delay = Duration::from_millis(discovery.refresh_interval_ms);
+    let result = super::discover_servers(&snapshot.control_http, &discovery).await;
+    let delay = match result {
+      Ok((servers, delay)) => {
+        if let Err(error) =
+          super::apply_discovered_servers(&state, &pool_name, discovery.provider, servers).await
+        {
+          tracing::warn!(
+            error = %error,
+            pool = %pool_name,
+            provider = ?discovery.provider,
+            "dynamic upstream discovery update rejected; keeping previous pool state"
+          );
+        }
+        delay
+      }
+      Err(error) => {
+        tracing::warn!(
+          error = %error,
+          pool = %pool_name,
+          provider = ?discovery.provider,
+          "dynamic upstream discovery failed; keeping previous pool state"
+        );
+        fallback_delay
+      }
+    };
+
+    tokio::select! {
+      _ = shutdown.changed() => {}
+      _ = tokio::time::sleep(delay) => {}
+    }
+  }
+}

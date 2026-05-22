@@ -41,6 +41,7 @@ struct Needs {
     turn_tcp_upstream: bool,
     turn_tls_upstream: bool,
     dns_server: bool,
+    kubernetes_server: bool,
     protocol_probe: bool,
     pq_probe: bool,
     postgres: bool,
@@ -228,6 +229,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     manifest.push_str(&format!(
         "CASE_NEED_DNS_SERVER={}\n",
         bool_env(case.needs.dns_server)
+    ));
+    manifest.push_str(&format!(
+        "CASE_NEED_KUBERNETES_SERVER={}\n",
+        bool_env(case.needs.kubernetes_server)
     ));
     manifest.push_str(&format!(
         "CASE_NEED_PROTOCOL_PROBE={}\n",
@@ -3587,6 +3592,69 @@ run_case_checks() {
 
   response="$(client_request "valid.example.test" "/app/valid-dns" 200)"
   assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/app/valid-dns"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-discovery",
+            "kubernetes-endpointslice-watch",
+            "Kubernetes EndpointSlice watch updates discovered pool servers",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                kubernetes_server: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response state attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/kube-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    if jq -e '.body | fromjson | ([.servers[] | select(.source == "kubernetes" and (.origin | contains(":18080/")))] | length) == 1' <<<"${state}" >/dev/null; then
+      response="$(client_request "kube.example.test" "/app/kubernetes-initial-${attempt}" 200)"
+      if jq -e '.body | fromjson | .upstream == "http-upstream"' <<<"${response}" >/dev/null; then
+        break
+      fi
+    fi
+    sleep 0.5
+  done
+  if ! jq -e '.body | fromjson | .upstream == "http-upstream"' <<<"${response}" >/dev/null; then
+    echo "${state}" >&2
+    echo "${response}" >&2
+    fail_with_diagnostics "EndpointSlice initial list did not route to the HTTP upstream"
+  fi
+
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/kube-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    if jq -e '.body | fromjson | ([.servers[] | select(.source == "kubernetes" and (.origin | contains(":18081/")))] | length) == 1' <<<"${state}" >/dev/null; then
+      response="$(client_request "kube.example.test" "/app/kubernetes-watch-modified-${attempt}" 200)"
+      if jq -e '.body | fromjson | .upstream == "alt-upstream"' <<<"${response}" >/dev/null; then
+        break
+      fi
+    fi
+    sleep 0.5
+  done
+  if ! jq -e '.body | fromjson | .upstream == "alt-upstream"' <<<"${response}" >/dev/null; then
+    echo "${state}" >&2
+    echo "${response}" >&2
+    fail_with_diagnostics "EndpointSlice watch modification did not route to the alternate upstream"
+  fi
+
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/kube-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+    if jq -e '.body | fromjson | ([.servers[] | select(.source == "kubernetes")] | length) == 0' <<<"${state}" >/dev/null; then
+      response="$(client_request "kube.example.test" "/app/kubernetes-watch-deleted-${attempt}" 502)"
+      break
+    fi
+    sleep 0.5
+  done
+  if ! jq -e '.body == "no available upstream pool server"' <<<"${response}" >/dev/null; then
+    echo "${state}" >&2
+    echo "${response}" >&2
+    fail_with_diagnostics "EndpointSlice watch deletion did not remove discovered upstreams"
+  fi
 }
 "#,
             None,

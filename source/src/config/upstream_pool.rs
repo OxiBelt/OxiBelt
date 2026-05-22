@@ -9,6 +9,22 @@ use super::{
   validate_optional_non_empty,
 };
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesDiscoveryResource {
+  #[default]
+  Endpoints,
+  EndpointSlice,
+}
+
+pub(super) fn default_kubernetes_watch_timeout_seconds() -> u64 {
+  300
+}
+
+pub(super) fn default_discovery_update_debounce_ms() -> u64 {
+  250
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct UpstreamPoolStickyCookieConfig {
   #[serde(default = "default_sticky_cookie_name")]
@@ -104,8 +120,15 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
         pool.name
       );
     }
+    if discovery.watch_timeout_seconds == 0 || discovery.update_debounce_ms == 0 {
+      bail!(
+        "upstream pool {} discovery watch_timeout_seconds and update_debounce_ms must be greater than 0",
+        pool.name
+      );
+    }
     match discovery.provider {
       UpstreamDiscoveryProvider::Dns => {
+        validate_non_kubernetes_discovery_fields(pool, discovery)?;
         let Some(name) = discovery.name.as_deref() else {
           bail!("upstream pool {} DNS discovery requires name", pool.name);
         };
@@ -118,6 +141,7 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
         }
       }
       UpstreamDiscoveryProvider::File => {
+        validate_non_kubernetes_discovery_fields(pool, discovery)?;
         if discovery.file.is_none() {
           bail!("upstream pool {} file discovery requires file", pool.name);
         }
@@ -155,8 +179,17 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
             pool.name
           );
         }
+        if discovery.watch
+          && discovery.kubernetes_resource != KubernetesDiscoveryResource::EndpointSlice
+        {
+          bail!(
+            "upstream pool {} kubernetes discovery watch requires kubernetes_resource = \"endpoint_slice\"",
+            pool.name
+          );
+        }
       }
       UpstreamDiscoveryProvider::Consul => {
+        validate_non_kubernetes_discovery_fields(pool, discovery)?;
         validate_http_endpoint(
           &format!("upstream pool {} consul discovery endpoint", pool.name),
           discovery.endpoint.as_ref(),
@@ -189,6 +222,7 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
         }
       }
       UpstreamDiscoveryProvider::Etcd => {
+        validate_non_kubernetes_discovery_fields(pool, discovery)?;
         validate_http_endpoint(
           &format!("upstream pool {} etcd discovery endpoint", pool.name),
           discovery.endpoint.as_ref(),
@@ -209,6 +243,25 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
         }
       }
     }
+  }
+  Ok(())
+}
+
+fn validate_non_kubernetes_discovery_fields(
+  pool: &UpstreamPoolConfig,
+  discovery: &super::UpstreamPoolDiscoveryConfig,
+) -> anyhow::Result<()> {
+  if discovery.kubernetes_resource != KubernetesDiscoveryResource::Endpoints {
+    bail!(
+      "upstream pool {} discovery kubernetes_resource is only supported for kubernetes providers",
+      pool.name
+    );
+  }
+  if discovery.watch {
+    bail!(
+      "upstream pool {} discovery watch is only supported for kubernetes providers",
+      pool.name
+    );
   }
   Ok(())
 }

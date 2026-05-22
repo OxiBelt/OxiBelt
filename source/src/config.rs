@@ -2756,6 +2756,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "file",
       "filter",
       "key_prefix",
+      "kubernetes_resource",
       "min_ttl_ms",
       "name",
       "namespace",
@@ -2767,6 +2768,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "scheme",
       "service",
       "token_env",
+      "update_debounce_ms",
+      "watch",
+      "watch_timeout_seconds",
     ][..],
     "upstream_pools.sticky_cookie" => &[
       "cookie_name",
@@ -5074,6 +5078,14 @@ pub struct UpstreamPoolDiscoveryConfig {
   pub scheme: DiscoveryUpstreamScheme,
   #[serde(default)]
   pub port: Option<u16>,
+  #[serde(default)]
+  pub kubernetes_resource: KubernetesDiscoveryResource,
+  #[serde(default)]
+  pub watch: bool,
+  #[serde(default = "upstream_pool::default_kubernetes_watch_timeout_seconds")]
+  pub watch_timeout_seconds: u64,
+  #[serde(default = "upstream_pool::default_discovery_update_debounce_ms")]
+  pub update_debounce_ms: u64,
   #[serde(default = "default_discovery_refresh_interval_ms")]
   pub refresh_interval_ms: u64,
   #[serde(default = "default_discovery_min_ttl_ms")]

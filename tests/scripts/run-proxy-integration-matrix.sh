@@ -24,6 +24,7 @@ logs_dir="${work_dir}/logs"
 network_name="oxibelt-matrix-${run_id}"
 mock_image="oxibelt/mock-upstream:${run_id}"
 mock_dns_image="oxibelt/mock-dns:${run_id}"
+mock_kubernetes_image="oxibelt/mock-kubernetes:${run_id}"
 pq_probe_image="oxibelt/pq-probe:${run_id}"
 protocol_probe_image="oxibelt/protocol-probe:${run_id}"
 postgres_image="oxibelt/postgres:${run_id}"
@@ -45,6 +46,7 @@ turn_udp_container="oxibelt-turn-udp-${run_id}"
 turn_tcp_container="oxibelt-turn-tcp-${run_id}"
 turn_tls_container="oxibelt-turn-tls-${run_id}"
 dns_container="oxibelt-dns-${run_id}"
+kubernetes_container="oxibelt-kubernetes-${run_id}"
 postgres_container="oxibelt-postgres-${run_id}"
 redis_container="oxibelt-redis-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
@@ -52,7 +54,7 @@ test_label="oxibelt.test.run=${run_id}"
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker rmi -f "${mock_image}" "${mock_dns_image}" "${pq_probe_image}" "${protocol_probe_image}" "${postgres_image}" >/dev/null 2>&1 || true
+  docker rmi -f "${mock_image}" "${mock_dns_image}" "${mock_kubernetes_image}" "${pq_probe_image}" "${protocol_probe_image}" "${postgres_image}" >/dev/null 2>&1 || true
   if [[ "${remove_proxy_image}" == "1" ]]; then
     docker rmi -f "${proxy_image}" >/dev/null 2>&1 || true
   fi
@@ -124,6 +126,7 @@ collect_diagnostics() {
   docker logs "${turn_tcp_container}" >"${logs_dir}/mock-turn-tcp.log" 2>&1 || true
   docker logs "${turn_tls_container}" >"${logs_dir}/mock-turn-tls.log" 2>&1 || true
   docker logs "${dns_container}" >"${logs_dir}/mock-dns.log" 2>&1 || true
+  docker logs "${kubernetes_container}" >"${logs_dir}/mock-kubernetes.log" 2>&1 || true
   docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
   docker logs "${redis_container}" >"${logs_dir}/redis.log" 2>&1 || true
 
@@ -1730,6 +1733,13 @@ if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
     "${repo_root}/tests/docker/mock_dns" >/dev/null
 fi
 
+if [[ "${CASE_NEED_KUBERNETES_SERVER}" == "1" ]]; then
+  docker build \
+    -t "${mock_kubernetes_image}" \
+    -f "${repo_root}/tests/docker/mock_kubernetes/Dockerfile" \
+    "${repo_root}/tests/docker/mock_kubernetes" >/dev/null
+fi
+
 if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
   docker build \
     -t "${pq_probe_image}" \
@@ -1800,6 +1810,27 @@ if [[ "${CASE_NEED_ALT_UPSTREAM}" == "1" ]]; then
     -e UPSTREAM_NAME=alt-upstream \
     -e ACCEPT_PROXY_PROTOCOL=1 \
     "${mock_image}" >/dev/null
+fi
+
+if [[ "${CASE_NEED_KUBERNETES_SERVER}" == "1" ]]; then
+  if [[ "${CASE_NEED_HTTP_UPSTREAM}" != "1" || "${CASE_NEED_ALT_UPSTREAM}" != "1" ]]; then
+    fail_with_diagnostics "Kubernetes mock matrix cases require the HTTP and alternate upstreams"
+  fi
+  http_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${http_container}")"
+  alt_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${alt_container}")"
+  if [[ -z "${http_container_ip}" || -z "${alt_container_ip}" ]]; then
+    fail_with_diagnostics "failed to inspect mock upstream IPs for Kubernetes case"
+  fi
+  docker run -d \
+    --name "${kubernetes_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-kubernetes \
+    -e LISTEN_PORT=18090 \
+    -e EXPECTED_TOKEN=matrix-kubernetes-token \
+    -e INITIAL_ENDPOINT_IP="${http_container_ip}" \
+    -e UPDATED_ENDPOINT_IP="${alt_container_ip}" \
+    "${mock_kubernetes_image}" >/dev/null
 fi
 
 if [[ "${CASE_NEED_HTTPS_UPSTREAM}" == "1" ]]; then
@@ -2043,6 +2074,7 @@ docker create \
   -e OXIBELT_DYNAMIC_POLICY_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
   -e OXIBELT_CACHE_PURGE_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
   -e OXIBELT_INSTANCE_ID=proxy-a \
+  -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
   "${proxy_dns_args[@]}" \
   "${proxy_image}" >/dev/null
 docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
@@ -2064,6 +2096,7 @@ if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then
     -e OXIBELT_DYNAMIC_POLICY_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
     -e OXIBELT_CACHE_PURGE_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
     -e OXIBELT_INSTANCE_ID=proxy-b \
+    -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
     "${proxy_dns_args[@]}" \
     "${proxy_image}" >/dev/null
   docker cp "${case_dir}/config/." "${proxy_b_container}:/etc/oxibelt/config"

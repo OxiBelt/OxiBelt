@@ -15,84 +15,6 @@ use crate::config::{
 use crate::control_http::{ControlHttpClient, empty_body, full_body, uri_from_url};
 use crate::upstream_control;
 
-pub(super) async fn discover_kubernetes_servers(
-  client: &ControlHttpClient,
-  discovery: &UpstreamPoolDiscoveryConfig,
-) -> anyhow::Result<(Vec<UpstreamPoolServerConfig>, Duration)> {
-  let namespace = discovery
-    .namespace
-    .as_deref()
-    .ok_or_else(|| anyhow!("Kubernetes discovery requires namespace"))?;
-  let service = discovery
-    .service
-    .as_deref()
-    .ok_or_else(|| anyhow!("Kubernetes discovery requires service"))?;
-  let mut url = discovery
-    .endpoint
-    .clone()
-    .ok_or_else(|| anyhow!("Kubernetes discovery requires endpoint"))?;
-  url
-    .path_segments_mut()
-    .map_err(|_| anyhow!("Kubernetes discovery endpoint cannot be a base URL"))?
-    .clear()
-    .extend(["api", "v1", "namespaces", namespace, "endpoints", service]);
-  url.set_query(None);
-  let mut builder = Request::builder()
-    .method(http::Method::GET)
-    .uri(uri_from_url(&url)?)
-    .header(http::header::ACCEPT, "application/json");
-  add_bearer_env_header(
-    &mut builder,
-    discovery.token_env.as_deref(),
-    http::header::AUTHORIZATION,
-  )?;
-  let response = client
-    .request(
-      builder.body(empty_body())?,
-      Duration::from_millis(discovery.refresh_interval_ms),
-      1_048_576,
-    )
-    .await?;
-  if !response.status.is_success() {
-    bail!(
-      "Kubernetes discovery returned HTTP status {}",
-      response.status
-    );
-  }
-  let endpoints: KubernetesEndpoints =
-    serde_json::from_slice(&response.body).context("failed to parse Kubernetes endpoints JSON")?;
-  let mut servers = Vec::new();
-  for subset in endpoints.subsets {
-    let port = match (&discovery.port_name, discovery.port) {
-      (Some(name), None) => subset
-        .ports
-        .iter()
-        .find(|port| port.name.as_deref() == Some(name.as_str()))
-        .map(|port| port.port),
-      (None, Some(port)) => Some(port),
-      _ => None,
-    };
-    let Some(port) = port else {
-      continue;
-    };
-    for address in subset.addresses {
-      servers.push(discovered_ip_server(
-        UpstreamPoolServerSource::Kubernetes,
-        discovery.scheme,
-        "kubernetes",
-        &[namespace, service, &address.ip, &port.to_string()],
-        &address.ip,
-        port,
-      )?);
-    }
-  }
-  sort_discovered_servers(&mut servers);
-  Ok((
-    servers,
-    Duration::from_millis(discovery.refresh_interval_ms),
-  ))
-}
-
 pub(super) async fn discover_consul_servers(
   client: &ControlHttpClient,
   discovery: &UpstreamPoolDiscoveryConfig,
@@ -230,32 +152,6 @@ pub(super) async fn discover_etcd_servers(
 }
 
 #[derive(Debug, Deserialize)]
-struct KubernetesEndpoints {
-  #[serde(default)]
-  subsets: Vec<KubernetesEndpointSubset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KubernetesEndpointSubset {
-  #[serde(default)]
-  addresses: Vec<KubernetesEndpointAddress>,
-  #[serde(default)]
-  ports: Vec<KubernetesEndpointPort>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KubernetesEndpointAddress {
-  ip: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct KubernetesEndpointPort {
-  #[serde(default)]
-  name: Option<String>,
-  port: u16,
-}
-
-#[derive(Debug, Deserialize)]
 struct ConsulServiceEntry {
   #[serde(rename = "Node")]
   node: ConsulNode,
@@ -351,22 +247,6 @@ fn parse_etcd_server(
     state: server.state,
     source: UpstreamPoolServerSource::Etcd,
   })
-}
-
-fn discovered_ip_server(
-  source: UpstreamPoolServerSource,
-  scheme: DiscoveryUpstreamScheme,
-  provider: &str,
-  id_parts: &[&str],
-  host: &str,
-  port: u16,
-) -> anyhow::Result<UpstreamPoolServerConfig> {
-  let parsed = host.parse::<IpAddr>().context("discovered IP is invalid")?;
-  let host = match parsed {
-    IpAddr::V4(ip) => ip.to_string(),
-    IpAddr::V6(ip) => format!("[{ip}]"),
-  };
-  discovered_host_server(source, scheme, provider, id_parts, &host, port)
 }
 
 fn discovered_host_server(

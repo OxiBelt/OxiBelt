@@ -2,6 +2,7 @@ use super::*;
 
 use crate::config::Config;
 use crate::state::{AppHandle, AppSnapshot};
+use tokio::sync::watch;
 
 mod common {
   include!(concat!(
@@ -129,4 +130,117 @@ upstream_pool = "app-pool"
   shutdown_tx.send(true).expect("shutdown should send");
   task.await.expect("discovery task should join");
   assert!(found, "file discovery should add file-alt server");
+}
+
+#[tokio::test]
+async fn discovered_server_noop_update_keeps_snapshot_generation() {
+  let temp_dir = common::TempDir::new("discovery-noop-runtime");
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+  std::fs::create_dir_all(&cert_dir).expect("cert dir should be created");
+  let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "discovery-noop-runtime");
+  let cert_name = cert_path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .expect("cert file name should be UTF-8");
+  let key_name = key_path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .expect("key file name should be UTF-8");
+  let config_path = config_dir.join("oxibelt.toml");
+  std::fs::write(
+    &config_path,
+    r#"
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "__CERT__"
+private_key = "__KEY__"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "power_of_two_choices"
+
+[[upstream_pools.servers]]
+id = "primary"
+origin = "http://127.0.0.1:18080/origin"
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream_pool = "app-pool"
+"#
+    .replace("__CERT__", cert_name)
+    .replace("__KEY__", key_name),
+  )
+  .expect("config should be written");
+
+  let config = Config::load(&config_path).expect("config should load");
+  config.validate().expect("config should validate");
+  let state = AppHandle::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let servers = vec![UpstreamPoolServerConfig {
+    id: Some("file-alt".to_string()),
+    origin: "http://127.0.0.1:18081/alt".parse().expect("valid origin"),
+    weight: 1,
+    max_conns: 0,
+    backup: false,
+    state: UpstreamPoolServerState::Ready,
+    source: UpstreamPoolServerSource::File,
+  }];
+
+  apply_discovered_servers(
+    &state,
+    "app-pool",
+    UpstreamDiscoveryProvider::File,
+    servers.clone(),
+  )
+  .await
+  .expect("first discovery update should apply");
+  let snapshot_after_apply = state.snapshot();
+
+  apply_discovered_servers(&state, "app-pool", UpstreamDiscoveryProvider::File, servers)
+    .await
+    .expect("second discovery update should be accepted as a no-op");
+  let snapshot_after_noop = state.snapshot();
+
+  assert!(
+    std::sync::Arc::ptr_eq(&snapshot_after_apply, &snapshot_after_noop),
+    "identical discovered servers should not replace the app snapshot"
+  );
 }

@@ -29,6 +29,12 @@ pub struct ControlHttpResponse {
   pub body: Bytes,
 }
 
+pub struct ControlHttpStreamResponse {
+  pub status: http::StatusCode,
+  pub headers: http::HeaderMap,
+  pub body: Incoming,
+}
+
 impl ControlHttpClient {
   pub fn new(extra_root_certs: &[std::path::PathBuf]) -> anyhow::Result<Self> {
     let tls_config =
@@ -66,6 +72,28 @@ impl ControlHttpClient {
         .await
         .context("control-plane HTTP request failed")?;
       collect_response(response, max_body_bytes).await
+    })
+    .await
+    .context("control-plane HTTP request timed out")?
+  }
+
+  pub async fn request_stream(
+    &self,
+    request: Request<ControlBody>,
+    timeout: Duration,
+  ) -> anyhow::Result<ControlHttpStreamResponse> {
+    tokio::time::timeout(timeout, async {
+      let response = self
+        .client
+        .request(request)
+        .await
+        .context("control-plane HTTP request failed")?;
+      let (parts, body) = response.into_parts();
+      Ok(ControlHttpStreamResponse {
+        status: parts.status,
+        headers: parts.headers,
+        body,
+      })
     })
     .await
     .context("control-plane HTTP request timed out")?

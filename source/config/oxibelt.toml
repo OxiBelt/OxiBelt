@@ -699,6 +699,10 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # namespace = "default"
 # service = "app"
 # port_name = "http"
+# kubernetes_resource = "endpoints" # endpoints | endpoint_slice
+# watch = false
+# watch_timeout_seconds = 300
+# update_debounce_ms = 250
 # token_env = "KUBERNETES_SERVICE_TOKEN"
 # refresh_interval_ms = 30000
 #
