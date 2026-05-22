@@ -513,6 +513,7 @@ jobs:
           - oxibelt-features
           - oxibelt-soak-stress
           - accept-multipliers
+          - remote-signer
     env:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
       PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}

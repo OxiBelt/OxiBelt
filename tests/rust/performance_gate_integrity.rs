@@ -556,7 +556,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     );
     assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer"
         ),
         "usage should document every supported serving type"
     );
@@ -567,6 +567,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
         "oxibelt-features",
         "oxibelt-soak-stress",
         "accept-multipliers",
+        "remote-signer",
     ] {
         assert!(
             script.contains(serving_type),
@@ -624,6 +625,33 @@ fn accept_multiplier_required_h3_probe_failure_fails_closed() {
 }
 
 #[test]
+fn remote_signer_profile_runs_local_key_and_remote_signer_pairs() {
+    let script = performance_script_text();
+
+    for expected in [
+        "run_remote_signer_group",
+        "start_oxibelt baseline oxibelt",
+        "run_load \"oxibelt-local-key-h1-keepalive\"",
+        "run_load \"oxibelt-local-key-h2\"",
+        "run_load \"oxibelt-local-key-h3\"",
+        "start_oxibelt remote-signer oxibelt",
+        "run_load \"oxibelt-remote-signer-h1-keepalive\"",
+        "run_load \"oxibelt-remote-signer-h2\"",
+        "run_load \"oxibelt-remote-signer-h3\"",
+        "start_oxibelt baseline-accept-1 oxibelt",
+        "run_handshake \"oxibelt-local-key-tls-handshake-h2\"",
+        "start_oxibelt remote-signer-accept-1 oxibelt",
+        "run_handshake \"oxibelt-remote-signer-tls-handshake-h2\"",
+        "append_remote_signer_overhead_summary",
+    ] {
+        assert!(
+            script.contains(expected),
+            "remote signer profile should contain {expected:?}"
+        );
+    }
+}
+
+#[test]
 fn oxibelt_performance_fixtures_pin_worker_profile() {
     for (scenario, expected_accept) in [
         ("baseline", 0.5),
@@ -633,9 +661,11 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
         ("crs-monitor", 0.5),
         ("waf-enforcing", 0.5),
         ("waf-monitor", 0.5),
+        ("remote-signer", 0.5),
         ("baseline-accept-1", 1.0),
         ("baseline-classical-kx", 1.0),
         ("crs-enforcing-accept-1", 1.0),
+        ("remote-signer-accept-1", 1.0),
         ("tls-resumption-off", 1.0),
         ("tls-resumption-stateless-tickets-2", 1.0),
         ("tls-resumption-stateful-tickets-1", 1.0),
@@ -684,6 +714,36 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
             Some(1.0),
             "{} should pin QUIC socket worker multiplier",
             path.display()
+        );
+    }
+}
+
+#[test]
+fn remote_signer_performance_fixtures_remove_local_private_key() {
+    for scenario in ["remote-signer", "remote-signer-accept-1"] {
+        let path = oxibelt_performance_fixture_root()
+            .join(scenario)
+            .join("config/oxibelt.toml");
+        let config_text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let value: toml::Value = toml::from_str(&config_text)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+        let tls = value
+            .get("tls")
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("{} should contain tls table", path.display()));
+        assert!(
+            !tls.contains_key("private_key"),
+            "{scenario} should not configure a local private key"
+        );
+        let remote_signer = tls
+            .get("remote_signer")
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("{scenario} should configure tls.remote_signer"));
+        assert_eq!(
+            remote_signer.get("enabled").and_then(toml::Value::as_bool),
+            Some(true),
+            "{scenario} should enable tls.remote_signer"
         );
     }
 }

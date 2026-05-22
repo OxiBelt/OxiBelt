@@ -18,6 +18,7 @@ run_id="$(date +%s)-$$-${RANDOM}"
 work_dir="${repo_root}/tests/.tmp/matrix-${category}-${case_name}-${run_id}"
 case_dir="${work_dir}/case"
 cert_dir="${work_dir}/cert"
+proxy_cert_dir="${work_dir}/proxy-cert"
 upstream_tls_dir="${work_dir}/upstream-tls"
 postgres_tls_dir="${work_dir}/postgres-tls"
 logs_dir="${work_dir}/logs"
@@ -49,11 +50,14 @@ dns_container="oxibelt-dns-${run_id}"
 kubernetes_container="oxibelt-kubernetes-${run_id}"
 postgres_container="oxibelt-postgres-${run_id}"
 redis_container="oxibelt-redis-${run_id}"
+remote_signer_container="oxibelt-keysigner-${run_id}"
+remote_signer_socket_volume="oxibelt-keysigner-sock-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
+  docker volume rm "${remote_signer_socket_volume}" >/dev/null 2>&1 || true
   docker rmi -f "${mock_image}" "${mock_dns_image}" "${mock_kubernetes_image}" "${pq_probe_image}" "${protocol_probe_image}" "${postgres_image}" >/dev/null 2>&1 || true
   if [[ "${remove_proxy_image}" == "1" ]]; then
     docker rmi -f "${proxy_image}" >/dev/null 2>&1 || true
@@ -64,7 +68,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${case_dir}" "${cert_dir}" "${upstream_tls_dir}" "${postgres_tls_dir}" "${logs_dir}"
+mkdir -p "${case_dir}" "${cert_dir}" "${proxy_cert_dir}" "${upstream_tls_dir}" "${postgres_tls_dir}" "${logs_dir}"
 
 unique_docker_container_name() {
   local prefix="$1"
@@ -129,6 +133,7 @@ collect_diagnostics() {
   docker logs "${kubernetes_container}" >"${logs_dir}/mock-kubernetes.log" 2>&1 || true
   docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
   docker logs "${redis_container}" >"${logs_dir}/redis.log" 2>&1 || true
+  docker logs "${remote_signer_container}" >"${logs_dir}/remote-signer.log" 2>&1 || true
 
   if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
@@ -1716,6 +1721,10 @@ printf 'ocsp' >"${cert_dir}/ocsp.der"
 printf 'not an ECHConfigList' >"${cert_dir}/invalid.echconfiglist"
 chmod 644 "${cert_dir}/"* "${upstream_tls_dir}/"* "${postgres_tls_dir}/"*
 chmod 600 "${postgres_tls_dir}/"*.key
+cp "${cert_dir}/"* "${proxy_cert_dir}/"
+if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
+  rm -f "${proxy_cert_dir}/privkey.pem"
+fi
 
 docker network create "${network_name}" >/dev/null
 
@@ -1786,6 +1795,54 @@ if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
     -t "${proxy_image}" \
     -f "${repo_root}/source/ops/Dockerfile.alpine" \
     "${repo_root}" >/dev/null
+fi
+
+remote_signer_token=""
+remote_signer_docker_args=()
+if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
+  remote_signer_token="$(openssl rand -base64 32)"
+  docker volume create --label "${test_label}" "${remote_signer_socket_volume}" >/dev/null
+  docker run --rm \
+    --label "${test_label}" \
+    --user 0:0 \
+    --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner" \
+    --entrypoint sh \
+    "${proxy_image}" \
+    -c 'chown 10001:10001 /run/oxibelt-keysigner && chmod 0770 /run/oxibelt-keysigner' >/dev/null
+
+  docker create \
+    --name "${remote_signer_container}" \
+    --label "${test_label}" \
+    --user 10001:10001 \
+    --network "${network_name}" \
+    --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner" \
+    --env "OXIBELT_KEYSIGNER_TOKEN=${remote_signer_token}" \
+    --entrypoint /usr/local/bin/oxibelt-keysigner \
+    "${proxy_image}" \
+    --socket /run/oxibelt-keysigner/sign.sock \
+    --key edge-default=/tmp/privkey.pem \
+    --token-env OXIBELT_KEYSIGNER_TOKEN \
+    --socket-mode 0660 \
+    --max-connections 256 \
+    --io-timeout-ms 5000 >/dev/null
+  docker cp "${cert_dir}/privkey.pem" "${remote_signer_container}:/tmp/privkey.pem"
+  docker start "${remote_signer_container}" >/dev/null
+  for _attempt in $(seq 1 100); do
+    if docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
+      break
+    fi
+    if [[ "$(docker inspect -f '{{.State.Running}}' "${remote_signer_container}" 2>/dev/null || echo false)" != "true" ]]; then
+      fail_with_diagnostics "remote signer exited before creating its socket"
+    fi
+    sleep 0.05
+  done
+  if ! docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
+    fail_with_diagnostics "remote signer socket was not created"
+  fi
+  remote_signer_docker_args+=(
+    --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner"
+    -e "OXIBELT_KEYSIGNER_TOKEN=${remote_signer_token}"
+  )
 fi
 
 if [[ "${CASE_NEED_HTTP_UPSTREAM}" == "1" ]]; then
@@ -2075,10 +2132,11 @@ docker create \
   -e OXIBELT_CACHE_PURGE_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
   -e OXIBELT_INSTANCE_ID=proxy-a \
   -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
+  "${remote_signer_docker_args[@]}" \
   "${proxy_dns_args[@]}" \
   "${proxy_image}" >/dev/null
 docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
-docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
+docker cp "${proxy_cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
 if [[ -d "${case_dir}/oxirule" ]]; then
   docker cp "${case_dir}/oxirule/." "${proxy_container}:/etc/oxibelt/oxirule"
 fi
@@ -2097,10 +2155,11 @@ if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then
     -e OXIBELT_CACHE_PURGE_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
     -e OXIBELT_INSTANCE_ID=proxy-b \
     -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
+    "${remote_signer_docker_args[@]}" \
     "${proxy_dns_args[@]}" \
     "${proxy_image}" >/dev/null
   docker cp "${case_dir}/config/." "${proxy_b_container}:/etc/oxibelt/config"
-  docker cp "${cert_dir}/." "${proxy_b_container}:/etc/oxibelt/cert"
+  docker cp "${proxy_cert_dir}/." "${proxy_b_container}:/etc/oxibelt/cert"
   if [[ -d "${case_dir}/oxirule" ]]; then
     docker cp "${case_dir}/oxirule/." "${proxy_b_container}:/etc/oxibelt/oxirule"
   fi

@@ -47,6 +47,7 @@ struct Needs {
     postgres: bool,
     postgres_mtls: bool,
     redis: bool,
+    remote_signer: bool,
     second_proxy: bool,
 }
 
@@ -251,6 +252,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
         bool_env(case.needs.postgres_mtls)
     ));
     manifest.push_str(&format!("CASE_NEED_REDIS={}\n", bool_env(case.needs.redis)));
+    manifest.push_str(&format!(
+        "CASE_NEED_REMOTE_SIGNER={}\n",
+        bool_env(case.needs.remote_signer)
+    ));
     manifest.push_str(&format!(
         "CASE_NEED_SECOND_PROXY={}\n",
         bool_env(case.needs.second_proxy)
@@ -6103,6 +6108,46 @@ run_case_checks() {
   assert_body_jq "${h3}" '.upstream == "http-upstream"
     and .request_version == "HTTP/1.1"
     and .path == "/origin/app/h3-suite"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "protocol-proxying",
+            "remote-signer-downstream-tls-http-suite",
+            "remote signer downstream TLS proxies HTTP/1.1, HTTP/2, and HTTP/3 with stable forwarded metadata",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                protocol_probe: true,
+                remote_signer: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local h1 h2 h3
+  h1="$(client_request "example.test" "/app/remote-signer-h1?case=forwarded" 200)"
+  assert_body_jq "${h1}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/remote-signer-h1?case=forwarded"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+
+  h2="$(protocol_probe_client "h2" "example.test" "/app/remote-signer-h2" 200)"
+  assert_response_jq "${h2}" '.negotiated_protocol == "h2"'
+  assert_body_jq "${h2}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/remote-signer-h2"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+
+  h3="$(protocol_probe_client "h3" "example.test" "/app/remote-signer-h3" 200)"
+  assert_response_jq "${h3}" '.negotiated_protocol == "h3"'
+  assert_body_jq "${h3}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/remote-signer-h3"
     and .headers["x-forwarded-proto"] == "https"
     and .headers["x-forwarded-host"] == "example.test"'
 }

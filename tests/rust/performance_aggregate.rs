@@ -238,6 +238,15 @@ fn find_accept_comparison<'a>(report: &'a Value, scenario: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing accept multiplier comparison for {scenario}"))
 }
 
+fn find_remote_signer_comparison<'a>(report: &'a Value, scenario: &str) -> &'a Value {
+    report["remote_signer_comparisons"]
+        .as_array()
+        .expect("remote signer comparisons should be an array")
+        .iter()
+        .find(|comparison| comparison["scenario"] == scenario)
+        .unwrap_or_else(|| panic!("missing remote signer comparison for {scenario}"))
+}
+
 fn find_regression_violation<'a>(report: &'a Value, gate: &str, scenario: &str) -> &'a Value {
     report["regression_gates"]["violations"]
         .as_array()
@@ -329,6 +338,26 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
         ],
     );
 
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-remote-signer-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-local-key-h1-keepalive", "h1", 1000.0, 1.0, 5.0),
+            load_row("oxibelt-remote-signer-h1-keepalive", "h1", 900.0, 1.0, 7.5),
+            load_row("oxibelt-local-key-h2", "h2", 1100.0, 1.0, 6.0),
+            load_row("oxibelt-remote-signer-h2", "h2", 990.0, 1.0, 8.4),
+            load_row("oxibelt-local-key-h3", "h3", 800.0, 2.0, 10.0),
+            load_row("oxibelt-remote-signer-h3", "h3", 720.0, 2.0, 13.0),
+            handshake_row("oxibelt-local-key-tls-handshake-h2", "h2", 700.0, 3.0, 12.0),
+            handshake_row(
+                "oxibelt-remote-signer-tls-handshake-h2",
+                "h2",
+                350.0,
+                6.0,
+                24.0,
+            ),
+        ],
+    );
+
     let jsonl_dir = input_dir.join("jsonl-artifact/run-1");
     fs::create_dir_all(&jsonl_dir).expect("jsonl fixture directory should be created");
     let jsonl = [
@@ -379,7 +408,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
     assert_eq!(oxibelt_h1["sample_count"], 25);
@@ -477,6 +506,33 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
         1571.88,
     );
 
+    let remote_signer_h2 = find_remote_signer_comparison(&report, "h2");
+    assert_close(
+        remote_signer_h2["remote_signer_vs_local_key"]["throughput_ratio"]
+            .as_f64()
+            .expect("remote signer h2 throughput ratio should exist"),
+        990.0 / 1100.0,
+    );
+    assert_close(
+        remote_signer_h2["remote_signer_vs_local_key"]["p99_ratio"]
+            .as_f64()
+            .expect("remote signer h2 p99 ratio should exist"),
+        8.4 / 6.0,
+    );
+
+    let remote_signer_tls = find_remote_signer_comparison(&report, "tls-handshake-h2");
+    assert_eq!(remote_signer_tls["local_key"]["result_type"], "handshake");
+    assert_close(
+        remote_signer_tls["remote_signer_vs_local_key"]["throughput_ratio"]
+            .as_f64()
+            .expect("remote signer handshake throughput ratio should exist"),
+        350.0 / 700.0,
+    );
+    assert_eq!(
+        report["summary"]["remote_signer"]["valid_comparisons"],
+        serde_json::json!(4)
+    );
+
     let oxibelt_only_labels = report["oxibelt_only_results"]
         .as_array()
         .expect("oxibelt-only results should be an array")
@@ -490,6 +546,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
     assert!(!oxibelt_only_labels.contains(&"oxibelt-h1-keepalive"));
     assert!(!oxibelt_only_labels.contains(&"oxibelt-tls-handshake-h2"));
     assert!(!oxibelt_only_labels.contains(&"oxibelt-accept-0_5-tls-handshake-h2"));
+    assert!(!oxibelt_only_labels.contains(&"oxibelt-remote-signer-h2"));
 
     let missing_rows = report["skipped_or_missing_comparator_rows"]
         .as_array()

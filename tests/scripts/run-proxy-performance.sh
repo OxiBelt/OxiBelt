@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers] [--comparators oxibelt,nginx,caddy]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer] [--comparators oxibelt,nginx,caddy]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -76,7 +76,7 @@ case "${profile}" in
 esac
 
 case "${serving_type}" in
-  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers) ;;
+  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer) ;;
   *)
     usage
     exit 2
@@ -105,6 +105,8 @@ nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
 remove_oxibelt_image=0
 active_proxy_container=""
+active_remote_signer_container=""
+active_remote_signer_volume=""
 nginx_h3_supported=0
 
 case "${profile}" in
@@ -175,6 +177,7 @@ esac
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
+  docker volume ls -q --filter "label=${test_label}" | xargs -r docker volume rm >/dev/null 2>&1 || true
   docker rmi -f "${perf_probe_image}" >/dev/null 2>&1 || true
   if [[ "${remove_oxibelt_image}" == "1" ]]; then
     docker rmi -f "${oxibelt_image}" >/dev/null 2>&1 || true
@@ -824,6 +827,15 @@ stop_active_proxy() {
     docker rm -f "${active_proxy_container}" >/dev/null 2>&1 || true
     active_proxy_container=""
   fi
+  if [[ -n "${active_remote_signer_container}" ]]; then
+    docker logs "${active_remote_signer_container}" >"${logs_dir}/${active_remote_signer_container}.log" 2>&1 || true
+    docker rm -f "${active_remote_signer_container}" >/dev/null 2>&1 || true
+    active_remote_signer_container=""
+  fi
+  if [[ -n "${active_remote_signer_volume}" ]]; then
+    docker volume rm "${active_remote_signer_volume}" >/dev/null 2>&1 || true
+    active_remote_signer_volume=""
+  fi
 }
 
 start_oxibelt() {
@@ -831,13 +843,73 @@ start_oxibelt() {
   local alias_name="$2"
   local fixture_dir="${fixture_root}/oxibelt/${scenario}"
   local container="oxibelt-perf-${scenario}-${run_id}"
+  local remote_signer=0
+  local remote_signer_token=""
+  local remote_signer_container="oxibelt-perf-keysigner-${scenario}-${run_id}"
+  local remote_signer_volume="oxibelt-perf-keysigner-sock-${scenario}-${run_id}"
+  local -a remote_signer_args=()
   stop_active_proxy
   if [[ ! -d "${fixture_dir}/config" ]]; then
     fail_with_diagnostics "missing OxiBelt performance fixture: ${scenario}"
   fi
   mkdir -p "${configs_dir}/oxibelt-${scenario}"
   cp -R "${fixture_dir}/." "${configs_dir}/oxibelt-${scenario}/"
-  cp -R "${tls_dir}" "${configs_dir}/oxibelt-${scenario}/cert"
+  if grep -Eq '^[[:space:]]*\[tls[.]remote_signer\]' "${fixture_dir}/config/oxibelt.toml"; then
+    remote_signer=1
+  fi
+  mkdir -p "${configs_dir}/oxibelt-${scenario}/cert"
+  cp "${tls_dir}/fullchain.pem" "${configs_dir}/oxibelt-${scenario}/cert/fullchain.pem"
+  cp "${tls_dir}/quic-host-key.b64" "${configs_dir}/oxibelt-${scenario}/cert/quic-host-key.b64"
+  if [[ "${remote_signer}" != "1" ]]; then
+    cp "${tls_dir}/privkey.pem" "${configs_dir}/oxibelt-${scenario}/cert/privkey.pem"
+  fi
+
+  if [[ "${remote_signer}" == "1" ]]; then
+    remote_signer_token="$(openssl rand -base64 32)"
+    docker volume create --label "${test_label}" "${remote_signer_volume}" >/dev/null
+    docker run --rm \
+      --label "${test_label}" \
+      --user 0:0 \
+      --mount "type=volume,src=${remote_signer_volume},dst=/run/oxibelt-keysigner" \
+      --entrypoint sh \
+      "${oxibelt_image}" \
+      -c 'chown 10001:10001 /run/oxibelt-keysigner && chmod 0770 /run/oxibelt-keysigner' >/dev/null
+    docker create \
+      --name "${remote_signer_container}" \
+      --label "${test_label}" \
+      --user 10001:10001 \
+      --network "${network_name}" \
+      --mount "type=volume,src=${remote_signer_volume},dst=/run/oxibelt-keysigner" \
+      --env "OXIBELT_KEYSIGNER_TOKEN=${remote_signer_token}" \
+      --entrypoint /usr/local/bin/oxibelt-keysigner \
+      "${oxibelt_image}" \
+      --socket /run/oxibelt-keysigner/sign.sock \
+      --key edge-default=/tmp/privkey.pem \
+      --token-env OXIBELT_KEYSIGNER_TOKEN \
+      --socket-mode 0660 \
+      --max-connections 1024 \
+      --io-timeout-ms 5000 >/dev/null
+    docker cp "${tls_dir}/privkey.pem" "${remote_signer_container}:/tmp/privkey.pem"
+    docker start "${remote_signer_container}" >/dev/null
+    active_remote_signer_container="${remote_signer_container}"
+    active_remote_signer_volume="${remote_signer_volume}"
+    for _attempt in $(seq 1 100); do
+      if docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
+        break
+      fi
+      if [[ "$(docker inspect -f '{{.State.Running}}' "${remote_signer_container}" 2>/dev/null || echo false)" != "true" ]]; then
+        fail_with_diagnostics "OxiBelt remote signer exited before creating its socket for ${scenario}"
+      fi
+      sleep 0.05
+    done
+    if ! docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
+      fail_with_diagnostics "OxiBelt remote signer socket was not created for ${scenario}"
+    fi
+    remote_signer_args+=(
+      --mount "type=volume,src=${remote_signer_volume},dst=/run/oxibelt-keysigner"
+      -e "OXIBELT_KEYSIGNER_TOKEN=${remote_signer_token}"
+    )
+  fi
 
   docker create \
     --name "${container}" \
@@ -845,9 +917,15 @@ start_oxibelt() {
     --network "${network_name}" \
     --network-alias "${alias_name}" \
     -e OXIBELT_INSTANCE_ID="perf-${scenario}" \
+    "${remote_signer_args[@]}" \
     "${oxibelt_image}" >/dev/null
   docker cp "${fixture_dir}/config/." "${container}:/etc/oxibelt/config"
-  docker cp "${tls_dir}/." "${container}:/etc/oxibelt/cert"
+  if [[ "${remote_signer}" == "1" ]]; then
+    docker cp "${tls_dir}/fullchain.pem" "${container}:/etc/oxibelt/cert/fullchain.pem"
+    docker cp "${tls_dir}/quic-host-key.b64" "${container}:/etc/oxibelt/cert/quic-host-key.b64"
+  else
+    docker cp "${tls_dir}/." "${container}:/etc/oxibelt/cert"
+  fi
   docker cp "${static_dir}/." "${container}:/etc/oxibelt/static"
   if [[ -d "${fixture_dir}/oxirule" ]]; then
     docker cp "${fixture_dir}/oxirule/." "${container}:/etc/oxibelt/oxirule"
@@ -1143,6 +1221,79 @@ run_accept_multipliers_group() {
   run_accept_multiplier_profile accept-1_0 baseline-accept-1 waf-enforcing-accept-1 crs-enforcing-accept-1
 }
 
+append_remote_signer_overhead_summary() {
+  local scenario local_label remote_label local_json remote_json
+  {
+    echo
+    echo "Remote signer overhead:"
+    echo
+    echo "| Scenario | Remote signer throughput | Throughput delta | Remote signer p99 | p99 delta |"
+    echo "| --- | --- | --- | --- | --- |"
+  } >>"${summary_md}"
+
+  for scenario in h1-keepalive h2 h3 tls-handshake-h2; do
+    local_label="oxibelt-local-key-${scenario}"
+    remote_label="oxibelt-remote-signer-${scenario}"
+    local_json="$(jq -c --arg label "${local_label}" 'select(.label == $label and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+    remote_json="$(jq -c --arg label "${remote_label}" 'select(.label == $label and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+    if [[ -z "${local_json}" || -z "${remote_json}" ]]; then
+      printf '| `%s` | unavailable | unavailable | unavailable | unavailable |\n' "${scenario}" >>"${summary_md}"
+      continue
+    fi
+    jq -nr \
+      --arg scenario "${scenario}" \
+      --argjson local "${local_json}" \
+      --argjson remote "${remote_json}" '
+        def rate($row): ($row.rps // $row.handshake_per_sec // 0);
+        def percent($value): $value * 100.0;
+        def fmt($value): (($value * 100.0 | round) / 100.0 | tostring);
+        (rate($local)) as $local_rate |
+        (rate($remote)) as $remote_rate |
+        ($local.p99_ms // 0) as $local_p99 |
+        ($remote.p99_ms // 0) as $remote_p99 |
+        if $local_rate <= 0 or $remote_rate <= 0 or $local_p99 <= 0 or $remote_p99 <= 0 then
+          "| `" + $scenario + "` | unavailable | unavailable | unavailable | unavailable |"
+        else
+          ($remote_rate / $local_rate) as $throughput_ratio |
+          ($remote_p99 / $local_p99) as $p99_ratio |
+          "| `" + $scenario + "` | " + fmt(percent($throughput_ratio)) + "% of local key | " + fmt(percent($throughput_ratio - 1.0)) + "% | " + fmt(percent($p99_ratio)) + "% of local key | " + fmt(percent($p99_ratio - 1.0)) + "% |"
+        end
+      ' >>"${summary_md}"
+  done
+}
+
+run_remote_signer_group() {
+  if ! has_comparator oxibelt; then
+    return
+  fi
+
+  start_oxibelt baseline oxibelt
+  run_load "oxibelt-local-key-h1-keepalive" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-local-key-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+  if h3_probe_succeeds oxibelt; then
+    run_load "oxibelt-local-key-h3" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+  else
+    fail_with_diagnostics "mandatory HTTP/3 probe failed for local-key remote signer comparison"
+  fi
+
+  start_oxibelt remote-signer oxibelt
+  run_load "oxibelt-remote-signer-h1-keepalive" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-remote-signer-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+  if h3_probe_succeeds oxibelt; then
+    run_load "oxibelt-remote-signer-h3" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+  else
+    fail_with_diagnostics "mandatory HTTP/3 probe failed for remote signer comparison"
+  fi
+
+  start_oxibelt baseline-accept-1 oxibelt
+  run_handshake "oxibelt-local-key-tls-handshake-h2" h2 oxibelt
+
+  start_oxibelt remote-signer-accept-1 oxibelt
+  run_handshake "oxibelt-remote-signer-tls-handshake-h2" h2 oxibelt
+
+  append_remote_signer_overhead_summary
+}
+
 run_all_serving_types() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
@@ -1268,6 +1419,9 @@ case "${serving_type}" in
     ;;
   accept-multipliers)
     run_accept_multipliers_group
+    ;;
+  remote-signer)
+    run_remote_signer_group
     ;;
 esac
 

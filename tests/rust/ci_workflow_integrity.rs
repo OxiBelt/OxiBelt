@@ -307,6 +307,7 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "oxibelt-features",
         "oxibelt-soak-stress",
         "accept-multipliers",
+        "remote-signer",
     ] {
         assert!(
             workflow.contains(&format!("          - {serving_type}")),

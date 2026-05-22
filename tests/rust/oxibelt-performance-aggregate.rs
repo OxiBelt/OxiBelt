@@ -14,12 +14,13 @@ const DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO: f64 = 0.85;
 const DEFAULT_WAF_ENFORCING_MIN_RPS: f64 = 11000.0;
 const DEFAULT_CRS_ENFORCING_MIN_RPS: f64 = 9000.0;
 const DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO: f64 = 1.20;
-const SERVING_TYPES: [&str; 5] = [
+const SERVING_TYPES: [&str; 6] = [
     "reverse-proxy",
     "static-files",
     "oxibelt-features",
     "oxibelt-soak-stress",
     "accept-multipliers",
+    "remote-signer",
 ];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -61,6 +62,7 @@ enum ScenarioGroup {
     ReverseProxy,
     StaticFiles,
     AcceptMultipliers,
+    RemoteSigner,
     OxibeltOnly,
     #[default]
     Unclassified,
@@ -72,6 +74,7 @@ impl ScenarioGroup {
             Self::ReverseProxy => "reverse-proxy",
             Self::StaticFiles => "static-files",
             Self::AcceptMultipliers => "accept-multipliers",
+            Self::RemoteSigner => "remote-signer",
             Self::OxibeltOnly => "oxibelt-only",
             Self::Unclassified => "unclassified",
         }
@@ -219,6 +222,27 @@ struct AcceptMultiplierComparison {
 }
 
 #[derive(Serialize)]
+struct RemoteSignerRatio {
+    status: String,
+    throughput_ratio: Option<f64>,
+    throughput_percent_of_local_key: Option<f64>,
+    throughput_delta_percent: Option<f64>,
+    p99_ratio: Option<f64>,
+    p99_percent_of_local_key: Option<f64>,
+    p99_delta_percent: Option<f64>,
+    text: String,
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RemoteSignerComparison {
+    scenario: String,
+    local_key: Option<AggregateStats>,
+    remote_signer: Option<AggregateStats>,
+    remote_signer_vs_local_key: RemoteSignerRatio,
+}
+
+#[derive(Serialize)]
 struct RatioSummary {
     scenario_count: usize,
     valid_comparisons: usize,
@@ -238,6 +262,7 @@ struct ReportSummary {
     reverse_proxy: GroupSummary,
     static_files: GroupSummary,
     accept_multipliers: AcceptMultiplierSummary,
+    remote_signer: RemoteSignerSummary,
     oxibelt_only_row_count: usize,
 }
 
@@ -285,6 +310,16 @@ struct AcceptMultiplierSummary {
 }
 
 #[derive(Serialize)]
+struct RemoteSignerSummary {
+    scenario_count: usize,
+    valid_comparisons: usize,
+    median_throughput_ratio: Option<f64>,
+    median_throughput_percent_of_local_key: Option<f64>,
+    median_p99_ratio: Option<f64>,
+    median_p99_percent_of_local_key: Option<f64>,
+}
+
+#[derive(Serialize)]
 struct MissingComparatorRow {
     group: String,
     scenario: String,
@@ -302,6 +337,7 @@ struct Report {
     summary: ReportSummary,
     comparisons: ComparisonGroups,
     accept_multiplier_comparisons: Vec<AcceptMultiplierComparison>,
+    remote_signer_comparisons: Vec<RemoteSignerComparison>,
     oxibelt_only_results: Vec<AggregateStats>,
     skipped_or_missing_comparator_rows: Vec<MissingComparatorRow>,
     regression_gates: RegressionGateReport,
@@ -495,6 +531,7 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
     let reverse_proxy = build_group_comparisons(ScenarioGroup::ReverseProxy, &aggregate_map);
     let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
     let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
+    let remote_signer_comparisons = build_remote_signer_comparisons(&aggregate_map);
     let regression_gates = build_regression_gate_report(&aggregate_map, regression_gate_thresholds);
     let oxibelt_only_results = aggregate_map
         .iter()
@@ -510,12 +547,13 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
         reverse_proxy: summarize_group(&reverse_proxy),
         static_files: summarize_group(&static_files),
         accept_multipliers: summarize_accept_multiplier_comparisons(&accept_multiplier_comparisons),
+        remote_signer: summarize_remote_signer_comparisons(&remote_signer_comparisons),
         oxibelt_only_row_count: oxibelt_only_results.len(),
     };
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 3,
+        schema_version: 4,
         profile,
         expected_runs,
         artifact_discovery,
@@ -525,6 +563,7 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
             static_files,
         },
         accept_multiplier_comparisons,
+        remote_signer_comparisons,
         oxibelt_only_results,
         skipped_or_missing_comparator_rows,
         regression_gates,
@@ -836,6 +875,8 @@ fn classify_scenario(comparator: Comparator, scenario: &str) -> ScenarioGroup {
         ScenarioGroup::StaticFiles
     } else if accept_multiplier_base_scenario(scenario).is_some() {
         ScenarioGroup::AcceptMultipliers
+    } else if remote_signer_base_scenario(scenario).is_some() {
+        ScenarioGroup::RemoteSigner
     } else if matches!(scenario, "h1-keepalive" | "h2" | "h3" | "tls-handshake-h2") {
         ScenarioGroup::ReverseProxy
     } else if comparator == Comparator::Oxibelt {
@@ -849,6 +890,12 @@ fn accept_multiplier_base_scenario(scenario: &str) -> Option<&str> {
     scenario
         .strip_prefix("accept-0_5-")
         .or_else(|| scenario.strip_prefix("accept-1_0-"))
+}
+
+fn remote_signer_base_scenario(scenario: &str) -> Option<&str> {
+    scenario
+        .strip_prefix("local-key-")
+        .or_else(|| scenario.strip_prefix("remote-signer-"))
 }
 
 fn string_field(value: Option<&Value>) -> Option<&str> {
@@ -993,6 +1040,41 @@ fn build_accept_multiplier_comparisons(
         .collect()
 }
 
+fn build_remote_signer_comparisons(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+) -> Vec<RemoteSignerComparison> {
+    let mut scenarios = BTreeSet::new();
+    for ((comparator, scenario), aggregate) in aggregates {
+        if *comparator == Comparator::Oxibelt
+            && aggregate.group == ScenarioGroup::RemoteSigner.as_str()
+            && let Some(base) = remote_signer_base_scenario(scenario)
+        {
+            scenarios.insert(base.to_owned());
+        }
+    }
+
+    scenarios
+        .into_iter()
+        .map(|scenario| {
+            let local_key = aggregates
+                .get(&(Comparator::Oxibelt, format!("local-key-{scenario}")))
+                .cloned();
+            let remote_signer = aggregates
+                .get(&(Comparator::Oxibelt, format!("remote-signer-{scenario}")))
+                .cloned();
+            let remote_signer_vs_local_key =
+                remote_signer_ratio(remote_signer.as_ref(), local_key.as_ref());
+
+            RemoteSignerComparison {
+                scenario,
+                local_key,
+                remote_signer,
+                remote_signer_vs_local_key,
+            }
+        })
+        .collect()
+}
+
 fn ratio_result(
     oxibelt: Option<&AggregateStats>,
     comparator: Option<&AggregateStats>,
@@ -1052,6 +1134,103 @@ fn ratio_result(
             ratio
         ),
         reason: None,
+    }
+}
+
+fn remote_signer_ratio(
+    remote_signer: Option<&AggregateStats>,
+    local_key: Option<&AggregateStats>,
+) -> RemoteSignerRatio {
+    let Some(local_key) = local_key else {
+        return remote_signer_ratio_status("no_local_key", None, None, "missing local-key row");
+    };
+    let Some(remote_signer) = remote_signer else {
+        return remote_signer_ratio_status(
+            "no_remote_signer",
+            None,
+            None,
+            "missing remote-signer row",
+        );
+    };
+    let Some(local_rate) = local_key.median_rps else {
+        return remote_signer_ratio_status(
+            "no_samples",
+            None,
+            None,
+            "local-key row has no non-skipped rate samples",
+        );
+    };
+    let Some(remote_rate) = remote_signer.median_rps else {
+        let reason = if remote_signer.skipped_count > 0 {
+            remote_signer
+                .skip_reasons
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "remote-signer row was skipped".to_owned())
+        } else {
+            "remote-signer row has no non-skipped rate samples".to_owned()
+        };
+        return remote_signer_ratio_status("no_samples", None, None, reason);
+    };
+    if local_rate == 0.0 {
+        return remote_signer_ratio_status(
+            "invalid_local_key",
+            None,
+            None,
+            "local-key median rate is zero",
+        );
+    }
+
+    let throughput_ratio = remote_rate / local_rate;
+    let p99_ratio = match (remote_signer.median_p99_ms, local_key.median_p99_ms) {
+        (Some(remote_p99), Some(local_p99)) if local_p99 > 0.0 => Some(remote_p99 / local_p99),
+        _ => None,
+    };
+    let text = match p99_ratio {
+        Some(p99_ratio) => format!(
+            "{:.1}% of local-key throughput ({:+.1}%), p99 {:.1}% of local key ({:+.1}%)",
+            throughput_ratio * 100.0,
+            (throughput_ratio - 1.0) * 100.0,
+            p99_ratio * 100.0,
+            (p99_ratio - 1.0) * 100.0
+        ),
+        None => format!(
+            "{:.1}% of local-key throughput ({:+.1}%), p99 unavailable",
+            throughput_ratio * 100.0,
+            (throughput_ratio - 1.0) * 100.0
+        ),
+    };
+
+    RemoteSignerRatio {
+        status: "ok".to_owned(),
+        throughput_ratio: Some(throughput_ratio),
+        throughput_percent_of_local_key: Some(throughput_ratio * 100.0),
+        throughput_delta_percent: Some((throughput_ratio - 1.0) * 100.0),
+        p99_ratio,
+        p99_percent_of_local_key: p99_ratio.map(|value| value * 100.0),
+        p99_delta_percent: p99_ratio.map(|value| (value - 1.0) * 100.0),
+        text,
+        reason: None,
+    }
+}
+
+fn remote_signer_ratio_status(
+    status: &str,
+    throughput_ratio: Option<f64>,
+    p99_ratio: Option<f64>,
+    reason: impl Into<String>,
+) -> RemoteSignerRatio {
+    let reason = reason.into();
+    RemoteSignerRatio {
+        status: status.to_owned(),
+        throughput_ratio,
+        throughput_percent_of_local_key: throughput_ratio.map(|value| value * 100.0),
+        throughput_delta_percent: throughput_ratio.map(|value| (value - 1.0) * 100.0),
+        p99_ratio,
+        p99_percent_of_local_key: p99_ratio.map(|value| value * 100.0),
+        p99_delta_percent: p99_ratio.map(|value| (value - 1.0) * 100.0),
+        text: reason.clone(),
+        reason: Some(reason),
     }
 }
 
@@ -1537,6 +1716,29 @@ fn summarize_accept_multiplier_comparisons(
     }
 }
 
+fn summarize_remote_signer_comparisons(
+    comparisons: &[RemoteSignerComparison],
+) -> RemoteSignerSummary {
+    let mut throughput_values = comparisons
+        .iter()
+        .filter_map(|comparison| comparison.remote_signer_vs_local_key.throughput_ratio)
+        .collect::<Vec<_>>();
+    let mut p99_values = comparisons
+        .iter()
+        .filter_map(|comparison| comparison.remote_signer_vs_local_key.p99_ratio)
+        .collect::<Vec<_>>();
+    let median_throughput_ratio = percentile(&mut throughput_values, 50.0);
+    let median_p99_ratio = percentile(&mut p99_values, 50.0);
+    RemoteSignerSummary {
+        scenario_count: comparisons.len(),
+        valid_comparisons: throughput_values.len(),
+        median_throughput_ratio,
+        median_throughput_percent_of_local_key: median_throughput_ratio.map(|ratio| ratio * 100.0),
+        median_p99_ratio,
+        median_p99_percent_of_local_key: median_p99_ratio.map(|ratio| ratio * 100.0),
+    }
+}
+
 fn summarize_ratios(values: impl Iterator<Item = f64>, scenario_count: usize) -> RatioSummary {
     let mut values = values.collect::<Vec<_>>();
     let median_ratio = percentile(&mut values, 50.0);
@@ -1869,6 +2071,12 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- Remote signer vs local key: {}",
+        format_remote_signer_summary(&report.summary.remote_signer)
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- Regression gates: `{}` ({} violation(s))",
         report.regression_gates.status,
         report.regression_gates.violations.len()
@@ -1892,6 +2100,7 @@ fn render_markdown(report: &Report) -> String {
         &report.comparisons.static_files,
     );
     write_accept_multiplier_table(&mut markdown, &report.accept_multiplier_comparisons);
+    write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
     write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
     write_missing_table(&mut markdown, &report.skipped_or_missing_comparator_rows);
     write_regression_gate_table(&mut markdown, &report.regression_gates);
@@ -1922,6 +2131,28 @@ fn format_accept_multiplier_summary(summary: &AcceptMultiplierSummary) -> String
             summary.scenario_count
         ),
         None => format!("n/a (0/{}) scenarios", summary.scenario_count),
+    }
+}
+
+fn format_remote_signer_summary(summary: &RemoteSignerSummary) -> String {
+    match (summary.median_throughput_ratio, summary.median_p99_ratio) {
+        (Some(throughput_ratio), Some(p99_ratio)) => format!(
+            "{:.1}% throughput of local key ({:+.1}%), p99 {:.1}% of local key ({:+.1}%, {}/{}) scenarios",
+            throughput_ratio * 100.0,
+            (throughput_ratio - 1.0) * 100.0,
+            p99_ratio * 100.0,
+            (p99_ratio - 1.0) * 100.0,
+            summary.valid_comparisons,
+            summary.scenario_count
+        ),
+        (Some(throughput_ratio), None) => format!(
+            "{:.1}% throughput of local key ({:+.1}%), p99 n/a ({}/{}) scenarios",
+            throughput_ratio * 100.0,
+            (throughput_ratio - 1.0) * 100.0,
+            summary.valid_comparisons,
+            summary.scenario_count
+        ),
+        _ => format!("n/a (0/{}) scenarios", summary.scenario_count),
     }
 }
 
@@ -1995,6 +2226,37 @@ fn write_accept_multiplier_table(
             format_number(accept_1_0.and_then(|stats| stats.median_p95_ms)),
             format_number(accept_0_5.and_then(|stats| stats.median_p99_ms)),
             format_number(accept_1_0.and_then(|stats| stats.median_p99_ms)),
+        )
+        .unwrap();
+    }
+    writeln!(markdown).unwrap();
+}
+
+fn write_remote_signer_table(markdown: &mut String, comparisons: &[RemoteSignerComparison]) {
+    writeln!(markdown, "## Remote signer overhead\n").unwrap();
+    if comparisons.is_empty() {
+        writeln!(markdown, "No remote signer rows were found.\n").unwrap();
+        return;
+    }
+
+    writeln!(
+        markdown,
+        "| Scenario | Local-key median rate/sec | Remote-signer median rate/sec | Remote signer vs local key | Local-key median p99 ms | Remote-signer median p99 ms |"
+    )
+    .unwrap();
+    writeln!(markdown, "| --- | ---: | ---: | --- | ---: | ---: |").unwrap();
+    for comparison in comparisons {
+        let local_key = comparison.local_key.as_ref();
+        let remote_signer = comparison.remote_signer.as_ref();
+        writeln!(
+            markdown,
+            "| `{}` | {} | {} | {} | {} | {} |",
+            comparison.scenario,
+            format_number(local_key.and_then(|stats| stats.median_rps)),
+            format_number(remote_signer.and_then(|stats| stats.median_rps)),
+            comparison.remote_signer_vs_local_key.text,
+            format_number(local_key.and_then(|stats| stats.median_p99_ms)),
+            format_number(remote_signer.and_then(|stats| stats.median_p99_ms)),
         )
         .unwrap();
     }
