@@ -19,6 +19,7 @@ use crate::config::{
 };
 use crate::dynamic_policy::DynamicPolicyRequest;
 use crate::external_auth::{ExternalAuthOutcome, ExternalAuthTerminal};
+use crate::ipm::{IpmDecision, IpmRequestContext, resource as ipm_resource};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
@@ -505,6 +506,31 @@ where
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.set_route_name(&resolved.route.name);
+
+  if resolved.route.ipm.enabled {
+    let Some(actor) = state.ipm.actor_from_headers(request.headers()) else {
+      return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let action = resolved
+      .route
+      .ipm
+      .action
+      .as_deref()
+      .unwrap_or("route:Invoke");
+    let resource = ipm_resource(state.ipm.namespace(), "route", &resolved.route.name);
+    let context = IpmRequestContext {
+      source_ip: Some(client_addr.ip()),
+      method: Some(request.method().as_str().to_string()),
+      host: Some(host.clone()),
+      path: Some(path.to_string()),
+      route: Some(resolved.route.name.clone()),
+      protocol: Some(format!("{:?}", request_version)),
+      claims: std::collections::HashMap::new(),
+    };
+    if state.ipm.authorize(&actor, action, &resource, &context) != IpmDecision::Allow {
+      return text_response(StatusCode::FORBIDDEN, "forbidden");
+    }
+  }
 
   let request = if !content_length_zero_guard_required(request.headers(), request_version) {
     match fast_path::try_handle_plain_proxy(

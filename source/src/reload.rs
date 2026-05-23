@@ -106,6 +106,9 @@ impl ReloadManager {
     )
     .context("failed to rebuild WAF engine")?;
     let route_table = RouteTable::new_with_waf(&config, &waf);
+    let ipm = crate::ipm::IpmRuntime::new(&config)
+      .await
+      .context("failed to build IPM runtime")?;
     let snapshot = AppSnapshot {
       route_table,
       sni_forward: active.sni_forward.clone(),
@@ -123,7 +126,7 @@ impl ReloadManager {
       static_files: active.static_files.clone(),
       metrics: active.metrics.clone(),
       telemetry: active.telemetry.clone(),
-      admin_tokens: active.admin_tokens.clone(),
+      ipm,
       dynamic_policy: active.dynamic_policy.clone(),
       external_auth: active.external_auth.clone(),
       lifecycle: active.lifecycle.clone(),
@@ -204,6 +207,9 @@ impl ReloadManager {
     } else {
       None
     };
+    let ipm = crate::ipm::IpmRuntime::new(&config)
+      .await
+      .context("failed to build IPM runtime")?;
     let snapshot = AppSnapshot {
       route_table: active.route_table.clone(),
       sni_forward: active.sni_forward.clone(),
@@ -221,7 +227,7 @@ impl ReloadManager {
       static_files: active.static_files.clone(),
       metrics: active.metrics.clone(),
       telemetry: active.telemetry.clone(),
-      admin_tokens: active.admin_tokens.clone(),
+      ipm,
       dynamic_policy: active.dynamic_policy.clone(),
       external_auth: active.external_auth.clone(),
       lifecycle: active.lifecycle.clone(),

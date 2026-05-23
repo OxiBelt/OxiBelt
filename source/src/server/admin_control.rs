@@ -7,7 +7,7 @@ use serde_json::json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::config::{AdminPermission, Config, RuntimeOverrides};
+use crate::config::{Config, RuntimeOverrides};
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::reload::{reload_downstream_tls_paths, validate_full_reload_runtime_compatibility};
@@ -57,7 +57,7 @@ pub(super) struct RollbackSnapshot {
 pub(super) enum AdminControlCommand {
   LoadConfig {
     actor: String,
-    actor_is_admin: bool,
+    actor_can_manage_ipm: bool,
     if_match: Option<String>,
     raw: String,
     respond: oneshot::Sender<AdminControlResponse>,
@@ -140,16 +140,6 @@ pub(super) enum AdminFileRoot {
   OxiRuleGroup,
 }
 
-impl AdminFileRoot {
-  pub(super) fn sync_permission(self) -> AdminPermission {
-    match self {
-      Self::Config => AdminPermission::FilesSyncConfig,
-      Self::OxiRule => AdminPermission::FilesSyncOxiRule,
-      Self::OxiRuleGroup => AdminPermission::FilesSyncOxiRuleGroup,
-    }
-  }
-}
-
 impl AdminControlHandle {
   pub(super) fn new(
     effective_config: Option<String>,
@@ -186,14 +176,14 @@ impl AdminControlHandle {
   pub(super) async fn load_config(
     &self,
     actor: String,
-    actor_is_admin: bool,
+    actor_can_manage_ipm: bool,
     if_match: Option<String>,
     raw: String,
   ) -> AdminControlResponse {
     self
       .request(|respond| AdminControlCommand::LoadConfig {
         actor,
-        actor_is_admin,
+        actor_can_manage_ipm,
         if_match,
         raw,
         respond,
@@ -296,14 +286,14 @@ pub(super) async fn handle_admin_control_command(
   match command {
     AdminControlCommand::LoadConfig {
       actor,
-      actor_is_admin,
+      actor_can_manage_ipm,
       if_match,
       raw,
       respond,
     } => {
       let response = apply_config_load(
         &actor,
-        actor_is_admin,
+        actor_can_manage_ipm,
         if_match,
         raw,
         state,
@@ -358,7 +348,7 @@ pub(super) async fn handle_admin_control_command(
 #[allow(clippy::too_many_arguments)]
 async fn apply_config_load(
   actor: &str,
-  actor_is_admin: bool,
+  actor_can_manage_ipm: bool,
   if_match: Option<String>,
   raw: String,
   state: &AppHandle,
@@ -378,12 +368,14 @@ async fn apply_config_load(
       return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
     }
   };
-  if let Err(response) = validate_admin_config_load_scope(actor_is_admin, &active.config, &config) {
+  if let Err(response) =
+    validate_admin_config_load_scope(actor_can_manage_ipm, &active.config, &config)
+  {
     record_operation(
       control,
       "config_load",
       "rejected",
-      Some("admin configuration changes require admin role".to_string()),
+      Some("admin or IPM configuration changes require ipm:*".to_string()),
     )
     .await;
     return response;

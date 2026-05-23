@@ -20,10 +20,8 @@ use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
-#[cfg(test)]
-use crate::config::AdminPermission;
 use crate::config::{
-  AdminRole, AdminTransportMode, Config, ConnectionLimitIdentityMode, RuntimeOverrides,
+  AdminTransportMode, Config, ConnectionLimitIdentityMode, RuntimeOverrides,
   UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
 };
 use crate::identity::Cidr;
@@ -48,16 +46,14 @@ mod admin;
 mod admin_auth;
 mod admin_body;
 mod admin_control;
+mod admin_ipm;
 mod admin_ops;
 mod connection_errors;
 mod plain_http;
 #[cfg(test)]
 mod reload_tests;
 use admin::json_response;
-use admin_auth::{
-  AdminActor, admin_actor, admin_actor_has_any_role, admin_actor_has_permission,
-  admin_actor_has_role,
-};
+use admin_auth::{AdminActor, admin_actor, admin_actor_is_allowed};
 use admin_body::collect_admin_json;
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 #[cfg(test)]
@@ -498,36 +494,36 @@ async fn admin_response(
     .into_owned()
     .collect::<std::collections::HashMap<_, _>>();
   let path = uri.path().to_string();
-  let actor = admin_actor(&request, &snapshot.config.admin, &snapshot.admin_tokens);
+  let actor = admin_actor(&request, &snapshot.config, &snapshot.ipm);
 
   if path == "/cache/purge" || path == "/cache/purge-prefix" || path == "/cache/purge-tag" {
     if method != ::http::Method::POST {
       return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
     }
-    let signed_actor = if actor
-      .as_ref()
-      .is_some_and(|actor| admin_actor_has_role(actor, AdminRole::CacheOperator))
-    {
-      None
-    } else {
+    let signed_actor = if actor.is_none() {
       match admin::signed_cache_purge_actor(&request, snapshot.as_ref(), &method) {
         Ok(actor) => Some(actor),
         Err(error) => {
-          if actor.is_none() {
-            warn!(error = %error, "rejected unsigned admin cache purge request");
-            return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
-          }
-          None
+          warn!(error = %error, "rejected unsigned admin cache purge request");
+          return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
         }
       }
+    } else {
+      None
     };
     let actor = match actor.or(signed_actor) {
-      Some(actor) if admin_actor_has_role(&actor, AdminRole::CacheOperator) => actor,
-      Some(_) => return text_response(StatusCode::FORBIDDEN, "forbidden"),
+      Some(actor) => actor,
       None => return text_response(StatusCode::UNAUTHORIZED, "unauthorized"),
     };
-    let response =
-      admin::cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &actor);
+    let response = admin::cache_purge_response(
+      &snapshot,
+      &params,
+      &path,
+      scheme,
+      peer_addr,
+      &actor,
+      &snapshot.ipm,
+    );
     return response;
   }
 
@@ -547,6 +543,7 @@ async fn admin_response(
       state.clone(),
       admin_control.clone(),
       &actor,
+      &snapshot.ipm,
       &method,
       &path,
     )
@@ -558,6 +555,7 @@ async fn admin_response(
     snapshot.as_ref(),
     admin_control.clone(),
     &actor,
+    &snapshot.ipm,
     &method,
     &path,
   )
@@ -567,20 +565,43 @@ async fn admin_response(
   }
 
   if path == "/admin/v1/files/sync" {
-    return admin_ops::admin_files_response(request, admin_control.clone(), &actor, &method, &path)
-      .await;
+    return admin_ops::admin_files_response(
+      request,
+      admin_control.clone(),
+      &actor,
+      &snapshot.ipm,
+      &method,
+      &path,
+    )
+    .await;
   }
   if path == "/admin/v1/cache/key-explain" {
-    return admin::cache_key_explain_response(request, snapshot.as_ref(), &actor, &method).await;
+    return admin::cache_key_explain_response(
+      request,
+      snapshot.as_ref(),
+      &actor,
+      &snapshot.ipm,
+      &method,
+    )
+    .await;
   }
   if path == "/admin/v1/cache/warm" {
-    return admin::cache_warm_response(request, state.clone(), &actor, &method, peer_addr).await;
+    return admin::cache_warm_response(
+      request,
+      state.clone(),
+      &actor,
+      &snapshot.ipm,
+      &method,
+      peer_addr,
+    )
+    .await;
   }
   if path == "/admin/v1/cache/purge" {
     return admin::cache_purge_json_response(
       request,
       snapshot.as_ref(),
       &actor,
+      &snapshot.ipm,
       &method,
       scheme,
       peer_addr,
@@ -588,24 +609,42 @@ async fn admin_response(
     .await;
   }
 
-  if let Some(response) = admin_ops::admin_waf_response(snapshot.as_ref(), &actor, &method, &path) {
-    return response;
-  }
   if let Some(response) =
-    admin_ops::admin_lifecycle_response(snapshot.as_ref(), &actor, &method, &path)
+    admin_ops::admin_waf_response(snapshot.as_ref(), &actor, &snapshot.ipm, &method, &path)
   {
     return response;
   }
-  let admin_token_path = path == "/admin/v1/tokens" || path.starts_with("/admin/v1/tokens/");
+  if let Some(response) =
+    admin_ops::admin_lifecycle_response(snapshot.as_ref(), &actor, &snapshot.ipm, &method, &path)
+  {
+    return response;
+  }
+  let ipm_path = path.starts_with("/admin/v1/ipm/");
   let dynamic_policy_path = path == "/admin/v1/dynamic-policies"
     || path == "/admin/v1/dynamic-policies/export"
     || path == "/admin/v1/dynamic-policies/import"
     || path.starts_with("/admin/v1/dynamic-policies/");
-  if admin_token_path || dynamic_policy_path {
-    let response = if admin_token_path {
-      admin::admin_tokens_response(request, state.clone(), &actor, &method, &path).await
+  if ipm_path || dynamic_policy_path {
+    let response = if ipm_path {
+      admin_ipm::ipm_response(
+        request,
+        state.clone(),
+        &actor,
+        &snapshot.ipm,
+        &method,
+        &path,
+      )
+      .await
     } else {
-      admin::dynamic_policy_response(request, state.clone(), &actor, &method, &path).await
+      admin::dynamic_policy_response(
+        request,
+        state.clone(),
+        &actor,
+        &snapshot.ipm,
+        &method,
+        &path,
+      )
+      .await
     };
     return response.unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
@@ -652,14 +691,7 @@ async fn admin_upstream_pools_response(
   path: &str,
 ) -> Option<Response<ProxyBody>> {
   if path == "/admin/v1/upstream-pools" {
-    if !admin_actor_has_any_role(
-      actor,
-      &[
-        AdminRole::Viewer,
-        AdminRole::UpstreamOperator,
-        AdminRole::Admin,
-      ],
-    ) {
+    if !admin_actor_is_allowed(actor, &snapshot.ipm, "upstream-pool:List", "*") {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     if *method != ::http::Method::GET {
@@ -674,14 +706,7 @@ async fn admin_upstream_pools_response(
   let rest = path.strip_prefix("/admin/v1/upstream-pools/")?;
   let segments = rest.split('/').collect::<Vec<_>>();
   if segments.len() == 1 {
-    if !admin_actor_has_any_role(
-      actor,
-      &[
-        AdminRole::Viewer,
-        AdminRole::UpstreamOperator,
-        AdminRole::Admin,
-      ],
-    ) {
+    if !admin_actor_is_allowed(actor, &snapshot.ipm, "upstream-pool:Get", segments[0]) {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     if *method != ::http::Method::GET {
@@ -697,7 +722,7 @@ async fn admin_upstream_pools_response(
   }
 
   if segments.len() == 2 && segments[1] == "servers" {
-    if !admin_actor_has_role(actor, AdminRole::UpstreamOperator) {
+    if !admin_actor_is_allowed(actor, &snapshot.ipm, "upstream-pool:AddServer", segments[0]) {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     if *method != ::http::Method::POST {
@@ -712,7 +737,12 @@ async fn admin_upstream_pools_response(
   }
 
   if segments.len() == 3 && segments[1] == "servers" {
-    if !admin_actor_has_role(actor, AdminRole::UpstreamOperator) {
+    let action = match *method {
+      ::http::Method::PATCH => "upstream-pool:UpdateServer",
+      ::http::Method::DELETE => "upstream-pool:RemoveServer",
+      _ => "upstream-pool:UpdateServer",
+    };
+    if !admin_actor_is_allowed(actor, &snapshot.ipm, action, segments[0]) {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     return Some(
@@ -990,7 +1020,8 @@ fn admin_audit(
     event = "oxibelt.admin.audit",
     peer = %peer_addr,
     actor = %actor.name,
-    roles = ?actor.roles.iter().map(|role| role.as_str()).collect::<Vec<_>>(),
+    principal = %actor.principal,
+    groups = ?actor.groups,
     operation,
     pool,
     server,
@@ -2455,95 +2486,46 @@ mod tests {
 
   const ADMIN_TOKEN_ENV: &str = "PATH";
 
-  fn test_actor(name: &str, roles: Vec<AdminRole>) -> AdminActor {
+  fn test_actor(name: &str) -> AdminActor {
     AdminActor {
       name: name.to_string(),
-      roles,
-      permissions: Vec::new(),
-      deny_permissions: Vec::new(),
+      principal: name.to_string(),
+      subject: name.to_string(),
+      groups: vec!["ipm-admin".to_string()],
     }
   }
 
-  #[test]
-  fn admin_rbac_role_checks_match_endpoint_scopes() {
-    let viewer = test_actor("viewer", vec![AdminRole::Viewer]);
-    let upstream_operator = test_actor("upstream", vec![AdminRole::UpstreamOperator]);
-    let admin = test_actor("admin", vec![AdminRole::Admin]);
-
-    assert!(admin_actor_has_any_role(
-      &viewer,
-      &[
-        AdminRole::Viewer,
-        AdminRole::UpstreamOperator,
-        AdminRole::Admin
-      ]
-    ));
-    assert!(!admin_actor_has_role(&viewer, AdminRole::UpstreamOperator));
-    assert!(admin_actor_has_role(
-      &upstream_operator,
-      AdminRole::UpstreamOperator
-    ));
-    assert!(admin_actor_has_role(&admin, AdminRole::CacheOperator));
-    assert!(admin_actor_has_role(&admin, AdminRole::UpstreamOperator));
-  }
-
-  #[test]
-  fn admin_permissions_allow_fine_grained_tokens_and_deny_overrides_roles() {
-    let config_token = AdminActor {
-      name: "config-token".to_string(),
-      roles: Vec::new(),
-      permissions: vec![AdminPermission::ConfigValidate],
-      deny_permissions: Vec::new(),
-    };
-    assert!(admin_actor_has_permission(
-      &config_token,
-      AdminPermission::ConfigValidate
-    ));
-    assert!(!admin_actor_has_permission(
-      &config_token,
-      AdminPermission::ConfigLoad
-    ));
-
-    let limited_admin = AdminActor {
-      name: "limited-admin".to_string(),
-      roles: vec![AdminRole::Admin],
-      permissions: Vec::new(),
-      deny_permissions: vec![AdminPermission::FilesDelete],
-    };
-    assert!(admin_actor_has_permission(
-      &limited_admin,
-      AdminPermission::ConfigLoad
-    ));
-    assert!(!admin_actor_has_permission(
-      &limited_admin,
-      AdminPermission::FilesDelete
-    ));
-  }
-
   #[tokio::test]
-  async fn admin_lifecycle_endpoints_enforce_rbac_and_toggle_drain() {
+  async fn admin_lifecycle_endpoints_enforce_ipm_and_toggle_drain() {
     let temp_dir = common::TempDir::new("admin-lifecycle");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-lifecycle");
     let config = admin_listener_config(&cert_path, &key_path, true, None);
     let snapshot = AppSnapshot::new(config)
       .await
       .expect("snapshot should initialize");
-    let viewer = test_actor("viewer", vec![AdminRole::Viewer]);
-    let admin = test_actor("admin", vec![AdminRole::Admin]);
+    let viewer = AdminActor {
+      name: "viewer".to_string(),
+      principal: "viewer".to_string(),
+      subject: "viewer".to_string(),
+      groups: Vec::new(),
+    };
+    let admin = test_actor("admin");
 
     let response = admin_lifecycle_response(
       &snapshot,
       &viewer,
+      &snapshot.ipm,
       &::http::Method::GET,
       "/admin/v1/lifecycle",
     )
     .expect("lifecycle GET should be handled");
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(!snapshot.lifecycle.is_draining());
 
     let response = admin_lifecycle_response(
       &snapshot,
       &viewer,
+      &snapshot.ipm,
       &::http::Method::POST,
       "/admin/v1/lifecycle/drain",
     )
@@ -2554,6 +2536,7 @@ mod tests {
     let response = admin_lifecycle_response(
       &snapshot,
       &admin,
+      &snapshot.ipm,
       &::http::Method::POST,
       "/admin/v1/lifecycle/drain",
     )
@@ -2565,6 +2548,7 @@ mod tests {
     let response = admin_lifecycle_response(
       &snapshot,
       &admin,
+      &snapshot.ipm,
       &::http::Method::POST,
       "/admin/v1/lifecycle/undrain",
     )

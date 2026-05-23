@@ -5,7 +5,9 @@ use serde::Deserialize;
 
 use crate::waf::RouteWafConfig;
 
-use super::{BufferingMode, HttpVersion, RetryCondition, default_hosts, default_path_prefix};
+use super::{
+  BufferingMode, HttpVersion, RetryCondition, RouteIpmConfig, default_hosts, default_path_prefix,
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RouteConfig {
@@ -32,6 +34,8 @@ pub struct RouteConfig {
   pub grpc_web: bool,
   #[serde(default)]
   pub external_auth: Option<String>,
+  #[serde(default)]
+  pub ipm: RouteIpmConfig,
   #[serde(default)]
   pub cache: Option<String>,
   #[serde(default)]

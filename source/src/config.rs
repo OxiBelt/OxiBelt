@@ -10,13 +10,14 @@ use url::Url;
 
 use crate::waf::{AccessLogFieldConfig, WafConfig};
 
+mod admin_legacy;
 mod admin_runtime;
-mod admin_token_store;
 mod allowed_keys;
 mod database;
 mod dynamic_policy;
 mod external_auth;
 mod http2;
+mod ipm;
 mod limits;
 mod quic;
 mod retry;
@@ -28,11 +29,12 @@ mod tls;
 mod turn;
 mod upstream_pool;
 mod workers;
-pub use admin_token_store::*;
+use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
 pub use database::*;
 pub use dynamic_policy::*;
 pub use external_auth::*;
 pub use http2::*;
+pub use ipm::*;
 use limits::{
   default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
   default_max_webtransport_sessions_per_connection,
@@ -63,6 +65,7 @@ pub struct Config {
   pub connection_limits: Vec<ConnectionLimitConfig>,
   pub compression: CompressionConfig,
   pub cache: CacheConfig,
+  pub ipm: IpmConfig,
   pub admin: AdminConfig,
   pub metrics: MetricsConfig,
   pub telemetry: TelemetryConfig,
@@ -107,6 +110,8 @@ struct RawConfig {
   compression: CompressionConfig,
   #[serde(default)]
   cache: CacheConfig,
+  #[serde(default)]
+  ipm: IpmConfig,
   #[serde(default)]
   admin: AdminConfig,
   #[serde(default)]
@@ -163,6 +168,7 @@ impl TryFrom<RawConfig> for Config {
       connection_limits: raw.connection_limits,
       compression: raw.compression,
       cache: raw.cache,
+      ipm: raw.ipm,
       admin: raw.admin,
       metrics: raw.metrics,
       telemetry: raw.telemetry,
@@ -652,6 +658,7 @@ impl Config {
     self.validate_proxy()?;
     self.validate_compression()?;
     self.validate_cache()?;
+    self.validate_ipm()?;
     self.validate_admin()?;
     self.validate_metrics_and_health()?;
     self.telemetry.validate()?;
@@ -987,6 +994,7 @@ impl Config {
         }
       }
       route.timeouts.validate(&route.name)?;
+      route.ipm.validate(&route.name)?;
       if let Some(retry) = &route.retry {
         retry.validate(&route.name)?;
         let backoff_base = retry
@@ -1636,11 +1644,11 @@ impl Config {
   }
 
   fn validate_admin(&self) -> anyhow::Result<()> {
-    self.validate_admin_token_store()?;
+    self.validate_legacy_admin_authorization()?;
     if !self.admin.enabled {
       return Ok(());
     }
-    if !self.admin.token_store.enabled {
+    if !self.ipm.enabled {
       if self.admin.bearer_token_env.trim().is_empty() {
         bail!("admin.bearer_token_env must not be empty when admin is enabled");
       }
@@ -1684,40 +1692,7 @@ impl Config {
         "admin.tls.enabled must be true for non-loopback admin.bind when admin.transport requires TLS"
       );
     }
-    if !self.admin.token_store.enabled {
-      self.validate_admin_rbac()?;
-    }
     self.admin.tls.validate()
-  }
-
-  fn validate_admin_rbac(&self) -> anyhow::Result<()> {
-    let mut names = HashSet::new();
-    for token in &self.admin.rbac.tokens {
-      validate_optional_non_empty("admin.rbac.tokens.name", Some(&token.name))?;
-      validate_optional_non_empty(
-        "admin.rbac.tokens.bearer_token_env",
-        Some(&token.bearer_token_env),
-      )?;
-      if !names.insert(token.name.as_str()) {
-        bail!("duplicate admin.rbac.tokens name {}", token.name);
-      }
-      if token.roles.is_empty() && token.permissions.is_empty() {
-        bail!(
-          "admin.rbac.tokens {} must include at least one role or permission",
-          token.name
-        );
-      }
-      if std::env::var(&token.bearer_token_env)
-        .ok()
-        .is_none_or(|value| value.is_empty())
-      {
-        bail!(
-          "admin RBAC bearer token environment variable {} must be set and non-empty",
-          token.bearer_token_env
-        );
-      }
-    }
-    Ok(())
   }
 
   fn validate_metrics_and_health(&self) -> anyhow::Result<()> {
@@ -2595,6 +2570,24 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "snapshot_refresh_interval_ms",
       "token_ttl_seconds",
     ][..],
+    "ipm" => &[
+      "bindings",
+      "backend",
+      "credentials",
+      "enabled",
+      "fail_closed",
+      "namespace",
+      "policies",
+      "principals",
+      "trust",
+    ][..],
+    "ipm.credentials" => &["bearer_token_env", "name", "principal"][..],
+    "ipm.principals" => &["groups", "id", "subject"][..],
+    "ipm.policies" => &["name", "statements", "version"][..],
+    "ipm.policies.statements" => &["actions", "conditions", "effect", "resources"][..],
+    "ipm.policies.statements.conditions" => &["key", "operator", "values"][..],
+    "ipm.bindings" => &["group", "policy", "principal"][..],
+    "ipm.trust" => &["claim", "group", "principal", "source", "value"][..],
     "admin.tls" => &[
       "certificates",
       "client_auth",
@@ -2829,6 +2822,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "generic_http_upgrade",
       "grpc_web",
       "external_auth",
+      "ipm",
       "static_root",
       "upstream",
       "upstream_http_version",
@@ -2853,6 +2847,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "websocket_idle_timeout_ms",
       "webtransport_idle_timeout_ms",
     ][..],
+    "routes.ipm" => &["action", "enabled"][..],
     "routes.retry" => &[
       "backoff_base_ms",
       "backoff_max_ms",
@@ -4501,10 +4496,10 @@ pub struct AdminConfig {
   pub cache_purge_signing: AdminCachePurgeSigningConfig,
   #[serde(default)]
   pub tls: AdminTlsConfig,
-  #[serde(default)]
-  pub rbac: AdminRbacConfig,
-  #[serde(default)]
-  pub token_store: AdminTokenStoreConfig,
+  #[serde(default, rename = "rbac")]
+  legacy_rbac: Option<LegacyAdminRbacConfig>,
+  #[serde(default, rename = "token_store")]
+  legacy_token_store: Option<LegacyAdminTokenStoreConfig>,
 }
 
 impl Default for AdminConfig {
@@ -4518,8 +4513,8 @@ impl Default for AdminConfig {
       plaintext_allowed_source_cidrs: default_admin_plaintext_allowed_source_cidrs(),
       cache_purge_signing: AdminCachePurgeSigningConfig::default(),
       tls: AdminTlsConfig::default(),
-      rbac: AdminRbacConfig::default(),
-      token_store: AdminTokenStoreConfig::default(),
+      legacy_rbac: None,
+      legacy_token_store: None,
     }
   }
 }
@@ -4545,24 +4540,6 @@ impl Default for AdminCachePurgeSigningConfig {
       nonce_ttl_seconds: default_cache_purge_signing_nonce_ttl_seconds(),
     }
   }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct AdminRbacConfig {
-  #[serde(default)]
-  pub tokens: Vec<AdminRbacTokenConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct AdminRbacTokenConfig {
-  pub name: String,
-  pub bearer_token_env: String,
-  #[serde(default)]
-  pub roles: Vec<AdminRole>,
-  #[serde(default)]
-  pub permissions: Vec<AdminPermission>,
-  #[serde(default)]
-  pub deny_permissions: Vec<AdminPermission>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -4709,8 +4686,8 @@ pub struct SharedStateConfig {
   pub reload_backend: Option<String>,
   #[serde(default)]
   pub dynamic_policy_backend: Option<String>,
-  #[serde(default)]
-  pub admin_tokens_backend: Option<String>,
+  #[serde(default, rename = "admin_tokens_backend")]
+  legacy_admin_tokens_backend: Option<String>,
   #[serde(default)]
   pub backends: Vec<SharedStateBackendConfig>,
 }
@@ -4733,7 +4710,7 @@ impl Default for SharedStateConfig {
       cache_backend: None,
       reload_backend: None,
       dynamic_policy_backend: None,
-      admin_tokens_backend: None,
+      legacy_admin_tokens_backend: None,
       backends: Vec::new(),
     }
   }
@@ -4751,6 +4728,9 @@ impl SharedStateConfig {
     }
     if self.backends.is_empty() {
       bail!("shared_state.backends must include at least one backend when enabled=true");
+    }
+    if self.legacy_admin_tokens_backend.is_some() {
+      bail!("shared_state.admin_tokens_backend is legacy Admin token syntax; use ipm.backend");
     }
     let mut names = HashSet::new();
     for backend in &self.backends {
@@ -4792,10 +4772,6 @@ impl SharedStateConfig {
       (
         "shared_state.dynamic_policy_backend",
         self.dynamic_policy_backend.as_deref(),
-      ),
-      (
-        "shared_state.admin_tokens_backend",
-        self.admin_tokens_backend.as_deref(),
       ),
     ] {
       if let Some(name) = name

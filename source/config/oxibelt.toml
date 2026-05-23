@@ -377,22 +377,33 @@ key_env = "OXIBELT_CACHE_PURGE_HMAC_KEY"
 max_skew_seconds = 300
 nonce_ttl_seconds = 600
 
-#[[admin.rbac.tokens]]
-# name = "upstream-ops"
-# bearer_token_env = "OXIBELT_UPSTREAM_TOKEN"
-# roles = ["viewer", "upstream_operator"] # viewer | cache_operator | upstream_operator | security_operator | config_operator | admin
-# permissions = ["config.validate"]
-# deny_permissions = ["files.delete"]
-
-[admin.token_store]
+[ipm]
 enabled = false
-# backend = "cluster" # PostgreSQL shared_state backend used as Admin token authority
-issuer = "oxibelt-admin"
-audience = "oxibelt-admin-api"
-public_key_env = "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY"
-snapshot_refresh_interval_ms = 2000
-token_ttl_seconds = 3600
+namespace = "oxibelt"
+# backend = "cluster" # optional PostgreSQL shared_state backend for oxibelt_ipm_* tables
 fail_closed = true
+
+#[[ipm.principals]]
+# id = "admin"
+# subject = "admin@example.com"
+# groups = ["platform-admins"]
+
+#[[ipm.credentials]]
+# name = "admin-env-token"
+# principal = "admin"
+# bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+
+#[[ipm.policies]]
+# name = "admin-full-access"
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["*"]
+# resources = ["*"]
+
+#[[ipm.bindings]]
+# group = "platform-admins"
+# policy = "admin-full-access"
 
 [admin.tls]
 enabled = false
@@ -493,7 +504,6 @@ cache_lock_ms = 10000
 # cache_backend = "cluster"
 # reload_backend = "cluster"
 # dynamic_policy_backend = "cluster"
-# admin_tokens_backend = "cluster"
 
 # [[shared_state.backends]]
 # name = "cluster"

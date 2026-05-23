@@ -8,6 +8,7 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "dynamic_policy",
   "external_auth",
   "health",
+  "ipm",
   "limits",
   "listeners",
   "logging",

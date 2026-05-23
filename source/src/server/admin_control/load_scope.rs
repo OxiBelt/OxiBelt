@@ -5,15 +5,15 @@ use crate::config::Config;
 use super::AdminControlResponse;
 
 pub(super) fn validate_admin_config_load_scope(
-  actor_is_admin: bool,
+  actor_can_manage_ipm: bool,
   active: &Config,
   candidate: &Config,
 ) -> Result<(), AdminControlResponse> {
-  if actor_is_admin || active.admin == candidate.admin {
+  if actor_can_manage_ipm || (active.admin == candidate.admin && active.ipm == candidate.ipm) {
     return Ok(());
   }
   Err(AdminControlResponse::error(
     StatusCode::FORBIDDEN,
-    "admin configuration changes require admin role",
+    "admin or IPM configuration changes require ipm:*",
   ))
 }

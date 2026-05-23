@@ -36,13 +36,25 @@ fn non_admin_config_load_cannot_change_admin_config() {
   candidate.admin.bearer_token_env = "OXIBELT_ESCALATED_ADMIN_TOKEN".to_string();
 
   let response = validate_admin_config_load_scope(false, &active, &candidate)
-    .expect_err("non-admin actor should not change admin config");
+    .expect_err("actor without ipm:* should not change admin config");
 
   assert_eq!(response.status, StatusCode::FORBIDDEN);
 }
 
 #[test]
-fn admin_config_load_scope_allows_admin_or_non_admin_non_admin_changes() {
+fn config_load_cannot_change_ipm_without_ipm_management_permission() {
+  let (_temp_dir, active) = load_temp_config("ipm-load-scope");
+  let mut candidate = active.clone();
+  candidate.ipm.enabled = true;
+
+  let response = validate_admin_config_load_scope(false, &active, &candidate)
+    .expect_err("actor without ipm:* should not change IPM config");
+
+  assert_eq!(response.status, StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn admin_config_load_scope_allows_ipm_manager_or_non_control_plane_changes() {
   let (_temp_dir, active) = load_temp_config("admin-load-scope-allowed");
   let mut candidate = active.clone();
   candidate.logging.level = "debug".to_string();
@@ -50,5 +62,9 @@ fn admin_config_load_scope_allows_admin_or_non_admin_non_admin_changes() {
   assert!(validate_admin_config_load_scope(false, &active, &candidate).is_ok());
 
   candidate.admin.bearer_token_env = "OXIBELT_ESCALATED_ADMIN_TOKEN".to_string();
+  assert!(validate_admin_config_load_scope(true, &active, &candidate).is_ok());
+
+  candidate = active.clone();
+  candidate.ipm.enabled = true;
   assert!(validate_admin_config_load_scope(true, &active, &candidate).is_ok());
 }

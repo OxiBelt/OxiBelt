@@ -5,11 +5,11 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-    AdminPermission, AdminRole, AdminTransportMode, BufferingMode, CacheStore, CompressionConfig,
-    Config, ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode,
-    DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
-    ExpectContinueMode, ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode,
-    GrpcRetryMode, HotReloadMode, KubernetesDiscoveryResource, LoadBalancingAlgorithm,
+    AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
+    ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
+    DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
+    ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
+    HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource, LoadBalancingAlgorithm,
     MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode,
     ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides,
     SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
@@ -543,10 +543,10 @@ unexpected = true
 }
 
 #[test]
-fn admin_rbac_tokens_accept_permissions_without_roles_and_parse_denies() {
-    let temp_dir = common::TempDir::new("admin-rbac-permissions");
+fn legacy_admin_rbac_tokens_are_rejected_by_ipm_model() {
+    let temp_dir = common::TempDir::new("admin-rbac-legacy");
     let (cert_path, key_path) =
-        common::create_self_signed_cert(temp_dir.path(), "admin-rbac-permissions");
+        common::create_self_signed_cert(temp_dir.path(), "admin-rbac-legacy");
     let raw = common::minimal_config_toml(&cert_path, &key_path)
         + r#"
 
@@ -563,18 +563,16 @@ permissions = ["config.validate", "files.sync.oxirule_group"]
 deny_permissions = ["files.delete"]
 "#;
 
-    let config: Config = toml::from_str(&raw).expect("config should parse");
-    config.validate().expect("config should validate");
-    let token = &config.admin.rbac.tokens[0];
-    assert!(token.roles.is_empty());
-    assert_eq!(
-        token.permissions,
-        vec![
-            AdminPermission::ConfigValidate,
-            AdminPermission::FilesSyncOxiRuleGroup
-        ]
+    let config: Config = toml::from_str(&raw).expect("legacy shape should parse for migration");
+    let error = config
+        .validate()
+        .expect_err("legacy RBAC tokens should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.rbac is legacy RBAC syntax"),
+        "unexpected error: {error}"
     );
-    assert_eq!(token.deny_permissions, vec![AdminPermission::FilesDelete]);
 }
 
 fn available_parallelism() -> usize {
@@ -2349,7 +2347,6 @@ upstream_health_backend = "redis-main"
 cache_backend = "postgres-main"
 reload_backend = "postgres-main"
 dynamic_policy_backend = "postgres-main"
-admin_tokens_backend = "postgres-main"
 operation_timeout_ms = 250
 connection_lease_ms = 30000
 cache_lock_ms = 5000
@@ -2386,10 +2383,6 @@ max_connections = 2
     );
     assert_eq!(
         config.shared_state.dynamic_policy_backend.as_deref(),
-        Some("postgres-main")
-    );
-    assert_eq!(
-        config.shared_state.admin_tokens_backend.as_deref(),
         Some("postgres-main")
     );
 }
@@ -2444,16 +2437,13 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 }
 
 #[test]
-fn admin_token_store_config_parses_postgres_backend_mapping_without_env_tokens() {
+fn ipm_config_parses_postgres_backend_mapping_without_bootstrap_env_token() {
     unsafe {
-        std::env::set_var(
-            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
-            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
-        );
+        std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
     }
-    let temp_dir = common::TempDir::new("admin-token-store-config");
+    let temp_dir = common::TempDir::new("ipm-store-config");
     let (cert_path, key_path) =
-        common::create_self_signed_cert(temp_dir.path(), "admin-token-store-config");
+        common::create_self_signed_cert(temp_dir.path(), "ipm-store-config");
     let raw = format!(
         r#"
 {}
@@ -2463,20 +2453,35 @@ enabled = true
 bind = "127.0.0.1:0"
 transport = "plaintext_allowlist"
 
-[admin.token_store]
+[ipm]
 enabled = true
 backend = "postgres-main"
-issuer = "issuer"
-audience = "audience"
-public_key_env = "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST"
-snapshot_refresh_interval_ms = 250
-token_ttl_seconds = 900
-fail_closed = true
+
+[[ipm.principals]]
+id = "deployer"
+subject = "oidc:ci/deployer"
+groups = ["operators"]
+
+[[ipm.credentials]]
+name = "deployer-token"
+principal = "deployer"
+bearer_token_env = "OXIBELT_IPM_TOKEN_TEST"
+
+[[ipm.policies]]
+name = "config-read"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["config:GetStatus"]
+resources = ["oxibelt:oxibelt:config:*"]
+
+[[ipm.bindings]]
+group = "operators"
+policy = "config-read"
 
 [shared_state]
 enabled = true
 namespace = "matrix"
-admin_tokens_backend = "postgres-main"
 
 [[shared_state.backends]]
 name = "postgres-main"
@@ -2489,25 +2494,14 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
 
-    assert!(config.admin.token_store.enabled);
-    assert_eq!(
-        config.admin.token_store.backend.as_deref(),
-        Some("postgres-main")
-    );
-    assert_eq!(config.admin.token_store.token_ttl_seconds, 900);
+    assert!(config.ipm.enabled);
+    assert_eq!(config.ipm.backend.as_deref(), Some("postgres-main"));
 }
 
 #[test]
-fn admin_token_store_rejects_non_postgres_backend() {
-    unsafe {
-        std::env::set_var(
-            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
-            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
-        );
-    }
-    let temp_dir = common::TempDir::new("admin-token-store-redis");
-    let (cert_path, key_path) =
-        common::create_self_signed_cert(temp_dir.path(), "admin-token-store-redis");
+fn ipm_store_rejects_non_postgres_backend() {
+    let temp_dir = common::TempDir::new("ipm-store-redis");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ipm-store-redis");
     let raw = format!(
         r#"
 {}
@@ -2515,10 +2509,9 @@ fn admin_token_store_rejects_non_postgres_backend() {
 [admin]
 enabled = true
 
-[admin.token_store]
+[ipm]
 enabled = true
 backend = "redis-main"
-public_key_env = "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST"
 
 [shared_state]
 enabled = true
@@ -2534,73 +2527,55 @@ connection_url = "redis://mock-redis:6379/0"
     let config: Config = toml::from_str(&raw).expect("config should parse");
     let error = config
         .validate()
-        .expect_err("admin token store should require postgres");
+        .expect_err("IPM store should require postgres");
 
     assert!(
         error
             .to_string()
-            .contains("admin token store backend redis-main must use kind = \"postgres\""),
+            .contains("ipm backend redis-main must use kind = \"postgres\""),
         "unexpected error: {error}"
     );
 }
 
 #[test]
-fn admin_token_store_rejects_invalid_values() {
-    unsafe {
-        std::env::set_var(
-            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
-            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
-        );
-        std::env::remove_var("OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_MISSING_TEST");
-    }
-    let temp_dir = common::TempDir::new("admin-token-store-invalid");
+fn ipm_store_rejects_invalid_backend_and_legacy_shared_state_mapping() {
+    let temp_dir = common::TempDir::new("ipm-store-invalid");
     let (cert_path, key_path) =
-        common::create_self_signed_cert(temp_dir.path(), "admin-token-store-invalid");
+        common::create_self_signed_cert(temp_dir.path(), "ipm-store-invalid");
     let base = common::minimal_config_toml(&cert_path, &key_path);
 
-    for (public_key_env, setting, expected) in [
+    for (setting, expected) in [
         (
-            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
-            "snapshot_refresh_interval_ms = 0",
-            "admin.token_store.snapshot_refresh_interval_ms must be greater than 0",
-        ),
-        (
-            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
-            "token_ttl_seconds = 0",
-            "admin.token_store.token_ttl_seconds must be greater than 0",
-        ),
-        (
-            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_MISSING_TEST",
-            "",
-            "failed to read admin.token_store.public_key_env",
-        ),
-    ] {
-        let raw = format!(
             r#"
-{base}
-
-[admin]
-enabled = true
-
-[admin.token_store]
-enabled = true
-backend = "postgres-main"
-public_key_env = "{public_key_env}"
-{setting}
-
+[ipm]
+backend = ""
+"#,
+            "ipm.backend must not be empty",
+        ),
+        (
+            r#"
 [shared_state]
 enabled = true
+admin_tokens_backend = "postgres-main"
 
 [[shared_state.backends]]
 name = "postgres-main"
 kind = "postgres"
 connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+            "shared_state.admin_tokens_backend is legacy Admin token syntax",
+        ),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+{setting}
 "#
         );
         let config: Config = toml::from_str(&raw).expect("config should parse");
         let error = config
             .validate()
-            .expect_err("invalid admin token store config should fail");
+            .expect_err("invalid IPM store config should fail");
         assert!(
             error.to_string().contains(expected),
             "expected {expected}, got {error:#}"
@@ -3233,15 +3208,12 @@ default = true
 }
 
 #[test]
-fn admin_rbac_tokens_parse_and_validate_roles() {
+fn ipm_config_parses_principals_credentials_policies_and_bindings() {
     unsafe {
-        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
-        std::env::set_var("OXIBELT_VIEWER_TOKEN_TEST", "viewer-secret");
-        std::env::set_var("OXIBELT_UPSTREAM_TOKEN_TEST", "upstream-secret");
-        std::env::set_var("OXIBELT_SECURITY_TOKEN_TEST", "security-secret");
+        std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
     }
-    let temp_dir = common::TempDir::new("admin-rbac");
-    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-rbac");
+    let temp_dir = common::TempDir::new("ipm-config");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ipm-config");
     let raw = format!(
         r#"
 {}
@@ -3250,47 +3222,56 @@ fn admin_rbac_tokens_parse_and_validate_roles() {
 enabled = true
 bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
 
-[[admin.rbac.tokens]]
-name = "viewer"
-bearer_token_env = "OXIBELT_VIEWER_TOKEN_TEST"
-roles = ["viewer"]
+[ipm]
+enabled = true
+namespace = "default"
 
-[[admin.rbac.tokens]]
-	name = "upstream-ops"
-	bearer_token_env = "OXIBELT_UPSTREAM_TOKEN_TEST"
-	roles = ["upstream_operator", "cache_operator"]
+[[ipm.principals]]
+id = "deployer"
+subject = "oidc:ci/deployer"
+groups = ["operators"]
 
-[[admin.rbac.tokens]]
-name = "security-ops"
-bearer_token_env = "OXIBELT_SECURITY_TOKEN_TEST"
-roles = ["security_operator"]
-	"#,
+[[ipm.credentials]]
+name = "deployer-token"
+principal = "deployer"
+bearer_token_env = "OXIBELT_IPM_TOKEN_TEST"
+
+[[ipm.policies]]
+name = "config-read"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["config:GetStatus", "config:GetEffective"]
+resources = ["oxibelt:default:config:*"]
+
+[[ipm.bindings]]
+group = "operators"
+policy = "config-read"
+    "#,
         common::minimal_config_toml(&cert_path, &key_path)
     );
 
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
-    assert_eq!(config.admin.rbac.tokens[0].roles, vec![AdminRole::Viewer]);
-    assert_eq!(
-        config.admin.rbac.tokens[1].roles,
-        vec![AdminRole::UpstreamOperator, AdminRole::CacheOperator]
-    );
-    assert_eq!(
-        config.admin.rbac.tokens[2].roles,
-        vec![AdminRole::SecurityOperator]
-    );
+    assert!(config.ipm.enabled);
+    assert_eq!(config.ipm.namespace, "default");
+    assert_eq!(config.ipm.principals[0].id, "deployer");
+    assert_eq!(config.ipm.credentials[0].principal, "deployer");
+    assert!(matches!(
+        config.ipm.policies[0].statements[0].effect,
+        IpmPolicyEffect::Allow
+    ));
+    assert_eq!(config.ipm.bindings[0].group.as_deref(), Some("operators"));
 }
 
 #[test]
-fn admin_rbac_rejects_duplicate_names_empty_roles_and_unknown_roles() {
+fn ipm_config_rejects_unknown_action_resource_condition_and_legacy_token_store() {
     unsafe {
-        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
-        std::env::set_var("OXIBELT_VIEWER_TOKEN_TEST", "viewer-secret");
+        std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
     }
-    let temp_dir = common::TempDir::new("admin-rbac-invalid");
-    let (cert_path, key_path) =
-        common::create_self_signed_cert(temp_dir.path(), "admin-rbac-invalid");
-    let duplicate_raw = format!(
+    let temp_dir = common::TempDir::new("ipm-invalid");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ipm-invalid");
+    let base = format!(
         r#"
 {}
 
@@ -3298,43 +3279,97 @@ fn admin_rbac_rejects_duplicate_names_empty_roles_and_unknown_roles() {
 enabled = true
 bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
 
-[[admin.rbac.tokens]]
-name = "viewer"
-bearer_token_env = "OXIBELT_VIEWER_TOKEN_TEST"
-roles = ["viewer"]
+[ipm]
+enabled = true
+namespace = "default"
 
-[[admin.rbac.tokens]]
-name = "viewer"
-bearer_token_env = "OXIBELT_VIEWER_TOKEN_TEST"
-roles = ["viewer"]
+[[ipm.principals]]
+id = "deployer"
+subject = "oidc:ci/deployer"
+groups = ["operators"]
+
+[[ipm.credentials]]
+name = "deployer-token"
+principal = "deployer"
+bearer_token_env = "OXIBELT_IPM_TOKEN_TEST"
+
+[[ipm.policies]]
+name = "policy"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["{{action}}"]
+resources = ["{{resource}}"]
+{{condition}}
+
+[[ipm.bindings]]
+group = "operators"
+policy = "policy"
 "#,
         common::minimal_config_toml(&cert_path, &key_path)
     );
-    let config: Config = toml::from_str(&duplicate_raw).expect("config should parse");
-    let error = config
-        .validate()
-        .expect_err("duplicate RBAC token names should be rejected");
+
+    let unknown_action = base
+        .replace("{action}", "config:Teleport")
+        .replace("{resource}", "oxibelt:default:config:*")
+        .replace("{condition}", "");
+    let config: Config = toml::from_str(&unknown_action).expect("config should parse");
+    let error = config.validate().expect_err("unknown action should fail");
     assert!(
         error
             .to_string()
-            .contains("duplicate admin.rbac.tokens name"),
+            .contains("unsupported action config:Teleport"),
         "unexpected error: {error}"
     );
 
-    let empty_roles_raw = duplicate_raw.replace("roles = [\"viewer\"]", "roles = []");
-    let config: Config = toml::from_str(&empty_roles_raw).expect("config should parse");
+    let unknown_resource_service = base
+        .replace("{action}", "config:GetStatus")
+        .replace("{resource}", "oxibelt:default:unknown:*")
+        .replace("{condition}", "");
+    let config: Config = toml::from_str(&unknown_resource_service).expect("config should parse");
     let error = config
         .validate()
-        .expect_err("empty RBAC token roles should be rejected");
+        .expect_err("unknown resource service should fail");
     assert!(
         error
             .to_string()
-            .contains("must include at least one role or permission"),
+            .contains("unsupported IPM service unknown"),
         "unexpected error: {error}"
     );
 
-    let unknown_role_raw = duplicate_raw.replace("roles = [\"viewer\"]", "roles = [\"root\"]");
-    toml::from_str::<Config>(&unknown_role_raw).expect_err("unknown RBAC role should not parse");
+    let unknown_condition = base
+        .replace("{action}", "config:GetStatus")
+        .replace("{resource}", "oxibelt:default:config:*")
+        .replace(
+            "{condition}",
+            r#"conditions = [{ operator = "StringEquals", key = "request.cookie", values = ["x"] }]"#,
+        );
+    let config: Config = toml::from_str(&unknown_condition).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("unknown condition key should fail");
+    let error_chain = format!("{error:#}");
+    assert!(
+        error_chain.contains("unsupported IPM condition key request.cookie"),
+        "unexpected error: {error:#}"
+    );
+
+    let legacy_token_store = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[admin.token_store]
+enabled = false
+"#;
+    let config: Config = toml::from_str(&legacy_token_store).expect("legacy shape should parse");
+    let error = config
+        .validate()
+        .expect_err("legacy token store should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.token_store is legacy Admin token syntax"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

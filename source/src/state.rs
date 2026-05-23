@@ -14,12 +14,12 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
-use crate::admin_tokens::AdminTokenRuntime;
 use crate::cache::ResponseCache;
 use crate::config::{Config, HttpVersion, ProxyHttp2Config, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
+use crate::ipm::IpmRuntime;
 use crate::lifecycle::LifecycleState;
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
@@ -192,7 +192,7 @@ pub struct AppSnapshot {
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
   pub telemetry: TelemetryRuntime,
-  pub admin_tokens: AdminTokenRuntime,
+  pub ipm: IpmRuntime,
   pub dynamic_policy: DynamicPolicyRuntime,
   pub external_auth: ExternalAuthRuntime,
   pub lifecycle: Arc<LifecycleState>,
@@ -277,9 +277,9 @@ impl AppSnapshot {
     let compression = CompressionState::new(&config.compression);
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
-    let admin_tokens = AdminTokenRuntime::new(&config)
+    let ipm = IpmRuntime::new(&config)
       .await
-      .context("failed to build admin token runtime")?;
+      .context("failed to build IPM runtime")?;
     let dynamic_policy = DynamicPolicyRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build dynamic policy runtime")?;
@@ -355,7 +355,7 @@ impl AppSnapshot {
       static_files: Arc::new(static_files),
       metrics,
       telemetry,
-      admin_tokens,
+      ipm,
       dynamic_policy,
       external_auth,
       lifecycle,
@@ -402,6 +402,9 @@ impl AppSnapshot {
     let external_auth =
       ExternalAuthRuntime::new(&config, control_http.clone(), previous.metrics.clone())
         .context("failed to build external auth runtime")?;
+    let ipm = IpmRuntime::new(&config)
+      .await
+      .context("failed to build IPM runtime")?;
 
     Ok(Self {
       config,
@@ -420,7 +423,7 @@ impl AppSnapshot {
       static_files: Arc::new(static_files),
       metrics: previous.metrics.clone(),
       telemetry: previous.telemetry.clone(),
-      admin_tokens: previous.admin_tokens.clone(),
+      ipm,
       dynamic_policy: previous.dynamic_policy.clone(),
       external_auth,
       lifecycle: previous.lifecycle.clone(),

@@ -11,7 +11,6 @@ compile_error!("oxibelt-proxy intentionally targets Linux only.");
 compile_error!("oxibelt-proxy supports only x86_64, aarch64, and riscv64.");
 
 pub mod access_log;
-pub mod admin_tokens;
 pub mod cache;
 pub mod config;
 pub mod control_http;
@@ -21,6 +20,7 @@ pub mod external_auth;
 pub mod fuzzing;
 mod h2_tuning;
 pub mod identity;
+pub mod ipm;
 pub mod lifecycle;
 pub mod limits;
 mod listener_socket;

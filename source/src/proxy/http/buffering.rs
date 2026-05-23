@@ -652,6 +652,7 @@ private_key = "/tmp/key.pem"
       connect_tunneling: false,
       grpc_web: false,
       external_auth: None,
+      ipm: Default::default(),
       cache: None,
       compression: None,
       buffering: RouteBufferingConfig {

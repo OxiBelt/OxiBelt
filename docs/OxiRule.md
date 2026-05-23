@@ -181,7 +181,7 @@ CRS files resolve under the OxiRule directory and must use normalized relative p
 
 CRS `monitor` mode records rule hits and latest inbound/outbound anomaly summaries through `/admin/v1/waf/rule-hits` without blocking. CRS `enforcing` mode blocks requests with `403` when the inbound blocking threshold is met and suppresses blocked upstream response bodies with a `502` response when the outbound blocking threshold is met. Prometheus metrics intentionally do not expose CRS rule IDs, names, or tags as labels.
 
-The CRS compatibility matrix is available at `GET /admin/v1/waf/crs/compatibility` for `viewer` or `admin` users. It returns the targeted CRS release lines, currently including CRS `v4.25.0` and the `v4.25.x` LTS line as of 2026-05-10, plus supported directives, operators, transforms, variables, action syntax, accepted-but-ignored syntax, and known unsupported surfaces.
+The CRS compatibility matrix is available at `GET /admin/v1/waf/crs/compatibility` for principals allowed to use `waf:GetCrsCompatibility`. It returns the targeted CRS release lines, currently including CRS `v4.25.0` and the `v4.25.x` LTS line as of 2026-05-10, plus supported directives, operators, transforms, variables, action syntax, accepted-but-ignored syntax, and known unsupported surfaces.
 
 OxiBelt-native CRS tuning is configured under `[waf.crs]`:
 

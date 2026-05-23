@@ -646,7 +646,6 @@ upstream_health_backend = "cluster"
 cache_backend = "cluster"
 reload_backend = "cluster"
 dynamic_policy_backend = "cluster"
-admin_tokens_backend = "cluster"
 
 [[shared_state.backends]]
 name = "cluster"
@@ -878,12 +877,32 @@ key_env = "OXIBELT_CACHE_PURGE_HMAC_KEY"
 max_skew_seconds = 300
 nonce_ttl_seconds = 600
 
-[[admin.rbac.tokens]]
+[ipm]
+enabled = false
+namespace = "oxibelt"
+fail_closed = true
+
+[[ipm.principals]]
+id = "upstream-ops"
+subject = "upstream-ops@example.com"
+groups = ["upstream-operators"]
+
+[[ipm.credentials]]
 name = "upstream-ops"
+principal = "upstream-ops"
 bearer_token_env = "OXIBELT_UPSTREAM_TOKEN"
-roles = ["viewer", "upstream_operator"]
-permissions = []
-deny_permissions = []
+
+[[ipm.policies]]
+name = "upstream-pool-ops"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["upstream-pool:*"]
+resources = ["oxibelt:oxibelt:upstream-pool:*"]
+
+[[ipm.bindings]]
+group = "upstream-operators"
+policy = "upstream-pool-ops"
 
 [admin.tls]
 enabled = false
@@ -974,32 +993,45 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 
 `[admin]` exposes operations APIs such as cache purge and upstream-pool runtime control. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>`, even when mTLS is enabled.
 
-`admin.bearer_token_env` remains the backward-compatible built-in admin token and receives the `admin` role. Additional `[[admin.rbac.tokens]]` entries name token environment variables and may set `roles`, `permissions`, and `deny_permissions`. Roles are `viewer`, `cache_operator`, `upstream_operator`, `security_operator`, `config_operator`, and `admin`; `admin` implies all scopes. A token with empty `roles` is valid when it grants at least one explicit permission. Explicit `permissions` add scopes beyond the listed roles, and `deny_permissions` wins last even over `admin`. Cache purge requires `cache_operator` or a valid `[admin.cache_purge_signing]` HMAC signature; upstream-pool reads require `viewer`; upstream-pool mutations require `upstream_operator`; dynamic policy automation APIs require `security_operator`. Config/file-sync/TLS operations use fine-grained permissions:
+IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
-- `config.read`, `config.validate`, `config.diff`, `config.load`, `config.rollback`
-- `files.sync.config`, `files.sync.oxirule`, `files.sync.oxirule_group`, `files.delete`
-- `tls.downstream.read`, `tls.downstream.reload`
-- `admin.tokens.read`, `admin.tokens.write`
+Actions use `service:Action` syntax. Initial services are `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:route:app` or `oxibelt:oxibelt:cache:policy/default`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`.
 
-`[admin.token_store]` replaces env-backed Admin API bearer tokens with a PostgreSQL-backed token authority when `enabled = true`. The selected backend comes from `admin.token_store.backend`, then `shared_state.admin_tokens_backend`, then `shared_state.default_backend`, and must be a PostgreSQL `[[shared_state.backends]]` entry. `public_key_env` must point to base64 for the 32-byte Ed25519 public key used to verify compact bearer tokens. Active token rows are loaded into an immutable in-memory snapshot every `snapshot_refresh_interval_ms`; Admin request authentication never queries PostgreSQL. When token store mode is enabled, `admin.bearer_token_env` and `[[admin.rbac.tokens]]` are ignored for authentication.
-
-Bearer tokens must be Ed25519-signed compact tokens with `iss`, `aud`, `sub`, `jti`, `iat`, and `exp` claims. `issuer` and `audience` must match the corresponding claims, `exp - iat` must not exceed `token_ttl_seconds`, and the `jti` must match an enabled, unrevoked, unexpired row in PostgreSQL. Roles and permissions come only from the PostgreSQL snapshot; role or permission claims inside the bearer token are not trusted. Startup fails closed by default when the backend or initial snapshot cannot be loaded. Refresh failures keep the last good snapshot.
+`[ipm].backend` optionally names a PostgreSQL `[[shared_state.backends]]` entry used to initialize the `oxibelt_ipm_*` operational tables. If `backend` is omitted and no shared-state default backend is configured, OxiBelt uses static TOML-defined IPM principals, credentials, policies, and bindings only. With `[ipm].enabled = true`, each `[[ipm.credentials]]` bearer-token environment variable must be set and non-empty at startup.
 
 ```toml
-[admin.token_store]
+[ipm]
 enabled = true
+namespace = "oxibelt"
 backend = "cluster"
-issuer = "oxibelt-admin"
-audience = "oxibelt-admin-api"
-public_key_env = "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY"
-snapshot_refresh_interval_ms = 2000
-token_ttl_seconds = 3600
 fail_closed = true
+
+[[ipm.principals]]
+id = "admin"
+subject = "admin@example.com"
+groups = ["platform-admins"]
+
+[[ipm.credentials]]
+name = "admin-env-token"
+principal = "admin"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+
+[[ipm.policies]]
+name = "admin-full-access"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["*"]
+resources = ["*"]
+
+[[ipm.bindings]]
+group = "platform-admins"
+policy = "admin-full-access"
 
 [shared_state]
 enabled = true
 namespace = "oxibelt"
-admin_tokens_backend = "cluster"
+default_backend = "cluster"
 
 [[shared_state.backends]]
 name = "cluster"
@@ -1019,63 +1051,36 @@ Admin config and downstream TLS endpoints:
 - `POST /admin/v1/config/rollback`
 - `GET /admin/v1/tls/downstream`
 - `POST /admin/v1/tls/downstream/reload`
-- `GET /admin/v1/tokens`
-- `POST /admin/v1/tokens`
-- `GET /admin/v1/tokens/{token_id}`
-- `PATCH /admin/v1/tokens/{token_id}`
-- `DELETE /admin/v1/tokens/{token_id}`
+- `GET /admin/v1/ipm/principals`
+- `GET /admin/v1/ipm/credentials`
+- `GET /admin/v1/ipm/policies`
+- `GET /admin/v1/ipm/bindings`
+- `POST /admin/v1/ipm/simulate`
 
-Config read endpoints require `config.read`. Validate, diff, load, and rollback require their matching `config.*` permissions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS read and reload require `tls.downstream.read` and `tls.downstream.reload`. TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
+Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, and downstream TLS operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
 
-Admin token list/get endpoints require `admin.tokens.read`; create, patch, and delete require the Admin role plus non-denied `admin.tokens.write`. Create registers token metadata and authorization state; the signed bearer token itself must be minted by trusted bootstrap tooling that holds the Ed25519 private key. `oxibelt-admin-token generate-keypair` prints base64 PKCS#8 private-key and raw-public-key material for operator secret stores, and `oxibelt-admin-token mint --seed-sql` signs a bearer token and emits seed SQL for the matching PostgreSQL row. Delete revokes the row and bumps the Admin token generation so other instances drop it on their next snapshot refresh.
-
-OxiBelt initializes the Admin token schema:
+OxiBelt initializes the IPM schema when `[ipm].backend` is configured:
 
 ```sql
-CREATE TABLE IF NOT EXISTS oxibelt_admin_tokens (
+CREATE TABLE IF NOT EXISTS oxibelt_ipm_principals (
   id bigserial PRIMARY KEY,
   namespace text NOT NULL,
-  token_id text NOT NULL,
+  principal_id text NOT NULL,
   subject text NOT NULL,
-  name text NOT NULL,
-  enabled boolean NOT NULL DEFAULT true,
-  revoked boolean NOT NULL DEFAULT false,
-  roles text[] NOT NULL DEFAULT ARRAY[]::text[],
-  permissions text[] NOT NULL DEFAULT ARRAY[]::text[],
-  deny_permissions text[] NOT NULL DEFAULT ARRAY[]::text[],
-  row_version bigint NOT NULL DEFAULT 0,
-  writer_identity text NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz NULL,
-  revoked_at timestamptz NULL,
-  UNIQUE(namespace, token_id)
+  groups text[] NOT NULL DEFAULT ARRAY[]::text[]
 );
-
-CREATE TABLE IF NOT EXISTS oxibelt_admin_token_generation (
-  namespace text PRIMARY KEY,
-  generation bigint NOT NULL DEFAULT 0,
-  updated_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS oxibelt_admin_token_audit (
-  id bigserial PRIMARY KEY,
-  namespace text NOT NULL,
-  token_id text NULL,
-  actor text NOT NULL,
-  operation text NOT NULL,
-  name text NULL,
-  outcome text NOT NULL,
-  error text NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
+CREATE TABLE IF NOT EXISTS oxibelt_ipm_credentials (...);
+CREATE TABLE IF NOT EXISTS oxibelt_ipm_policies (...);
+CREATE TABLE IF NOT EXISTS oxibelt_ipm_policy_bindings (...);
+CREATE TABLE IF NOT EXISTS oxibelt_ipm_generation (...);
+CREATE TABLE IF NOT EXISTS oxibelt_ipm_audit (...);
 ```
 
 Admin file sync endpoint:
 
 - `POST /admin/v1/files/sync`
 
-File sync requires the matching `files.sync.*` permission for every operation root, and `files.delete` for delete operations. The request body is explicit: missing files are never implicitly removed.
+File sync requires `config:SyncFiles`; `apply = "full"` also requires `config:Load`, and `apply = "downstream_tls"` also requires `config:ReloadDownstreamTls`. The request body is explicit: missing files are never implicitly removed.
 
 ```json
 {
@@ -1106,7 +1111,7 @@ Admin lifecycle endpoints:
 - `POST /admin/v1/lifecycle/drain`
 - `POST /admin/v1/lifecycle/undrain`
 
-Lifecycle read requires `viewer` or `admin` and returns `{"draining": bool, "reason": string}`. Drain and undrain require `admin`. Admin drain makes `/ready` return `503 draining`, keeps `/live` at `200 live`, and rejects new data-plane requests with `503 draining` and `Connection: close`; in-flight requests continue. Undrain clears only admin-initiated drain state.
+Lifecycle read requires `lifecycle:Get` and returns `{"draining": bool, "reason": string}`. Drain and undrain require `lifecycle:Drain` and `lifecycle:Undrain`. Admin drain makes `/ready` return `503 draining`, keeps `/live` at `200 live`, and rejects new data-plane requests with `503 draining` and `Connection: close`; in-flight requests continue. Undrain clears only admin-initiated drain state.
 
 Admin WAF telemetry endpoint:
 
@@ -1114,7 +1119,7 @@ Admin WAF telemetry endpoint:
 - `GET /admin/v1/waf/rule-costs`
 - `GET /admin/v1/waf/crs/compatibility`
 
-These endpoints require `viewer` or `admin`. Rule hits returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`. Rule costs returns OxiRule evaluation counters and total/average runtime in nanoseconds using the same authenticated rule metadata; CRS rule cost accounting is intentionally not exposed through the public metrics listener. CRS rule hit entries also include `tags`, `tuned_hits`, latest observed anomaly scores, and latest blocking scores when available. The CRS compatibility endpoint returns the OxiBelt-supported CRS release lines, supported directives/operators/transforms/variables/actions, accepted-but-ignored syntax, fail-closed policy, and known unsupported surfaces.
+These endpoints require the matching `waf:*` IPM actions. Rule hits returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`. Rule costs returns OxiRule evaluation counters and total/average runtime in nanoseconds using the same authenticated rule metadata; CRS rule cost accounting is intentionally not exposed through the public metrics listener. CRS rule hit entries also include `tags`, `tuned_hits`, latest observed anomaly scores, and latest blocking scores when available. The CRS compatibility endpoint returns the OxiBelt-supported CRS release lines, supported directives/operators/transforms/variables/actions, accepted-but-ignored syntax, fail-closed policy, and known unsupported surfaces.
 
 Admin upstream-pool endpoints:
 
@@ -1147,7 +1152,7 @@ POST /cache/purge-tag?policy=default&tag=release-2026-05-09
 POST /admin/v1/cache/purge
 ```
 
-The `/admin/v1/cache/purge` endpoint accepts JSON with `"type": "exact"`, `"prefix"`, or `"tag"`, plus the same selectors used by the query endpoints. Exact purge uses `policy`, `scheme`, `host`, `uri`, and optional `partition`; prefix purge uses `path_prefix`; tag purge uses `tag` plus optional `scheme`, `host`, and `partition`. It returns `{"purged": number}` and requires a bearer token with `cache_operator` or `admin`.
+The `/admin/v1/cache/purge` endpoint accepts JSON with `"type": "exact"`, `"prefix"`, or `"tag"`, plus the same selectors used by the query endpoints. Exact purge uses `policy`, `scheme`, `host`, `uri`, and optional `partition`; prefix purge uses `path_prefix`; tag purge uses `tag` plus optional `scheme`, `host`, and `partition`. It returns `{"purged": number}` and requires the matching `cache:PurgeObject`, `cache:PurgePrefix`, or `cache:PurgeTag` IPM action.
 
 Query-string purge requests also accept optional `partition`. When `[admin.cache_purge_signing]` is enabled, the `/cache/purge*` query endpoints may authenticate with `X-OxiBelt-Cache-Timestamp`, `X-OxiBelt-Cache-Nonce`, and `X-OxiBelt-Cache-Signature` instead of a bearer token. The signature is base64 HMAC-SHA256 over `OXIBELT-CACHE-PURGE-V1\n{method}\n{path_and_query}\n{sha256(body)}\n{timestamp}\n{nonce}`; signed purge requests must use an empty body. The JSON v1 purge endpoint is bearer-token only.
 
@@ -1158,7 +1163,7 @@ POST /admin/v1/cache/key-explain
 POST /admin/v1/cache/warm
 ```
 
-`key-explain` requires `viewer` and accepts `{ "policy": "default", "method": "GET", "scheme": "https", "host": "example.test", "uri": "/asset.css", "headers": {}, "response_headers": {} }`. It returns the selected policy, partition, base key, optional variant key, Vary fields, and cacheability reasons. `warm` requires `cache_operator` and accepts `{ "items": [{ "scheme": "https", "host": "example.test", "uri": "/asset.css", "method": "GET", "headers": {} }] }`; methods are limited to `GET` and `HEAD`, and each item returns `stored`, `not_cacheable`, `upstream_error`, or `validation_error`.
+`key-explain` requires `cache:ExplainKey` and accepts `{ "policy": "default", "method": "GET", "scheme": "https", "host": "example.test", "uri": "/asset.css", "headers": {}, "response_headers": {} }`. It returns the selected policy, partition, base key, optional variant key, Vary fields, and cacheability reasons. `warm` requires `cache:Warm` and accepts `{ "items": [{ "scheme": "https", "host": "example.test", "uri": "/asset.css", "method": "GET", "headers": {} }] }`; methods are limited to `GET` and `HEAD`, and each item returns `stored`, `not_cacheable`, `upstream_error`, or `validation_error`.
 
 Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics include aggregate TLS server session storage diagnostic counters for stateful resumption cache calls and approximate lock/put timing. With `metrics.detail = "detailed"`, Prometheus also includes bounded-label HTTP, upstream, cache, TLS handshake, QUIC Retry, WebSocket, WebTransport, and TURN counters/histograms using route/upstream/protocol/status/cache-reason style labels. Cache miss reasons include lookup misses, fill lock timeouts, shared fill lock conflicts, and fills that completed without storing an entry. Detailed mode also emits `oxibelt_cache_fill_stage_duration_ms` with `route`, `policy`, `stage`, and `outcome` labels for `lock_wait`, `head_decision`, `body_collect`, `local_store`, and `shared_store`. `metrics.detail = "basic"` keeps only aggregate counters and gauges. `metrics.histogram_buckets_ms` must be a non-empty strictly increasing list of positive millisecond buckets. The public metrics listener omits detailed WAF rule names, IDs, modes, routes, and per-rule hit/cost counters because it is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoints for rule-level data.
 
