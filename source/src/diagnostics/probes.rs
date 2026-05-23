@@ -413,8 +413,21 @@ async fn postgres_select_one(backend: &SharedStateBackendConfig) -> anyhow::Resu
     .acquire_timeout(Duration::from_millis(backend.connect_timeout_ms))
     .connect_with(options)
     .await?;
-  sqlx::query("SELECT 1").execute(&pool).await?;
+  run_postgres_select_one(Duration::from_millis(backend.connect_timeout_ms), async {
+    sqlx::query("SELECT 1").execute(&pool).await?;
+    Ok(())
+  })
+  .await?;
   Ok(())
+}
+
+async fn run_postgres_select_one<F>(timeout: Duration, query: F) -> anyhow::Result<()>
+where
+  F: std::future::Future<Output = anyhow::Result<()>>,
+{
+  tokio::time::timeout(timeout, query)
+    .await
+    .map_err(|_| anyhow!("PostgreSQL SELECT 1 timed out"))?
 }
 
 fn remote_signer_describe_key(config: &Config) -> anyhow::Result<()> {
@@ -432,4 +445,28 @@ fn remote_signer_describe_key(config: &Config) -> anyhow::Result<()> {
     cert,
   )?;
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn postgres_select_one_times_out_when_query_never_completes() {
+    let error = run_postgres_select_one(
+      Duration::from_millis(5),
+      std::future::pending::<anyhow::Result<()>>(),
+    )
+    .await
+    .expect_err("pending PostgreSQL SELECT 1 should time out");
+
+    assert_eq!(error.to_string(), "PostgreSQL SELECT 1 timed out");
+  }
+
+  #[tokio::test]
+  async fn postgres_select_one_allows_completed_query() {
+    run_postgres_select_one(Duration::from_secs(1), async { Ok(()) })
+      .await
+      .expect("completed PostgreSQL SELECT 1 should succeed");
+  }
 }
