@@ -209,6 +209,47 @@ fn waf_file_permissions_authorize_matching_operations() {
 }
 
 #[test]
+fn waf_file_permissions_reject_cross_type_paths() {
+  let (actor, ipm) = actor_and_ipm(&["waf:PutOxiRule"], &["oxibelt:oxibelt:waf:oxirule/*"]);
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  let group_path_as_rule = sync_request(
+    admin_control::AdminApplyMode::None,
+    vec![put(
+      admin_control::AdminFileRoot::OxiRule,
+      "groups/main.oxirule-group.toml",
+    )],
+  );
+  let error = check_file_sync_permissions(&authorization, &group_path_as_rule)
+    .expect_err("group file path should not authorize as an OxiRule file");
+  assert!(matches!(
+    error,
+    FileSyncPermissionError::InvalidPath(message)
+      if message.contains("root oxirule can only manage .oxirule.toml files")
+  ));
+
+  let (actor, ipm) = actor_and_ipm(
+    &["waf:PutOxiRuleGroup"],
+    &["oxibelt:oxibelt:waf:oxirule-group/*"],
+  );
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  let rule_path_as_group = sync_request(
+    admin_control::AdminApplyMode::None,
+    vec![put(
+      admin_control::AdminFileRoot::OxiRuleGroup,
+      "rules/main.oxirule.toml",
+    )],
+  );
+  let error = check_file_sync_permissions(&authorization, &rule_path_as_group)
+    .expect_err("rule file path should not authorize as an OxiRule group file");
+  assert!(matches!(
+    error,
+    FileSyncPermissionError::InvalidPath(message)
+      if message.contains("root oxirule_group can only manage .oxirule-group.toml files")
+  ));
+}
+
+#[test]
 fn mixed_file_sync_requires_every_operation_permission() {
   let (actor, ipm) = actor_and_ipm(&["waf:PutOxiRule"], &["oxibelt:oxibelt:waf:oxirule/*"]);
   let context = IpmRequestContext::default();

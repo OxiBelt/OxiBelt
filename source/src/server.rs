@@ -49,6 +49,7 @@ mod admin_control;
 mod admin_ipm;
 mod admin_ops;
 mod connection_errors;
+mod file_sync_path;
 mod plain_http;
 #[cfg(test)]
 mod reload_tests;

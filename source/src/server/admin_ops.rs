@@ -1,5 +1,3 @@
-use std::path::{Component, Path};
-
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde_json::json;
@@ -11,7 +9,7 @@ use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminActor, AdminAuthorization};
-use super::{admin, admin_body::collect_admin_json, admin_control};
+use super::{admin, admin_body::collect_admin_json, admin_control, file_sync_path};
 
 #[cfg(test)]
 mod tests;
@@ -375,62 +373,48 @@ fn file_sync_operation_permissions(
       ])
     }
     (admin_control::AdminFileRoot::OxiRule, admin_control::AdminFileOperationKind::Put) => {
-      waf_file_permission("waf:PutOxiRule", "oxirule", &operation.path)
+      waf_file_permission(operation.root, "waf:PutOxiRule", "oxirule", &operation.path)
     }
     (admin_control::AdminFileRoot::OxiRule, admin_control::AdminFileOperationKind::Delete) => {
-      waf_file_permission("waf:DeleteOxiRule", "oxirule", &operation.path)
+      waf_file_permission(
+        operation.root,
+        "waf:DeleteOxiRule",
+        "oxirule",
+        &operation.path,
+      )
     }
     (admin_control::AdminFileRoot::OxiRuleGroup, admin_control::AdminFileOperationKind::Put) => {
-      waf_file_permission("waf:PutOxiRuleGroup", "oxirule-group", &operation.path)
+      waf_file_permission(
+        operation.root,
+        "waf:PutOxiRuleGroup",
+        "oxirule-group",
+        &operation.path,
+      )
     }
     (admin_control::AdminFileRoot::OxiRuleGroup, admin_control::AdminFileOperationKind::Delete) => {
-      waf_file_permission("waf:DeleteOxiRuleGroup", "oxirule-group", &operation.path)
+      waf_file_permission(
+        operation.root,
+        "waf:DeleteOxiRuleGroup",
+        "oxirule-group",
+        &operation.path,
+      )
     }
   }
 }
 
 fn waf_file_permission(
+  root: admin_control::AdminFileRoot,
   action: &'static str,
   resource_prefix: &str,
   path: &str,
 ) -> Result<Vec<RequiredIpmPermission>, FileSyncPermissionError> {
   let path =
-    normalized_file_sync_relative_path(path).map_err(FileSyncPermissionError::InvalidPath)?;
+    file_sync_path::normalized_relative_path(path).map_err(FileSyncPermissionError::InvalidPath)?;
+  file_sync_path::validate_root_path(root, &path).map_err(FileSyncPermissionError::InvalidPath)?;
   Ok(vec![RequiredIpmPermission {
     action,
     resource_name: format!("{resource_prefix}/{path}"),
   }])
-}
-
-fn normalized_file_sync_relative_path(path: &str) -> Result<String, String> {
-  if path.trim().is_empty() {
-    return Err("file sync path must not be empty".to_string());
-  }
-  let path = Path::new(path);
-  if path.to_str().is_none() {
-    return Err("file sync path must be valid UTF-8".to_string());
-  }
-  let mut parts = Vec::new();
-  for component in path.components() {
-    match component {
-      Component::Normal(part) => parts.push(
-        part
-          .to_str()
-          .ok_or_else(|| "file sync path must be valid UTF-8".to_string())?
-          .to_string(),
-      ),
-      Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-        return Err(
-          "file sync path must not contain absolute, current-directory, or parent-directory components"
-            .to_string(),
-        );
-      }
-    }
-  }
-  if parts.is_empty() {
-    return Err("file sync path must not be empty".to_string());
-  }
-  Ok(parts.join("/"))
 }
 
 fn file_sync_apply_permission(

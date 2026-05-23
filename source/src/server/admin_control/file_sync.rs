@@ -10,6 +10,7 @@ use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::state::AppHandle;
 
+use super::super::file_sync_path;
 use crate::server::ListenerSupervisor;
 
 use super::{
@@ -96,7 +97,11 @@ fn commit_file_sync(
   }
   let mut committed = Vec::new();
   for (index, operation) in request.operations.iter().enumerate() {
-    let target = resolve_sync_target(config, operation.root, &operation.path)?;
+    let normalized_path = file_sync_path::normalized_relative_path(&operation.path)
+      .map_err(|message| anyhow!("operation {index} has invalid file sync path: {message}"))?;
+    file_sync_path::validate_root_path(operation.root, &normalized_path)
+      .map_err(|message| anyhow!("operation {index} has invalid file sync path: {message}"))?;
+    let target = resolve_sync_target(config, operation.root, &normalized_path)?;
     verify_expected_hash(&target, operation.expected_sha256.as_deref())?;
     match operation.op {
       AdminFileOperationKind::Put => {
@@ -123,13 +128,10 @@ fn resolve_sync_target(
   root: AdminFileRoot,
   path: &str,
 ) -> anyhow::Result<PathBuf> {
-  if path.trim().is_empty() {
-    bail!("file sync path must not be empty");
-  }
-  let relative = Path::new(path);
-  if relative.to_str().is_none() {
-    bail!("file sync path must be valid UTF-8");
-  }
+  let normalized_path =
+    file_sync_path::normalized_relative_path(path).map_err(|message| anyhow!(message))?;
+  file_sync_path::validate_root_path(root, &normalized_path).map_err(|message| anyhow!(message))?;
+  let relative = Path::new(&normalized_path);
   let base = match root {
     AdminFileRoot::Config => config
       .source_paths
@@ -326,6 +328,32 @@ mod tests {
     (temp_dir, config)
   }
 
+  fn put_request(root: AdminFileRoot, path: &str, content: &str) -> AdminFilesSyncRequest {
+    AdminFilesSyncRequest {
+      apply: AdminApplyMode::None,
+      operations: vec![AdminFileOperation {
+        op: AdminFileOperationKind::Put,
+        root,
+        path: path.to_string(),
+        expected_sha256: None,
+        content: Some(content.to_string()),
+      }],
+    }
+  }
+
+  fn delete_request(root: AdminFileRoot, path: &str) -> AdminFilesSyncRequest {
+    AdminFilesSyncRequest {
+      apply: AdminApplyMode::None,
+      operations: vec![AdminFileOperation {
+        op: AdminFileOperationKind::Delete,
+        root,
+        path: path.to_string(),
+        expected_sha256: None,
+        content: None,
+      }],
+    }
+  }
+
   #[test]
   fn file_sync_rejects_path_escape_and_checksum_mismatch() {
     let (_temp_dir, config) = load_temp_config("admin-file-sync-rejects");
@@ -352,6 +380,29 @@ mod tests {
       }],
     };
     assert!(commit_file_sync(&mismatch, &config).is_err());
+  }
+
+  #[test]
+  fn file_sync_put_accepts_oxirule_rule_files() {
+    let (_temp_dir, config) = load_temp_config("admin-file-sync-rule");
+    let valid = put_request(
+      AdminFileRoot::OxiRule,
+      "rules/main.oxirule.toml",
+      "when = \"true\"\n",
+    );
+
+    let committed = commit_file_sync(&valid, &config).expect("rule file should sync");
+    assert_eq!(committed.len(), 1);
+    let rule_path = config
+      .source_paths
+      .oxirule_dir
+      .as_ref()
+      .expect("oxirule dir should be set")
+      .join("rules/main.oxirule.toml");
+    assert_eq!(
+      std::fs::read_to_string(rule_path).expect("rule file should be written"),
+      "when = \"true\"\n"
+    );
   }
 
   #[test]
@@ -388,5 +439,57 @@ when = "true"
       }],
     };
     assert!(commit_file_sync(&invalid, &config).is_err());
+  }
+
+  #[test]
+  fn file_sync_rejects_cross_type_oxirule_paths() {
+    let (_temp_dir, config) = load_temp_config("admin-file-sync-cross-type");
+    let oxirule_dir = config
+      .source_paths
+      .oxirule_dir
+      .as_ref()
+      .expect("oxirule dir should be set");
+
+    let group_path_as_rule = put_request(
+      AdminFileRoot::OxiRule,
+      "groups/bad.oxirule-group.toml",
+      "[[rule_groups]]\nname = ''\n",
+    );
+    let error = match commit_file_sync(&group_path_as_rule, &config) {
+      Ok(_) => panic!("group file path should not sync through OxiRule root"),
+      Err(error) => error.to_string(),
+    };
+    assert!(error.contains("root oxirule can only manage .oxirule.toml files"));
+    assert!(!oxirule_dir.join("groups/bad.oxirule-group.toml").exists());
+
+    let rule_path_as_group = put_request(
+      AdminFileRoot::OxiRuleGroup,
+      "rules/main.oxirule.toml",
+      "[[rule_groups]]\nname = \"valid\"\n",
+    );
+    let error = match commit_file_sync(&rule_path_as_group, &config) {
+      Ok(_) => panic!("rule file path should not sync through OxiRule group root"),
+      Err(error) => error.to_string(),
+    };
+    assert!(error.contains("root oxirule_group can only manage .oxirule-group.toml files"));
+    assert!(!oxirule_dir.join("rules/main.oxirule.toml").exists());
+
+    let existing_group = oxirule_dir.join("groups/main.oxirule-group.toml");
+    std::fs::create_dir_all(
+      existing_group
+        .parent()
+        .expect("group file should have parent"),
+    )
+    .expect("group directory should be created");
+    std::fs::write(&existing_group, "[[rule_groups]]\nname = \"existing\"\n")
+      .expect("group file should be written");
+    let delete_group_as_rule =
+      delete_request(AdminFileRoot::OxiRule, "groups/main.oxirule-group.toml");
+    let error = match commit_file_sync(&delete_group_as_rule, &config) {
+      Ok(_) => panic!("group file path should not delete through OxiRule root"),
+      Err(error) => error.to_string(),
+    };
+    assert!(error.contains("root oxirule can only manage .oxirule.toml files"));
+    assert!(existing_group.exists());
   }
 }

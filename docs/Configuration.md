@@ -1080,7 +1080,7 @@ Admin file sync endpoint:
 
 - `POST /admin/v1/files/sync`
 
-File sync authorizes each operation by root and operation type. `root = "config"` requires `config:SyncFiles`, and config deletes also require `config:SyncFiles` on resource `delete`. `root = "oxirule"` requires `waf:PutOxiRule` or `waf:DeleteOxiRule` on `oxibelt:<namespace>:waf:oxirule/<path>`. `root = "oxirule_group"` requires `waf:PutOxiRuleGroup` or `waf:DeleteOxiRuleGroup` on `oxibelt:<namespace>:waf:oxirule-group/<path>`. `apply = "oxirule"` requires `waf:ReloadOxiRule` on `*`, `apply = "full"` also requires `config:Load`, and `apply = "downstream_tls"` also requires `config:ReloadDownstreamTls`. The request body is explicit: missing files are never implicitly removed.
+File sync authorizes each operation by root and operation type. `root = "config"` requires `config:SyncFiles`, and config deletes also require `config:SyncFiles` on resource `delete`. `root = "oxirule"` requires `waf:PutOxiRule` or `waf:DeleteOxiRule` on `oxibelt:<namespace>:waf:oxirule/<path>` and only accepts `.oxirule.toml` paths. `root = "oxirule_group"` requires `waf:PutOxiRuleGroup` or `waf:DeleteOxiRuleGroup` on `oxibelt:<namespace>:waf:oxirule-group/<path>` and only accepts `.oxirule-group.toml` paths. `apply = "oxirule"` requires `waf:ReloadOxiRule` on `*`, `apply = "full"` also requires `config:Load`, and `apply = "downstream_tls"` also requires `config:ReloadDownstreamTls`. The request body is explicit: missing files are never implicitly removed.
 
 ```json
 {
@@ -1103,7 +1103,7 @@ File sync authorizes each operation by root and operation type. `root = "config"
 }
 ```
 
-`root` is `config`, `oxirule`, or `oxirule_group`. Paths are UTF-8 relative paths, normalized, and must stay under the configured root. `put` writes `content`, optionally guarded by `expected_sha256`; `delete` removes exactly the named file. `apply` defaults to `none`; `oxirule` reloads rule policy from disk, `full` reloads the full TOML/runtime view from disk, and `downstream_tls` reloads downstream TLS material. File sync commits with same-directory temporary files and restores touched files if validation or apply fails. The endpoint is not a certificate lifecycle API: private key upload, ACME credentials, DNS provider credentials, and ACME issuance are out of scope.
+`root` is `config`, `oxirule`, or `oxirule_group`. Paths are UTF-8 relative paths, normalized, and must stay under the configured root. The two WAF roots share the configured OxiRule directory but are separated by suffix: use `oxirule` for `.oxirule.toml` rule files and `oxirule_group` for `.oxirule-group.toml` shared group files. `put` writes `content`, optionally guarded by `expected_sha256`; `delete` removes exactly the named file. `apply` defaults to `none`; `oxirule` reloads rule policy from disk, `full` reloads the full TOML/runtime view from disk, and `downstream_tls` reloads downstream TLS material. File sync commits with same-directory temporary files and restores touched files if validation or apply fails. The endpoint is not a certificate lifecycle API: private key upload, ACME credentials, DNS provider credentials, and ACME issuance are out of scope.
 
 Admin lifecycle endpoints:
 
