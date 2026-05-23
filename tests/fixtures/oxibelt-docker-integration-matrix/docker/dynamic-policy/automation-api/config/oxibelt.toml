@@ -34,10 +34,50 @@ bearer_token_env = "OXIBELT_ADMIN_TOKEN"
 transport = "plaintext_allowlist"
 plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 
-[[admin.rbac.tokens]]
+[ipm]
+enabled = true
+
+[[ipm.principals]]
+id = "admin"
+subject = "admin@example.test"
+
+[[ipm.credentials]]
+name = "admin"
+principal = "admin"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+
+[[ipm.policies]]
+name = "admin-full-access"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["*"]
+resources = ["*"]
+
+[[ipm.bindings]]
+principal = "admin"
+policy = "admin-full-access"
+
+[[ipm.principals]]
+id = "security-operator"
+subject = "security-operator@example.test"
+
+[[ipm.credentials]]
 name = "security-operator"
+principal = "security-operator"
 bearer_token_env = "OXIBELT_SECURITY_TOKEN"
-roles = ["security_operator"]
+
+[[ipm.policies]]
+name = "dynamic-policy-automation"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["dynamic-policy:*"]
+resources = ["*"]
+
+[[ipm.bindings]]
+principal = "security-operator"
+policy = "dynamic-policy-automation"
 
 [shared_state]
 enabled = true

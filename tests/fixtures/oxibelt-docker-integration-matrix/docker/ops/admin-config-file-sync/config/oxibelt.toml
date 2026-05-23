@@ -41,17 +41,76 @@ bearer_token_env = "OXIBELT_ADMIN_TOKEN"
 transport = "plaintext_allowlist"
 plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 
-[[admin.rbac.tokens]]
-name = "viewer"
-bearer_token_env = "OXIBELT_VIEWER_TOKEN"
-roles = ["viewer"]
+[ipm]
+enabled = true
 
-[[admin.rbac.tokens]]
+[[ipm.principals]]
+id = "admin"
+subject = "admin@example.test"
+
+[[ipm.credentials]]
+name = "admin"
+principal = "admin"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+
+[[ipm.policies]]
+name = "admin-full-access"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["*"]
+resources = ["*"]
+
+[[ipm.bindings]]
+principal = "admin"
+policy = "admin-full-access"
+
+[[ipm.principals]]
+id = "viewer"
+subject = "viewer@example.test"
+
+[[ipm.credentials]]
+name = "viewer"
+principal = "viewer"
+bearer_token_env = "OXIBELT_VIEWER_TOKEN"
+
+[[ipm.policies]]
+name = "viewer-config-read"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["config:GetEffective", "config:ReadDownstreamTls"]
+resources = ["*"]
+
+[[ipm.bindings]]
+principal = "viewer"
+policy = "viewer-config-read"
+
+[[ipm.principals]]
+id = "config-readonly"
+subject = "config-readonly@example.test"
+
+[[ipm.credentials]]
 name = "config-readonly"
+principal = "config-readonly"
 bearer_token_env = "OXIBELT_UPSTREAM_TOKEN"
-roles = []
-permissions = ["config.read", "config.validate", "config.diff", "tls.downstream.read"]
-deny_permissions = ["config.load"]
+
+[[ipm.policies]]
+name = "config-readonly"
+
+[[ipm.policies.statements]]
+effect = "deny"
+actions = ["config:Load"]
+resources = ["*"]
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["config:GetStatus", "config:Validate", "config:Diff"]
+resources = ["*"]
+
+[[ipm.bindings]]
+principal = "config-readonly"
+policy = "config-readonly"
 
 [waf]
 enabled = true
