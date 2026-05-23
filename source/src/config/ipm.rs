@@ -437,7 +437,16 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
     "dynamic-policy" => &[
       "List", "Get", "Create", "Update", "Delete", "Import", "Export",
     ],
-    "waf" => &["GetRuleHits", "GetRuleCosts", "GetCrsCompatibility"],
+    "waf" => &[
+      "GetRuleHits",
+      "GetRuleCosts",
+      "GetCrsCompatibility",
+      "PutOxiRule",
+      "DeleteOxiRule",
+      "PutOxiRuleGroup",
+      "DeleteOxiRuleGroup",
+      "ReloadOxiRule",
+    ],
     "lifecycle" => &["Get", "Drain", "Undrain"],
     "route" => &["Invoke"],
     "stream" => &["Connect"],

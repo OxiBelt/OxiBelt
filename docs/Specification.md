@@ -198,7 +198,7 @@ Lifecycle endpoints are:
 - `POST /admin/v1/config/diff`: requires `config:Diff`, returns a coarse redacted effective-config diff for submitted TOML.
 - `POST /admin/v1/config/load`: requires `config:Load` and matching `If-Match`, installs a runtime-only config snapshot.
 - `POST /admin/v1/config/rollback`: requires `config:Rollback` and matching `If-Match`, restores the last-good runtime snapshot.
-- `POST /admin/v1/files/sync`: requires `config:SyncFiles`, writes explicit files under configured config/OxiRule roots and can apply `none`, `oxirule`, `full`, or `downstream_tls`.
+- `POST /admin/v1/files/sync`: writes explicit files under configured config/OxiRule roots and can apply `none`, `oxirule`, `full`, or `downstream_tls`. Config-root writes require `config:SyncFiles`; OxiRule and OxiRule group writes require the matching `waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, or `waf:DeleteOxiRuleGroup`; `apply = "oxirule"` requires `waf:ReloadOxiRule`.
 - `GET /admin/v1/tls/downstream`: requires `config:ReadDownstreamTls`, returns downstream TLS material status.
 - `POST /admin/v1/tls/downstream/reload`: requires `config:ReloadDownstreamTls` and matching `If-Match`, reloads configured certificate, key, and static OCSP files from disk.
 - `GET /admin/v1/lifecycle`: requires `lifecycle:Get`, returns draining state and reason.

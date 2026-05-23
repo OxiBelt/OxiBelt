@@ -3265,6 +3265,68 @@ policy = "config-read"
 }
 
 #[test]
+fn ipm_config_accepts_oxirule_management_actions() {
+    unsafe {
+        std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+    }
+    let temp_dir = common::TempDir::new("ipm-oxirule-actions");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "ipm-oxirule-actions");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[ipm]
+enabled = true
+namespace = "default"
+
+[[ipm.principals]]
+id = "waf-deployer"
+subject = "oidc:ci/waf-deployer"
+groups = ["waf-operators"]
+
+[[ipm.credentials]]
+name = "waf-deployer-token"
+principal = "waf-deployer"
+bearer_token_env = "OXIBELT_IPM_TOKEN_TEST"
+
+[[ipm.policies]]
+name = "oxirule-management"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = [
+    "waf:PutOxiRule",
+    "waf:DeleteOxiRule",
+    "waf:PutOxiRuleGroup",
+    "waf:DeleteOxiRuleGroup",
+]
+resources = [
+    "oxibelt:default:waf:oxirule/*",
+    "oxibelt:default:waf:oxirule-group/*",
+]
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["waf:ReloadOxiRule"]
+resources = ["*"]
+
+[[ipm.bindings]]
+group = "waf-operators"
+policy = "oxirule-management"
+    "#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+}
+
+#[test]
 fn ipm_config_rejects_unknown_action_resource_condition_and_legacy_token_store() {
     unsafe {
         std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
@@ -3319,6 +3381,21 @@ policy = "policy"
         error
             .to_string()
             .contains("unsupported action config:Teleport"),
+        "unexpected error: {error}"
+    );
+
+    let unknown_waf_action = base
+        .replace("{action}", "waf:Teleport")
+        .replace("{resource}", "oxibelt:default:waf:*")
+        .replace("{condition}", "");
+    let config: Config = toml::from_str(&unknown_waf_action).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("unknown WAF action should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported action waf:Teleport"),
         "unexpected error: {error}"
     );
 

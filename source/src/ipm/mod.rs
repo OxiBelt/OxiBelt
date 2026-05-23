@@ -234,6 +234,28 @@ impl IpmRuntime {
     credentials
   }
 
+  #[cfg(test)]
+  pub(crate) fn test_with_actor_policy(
+    namespace: &str,
+    actor: IpmActor,
+    policy: IpmPolicyConfig,
+  ) -> Self {
+    let principal = actor.principal.clone();
+    let policy_name = policy.name.clone();
+    Self {
+      inner: Arc::new(IpmRuntimeInner {
+        namespace: namespace.to_string(),
+        credentials: Vec::new(),
+        principals: HashMap::from([(principal.clone(), actor)]),
+        policies: HashMap::from([(policy_name.clone(), policy)]),
+        principal_bindings: HashMap::from([(principal, vec![policy_name])]),
+        group_bindings: HashMap::new(),
+        legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
+        allow_legacy_bootstrap: false,
+      }),
+    }
+  }
+
   fn policies_for_actor(&self, actor: &IpmActor) -> Vec<&IpmPolicyConfig> {
     let mut names = Vec::new();
     if let Some(policies) = self.inner.principal_bindings.get(&actor.principal) {

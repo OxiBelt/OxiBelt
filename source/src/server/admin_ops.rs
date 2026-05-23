@@ -1,3 +1,5 @@
+use std::path::{Component, Path};
+
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde_json::json;
@@ -11,6 +13,9 @@ use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminActor, admin_actor_is_allowed};
 use super::{admin, admin_body::collect_admin_json, admin_control};
+
+#[cfg(test)]
+mod tests;
 
 pub(super) fn admin_waf_response(
   snapshot: &AppSnapshot,
@@ -307,18 +312,13 @@ pub(super) async fn admin_files_response(
   if let Some(response) = admin_control::validate_file_sync_payload(&payload) {
     return response;
   }
-  if !admin_actor_is_allowed(actor, ipm, "config:SyncFiles", "*") {
-    return permission_denied(actor, "config:SyncFiles");
-  }
-  for operation in &payload.operations {
-    if operation.op == admin_control::AdminFileOperationKind::Delete
-      && !admin_actor_is_allowed(actor, ipm, "config:SyncFiles", "delete")
-    {
-      return permission_denied(actor, "config:SyncFiles");
-    }
-  }
-  if let Err(action) = check_file_sync_apply_permission(actor, ipm, payload.apply) {
-    return permission_denied(actor, action);
+  if let Err(error) = check_file_sync_permissions(actor, ipm, &payload) {
+    return match error {
+      FileSyncPermissionError::Denied(action) => permission_denied(actor, action),
+      FileSyncPermissionError::InvalidPath(message) => {
+        text_response(StatusCode::BAD_REQUEST, &message)
+      }
+    };
   }
   admin_control
     .sync_files(actor.name.clone(), if_match, payload)
@@ -326,34 +326,147 @@ pub(super) async fn admin_files_response(
     .into_http()
 }
 
-fn check_file_sync_apply_permission(
+struct RequiredIpmPermission {
+  action: &'static str,
+  resource_name: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum FileSyncPermissionError {
+  Denied(&'static str),
+  InvalidPath(String),
+}
+
+fn check_file_sync_permissions(
   actor: &AdminActor,
   ipm: &IpmRuntime,
-  apply: admin_control::AdminApplyMode,
-) -> Result<(), &'static str> {
-  match apply {
-    admin_control::AdminApplyMode::None => Ok(()),
-    admin_control::AdminApplyMode::Full => require_ipm_action(actor, ipm, "config:Load"),
-    admin_control::AdminApplyMode::DownstreamTls => {
-      require_ipm_action(actor, ipm, "config:ReloadDownstreamTls")
+  payload: &admin_control::AdminFilesSyncRequest,
+) -> Result<(), FileSyncPermissionError> {
+  for operation in &payload.operations {
+    for permission in file_sync_operation_permissions(operation)? {
+      require_ipm_permission(actor, ipm, permission)?;
     }
-    admin_control::AdminApplyMode::OxiRule => require_ipm_action(actor, ipm, "config:SyncFiles"),
+  }
+  if let Some(permission) = file_sync_apply_permission(payload.apply) {
+    require_ipm_permission(actor, ipm, permission)?;
+  }
+  Ok(())
+}
+
+fn file_sync_operation_permissions(
+  operation: &admin_control::AdminFileOperation,
+) -> Result<Vec<RequiredIpmPermission>, FileSyncPermissionError> {
+  match (operation.root, operation.op) {
+    (admin_control::AdminFileRoot::Config, admin_control::AdminFileOperationKind::Put) => {
+      Ok(vec![RequiredIpmPermission {
+        action: "config:SyncFiles",
+        resource_name: "*".to_string(),
+      }])
+    }
+    (admin_control::AdminFileRoot::Config, admin_control::AdminFileOperationKind::Delete) => {
+      Ok(vec![
+        RequiredIpmPermission {
+          action: "config:SyncFiles",
+          resource_name: "*".to_string(),
+        },
+        RequiredIpmPermission {
+          action: "config:SyncFiles",
+          resource_name: "delete".to_string(),
+        },
+      ])
+    }
+    (admin_control::AdminFileRoot::OxiRule, admin_control::AdminFileOperationKind::Put) => {
+      waf_file_permission("waf:PutOxiRule", "oxirule", &operation.path)
+    }
+    (admin_control::AdminFileRoot::OxiRule, admin_control::AdminFileOperationKind::Delete) => {
+      waf_file_permission("waf:DeleteOxiRule", "oxirule", &operation.path)
+    }
+    (admin_control::AdminFileRoot::OxiRuleGroup, admin_control::AdminFileOperationKind::Put) => {
+      waf_file_permission("waf:PutOxiRuleGroup", "oxirule-group", &operation.path)
+    }
+    (admin_control::AdminFileRoot::OxiRuleGroup, admin_control::AdminFileOperationKind::Delete) => {
+      waf_file_permission("waf:DeleteOxiRuleGroup", "oxirule-group", &operation.path)
+    }
   }
 }
 
-fn require_ipm_action(
+fn waf_file_permission(
+  action: &'static str,
+  resource_prefix: &str,
+  path: &str,
+) -> Result<Vec<RequiredIpmPermission>, FileSyncPermissionError> {
+  let path =
+    normalized_file_sync_relative_path(path).map_err(FileSyncPermissionError::InvalidPath)?;
+  Ok(vec![RequiredIpmPermission {
+    action,
+    resource_name: format!("{resource_prefix}/{path}"),
+  }])
+}
+
+fn normalized_file_sync_relative_path(path: &str) -> Result<String, String> {
+  if path.trim().is_empty() {
+    return Err("file sync path must not be empty".to_string());
+  }
+  let path = Path::new(path);
+  if path.to_str().is_none() {
+    return Err("file sync path must be valid UTF-8".to_string());
+  }
+  let mut parts = Vec::new();
+  for component in path.components() {
+    match component {
+      Component::Normal(part) => parts.push(
+        part
+          .to_str()
+          .ok_or_else(|| "file sync path must be valid UTF-8".to_string())?
+          .to_string(),
+      ),
+      Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+        return Err(
+          "file sync path must not contain absolute, current-directory, or parent-directory components"
+            .to_string(),
+        );
+      }
+    }
+  }
+  if parts.is_empty() {
+    return Err("file sync path must not be empty".to_string());
+  }
+  Ok(parts.join("/"))
+}
+
+fn file_sync_apply_permission(
+  apply: admin_control::AdminApplyMode,
+) -> Option<RequiredIpmPermission> {
+  match apply {
+    admin_control::AdminApplyMode::None => None,
+    admin_control::AdminApplyMode::Full => Some(RequiredIpmPermission {
+      action: "config:Load",
+      resource_name: "*".to_string(),
+    }),
+    admin_control::AdminApplyMode::DownstreamTls => Some(RequiredIpmPermission {
+      action: "config:ReloadDownstreamTls",
+      resource_name: "*".to_string(),
+    }),
+    admin_control::AdminApplyMode::OxiRule => Some(RequiredIpmPermission {
+      action: "waf:ReloadOxiRule",
+      resource_name: "*".to_string(),
+    }),
+  }
+}
+
+fn require_ipm_permission(
   actor: &AdminActor,
   ipm: &IpmRuntime,
-  action: &'static str,
-) -> Result<(), &'static str> {
-  if admin_actor_is_allowed(actor, ipm, action, "*") {
+  permission: RequiredIpmPermission,
+) -> Result<(), FileSyncPermissionError> {
+  if admin_actor_is_allowed(actor, ipm, permission.action, &permission.resource_name) {
     Ok(())
   } else {
-    Err(action)
+    Err(FileSyncPermissionError::Denied(permission.action))
   }
 }
 
-fn permission_denied(actor: &AdminActor, operation: &'static str) -> Response<ProxyBody> {
+fn permission_denied(actor: &AdminActor, operation: &str) -> Response<ProxyBody> {
   warn!(
     event = "oxibelt.admin.audit",
     actor = %actor.name,

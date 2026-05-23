@@ -404,6 +404,31 @@ fail_closed = true
 #[[ipm.bindings]]
 # group = "platform-admins"
 # policy = "admin-full-access"
+#
+#[[ipm.policies]]
+# name = "oxirule-file-management"
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = [
+#   "waf:PutOxiRule",
+#   "waf:DeleteOxiRule",
+#   "waf:PutOxiRuleGroup",
+#   "waf:DeleteOxiRuleGroup",
+# ]
+# resources = [
+#   "oxibelt:oxibelt:waf:oxirule/*",
+#   "oxibelt:oxibelt:waf:oxirule-group/*",
+# ]
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["waf:ReloadOxiRule"]
+# resources = ["*"]
+#
+#[[ipm.bindings]]
+# group = "platform-admins"
+# policy = "oxirule-file-management"
 
 [admin.tls]
 enabled = false
