@@ -382,6 +382,7 @@ fn validate_ipm_service(field: &str, service: &str) -> anyhow::Result<()> {
       | "dynamic-policy"
       | "waf"
       | "lifecycle"
+      | "diagnostics"
       | "route"
       | "stream"
       | "turn"
@@ -448,6 +449,7 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "ReloadOxiRule",
     ],
     "lifecycle" => &["Get", "Drain", "Undrain"],
+    "diagnostics" => &["ReadPreflight", "RunPreflight", "RunProbe"],
     "route" => &["Invoke"],
     "stream" => &["Connect"],
     "turn" => &["Allocate"],

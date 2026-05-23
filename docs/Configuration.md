@@ -23,6 +23,21 @@ Validate a configuration without starting listeners:
 oxibelt --config source/config/oxibelt.toml --check
 ```
 
+Run the production preflight doctor without starting listeners:
+
+```sh
+oxibelt --config source/config/oxibelt.toml --doctor
+```
+
+`--doctor` emits a human-readable report by default and exits non-zero for
+`error` or `critical` findings. Use `--doctor-format json` for automation,
+`--doctor-fail-on critical|error|warning` to tune deploy gates, and repeat
+`--doctor-external-probe shared_state|ipm_store|remote_signer|upstream|all` to
+run explicit dependency probes. Without `--doctor-external-probe`, doctor only
+loads and validates configuration plus local files, directories, and Unix
+socket permissions; it does not connect to upstreams, databases, Redis, or the
+remote signer.
+
 Print the merged, redacted effective configuration:
 
 ```sh
@@ -1056,8 +1071,44 @@ Admin config and downstream TLS endpoints:
 - `GET /admin/v1/ipm/policies`
 - `GET /admin/v1/ipm/bindings`
 - `POST /admin/v1/ipm/simulate`
+- `GET /admin/v1/diagnostics/preflight`
+- `POST /admin/v1/diagnostics/preflight`
 
 Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, and downstream TLS operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
+
+Admin diagnostics endpoints return the same production preflight report shape as
+`--doctor`: `ok`, `profile`, severity `summary`, `findings`, and optional
+`probes`. `GET /admin/v1/diagnostics/preflight` diagnoses the active runtime
+configuration and requires `diagnostics:ReadPreflight` on
+`oxibelt:<namespace>:diagnostics:preflight/current`. `POST
+/admin/v1/diagnostics/preflight` accepts JSON such as:
+
+```json
+{
+  "format": "toml",
+  "config": "[listeners]\n...",
+  "external_probes": ["shared_state"]
+}
+```
+
+Candidate TOML load or validation failures are returned as `200 OK` reports
+with `ok = false` and a `config.invalid` critical finding, so deployment
+automation can consume a stable diagnostics schema. Invalid JSON envelopes or
+unsupported formats are rejected with `400`. Candidate preflight requires
+`diagnostics:RunPreflight` on
+`oxibelt:<namespace>:diagnostics:preflight/candidate`. Each requested external
+probe also requires `diagnostics:RunProbe` on
+`oxibelt:<namespace>:diagnostics:probe/<kind>`, where `<kind>` is
+`shared_state`, `ipm_store`, `remote_signer`, or `upstream`. Candidate external
+probes additionally require `diagnostics:RunProbe` on every resolved probe
+target before OxiBelt opens any network or Unix socket connection. TCP targets
+use `oxibelt:<namespace>:diagnostics:probe/<kind>/tcp/<host>:<port>` with DNS
+names lowercased and IPv6 hosts bracketed. Remote signer Unix sockets use
+`oxibelt:<namespace>:diagnostics:probe/remote_signer/unix/<absolute-socket-path>`.
+For example, allow `upstream` probes to one origin with
+`probe/upstream/tcp/api.example.test:443`; use a wildcard such as
+`probe/upstream/tcp/*` only for intentionally delegated broad reachability
+checks.
 
 OxiBelt initializes the IPM schema when `[ipm].backend` is configured:
 

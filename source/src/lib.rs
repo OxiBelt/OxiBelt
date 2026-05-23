@@ -14,6 +14,7 @@ pub mod access_log;
 pub mod cache;
 pub mod config;
 pub mod control_http;
+pub mod diagnostics;
 pub mod dynamic_policy;
 pub mod external_auth;
 #[cfg(feature = "fuzzing")]

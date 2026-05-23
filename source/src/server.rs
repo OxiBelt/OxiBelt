@@ -46,6 +46,7 @@ mod admin;
 mod admin_auth;
 mod admin_body;
 mod admin_control;
+mod admin_diagnostics;
 mod admin_ipm;
 mod admin_ops;
 mod connection_errors;
@@ -596,6 +597,17 @@ async fn admin_response(
     admin_ops::admin_lifecycle_response(snapshot.as_ref(), &authorization, &method, &path)
   {
     return response;
+  }
+  if path == "/admin/v1/diagnostics/preflight" {
+    return admin_diagnostics::admin_diagnostics_response(
+      request,
+      state.clone(),
+      &authorization,
+      &method,
+      &path,
+    )
+    .await
+    .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
   let ipm_path = path.starts_with("/admin/v1/ipm/");
   let dynamic_policy_path = path == "/admin/v1/dynamic-policies"
@@ -2432,6 +2444,9 @@ fn unique_nonempty(values: impl IntoIterator<Item = String>) -> Vec<String> {
   }
   unique
 }
+
+#[cfg(test)]
+mod admin_diagnostics_tests;
 
 #[cfg(test)]
 mod admin_json_tests;

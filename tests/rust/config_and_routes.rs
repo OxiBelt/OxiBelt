@@ -3327,6 +3327,63 @@ policy = "oxirule-management"
 }
 
 #[test]
+fn ipm_config_accepts_diagnostics_actions() {
+    unsafe {
+        std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+    }
+    let temp_dir = common::TempDir::new("ipm-diagnostics-actions");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "ipm-diagnostics-actions");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[ipm]
+enabled = true
+namespace = "default"
+
+[[ipm.principals]]
+id = "diagnostics"
+subject = "oidc:ci/diagnostics"
+groups = ["diagnostics-readers"]
+
+[[ipm.credentials]]
+name = "diagnostics-token"
+principal = "diagnostics"
+bearer_token_env = "OXIBELT_IPM_TOKEN_TEST"
+
+[[ipm.policies]]
+name = "diagnostics-preflight"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["diagnostics:ReadPreflight", "diagnostics:RunPreflight", "diagnostics:RunProbe"]
+resources = [
+    "oxibelt:default:diagnostics:preflight/current",
+    "oxibelt:default:diagnostics:preflight/candidate",
+    "oxibelt:default:diagnostics:probe/shared_state",
+    "oxibelt:default:diagnostics:probe/shared_state/tcp/redis.example.test:6379",
+    "oxibelt:default:diagnostics:probe/upstream/tcp/example.test:443",
+    "oxibelt:default:diagnostics:probe/upstream/tcp/*",
+    "oxibelt:default:diagnostics:probe/remote_signer/unix/*",
+]
+
+[[ipm.bindings]]
+group = "diagnostics-readers"
+policy = "diagnostics-preflight"
+    "#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+}
+
+#[test]
 fn ipm_config_rejects_unknown_action_resource_condition_and_legacy_token_store() {
     unsafe {
         std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");

@@ -429,6 +429,34 @@ fail_closed = true
 #[[ipm.bindings]]
 # group = "platform-admins"
 # policy = "oxirule-file-management"
+#
+#[[ipm.policies]]
+# name = "diagnostics-preflight-read"
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["diagnostics:ReadPreflight"]
+# resources = ["oxibelt:oxibelt:diagnostics:preflight/current"]
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["diagnostics:RunPreflight"]
+# resources = ["oxibelt:oxibelt:diagnostics:preflight/candidate"]
+#
+## External probes can be delegated independently from config/admin writes.
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["diagnostics:RunProbe"]
+# resources = [
+#   "oxibelt:oxibelt:diagnostics:probe/shared_state",
+#   "oxibelt:oxibelt:diagnostics:probe/shared_state/tcp/redis.internal.example:6379",
+#   # Use broad target wildcards only for intentionally delegated reachability checks.
+#   "oxibelt:oxibelt:diagnostics:probe/upstream/tcp/*",
+# ]
+#
+#[[ipm.bindings]]
+# group = "platform-admins"
+# policy = "diagnostics-preflight-read"
 
 [admin.tls]
 enabled = false
