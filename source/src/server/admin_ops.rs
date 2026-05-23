@@ -9,7 +9,7 @@ use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminActor, admin_actor_has_permission, admin_actor_has_role};
-use super::{admin, admin_control, collect_admin_json};
+use super::{admin, admin_body::collect_admin_json, admin_control};
 
 pub(super) fn admin_waf_response(
   snapshot: &AppSnapshot,

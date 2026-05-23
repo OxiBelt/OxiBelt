@@ -2,6 +2,7 @@ use hyper::body::Incoming;
 use ring::digest;
 use subtle::ConstantTimeEq;
 
+use crate::admin_tokens::{AdminTokenRuntime, VerifiedAdminToken};
 use crate::config::{AdminConfig, AdminPermission, AdminRole};
 
 #[derive(Debug, Clone)]
@@ -15,12 +16,16 @@ pub(super) struct AdminActor {
 pub(super) fn admin_actor(
   request: &hyper::Request<Incoming>,
   config: &AdminConfig,
+  token_runtime: &AdminTokenRuntime,
 ) -> Option<AdminActor> {
   let actual = request
     .headers()
     .get(::http::header::AUTHORIZATION)
     .and_then(|value| value.to_str().ok())
     .and_then(|value| value.strip_prefix("Bearer "))?;
+  if config.token_store.enabled {
+    return token_runtime.verify_bearer(actual).map(AdminActor::from);
+  }
   if bearer_token_matches_env(&config.bearer_token_env, actual) {
     return Some(AdminActor {
       name: "admin".to_string(),
@@ -40,6 +45,17 @@ pub(super) fn admin_actor(
     }
   }
   None
+}
+
+impl From<VerifiedAdminToken> for AdminActor {
+  fn from(token: VerifiedAdminToken) -> Self {
+    Self {
+      name: token.name,
+      roles: token.roles,
+      permissions: token.permissions,
+      deny_permissions: token.deny_permissions,
+    }
+  }
 }
 
 fn bearer_token_matches_env(env_name: &str, actual: &str) -> bool {

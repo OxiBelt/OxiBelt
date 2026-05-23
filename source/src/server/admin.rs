@@ -3,13 +3,14 @@ use std::time::{Duration, SystemTime};
 
 use ::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, Uri};
 use anyhow::bail;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
 
-use crate::config::AdminRole;
+use crate::admin_tokens::{AdminTokenAdminCreate, AdminTokenAdminPatch};
+use crate::config::{AdminPermission, AdminRole};
 use crate::dynamic_policy::{
   DynamicPolicyAdminCreate, DynamicPolicyAdminImport, DynamicPolicyAdminPatch,
 };
@@ -19,6 +20,8 @@ use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::AdminActor;
+
+const ADMIN_JSON_BODY_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct AdminCacheKeyExplainRequest {
@@ -585,6 +588,104 @@ pub(super) async fn dynamic_policy_response(
   })
 }
 
+pub(super) async fn admin_tokens_response(
+  request: hyper::Request<Incoming>,
+  state: AppHandle,
+  actor: &super::AdminActor,
+  method: &::http::Method,
+  path: &str,
+) -> Option<Response<ProxyBody>> {
+  if path != "/admin/v1/tokens" && !path.starts_with("/admin/v1/tokens/") {
+    return None;
+  }
+
+  let write_method = matches!(
+    *method,
+    ::http::Method::POST | ::http::Method::PATCH | ::http::Method::DELETE
+  );
+  let required = if write_method {
+    AdminPermission::AdminTokensWrite
+  } else {
+    AdminPermission::AdminTokensRead
+  };
+  if !super::admin_actor_has_permission(actor, required) {
+    return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+  }
+
+  match (method, path) {
+    (&::http::Method::GET, "/admin/v1/tokens") => {
+      return Some(match state.snapshot().admin_tokens.admin_list().await {
+        Ok(tokens) => json_response(StatusCode::OK, &json!({ "tokens": tokens })),
+        Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+      });
+    }
+    (&::http::Method::POST, "/admin/v1/tokens") => {
+      let body = match collect_admin_json::<AdminTokenAdminCreate>(request).await {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      return Some(
+        match state
+          .snapshot()
+          .admin_tokens
+          .admin_create(&actor.name, body)
+          .await
+        {
+          Ok(token) => json_response(StatusCode::CREATED, &token),
+          Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        },
+      );
+    }
+    _ => {}
+  }
+
+  let Some(token_id) = token_id_from_path(path) else {
+    return Some(text_response(StatusCode::NOT_FOUND, "not found"));
+  };
+  Some(match *method {
+    ::http::Method::GET => match state.snapshot().admin_tokens.admin_get(token_id).await {
+      Ok(Some(token)) => json_response(StatusCode::OK, &token),
+      Ok(None) => text_response(StatusCode::NOT_FOUND, "not found"),
+      Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    },
+    ::http::Method::PATCH => {
+      let body = match collect_admin_json::<AdminTokenAdminPatch>(request).await {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      match state
+        .snapshot()
+        .admin_tokens
+        .admin_patch(&actor.name, token_id, body)
+        .await
+      {
+        Ok(Some(token)) => json_response(StatusCode::OK, &token),
+        Ok(None) => text_response(StatusCode::NOT_FOUND, "not found"),
+        Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+      }
+    }
+    ::http::Method::DELETE => match state
+      .snapshot()
+      .admin_tokens
+      .admin_delete(&actor.name, token_id)
+      .await
+    {
+      Ok(true) => json_response(StatusCode::OK, &json!({ "ok": true })),
+      Ok(false) => text_response(StatusCode::NOT_FOUND, "not found"),
+      Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    },
+    _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
+  })
+}
+
+fn token_id_from_path(path: &str) -> Option<&str> {
+  let token_id = path.strip_prefix("/admin/v1/tokens/")?;
+  if token_id.is_empty() || token_id.contains('/') {
+    return None;
+  }
+  Some(token_id)
+}
+
 fn policy_id_from_path(path: &str) -> Option<i64> {
   path
     .strip_prefix("/admin/v1/dynamic-policies/")?
@@ -596,18 +697,17 @@ async fn collect_admin_json<T>(request: hyper::Request<Incoming>) -> Result<T, R
 where
   T: for<'de> serde::Deserialize<'de>,
 {
-  let bytes = request
-    .into_body()
+  let bytes = Limited::new(request.into_body(), ADMIN_JSON_BODY_LIMIT)
     .collect()
     .await
-    .map_err(|_| text_response(StatusCode::BAD_REQUEST, "failed to read request body"))?
+    .map_err(|error| {
+      if error.downcast_ref::<LengthLimitError>().is_some() {
+        text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+      } else {
+        text_response(StatusCode::BAD_REQUEST, "failed to read request body")
+      }
+    })?
     .to_bytes();
-  if bytes.len() > 64 * 1024 {
-    return Err(text_response(
-      StatusCode::PAYLOAD_TOO_LARGE,
-      "request body is too large",
-    ));
-  }
   serde_json::from_slice(&bytes)
     .map_err(|_| text_response(StatusCode::BAD_REQUEST, "invalid JSON request body"))
 }

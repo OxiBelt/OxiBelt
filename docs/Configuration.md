@@ -646,6 +646,7 @@ upstream_health_backend = "cluster"
 cache_backend = "cluster"
 reload_backend = "cluster"
 dynamic_policy_backend = "cluster"
+admin_tokens_backend = "cluster"
 
 [[shared_state.backends]]
 name = "cluster"
@@ -978,6 +979,33 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 - `config.read`, `config.validate`, `config.diff`, `config.load`, `config.rollback`
 - `files.sync.config`, `files.sync.oxirule`, `files.sync.oxirule_group`, `files.delete`
 - `tls.downstream.read`, `tls.downstream.reload`
+- `admin.tokens.read`, `admin.tokens.write`
+
+`[admin.token_store]` replaces env-backed Admin API bearer tokens with a PostgreSQL-backed token authority when `enabled = true`. The selected backend comes from `admin.token_store.backend`, then `shared_state.admin_tokens_backend`, then `shared_state.default_backend`, and must be a PostgreSQL `[[shared_state.backends]]` entry. `public_key_env` must point to base64 for the 32-byte Ed25519 public key used to verify compact bearer tokens. Active token rows are loaded into an immutable in-memory snapshot every `snapshot_refresh_interval_ms`; Admin request authentication never queries PostgreSQL. When token store mode is enabled, `admin.bearer_token_env` and `[[admin.rbac.tokens]]` are ignored for authentication.
+
+Bearer tokens must be Ed25519-signed compact tokens with `iss`, `aud`, `sub`, `jti`, `iat`, and `exp` claims. `issuer` and `audience` must match the corresponding claims, `exp - iat` must not exceed `token_ttl_seconds`, and the `jti` must match an enabled, unrevoked, unexpired row in PostgreSQL. Roles and permissions come only from the PostgreSQL snapshot; role or permission claims inside the bearer token are not trusted. Startup fails closed by default when the backend or initial snapshot cannot be loaded. Refresh failures keep the last good snapshot.
+
+```toml
+[admin.token_store]
+enabled = true
+backend = "cluster"
+issuer = "oxibelt-admin"
+audience = "oxibelt-admin-api"
+public_key_env = "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY"
+snapshot_refresh_interval_ms = 2000
+token_ttl_seconds = 3600
+fail_closed = true
+
+[shared_state]
+enabled = true
+namespace = "oxibelt"
+admin_tokens_backend = "cluster"
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "postgres"
+connection_url_env = "OXIBELT_SHARED_STATE_URL"
+```
 
 Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
 
@@ -991,8 +1019,57 @@ Admin config and downstream TLS endpoints:
 - `POST /admin/v1/config/rollback`
 - `GET /admin/v1/tls/downstream`
 - `POST /admin/v1/tls/downstream/reload`
+- `GET /admin/v1/tokens`
+- `POST /admin/v1/tokens`
+- `GET /admin/v1/tokens/{token_id}`
+- `PATCH /admin/v1/tokens/{token_id}`
+- `DELETE /admin/v1/tokens/{token_id}`
 
 Config read endpoints require `config.read`. Validate, diff, load, and rollback require their matching `config.*` permissions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS read and reload require `tls.downstream.read` and `tls.downstream.reload`. TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
+
+Admin token list/get endpoints require `admin.tokens.read`; create, patch, and delete require `admin.tokens.write`. Create registers token metadata and authorization state; the signed bearer token itself must be minted by trusted bootstrap tooling that holds the Ed25519 private key. `oxibelt-admin-token generate-keypair` prints base64 PKCS#8 private-key and raw-public-key material for operator secret stores, and `oxibelt-admin-token mint --seed-sql` signs a bearer token and emits seed SQL for the matching PostgreSQL row. Delete revokes the row and bumps the Admin token generation so other instances drop it on their next snapshot refresh.
+
+OxiBelt initializes the Admin token schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS oxibelt_admin_tokens (
+  id bigserial PRIMARY KEY,
+  namespace text NOT NULL,
+  token_id text NOT NULL,
+  subject text NOT NULL,
+  name text NOT NULL,
+  enabled boolean NOT NULL DEFAULT true,
+  revoked boolean NOT NULL DEFAULT false,
+  roles text[] NOT NULL DEFAULT ARRAY[]::text[],
+  permissions text[] NOT NULL DEFAULT ARRAY[]::text[],
+  deny_permissions text[] NOT NULL DEFAULT ARRAY[]::text[],
+  row_version bigint NOT NULL DEFAULT 0,
+  writer_identity text NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NULL,
+  revoked_at timestamptz NULL,
+  UNIQUE(namespace, token_id)
+);
+
+CREATE TABLE IF NOT EXISTS oxibelt_admin_token_generation (
+  namespace text PRIMARY KEY,
+  generation bigint NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS oxibelt_admin_token_audit (
+  id bigserial PRIMARY KEY,
+  namespace text NOT NULL,
+  token_id text NULL,
+  actor text NOT NULL,
+  operation text NOT NULL,
+  name text NULL,
+  outcome text NOT NULL,
+  error text NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+```
 
 Admin file sync endpoint:
 

@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
+use crate::admin_tokens::AdminTokenRuntime;
 use crate::cache::ResponseCache;
 use crate::config::{Config, HttpVersion, ProxyHttp2Config, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
@@ -191,6 +192,7 @@ pub struct AppSnapshot {
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
   pub telemetry: TelemetryRuntime,
+  pub admin_tokens: AdminTokenRuntime,
   pub dynamic_policy: DynamicPolicyRuntime,
   pub external_auth: ExternalAuthRuntime,
   pub lifecycle: Arc<LifecycleState>,
@@ -275,6 +277,9 @@ impl AppSnapshot {
     let compression = CompressionState::new(&config.compression);
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
+    let admin_tokens = AdminTokenRuntime::new(&config)
+      .await
+      .context("failed to build admin token runtime")?;
     let dynamic_policy = DynamicPolicyRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build dynamic policy runtime")?;
@@ -350,6 +355,7 @@ impl AppSnapshot {
       static_files: Arc::new(static_files),
       metrics,
       telemetry,
+      admin_tokens,
       dynamic_policy,
       external_auth,
       lifecycle,
@@ -414,6 +420,7 @@ impl AppSnapshot {
       static_files: Arc::new(static_files),
       metrics: previous.metrics.clone(),
       telemetry: previous.telemetry.clone(),
+      admin_tokens: previous.admin_tokens.clone(),
       dynamic_policy: previous.dynamic_policy.clone(),
       external_auth,
       lifecycle: previous.lifecycle.clone(),

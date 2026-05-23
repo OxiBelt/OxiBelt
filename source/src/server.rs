@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use ::http::{Response, StatusCode};
 use anyhow::{Context, bail};
-use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -47,6 +46,7 @@ use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod admin;
 mod admin_auth;
+mod admin_body;
 mod admin_control;
 mod admin_ops;
 mod connection_errors;
@@ -54,9 +54,11 @@ mod plain_http;
 #[cfg(test)]
 mod reload_tests;
 use admin::json_response;
-#[cfg(test)]
-use admin_auth::admin_actor_has_permission;
-use admin_auth::{AdminActor, admin_actor, admin_actor_has_any_role, admin_actor_has_role};
+use admin_auth::{
+  AdminActor, admin_actor, admin_actor_has_any_role, admin_actor_has_permission,
+  admin_actor_has_role,
+};
+use admin_body::collect_admin_json;
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 #[cfg(test)]
 use admin_ops::admin_lifecycle_response;
@@ -441,6 +443,12 @@ async fn serve_admin_http1<I>(
 where
   I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+  let snapshot = state.snapshot();
+  let header_timeout_ms = snapshot.config.limits.client_header_timeout_ms;
+  let max_headers = snapshot.config.limits.max_headers;
+  let max_total_header_bytes = snapshot.config.limits.max_total_header_bytes.max(8192);
+  drop(snapshot);
+
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
     let admin_control = admin_control.clone();
@@ -458,7 +466,14 @@ where
       )
     }
   });
-  hyper::server::conn::http1::Builder::new()
+  let mut builder = hyper::server::conn::http1::Builder::new();
+  builder
+    .timer(TokioTimer::new())
+    .header_read_timeout(Duration::from_millis(header_timeout_ms))
+    .max_headers(max_headers)
+    .max_buf_size(max_total_header_bytes)
+    .keep_alive(true);
+  builder
     .serve_connection(io, service)
     .await
     .map_err(|error| anyhow::anyhow!(error))
@@ -483,7 +498,7 @@ async fn admin_response(
     .into_owned()
     .collect::<std::collections::HashMap<_, _>>();
   let path = uri.path().to_string();
-  let actor = admin_actor(&request, &snapshot.config.admin);
+  let actor = admin_actor(&request, &snapshot.config.admin, &snapshot.admin_tokens);
 
   if path == "/cache/purge" || path == "/cache/purge-prefix" || path == "/cache/purge-tag" {
     if method != ::http::Method::POST {
@@ -555,15 +570,12 @@ async fn admin_response(
     return admin_ops::admin_files_response(request, admin_control.clone(), &actor, &method, &path)
       .await;
   }
-
   if path == "/admin/v1/cache/key-explain" {
     return admin::cache_key_explain_response(request, snapshot.as_ref(), &actor, &method).await;
   }
-
   if path == "/admin/v1/cache/warm" {
     return admin::cache_warm_response(request, state.clone(), &actor, &method, peer_addr).await;
   }
-
   if path == "/admin/v1/cache/purge" {
     return admin::cache_purge_json_response(
       request,
@@ -579,21 +591,23 @@ async fn admin_response(
   if let Some(response) = admin_ops::admin_waf_response(snapshot.as_ref(), &actor, &method, &path) {
     return response;
   }
-
   if let Some(response) =
     admin_ops::admin_lifecycle_response(snapshot.as_ref(), &actor, &method, &path)
   {
     return response;
   }
-
-  if path == "/admin/v1/dynamic-policies"
+  let admin_token_path = path == "/admin/v1/tokens" || path.starts_with("/admin/v1/tokens/");
+  let dynamic_policy_path = path == "/admin/v1/dynamic-policies"
     || path == "/admin/v1/dynamic-policies/export"
     || path == "/admin/v1/dynamic-policies/import"
-    || path.starts_with("/admin/v1/dynamic-policies/")
-  {
-    return admin::dynamic_policy_response(request, state.clone(), &actor, &method, &path)
-      .await
-      .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
+    || path.starts_with("/admin/v1/dynamic-policies/");
+  if admin_token_path || dynamic_policy_path {
+    let response = if admin_token_path {
+      admin::admin_tokens_response(request, state.clone(), &actor, &method, &path).await
+    } else {
+      admin::dynamic_policy_response(request, state.clone(), &actor, &method, &path).await
+    };
+    return response.unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
 
   if let Some(response) = admin_upstream_pools_response(
@@ -961,26 +975,6 @@ async fn admin_delete_pool_server(
       text_response(StatusCode::BAD_REQUEST, &message)
     }
   }
-}
-
-async fn collect_admin_json<T>(request: hyper::Request<Incoming>) -> Result<T, Response<ProxyBody>>
-where
-  T: for<'de> Deserialize<'de>,
-{
-  let bytes = request
-    .into_body()
-    .collect()
-    .await
-    .map_err(|_| text_response(StatusCode::BAD_REQUEST, "failed to read request body"))?
-    .to_bytes();
-  if bytes.len() > admin_control::ADMIN_CONFIG_BODY_LIMIT {
-    return Err(text_response(
-      StatusCode::PAYLOAD_TOO_LARGE,
-      "request body is too large",
-    ));
-  }
-  serde_json::from_slice(&bytes)
-    .map_err(|_| text_response(StatusCode::BAD_REQUEST, "invalid JSON request body"))
 }
 
 fn admin_audit(

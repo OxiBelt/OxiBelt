@@ -384,6 +384,16 @@ nonce_ttl_seconds = 600
 # permissions = ["config.validate"]
 # deny_permissions = ["files.delete"]
 
+[admin.token_store]
+enabled = false
+# backend = "cluster" # PostgreSQL shared_state backend used as Admin token authority
+issuer = "oxibelt-admin"
+audience = "oxibelt-admin-api"
+public_key_env = "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY"
+snapshot_refresh_interval_ms = 2000
+token_ttl_seconds = 3600
+fail_closed = true
+
 [admin.tls]
 enabled = false
 min_version = "tls1.3"
@@ -483,6 +493,7 @@ cache_lock_ms = 10000
 # cache_backend = "cluster"
 # reload_backend = "cluster"
 # dynamic_policy_backend = "cluster"
+# admin_tokens_backend = "cluster"
 
 # [[shared_state.backends]]
 # name = "cluster"

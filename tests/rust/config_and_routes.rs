@@ -2349,6 +2349,7 @@ upstream_health_backend = "redis-main"
 cache_backend = "postgres-main"
 reload_backend = "postgres-main"
 dynamic_policy_backend = "postgres-main"
+admin_tokens_backend = "postgres-main"
 operation_timeout_ms = 250
 connection_lease_ms = 30000
 cache_lock_ms = 5000
@@ -2385,6 +2386,10 @@ max_connections = 2
     );
     assert_eq!(
         config.shared_state.dynamic_policy_backend.as_deref(),
+        Some("postgres-main")
+    );
+    assert_eq!(
+        config.shared_state.admin_tokens_backend.as_deref(),
         Some("postgres-main")
     );
 }
@@ -2436,6 +2441,171 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
         DynamicPolicyFailPolicy::DisabledOnError
     );
     assert_eq!(config.dynamic_policy.default_status, 403);
+}
+
+#[test]
+fn admin_token_store_config_parses_postgres_backend_mapping_without_env_tokens() {
+    unsafe {
+        std::env::set_var(
+            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
+            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
+        );
+    }
+    let temp_dir = common::TempDir::new("admin-token-store-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "admin-token-store-config");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.token_store]
+enabled = true
+backend = "postgres-main"
+issuer = "issuer"
+audience = "audience"
+public_key_env = "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST"
+snapshot_refresh_interval_ms = 250
+token_ttl_seconds = 900
+fail_closed = true
+
+[shared_state]
+enabled = true
+namespace = "matrix"
+admin_tokens_backend = "postgres-main"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert!(config.admin.token_store.enabled);
+    assert_eq!(
+        config.admin.token_store.backend.as_deref(),
+        Some("postgres-main")
+    );
+    assert_eq!(config.admin.token_store.token_ttl_seconds, 900);
+}
+
+#[test]
+fn admin_token_store_rejects_non_postgres_backend() {
+    unsafe {
+        std::env::set_var(
+            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
+            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
+        );
+    }
+    let temp_dir = common::TempDir::new("admin-token-store-redis");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "admin-token-store-redis");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+
+[admin.token_store]
+enabled = true
+backend = "redis-main"
+public_key_env = "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST"
+
+[shared_state]
+enabled = true
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("admin token store should require postgres");
+
+    assert!(
+        error
+            .to_string()
+            .contains("admin token store backend redis-main must use kind = \"postgres\""),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn admin_token_store_rejects_invalid_values() {
+    unsafe {
+        std::env::set_var(
+            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
+            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
+        );
+        std::env::remove_var("OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_MISSING_TEST");
+    }
+    let temp_dir = common::TempDir::new("admin-token-store-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "admin-token-store-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (public_key_env, setting, expected) in [
+        (
+            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
+            "snapshot_refresh_interval_ms = 0",
+            "admin.token_store.snapshot_refresh_interval_ms must be greater than 0",
+        ),
+        (
+            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_TEST",
+            "token_ttl_seconds = 0",
+            "admin.token_store.token_ttl_seconds must be greater than 0",
+        ),
+        (
+            "OXIBELT_ADMIN_TOKEN_PUBLIC_KEY_MISSING_TEST",
+            "",
+            "failed to read admin.token_store.public_key_env",
+        ),
+    ] {
+        let raw = format!(
+            r#"
+{base}
+
+[admin]
+enabled = true
+
+[admin.token_store]
+enabled = true
+backend = "postgres-main"
+public_key_env = "{public_key_env}"
+{setting}
+
+[shared_state]
+enabled = true
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#
+        );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid admin token store config should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected}, got {error:#}"
+        );
+    }
 }
 
 #[test]

@@ -77,6 +77,14 @@ async fn admin_v1_json_purge_removes_exact_prefix_and_tag_entries() {
     log_safe_text(&response)
   );
 
+  let large_body = "x".repeat(64 * 1024 + 1);
+  let response = admin_json_purge_response(addr, &large_body).await;
+  assert!(
+    response.starts_with("HTTP/1.1 413 Payload Too Large"),
+    "oversized JSON purge should be rejected before parsing: {}",
+    log_safe_text(&response)
+  );
+
   let _ = shutdown.send(true);
   task.abort();
 }

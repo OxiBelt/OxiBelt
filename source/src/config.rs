@@ -11,6 +11,7 @@ use url::Url;
 use crate::waf::{AccessLogFieldConfig, WafConfig};
 
 mod admin_runtime;
+mod admin_token_store;
 mod allowed_keys;
 mod database;
 mod dynamic_policy;
@@ -27,6 +28,7 @@ mod tls;
 mod turn;
 mod upstream_pool;
 mod workers;
+pub use admin_token_store::*;
 pub use database::*;
 pub use dynamic_policy::*;
 pub use external_auth::*;
@@ -1634,20 +1636,23 @@ impl Config {
   }
 
   fn validate_admin(&self) -> anyhow::Result<()> {
+    self.validate_admin_token_store()?;
     if !self.admin.enabled {
       return Ok(());
     }
-    if self.admin.bearer_token_env.trim().is_empty() {
-      bail!("admin.bearer_token_env must not be empty when admin is enabled");
-    }
-    if std::env::var(&self.admin.bearer_token_env)
-      .ok()
-      .is_none_or(|token| token.is_empty())
-    {
-      bail!(
-        "admin bearer token environment variable {} must be set and non-empty",
-        self.admin.bearer_token_env
-      );
+    if !self.admin.token_store.enabled {
+      if self.admin.bearer_token_env.trim().is_empty() {
+        bail!("admin.bearer_token_env must not be empty when admin is enabled");
+      }
+      if std::env::var(&self.admin.bearer_token_env)
+        .ok()
+        .is_none_or(|token| token.is_empty())
+      {
+        bail!(
+          "admin bearer token environment variable {} must be set and non-empty",
+          self.admin.bearer_token_env
+        );
+      }
     }
     for cidr in &self.admin.plaintext_allowed_source_cidrs {
       crate::identity::Cidr::parse(cidr)
@@ -1679,7 +1684,9 @@ impl Config {
         "admin.tls.enabled must be true for non-loopback admin.bind when admin.transport requires TLS"
       );
     }
-    self.validate_admin_rbac()?;
+    if !self.admin.token_store.enabled {
+      self.validate_admin_rbac()?;
+    }
     self.admin.tls.validate()
   }
 
@@ -2561,6 +2568,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "plaintext_allowed_source_cidrs",
       "rbac",
       "tls",
+      "token_store",
       "transport",
     ][..],
     "admin.cache_purge_signing" => &[
@@ -2576,6 +2584,16 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "name",
       "permissions",
       "roles",
+    ][..],
+    "admin.token_store" => &[
+      "audience",
+      "backend",
+      "enabled",
+      "fail_closed",
+      "issuer",
+      "public_key_env",
+      "snapshot_refresh_interval_ms",
+      "token_ttl_seconds",
     ][..],
     "admin.tls" => &[
       "certificates",
@@ -2703,6 +2721,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "instance_id_env",
       "namespace",
       "operation_timeout_ms",
+      "admin_tokens_backend",
       "person_proof_backend",
       "rate_limits_backend",
       "reload_backend",
@@ -4484,6 +4503,8 @@ pub struct AdminConfig {
   pub tls: AdminTlsConfig,
   #[serde(default)]
   pub rbac: AdminRbacConfig,
+  #[serde(default)]
+  pub token_store: AdminTokenStoreConfig,
 }
 
 impl Default for AdminConfig {
@@ -4498,6 +4519,7 @@ impl Default for AdminConfig {
       cache_purge_signing: AdminCachePurgeSigningConfig::default(),
       tls: AdminTlsConfig::default(),
       rbac: AdminRbacConfig::default(),
+      token_store: AdminTokenStoreConfig::default(),
     }
   }
 }
@@ -4541,94 +4563,6 @@ pub struct AdminRbacTokenConfig {
   pub permissions: Vec<AdminPermission>,
   #[serde(default)]
   pub deny_permissions: Vec<AdminPermission>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum AdminRole {
-  Viewer,
-  CacheOperator,
-  UpstreamOperator,
-  SecurityOperator,
-  ConfigOperator,
-  Admin,
-}
-
-impl AdminRole {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::Viewer => "viewer",
-      Self::CacheOperator => "cache_operator",
-      Self::UpstreamOperator => "upstream_operator",
-      Self::SecurityOperator => "security_operator",
-      Self::ConfigOperator => "config_operator",
-      Self::Admin => "admin",
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
-pub enum AdminPermission {
-  ConfigRead,
-  ConfigValidate,
-  ConfigDiff,
-  ConfigLoad,
-  ConfigRollback,
-  FilesSyncConfig,
-  FilesSyncOxiRule,
-  FilesSyncOxiRuleGroup,
-  FilesDelete,
-  TlsDownstreamRead,
-  TlsDownstreamReload,
-}
-
-impl AdminPermission {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::ConfigRead => "config.read",
-      Self::ConfigValidate => "config.validate",
-      Self::ConfigDiff => "config.diff",
-      Self::ConfigLoad => "config.load",
-      Self::ConfigRollback => "config.rollback",
-      Self::FilesSyncConfig => "files.sync.config",
-      Self::FilesSyncOxiRule => "files.sync.oxirule",
-      Self::FilesSyncOxiRuleGroup => "files.sync.oxirule_group",
-      Self::FilesDelete => "files.delete",
-      Self::TlsDownstreamRead => "tls.downstream.read",
-      Self::TlsDownstreamReload => "tls.downstream.reload",
-    }
-  }
-}
-
-impl std::str::FromStr for AdminPermission {
-  type Err = anyhow::Error;
-
-  fn from_str(value: &str) -> Result<Self, Self::Err> {
-    match value {
-      "config.read" => Ok(Self::ConfigRead),
-      "config.validate" => Ok(Self::ConfigValidate),
-      "config.diff" => Ok(Self::ConfigDiff),
-      "config.load" => Ok(Self::ConfigLoad),
-      "config.rollback" => Ok(Self::ConfigRollback),
-      "files.sync.config" => Ok(Self::FilesSyncConfig),
-      "files.sync.oxirule" => Ok(Self::FilesSyncOxiRule),
-      "files.sync.oxirule_group" => Ok(Self::FilesSyncOxiRuleGroup),
-      "files.delete" => Ok(Self::FilesDelete),
-      "tls.downstream.read" => Ok(Self::TlsDownstreamRead),
-      "tls.downstream.reload" => Ok(Self::TlsDownstreamReload),
-      _ => bail!("unknown admin permission {value}"),
-    }
-  }
-}
-
-impl<'de> Deserialize<'de> for AdminPermission {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: serde::Deserializer<'de>,
-  {
-    let value = String::deserialize(deserializer)?;
-    value.parse().map_err(serde::de::Error::custom)
-  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -4776,6 +4710,8 @@ pub struct SharedStateConfig {
   #[serde(default)]
   pub dynamic_policy_backend: Option<String>,
   #[serde(default)]
+  pub admin_tokens_backend: Option<String>,
+  #[serde(default)]
   pub backends: Vec<SharedStateBackendConfig>,
 }
 
@@ -4797,6 +4733,7 @@ impl Default for SharedStateConfig {
       cache_backend: None,
       reload_backend: None,
       dynamic_policy_backend: None,
+      admin_tokens_backend: None,
       backends: Vec::new(),
     }
   }
@@ -4855,6 +4792,10 @@ impl SharedStateConfig {
       (
         "shared_state.dynamic_policy_backend",
         self.dynamic_policy_backend.as_deref(),
+      ),
+      (
+        "shared_state.admin_tokens_backend",
+        self.admin_tokens_backend.as_deref(),
       ),
     ] {
       if let Some(name) = name
