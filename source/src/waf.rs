@@ -28,6 +28,7 @@ mod body_eval;
 mod body_scan;
 mod crs;
 mod defaults;
+mod devtools;
 mod expression;
 mod functions;
 mod metadata;
@@ -52,6 +53,7 @@ use body_eval::{body_content_method, eval_body_call};
 pub use crs::{CrsCompatibilityMatrix, compatibility_matrix as crs_compatibility_matrix};
 use crs::{CrsDecision, CrsEngine, WafCrsConfig, validate_crs_config};
 use defaults::*;
+pub use devtools::*;
 use expression::Parser;
 pub use functions::WafFunctionConfig;
 use functions::{

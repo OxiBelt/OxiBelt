@@ -3304,16 +3304,32 @@ actions = [
     "waf:DeleteOxiRule",
     "waf:PutOxiRuleGroup",
     "waf:DeleteOxiRuleGroup",
+    "waf:CheckOxiRule",
+    "waf:CheckOxiRuleGroup",
+    "waf:TestOxiRule",
+    "waf:ExplainOxiRule",
+    "waf:EstimateOxiRuleCost",
+    "waf:ReplayOxiRule",
 ]
 resources = [
     "oxibelt:default:waf:oxirule/*",
     "oxibelt:default:waf:oxirule-group/*",
+    "oxibelt:default:waf:replay/*",
 ]
 
 [[ipm.policies.statements]]
 effect = "allow"
-actions = ["waf:ReloadOxiRule"]
-resources = ["*"]
+actions = [
+    "waf:ReloadOxiRule",
+    "waf:ListOxiRuleTemplates",
+    "waf:RenderOxiRuleTemplate",
+    "waf:PlanOxiRuleFalsePositive",
+]
+resources = [
+    "*",
+    "oxibelt:default:waf:template/*",
+    "oxibelt:default:waf:false-positive/*",
+]
 
 [[ipm.bindings]]
 group = "waf-operators"

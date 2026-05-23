@@ -161,6 +161,29 @@ Condition fragments are processed in `groups` array order, followed by the rule'
 
 Actions from referenced groups and the rule are collected, sorted by action `priority` with lower values first, and executed in stable declaration order for equal priorities. Action `priority` defaults to `0`. Terminal actions still stop later actions after sorting.
 
+## Development Tools
+
+OxiBelt includes local and Admin API OxiRule development tools for validating and exercising rules before writing or applying them.
+
+Local CLI:
+
+```sh
+oxibelt --config source/config/oxibelt.toml oxirule check --rule rules/block.oxirule.toml
+oxibelt --config source/config/oxibelt.toml oxirule test --rule rules/block.oxirule.toml --fixture '{"request":{"uri":"/admin"}}'
+oxibelt --config source/config/oxibelt.toml oxirule explain --rule rules/block.oxirule.toml --fixture fixture.json
+oxibelt --config source/config/oxibelt.toml oxirule cost --rule rules/block.oxirule.toml
+oxibelt --config source/config/oxibelt.toml oxirule replay --rule rules/block.oxirule.toml --input captured.ndjson
+oxibelt oxirule template list
+oxibelt oxirule template render --name admin-path --var path_prefix=/admin --var admin_cidr=10.0.0.0/8
+oxibelt oxirule false-positive --finding finding.json
+```
+
+The matching Admin API endpoints live under `/admin/v1/waf/oxirule/*` and are synchronous and stateless. They accept inline candidate OxiRule content plus optional inline OxiRule group content, compile it against the active configuration context, and return JSON fields such as `ok`, `diagnostics`, `matched_rules`, `actions`, `terminal`, `mutations`, `tags`, `stream_close`, `body_need`, `cost_warnings`, and `explain_steps`. The API does not write files or install rules; use `POST /admin/v1/files/sync` for deployment.
+
+Fixtures can target request, response, or stream phase. Stream fixtures evaluate the rule engine's `WafStreamInput` shape for WebSocket/WebTransport metadata and payloads; they do not create live upgraded sessions. Replay accepts uploaded NDJSON fixture lines and does not read server-side log files.
+
+Built-in templates are `vaultwarden`, `gitea`, `nextcloud`, `generic-login`, and `admin-path`. The false-positive planner returns suggested TOML for CRS allowlists/rule overrides or native OxiRule monitor/condition tuning without mutating configuration.
+
 ## CRS Compatibility
 
 OxiBelt can run a CRS-compatible WAF layer alongside OxiRule rules:

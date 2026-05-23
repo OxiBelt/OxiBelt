@@ -204,6 +204,9 @@ Lifecycle endpoints are:
 - `GET /admin/v1/lifecycle`: requires `lifecycle:Get`, returns draining state and reason.
 - `POST /admin/v1/lifecycle/drain`: requires `lifecycle:Drain`, starts admin drain.
 - `POST /admin/v1/lifecycle/undrain`: requires `lifecycle:Undrain`, clears admin drain.
+- `GET /admin/v1/waf/rule-hits`, `GET /admin/v1/waf/rule-costs`, and `GET /admin/v1/waf/crs/compatibility`: require the matching `waf:GetRuleHits`, `waf:GetRuleCosts`, and `waf:GetCrsCompatibility` actions.
+- `POST /admin/v1/waf/oxirule/check`, `test`, `explain`, `cost`, and `replay`: require `waf:CheckOxiRule`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, or `waf:ReplayOxiRule`; `check` also requires `waf:CheckOxiRuleGroup` when group candidates are supplied. Requests with `include_active_rules = true` require the same action on `oxirule/*`, except replay uses `replay/*`. These endpoints are synchronous, stateless, and never write OxiRule files.
+- `GET /admin/v1/waf/oxirule/templates`, `POST /admin/v1/waf/oxirule/templates/render`, and `POST /admin/v1/waf/oxirule/false-positive`: require `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, and `waf:PlanOxiRuleFalsePositive`; they list/render built-in templates or return tuning suggestions without changing configuration.
 
 Admin and process drain make readiness return `503 draining`, keep liveness `200 live`, and reject new data-plane requests with `503 draining` plus `Connection: close`. Existing in-flight requests continue. `SIGTERM` and Ctrl-C follow the same shutdown sequence: mark draining, wait `shutdown_delay_ms`, then drain listeners up to `graceful_timeout_ms`.
 

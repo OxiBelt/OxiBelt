@@ -286,3 +286,222 @@ fn oxirule_reload_requires_waf_reload_permission() {
 
   assert!(check_file_sync_permissions(&authorization, &payload).is_ok());
 }
+
+#[test]
+fn oxirule_devtools_check_requires_rule_and_group_permissions() {
+  let (actor, ipm) = actor_and_ipm(&["waf:CheckOxiRule"], &["oxibelt:oxibelt:waf:oxirule/*"]);
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  let payload = crate::waf::OxiRuleDevtoolsCheckRequest {
+    rule: Some(crate::waf::OxiRuleCandidate {
+      content: "when = \"true\"\n".to_string(),
+      name: Some("candidate".to_string()),
+      id: None,
+      tags: Vec::new(),
+      mode: None,
+      phase: Some(crate::waf::WafPhase::Request),
+      priority: Some(100),
+      route: None,
+    }),
+    groups: vec![crate::waf::OxiRuleGroupCandidate {
+      content: "[[rule_groups]]\nname = \"group\"\nwhen = \"true\"\n".to_string(),
+      route: None,
+      name: Some("group".to_string()),
+    }],
+    include_active_rules: false,
+  };
+
+  let response = authorize_oxirule_check(&authorization, &payload)
+    .expect("missing group permission should reject");
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+  let (actor, ipm) = actor_and_ipm(
+    &["waf:CheckOxiRule", "waf:CheckOxiRuleGroup"],
+    &[
+      "oxibelt:oxibelt:waf:oxirule/*",
+      "oxibelt:oxibelt:waf:oxirule-group/*",
+    ],
+  );
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  assert!(authorize_oxirule_check(&authorization, &payload).is_none());
+}
+
+#[test]
+fn oxirule_devtools_active_context_requires_wildcard_permission() {
+  let context = IpmRequestContext::default();
+  let active_context_cases = [
+    (
+      "check",
+      "waf:CheckOxiRule",
+      "oxibelt:oxibelt:waf:oxirule/candidate",
+      "oxibelt:oxibelt:waf:oxirule/*",
+      "oxirule/*",
+    ),
+    (
+      "cost",
+      "waf:EstimateOxiRuleCost",
+      "oxibelt:oxibelt:waf:oxirule/candidate",
+      "oxibelt:oxibelt:waf:oxirule/*",
+      "oxirule/*",
+    ),
+    (
+      "test",
+      "waf:TestOxiRule",
+      "oxibelt:oxibelt:waf:oxirule/candidate",
+      "oxibelt:oxibelt:waf:oxirule/*",
+      "oxirule/*",
+    ),
+    (
+      "explain",
+      "waf:ExplainOxiRule",
+      "oxibelt:oxibelt:waf:oxirule/candidate",
+      "oxibelt:oxibelt:waf:oxirule/*",
+      "oxirule/*",
+    ),
+    (
+      "replay",
+      "waf:ReplayOxiRule",
+      "oxibelt:oxibelt:waf:replay/candidate",
+      "oxibelt:oxibelt:waf:replay/*",
+      "replay/*",
+    ),
+  ];
+
+  for (name, action, scoped_resource, wildcard_resource, active_resource) in active_context_cases {
+    let (actor, ipm) = actor_and_ipm(&[action], &[scoped_resource]);
+    let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+    if name == "check" {
+      let inactive_payload = oxirule_check_payload(false);
+      assert!(
+        authorize_oxirule_check(&authorization, &inactive_payload).is_none(),
+        "{name} should allow inactive candidate-only checks"
+      );
+      let active_payload = oxirule_check_payload(true);
+      let response = authorize_oxirule_check(&authorization, &active_payload)
+        .expect("active check should require wildcard permission");
+      assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    } else {
+      assert!(
+        authorize_oxirule_active_context(&authorization, false, action, active_resource).is_none(),
+        "{name} should not require wildcard permission without active rules"
+      );
+      let response =
+        authorize_oxirule_active_context(&authorization, true, action, active_resource)
+          .expect("active context should require wildcard permission");
+      assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    let (actor, ipm) = actor_and_ipm(&[action], &[wildcard_resource]);
+    let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+    if name == "check" {
+      let active_payload = oxirule_check_payload(true);
+      assert!(
+        authorize_oxirule_check(&authorization, &active_payload).is_none(),
+        "{name} should allow active checks with wildcard permission"
+      );
+    } else {
+      assert!(
+        authorize_oxirule_active_context(&authorization, true, action, active_resource).is_none(),
+        "{name} should allow active context with wildcard permission"
+      );
+    }
+  }
+}
+
+fn oxirule_check_payload(include_active_rules: bool) -> crate::waf::OxiRuleDevtoolsCheckRequest {
+  crate::waf::OxiRuleDevtoolsCheckRequest {
+    rule: Some(crate::waf::OxiRuleCandidate {
+      content: "when = \"true\"\n".to_string(),
+      name: Some("candidate".to_string()),
+      id: None,
+      tags: Vec::new(),
+      mode: None,
+      phase: Some(crate::waf::WafPhase::Request),
+      priority: Some(100),
+      route: None,
+    }),
+    groups: Vec::new(),
+    include_active_rules,
+  }
+}
+
+#[test]
+fn oxirule_devtools_actions_require_matching_ipm_permission() {
+  let context = IpmRequestContext::default();
+  let cases = [
+    (
+      "waf:CheckOxiRule",
+      "oxibelt:oxibelt:waf:oxirule/candidate",
+      "oxirule/candidate",
+      "waf:TestOxiRule",
+    ),
+    (
+      "waf:CheckOxiRuleGroup",
+      "oxibelt:oxibelt:waf:oxirule-group/group",
+      "oxirule-group/group",
+      "waf:CheckOxiRule",
+    ),
+    (
+      "waf:TestOxiRule",
+      "oxibelt:oxibelt:waf:oxirule/candidate",
+      "oxirule/candidate",
+      "waf:ExplainOxiRule",
+    ),
+    (
+      "waf:ExplainOxiRule",
+      "oxibelt:oxibelt:waf:oxirule/candidate",
+      "oxirule/candidate",
+      "waf:EstimateOxiRuleCost",
+    ),
+    (
+      "waf:EstimateOxiRuleCost",
+      "oxibelt:oxibelt:waf:oxirule/candidate",
+      "oxirule/candidate",
+      "waf:ReplayOxiRule",
+    ),
+    (
+      "waf:ReplayOxiRule",
+      "oxibelt:oxibelt:waf:replay/candidate",
+      "replay/candidate",
+      "waf:TestOxiRule",
+    ),
+    (
+      "waf:ListOxiRuleTemplates",
+      "oxibelt:oxibelt:waf:template/*",
+      "template/*",
+      "waf:RenderOxiRuleTemplate",
+    ),
+    (
+      "waf:RenderOxiRuleTemplate",
+      "oxibelt:oxibelt:waf:template/admin-path",
+      "template/admin-path",
+      "waf:ListOxiRuleTemplates",
+    ),
+    (
+      "waf:PlanOxiRuleFalsePositive",
+      "oxibelt:oxibelt:waf:false-positive/inline",
+      "false-positive/inline",
+      "waf:CheckOxiRule",
+    ),
+  ];
+
+  for (action, policy_resource, resource_name, denied_action) in cases {
+    let (actor, ipm) = actor_and_ipm(&[action], &[policy_resource]);
+    let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+    assert!(
+      authorization.is_allowed(action, resource_name),
+      "{action} should allow {resource_name}"
+    );
+    assert!(
+      !authorization.is_allowed(denied_action, resource_name),
+      "{denied_action} should not be allowed by {action}"
+    );
+
+    let (actor, ipm) = actor_and_ipm(&[action], &["oxibelt:oxibelt:waf:other/*"]);
+    let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+    assert!(
+      !authorization.is_allowed(action, resource_name),
+      "{action} should still require a matching resource"
+    );
+  }
+}

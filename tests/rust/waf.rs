@@ -9,11 +9,15 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
-    BodyNeed, HeaderMutation, PersonProofIssuedClearance, PersonProofMode, WafBodyInput, WafEngine,
-    WafProtocol, WafRequestInput, WafResponseInput, WafStreamDirection, WafStreamInput,
-    WafStreamProtocol, WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput,
-    WafTransportNetwork, WafWebSocketStreamMetadata, WafWebTransportStreamKind,
-    WafWebTransportStreamMetadata, compile_access_log_fields, crs_compatibility_matrix,
+    BodyNeed, HeaderMutation, OxiRuleCandidate, OxiRuleDevtoolsCheckRequest,
+    OxiRuleDevtoolsEvalRequest, OxiRuleDevtoolsReplayRequest, OxiRuleFixture,
+    OxiRuleRequestFixture, OxiRuleResponseFixture, OxiRuleStreamFixture,
+    PersonProofIssuedClearance, PersonProofMode, WafBodyInput, WafEngine, WafPhase, WafProtocol,
+    WafRequestInput, WafResponseInput, WafStreamDirection, WafStreamInput, WafStreamProtocol,
+    WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
+    WafWebSocketStreamMetadata, WafWebTransportStreamKind, WafWebTransportStreamMetadata,
+    check_oxirule, compile_access_log_fields, cost_oxirule, crs_compatibility_matrix,
+    explain_oxirule, replay_oxirule, test_oxirule,
 };
 use ring::digest;
 
@@ -21,6 +25,244 @@ static TEST_DYNAMIC_POLICY: OnceLock<DynamicPolicyContext> = OnceLock::new();
 
 fn test_dynamic_policy() -> &'static DynamicPolicyContext {
     TEST_DYNAMIC_POLICY.get_or_init(DynamicPolicyContext::default)
+}
+
+fn minimal_devtools_config(name: &str) -> Config {
+    let temp_dir = common::TempDir::new(name);
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+    let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+        .expect("config should parse");
+    config.validate().expect("config should validate");
+    config
+}
+
+fn devtools_rule(name: &str, phase: WafPhase, content: &str) -> OxiRuleCandidate {
+    OxiRuleCandidate {
+        content: content.to_string(),
+        name: Some(name.to_string()),
+        id: None,
+        tags: Vec::new(),
+        mode: None,
+        phase: Some(phase),
+        priority: Some(100),
+        route: None,
+    }
+}
+
+fn request_fixture(path: &str) -> OxiRuleFixture {
+    OxiRuleFixture {
+        request: OxiRuleRequestFixture {
+            uri: path.to_string(),
+            ..OxiRuleRequestFixture::default()
+        },
+        ..OxiRuleFixture::default()
+    }
+}
+
+fn response_fixture(status: u16) -> OxiRuleFixture {
+    OxiRuleFixture {
+        phase: Some(WafPhase::Response),
+        response: Some(OxiRuleResponseFixture {
+            status,
+            ..OxiRuleResponseFixture::default()
+        }),
+        ..OxiRuleFixture::default()
+    }
+}
+
+fn stream_fixture(payload: &str) -> OxiRuleFixture {
+    OxiRuleFixture {
+        phase: Some(WafPhase::Stream),
+        stream: Some(OxiRuleStreamFixture {
+            protocol: "websocket".to_string(),
+            direction: "downstream_to_upstream".to_string(),
+            unit: "websocket_message".to_string(),
+            payload: Some(payload.to_string()),
+            payload_base64: None,
+            payload_truncated: false,
+            websocket: None,
+            webtransport: None,
+        }),
+        ..OxiRuleFixture::default()
+    }
+}
+
+#[test]
+fn oxirule_devtools_check_test_explain_and_cost_request_rules() {
+    let config = minimal_devtools_config("oxirule-devtools-request");
+    let rule = devtools_rule(
+        "devtools-block-admin",
+        WafPhase::Request,
+        r#"
+when = "Request.Http.Path == '/admin'"
+
+[[actions]]
+type = "reject"
+status = 403
+body = "blocked"
+"#,
+    );
+
+    let check = check_oxirule(
+        &config,
+        OxiRuleDevtoolsCheckRequest {
+            rule: Some(rule.clone()),
+            groups: Vec::new(),
+            include_active_rules: false,
+        },
+    );
+    assert!(check.ok, "check should pass: {:?}", check.diagnostics);
+
+    let report = test_oxirule(
+        &config,
+        OxiRuleDevtoolsEvalRequest {
+            rule: rule.clone(),
+            groups: Vec::new(),
+            include_active_rules: false,
+            fixture: request_fixture("/admin"),
+            expected: None,
+        },
+    );
+    assert!(report.ok, "test should pass: {:?}", report.diagnostics);
+    assert_eq!(
+        report.terminal.as_ref().map(|terminal| terminal.status),
+        Some(403)
+    );
+    assert!(
+        report
+            .matched_rules
+            .iter()
+            .any(|rule| rule.name == "devtools-block-admin")
+    );
+
+    let explain = explain_oxirule(
+        &config,
+        OxiRuleDevtoolsEvalRequest {
+            rule: rule.clone(),
+            groups: Vec::new(),
+            include_active_rules: false,
+            fixture: request_fixture("/admin"),
+            expected: None,
+        },
+    );
+    assert!(explain.ok, "explain should pass: {:?}", explain.diagnostics);
+    assert!(explain.explain_steps.iter().any(|step| step.matched));
+
+    let body_rule = devtools_rule(
+        "devtools-body-cost",
+        WafPhase::Request,
+        r#"
+when = "Request.Body.Text.contains('secret')"
+
+[[actions]]
+type = "reject"
+status = 403
+"#,
+    );
+    let cost = cost_oxirule(
+        &config,
+        OxiRuleDevtoolsCheckRequest {
+            rule: Some(body_rule),
+            groups: Vec::new(),
+            include_active_rules: false,
+        },
+    );
+    assert!(
+        cost.cost_warnings
+            .iter()
+            .any(|warning| warning.contains("request body prefix")),
+        "cost should warn about request body inspection: {:?}",
+        cost.cost_warnings
+    );
+}
+
+#[test]
+fn oxirule_devtools_supports_response_stream_and_replay_fixtures() {
+    let config = minimal_devtools_config("oxirule-devtools-phases");
+    let response_rule = devtools_rule(
+        "devtools-response-block",
+        WafPhase::Response,
+        r#"
+when = "Response.Http.Status >= 500"
+
+[[actions]]
+type = "reject_response"
+status = 502
+body = "upstream blocked"
+"#,
+    );
+    let response = test_oxirule(
+        &config,
+        OxiRuleDevtoolsEvalRequest {
+            rule: response_rule,
+            groups: Vec::new(),
+            include_active_rules: false,
+            fixture: response_fixture(503),
+            expected: None,
+        },
+    );
+    assert!(
+        response.ok,
+        "response fixture should pass: {:?}",
+        response.diagnostics
+    );
+    assert_eq!(
+        response.terminal.as_ref().map(|terminal| terminal.status),
+        Some(502)
+    );
+
+    let stream_rule = devtools_rule(
+        "devtools-stream-close",
+        WafPhase::Stream,
+        r#"
+when = "Stream.Payload.Text.contains('bad')"
+
+[[actions]]
+type = "close_stream"
+reason = "blocked"
+"#,
+    );
+    let stream = test_oxirule(
+        &config,
+        OxiRuleDevtoolsEvalRequest {
+            rule: stream_rule.clone(),
+            groups: Vec::new(),
+            include_active_rules: false,
+            fixture: stream_fixture("bad payload"),
+            expected: None,
+        },
+    );
+    assert!(
+        stream.ok,
+        "stream fixture should pass: {:?}",
+        stream.diagnostics
+    );
+    assert_eq!(
+        stream
+            .stream_close
+            .as_ref()
+            .map(|close| close.reason.as_str()),
+        Some("blocked")
+    );
+
+    let replay = replay_oxirule(
+        &config,
+        OxiRuleDevtoolsReplayRequest {
+            rule: stream_rule,
+            groups: Vec::new(),
+            include_active_rules: false,
+            input: serde_json::to_string(&serde_json::json!({
+                "phase": "stream",
+                "stream": {
+                    "payload": "bad payload"
+                }
+            }))
+            .expect("fixture should serialize"),
+        },
+    );
+    assert!(replay.ok, "replay should pass: {:?}", replay.diagnostics);
+    assert_eq!(replay.replay_results.len(), 1);
+    assert!(replay.replay_results[0].stream_close.is_some());
 }
 
 #[test]

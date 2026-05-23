@@ -588,6 +588,18 @@ async fn admin_response(
     .await;
   }
 
+  if path.starts_with("/admin/v1/waf/oxirule/") {
+    return admin_ops::admin_waf_devtools_response(
+      request,
+      snapshot.as_ref(),
+      &authorization,
+      &method,
+      &path,
+    )
+    .await
+    .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
+  }
+
   if let Some(response) =
     admin_ops::admin_waf_response(snapshot.as_ref(), &authorization, &method, &path)
   {

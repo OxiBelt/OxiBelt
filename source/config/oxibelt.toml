@@ -415,16 +415,32 @@ fail_closed = true
 #   "waf:DeleteOxiRule",
 #   "waf:PutOxiRuleGroup",
 #   "waf:DeleteOxiRuleGroup",
+#   "waf:CheckOxiRule",
+#   "waf:CheckOxiRuleGroup",
+#   "waf:TestOxiRule",
+#   "waf:ExplainOxiRule",
+#   "waf:EstimateOxiRuleCost",
+#   "waf:ReplayOxiRule",
 # ]
 # resources = [
 #   "oxibelt:oxibelt:waf:oxirule/*",
 #   "oxibelt:oxibelt:waf:oxirule-group/*",
+#   "oxibelt:oxibelt:waf:replay/*",
 # ]
 #
 #[[ipm.policies.statements]]
 # effect = "allow"
-# actions = ["waf:ReloadOxiRule"]
-# resources = ["*"]
+# actions = [
+#   "waf:ReloadOxiRule",
+#   "waf:ListOxiRuleTemplates",
+#   "waf:RenderOxiRuleTemplate",
+#   "waf:PlanOxiRuleFalsePositive",
+# ]
+# resources = [
+#   "*",
+#   "oxibelt:oxibelt:waf:template/*",
+#   "oxibelt:oxibelt:waf:false-positive/*",
+# ]
 #
 #[[ipm.bindings]]
 # group = "platform-admins"

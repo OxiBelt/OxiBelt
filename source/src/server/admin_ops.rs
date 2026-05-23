@@ -9,7 +9,11 @@ use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminActor, AdminAuthorization};
-use super::{admin, admin_body::collect_admin_json, admin_control, file_sync_path};
+use super::{
+  admin,
+  admin_body::{collect_admin_json, collect_admin_json_with_limit},
+  admin_control, file_sync_path,
+};
 
 #[cfg(test)]
 mod tests;
@@ -56,6 +60,230 @@ pub(super) fn admin_waf_response(
     )),
     _ => None,
   }
+}
+
+pub(super) async fn admin_waf_devtools_response(
+  request: hyper::Request<Incoming>,
+  snapshot: &AppSnapshot,
+  authorization: &AdminAuthorization<'_>,
+  method: &::http::Method,
+  path: &str,
+) -> Option<Response<ProxyBody>> {
+  const REPLAY_BODY_LIMIT: usize = 4 * 1024 * 1024;
+  match (method, path) {
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/check") => {
+      let body = match collect_admin_json::<crate::waf::OxiRuleDevtoolsCheckRequest>(request).await
+      {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      if let Some(response) = authorize_oxirule_check(authorization, &body) {
+        return Some(response);
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::check_oxirule(&snapshot.config, body),
+      ))
+    }
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/cost") => {
+      let body = match collect_admin_json::<crate::waf::OxiRuleDevtoolsCheckRequest>(request).await
+      {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      if !authorization.is_allowed(
+        "waf:EstimateOxiRuleCost",
+        oxirule_check_resource(&body).as_str(),
+      ) {
+        return Some(permission_denied(
+          authorization.actor,
+          "waf:EstimateOxiRuleCost",
+        ));
+      }
+      if let Some(response) = authorize_oxirule_active_context(
+        authorization,
+        body.include_active_rules,
+        "waf:EstimateOxiRuleCost",
+        "oxirule/*",
+      ) {
+        return Some(response);
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::cost_oxirule(&snapshot.config, body),
+      ))
+    }
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/test") => {
+      let body = match collect_admin_json::<crate::waf::OxiRuleDevtoolsEvalRequest>(request).await {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      let resource = crate::waf::oxirule_rule_resource_name(&body.rule);
+      if !authorization.is_allowed("waf:TestOxiRule", &resource) {
+        return Some(permission_denied(authorization.actor, "waf:TestOxiRule"));
+      }
+      if let Some(response) = authorize_oxirule_active_context(
+        authorization,
+        body.include_active_rules,
+        "waf:TestOxiRule",
+        "oxirule/*",
+      ) {
+        return Some(response);
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::test_oxirule(&snapshot.config, body),
+      ))
+    }
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/explain") => {
+      let body = match collect_admin_json::<crate::waf::OxiRuleDevtoolsEvalRequest>(request).await {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      let resource = crate::waf::oxirule_rule_resource_name(&body.rule);
+      if !authorization.is_allowed("waf:ExplainOxiRule", &resource) {
+        return Some(permission_denied(authorization.actor, "waf:ExplainOxiRule"));
+      }
+      if let Some(response) = authorize_oxirule_active_context(
+        authorization,
+        body.include_active_rules,
+        "waf:ExplainOxiRule",
+        "oxirule/*",
+      ) {
+        return Some(response);
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::explain_oxirule(&snapshot.config, body),
+      ))
+    }
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/replay") => {
+      let body = match collect_admin_json_with_limit::<crate::waf::OxiRuleDevtoolsReplayRequest>(
+        request,
+        REPLAY_BODY_LIMIT,
+      )
+      .await
+      {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      let resource =
+        crate::waf::oxirule_rule_resource_name(&body.rule).replace("oxirule/", "replay/");
+      if !authorization.is_allowed("waf:ReplayOxiRule", &resource) {
+        return Some(permission_denied(authorization.actor, "waf:ReplayOxiRule"));
+      }
+      if let Some(response) = authorize_oxirule_active_context(
+        authorization,
+        body.include_active_rules,
+        "waf:ReplayOxiRule",
+        "replay/*",
+      ) {
+        return Some(response);
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::replay_oxirule(&snapshot.config, body),
+      ))
+    }
+    (&::http::Method::GET, "/admin/v1/waf/oxirule/templates") => {
+      if !authorization.is_allowed("waf:ListOxiRuleTemplates", "template/*") {
+        return Some(permission_denied(
+          authorization.actor,
+          "waf:ListOxiRuleTemplates",
+        ));
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::list_oxirule_templates(),
+      ))
+    }
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/templates/render") => {
+      let body = match collect_admin_json::<crate::waf::OxiRuleTemplateRenderRequest>(request).await
+      {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      let resource = format!("template/{}", body.name);
+      if !authorization.is_allowed("waf:RenderOxiRuleTemplate", &resource) {
+        return Some(permission_denied(
+          authorization.actor,
+          "waf:RenderOxiRuleTemplate",
+        ));
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::render_oxirule_template(body),
+      ))
+    }
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/false-positive") => {
+      let body = match collect_admin_json::<crate::waf::OxiRuleFalsePositiveRequest>(request).await
+      {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      if !authorization.is_allowed("waf:PlanOxiRuleFalsePositive", "false-positive/inline") {
+        return Some(permission_denied(
+          authorization.actor,
+          "waf:PlanOxiRuleFalsePositive",
+        ));
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::plan_false_positive(body),
+      ))
+    }
+    (_, path) if path.starts_with("/admin/v1/waf/oxirule/") => Some(text_response(
+      StatusCode::METHOD_NOT_ALLOWED,
+      "method not allowed",
+    )),
+    _ => None,
+  }
+}
+
+fn authorize_oxirule_check(
+  authorization: &AdminAuthorization<'_>,
+  body: &crate::waf::OxiRuleDevtoolsCheckRequest,
+) -> Option<Response<ProxyBody>> {
+  if let Some(rule) = &body.rule {
+    let resource = crate::waf::oxirule_rule_resource_name(rule);
+    if !authorization.is_allowed("waf:CheckOxiRule", &resource) {
+      return Some(permission_denied(authorization.actor, "waf:CheckOxiRule"));
+    }
+  }
+  for resource in crate::waf::oxirule_group_resource_names(&body.groups) {
+    if !authorization.is_allowed("waf:CheckOxiRuleGroup", &resource) {
+      return Some(permission_denied(
+        authorization.actor,
+        "waf:CheckOxiRuleGroup",
+      ));
+    }
+  }
+  authorize_oxirule_active_context(
+    authorization,
+    body.include_active_rules,
+    "waf:CheckOxiRule",
+    "oxirule/*",
+  )
+}
+
+fn authorize_oxirule_active_context(
+  authorization: &AdminAuthorization<'_>,
+  include_active_rules: bool,
+  action: &str,
+  resource: &str,
+) -> Option<Response<ProxyBody>> {
+  if include_active_rules && !authorization.is_allowed(action, resource) {
+    return Some(permission_denied(authorization.actor, action));
+  }
+  None
+}
+
+fn oxirule_check_resource(body: &crate::waf::OxiRuleDevtoolsCheckRequest) -> String {
+  body
+    .rule
+    .as_ref()
+    .map(crate::waf::oxirule_rule_resource_name)
+    .unwrap_or_else(|| "oxirule/inline".to_string())
 }
 
 pub(super) fn admin_lifecycle_response(

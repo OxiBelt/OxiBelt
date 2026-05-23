@@ -14,7 +14,17 @@ pub(super) async fn collect_admin_json<T>(
 where
   T: for<'de> Deserialize<'de>,
 {
-  let bytes = Limited::new(request.into_body(), admin_control::ADMIN_CONFIG_BODY_LIMIT)
+  collect_admin_json_with_limit(request, admin_control::ADMIN_CONFIG_BODY_LIMIT).await
+}
+
+pub(super) async fn collect_admin_json_with_limit<T>(
+  request: hyper::Request<Incoming>,
+  limit: usize,
+) -> Result<T, Response<ProxyBody>>
+where
+  T: for<'de> Deserialize<'de>,
+{
+  let bytes = Limited::new(request.into_body(), limit)
     .collect()
     .await
     .map_err(|error| {
