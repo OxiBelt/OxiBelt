@@ -599,16 +599,7 @@ pub(super) async fn admin_tokens_response(
     return None;
   }
 
-  let write_method = matches!(
-    *method,
-    ::http::Method::POST | ::http::Method::PATCH | ::http::Method::DELETE
-  );
-  let required = if write_method {
-    AdminPermission::AdminTokensWrite
-  } else {
-    AdminPermission::AdminTokensRead
-  };
-  if !super::admin_actor_has_permission(actor, required) {
+  if !admin_token_request_authorized(actor, method) {
     return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
   }
 
@@ -678,6 +669,26 @@ pub(super) async fn admin_tokens_response(
   })
 }
 
+fn admin_token_request_authorized(actor: &super::AdminActor, method: &::http::Method) -> bool {
+  let write_method = admin_token_write_method(method);
+  if write_method && !super::admin_actor_has_role(actor, AdminRole::Admin) {
+    return false;
+  }
+  let required = if write_method {
+    AdminPermission::AdminTokensWrite
+  } else {
+    AdminPermission::AdminTokensRead
+  };
+  super::admin_actor_has_permission(actor, required)
+}
+
+fn admin_token_write_method(method: &::http::Method) -> bool {
+  matches!(
+    *method,
+    ::http::Method::POST | ::http::Method::PATCH | ::http::Method::DELETE
+  )
+}
+
 fn token_id_from_path(path: &str) -> Option<&str> {
   let token_id = path.strip_prefix("/admin/v1/tokens/")?;
   if token_id.is_empty() || token_id.contains('/') {
@@ -730,5 +741,92 @@ pub(super) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
       StatusCode::INTERNAL_SERVER_ERROR,
       &format!("failed to encode JSON response: {error}"),
     ),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn actor(
+    roles: Vec<AdminRole>,
+    permissions: Vec<AdminPermission>,
+    deny_permissions: Vec<AdminPermission>,
+  ) -> AdminActor {
+    AdminActor {
+      name: "test-actor".to_string(),
+      roles,
+      permissions,
+      deny_permissions,
+    }
+  }
+
+  #[test]
+  fn admin_token_write_authorization_requires_admin_role() {
+    let write_only = actor(
+      Vec::new(),
+      vec![AdminPermission::AdminTokensWrite],
+      Vec::new(),
+    );
+
+    assert!(!admin_token_request_authorized(
+      &write_only,
+      &::http::Method::PATCH
+    ));
+  }
+
+  #[test]
+  fn admin_token_write_authorization_allows_admin_role() {
+    let admin = actor(vec![AdminRole::Admin], Vec::new(), Vec::new());
+
+    assert!(admin_token_request_authorized(
+      &admin,
+      &::http::Method::POST
+    ));
+    assert!(admin_token_request_authorized(
+      &admin,
+      &::http::Method::PATCH
+    ));
+    assert!(admin_token_request_authorized(
+      &admin,
+      &::http::Method::DELETE
+    ));
+  }
+
+  #[test]
+  fn admin_token_write_authorization_preserves_deny_override() {
+    let denied_admin = actor(
+      vec![AdminRole::Admin],
+      Vec::new(),
+      vec![AdminPermission::AdminTokensWrite],
+    );
+
+    assert!(!admin_token_request_authorized(
+      &denied_admin,
+      &::http::Method::DELETE
+    ));
+  }
+
+  #[test]
+  fn admin_token_read_authorization_uses_read_permission() {
+    let reader = actor(
+      Vec::new(),
+      vec![AdminPermission::AdminTokensRead],
+      Vec::new(),
+    );
+    let write_only = actor(
+      Vec::new(),
+      vec![AdminPermission::AdminTokensWrite],
+      Vec::new(),
+    );
+
+    assert!(admin_token_request_authorized(
+      &reader,
+      &::http::Method::GET
+    ));
+    assert!(!admin_token_request_authorized(
+      &write_only,
+      &::http::Method::GET
+    ));
   }
 }
