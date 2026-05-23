@@ -6,12 +6,11 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::ipm::IpmRuntime;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
 
-use super::admin_auth::{AdminActor, admin_actor_is_allowed};
+use super::admin_auth::{AdminActor, AdminAuthorization};
 use super::{admin, admin_body::collect_admin_json, admin_control};
 
 #[cfg(test)]
@@ -19,8 +18,7 @@ mod tests;
 
 pub(super) fn admin_waf_response(
   snapshot: &AppSnapshot,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
@@ -42,8 +40,8 @@ pub(super) fn admin_waf_response(
     "/admin/v1/waf/crs/compatibility" => "waf:GetCrsCompatibility",
     _ => return None,
   };
-  if !admin_actor_is_allowed(actor, ipm, action, "*") {
-    return Some(permission_denied(actor, action));
+  if !authorization.is_allowed(action, "*") {
+    return Some(permission_denied(authorization.actor, action));
   }
   match path {
     "/admin/v1/waf/rule-hits" => Some(admin::json_response(
@@ -64,15 +62,14 @@ pub(super) fn admin_waf_response(
 
 pub(super) fn admin_lifecycle_response(
   snapshot: &AppSnapshot,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
   match path {
     "/admin/v1/lifecycle" => {
-      if !admin_actor_is_allowed(actor, ipm, "lifecycle:Get", "*") {
-        return Some(permission_denied(actor, "lifecycle:Get"));
+      if !authorization.is_allowed("lifecycle:Get", "*") {
+        return Some(permission_denied(authorization.actor, "lifecycle:Get"));
       }
       if *method != ::http::Method::GET {
         return Some(text_response(
@@ -89,8 +86,8 @@ pub(super) fn admin_lifecycle_response(
       ))
     }
     "/admin/v1/lifecycle/drain" => {
-      if !admin_actor_is_allowed(actor, ipm, "lifecycle:Drain", "*") {
-        return Some(permission_denied(actor, "lifecycle:Drain"));
+      if !authorization.is_allowed("lifecycle:Drain", "*") {
+        return Some(permission_denied(authorization.actor, "lifecycle:Drain"));
       }
       if *method != ::http::Method::POST {
         return Some(text_response(
@@ -102,8 +99,8 @@ pub(super) fn admin_lifecycle_response(
       Some(admin::json_response(StatusCode::OK, &json!({ "ok": true })))
     }
     "/admin/v1/lifecycle/undrain" => {
-      if !admin_actor_is_allowed(actor, ipm, "lifecycle:Undrain", "*") {
-        return Some(permission_denied(actor, "lifecycle:Undrain"));
+      if !authorization.is_allowed("lifecycle:Undrain", "*") {
+        return Some(permission_denied(authorization.actor, "lifecycle:Undrain"));
       }
       if *method != ::http::Method::POST {
         return Some(text_response(
@@ -122,21 +119,20 @@ pub(super) async fn admin_config_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
   admin_control: admin_control::AdminControlHandle,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
 ) -> Response<ProxyBody> {
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/config/status") => {
-      if !admin_actor_is_allowed(actor, ipm, "config:GetStatus", "*") {
-        return permission_denied(actor, "config:GetStatus");
+      if !authorization.is_allowed("config:GetStatus", "*") {
+        return permission_denied(authorization.actor, "config:GetStatus");
       }
       admin::json_response(StatusCode::OK, &admin_control.status().await)
     }
     (&::http::Method::GET, "/admin/v1/config/effective") => {
-      if !admin_actor_is_allowed(actor, ipm, "config:GetEffective", "*") {
-        return permission_denied(actor, "config:GetEffective");
+      if !authorization.is_allowed("config:GetEffective", "*") {
+        return permission_denied(authorization.actor, "config:GetEffective");
       }
       match admin_control.effective_config().await {
         Some((revision, etag, config)) => admin::json_response(
@@ -152,8 +148,8 @@ pub(super) async fn admin_config_response(
       }
     }
     (&::http::Method::POST, "/admin/v1/config/validate") => {
-      if !admin_actor_is_allowed(actor, ipm, "config:Validate", "*") {
-        return permission_denied(actor, "config:Validate");
+      if !authorization.is_allowed("config:Validate", "*") {
+        return permission_denied(authorization.actor, "config:Validate");
       }
       let payload = match collect_admin_json::<admin_control::AdminConfigPayload>(request).await {
         Ok(payload) => payload,
@@ -169,7 +165,7 @@ pub(super) async fn admin_config_response(
         Ok(_) => admin::json_response(StatusCode::OK, &json!({ "ok": true })),
         Err(error) => {
           let error = error.to_string();
-          validation_failed(actor, "config.validate", &error);
+          validation_failed(authorization.actor, "config.validate", &error);
           admin::json_response(
             StatusCode::BAD_REQUEST,
             &json!({ "ok": false, "error": error }),
@@ -178,8 +174,8 @@ pub(super) async fn admin_config_response(
       }
     }
     (&::http::Method::POST, "/admin/v1/config/diff") => {
-      if !admin_actor_is_allowed(actor, ipm, "config:Diff", "*") {
-        return permission_denied(actor, "config:Diff");
+      if !authorization.is_allowed("config:Diff", "*") {
+        return permission_denied(authorization.actor, "config:Diff");
       }
       let payload = match collect_admin_json::<admin_control::AdminConfigPayload>(request).await {
         Ok(payload) => payload,
@@ -194,7 +190,7 @@ pub(super) async fn admin_config_response(
           Ok(value) => value,
           Err(error) => {
             let error = error.to_string();
-            validation_failed(actor, "config.diff", &error);
+            validation_failed(authorization.actor, "config.diff", &error);
             return admin::json_response(
               StatusCode::BAD_REQUEST,
               &json!({ "ok": false, "error": error }),
@@ -211,8 +207,8 @@ pub(super) async fn admin_config_response(
       admin::json_response(StatusCode::OK, &json!({ "changes": changes }))
     }
     (&::http::Method::POST, "/admin/v1/config/load") => {
-      if !admin_actor_is_allowed(actor, ipm, "config:Load", "*") {
-        return permission_denied(actor, "config:Load");
+      if !authorization.is_allowed("config:Load", "*") {
+        return permission_denied(authorization.actor, "config:Load");
       }
       let if_match = if_match_header(&request);
       let payload = match collect_admin_json::<admin_control::AdminConfigPayload>(request).await {
@@ -222,10 +218,10 @@ pub(super) async fn admin_config_response(
       if let Some(response) = admin_control::validate_config_payload(&payload) {
         return response;
       }
-      let actor_can_manage_ipm = admin_actor_is_allowed(actor, ipm, "ipm:*", "*");
+      let actor_can_manage_ipm = authorization.is_allowed("ipm:*", "*");
       admin_control
         .load_config(
-          actor.name.clone(),
+          authorization.actor.name.clone(),
           actor_can_manage_ipm,
           if_match,
           payload.config,
@@ -234,11 +230,11 @@ pub(super) async fn admin_config_response(
         .into_http()
     }
     (&::http::Method::POST, "/admin/v1/config/rollback") => {
-      if !admin_actor_is_allowed(actor, ipm, "config:Rollback", "*") {
-        return permission_denied(actor, "config:Rollback");
+      if !authorization.is_allowed("config:Rollback", "*") {
+        return permission_denied(authorization.actor, "config:Rollback");
       }
       admin_control
-        .rollback_config(actor.name.clone(), if_match_header(&request))
+        .rollback_config(authorization.actor.name.clone(), if_match_header(&request))
         .await
         .into_http()
     }
@@ -250,15 +246,17 @@ pub(super) async fn admin_tls_response(
   request: &hyper::Request<Incoming>,
   snapshot: &AppSnapshot,
   admin_control: admin_control::AdminControlHandle,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/tls/downstream") => {
-      if !admin_actor_is_allowed(actor, ipm, "config:ReadDownstreamTls", "*") {
-        return Some(permission_denied(actor, "config:ReadDownstreamTls"));
+      if !authorization.is_allowed("config:ReadDownstreamTls", "*") {
+        return Some(permission_denied(
+          authorization.actor,
+          "config:ReadDownstreamTls",
+        ));
       }
       Some(admin::json_response(
         StatusCode::OK,
@@ -273,12 +271,15 @@ pub(super) async fn admin_tls_response(
       ))
     }
     (&::http::Method::POST, "/admin/v1/tls/downstream/reload") => {
-      if !admin_actor_is_allowed(actor, ipm, "config:ReloadDownstreamTls", "*") {
-        return Some(permission_denied(actor, "config:ReloadDownstreamTls"));
+      if !authorization.is_allowed("config:ReloadDownstreamTls", "*") {
+        return Some(permission_denied(
+          authorization.actor,
+          "config:ReloadDownstreamTls",
+        ));
       }
       Some(
         admin_control
-          .reload_downstream_tls(actor.name.clone(), if_match_header(request))
+          .reload_downstream_tls(authorization.actor.name.clone(), if_match_header(request))
           .await
           .into_http(),
       )
@@ -293,8 +294,7 @@ pub(super) async fn admin_tls_response(
 pub(super) async fn admin_files_response(
   request: hyper::Request<Incoming>,
   admin_control: admin_control::AdminControlHandle,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
 ) -> Response<ProxyBody> {
@@ -312,16 +312,16 @@ pub(super) async fn admin_files_response(
   if let Some(response) = admin_control::validate_file_sync_payload(&payload) {
     return response;
   }
-  if let Err(error) = check_file_sync_permissions(actor, ipm, &payload) {
+  if let Err(error) = check_file_sync_permissions(authorization, &payload) {
     return match error {
-      FileSyncPermissionError::Denied(action) => permission_denied(actor, action),
+      FileSyncPermissionError::Denied(action) => permission_denied(authorization.actor, action),
       FileSyncPermissionError::InvalidPath(message) => {
         text_response(StatusCode::BAD_REQUEST, &message)
       }
     };
   }
   admin_control
-    .sync_files(actor.name.clone(), if_match, payload)
+    .sync_files(authorization.actor.name.clone(), if_match, payload)
     .await
     .into_http()
 }
@@ -338,17 +338,16 @@ enum FileSyncPermissionError {
 }
 
 fn check_file_sync_permissions(
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   payload: &admin_control::AdminFilesSyncRequest,
 ) -> Result<(), FileSyncPermissionError> {
   for operation in &payload.operations {
     for permission in file_sync_operation_permissions(operation)? {
-      require_ipm_permission(actor, ipm, permission)?;
+      require_ipm_permission(authorization, permission)?;
     }
   }
   if let Some(permission) = file_sync_apply_permission(payload.apply) {
-    require_ipm_permission(actor, ipm, permission)?;
+    require_ipm_permission(authorization, permission)?;
   }
   Ok(())
 }
@@ -455,11 +454,10 @@ fn file_sync_apply_permission(
 }
 
 fn require_ipm_permission(
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   permission: RequiredIpmPermission,
 ) -> Result<(), FileSyncPermissionError> {
-  if admin_actor_is_allowed(actor, ipm, permission.action, &permission.resource_name) {
+  if authorization.is_allowed(permission.action, &permission.resource_name) {
     Ok(())
   } else {
     Err(FileSyncPermissionError::Denied(permission.action))

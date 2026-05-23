@@ -12,23 +12,17 @@ use tracing::info;
 use crate::dynamic_policy::{
   DynamicPolicyAdminCreate, DynamicPolicyAdminImport, DynamicPolicyAdminPatch,
 };
-use crate::ipm::{IpmDecision, IpmRequestContext, IpmRuntime, resource};
 use crate::proxy::http;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
 
-use super::AdminActor;
+use super::{AdminActor, AdminAuthorization};
 
 const ADMIN_JSON_BODY_LIMIT: usize = 64 * 1024;
 
-fn allowed(actor: &AdminActor, ipm: &IpmRuntime, action: &str, resource_name: &str) -> bool {
-  let service = action.split_once(':').map_or("*", |(service, _)| service);
-  let resource = resource(ipm.namespace(), service, resource_name);
-  matches!(
-    ipm.authorize(actor, action, &resource, &IpmRequestContext::default()),
-    IpmDecision::Allow
-  )
+fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
+  authorization.is_allowed(action, resource_name)
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,11 +122,10 @@ pub(super) fn signed_cache_purge_actor(
 pub(super) async fn cache_key_explain_response(
   request: hyper::Request<Incoming>,
   snapshot: &AppSnapshot,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
 ) -> Response<ProxyBody> {
-  if !allowed(actor, ipm, "cache:ExplainKey", "policy/*") {
+  if !allowed(authorization, "cache:ExplainKey", "policy/*") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
   if *method != ::http::Method::POST {
@@ -175,12 +168,11 @@ pub(super) async fn cache_key_explain_response(
 pub(super) async fn cache_warm_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   peer_addr: SocketAddr,
 ) -> Response<ProxyBody> {
-  if !allowed(actor, ipm, "cache:Warm", "policy/*") {
+  if !allowed(authorization, "cache:Warm", "policy/*") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
   if *method != ::http::Method::POST {
@@ -242,8 +234,7 @@ pub(super) async fn cache_warm_response(
 pub(super) async fn cache_purge_json_response(
   request: hyper::Request<Incoming>,
   snapshot: &AppSnapshot,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   default_scheme: &'static str,
   peer_addr: SocketAddr,
@@ -264,18 +255,28 @@ pub(super) async fn cache_purge_json_response(
     "tag" => "cache:PurgeTag",
     _ => "cache:PurgeObject",
   };
-  if !allowed(actor, ipm, action, &format!("policy/{policy}")) {
+  if !allowed(authorization, action, &format!("policy/{policy}")) {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
 
   let purged = match body.purge_type.as_str() {
     "exact" => {
       let Some(host) = body.host.as_deref() else {
-        audit_rejected_cache_purge(peer_addr, actor, "cache_purge_json", "missing host");
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_json",
+          "missing host",
+        );
         return text_response(StatusCode::BAD_REQUEST, "missing host");
       };
       let Some(uri) = body.uri.as_deref() else {
-        audit_rejected_cache_purge(peer_addr, actor, "cache_purge_json", "missing uri");
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_json",
+          "missing uri",
+        );
         return text_response(StatusCode::BAD_REQUEST, "missing uri");
       };
       snapshot
@@ -284,13 +285,18 @@ pub(super) async fn cache_purge_json_response(
     }
     "prefix" => {
       let Some(host) = body.host.as_deref() else {
-        audit_rejected_cache_purge(peer_addr, actor, "cache_purge_prefix_json", "missing host");
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_prefix_json",
+          "missing host",
+        );
         return text_response(StatusCode::BAD_REQUEST, "missing host");
       };
       let Some(path_prefix) = body.path_prefix.as_deref() else {
         audit_rejected_cache_purge(
           peer_addr,
-          actor,
+          authorization.actor,
           "cache_purge_prefix_json",
           "missing path_prefix",
         );
@@ -302,7 +308,12 @@ pub(super) async fn cache_purge_json_response(
     }
     "tag" => {
       let Some(tag) = body.tag.as_deref() else {
-        audit_rejected_cache_purge(peer_addr, actor, "cache_purge_tag_json", "missing tag");
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_tag_json",
+          "missing tag",
+        );
         return text_response(StatusCode::BAD_REQUEST, "missing tag");
       };
       snapshot.cache.purge_tag_partition(
@@ -314,7 +325,12 @@ pub(super) async fn cache_purge_json_response(
       )
     }
     _ => {
-      audit_rejected_cache_purge(peer_addr, actor, "cache_purge_json", "invalid type");
+      audit_rejected_cache_purge(
+        peer_addr,
+        authorization.actor,
+        "cache_purge_json",
+        "invalid type",
+      );
       return text_response(StatusCode::BAD_REQUEST, "invalid type");
     }
   };
@@ -326,7 +342,7 @@ pub(super) async fn cache_purge_json_response(
   }
   super::admin_audit(
     peer_addr,
-    actor,
+    authorization.actor,
     match body.purge_type.as_str() {
       "exact" => "cache_purge_json",
       "prefix" => "cache_purge_prefix_json",
@@ -340,7 +356,7 @@ pub(super) async fn cache_purge_json_response(
   );
   info!(
     peer = %peer_addr,
-    actor = %actor.name,
+    actor = %authorization.actor.name,
     policy,
     purged,
     purge_type = %body.purge_type,
@@ -384,8 +400,7 @@ pub(super) fn cache_purge_response(
   path: &str,
   scheme: &'static str,
   peer_addr: SocketAddr,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
 ) -> Response<ProxyBody> {
   let policy = params
     .get("policy")
@@ -397,10 +412,10 @@ pub(super) fn cache_purge_response(
     "/cache/purge-tag" => ("cache:PurgeTag", "cache_purge_tag"),
     _ => return text_response(StatusCode::NOT_FOUND, "not found"),
   };
-  if !allowed(actor, ipm, action, &format!("policy/{policy}")) {
+  if !allowed(authorization, action, &format!("policy/{policy}")) {
     super::admin_audit(
       peer_addr,
-      actor,
+      authorization.actor,
       operation,
       None,
       None,
@@ -417,7 +432,7 @@ pub(super) fn cache_purge_response(
       let Some(host) = host else {
         super::admin_audit(
           peer_addr,
-          actor,
+          authorization.actor,
           "cache_purge",
           None,
           None,
@@ -429,7 +444,7 @@ pub(super) fn cache_purge_response(
       let Some(uri) = params.get("uri").map(String::as_str) else {
         super::admin_audit(
           peer_addr,
-          actor,
+          authorization.actor,
           "cache_purge",
           None,
           None,
@@ -446,7 +461,7 @@ pub(super) fn cache_purge_response(
       let Some(host) = host else {
         super::admin_audit(
           peer_addr,
-          actor,
+          authorization.actor,
           "cache_purge_prefix",
           None,
           None,
@@ -458,7 +473,7 @@ pub(super) fn cache_purge_response(
       let Some(path_prefix) = params.get("path_prefix").map(String::as_str) else {
         super::admin_audit(
           peer_addr,
-          actor,
+          authorization.actor,
           "cache_purge_prefix",
           None,
           None,
@@ -475,7 +490,7 @@ pub(super) fn cache_purge_response(
       let Some(tag) = params.get("tag").map(String::as_str) else {
         super::admin_audit(
           peer_addr,
-          actor,
+          authorization.actor,
           "cache_purge_tag",
           None,
           None,
@@ -501,22 +516,21 @@ pub(super) fn cache_purge_response(
   }
   super::admin_audit(
     peer_addr,
-    actor,
+    authorization.actor,
     operation,
     None,
     None,
     super::AdminAuditOutcome::Applied,
     None,
   );
-  info!(peer = %peer_addr, actor = %actor.name, policy, purged, "admin cache purge completed");
+  info!(peer = %peer_addr, actor = %authorization.actor.name, policy, purged, "admin cache purge completed");
   text_response(StatusCode::OK, &format!("purged={purged}\n"))
 }
 
 pub(super) async fn dynamic_policy_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
-  actor: &super::AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
@@ -529,7 +543,7 @@ pub(super) async fn dynamic_policy_response(
   }
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/dynamic-policies") => {
-      if !allowed(actor, ipm, "dynamic-policy:List", "*") {
+      if !allowed(authorization, "dynamic-policy:List", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       return Some(match state.snapshot().dynamic_policy.admin_list().await {
@@ -538,7 +552,7 @@ pub(super) async fn dynamic_policy_response(
       });
     }
     (&::http::Method::POST, "/admin/v1/dynamic-policies") => {
-      if !allowed(actor, ipm, "dynamic-policy:Create", "*") {
+      if !allowed(authorization, "dynamic-policy:Create", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       let body = match collect_admin_json::<DynamicPolicyAdminCreate>(request).await {
@@ -549,7 +563,7 @@ pub(super) async fn dynamic_policy_response(
         match state
           .snapshot()
           .dynamic_policy
-          .admin_create(&actor.name, body)
+          .admin_create(&authorization.actor.name, body)
           .await
         {
           Ok(policy) => json_response(StatusCode::CREATED, &policy),
@@ -558,7 +572,7 @@ pub(super) async fn dynamic_policy_response(
       );
     }
     (&::http::Method::GET, "/admin/v1/dynamic-policies/export") => {
-      if !allowed(actor, ipm, "dynamic-policy:Export", "*") {
+      if !allowed(authorization, "dynamic-policy:Export", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       return Some(match state.snapshot().dynamic_policy.admin_export().await {
@@ -567,7 +581,7 @@ pub(super) async fn dynamic_policy_response(
       });
     }
     (&::http::Method::POST, "/admin/v1/dynamic-policies/import") => {
-      if !allowed(actor, ipm, "dynamic-policy:Import", "*") {
+      if !allowed(authorization, "dynamic-policy:Import", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       let body = match collect_admin_json::<DynamicPolicyAdminImport>(request).await {
@@ -578,7 +592,7 @@ pub(super) async fn dynamic_policy_response(
         match state
           .snapshot()
           .dynamic_policy
-          .admin_import(&actor.name, body)
+          .admin_import(&authorization.actor.name, body)
           .await
         {
           Ok(policies) => json_response(StatusCode::OK, &json!({ "policies": policies })),
@@ -594,7 +608,7 @@ pub(super) async fn dynamic_policy_response(
   };
   Some(match *method {
     ::http::Method::GET => {
-      if !allowed(actor, ipm, "dynamic-policy:Get", &id.to_string()) {
+      if !allowed(authorization, "dynamic-policy:Get", &id.to_string()) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       match state.snapshot().dynamic_policy.admin_get(id).await {
@@ -604,7 +618,7 @@ pub(super) async fn dynamic_policy_response(
       }
     }
     ::http::Method::PATCH => {
-      if !allowed(actor, ipm, "dynamic-policy:Update", &id.to_string()) {
+      if !allowed(authorization, "dynamic-policy:Update", &id.to_string()) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       let body = match collect_admin_json::<DynamicPolicyAdminPatch>(request).await {
@@ -614,7 +628,7 @@ pub(super) async fn dynamic_policy_response(
       match state
         .snapshot()
         .dynamic_policy
-        .admin_patch(&actor.name, id, body)
+        .admin_patch(&authorization.actor.name, id, body)
         .await
       {
         Ok(Some(policy)) => json_response(StatusCode::OK, &policy),
@@ -623,13 +637,13 @@ pub(super) async fn dynamic_policy_response(
       }
     }
     ::http::Method::DELETE => {
-      if !allowed(actor, ipm, "dynamic-policy:Delete", &id.to_string()) {
+      if !allowed(authorization, "dynamic-policy:Delete", &id.to_string()) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       match state
         .snapshot()
         .dynamic_policy
-        .admin_delete(&actor.name, id)
+        .admin_delete(&authorization.actor.name, id)
         .await
       {
         Ok(true) => json_response(StatusCode::OK, &json!({ "ok": true })),

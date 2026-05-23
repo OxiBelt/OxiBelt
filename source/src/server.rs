@@ -53,11 +53,9 @@ mod plain_http;
 #[cfg(test)]
 mod reload_tests;
 use admin::json_response;
-use admin_auth::{AdminActor, admin_actor, admin_actor_is_allowed};
+use admin_auth::{AdminActor, AdminAuthorization, admin_actor, admin_request_context};
 use admin_body::collect_admin_json;
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
-#[cfg(test)]
-use admin_ops::admin_lifecycle_response;
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
 const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
@@ -494,6 +492,7 @@ async fn admin_response(
     .into_owned()
     .collect::<std::collections::HashMap<_, _>>();
   let path = uri.path().to_string();
+  let admin_context = admin_request_context(&request, peer_addr);
   let actor = admin_actor(&request, &snapshot.config, &snapshot.ipm);
 
   if path == "/cache/purge" || path == "/cache/purge-prefix" || path == "/cache/purge-tag" {
@@ -515,21 +514,16 @@ async fn admin_response(
       Some(actor) => actor,
       None => return text_response(StatusCode::UNAUTHORIZED, "unauthorized"),
     };
-    let response = admin::cache_purge_response(
-      &snapshot,
-      &params,
-      &path,
-      scheme,
-      peer_addr,
-      &actor,
-      &snapshot.ipm,
-    );
+    let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context);
+    let response =
+      admin::cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &authorization);
     return response;
   }
 
   let Some(actor) = actor else {
     return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
   };
+  let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context);
 
   if path == "/admin/v1/config/status"
     || path == "/admin/v1/config/effective"
@@ -542,8 +536,7 @@ async fn admin_response(
       request,
       state.clone(),
       admin_control.clone(),
-      &actor,
-      &snapshot.ipm,
+      &authorization,
       &method,
       &path,
     )
@@ -554,8 +547,7 @@ async fn admin_response(
     &request,
     snapshot.as_ref(),
     admin_control.clone(),
-    &actor,
-    &snapshot.ipm,
+    &authorization,
     &method,
     &path,
   )
@@ -568,40 +560,25 @@ async fn admin_response(
     return admin_ops::admin_files_response(
       request,
       admin_control.clone(),
-      &actor,
-      &snapshot.ipm,
+      &authorization,
       &method,
       &path,
     )
     .await;
   }
   if path == "/admin/v1/cache/key-explain" {
-    return admin::cache_key_explain_response(
-      request,
-      snapshot.as_ref(),
-      &actor,
-      &snapshot.ipm,
-      &method,
-    )
-    .await;
+    return admin::cache_key_explain_response(request, snapshot.as_ref(), &authorization, &method)
+      .await;
   }
   if path == "/admin/v1/cache/warm" {
-    return admin::cache_warm_response(
-      request,
-      state.clone(),
-      &actor,
-      &snapshot.ipm,
-      &method,
-      peer_addr,
-    )
-    .await;
+    return admin::cache_warm_response(request, state.clone(), &authorization, &method, peer_addr)
+      .await;
   }
   if path == "/admin/v1/cache/purge" {
     return admin::cache_purge_json_response(
       request,
       snapshot.as_ref(),
-      &actor,
-      &snapshot.ipm,
+      &authorization,
       &method,
       scheme,
       peer_addr,
@@ -610,12 +587,12 @@ async fn admin_response(
   }
 
   if let Some(response) =
-    admin_ops::admin_waf_response(snapshot.as_ref(), &actor, &snapshot.ipm, &method, &path)
+    admin_ops::admin_waf_response(snapshot.as_ref(), &authorization, &method, &path)
   {
     return response;
   }
   if let Some(response) =
-    admin_ops::admin_lifecycle_response(snapshot.as_ref(), &actor, &snapshot.ipm, &method, &path)
+    admin_ops::admin_lifecycle_response(snapshot.as_ref(), &authorization, &method, &path)
   {
     return response;
   }
@@ -626,25 +603,9 @@ async fn admin_response(
     || path.starts_with("/admin/v1/dynamic-policies/");
   if ipm_path || dynamic_policy_path {
     let response = if ipm_path {
-      admin_ipm::ipm_response(
-        request,
-        state.clone(),
-        &actor,
-        &snapshot.ipm,
-        &method,
-        &path,
-      )
-      .await
+      admin_ipm::ipm_response(request, state.clone(), &authorization, &method, &path).await
     } else {
-      admin::dynamic_policy_response(
-        request,
-        state.clone(),
-        &actor,
-        &snapshot.ipm,
-        &method,
-        &path,
-      )
-      .await
+      admin::dynamic_policy_response(request, state.clone(), &authorization, &method, &path).await
     };
     return response.unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
@@ -654,7 +615,7 @@ async fn admin_response(
     state,
     snapshot.as_ref(),
     peer_addr,
-    &actor,
+    &authorization,
     &method,
     &path,
   )
@@ -686,12 +647,12 @@ async fn admin_upstream_pools_response(
   state: AppHandle,
   snapshot: &AppSnapshot,
   peer_addr: SocketAddr,
-  actor: &AdminActor,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
   if path == "/admin/v1/upstream-pools" {
-    if !admin_actor_is_allowed(actor, &snapshot.ipm, "upstream-pool:List", "*") {
+    if !authorization.is_allowed("upstream-pool:List", "*") {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     if *method != ::http::Method::GET {
@@ -706,7 +667,7 @@ async fn admin_upstream_pools_response(
   let rest = path.strip_prefix("/admin/v1/upstream-pools/")?;
   let segments = rest.split('/').collect::<Vec<_>>();
   if segments.len() == 1 {
-    if !admin_actor_is_allowed(actor, &snapshot.ipm, "upstream-pool:Get", segments[0]) {
+    if !authorization.is_allowed("upstream-pool:Get", segments[0]) {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     if *method != ::http::Method::GET {
@@ -722,7 +683,7 @@ async fn admin_upstream_pools_response(
   }
 
   if segments.len() == 2 && segments[1] == "servers" {
-    if !admin_actor_is_allowed(actor, &snapshot.ipm, "upstream-pool:AddServer", segments[0]) {
+    if !authorization.is_allowed("upstream-pool:AddServer", segments[0]) {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     if *method != ::http::Method::POST {
@@ -732,7 +693,14 @@ async fn admin_upstream_pools_response(
       ));
     }
     return Some(
-      admin_add_pool_server(request, &state, peer_addr, actor, segments[0].to_string()).await,
+      admin_add_pool_server(
+        request,
+        &state,
+        peer_addr,
+        authorization.actor,
+        segments[0].to_string(),
+      )
+      .await,
     );
   }
 
@@ -742,7 +710,7 @@ async fn admin_upstream_pools_response(
       ::http::Method::DELETE => "upstream-pool:RemoveServer",
       _ => "upstream-pool:UpdateServer",
     };
-    if !admin_actor_is_allowed(actor, &snapshot.ipm, action, segments[0]) {
+    if !authorization.is_allowed(action, segments[0]) {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     return Some(
@@ -750,7 +718,7 @@ async fn admin_upstream_pools_response(
         request,
         &state,
         peer_addr,
-        actor,
+        authorization.actor,
         method,
         segments[0].to_string(),
         segments[2].to_string(),
@@ -2485,77 +2453,6 @@ mod tests {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
   const ADMIN_TOKEN_ENV: &str = "PATH";
-
-  fn test_actor(name: &str) -> AdminActor {
-    AdminActor {
-      name: name.to_string(),
-      principal: name.to_string(),
-      subject: name.to_string(),
-      groups: vec!["ipm-admin".to_string()],
-    }
-  }
-
-  #[tokio::test]
-  async fn admin_lifecycle_endpoints_enforce_ipm_and_toggle_drain() {
-    let temp_dir = common::TempDir::new("admin-lifecycle");
-    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-lifecycle");
-    let config = admin_listener_config(&cert_path, &key_path, true, None);
-    let snapshot = AppSnapshot::new(config)
-      .await
-      .expect("snapshot should initialize");
-    let viewer = AdminActor {
-      name: "viewer".to_string(),
-      principal: "viewer".to_string(),
-      subject: "viewer".to_string(),
-      groups: Vec::new(),
-    };
-    let admin = test_actor("admin");
-
-    let response = admin_lifecycle_response(
-      &snapshot,
-      &viewer,
-      &snapshot.ipm,
-      &::http::Method::GET,
-      "/admin/v1/lifecycle",
-    )
-    .expect("lifecycle GET should be handled");
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(!snapshot.lifecycle.is_draining());
-
-    let response = admin_lifecycle_response(
-      &snapshot,
-      &viewer,
-      &snapshot.ipm,
-      &::http::Method::POST,
-      "/admin/v1/lifecycle/drain",
-    )
-    .expect("lifecycle drain should be handled");
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(!snapshot.lifecycle.is_draining());
-
-    let response = admin_lifecycle_response(
-      &snapshot,
-      &admin,
-      &snapshot.ipm,
-      &::http::Method::POST,
-      "/admin/v1/lifecycle/drain",
-    )
-    .expect("lifecycle drain should be handled");
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(snapshot.lifecycle.is_draining());
-    assert_eq!(snapshot.lifecycle.reason(), "admin");
-
-    let response = admin_lifecycle_response(
-      &snapshot,
-      &admin,
-      &snapshot.ipm,
-      &::http::Method::POST,
-      "/admin/v1/lifecycle/undrain",
-    )
-    .expect("lifecycle undrain should be handled");
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(!snapshot.lifecycle.is_draining());
-  }
 
   #[tokio::test]
   async fn admin_listener_disabled_config_does_not_serve_stale_requests() {

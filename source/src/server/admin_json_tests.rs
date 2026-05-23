@@ -143,6 +143,42 @@ async fn query_cache_purge_authorizes_specific_type_and_policy() {
   task.abort();
 }
 
+#[tokio::test]
+async fn admin_ipm_request_context_applies_source_ip_deny() {
+  let temp_dir = common::TempDir::new("admin-ipm-request-context");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-ipm-request-context");
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("admin listener should bind");
+  let addr = listener
+    .local_addr()
+    .expect("admin listener address should be available");
+  let config = admin_listener_source_ip_deny_config(&cert_path, &key_path, addr);
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let state = AppHandle::new(snapshot);
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = tokio::spawn(serve_admin_listener(
+    listener,
+    addr,
+    state,
+    test_admin_control(),
+    shutdown_rx,
+  ));
+
+  let response = admin_config_status_response(addr).await;
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden"),
+    "request.source_ip deny should reject local admin request: {}",
+    log_safe_text(&response)
+  );
+
+  let _ = shutdown.send(true);
+  task.abort();
+}
+
 fn admin_listener_config(cert_path: &Path, key_path: &Path, admin_bind: SocketAddr) -> Config {
   let mut raw = common::minimal_config_toml(cert_path, key_path)
     .replace("unprivileged_mode = true", "unprivileged_mode = false")
@@ -216,6 +252,62 @@ resources = ["oxibelt:oxibelt:cache:policy/default"]
 [[ipm.bindings]]
 principal = "purger"
 policy = "exact-default"
+"#
+  ));
+  parse_config(&raw)
+}
+
+fn admin_listener_source_ip_deny_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
+  let mut raw = common::minimal_config_toml(cert_path, key_path)
+    .replace("unprivileged_mode = true", "unprivileged_mode = false")
+    .replace(
+      "https_bind = \"127.0.0.1:8443\"",
+      "https_bind = \"127.0.0.1:0\"",
+    );
+  raw.push_str(&format!(
+    r#"
+
+[admin]
+enabled = true
+bind = "{admin_bind}"
+bearer_token_env = "{ADMIN_TOKEN_ENV}"
+transport = "plaintext_allowlist"
+
+[ipm]
+enabled = true
+
+[[ipm.principals]]
+id = "deployer"
+subject = "deployer@example.com"
+
+[[ipm.credentials]]
+name = "deployer-token"
+principal = "deployer"
+bearer_token_env = "{ADMIN_TOKEN_ENV}"
+
+[[ipm.policies]]
+name = "config-local-network"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["config:*"]
+resources = ["*"]
+
+[[ipm.policies.statements]]
+effect = "deny"
+actions = ["config:*"]
+resources = ["*"]
+conditions = [
+  {{ operator = "NotIpAddress", key = "request.source_ip", values = ["10.0.0.0/8"] }}
+]
+
+[[ipm.bindings]]
+principal = "deployer"
+policy = "config-local-network"
 "#
   ));
   parse_config(&raw)
@@ -305,6 +397,33 @@ async fn admin_query_purge_response(addr: SocketAddr, path: &str) -> String {
     .write_all(request.as_bytes())
     .await
     .expect("admin query purge request should write");
+  let mut response = Vec::new();
+  tokio::time::timeout(
+    std::time::Duration::from_secs(1),
+    stream.read_to_end(&mut response),
+  )
+  .await
+  .expect("admin response should not time out")
+  .expect("admin response should read");
+  String::from_utf8_lossy(&response).into_owned()
+}
+
+async fn admin_config_status_response(addr: SocketAddr) -> String {
+  let mut stream = TcpStream::connect(addr)
+    .await
+    .expect("admin config status connection should open");
+  let token = std::env::var(ADMIN_TOKEN_ENV).expect("admin token should be available");
+  let request = format!(
+    "GET /admin/v1/config/status HTTP/1.1\r\n\
+     Host: Admin.Example.COM:9443\r\n\
+     Authorization: Bearer {token}\r\n\
+     Connection: close\r\n\
+     \r\n"
+  );
+  stream
+    .write_all(request.as_bytes())
+    .await
+    .expect("admin config status request should write");
   let mut response = Vec::new();
   tokio::time::timeout(
     std::time::Duration::from_secs(1),

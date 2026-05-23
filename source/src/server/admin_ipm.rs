@@ -3,21 +3,19 @@ use hyper::body::Incoming;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::ipm::{IpmDecision, IpmRequestContext, IpmRuntime};
+use crate::ipm::{IpmDecision, IpmRequestContext};
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::state::AppHandle;
 
-use super::AdminActor;
 use super::admin::json_response;
-use super::admin_auth::admin_actor_is_allowed;
+use super::admin_auth::AdminAuthorization;
 use super::admin_body::collect_admin_json;
 
 pub(super) async fn ipm_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
-  actor: &AdminActor,
-  ipm: &IpmRuntime,
+  authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
@@ -34,7 +32,7 @@ pub(super) async fn ipm_response(
 
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/ipm/principals") => {
-      if !admin_actor_is_allowed(actor, ipm, "ipm:ListPrincipals", "*") {
+      if !authorization.is_allowed("ipm:ListPrincipals", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       Some(json_response(
@@ -43,7 +41,7 @@ pub(super) async fn ipm_response(
       ))
     }
     (&::http::Method::GET, "/admin/v1/ipm/credentials") => {
-      if !admin_actor_is_allowed(actor, ipm, "ipm:ListCredentials", "*") {
+      if !authorization.is_allowed("ipm:ListCredentials", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       Some(json_response(
@@ -52,7 +50,7 @@ pub(super) async fn ipm_response(
       ))
     }
     (&::http::Method::GET, "/admin/v1/ipm/policies") => {
-      if !admin_actor_is_allowed(actor, ipm, "ipm:ListPolicies", "*") {
+      if !authorization.is_allowed("ipm:ListPolicies", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       Some(json_response(
@@ -61,7 +59,7 @@ pub(super) async fn ipm_response(
       ))
     }
     (&::http::Method::GET, "/admin/v1/ipm/bindings") => {
-      if !admin_actor_is_allowed(actor, ipm, "ipm:ListBindings", "*") {
+      if !authorization.is_allowed("ipm:ListBindings", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       Some(json_response(
@@ -70,15 +68,15 @@ pub(super) async fn ipm_response(
       ))
     }
     (&::http::Method::POST, "/admin/v1/ipm/simulate") => {
-      if !admin_actor_is_allowed(actor, ipm, "ipm:Simulate", "*") {
+      if !authorization.is_allowed("ipm:Simulate", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       let body = match collect_admin_json::<IpmSimulationRequest>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
       };
-      let decision = ipm.authorize(
-        actor,
+      let decision = authorization.ipm.authorize(
+        authorization.actor,
         &body.action,
         &body.resource,
         &IpmRequestContext::default(),

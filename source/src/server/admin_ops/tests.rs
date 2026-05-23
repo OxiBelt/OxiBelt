@@ -1,6 +1,13 @@
 use super::*;
 use crate::config::{IpmPolicyConfig, IpmPolicyEffect, IpmPolicyStatementConfig};
-use crate::ipm::IpmActor;
+use crate::ipm::{IpmActor, IpmRequestContext, IpmRuntime};
+
+mod common {
+  include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/rust/common/mod.rs"
+  ));
+}
 
 fn actor_and_ipm(actions: &[&str], resources: &[&str]) -> (AdminActor, IpmRuntime) {
   let actor = IpmActor {
@@ -24,6 +31,15 @@ fn actor_and_ipm(actions: &[&str], resources: &[&str]) -> (AdminActor, IpmRuntim
   };
   let ipm = IpmRuntime::test_with_actor_policy("oxibelt", actor.clone(), policy);
   (actor, ipm)
+}
+
+fn admin_actor(name: &str, groups: Vec<String>) -> AdminActor {
+  AdminActor {
+    name: name.to_string(),
+    principal: name.to_string(),
+    subject: name.to_string(),
+    groups,
+  }
 }
 
 fn sync_request(
@@ -53,9 +69,69 @@ fn delete(root: admin_control::AdminFileRoot, path: &str) -> admin_control::Admi
   }
 }
 
+#[tokio::test]
+async fn admin_lifecycle_endpoints_enforce_ipm_and_toggle_drain() {
+  let temp_dir = common::TempDir::new("admin-lifecycle");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-lifecycle");
+  let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let viewer = admin_actor("viewer", Vec::new());
+  let admin = admin_actor("admin", vec!["ipm-admin".to_string()]);
+  let context = IpmRequestContext::default();
+  let viewer_auth = AdminAuthorization::new(&viewer, &snapshot.ipm, &context);
+  let admin_auth = AdminAuthorization::new(&admin, &snapshot.ipm, &context);
+
+  let response = admin_lifecycle_response(
+    &snapshot,
+    &viewer_auth,
+    &::http::Method::GET,
+    "/admin/v1/lifecycle",
+  )
+  .expect("lifecycle GET should be handled");
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+  assert!(!snapshot.lifecycle.is_draining());
+
+  let response = admin_lifecycle_response(
+    &snapshot,
+    &viewer_auth,
+    &::http::Method::POST,
+    "/admin/v1/lifecycle/drain",
+  )
+  .expect("lifecycle drain should be handled");
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+  assert!(!snapshot.lifecycle.is_draining());
+
+  let response = admin_lifecycle_response(
+    &snapshot,
+    &admin_auth,
+    &::http::Method::POST,
+    "/admin/v1/lifecycle/drain",
+  )
+  .expect("lifecycle drain should be handled");
+  assert_eq!(response.status(), StatusCode::OK);
+  assert!(snapshot.lifecycle.is_draining());
+  assert_eq!(snapshot.lifecycle.reason(), "admin");
+
+  let response = admin_lifecycle_response(
+    &snapshot,
+    &admin_auth,
+    &::http::Method::POST,
+    "/admin/v1/lifecycle/undrain",
+  )
+  .expect("lifecycle undrain should be handled");
+  assert_eq!(response.status(), StatusCode::OK);
+  assert!(!snapshot.lifecycle.is_draining());
+}
+
 #[test]
 fn config_sync_files_does_not_authorize_oxirule_files() {
   let (actor, ipm) = actor_and_ipm(&["config:SyncFiles"], &["*"]);
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
 
   let oxirule_put = sync_request(
     admin_control::AdminApplyMode::None,
@@ -65,7 +141,7 @@ fn config_sync_files_does_not_authorize_oxirule_files() {
     )],
   );
   assert_eq!(
-    check_file_sync_permissions(&actor, &ipm, &oxirule_put),
+    check_file_sync_permissions(&authorization, &oxirule_put),
     Err(FileSyncPermissionError::Denied("waf:PutOxiRule"))
   );
 
@@ -77,7 +153,7 @@ fn config_sync_files_does_not_authorize_oxirule_files() {
     )],
   );
   assert_eq!(
-    check_file_sync_permissions(&actor, &ipm, &group_delete),
+    check_file_sync_permissions(&authorization, &group_delete),
     Err(FileSyncPermissionError::Denied("waf:DeleteOxiRuleGroup"))
   );
 
@@ -86,7 +162,7 @@ fn config_sync_files_does_not_authorize_oxirule_files() {
     vec![put(admin_control::AdminFileRoot::Config, "runtime.toml")],
   );
   assert_eq!(
-    check_file_sync_permissions(&actor, &ipm, &reload),
+    check_file_sync_permissions(&authorization, &reload),
     Err(FileSyncPermissionError::Denied("waf:ReloadOxiRule"))
   );
 }
@@ -105,6 +181,8 @@ fn waf_file_permissions_authorize_matching_operations() {
       "oxibelt:oxibelt:waf:oxirule-group/*",
     ],
   );
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
   let payload = sync_request(
     admin_control::AdminApplyMode::None,
     vec![
@@ -127,12 +205,14 @@ fn waf_file_permissions_authorize_matching_operations() {
     ],
   );
 
-  assert!(check_file_sync_permissions(&actor, &ipm, &payload).is_ok());
+  assert!(check_file_sync_permissions(&authorization, &payload).is_ok());
 }
 
 #[test]
 fn mixed_file_sync_requires_every_operation_permission() {
   let (actor, ipm) = actor_and_ipm(&["waf:PutOxiRule"], &["oxibelt:oxibelt:waf:oxirule/*"]);
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
   let payload = sync_request(
     admin_control::AdminApplyMode::None,
     vec![
@@ -148,7 +228,7 @@ fn mixed_file_sync_requires_every_operation_permission() {
   );
 
   assert_eq!(
-    check_file_sync_permissions(&actor, &ipm, &payload),
+    check_file_sync_permissions(&authorization, &payload),
     Err(FileSyncPermissionError::Denied("waf:PutOxiRuleGroup"))
   );
 }
@@ -156,10 +236,12 @@ fn mixed_file_sync_requires_every_operation_permission() {
 #[test]
 fn oxirule_reload_requires_waf_reload_permission() {
   let (actor, ipm) = actor_and_ipm(&["config:SyncFiles", "waf:ReloadOxiRule"], &["*"]);
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
   let payload = sync_request(
     admin_control::AdminApplyMode::OxiRule,
     vec![put(admin_control::AdminFileRoot::Config, "runtime.toml")],
   );
 
-  assert!(check_file_sync_permissions(&actor, &ipm, &payload).is_ok());
+  assert!(check_file_sync_permissions(&authorization, &payload).is_ok());
 }
