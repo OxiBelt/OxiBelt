@@ -54,7 +54,7 @@ port_name = "http"
 token_env = "KUBERNETES_SERVICE_TOKEN"
 kubernetes_resource = "endpoint_slice"
 watch = true
-watch_timeout_seconds = 5
+watch_timeout_seconds = 10
 update_debounce_ms = 100
 refresh_interval_ms = 1000
 
