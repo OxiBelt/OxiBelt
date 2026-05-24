@@ -3,6 +3,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <docker-platform> <artifact-arch> <output-dir>" >&2
+  echo "artifact-arch: amd64v2, amd64, amd64v4, arm64, or riscv64" >&2
 }
 
 default_oxibelt_source="https://github.com/OxiBelt/OxiBelt"
@@ -39,24 +40,49 @@ if [[ -z "${platform}" || -z "${artifact_arch}" || -z "${output_dir}" ]]; then
   exit 2
 fi
 
-case "${artifact_arch}" in
-  amd64|arm64|riscv64) ;;
-  *)
-    usage
-    exit 2
-    ;;
-esac
-
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 image_tag="oxibelt:alpine-musl-${artifact_arch}"
 image_tar="${output_dir%/}/oxibelt-alpine-musl-${artifact_arch}.tar"
 rust_builder_image="rust:1.95.0-alpine3.23"
 rust_target=""
+rust_target_cpu=""
 oxibelt_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/source/Cargo.toml" | head -n 1)"
 oxibelt_revision="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)"
 oxibelt_created="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 oxibelt_source="$(detect_oxibelt_source)"
+
+case "${artifact_arch}" in
+  amd64v2)
+    if [[ "${platform}" != "linux/amd64" ]]; then
+      usage
+      exit 2
+    fi
+    rust_target="x86_64-unknown-linux-musl"
+    rust_target_cpu="x86-64-v2"
+    ;;
+  amd64)
+    if [[ "${platform}" != "linux/amd64" ]]; then
+      usage
+      exit 2
+    fi
+    rust_target="x86_64-unknown-linux-musl"
+    rust_target_cpu="x86-64-v3"
+    ;;
+  amd64v4)
+    if [[ "${platform}" != "linux/amd64" ]]; then
+      usage
+      exit 2
+    fi
+    rust_target="x86_64-unknown-linux-musl"
+    rust_target_cpu="x86-64-v4"
+    ;;
+  arm64|riscv64) ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
 
 if [[ -z "${oxibelt_version}" ]]; then
   oxibelt_version="dev"
@@ -82,6 +108,7 @@ docker buildx build \
   --file "${repo_root}/source/ops/Dockerfile.alpine" \
   --build-arg "RUST_BUILDER_IMAGE=${rust_builder_image}" \
   --build-arg "OXIBELT_RUST_TARGET=${rust_target}" \
+  --build-arg "OXIBELT_RUST_TARGET_CPU=${rust_target_cpu}" \
   --build-arg "OXIBELT_VERSION=${oxibelt_version}" \
   --build-arg "OXIBELT_REVISION=${oxibelt_revision}" \
   --build-arg "OXIBELT_CREATED=${oxibelt_created}" \

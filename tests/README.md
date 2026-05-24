@@ -3,7 +3,8 @@
 - `rust/`: repository-root Cargo integration tests linked from `source/Cargo.toml`
 - `docker/`: mock upstream image assets for end-to-end proxy verification
 - `scripts/build-targets.sh`: adds the current Linux `gnu` and `musl` targets, then builds both
-- `scripts/build-docker-image-artifact.sh`: builds an Alpine musl Docker image for a requested Docker platform (`linux/amd64`, `linux/arm64`, or `linux/riscv64`) and writes it as a loadable image tar artifact
+- `scripts/build-docker-image-artifact.sh`: builds an Alpine musl Docker image for a requested Docker platform (`linux/amd64`, `linux/arm64`, or `linux/riscv64`) and writes it as a loadable image tar artifact. AMD64 builds accept `amd64v2`, `amd64`, and `amd64v4`; the default `amd64` artifact name remains `oxibelt-alpine-musl-amd64-image` and targets `x86-64-v3`.
+- `scripts/select-amd64-docker-image-artifact.sh`: selects the best loadable AMD64 Docker artifact for the current Linux runner from `/proc/cpuinfo`, or validates a required target such as `x86-64-v3` for benchmark jobs.
 - `riscv64gc-unknown-linux-musl` builds need `clang/libclang`, and either a native `riscv64gc-unknown-linux-musl` toolchain or `riscv64-linux-musl-gcc`
 - RISC-V Docker image artifacts use `rust:1.95.0-trixie` as the builder because the official `rust:1.95.0-alpine3.23` image is not published for `riscv64`; the runtime image is still Alpine/musl.
 - `scripts/run-proxy-integration.sh`: generates fresh TLS certificates for every run, validates HTTP and HTTPS proxying through Docker, probes `X25519` plus `X25519MLKEM768` TLS negotiation against the current server, and exercises HTTPS upstream proxying with ECH GREASE enabled
@@ -26,5 +27,7 @@
 The Docker integration flow avoids host bind mounts on purpose. It uses `docker build` and `docker cp`, which behaves more reliably when Docker is exposed through `docker-outside-of-docker`.
 
 The Docker performance flow follows the same constraint. It copies generated TLS material and configs into containers instead of relying on bind mounts, and removes test containers, networks, and test-only images by label during cleanup.
+
+CI builds AMD64 Alpine musl images for `x86-64-v2`, `x86-64-v3`, and `x86-64-v4`. Docker integration, remote signer, and browser WebDriver jobs auto-select the newest supported artifact on each runner. Docker performance and aggressive long-run jobs intentionally use the `x86-64-v3` artifact so benchmark summaries compare the same binary target; unsupported performance runners upload `unsupported-cpu.json` and are excluded from aggregate calculations, while unsupported aggressive long-run runners fail and should be manually rerun.
 
 Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, `hot-reload/full-config-tls-listener-rebind`, `hot-reload/telemetry-tracing-disable`, and `hot-reload/webtransport-stale-snapshot-drain`. The WebTransport drain case keeps an existing session open through the long-connection grace window while asserting new streams on that drained HTTP/3 bridge are rejected. The telemetry case verifies full reload rebuilds tracing state and stops `traceparent` propagation when tracing is disabled. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.

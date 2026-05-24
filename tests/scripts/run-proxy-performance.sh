@@ -158,6 +158,7 @@ waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-11000}"
 crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-9000}"
 waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.20}"
 regression_gate_mode="${OXIBELT_PERF_REGRESSION_GATE_MODE:-fail}"
+amd64_target_cpu="${OXIBELT_AMD64_TARGET_CPU:-unspecified}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
 oxibelt_aggressive_scenario="${OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO:-baseline-aggressive-long-run}"
 oxibelt_handshake_scenario="${OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO:-baseline-accept-1}"
@@ -1580,6 +1581,7 @@ cat >"${summary_md}" <<EOF
 - OxiBelt baseline fixture: \`${oxibelt_baseline_scenario}\`
 - OxiBelt aggressive fixture: \`${oxibelt_aggressive_scenario}\`
 - OxiBelt handshake fixture: \`${oxibelt_handshake_scenario}\`
+- OxiBelt AMD64 target CPU: \`${amd64_target_cpu}\`
 - Duration: \`${duration_seconds}s\`
 - Warmup: \`${warmup_seconds}s\`
 - Concurrency: \`${concurrency}\`

@@ -44,6 +44,8 @@ struct Args {
     #[arg(long)]
     expected_runs: Option<usize>,
     #[arg(long)]
+    expected_shards: Option<usize>,
+    #[arg(long)]
     baseline_report: Option<PathBuf>,
 }
 
@@ -112,6 +114,7 @@ struct DiscoveredFiles {
     results: Vec<PathBuf>,
     summary_count: usize,
     docker_stats_count: usize,
+    unsupported_cpu_markers: Vec<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -121,6 +124,14 @@ struct ArtifactDiscovery {
     docker_stats_files: usize,
     expected_results_files: Option<usize>,
     missing_expected_paths: Vec<String>,
+    unsupported_cpu: UnsupportedCpuDiscovery,
+}
+
+#[derive(Default, Serialize)]
+struct UnsupportedCpuDiscovery {
+    count: usize,
+    markers: Vec<String>,
+    shards: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -374,6 +385,7 @@ struct Report {
     schema_version: u32,
     profile: Option<String>,
     expected_runs: Option<usize>,
+    expected_shards: Option<usize>,
     artifact_discovery: ArtifactDiscovery,
     summary: ReportSummary,
     comparisons: ComparisonGroups,
@@ -511,6 +523,7 @@ fn main() -> Result<()> {
         &args.input_dir,
         args.profile,
         args.expected_runs,
+        args.expected_shards,
         args.baseline_report.as_deref(),
     );
     fs::create_dir_all(&args.output_dir)?;
@@ -540,33 +553,56 @@ fn aggregate(
     input_dir: &Path,
     profile: Option<String>,
     expected_runs: Option<usize>,
+    expected_shards: Option<usize>,
     baseline_report: Option<&Path>,
 ) -> Report {
     let mut warnings = WarningBag::default();
     let regression_gate_thresholds = regression_gate_thresholds(&mut warnings);
     let baseline_gate_context = load_baseline_gate_context(baseline_report, &mut warnings);
     let discovered = discover_files(input_dir, &mut warnings);
+    let unsupported_artifact_dirs = unsupported_artifact_dirs(&discovered.unsupported_cpu_markers);
+    let results = discovered
+        .results
+        .iter()
+        .filter(|path| {
+            !unsupported_artifact_dirs
+                .iter()
+                .any(|unsupported_dir| path.starts_with(unsupported_dir))
+        })
+        .collect::<Vec<_>>();
     let mut artifact_discovery = ArtifactDiscovery {
-        results_files: discovered.results.len(),
+        results_files: results.len(),
         summary_files: discovered.summary_count,
         docker_stats_files: discovered.docker_stats_count,
         expected_results_files: None,
         missing_expected_paths: Vec::new(),
+        unsupported_cpu: unsupported_cpu_discovery(
+            input_dir,
+            profile.as_deref(),
+            &discovered.unsupported_cpu_markers,
+        ),
     };
 
     add_expected_artifact_warnings(
         input_dir,
         profile.as_deref(),
         expected_runs,
+        expected_shards,
         &mut artifact_discovery,
         &mut warnings,
     );
-    if discovered.results.is_empty() {
-        warnings.push("no results.json files were discovered");
+    if results.is_empty() {
+        if artifact_discovery.unsupported_cpu.count > 0 {
+            warnings.push(
+                "no supported results.json files were discovered; only unsupported CPU marker artifacts were found",
+            );
+        } else {
+            warnings.push("no results.json files were discovered");
+        }
     }
 
     let mut builders: BTreeMap<(Comparator, String), AggregateBuilder> = BTreeMap::new();
-    for results_path in &discovered.results {
+    for results_path in results {
         for row in parse_results_file(input_dir, results_path, &mut warnings) {
             builders
                 .entry((row.comparator, row.scenario.clone()))
@@ -609,9 +645,10 @@ fn aggregate(
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 5,
+        schema_version: 6,
         profile,
         expected_runs,
+        expected_shards,
         artifact_discovery,
         summary,
         comparisons: ComparisonGroups {
@@ -674,6 +711,7 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
         results: Vec::new(),
         summary_count: 0,
         docker_stats_count: 0,
+        unsupported_cpu_markers: Vec::new(),
     };
 
     if !input_dir.exists() {
@@ -724,19 +762,66 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
                 "results.json" => discovered.results.push(entry.path()),
                 "summary.md" => discovered.summary_count += 1,
                 "docker-stats.jsonl" => discovered.docker_stats_count += 1,
+                "unsupported-cpu.json" => discovered.unsupported_cpu_markers.push(entry.path()),
                 _ => {}
             }
         }
     }
 
     discovered.results.sort();
+    discovered.unsupported_cpu_markers.sort();
     discovered
+}
+
+fn unsupported_cpu_discovery(
+    input_dir: &Path,
+    profile: Option<&str>,
+    markers: &[PathBuf],
+) -> UnsupportedCpuDiscovery {
+    let mut marker_paths = Vec::new();
+    let mut shards = BTreeSet::new();
+
+    for marker in markers {
+        marker_paths.push(display_path(input_dir, marker));
+        if let Some(shard) = unsupported_shard_id(input_dir, profile, marker) {
+            shards.insert(shard);
+        }
+    }
+
+    UnsupportedCpuDiscovery {
+        count: markers.len(),
+        markers: marker_paths,
+        shards: shards.into_iter().collect(),
+    }
+}
+
+fn unsupported_artifact_dirs(markers: &[PathBuf]) -> BTreeSet<PathBuf> {
+    markers
+        .iter()
+        .filter_map(|marker| marker.parent().map(Path::to_path_buf))
+        .collect()
+}
+
+fn unsupported_shard_id(input_dir: &Path, profile: Option<&str>, marker: &Path) -> Option<String> {
+    let artifact_name = marker.strip_prefix(input_dir).ok()?.components().next()?;
+    let artifact_name = artifact_name.as_os_str().to_string_lossy();
+    let artifact_name = artifact_name.as_ref();
+
+    let remainder = if let Some(profile) = profile {
+        let prefix = format!("oxibelt-docker-performance-{profile}-");
+        artifact_name.strip_prefix(&prefix)?
+    } else {
+        artifact_name
+    };
+    let (serving_type, shard) = remainder.rsplit_once("-shard-")?;
+    Some(format!("{serving_type}/shard-{shard}"))
 }
 
 fn add_expected_artifact_warnings(
     input_dir: &Path,
     profile: Option<&str>,
     expected_runs: Option<usize>,
+    expected_shards: Option<usize>,
     artifact_discovery: &mut ArtifactDiscovery,
     warnings: &mut WarningBag,
 ) {
@@ -751,13 +836,22 @@ fn add_expected_artifact_warnings(
     let Some(expected_runs) = expected_runs else {
         return;
     };
+    let expected_shards = expected_shards.unwrap_or(5);
+    if expected_shards == 0 {
+        warnings.push("--expected-shards was 0; skipping expected artifact checks");
+        return;
+    }
 
-    artifact_discovery.expected_results_files = Some(SERVING_TYPES.len() * 5 * expected_runs);
+    let mut expected_results_files = 0;
     for serving_type in SERVING_TYPES {
-        for shard in 1..=5 {
+        for shard in 1..=expected_shards {
             let artifact_name =
                 format!("oxibelt-docker-performance-{profile}-{serving_type}-shard-{shard}");
             let artifact_dir = input_dir.join(&artifact_name);
+            if artifact_dir.join("unsupported-cpu.json").exists() {
+                continue;
+            }
+            expected_results_files += expected_runs;
             if !artifact_dir.exists() {
                 artifact_discovery
                     .missing_expected_paths
@@ -779,6 +873,7 @@ fn add_expected_artifact_warnings(
             }
         }
     }
+    artifact_discovery.expected_results_files = Some(expected_results_files);
 }
 
 fn parse_results_file(
@@ -2697,6 +2792,24 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- Unsupported AMD64 v3 runner artifacts: `{}`",
+        report.artifact_discovery.unsupported_cpu.count
+    )
+    .unwrap();
+    if !report.artifact_discovery.unsupported_cpu.shards.is_empty() {
+        writeln!(
+            markdown,
+            "- Unsupported AMD64 v3 shards excluded: `{}`",
+            report
+                .artifact_discovery
+                .unsupported_cpu
+                .shards
+                .join("`, `")
+        )
+        .unwrap();
+    }
+    writeln!(
+        markdown,
         "- Reverse proxy vs nginx: {}",
         format_ratio_summary(&report.summary.reverse_proxy.oxibelt_vs_nginx, "nginx")
     )
@@ -3161,4 +3274,100 @@ fn display_path(input_dir: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = env::temp_dir().join(format!(
+            "oxibelt-performance-aggregate-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("temporary aggregate directory should be creatable");
+        path
+    }
+
+    #[test]
+    fn unsupported_cpu_markers_are_excluded_from_expected_results() {
+        let input_dir = temp_dir("unsupported");
+        let artifact_dir = input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1");
+        fs::create_dir_all(&artifact_dir).expect("unsupported artifact dir should be creatable");
+        fs::write(
+            artifact_dir.join("unsupported-cpu.json"),
+            r#"{"schema_version":1,"required_target_cpu":"x86-64-v3"}"#,
+        )
+        .expect("unsupported marker should be writable");
+        fs::create_dir_all(artifact_dir.join("run-1")).expect("run dir should be creatable");
+        fs::write(
+            artifact_dir.join("run-1/results.json"),
+            r#"{"type":"load","label":"oxibelt-h1-keepalive","requests":1,"rps":1}"#,
+        )
+        .expect("ignored unsupported result should be writable");
+
+        let report = aggregate(&input_dir, Some("smoke".to_owned()), Some(5), Some(2), None);
+
+        assert_eq!(report.artifact_discovery.results_files, 0);
+        assert!(report.aggregates.is_empty());
+        assert_eq!(report.artifact_discovery.unsupported_cpu.count, 1);
+        assert_eq!(
+            report.artifact_discovery.unsupported_cpu.shards,
+            vec!["reverse-proxy/shard-1".to_owned()]
+        );
+        assert_eq!(
+            report.artifact_discovery.expected_results_files,
+            Some((SERVING_TYPES.len() * 2 - 1) * 5)
+        );
+        assert!(
+            !report
+                .artifact_discovery
+                .missing_expected_paths
+                .iter()
+                .any(|path| path == "oxibelt-docker-performance-smoke-reverse-proxy-shard-1"),
+            "unsupported shard should not be reported as missing expected results"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("only unsupported CPU marker artifacts")),
+            "all-unsupported aggregate should explain why no results were found"
+        );
+
+        fs::remove_dir_all(input_dir).ok();
+    }
+
+    #[test]
+    fn unsupported_cpu_markers_are_rendered_in_markdown() {
+        let input_dir = temp_dir("markdown");
+        let artifact_dir =
+            input_dir.join("oxibelt-docker-performance-benchmark-static-files-shard-20");
+        fs::create_dir_all(&artifact_dir).expect("unsupported artifact dir should be creatable");
+        fs::write(
+            artifact_dir.join("unsupported-cpu.json"),
+            r#"{"schema_version":1,"required_target_cpu":"x86-64-v3"}"#,
+        )
+        .expect("unsupported marker should be writable");
+
+        let report = aggregate(
+            &input_dir,
+            Some("benchmark".to_owned()),
+            Some(5),
+            Some(20),
+            None,
+        );
+        let markdown = render_markdown(&report);
+
+        assert!(markdown.contains("Unsupported AMD64 v3 runner artifacts: `1`"));
+        assert!(markdown.contains("Unsupported AMD64 v3 shards excluded: `static-files/shard-20`"));
+
+        fs::remove_dir_all(input_dir).ok();
+    }
 }

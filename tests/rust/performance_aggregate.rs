@@ -505,7 +505,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 5);
+    assert_eq!(report["schema_version"], 6);
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
     assert_eq!(oxibelt_h1["sample_count"], 25);

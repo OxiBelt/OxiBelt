@@ -276,6 +276,38 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
 }
 
 #[test]
+fn amd64_docker_image_job_builds_cpu_level_artifacts() {
+    let workflow = workflow_text();
+
+    assert!(
+        workflow.contains("name: Docker image (Alpine musl, amd64, ${{ matrix.target_cpu }})"),
+        "AMD64 Docker image job should expose the target CPU in the job name"
+    );
+    for (artifact_arch, target_cpu, artifact_name) in [
+        ("amd64v2", "x86-64-v2", "oxibelt-alpine-musl-amd64v2-image"),
+        ("amd64", "x86-64-v3", "oxibelt-alpine-musl-amd64-image"),
+        ("amd64v4", "x86-64-v4", "oxibelt-alpine-musl-amd64v4-image"),
+    ] {
+        assert!(
+            workflow.contains(&format!("artifact_arch: {artifact_arch}")),
+            "AMD64 Docker image matrix should include {artifact_arch}"
+        );
+        assert!(
+            workflow.contains(&format!("target_cpu: {target_cpu}")),
+            "AMD64 Docker image matrix should include {target_cpu}"
+        );
+        assert!(
+            workflow.contains(&format!("artifact_name: {artifact_name}")),
+            "AMD64 Docker image matrix should upload {artifact_name}"
+        );
+    }
+    assert!(
+        workflow.contains("\"${{ matrix.artifact_arch }}\""),
+        "AMD64 Docker image build should pass the matrix artifact arch to the build script"
+    );
+}
+
+#[test]
 fn docker_performance_job_uses_sharded_repeated_sampling() {
     let workflow = workflow_text();
 
@@ -296,7 +328,7 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         workflow.contains("serving_type:"),
         "docker-performance should define a serving-type matrix axis"
     );
-    for shard in 1..=5 {
+    for shard in 1..=20 {
         assert!(
             workflow.contains(&format!("          - {shard}")),
             "docker-performance should include shard {shard}"
@@ -327,6 +359,26 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     assert!(
         workflow.contains("OXIBELT_PERF_REGRESSION_GATE_MODE: warn"),
         "docker-performance should defer noisy per-iteration regression gates to the summary job"
+    );
+    assert!(
+        workflow.contains(
+            "tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported"
+        ),
+        "docker-performance should force the x86-64-v3 artifact with unsupported-runner handling"
+    );
+    assert!(
+        workflow.contains("unsupported-cpu.json"),
+        "docker-performance should upload unsupported CPU markers instead of benchmark rows"
+    );
+    assert!(
+        workflow.contains("steps.select-amd64-image.outputs.supported == 'true'"),
+        "docker-performance should only download and run the image when the runner supports v3"
+    );
+    assert!(
+        workflow.contains(
+            "OXIBELT_AMD64_TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}"
+        ),
+        "docker-performance should record the AMD64 target CPU in per-run summaries"
     );
     assert!(
         workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),
@@ -420,6 +472,10 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should pass the comparison output directory"
     );
     assert!(
+        workflow.contains("--expected-shards 20"),
+        "summary job should expect the expanded 20-shard performance matrix"
+    );
+    assert!(
         workflow.contains("--baseline-report \"${BASELINE_REPORT}\""),
         "summary job should pass the previous report to the aggregate binary when available"
     );
@@ -430,6 +486,14 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         workflow.contains("gate_status=\"$(jq -r '.regression_gates.status // \"unknown\"'"),
         "summary job should read the regression gate status from the comparison JSON"
+    );
+    assert!(
+        workflow.contains(".artifact_discovery.unsupported_cpu.count // 0"),
+        "summary job should surface unsupported AMD64 v3 benchmark runner counts"
+    );
+    assert!(
+        workflow.contains("Docker performance produced no results.json files"),
+        "summary job should fail when every benchmark runner produced only unsupported CPU markers"
     );
     assert!(
         workflow.contains("Docker performance regression gates failed with status"),
@@ -494,8 +558,26 @@ fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
         "aggressive long-run should use the connect-stable OxiBelt fixture"
     );
     assert!(
+        workflow.contains("tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3"),
+        "aggressive long-run should force the x86-64-v3 image artifact"
+    );
+    assert!(
+        workflow.contains("manually rerun this job to get a different runner"),
+        "aggressive long-run should fail loudly and ask for a rerun when v3 is unavailable"
+    );
+    assert!(
+        workflow.contains(
+            "OXIBELT_AMD64_TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}"
+        ),
+        "aggressive long-run should record the AMD64 target CPU in its summary"
+    );
+    assert!(
         workflow.contains("--serving-type oxibelt-aggressive-long-run"),
         "aggressive long-run should call the dedicated performance serving type"
+    );
+    assert!(
+        workflow.contains("cat \"${RUNNER_TEMP}/oxibelt-aggressive-long-run/summary.md\" >> \"${GITHUB_STEP_SUMMARY}\""),
+        "aggressive long-run should append its run summary to the GitHub step summary"
     );
     assert!(
         workflow.contains("name: oxibelt-docker-aggressive-long-run-${{ github.run_id }}"),

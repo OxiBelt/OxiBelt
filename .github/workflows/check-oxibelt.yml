@@ -306,7 +306,7 @@ jobs:
         run: tests/scripts/build-targets.sh
 
   docker-alpine-musl-image-amd64:
-    name: Docker image (Alpine musl, amd64)
+    name: Docker image (Alpine musl, amd64, ${{ matrix.target_cpu }})
     runs-on: ubuntu-latest
     needs:
       - test
@@ -314,6 +314,19 @@ jobs:
       - fuzz-smoke
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_arch: amd64v2
+            artifact_name: oxibelt-alpine-musl-amd64v2-image
+            target_cpu: x86-64-v2
+          - artifact_arch: amd64
+            artifact_name: oxibelt-alpine-musl-amd64-image
+            target_cpu: x86-64-v3
+          - artifact_arch: amd64v4
+            artifact_name: oxibelt-alpine-musl-amd64v4-image
+            target_cpu: x86-64-v4
 
     steps:
       - name: Checkout
@@ -326,14 +339,14 @@ jobs:
         run: |
           tests/scripts/build-docker-image-artifact.sh \
             "linux/amd64" \
-            "amd64" \
+            "${{ matrix.artifact_arch }}" \
             "${RUNNER_TEMP}/oxibelt-image"
 
       - name: Upload Docker image artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: oxibelt-alpine-musl-amd64-image
-          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-amd64.tar
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
           retention-days: 0
 
   docker-alpine-musl-image-other:
@@ -408,18 +421,24 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal
           rustup default 1.95.0
 
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: tests/scripts/select-amd64-docker-image-artifact.sh auto
+
       - name: Download AMD64 Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: oxibelt-alpine-musl-amd64-image
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
 
       - name: Load OxiBelt Docker image
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/oxibelt-alpine-musl-amd64.tar"
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Run Docker integration matrix case
         env:
-          OXIBELT_DOCKER_IMAGE: oxibelt:alpine-musl-amd64
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
@@ -446,18 +465,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
 
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: tests/scripts/select-amd64-docker-image-artifact.sh auto
+
       - name: Download AMD64 Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: oxibelt-alpine-musl-amd64-image
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
 
       - name: Load OxiBelt Docker image
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/oxibelt-alpine-musl-amd64.tar"
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Run remote signer slowloris regression
         env:
-          OXIBELT_DOCKER_IMAGE: oxibelt:alpine-musl-amd64
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
         run: tests/scripts/run-remote-signer-dos.sh
 
   browser-webdriver:
@@ -478,18 +503,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
 
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: tests/scripts/select-amd64-docker-image-artifact.sh auto
+
       - name: Download AMD64 Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: oxibelt-alpine-musl-amd64-image
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
 
       - name: Load OxiBelt Docker image
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/oxibelt-alpine-musl-amd64.tar"
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Run browser-to-proxy WebDriver check
         env:
-          OXIBELT_DOCKER_IMAGE: oxibelt:alpine-musl-amd64
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-browser-logs/${{ matrix.browser }}-${{ matrix.case }}
         run: tests/scripts/run-browser-webdriver-check.sh "${{ matrix.browser }}" "${{ matrix.case }}"
 
@@ -524,6 +555,21 @@ jobs:
           - 3
           - 4
           - 5
+          - 6
+          - 7
+          - 8
+          - 9
+          - 10
+          - 11
+          - 12
+          - 13
+          - 14
+          - 15
+          - 16
+          - 17
+          - 18
+          - 19
+          - 20
         serving_type:
           - reverse-proxy
           - static-files
@@ -541,18 +587,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
 
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported
+
+      - name: Record unsupported AMD64 v3 runner
+        if: steps.select-amd64-image.outputs.supported != 'true'
+        env:
+          PERFORMANCE_SHARD: ${{ matrix.shard }}
+          TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}
+          MISSING_FEATURES: ${{ steps.select-amd64-image.outputs.missing_features }}
+        run: |
+          artifact_dir="${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}"
+          mkdir -p "${artifact_dir}"
+          printf '{\n' >"${artifact_dir}/unsupported-cpu.json"
+          printf '  "schema_version": 1,\n' >>"${artifact_dir}/unsupported-cpu.json"
+          printf '  "profile": "%s",\n' "${PERFORMANCE_PROFILE}" >>"${artifact_dir}/unsupported-cpu.json"
+          printf '  "serving_type": "%s",\n' "${PERFORMANCE_SERVING_TYPE}" >>"${artifact_dir}/unsupported-cpu.json"
+          printf '  "shard": %s,\n' "${PERFORMANCE_SHARD}" >>"${artifact_dir}/unsupported-cpu.json"
+          printf '  "required_target_cpu": "%s",\n' "${TARGET_CPU}" >>"${artifact_dir}/unsupported-cpu.json"
+          printf '  "missing_features": "%s"\n' "${MISSING_FEATURES}" >>"${artifact_dir}/unsupported-cpu.json"
+          printf '}\n' >>"${artifact_dir}/unsupported-cpu.json"
+          echo "::warning title=AMD64 v3 unsupported::Skipping Docker performance ${PERFORMANCE_PROFILE}/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}; runner CPU is missing ${MISSING_FEATURES}"
+
       - name: Download AMD64 Docker image artifact
+        if: steps.select-amd64-image.outputs.supported == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: oxibelt-alpine-musl-amd64-image
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
 
       - name: Load OxiBelt Docker image
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/oxibelt-alpine-musl-amd64.tar"
+        if: steps.select-amd64-image.outputs.supported == 'true'
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Run Docker performance profile
+        if: steps.select-amd64-image.outputs.supported == 'true'
         env:
-          OXIBELT_DOCKER_IMAGE: oxibelt:alpine-musl-amd64
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_AMD64_TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}
           PERFORMANCE_SHARD: ${{ matrix.shard }}
         run: |
           if [[ ! "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -682,6 +757,7 @@ jobs:
             --input-dir "${RUNNER_TEMP}/oxibelt-performance-artifacts"
             --output-dir "${RUNNER_TEMP}/oxibelt-performance-comparison"
             --profile "${PERFORMANCE_PROFILE}"
+            --expected-shards 20
           )
           if [[ "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
             aggregate_args+=(--expected-runs "${PERFORMANCE_ITERATIONS}")
@@ -717,6 +793,13 @@ jobs:
       - name: Evaluate Docker performance regression gates
         if: steps.performance-artifacts.outputs.found == 'true'
         run: |
+          results_files="$(jq -r '.artifact_discovery.results_files // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          unsupported_count="$(jq -r '.artifact_discovery.unsupported_cpu.count // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          if [[ "${results_files}" == "0" ]]; then
+            echo "Docker performance produced no results.json files; unsupported AMD64 v3 runner artifacts: ${unsupported_count}" >&2
+            exit 1
+          fi
+
           gate_status="$(jq -r '.regression_gates.status // "unknown"' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if [[ "${gate_status}" == "pass" ]]; then
             echo "Docker performance regression gates passed"
@@ -746,18 +829,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
 
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: |
+          if ! tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3; then
+            echo "::error title=AMD64 v3 unsupported::Docker aggressive long-run requires an x86-64-v3-capable runner; manually rerun this job to get a different runner."
+            exit 1
+          fi
+
       - name: Download AMD64 Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: oxibelt-alpine-musl-amd64-image
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
 
       - name: Load OxiBelt Docker image
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/oxibelt-alpine-musl-amd64.tar"
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Run aggressive long-run
         env:
-          OXIBELT_DOCKER_IMAGE: oxibelt:alpine-musl-amd64
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_AMD64_TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}
           OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO: baseline-aggressive-long-run
           OXIBELT_PERF_SOAK_SECONDS: ${{ env.AGGRESSIVE_LONG_RUN_SECONDS }}
           OXIBELT_PERF_CONCURRENCY: ${{ env.AGGRESSIVE_LONG_RUN_CONCURRENCY }}
@@ -776,6 +870,13 @@ jobs:
             --profile soak \
             --serving-type oxibelt-aggressive-long-run \
             --comparators oxibelt
+
+      - name: Append aggressive long-run summary
+        if: always()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/oxibelt-aggressive-long-run/summary.md" ]]; then
+            cat "${RUNNER_TEMP}/oxibelt-aggressive-long-run/summary.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Upload aggressive long-run artifacts
         if: always()
