@@ -1540,6 +1540,7 @@ short_timeout_upstream_request() {
 
 run_case_checks() {
   local response
+  local fifo_writer_status=0
 
   docker exec --user 0 "${proxy_container}" /bin/sh -ceu \
     'rm -f /etc/oxibelt/config/public/blocking.fifo && mkfifo /etc/oxibelt/config/public/blocking.fifo'
@@ -1552,7 +1553,11 @@ run_case_checks() {
   assert_response_jq "${response}" '.body == "runtime-free"'
 
   docker exec --user 0 "${proxy_container}" /bin/sh -ceu \
-    'timeout 5 sh -c "printf x > /etc/oxibelt/config/public/blocking.fifo"'
+    'timeout 5 sh -c "printf x > /etc/oxibelt/config/public/blocking.fifo"' \
+    || fifo_writer_status=$?
+  if [[ "${fifo_writer_status}" != "0" && "${fifo_writer_status}" != "141" ]]; then
+    fail_with_diagnostics "failed to unblock blocking static FIFO request"
+  fi
   if ! wait "${BLOCKING_STATIC_CLIENT_PID}"; then
     cat "${BLOCKING_STATIC_CLIENT_LOG}" >&2 || true
     fail_with_diagnostics "blocking static FIFO request did not finish as forbidden"
