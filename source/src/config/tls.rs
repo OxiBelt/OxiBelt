@@ -432,7 +432,7 @@ pub struct AdminTlsCertificateConfig {
   pub default: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TlsRemoteSignerConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -446,8 +446,25 @@ pub struct TlsRemoteSignerConfig {
   pub connect_timeout_ms: u64,
   #[serde(default = "default_tls_remote_signer_sign_timeout_ms")]
   pub sign_timeout_ms: u64,
+  #[serde(default = "default_tls_remote_signer_pool_max_idle_connections")]
+  pub pool_max_idle_connections: usize,
   #[serde(default)]
   pub allow_tls12_unstructured_signing: bool,
+}
+
+impl Default for TlsRemoteSignerConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      socket_path: PathBuf::new(),
+      key_id: String::new(),
+      token_env: default_tls_remote_signer_token_env(),
+      connect_timeout_ms: default_tls_remote_signer_connect_timeout_ms(),
+      sign_timeout_ms: default_tls_remote_signer_sign_timeout_ms(),
+      pool_max_idle_connections: default_tls_remote_signer_pool_max_idle_connections(),
+      allow_tls12_unstructured_signing: false,
+    }
+  }
 }
 
 impl TlsRemoteSignerConfig {
@@ -596,4 +613,8 @@ fn default_tls_remote_signer_connect_timeout_ms() -> u64 {
 
 fn default_tls_remote_signer_sign_timeout_ms() -> u64 {
   1000
+}
+
+fn default_tls_remote_signer_pool_max_idle_connections() -> usize {
+  64
 }

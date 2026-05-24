@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -87,14 +87,20 @@ pub(crate) struct StaticRootHandle {
   root: PathBuf,
   #[cfg(target_os = "linux")]
   dir_fd: Option<Arc<OwnedFd>>,
+  #[cfg(target_os = "linux")]
+  root_id: Option<StaticRootId>,
 }
 
 impl StaticRootHandle {
   fn new(root: &Path) -> anyhow::Result<Self> {
+    #[cfg(target_os = "linux")]
+    let (dir_fd, root_id) = open_root_dir_fd(root)?;
     Ok(Self {
       root: root.to_path_buf(),
       #[cfg(target_os = "linux")]
-      dir_fd: Some(Arc::new(open_root_dir_fd(root)?)),
+      dir_fd: Some(Arc::new(dir_fd)),
+      #[cfg(target_os = "linux")]
+      root_id: Some(root_id),
     })
   }
 
@@ -103,6 +109,8 @@ impl StaticRootHandle {
       root: root.to_path_buf(),
       #[cfg(target_os = "linux")]
       dir_fd: None,
+      #[cfg(target_os = "linux")]
+      root_id: None,
     }
   }
 
@@ -113,19 +121,13 @@ impl StaticRootHandle {
   pub(crate) fn path_status(&self) -> StaticRootPathStatus {
     #[cfg(target_os = "linux")]
     {
-      let Some(dir_fd) = self.dir_fd.as_ref() else {
+      let Some(root_id) = self.root_id else {
         return StaticRootPathStatus::Uncached;
-      };
-      let Ok(opened_metadata) = std::fs::metadata(format!("/proc/self/fd/{}", dir_fd.as_raw_fd()))
-      else {
-        return StaticRootPathStatus::Unavailable;
       };
       let Ok(current_metadata) = std::fs::metadata(&self.root) else {
         return StaticRootPathStatus::Unavailable;
       };
-      if opened_metadata.dev() == current_metadata.dev()
-        && opened_metadata.ino() == current_metadata.ino()
-      {
+      if root_id.matches(&current_metadata) {
         StaticRootPathStatus::Matches
       } else {
         StaticRootPathStatus::Replaced
@@ -143,6 +145,20 @@ impl StaticRootHandle {
   }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct StaticRootId {
+  dev: u64,
+  ino: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl StaticRootId {
+  fn matches(self, metadata: &std::fs::Metadata) -> bool {
+    self.dev == metadata.dev() && self.ino == metadata.ino()
+  }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum StaticRootPathStatus {
   Matches,
@@ -152,16 +168,25 @@ pub(crate) enum StaticRootPathStatus {
 }
 
 #[cfg(target_os = "linux")]
-fn open_root_dir_fd(root: &Path) -> anyhow::Result<OwnedFd> {
+fn open_root_dir_fd(root: &Path) -> anyhow::Result<(OwnedFd, StaticRootId)> {
   use nix::fcntl::{OFlag, open};
-  use nix::sys::stat::Mode;
+  use nix::sys::stat::{Mode, fstat};
 
-  open(
+  let dir_fd = open(
     root,
     OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_DIRECTORY,
     Mode::empty(),
   )
-  .with_context(|| format!("failed to open static_root directory {}", root.display()))
+  .with_context(|| format!("failed to open static_root directory {}", root.display()))?;
+  let stat = fstat(&dir_fd)
+    .with_context(|| format!("failed to inspect static_root directory {}", root.display()))?;
+  Ok((
+    dir_fd,
+    StaticRootId {
+      dev: stat.st_dev,
+      ino: stat.st_ino,
+    },
+  ))
 }
 
 #[derive(Clone, Debug)]

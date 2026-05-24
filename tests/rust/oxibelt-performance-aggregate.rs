@@ -10,7 +10,10 @@ use serde_json::Value;
 
 const MAX_RESULTS_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_WARNINGS: usize = 200;
+const DEFAULT_H2_MIN_NGINX_RATIO: f64 = 0.90;
 const DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO: f64 = 0.85;
+const DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO: f64 = 0.95;
+const DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO: f64 = 0.95;
 const DEFAULT_WAF_ENFORCING_MIN_RPS: f64 = 11000.0;
 const DEFAULT_CRS_ENFORCING_MIN_RPS: f64 = 9000.0;
 const DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO: f64 = 1.20;
@@ -268,7 +271,10 @@ struct ReportSummary {
 
 #[derive(Clone, Copy, Serialize)]
 struct RegressionGateThresholds {
+    h2_min_nginx_ratio: f64,
     static_16k_h1c_min_caddy_ratio: f64,
+    static_16k_h1c_min_nginx_ratio: f64,
+    remote_signer_handshake_min_local_ratio: f64,
     waf_enforcing_min_rps: f64,
     crs_enforcing_min_rps: f64,
     waf_crs_max_enforce_p99_ratio: f64,
@@ -1310,9 +1316,27 @@ fn ratio_status(status: &str, ratio: Option<f64>, reason: impl Into<String>) -> 
 
 fn regression_gate_thresholds(warnings: &mut WarningBag) -> RegressionGateThresholds {
     RegressionGateThresholds {
+        h2_min_nginx_ratio: env_threshold(
+            "OXIBELT_PERF_H2_MIN_NGINX_RATIO",
+            DEFAULT_H2_MIN_NGINX_RATIO,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
         static_16k_h1c_min_caddy_ratio: env_threshold(
             "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO",
             DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
+        static_16k_h1c_min_nginx_ratio: env_threshold(
+            "OXIBELT_PERF_STATIC_16K_H1C_MIN_NGINX_RATIO",
+            DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
+        remote_signer_handshake_min_local_ratio: env_threshold(
+            "OXIBELT_PERF_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO",
+            DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
             ThresholdKind::NonNegative,
             warnings,
         ),
@@ -1374,7 +1398,26 @@ fn build_regression_gate_report(
 ) -> RegressionGateReport {
     let mut violations = Vec::new();
 
+    collect_comparator_ratio_regression_gate(
+        aggregates,
+        "h2_min_nginx_ratio",
+        ScenarioGroup::ReverseProxy,
+        "h2",
+        Comparator::Nginx,
+        thresholds.h2_min_nginx_ratio,
+        &mut violations,
+    );
     collect_static_regression_gate(aggregates, thresholds, &mut violations);
+    collect_comparator_ratio_regression_gate(
+        aggregates,
+        "static_16k_h1c_min_nginx_ratio",
+        ScenarioGroup::StaticFiles,
+        "static-16k-h1c",
+        Comparator::Nginx,
+        thresholds.static_16k_h1c_min_nginx_ratio,
+        &mut violations,
+    );
+    collect_remote_signer_handshake_regression_gate(aggregates, thresholds, &mut violations);
     collect_min_rps_regression_gate(
         aggregates,
         "waf_enforcing_min_rps",
@@ -1495,6 +1538,174 @@ fn collect_static_regression_gate(
             message: format!(
                 "OxiBelt static-16k-h1c median RPS ratio {:.4} < {:.4} vs Caddy ({:.3} RPS vs {:.3} RPS)",
                 ratio, threshold, oxibelt_rps, caddy_rps
+            ),
+        });
+    }
+}
+
+fn collect_comparator_ratio_regression_gate(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    gate: &str,
+    group: ScenarioGroup,
+    scenario: &str,
+    comparator: Comparator,
+    threshold: f64,
+    violations: &mut Vec<RegressionGateViolation>,
+) {
+    let comparator_name = comparator.as_str();
+    let context = RegressionGateContext {
+        gate,
+        group: group.as_str(),
+        scenario,
+        threshold,
+    };
+    let Some(oxibelt_rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, scenario) else {
+        push_missing_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            Some("oxibelt"),
+            format!("missing OxiBelt {scenario} median RPS; cannot evaluate {gate}"),
+        );
+        return;
+    };
+    if oxibelt_rps <= 0.0 {
+        push_invalid_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            oxibelt_rps,
+            Some("oxibelt"),
+            format!(
+                "OxiBelt {scenario} median RPS must be positive; got {:.3}",
+                oxibelt_rps
+            ),
+        );
+        return;
+    }
+    let Some(comparator_rps) = aggregate_median_rps(aggregates, comparator, scenario) else {
+        push_missing_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            Some(comparator_name),
+            format!("missing {comparator_name} {scenario} median RPS; cannot evaluate {gate}"),
+        );
+        return;
+    };
+    if comparator_rps <= 0.0 {
+        push_invalid_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            comparator_rps,
+            Some(comparator_name),
+            format!(
+                "{comparator_name} {scenario} median RPS must be positive; got {:.3}",
+                comparator_rps
+            ),
+        );
+        return;
+    }
+
+    let ratio = oxibelt_rps / comparator_rps;
+    if ratio < threshold {
+        violations.push(RegressionGateViolation {
+            gate: gate.to_owned(),
+            group: group.as_str().to_owned(),
+            scenario: scenario.to_owned(),
+            metric: "median_rps_ratio".to_owned(),
+            observed: Some(ratio),
+            threshold,
+            comparator: Some(comparator_name.to_owned()),
+            message: format!(
+                "OxiBelt {scenario} median RPS ratio {:.4} < {:.4} vs {comparator_name} ({:.3} RPS vs {:.3} RPS)",
+                ratio, threshold, oxibelt_rps, comparator_rps
+            ),
+        });
+    }
+}
+
+fn collect_remote_signer_handshake_regression_gate(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    thresholds: RegressionGateThresholds,
+    violations: &mut Vec<RegressionGateViolation>,
+) {
+    let gate = "remote_signer_handshake_min_local_ratio";
+    let scenario = "tls-handshake-h2";
+    let local_scenario = "local-key-tls-handshake-h2";
+    let remote_scenario = "remote-signer-tls-handshake-h2";
+    let threshold = thresholds.remote_signer_handshake_min_local_ratio;
+    let context = RegressionGateContext {
+        gate,
+        group: ScenarioGroup::RemoteSigner.as_str(),
+        scenario,
+        threshold,
+    };
+    let Some(remote_rate) = aggregate_median_rps(aggregates, Comparator::Oxibelt, remote_scenario)
+    else {
+        push_missing_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            Some("remote-signer"),
+            format!("missing OxiBelt {remote_scenario} median rate; cannot evaluate {gate}"),
+        );
+        return;
+    };
+    if remote_rate <= 0.0 {
+        push_invalid_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            remote_rate,
+            Some("remote-signer"),
+            format!(
+                "OxiBelt {remote_scenario} median rate must be positive; got {:.3}",
+                remote_rate
+            ),
+        );
+        return;
+    }
+    let Some(local_rate) = aggregate_median_rps(aggregates, Comparator::Oxibelt, local_scenario)
+    else {
+        push_missing_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            Some("local-key"),
+            format!("missing OxiBelt {local_scenario} median rate; cannot evaluate {gate}"),
+        );
+        return;
+    };
+    if local_rate <= 0.0 {
+        push_invalid_regression_gate_metric(
+            violations,
+            context,
+            "median_rps",
+            local_rate,
+            Some("local-key"),
+            format!(
+                "OxiBelt {local_scenario} median rate must be positive; got {:.3}",
+                local_rate
+            ),
+        );
+        return;
+    }
+
+    let ratio = remote_rate / local_rate;
+    if ratio < threshold {
+        violations.push(RegressionGateViolation {
+            gate: gate.to_owned(),
+            group: ScenarioGroup::RemoteSigner.as_str().to_owned(),
+            scenario: scenario.to_owned(),
+            metric: "median_rps_ratio".to_owned(),
+            observed: Some(ratio),
+            threshold,
+            comparator: Some("local-key".to_owned()),
+            message: format!(
+                "OxiBelt remote-signer cold H2 handshake median rate ratio {:.4} < {:.4} vs local key ({:.3} handshakes/s vs {:.3} handshakes/s)",
+                ratio, threshold, remote_rate, local_rate
             ),
         });
     }

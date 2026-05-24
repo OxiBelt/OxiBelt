@@ -1740,6 +1740,17 @@ token_env = "{token_env}"
     config
         .validate()
         .expect("remote signer should replace local private key");
+    assert_eq!(config.tls.remote_signer.pool_max_idle_connections, 64);
+
+    let no_pool = remote_only.replace(
+        &format!("token_env = \"{token_env}\"\n"),
+        &format!("token_env = \"{token_env}\"\npool_max_idle_connections = 0\n"),
+    );
+    let config: Config = toml::from_str(&no_pool).expect("config should parse");
+    config
+        .validate()
+        .expect("pool_max_idle_connections = 0 should disable reuse without disabling signing");
+    assert_eq!(config.tls.remote_signer.pool_max_idle_connections, 0);
 
     let both = base.replace("[tls.ocsp]", &format!("{remote_block}\n[tls.ocsp]"));
     let config: Config = toml::from_str(&both).expect("config should parse");

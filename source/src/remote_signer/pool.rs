@@ -1,0 +1,51 @@
+use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+#[derive(Debug)]
+pub(super) struct RemoteSignerConnectionPool {
+  pub(super) max_idle: usize,
+  idle: Mutex<Vec<IdleRemoteSignerConnection>>,
+}
+
+#[derive(Debug)]
+struct IdleRemoteSignerConnection {
+  stream: UnixStream,
+  returned_at: Instant,
+}
+
+impl RemoteSignerConnectionPool {
+  pub(super) fn new(max_idle: usize) -> Self {
+    Self {
+      max_idle,
+      idle: Mutex::new(Vec::with_capacity(max_idle.min(64))),
+    }
+  }
+
+  pub(super) fn take(&self, max_idle_age: Duration) -> Option<UnixStream> {
+    if self.max_idle == 0 {
+      return None;
+    }
+    let mut idle = self.idle.lock().expect("remote signer pool lock poisoned");
+    while let Some(connection) = idle.pop() {
+      if connection.returned_at.elapsed() <= max_idle_age {
+        return Some(connection.stream);
+      }
+    }
+    None
+  }
+
+  pub(super) fn put(&self, stream: UnixStream) {
+    if self.max_idle == 0 {
+      return;
+    }
+    let mut idle = self.idle.lock().expect("remote signer pool lock poisoned");
+    if idle.len() >= self.max_idle {
+      return;
+    }
+    idle.push(IdleRemoteSignerConnection {
+      stream,
+      returned_at: Instant::now(),
+    });
+  }
+}

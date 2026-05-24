@@ -584,6 +584,7 @@ fn remote_tls_config(
             token_env: token_env.to_string(),
             connect_timeout_ms: 5000,
             sign_timeout_ms: 5000,
+            pool_max_idle_connections: 64,
             allow_tls12_unstructured_signing,
         },
         min_version: TlsVersion::Tls13,

@@ -71,6 +71,7 @@ rotation_seconds = 86400
 # token_env = "OXIBELT_KEYSIGNER_TOKEN"
 # connect_timeout_ms = 250
 # sign_timeout_ms = 1000
+# pool_max_idle_connections = 64
 # allow_tls12_unstructured_signing = false
 
 [tls.client_auth]

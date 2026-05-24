@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,12 +18,16 @@ use tokio::sync::{Semaphore, TryAcquireError};
 use tracing::{info, warn};
 
 use crate::config::TlsRemoteSignerConfig;
+use pool::RemoteSignerConnectionPool;
 use protocol::{
   RemoteSignerRequest, RemoteSignerResponse, SignContext, read_async_frame_with_timeout,
   read_sync_frame, write_async_frame_with_timeout, write_sync_frame,
 };
 
+mod pool;
 mod protocol;
+#[cfg(test)]
+mod tests;
 
 pub const DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS: u64 = 5_000;
@@ -116,6 +122,9 @@ struct RemoteSignerClient {
   token: [u8; 32],
   connect_timeout: Duration,
   sign_timeout: Duration,
+  pool: Arc<RemoteSignerConnectionPool>,
+  #[cfg(test)]
+  connect_override: Option<Arc<dyn Fn() -> anyhow::Result<UnixStream> + Send + Sync>>,
   allow_tls12_unstructured_signing: bool,
 }
 
@@ -126,6 +135,11 @@ impl RemoteSignerClient {
       token: load_token_from_env(&config.token_env)?,
       connect_timeout: Duration::from_millis(config.connect_timeout_ms),
       sign_timeout: Duration::from_millis(config.sign_timeout_ms),
+      pool: Arc::new(RemoteSignerConnectionPool::new(
+        config.pool_max_idle_connections,
+      )),
+      #[cfg(test)]
+      connect_override: None,
       allow_tls12_unstructured_signing: config.allow_tls12_unstructured_signing,
     })
   }
@@ -192,16 +206,69 @@ impl RemoteSignerClient {
   }
 
   fn request(&self, request: RemoteSignerRequest) -> anyhow::Result<RemoteSignerResponse> {
-    let mut stream = connect_with_timeout(self.socket_path.clone(), self.connect_timeout)
-      .with_context(|| format!("failed to connect to {}", self.socket_path.display()))?;
-    stream
-      .set_read_timeout(Some(self.sign_timeout))
-      .context("failed to set remote signer read timeout")?;
-    stream
-      .set_write_timeout(Some(self.sign_timeout))
-      .context("failed to set remote signer write timeout")?;
-    write_sync_frame(&mut stream, &request)?;
-    read_sync_frame(&mut stream)
+    self.request_with_transport(request, |stream, request| {
+      self.request_on_stream(stream, request)
+    })
+  }
+
+  fn request_with_transport<F>(
+    &self,
+    request: RemoteSignerRequest,
+    mut transport: F,
+  ) -> anyhow::Result<RemoteSignerResponse>
+  where
+    F: FnMut(&mut UnixStream, &RemoteSignerRequest) -> anyhow::Result<RemoteSignerResponse>,
+  {
+    if let Some(mut stream) = self.pool.take(self.sign_timeout) {
+      match transport(&mut stream, &request) {
+        Ok(response) => {
+          self.pool.put(stream);
+          return Ok(response);
+        }
+        Err(error) => {
+          tracing::debug!(
+            error = %error,
+            socket_path = %self.socket_path.display(),
+            "discarding stale remote signer pooled connection"
+          );
+        }
+      }
+    }
+
+    let mut stream = self.connect()?;
+    let response = transport(&mut stream, &request)?;
+    self.pool.put(stream);
+    Ok(response)
+  }
+
+  fn connect(&self) -> anyhow::Result<UnixStream> {
+    #[cfg(test)]
+    if let Some(connect) = &self.connect_override {
+      return connect();
+    }
+    connect_with_timeout(self.socket_path.clone(), self.connect_timeout)
+      .with_context(|| format!("failed to connect to {}", self.socket_path.display()))
+  }
+
+  fn request_on_stream(
+    &self,
+    stream: &mut UnixStream,
+    request: &RemoteSignerRequest,
+  ) -> anyhow::Result<RemoteSignerResponse> {
+    #[cfg(test)]
+    let set_timeouts = self.connect_override.is_none();
+    #[cfg(not(test))]
+    let set_timeouts = true;
+    if set_timeouts {
+      stream
+        .set_read_timeout(Some(self.sign_timeout))
+        .context("failed to set remote signer read timeout")?;
+      stream
+        .set_write_timeout(Some(self.sign_timeout))
+        .context("failed to set remote signer write timeout")?;
+    }
+    write_sync_frame(stream, request)?;
+    read_sync_frame(stream)
   }
 }
 
@@ -228,6 +295,7 @@ impl fmt::Debug for RemoteSignerClient {
       .field("socket_path", &self.socket_path)
       .field("connect_timeout", &self.connect_timeout)
       .field("sign_timeout", &self.sign_timeout)
+      .field("pool_max_idle_connections", &self.pool.max_idle)
       .field(
         "allow_tls12_unstructured_signing",
         &self.allow_tls12_unstructured_signing,
@@ -328,10 +396,34 @@ async fn handle_connection(
     return Ok(());
   }
 
-  let request: RemoteSignerRequest = read_async_frame_with_timeout(&mut stream, io_timeout).await?;
-  let response = process_request(request, &keys, &token, allow_tls12_unstructured_signing);
-  write_async_frame_with_timeout(&mut stream, &response, io_timeout).await?;
-  Ok(())
+  loop {
+    let request: RemoteSignerRequest =
+      match read_async_frame_with_timeout(&mut stream, io_timeout).await {
+        Ok(request) => request,
+        Err(error) if remote_signer_peer_closed(&error) => return Ok(()),
+        Err(error) => return Err(error),
+      };
+    let response = process_request(request, &keys, &token, allow_tls12_unstructured_signing);
+    match write_async_frame_with_timeout(&mut stream, &response, io_timeout).await {
+      Ok(()) => {}
+      Err(error) if remote_signer_peer_closed(&error) => return Ok(()),
+      Err(error) => return Err(error),
+    }
+  }
+}
+
+fn remote_signer_peer_closed(error: &anyhow::Error) -> bool {
+  error.chain().any(|cause| {
+    cause.downcast_ref::<io::Error>().is_some_and(|error| {
+      matches!(
+        error.kind(),
+        io::ErrorKind::UnexpectedEof
+          | io::ErrorKind::ConnectionReset
+          | io::ErrorKind::BrokenPipe
+          | io::ErrorKind::NotConnected
+      )
+    })
+  })
 }
 
 fn process_request(
@@ -539,13 +631,10 @@ fn is_tls13_server_certificate_verify_message(message: &[u8]) -> bool {
     && &message[64..prefix_len] == TLS13_SERVER_CERT_VERIFY_CONTEXT
 }
 
-fn connect_with_timeout(
-  path: PathBuf,
-  timeout: Duration,
-) -> anyhow::Result<std::os::unix::net::UnixStream> {
+fn connect_with_timeout(path: PathBuf, timeout: Duration) -> anyhow::Result<UnixStream> {
   let (tx, rx) = std::sync::mpsc::channel();
   std::thread::spawn(move || {
-    let _ = tx.send(std::os::unix::net::UnixStream::connect(path));
+    let _ = tx.send(UnixStream::connect(path));
   });
   match rx.recv_timeout(timeout) {
     Ok(Ok(stream)) => Ok(stream),
@@ -620,20 +709,4 @@ struct RemoteKeyDescription {
   public_key: Vec<u8>,
   algorithm: SignatureAlgorithm,
   schemes: Vec<SignatureScheme>,
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn tls13_server_certificate_verify_detection_is_strict() {
-    let mut message = vec![b' '; 64];
-    message.extend_from_slice(TLS13_SERVER_CERT_VERIFY_CONTEXT);
-    message.extend_from_slice(&[7u8; 32]);
-    assert!(is_tls13_server_certificate_verify_message(&message));
-
-    message[0] = b'!';
-    assert!(!is_tls13_server_certificate_verify_message(&message));
-  }
 }

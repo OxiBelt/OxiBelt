@@ -2229,6 +2229,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "connect_timeout_ms",
       "enabled",
       "key_id",
+      "pool_max_idle_connections",
       "sign_timeout_ms",
       "socket_path",
       "token_env",

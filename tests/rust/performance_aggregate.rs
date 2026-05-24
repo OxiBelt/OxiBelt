@@ -51,7 +51,10 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         .arg("--output-dir")
         .arg(output_dir);
     for name in [
+        "OXIBELT_PERF_H2_MIN_NGINX_RATIO",
         "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO",
+        "OXIBELT_PERF_STATIC_16K_H1C_MIN_NGINX_RATIO",
+        "OXIBELT_PERF_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO",
         "OXIBELT_PERF_WAF_ENFORCING_MIN_RPS",
         "OXIBELT_PERF_CRS_ENFORCING_MIN_RPS",
         "OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO",
@@ -281,6 +284,9 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
                     load_row("oxibelt-h1-keepalive", "h1", 100.0 + sample, 1.0, 5.0),
                     load_row("nginx-h1-keepalive", "h1", 200.0 + sample, 2.0, 6.0),
                     load_row("caddy-h1-keepalive", "h1", 150.0 + sample, 3.0, 7.0),
+                    load_row("oxibelt-h2", "h2", 190.0 + sample, 1.0, 5.0),
+                    load_row("nginx-h2", "h2", 200.0 + sample, 2.0, 6.0),
+                    load_row("caddy-h2", "h2", 180.0 + sample, 3.0, 7.0),
                     handshake_row("oxibelt-tls-handshake-h2", "h2", 1000.0 + sample, 6.0, 10.0),
                     handshake_row("nginx-tls-handshake-h2", "h2", 1250.0 + sample, 7.0, 11.0),
                     handshake_row("caddy-tls-handshake-h2", "h2", 900.0 + sample, 8.0, 12.0),
@@ -591,7 +597,34 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
         &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
         vec![
             load_row("oxibelt-static-16k-h1c", "h1c", 90.0, 1.0, 4.0),
+            load_row("nginx-static-16k-h1c", "h1c", 94.0, 1.0, 4.0),
             load_row("caddy-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+        ],
+    );
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-h2", "h2", 90.0, 1.0, 4.0),
+            load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
+        ],
+    );
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-remote-signer-shard-1/run-1"),
+        vec![
+            handshake_row(
+                "oxibelt-local-key-tls-handshake-h2",
+                "h2",
+                1000.0,
+                3.0,
+                12.0,
+            ),
+            handshake_row(
+                "oxibelt-remote-signer-tls-handshake-h2",
+                "h2",
+                950.0,
+                3.5,
+                13.0,
+            ),
         ],
     );
     write_results_array(
@@ -610,6 +643,24 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
 
     let report = run_aggregate(&input_dir, &output_dir);
     assert_eq!(report["regression_gates"]["status"], "pass");
+    assert_close(
+        report["regression_gates"]["thresholds"]["h2_min_nginx_ratio"]
+            .as_f64()
+            .expect("H2 threshold should be emitted"),
+        0.90,
+    );
+    assert_close(
+        report["regression_gates"]["thresholds"]["static_16k_h1c_min_nginx_ratio"]
+            .as_f64()
+            .expect("static nginx threshold should be emitted"),
+        0.95,
+    );
+    assert_close(
+        report["regression_gates"]["thresholds"]["remote_signer_handshake_min_local_ratio"]
+            .as_f64()
+            .expect("remote signer threshold should be emitted"),
+        0.95,
+    );
     assert_eq!(
         report["regression_gates"]["violations"]
             .as_array()
@@ -709,7 +760,7 @@ fn regression_gates_fail_closed_when_no_samples_are_available() {
             .as_array()
             .expect("violations should be an array")
             .len()
-            >= 5,
+            >= 8,
         "every required regression gate should fail closed when no samples exist"
     );
 
@@ -775,7 +826,34 @@ fn regression_gates_report_static_crs_and_p99_violations() {
         &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
         vec![
             load_row("oxibelt-static-16k-h1c", "h1c", 80.0, 1.0, 4.0),
+            load_row("nginx-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
             load_row("caddy-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+        ],
+    );
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-h2", "h2", 85.0, 1.0, 4.0),
+            load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
+        ],
+    );
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-remote-signer-shard-1/run-1"),
+        vec![
+            handshake_row(
+                "oxibelt-local-key-tls-handshake-h2",
+                "h2",
+                1000.0,
+                3.0,
+                12.0,
+            ),
+            handshake_row(
+                "oxibelt-remote-signer-tls-handshake-h2",
+                "h2",
+                900.0,
+                4.0,
+                14.0,
+            ),
         ],
     );
     write_results_array(
@@ -790,6 +868,11 @@ fn regression_gates_report_static_crs_and_p99_violations() {
 
     let report = run_aggregate(&input_dir, &output_dir);
     assert_eq!(report["regression_gates"]["status"], "fail");
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains("`h2_min_nginx_ratio`"));
+    assert!(markdown.contains("`static_16k_h1c_min_nginx_ratio`"));
+    assert!(markdown.contains("`remote_signer_handshake_min_local_ratio`"));
 
     let static_ratio =
         find_regression_violation(&report, "static_16k_h1c_min_caddy_ratio", "static-16k-h1c");
@@ -800,6 +883,41 @@ fn regression_gates_report_static_crs_and_p99_violations() {
             .expect("static ratio should exist"),
         0.8,
     );
+
+    let h2_ratio = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(h2_ratio["metric"], "median_rps_ratio");
+    assert_close(
+        h2_ratio["observed"]
+            .as_f64()
+            .expect("H2 ratio should exist"),
+        0.85,
+    );
+    assert_eq!(h2_ratio["comparator"], "nginx");
+
+    let static_nginx_ratio =
+        find_regression_violation(&report, "static_16k_h1c_min_nginx_ratio", "static-16k-h1c");
+    assert_eq!(static_nginx_ratio["metric"], "median_rps_ratio");
+    assert_close(
+        static_nginx_ratio["observed"]
+            .as_f64()
+            .expect("static nginx ratio should exist"),
+        0.8,
+    );
+    assert_eq!(static_nginx_ratio["comparator"], "nginx");
+
+    let remote_signer_ratio = find_regression_violation(
+        &report,
+        "remote_signer_handshake_min_local_ratio",
+        "tls-handshake-h2",
+    );
+    assert_eq!(remote_signer_ratio["metric"], "median_rps_ratio");
+    assert_close(
+        remote_signer_ratio["observed"]
+            .as_f64()
+            .expect("remote signer handshake ratio should exist"),
+        0.9,
+    );
+    assert_eq!(remote_signer_ratio["comparator"], "local-key");
 
     let crs_min = find_regression_violation(&report, "crs_enforcing_min_rps", "crs-enforcing");
     assert_eq!(crs_min["metric"], "median_rps");
