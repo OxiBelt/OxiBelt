@@ -490,6 +490,10 @@ fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
         "aggressive long-run should default to a five-hour scheduled soak"
     );
     assert!(
+        workflow.contains("OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO: baseline-aggressive-long-run"),
+        "aggressive long-run should use the connect-stable OxiBelt fixture"
+    );
+    assert!(
         workflow.contains("--serving-type oxibelt-aggressive-long-run"),
         "aggressive long-run should call the dedicated performance serving type"
     );

@@ -758,6 +758,7 @@ jobs:
       - name: Run aggressive long-run
         env:
           OXIBELT_DOCKER_IMAGE: oxibelt:alpine-musl-amd64
+          OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO: baseline-aggressive-long-run
           OXIBELT_PERF_SOAK_SECONDS: ${{ env.AGGRESSIVE_LONG_RUN_SECONDS }}
           OXIBELT_PERF_CONCURRENCY: ${{ env.AGGRESSIVE_LONG_RUN_CONCURRENCY }}
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-aggressive-long-run

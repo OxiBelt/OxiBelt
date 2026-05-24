@@ -649,10 +649,23 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
 #[test]
 fn aggressive_long_run_serving_type_runs_expected_phases() {
     let script = performance_script_text();
+    let aggressive_function = extract_bash_function(&script, "run_oxibelt_aggressive_long_run");
+    let soak_function = extract_bash_function(&script, "run_oxibelt_soak_and_stress");
+
+    assert!(
+        aggressive_function.contains("start_oxibelt \"${oxibelt_aggressive_scenario}\" oxibelt"),
+        "aggressive long-run should use the connect-stable OxiBelt fixture"
+    );
+    assert!(
+        soak_function.contains("start_oxibelt \"${oxibelt_baseline_scenario}\" oxibelt"),
+        "regular soak/stress should keep using the baseline OxiBelt fixture"
+    );
 
     for expected in [
         "run_oxibelt_aggressive_long_run",
         "oxibelt-aggressive-long-run)",
+        "OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO",
+        "baseline-aggressive-long-run",
         "warm_oxibelt_aggressive_resource_baseline",
         "sample_resource_snapshot \"aggressive-before\"",
         "run_load \"oxibelt-aggressive-soak-h1\" h1",
@@ -670,6 +683,72 @@ fn aggressive_long_run_serving_type_runs_expected_phases() {
             "aggressive long-run should contain {expected:?}"
         );
     }
+}
+
+#[test]
+fn oxibelt_aggressive_long_run_fixture_pins_connect_stability_profile() {
+    let path = oxibelt_performance_fixture_root()
+        .join("baseline-aggressive-long-run")
+        .join("config/oxibelt.toml");
+    let config_text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let value: toml::Value = toml::from_str(&config_text)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+
+    let retry = value
+        .get("proxy")
+        .and_then(toml::Value::as_table)
+        .and_then(|proxy| proxy.get("retry"))
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{} should contain proxy.retry", path.display()));
+    assert_eq!(
+        retry.get("enabled").and_then(toml::Value::as_bool),
+        Some(true),
+        "{} should enable retry for aggressive long-run connect stability",
+        path.display()
+    );
+    assert_eq!(
+        retry.get("tries").and_then(toml::Value::as_integer),
+        Some(3),
+        "{} should retry transient upstream connect failures",
+        path.display()
+    );
+    assert_eq!(
+        retry
+            .get("retry_non_idempotent")
+            .and_then(toml::Value::as_bool),
+        Some(false),
+        "{} should avoid retrying non-idempotent stress requests",
+        path.display()
+    );
+    let retry_on: Vec<&str> = retry
+        .get("on")
+        .and_then(toml::Value::as_array)
+        .expect("proxy.retry.on should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("retry condition should be a string"))
+        .collect();
+    assert_eq!(
+        retry_on,
+        vec!["connect_error"],
+        "{} should only mask transient upstream connect churn",
+        path.display()
+    );
+
+    let upstream = value
+        .get("upstreams")
+        .and_then(toml::Value::as_array)
+        .and_then(|upstreams| upstreams.first())
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{} should contain an upstream", path.display()));
+    assert_eq!(
+        upstream
+            .get("pool_max_idle_per_host")
+            .and_then(toml::Value::as_integer),
+        Some(256),
+        "{} should keep enough idle H1 upstream connections for long-run concurrency without exceeding the FD drift gate",
+        path.display()
+    );
 }
 
 #[test]
@@ -787,6 +866,7 @@ fn remote_signer_profile_runs_local_key_and_remote_signer_pairs() {
 fn oxibelt_performance_fixtures_pin_worker_profile() {
     for (scenario, expected_accept) in [
         ("baseline", 0.5),
+        ("baseline-aggressive-long-run", 0.5),
         ("baseline-no-http3", 0.5),
         ("baseline-h2-adaptive-window", 0.5),
         ("baseline-upstream-h2", 0.5),

@@ -41,6 +41,8 @@ Environment:
   OXIBELT_PERF_REGRESSION_GATE_MODE   fail or warn for targeted regression gates (default: fail)
   OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO
                                       test-only OxiBelt baseline fixture override
+  OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO
+                                      test-only OxiBelt aggressive long-run fixture override
   OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO
                                       test-only OxiBelt TLS handshake fixture override
   OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, probe logs, configs, and stats here
@@ -157,6 +159,7 @@ crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-9000}"
 waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.20}"
 regression_gate_mode="${OXIBELT_PERF_REGRESSION_GATE_MODE:-fail}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
+oxibelt_aggressive_scenario="${OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO:-baseline-aggressive-long-run}"
 oxibelt_handshake_scenario="${OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO:-baseline-accept-1}"
 resource_max_memory_delta_bytes="${OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES:-268435456}"
 resource_max_fd_delta="${OXIBELT_PERF_RESOURCE_MAX_FD_DELTA:-256}"
@@ -1299,7 +1302,7 @@ run_oxibelt_aggressive_long_run() {
   if (( h3_soak < 1 )); then h3_soak=1; fi
   stress_duration="${aggressive_stress_seconds}"
 
-  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+  start_oxibelt "${oxibelt_aggressive_scenario}" oxibelt
   warm_oxibelt_aggressive_resource_baseline || fail_with_diagnostics "mandatory HTTP/3 probe failed for OxiBelt aggressive long-run"
   sample_resource_snapshot "aggressive-before"
   run_load "oxibelt-aggressive-soak-h1" h1 oxibelt "/perf/aggressive-soak-h1?body=ok" "${h1_soak}" "${concurrency}"
@@ -1575,6 +1578,7 @@ cat >"${summary_md}" <<EOF
 - Serving type: \`${serving_type}\`
 - Comparators: \`${comparators}\`
 - OxiBelt baseline fixture: \`${oxibelt_baseline_scenario}\`
+- OxiBelt aggressive fixture: \`${oxibelt_aggressive_scenario}\`
 - OxiBelt handshake fixture: \`${oxibelt_handshake_scenario}\`
 - Duration: \`${duration_seconds}s\`
 - Warmup: \`${warmup_seconds}s\`
