@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer] [--comparators oxibelt,nginx,caddy]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -13,6 +13,16 @@ Environment:
   OXIBELT_PERF_WARMUP_SECONDS      warmup duration override
   OXIBELT_PERF_CONCURRENCY         load concurrency override
   OXIBELT_PERF_SOAK_SECONDS        soak duration override
+  OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS
+                                      fixed aggressive stress phase duration (default: 180)
+  OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES
+                                      max OxiBelt RSS drift during aggressive long-run (default: 268435456)
+  OXIBELT_PERF_RESOURCE_MAX_FD_DELTA
+                                      max OxiBelt FD drift during aggressive long-run (default: 256)
+  OXIBELT_PERF_RESOURCE_MAX_TASK_DELTA
+                                      max OxiBelt task/thread drift during aggressive long-run (default: 64)
+  OXIBELT_PERF_RESOURCE_SETTLE_SECONDS
+                                      seconds to wait before the final aggressive resource snapshot (default: 30)
   OXIBELT_PERF_MAX_P99_MS          sanity ceiling for load p99 latency
   OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION
                                       load request error budget per million completed requests
@@ -76,7 +86,7 @@ case "${profile}" in
 esac
 
 case "${serving_type}" in
-  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer) ;;
+  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|oxibelt-aggressive-long-run) ;;
   *)
     usage
     exit 2
@@ -97,6 +107,8 @@ results_jsonl="${work_dir}/results.jsonl"
 results_json="${work_dir}/results.json"
 summary_md="${work_dir}/summary.md"
 stats_jsonl="${work_dir}/docker-stats.jsonl"
+resource_snapshots_jsonl="${work_dir}/resource-snapshots.jsonl"
+resource_drift_json="${work_dir}/resource-drift.json"
 network_name="oxibelt-perf-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 perf_probe_image="oxibelt/perf-probe:${run_id}"
@@ -134,6 +146,7 @@ duration_seconds="${OXIBELT_PERF_DURATION_SECONDS:-${default_duration}}"
 warmup_seconds="${OXIBELT_PERF_WARMUP_SECONDS:-${default_warmup}}"
 concurrency="${OXIBELT_PERF_CONCURRENCY:-${default_concurrency}}"
 soak_seconds="${OXIBELT_PERF_SOAK_SECONDS:-${default_soak}}"
+aggressive_stress_seconds="${OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS:-180}"
 max_p99_ms="${OXIBELT_PERF_MAX_P99_MS:-10000}"
 max_load_errors_per_million="${OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION:-100}"
 tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-20}"
@@ -145,9 +158,29 @@ waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.2
 regression_gate_mode="${OXIBELT_PERF_REGRESSION_GATE_MODE:-fail}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
 oxibelt_handshake_scenario="${OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO:-baseline-accept-1}"
+resource_max_memory_delta_bytes="${OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES:-268435456}"
+resource_max_fd_delta="${OXIBELT_PERF_RESOURCE_MAX_FD_DELTA:-256}"
+resource_max_task_delta="${OXIBELT_PERF_RESOURCE_MAX_TASK_DELTA:-64}"
+resource_settle_seconds="${OXIBELT_PERF_RESOURCE_SETTLE_SECONDS:-30}"
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
+  exit 2
+fi
+for integer_env in \
+  "OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS:${aggressive_stress_seconds}" \
+  "OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES:${resource_max_memory_delta_bytes}" \
+  "OXIBELT_PERF_RESOURCE_MAX_FD_DELTA:${resource_max_fd_delta}" \
+  "OXIBELT_PERF_RESOURCE_MAX_TASK_DELTA:${resource_max_task_delta}"; do
+  integer_name="${integer_env%%:*}"
+  integer_value="${integer_env#*:}"
+  if [[ ! "${integer_value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "${integer_name} must be a positive integer; got '${integer_value}'" >&2
+    exit 2
+  fi
+done
+if [[ ! "${resource_settle_seconds}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  echo "OXIBELT_PERF_RESOURCE_SETTLE_SECONDS must be a non-negative integer; got '${resource_settle_seconds}'" >&2
   exit 2
 fi
 if [[ ! "${static_16k_h1c_min_caddy_ratio}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
@@ -191,6 +224,7 @@ trap cleanup EXIT
 mkdir -p "${logs_dir}" "${probe_logs_dir}" "${configs_dir}" "${tls_dir}" "${static_dir}"
 : >"${results_jsonl}"
 : >"${stats_jsonl}"
+: >"${resource_snapshots_jsonl}"
 
 require_tool() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -306,6 +340,86 @@ sample_stats() {
       [[ -z "${line}" ]] && continue
       jq -c --arg sample "${sample}" '. + {sample: $sample}' <<<"${line}" >>"${stats_jsonl}" || true
     done
+}
+
+sample_resource_snapshot() {
+  local sample="$1"
+  local container="${active_proxy_container}"
+  local status rss_kb threads fd_count task_count memory_bytes json
+  if [[ -z "${container}" ]]; then
+    return
+  fi
+  status="$(docker exec "${container}" sh -c 'awk "/^VmRSS:/{rss=\$2} /^Threads:/{threads=\$2} END{print rss+0, threads+0}" /proc/1/status' 2>/dev/null || echo "0 0")"
+  read -r rss_kb threads <<<"${status}"
+  fd_count="$(docker exec "${container}" sh -c 'ls -1 /proc/1/fd 2>/dev/null | wc -l' 2>/dev/null | tr -d '[:space:]' || echo 0)"
+  task_count="$(docker exec "${container}" sh -c 'ls -1 /proc/1/task 2>/dev/null | wc -l' 2>/dev/null | tr -d '[:space:]' || echo 0)"
+  memory_bytes=$(( rss_kb * 1024 ))
+  json="$(jq -cn \
+    --arg sample "${sample}" \
+    --arg container "${container}" \
+    --argjson memory_rss_bytes "${memory_bytes}" \
+    --argjson fd_count "${fd_count:-0}" \
+    --argjson task_count "${task_count:-0}" \
+    --argjson thread_count "${threads:-0}" \
+    '{sample: $sample, container: $container, memory_rss_bytes: $memory_rss_bytes, fd_count: $fd_count, task_count: $task_count, thread_count: $thread_count}')"
+  printf '%s\n' "${json}" >>"${resource_snapshots_jsonl}"
+}
+
+assert_resource_drift() {
+  local before_label="$1"
+  local after_label="$2"
+  local before after memory_delta fd_delta task_delta thread_delta max_taskish_delta
+  before="$(jq -c --arg sample "${before_label}" 'select(.sample == $sample)' "${resource_snapshots_jsonl}" | tail -n 1)"
+  after="$(jq -c --arg sample "${after_label}" 'select(.sample == $sample)' "${resource_snapshots_jsonl}" | tail -n 1)"
+  if [[ -z "${before}" || -z "${after}" ]]; then
+    fail_with_diagnostics "missing resource snapshots for drift gate (${before_label} -> ${after_label})"
+  fi
+  jq -n \
+    --arg before_label "${before_label}" \
+    --arg after_label "${after_label}" \
+    --argjson before "${before}" \
+    --argjson after "${after}" \
+    --argjson max_memory_delta_bytes "${resource_max_memory_delta_bytes}" \
+    --argjson max_fd_delta "${resource_max_fd_delta}" \
+    --argjson max_task_delta "${resource_max_task_delta}" \
+    '{
+      before_label: $before_label,
+      after_label: $after_label,
+      before: $before,
+      after: $after,
+      deltas: {
+        memory_rss_bytes: (($after.memory_rss_bytes // 0) - ($before.memory_rss_bytes // 0)),
+        fd_count: (($after.fd_count // 0) - ($before.fd_count // 0)),
+        task_count: (($after.task_count // 0) - ($before.task_count // 0)),
+        thread_count: (($after.thread_count // 0) - ($before.thread_count // 0))
+      },
+      limits: {
+        memory_rss_bytes: $max_memory_delta_bytes,
+        fd_count: $max_fd_delta,
+        task_count: $max_task_delta,
+        thread_count: $max_task_delta
+      }
+    }' >"${resource_drift_json}"
+  memory_delta="$(jq -r '.deltas.memory_rss_bytes' "${resource_drift_json}")"
+  fd_delta="$(jq -r '.deltas.fd_count' "${resource_drift_json}")"
+  task_delta="$(jq -r '.deltas.task_count' "${resource_drift_json}")"
+  thread_delta="$(jq -r '.deltas.thread_count' "${resource_drift_json}")"
+  max_taskish_delta="${task_delta}"
+  if (( thread_delta > max_taskish_delta )); then
+    max_taskish_delta="${thread_delta}"
+  fi
+  printf '| `%s` | `resource` | `procfs` | memory %+d bytes, fd %+d, tasks %+d, threads %+d | limits: memory %s bytes, fd %s, task/thread %s |\n' \
+    "oxibelt-resource-drift" "${memory_delta}" "${fd_delta}" "${task_delta}" "${thread_delta}" \
+    "${resource_max_memory_delta_bytes}" "${resource_max_fd_delta}" "${resource_max_task_delta}" >>"${summary_md}"
+  if (( memory_delta > resource_max_memory_delta_bytes )); then
+    fail_with_diagnostics "OxiBelt aggressive long-run RSS drift exceeded gate (${memory_delta} > ${resource_max_memory_delta_bytes} bytes)"
+  fi
+  if (( fd_delta > resource_max_fd_delta )); then
+    fail_with_diagnostics "OxiBelt aggressive long-run FD drift exceeded gate (${fd_delta} > ${resource_max_fd_delta})"
+  fi
+  if (( max_taskish_delta > resource_max_task_delta )); then
+    fail_with_diagnostics "OxiBelt aggressive long-run task/thread drift exceeded gate (${max_taskish_delta} > ${resource_max_task_delta})"
+  fi
 }
 
 run_probe_json() {
@@ -761,6 +875,8 @@ run_stress() {
   local connections="$3"
   local duration="$4"
   local bytes="$5"
+  shift 5
+  local extra_args=("$@")
   local json
   json="$(run_probe_json stress \
     --label "${label}" \
@@ -770,7 +886,8 @@ run_stress() {
     --authority example.test \
     --connections "${connections}" \
     --duration-seconds "${duration}" \
-    --bytes "${bytes}")"
+    --bytes "${bytes}" \
+    "${extra_args[@]}")"
   append_result "${json}"
   assert_result "${json}"
   sample_stats "${label}"
@@ -795,6 +912,40 @@ h3_probe_succeeds() {
     return 1
   fi
   jq -e '(.requests // 0) > 0 and (.errors // 0) == 0 and ((.statuses["200"] // 0) > 0)' >/dev/null <<<"${json}"
+}
+
+run_resource_baseline_load() {
+  local label="$1"
+  local protocol="$2"
+  local path="$3"
+  local conc="$4"
+  local json
+  if ! json="$(run_probe_json load \
+    --label "${label}" \
+    --protocol "${protocol}" \
+    --host oxibelt \
+    --port 8443 \
+    --server-name proxy \
+    --authority example.test \
+    --path "${path}" \
+    --ca-cert /tls/proxy-ca.pem \
+    --duration-seconds 1 \
+    --warmup-seconds 0 \
+    --concurrency "${conc}" \
+    --expect-status 200)"; then
+    return 1
+  fi
+  assert_diagnostic_result "${json}"
+}
+
+warm_oxibelt_aggressive_resource_baseline() {
+  local warmup_concurrency="${concurrency}"
+  if (( warmup_concurrency > 4 )); then
+    warmup_concurrency=4
+  fi
+  run_resource_baseline_load "oxibelt-aggressive-resource-warmup-h1" h1 "/ready?body=ok" "${warmup_concurrency}" || return 1
+  run_resource_baseline_load "oxibelt-aggressive-resource-warmup-h2" h2 "/ready?body=ok" "${warmup_concurrency}" || return 1
+  run_resource_baseline_load "oxibelt-aggressive-resource-warmup-h3" h3 "/ready?body=ok" "${warmup_concurrency}" || return 1
 }
 
 wait_for_tls_proxy() {
@@ -1138,6 +1289,61 @@ run_manual_soak_presets() {
   done
 }
 
+run_oxibelt_aggressive_long_run() {
+  local h1_soak h2_soak h3_soak stress_duration
+  h1_soak=$(( soak_seconds / 3 ))
+  h2_soak=$(( soak_seconds / 3 ))
+  h3_soak=$(( soak_seconds - h1_soak - h2_soak ))
+  if (( h1_soak < 1 )); then h1_soak=1; fi
+  if (( h2_soak < 1 )); then h2_soak=1; fi
+  if (( h3_soak < 1 )); then h3_soak=1; fi
+  stress_duration="${aggressive_stress_seconds}"
+
+  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+  warm_oxibelt_aggressive_resource_baseline || fail_with_diagnostics "mandatory HTTP/3 probe failed for OxiBelt aggressive long-run"
+  sample_resource_snapshot "aggressive-before"
+  run_load "oxibelt-aggressive-soak-h1" h1 oxibelt "/perf/aggressive-soak-h1?body=ok" "${h1_soak}" "${concurrency}"
+  run_load "oxibelt-aggressive-soak-h2" h2 oxibelt "/perf/aggressive-soak-h2?body=ok" "${h2_soak}" "${concurrency}"
+  run_load "oxibelt-aggressive-soak-h3" h3 oxibelt "/perf/aggressive-soak-h3?body=ok" "${h3_soak}" "${concurrency}"
+
+  run_stress "oxibelt-aggressive-slow-post" slow-post 32 "${stress_duration}" 1048576 \
+    --path "/perf/aggressive-slow-post?json=1" \
+    --chunk-bytes 512 \
+    --chunk-delay-ms 100
+  run_stress "oxibelt-aggressive-slow-response" slow-response 16 "${stress_duration}" 65536 \
+    --path "/perf/aggressive-slow-response?body_repeat=65536&response_delay_ms=100&response_chunk_delay_ms=50&response_chunk_bytes=512" \
+    --expect-status 200
+  run_stress "oxibelt-aggressive-h2-rapid-stream-churn" h2-rapid-stream-churn 16 "${stress_duration}" 1024 \
+    --protocol h2 \
+    --port 8443 \
+    --server-name proxy \
+    --ca-cert /tls/proxy-ca.pem \
+    --path "/perf/aggressive-h2-churn?body=ok" \
+    --expect-status 200 \
+    --streams-per-connection 128
+  run_stress "oxibelt-aggressive-h2-cl0-data" h2-cl0-data 32 "${stress_duration}" 8 \
+    --protocol h2 \
+    --port 8443 \
+    --server-name proxy \
+    --ca-cert /tls/proxy-ca.pem \
+    --path "/perf/aggressive-h2-cl0-data" \
+    --chunk-bytes 8
+  run_stress "oxibelt-aggressive-h3-cl0-data" h3-cl0-data 16 "${stress_duration}" 8 \
+    --protocol h3 \
+    --port 8443 \
+    --server-name proxy \
+    --ca-cert /tls/proxy-ca.pem \
+    --path "/perf/aggressive-h3-cl0-data" \
+    --chunk-bytes 8
+
+  sample_resource_snapshot "aggressive-after-stress"
+  if (( resource_settle_seconds > 0 )); then
+    sleep "${resource_settle_seconds}"
+  fi
+  sample_resource_snapshot "aggressive-after"
+  assert_resource_drift "aggressive-before" "aggressive-after"
+}
+
 run_reverse_proxy_group() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
@@ -1422,6 +1628,9 @@ case "${serving_type}" in
     ;;
   remote-signer)
     run_remote_signer_group
+    ;;
+  oxibelt-aggressive-long-run)
+    run_oxibelt_aggressive_long_run
     ;;
 esac
 

@@ -254,6 +254,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "browser-webdriver",
         "docker-performance",
         "docker-performance-summary",
+        "docker-aggressive-long-run",
     ];
 
     assert_eq!(
@@ -446,5 +447,58 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         workflow
             .contains("name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-comparison"),
         "summary job should upload a profile-scoped comparison artifact"
+    );
+}
+
+#[test]
+fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let long_run = jobs
+        .get("docker-aggressive-long-run")
+        .expect("workflow should define docker-aggressive-long-run");
+
+    assert!(
+        workflow.contains("schedule:") && workflow.contains("cron: \"17 3 * * *\""),
+        "workflow should schedule the aggressive long-run at 03:17 UTC"
+    );
+    for input in [
+        "aggressive_long_run:",
+        "aggressive_long_run_seconds:",
+        "aggressive_long_run_concurrency:",
+    ] {
+        assert!(
+            workflow.contains(input),
+            "workflow_dispatch should expose {input}"
+        );
+    }
+    assert_eq!(
+        long_run.needs,
+        vec!["docker-performance-summary".to_owned()],
+        "aggressive long-run should start after the Docker performance summary"
+    );
+    assert!(
+        workflow.contains("if: needs.docker-performance-summary.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run))"),
+        "aggressive long-run should run only after successful summary on schedule or explicit manual dispatch"
+    );
+    assert!(
+        workflow.contains("timeout-minutes: 360"),
+        "aggressive long-run should fit within GitHub-hosted runner limits"
+    );
+    assert!(
+        workflow.contains("AGGRESSIVE_LONG_RUN_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run_seconds || '18000' }}"),
+        "aggressive long-run should default to a five-hour scheduled soak"
+    );
+    assert!(
+        workflow.contains("--serving-type oxibelt-aggressive-long-run"),
+        "aggressive long-run should call the dedicated performance serving type"
+    );
+    assert!(
+        workflow.contains("name: oxibelt-docker-aggressive-long-run-${{ github.run_id }}"),
+        "aggressive long-run should upload a dedicated artifact"
+    );
+    assert!(
+        !workflow.contains("          - oxibelt-aggressive-long-run"),
+        "aggressive long-run should not be part of the default docker-performance matrix"
     );
 }

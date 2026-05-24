@@ -185,6 +185,47 @@ fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) ->
     HarnessRun { output, events }
 }
 
+fn resource_drift_harness(
+    before: &str,
+    after: &str,
+    max_memory_delta: &str,
+    max_fd_delta: &str,
+    max_task_delta: &str,
+) -> HarnessRun {
+    let functions = extract_bash_function(&performance_script_text(), "assert_resource_drift");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-resource-drift-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    let snapshots_path = temp_dir.join("resource-snapshots.jsonl");
+    fs::write(&snapshots_path, format!("{before}\n{after}\n"))
+        .expect("resource snapshots fixture should be writable");
+    write_resource_drift_harness(&harness_path, &functions);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("RESOURCE_SNAPSHOTS_JSONL", &snapshots_path)
+        .env("RESOURCE_DRIFT_JSON", temp_dir.join("resource-drift.json"))
+        .env("SUMMARY_MD", temp_dir.join("summary.md"))
+        .env("MAX_MEMORY_DELTA", max_memory_delta)
+        .env("MAX_FD_DELTA", max_fd_delta)
+        .env("MAX_TASK_DELTA", max_task_delta)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
 fn static_16k_ratio_harness(rows: &[&str], min_ratio: &str) -> HarnessRun {
     let functions = format!(
         "{}\n\n{}",
@@ -464,6 +505,34 @@ assert_result "${{json}}"
     fs::write(path, harness).expect("Bash harness should be writable");
 }
 
+fn write_resource_drift_harness(path: &Path, functions: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+resource_snapshots_jsonl="${{RESOURCE_SNAPSHOTS_JSONL:?}}"
+resource_drift_json="${{RESOURCE_DRIFT_JSON:?}}"
+summary_md="${{SUMMARY_MD:?}}"
+resource_max_memory_delta_bytes="${{MAX_MEMORY_DELTA:?}}"
+resource_max_fd_delta="${{MAX_FD_DELTA:?}}"
+resource_max_task_delta="${{MAX_TASK_DELTA:?}}"
+: >"${{summary_md}}"
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{functions}
+
+assert_resource_drift aggressive-before aggressive-after
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
 #[test]
 fn required_h3_probe_failure_fails_closed_without_skip() {
     let run = run_common_loads_harness("required", "failure");
@@ -556,7 +625,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     );
     assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|oxibelt-aggressive-long-run"
         ),
         "usage should document every supported serving type"
     );
@@ -568,12 +637,75 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
         "oxibelt-soak-stress",
         "accept-multipliers",
         "remote-signer",
+        "oxibelt-aggressive-long-run",
     ] {
         assert!(
             script.contains(serving_type),
             "performance script should recognize serving type {serving_type}"
         );
     }
+}
+
+#[test]
+fn aggressive_long_run_serving_type_runs_expected_phases() {
+    let script = performance_script_text();
+
+    for expected in [
+        "run_oxibelt_aggressive_long_run",
+        "oxibelt-aggressive-long-run)",
+        "warm_oxibelt_aggressive_resource_baseline",
+        "sample_resource_snapshot \"aggressive-before\"",
+        "run_load \"oxibelt-aggressive-soak-h1\" h1",
+        "run_load \"oxibelt-aggressive-soak-h2\" h2",
+        "run_load \"oxibelt-aggressive-soak-h3\" h3",
+        "run_stress \"oxibelt-aggressive-slow-post\" slow-post",
+        "run_stress \"oxibelt-aggressive-slow-response\" slow-response",
+        "run_stress \"oxibelt-aggressive-h2-rapid-stream-churn\" h2-rapid-stream-churn",
+        "run_stress \"oxibelt-aggressive-h2-cl0-data\" h2-cl0-data",
+        "run_stress \"oxibelt-aggressive-h3-cl0-data\" h3-cl0-data",
+        "assert_resource_drift \"aggressive-before\" \"aggressive-after\"",
+    ] {
+        assert!(
+            script.contains(expected),
+            "aggressive long-run should contain {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn resource_drift_gate_passes_within_limits() {
+    let run = resource_drift_harness(
+        r#"{"sample":"aggressive-before","memory_rss_bytes":1000,"fd_count":10,"task_count":4,"thread_count":4}"#,
+        r#"{"sample":"aggressive-after","memory_rss_bytes":1250,"fd_count":12,"task_count":5,"thread_count":5}"#,
+        "512",
+        "4",
+        "2",
+    );
+
+    assert!(
+        run.output.status.success(),
+        "resource drift within limits should pass"
+    );
+}
+
+#[test]
+fn resource_drift_gate_fails_above_limits() {
+    let run = resource_drift_harness(
+        r#"{"sample":"aggressive-before","memory_rss_bytes":1000,"fd_count":10,"task_count":4,"thread_count":4}"#,
+        r#"{"sample":"aggressive-after","memory_rss_bytes":2048,"fd_count":12,"task_count":5,"thread_count":5}"#,
+        "512",
+        "4",
+        "2",
+    );
+
+    assert!(
+        !run.output.status.success(),
+        "resource drift above limits should fail"
+    );
+    assert!(
+        run.events.contains("RSS drift exceeded gate"),
+        "failure should identify the RSS drift gate"
+    );
 }
 
 #[test]

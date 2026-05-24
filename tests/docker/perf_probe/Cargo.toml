@@ -10,6 +10,7 @@ publish = false
 anyhow = "1.0.102"
 bytes = "1.11.1"
 futures-util = "0.3.32"
+h2 = "0.4.14"
 h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
 hdrhistogram = "7.5.4"

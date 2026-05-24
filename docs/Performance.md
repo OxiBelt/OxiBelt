@@ -25,6 +25,7 @@ Serving type filters:
 - `oxibelt-soak-stress`: OxiBelt smoke soak, benchmark stress, or soak concurrency rows according to the selected profile.
 - `accept-multipliers`: OxiBelt-only comparison of `runtime.worker_multipliers.accept = 0.5` and `1.0` across `h1-keepalive`, `h2`, `h3`, `static-16k-h1c`, `tls-handshake-h2`, `waf-enforcing`, and `crs-enforcing`.
 - `remote-signer`: OxiBelt-only comparison of local private-key TLS and `[tls.remote_signer]` sidecar signing across downstream H1, H2, H3, and cold H2 TLS handshakes.
+- `oxibelt-aggressive-long-run`: OxiBelt-only scheduled/manual long-run coverage. It splits `OXIBELT_PERF_SOAK_SECONDS` across H1, H2, and H3 steady soak rows, then runs slow POST, slow response, H2 stream churn, H2 `Content-Length: 0` plus DATA, and H3 `Content-Length: 0` plus DATA stress rows before checking OxiBelt RSS, FD, task, and thread drift.
 
 Useful environment overrides:
 
@@ -36,6 +37,11 @@ OXIBELT_PERF_DURATION_SECONDS=30
 OXIBELT_PERF_WARMUP_SECONDS=5
 OXIBELT_PERF_CONCURRENCY=64
 OXIBELT_PERF_SOAK_SECONDS=300
+OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS=180
+OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES=268435456
+OXIBELT_PERF_RESOURCE_MAX_FD_DELTA=256
+OXIBELT_PERF_RESOURCE_MAX_TASK_DELTA=64
+OXIBELT_PERF_RESOURCE_SETTLE_SECONDS=30
 OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION=100
 OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS=20
 OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS=35
@@ -66,7 +72,15 @@ OxiRule payload inspection is bounded by `waf.limits.max_body_inspection_bytes`,
 
 The baseline performance fixture also includes `/static/1k.bin`, `/static/16k.bin`, and `/static/1m.bin` static file scenarios. OxiBelt enables `proxy.static_files.sendfile = "auto"` and the opt-in static hot-object cache for that fixture: plaintext HTTP/1.1 static rows are labeled `h1c` and can exercise the guarded Linux sendfile path or hot small-object path, while TLS H1/H2/H3 static rows measure the optimized streaming fallback. nginx is configured with `sendfile on`, and Caddy uses `file_server`, so benchmark profile static rows compare the same static file sizes across all comparators.
 
-In GitHub Actions, `workflow_dispatch` also accepts `performance_iterations`, which defaults to `5`. Reduce it for long manual `benchmark` or `soak` runs when the default repeated sampling would exceed the job budget.
+In GitHub Actions, `workflow_dispatch` also accepts `performance_iterations`, which defaults to `5`. Reduce it for long manual `benchmark` or `soak` runs when the default repeated sampling would exceed the job budget. The workflow also has a scheduled/manual `Docker aggressive long-run` job that starts after `Docker performance summary`. Scheduled runs use a five-hour steady soak by default. Manual runs must set `aggressive_long_run` and can override `aggressive_long_run_seconds` and `aggressive_long_run_concurrency`.
+
+To reproduce the scheduled long-run locally with a shorter duration:
+
+```sh
+OXIBELT_PERF_SOAK_SECONDS=30 \
+OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS=5 \
+tests/scripts/run-proxy-performance.sh --profile soak --serving-type oxibelt-aggressive-long-run --comparators oxibelt
+```
 
 ## Artifacts
 
@@ -75,6 +89,8 @@ The runner writes:
 - `summary.md`: compact Markdown table for human review.
 - `results.json`: machine-readable results from the Rust probe.
 - `docker-stats.jsonl`: sampled container CPU, memory, network, and block I/O from `docker stats`.
+- `resource-snapshots.jsonl`: OxiBelt procfs RSS, FD, task, and thread snapshots for aggressive long-runs.
+- `resource-drift.json`: before/after resource drift and gate limits for aggressive long-runs.
 - `logs/`: per-container logs.
 - `probe-logs/`: stdout and stderr captured from each probe scenario.
 - `configs/`: generated effective proxy configs and TLS material used for the run.

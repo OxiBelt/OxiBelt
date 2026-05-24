@@ -15,8 +15,9 @@ use h3_quinn::quinn::{ClientConfig as QuinnClientConfig, Endpoint};
 use hdrhistogram::Histogram;
 use http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH};
 use http::{HeaderMap, Method, Request, Response, StatusCode, Uri, Version};
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::{Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -121,16 +122,24 @@ struct HandshakeArgs {
     post_handshake_observe: Duration,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct StressArgs {
     label: String,
     mode: String,
+    protocol: Protocol,
     host: String,
     port: u16,
+    server_name: Option<String>,
     authority: String,
+    path: String,
+    ca_cert: Option<String>,
+    expect_status: Option<u16>,
     connections: usize,
     duration: Duration,
     bytes: usize,
+    chunk_bytes: usize,
+    chunk_delay: Duration,
+    streams_per_connection: usize,
 }
 
 #[derive(Clone)]
@@ -363,7 +372,7 @@ fn usage() {
   perf-probe upstream --listen <addr:port> [--name <name>] [--protocol <h1|h2c|h2>] [--cert <pem> --key <pem>]
   perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
-  perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>]
+  perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close|slow-post|slow-response|h2-rapid-stream-churn|h2-cl0-data|h3-cl0-data> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>] [--protocol <h1c|h1|h2|h3>] [--server-name <name>] [--ca-cert <pem>] [--path <path>] [--expect-status <status>] [--chunk-bytes <n>] [--chunk-delay-ms <n>] [--streams-per-connection <n>]
   perf-probe metrics --host <host> --port <port> --authority <authority> --path <path> [--label <label>]"
     );
 }
@@ -468,15 +477,52 @@ fn parse_handshake_args(args: impl Iterator<Item = String>) -> anyhow::Result<Ha
 fn parse_stress_args(args: impl Iterator<Item = String>) -> anyhow::Result<StressArgs> {
     let values = flag_map(args)?;
     let mode = required(&values, "--mode")?.to_owned();
+    let protocol = values
+        .get("--protocol")
+        .map(|value| Protocol::parse(value))
+        .transpose()?
+        .unwrap_or_else(|| default_stress_protocol(&mode));
+    validate_stress_protocol(&mode, protocol)?;
+    let chunk_bytes = values
+        .get("--chunk-bytes")
+        .map(|value| value.parse().context("invalid --chunk-bytes value"))
+        .transpose()?
+        .unwrap_or(1024usize);
+    if chunk_bytes == 0 {
+        bail!("--chunk-bytes must be greater than zero");
+    }
+    let streams_per_connection = values
+        .get("--streams-per-connection")
+        .map(|value| {
+            value
+                .parse()
+                .context("invalid --streams-per-connection value")
+        })
+        .transpose()?
+        .unwrap_or(64usize);
+    if streams_per_connection == 0 {
+        bail!("--streams-per-connection must be greater than zero");
+    }
     Ok(StressArgs {
         label: values
             .get("--label")
             .cloned()
             .unwrap_or_else(|| format!("stress-{mode}")),
         mode,
+        protocol,
         host: required(&values, "--host")?.to_owned(),
         port: parse_u16(&values, "--port")?,
+        server_name: values.get("--server-name").cloned(),
         authority: required(&values, "--authority")?.to_owned(),
+        path: values
+            .get("--path")
+            .cloned()
+            .unwrap_or_else(|| "/perf/stress?body=ok".to_owned()),
+        ca_cert: values.get("--ca-cert").cloned(),
+        expect_status: values
+            .get("--expect-status")
+            .map(|value| value.parse().context("invalid --expect-status value"))
+            .transpose()?,
         connections: parse_usize(&values, "--connections")?,
         duration: Duration::from_secs(parse_u64(&values, "--duration-seconds")?),
         bytes: values
@@ -484,7 +530,47 @@ fn parse_stress_args(args: impl Iterator<Item = String>) -> anyhow::Result<Stres
             .map(|value| value.parse().context("invalid --bytes value"))
             .transpose()?
             .unwrap_or(1024 * 1024),
+        chunk_bytes,
+        chunk_delay: Duration::from_millis(
+            values
+                .get("--chunk-delay-ms")
+                .map(|value| value.parse().context("invalid --chunk-delay-ms value"))
+                .transpose()?
+                .unwrap_or(50),
+        ),
+        streams_per_connection,
     })
+}
+
+fn default_stress_protocol(mode: &str) -> Protocol {
+    match mode {
+        "h2-rapid-stream-churn" | "h2-cl0-data" => Protocol::H2,
+        "h3-cl0-data" => Protocol::H3,
+        _ => Protocol::H1c,
+    }
+}
+
+fn validate_stress_protocol(mode: &str, protocol: Protocol) -> anyhow::Result<()> {
+    match mode {
+        "slowloris" | "large-header" | "large-body" | "idle" | "half-close" | "slow-post"
+        | "slow-response" => {
+            if protocol != Protocol::H1c {
+                bail!("{mode} stress mode currently supports only protocol h1c");
+            }
+        }
+        "h2-rapid-stream-churn" | "h2-cl0-data" => {
+            if protocol != Protocol::H2 {
+                bail!("{mode} stress mode requires protocol h2");
+            }
+        }
+        "h3-cl0-data" => {
+            if protocol != Protocol::H3 {
+                bail!("{mode} stress mode requires protocol h3");
+            }
+        }
+        _ => bail!("unsupported stress mode: {mode}"),
+    }
+    Ok(())
 }
 
 fn parse_metrics_args(args: impl Iterator<Item = String>) -> anyhow::Result<MetricsArgs> {
@@ -648,9 +734,15 @@ fn upstream_tls_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<TlsA
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-async fn upstream_response(request: Request<Incoming>, name: Arc<str>) -> Response<Full<Bytes>> {
+async fn upstream_response(
+    request: Request<Incoming>,
+    name: Arc<str>,
+) -> Response<BoxBody<Bytes, Infallible>> {
     let (parts, body) = request.into_parts();
     let query = parse_query(parts.uri.query().unwrap_or(""));
+    if let Some(delay) = query_duration(&query, "response_delay_ms") {
+        tokio::time::sleep(delay).await;
+    }
     let status = query
         .get("status")
         .and_then(|value| value.parse::<u16>().ok())
@@ -665,7 +757,7 @@ async fn upstream_response(request: Request<Incoming>, name: Arc<str>) -> Respon
             .and_then(|value| value.to_str().ok())
             == Some(etag.as_str())
     {
-        let mut response = Response::new(Full::new(Bytes::new()));
+        let mut response = Response::new(Full::new(Bytes::new()).boxed());
         *response.status_mut() = StatusCode::NOT_MODIFIED;
         response.headers_mut().insert(
             ETAG,
@@ -680,7 +772,10 @@ async fn upstream_response(request: Request<Incoming>, name: Arc<str>) -> Respon
         .map(|collected| collected.to_bytes())
         .unwrap_or_default();
     let body = response_body(&query, &parts.uri, &parts.headers, &request_body, &name);
-    let mut response = Response::new(Full::new(Bytes::from(body.clone())));
+    let body = Bytes::from(body);
+    let streaming_response = query.get("response_chunk_delay_ms").is_some();
+    let response_body = response_body_stream(&query, body.clone());
+    let mut response = Response::new(response_body);
     *response.status_mut() = status;
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -691,13 +786,15 @@ async fn upstream_response(request: Request<Incoming>, name: Arc<str>) -> Respon
             .parse()
             .unwrap_or_else(|_| "text/plain".parse().unwrap()),
     );
-    response.headers_mut().insert(
-        CONTENT_LENGTH,
-        body.len()
-            .to_string()
-            .parse()
-            .expect("valid content-length"),
-    );
+    if !streaming_response {
+        response.headers_mut().insert(
+            CONTENT_LENGTH,
+            body.len()
+                .to_string()
+                .parse()
+                .expect("valid content-length"),
+        );
+    }
     response
         .headers_mut()
         .insert("x-upstream-marker", "perf-upstream".parse().unwrap());
@@ -713,6 +810,35 @@ async fn upstream_response(request: Request<Incoming>, name: Arc<str>) -> Respon
         );
     }
     response
+}
+
+fn response_body_stream(
+    query: &BTreeMap<String, String>,
+    body: Bytes,
+) -> BoxBody<Bytes, Infallible> {
+    let Some(chunk_delay) = query_duration(query, "response_chunk_delay_ms") else {
+        return Full::new(body).boxed();
+    };
+    let chunk_bytes = query
+        .get("response_chunk_bytes")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1024);
+    StreamBody::new(futures_util::stream::unfold(
+        (0usize, body, false),
+        move |(sent, body, delayed)| async move {
+            if sent >= body.len() {
+                return None;
+            }
+            if delayed {
+                tokio::time::sleep(chunk_delay).await;
+            }
+            let next = (sent + chunk_bytes).min(body.len());
+            let chunk = body.slice(sent..next);
+            Some((Ok(Frame::data(chunk)), (next, body, true)))
+        },
+    ))
+    .boxed()
 }
 
 fn response_body(
@@ -757,6 +883,13 @@ fn cache_control_value(query: &BTreeMap<String, String>) -> Option<&str> {
         Some("no-store") => Some("no-store"),
         _ => query.get("cache_control_value").map(String::as_str),
     }
+}
+
+fn query_duration(query: &BTreeMap<String, String>, key: &str) -> Option<Duration> {
+    query
+        .get(key)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
 }
 
 fn parse_query(raw: &str) -> BTreeMap<String, String> {
@@ -1248,10 +1381,7 @@ fn tcp_handshake_observation(stream: &TlsStream<TcpStream>) -> HandshakeObservat
 }
 
 async fn run_stress(args: StressArgs) -> anyhow::Result<()> {
-    match args.mode.as_str() {
-        "slowloris" | "large-header" | "large-body" | "idle" | "half-close" => {}
-        _ => bail!("unsupported stress mode: {}", args.mode),
-    }
+    validate_stress_protocol(&args.mode, args.protocol)?;
     let stats = SharedStats::new()?;
     let mut tasks = Vec::with_capacity(args.connections);
     for _ in 0..args.connections {
@@ -1264,17 +1394,14 @@ async fn run_stress(args: StressArgs) -> anyhow::Result<()> {
                 "large-body" => stress_large_body(&args).await,
                 "idle" => stress_idle(&args).await,
                 "half-close" => stress_half_close(&args).await,
+                "slow-post" => stress_slow_post(&args).await,
+                "slow-response" => stress_slow_response(&args).await,
+                "h2-rapid-stream-churn" => stress_h2_rapid_stream_churn(&args).await,
+                "h2-cl0-data" => stress_h2_cl0_data(&args).await,
+                "h3-cl0-data" => stress_h3_cl0_data(&args).await,
                 _ => unreachable!("mode already validated"),
             };
-            match result {
-                Ok(Some(status)) => stats.record_status(status),
-                Ok(None) => stats.record_success(args.duration),
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    stats.record_error_sample(message.clone());
-                    eprintln!("stress connection failed: {message}");
-                }
-            }
+            record_stress_result(&stats, &args, result);
         }));
     }
     for task in tasks {
@@ -1287,6 +1414,7 @@ async fn run_stress(args: StressArgs) -> anyhow::Result<()> {
             "type": "stress",
             "label": args.label,
             "mode": args.mode,
+            "protocol": args.protocol.label(),
             "duration_seconds": args.duration.as_secs(),
             "connections": args.connections,
             "requests": snapshot.requests,
@@ -1296,6 +1424,27 @@ async fn run_stress(args: StressArgs) -> anyhow::Result<()> {
         })
     );
     Ok(())
+}
+
+fn record_stress_result(
+    stats: &SharedStats,
+    args: &StressArgs,
+    result: anyhow::Result<Option<u16>>,
+) {
+    match result {
+        Ok(Some(status)) => match args.expect_status {
+            Some(expect_status) => {
+                stats.record_response(status, args.duration, expect_status);
+            }
+            None => stats.record_status(status),
+        },
+        Ok(None) => stats.record_success(args.duration),
+        Err(error) => {
+            let message = format!("{error:#}");
+            stats.record_error_sample(message.clone());
+            eprintln!("stress connection failed: {message}");
+        }
+    }
 }
 
 async fn run_metrics(args: MetricsArgs) -> anyhow::Result<()> {
@@ -1545,9 +1694,260 @@ async fn stress_half_close(args: &StressArgs) -> anyhow::Result<Option<u16>> {
     read_http_status(&mut stream).await
 }
 
+async fn stress_slow_post(args: &StressArgs) -> anyhow::Result<Option<u16>> {
+    let mut stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .context("failed to connect slow-post socket")?;
+    stream
+        .write_all(
+            format!(
+                "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n\r\n",
+                args.path, args.authority, args.bytes
+            )
+            .as_bytes(),
+        )
+        .await
+        .context("failed to write slow-post headers")?;
+    let deadline = Instant::now() + args.duration;
+    let chunk = vec![b'x'; args.chunk_bytes];
+    let mut remaining = args.bytes;
+    while remaining > 0 && Instant::now() < deadline {
+        let len = remaining.min(chunk.len());
+        stream
+            .write_all(&chunk[..len])
+            .await
+            .context("failed to write slow-post chunk")?;
+        remaining -= len;
+        if remaining > 0 {
+            tokio::time::sleep(args.chunk_delay).await;
+        }
+    }
+    if remaining > 0 {
+        stream
+            .shutdown()
+            .await
+            .context("failed to close incomplete slow-post body")?;
+        return Ok(None);
+    }
+    read_http_status_with_timeout(&mut stream, args.duration + Duration::from_secs(10)).await
+}
+
+async fn stress_slow_response(args: &StressArgs) -> anyhow::Result<Option<u16>> {
+    let mut stream = TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .context("failed to connect slow-response socket")?;
+    stream
+        .write_all(
+            format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                args.path, args.authority
+            )
+            .as_bytes(),
+        )
+        .await
+        .context("failed to write slow-response request")?;
+    read_http_status_with_timeout(&mut stream, args.duration + Duration::from_secs(10)).await
+}
+
+async fn stress_h2_rapid_stream_churn(args: &StressArgs) -> anyhow::Result<Option<u16>> {
+    let (mut sender, connection_task) = h2_sender(args).await?;
+    let mut responses = Vec::with_capacity(args.streams_per_connection);
+    for index in 0..args.streams_per_connection {
+        let path = append_query_param(&args.path, "churn_id", index);
+        let request = stress_h2_request(args, Method::GET, &path, false)?;
+        let (response, _) = sender
+            .send_request(request, true)
+            .context("failed to send H2 churn request")?;
+        responses.push(response);
+    }
+    let mut last_status = None;
+    let responses = tokio::time::timeout(
+        stress_response_timeout(args),
+        futures_util::future::try_join_all(responses),
+    )
+    .await
+    .context("timed out receiving H2 churn responses")?
+    .context("failed to receive H2 churn response")?;
+    for response in responses {
+        let status = response.status().as_u16();
+        if let Some(expect_status) = args.expect_status {
+            if status != expect_status {
+                bail!("unexpected H2 churn status {status}, expected {expect_status}");
+            }
+        }
+        last_status = Some(status);
+    }
+    drop(sender);
+    connection_task.abort();
+    let _ = connection_task.await;
+    Ok(last_status)
+}
+
+async fn stress_h2_cl0_data(args: &StressArgs) -> anyhow::Result<Option<u16>> {
+    let (mut sender, connection_task) = h2_sender(args).await?;
+    let request = stress_h2_request(args, Method::POST, &args.path, true)?;
+    let (response, mut stream) = sender
+        .send_request(request, false)
+        .context("failed to send H2 CL0 request")?;
+    if stream
+        .send_data(Bytes::from(vec![b'x'; args.chunk_bytes]), true)
+        .is_err()
+    {
+        drop(sender);
+        connection_task.abort();
+        let _ = connection_task.await;
+        return Ok(None);
+    }
+    let status = match tokio::time::timeout(stress_response_timeout(args), response).await {
+        Ok(Ok(response)) => Some(response.status().as_u16()),
+        Ok(Err(_)) | Err(_) => None,
+    };
+    drop(sender);
+    connection_task.abort();
+    let _ = connection_task.await;
+    Ok(status)
+}
+
+async fn stress_h3_cl0_data(args: &StressArgs) -> anyhow::Result<Option<u16>> {
+    let server_name = stress_server_name(args)?;
+    let ca_cert = stress_ca_cert(args)?;
+    let h3_client = h3_connect(
+        &args.host,
+        args.port,
+        &server_name,
+        &ca_cert,
+        args.protocol.alpn(),
+    )
+    .await?;
+    let close_connection = h3_client.connection.clone();
+    let h3_connection = h3_quinn::Connection::new(h3_client.connection);
+    let (mut driver, mut send_request) = h3::client::builder()
+        .build::<_, _, Bytes>(h3_connection)
+        .await
+        .context("failed to establish HTTP/3 CL0 client")?;
+    let driver_task = tokio::spawn(async move {
+        let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let request = stress_h3_request(args, Method::POST, &args.path, true)?;
+    let timeout = stress_response_timeout(args);
+    let status = tokio::time::timeout(timeout, async {
+        match send_request.send_request(request).await {
+            Ok(mut stream) => {
+                if stream
+                    .send_data(Bytes::from(vec![b'x'; args.chunk_bytes]))
+                    .await
+                    .is_err()
+                {
+                    None
+                } else if stream.finish().await.is_err() {
+                    None
+                } else {
+                    match stream.recv_response().await {
+                        Ok(response) => Some(response.status().as_u16()),
+                        Err(_) => None,
+                    }
+                }
+            }
+            Err(_) => None,
+        }
+    })
+    .await
+    .unwrap_or(None);
+    close_connection.close(0u32.into(), b"stress complete");
+    driver_task.abort();
+    let _ = driver_task.await;
+    Ok(status)
+}
+
+fn stress_response_timeout(args: &StressArgs) -> Duration {
+    args.duration + Duration::from_secs(10)
+}
+
+async fn h2_sender(
+    args: &StressArgs,
+) -> anyhow::Result<(h2::client::SendRequest<Bytes>, tokio::task::JoinHandle<()>)> {
+    let server_name = stress_server_name(args)?;
+    let ca_cert = stress_ca_cert(args)?;
+    let tls_stream = tls_connect(
+        &args.host,
+        args.port,
+        &server_name,
+        &ca_cert,
+        args.protocol.alpn(),
+    )
+    .await?;
+    let (sender, connection) = h2::client::handshake(tls_stream)
+        .await
+        .context("failed to establish direct H2 client")?;
+    let task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok((sender, task))
+}
+
+fn stress_server_name(args: &StressArgs) -> anyhow::Result<String> {
+    args.server_name.clone().ok_or_else(|| {
+        anyhow!(
+            "--server-name is required for {} stress",
+            args.protocol.label()
+        )
+    })
+}
+
+fn stress_ca_cert(args: &StressArgs) -> anyhow::Result<String> {
+    args.ca_cert
+        .clone()
+        .ok_or_else(|| anyhow!("--ca-cert is required for {} stress", args.protocol.label()))
+}
+
+fn stress_h2_request(
+    args: &StressArgs,
+    method: Method,
+    path: &str,
+    content_length_zero: bool,
+) -> anyhow::Result<Request<()>> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(format!("https://{}{}", args.authority, path))
+        .version(Version::HTTP_2);
+    if content_length_zero {
+        builder = builder.header(CONTENT_LENGTH, "0");
+    }
+    builder.body(()).map_err(Into::into)
+}
+
+fn stress_h3_request(
+    args: &StressArgs,
+    method: Method,
+    path: &str,
+    content_length_zero: bool,
+) -> anyhow::Result<Request<()>> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(format!("https://{}{}", args.authority, path))
+        .version(Version::HTTP_3);
+    if content_length_zero {
+        builder = builder.header(CONTENT_LENGTH, "0");
+    }
+    builder.body(()).map_err(Into::into)
+}
+
+fn append_query_param(path: &str, name: &str, value: usize) -> String {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{separator}{name}={value}")
+}
+
 async fn read_http_status(stream: &mut TcpStream) -> anyhow::Result<Option<u16>> {
+    read_http_status_with_timeout(stream, Duration::from_secs(10)).await
+}
+
+async fn read_http_status_with_timeout(
+    stream: &mut TcpStream,
+    timeout: Duration,
+) -> anyhow::Result<Option<u16>> {
     let mut buffer = vec![0u8; 1024];
-    let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buffer))
+    let read = tokio::time::timeout(timeout, stream.read(&mut buffer))
         .await
         .context("timed out reading HTTP status")?
         .context("failed to read HTTP status")?;
@@ -1896,6 +2296,176 @@ mod tests {
             second.uri().to_string(),
             "https://example.test/perf/cache-cold-fill?cache_control=public&fill_id=1"
         );
+    }
+
+    #[test]
+    fn stress_args_parse_aggressive_options() {
+        let args = parse_stress_args(
+            [
+                "--label",
+                "slow-post",
+                "--mode",
+                "slow-post",
+                "--protocol",
+                "h1c",
+                "--host",
+                "oxibelt",
+                "--port",
+                "8080",
+                "--authority",
+                "example.test",
+                "--path",
+                "/perf/slow-post",
+                "--connections",
+                "4",
+                "--duration-seconds",
+                "30",
+                "--bytes",
+                "4096",
+                "--chunk-bytes",
+                "128",
+                "--chunk-delay-ms",
+                "25",
+                "--expect-status",
+                "200",
+                "--streams-per-connection",
+                "8",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("stress args should parse");
+
+        assert_eq!(args.label, "slow-post");
+        assert_eq!(args.mode, "slow-post");
+        assert_eq!(args.protocol, Protocol::H1c);
+        assert_eq!(args.path, "/perf/slow-post");
+        assert_eq!(args.expect_status, Some(200));
+        assert_eq!(args.connections, 4);
+        assert_eq!(args.duration, Duration::from_secs(30));
+        assert_eq!(args.bytes, 4096);
+        assert_eq!(args.chunk_bytes, 128);
+        assert_eq!(args.chunk_delay, Duration::from_millis(25));
+        assert_eq!(args.streams_per_connection, 8);
+    }
+
+    #[test]
+    fn stress_args_default_protocols_for_abuse_modes() {
+        for (mode, protocol) in [
+            ("h2-rapid-stream-churn", Protocol::H2),
+            ("h2-cl0-data", Protocol::H2),
+            ("h3-cl0-data", Protocol::H3),
+            ("slow-response", Protocol::H1c),
+        ] {
+            let args = parse_stress_args(
+                [
+                    "--mode",
+                    mode,
+                    "--host",
+                    "oxibelt",
+                    "--port",
+                    "8443",
+                    "--authority",
+                    "example.test",
+                    "--connections",
+                    "1",
+                    "--duration-seconds",
+                    "1",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .expect("stress args should parse");
+            assert_eq!(args.protocol, protocol, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn stress_args_reject_incompatible_protocols() {
+        let error = parse_stress_args(
+            [
+                "--mode",
+                "h2-cl0-data",
+                "--protocol",
+                "h3",
+                "--host",
+                "oxibelt",
+                "--port",
+                "8443",
+                "--authority",
+                "example.test",
+                "--connections",
+                "1",
+                "--duration-seconds",
+                "1",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect_err("h2-cl0-data should reject h3");
+
+        assert!(
+            format!("{error:#}").contains("requires protocol h2"),
+            "error should explain the protocol requirement"
+        );
+    }
+
+    #[test]
+    fn stress_result_accounting_handles_statuses_resets_and_errors() {
+        let args = parse_stress_args(
+            [
+                "--mode",
+                "h2-cl0-data",
+                "--host",
+                "oxibelt",
+                "--port",
+                "8443",
+                "--authority",
+                "example.test",
+                "--connections",
+                "1",
+                "--duration-seconds",
+                "1",
+                "--expect-status",
+                "200",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("stress args should parse");
+        let stats = SharedStats::new().expect("stats should initialize");
+
+        record_stress_result(&stats, &args, Ok(Some(200)));
+        record_stress_result(&stats, &args, Ok(Some(503)));
+        record_stress_result(&stats, &args, Ok(None));
+        record_stress_result(&stats, &args, Err(anyhow!("stream closed")));
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.requests, 3);
+        assert_eq!(snapshot.errors, 2);
+        assert_eq!(snapshot.statuses.get(&200), Some(&1));
+        assert_eq!(snapshot.statuses.get(&503), Some(&1));
+        assert_eq!(
+            snapshot.error_samples,
+            vec!["unexpected status 503, expected 200", "stream closed"]
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_response_body_stream_replays_delayed_chunks() {
+        let query = parse_query("response_chunk_delay_ms=1&response_chunk_bytes=2");
+
+        assert_eq!(
+            query_duration(&query, "response_chunk_delay_ms"),
+            Some(Duration::from_millis(1))
+        );
+        let body = response_body_stream(&query, Bytes::from_static(b"hello"))
+            .collect()
+            .await
+            .expect("streaming body should collect")
+            .to_bytes();
+
+        assert_eq!(body, Bytes::from_static(b"hello"));
     }
 
     #[test]

@@ -5,6 +5,8 @@ on:
     branches:
       - "**"
   pull_request:
+  schedule:
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       performance_profile:
@@ -20,6 +22,21 @@ on:
         description: Docker performance iterations per runner shard
         required: false
         default: "5"
+        type: string
+      aggressive_long_run:
+        description: Run the scheduled aggressive long-run job after Docker performance summary
+        required: false
+        default: false
+        type: boolean
+      aggressive_long_run_seconds:
+        description: Aggressive long-run steady soak duration in seconds
+        required: false
+        default: "18000"
+        type: string
+      aggressive_long_run_concurrency:
+        description: Aggressive long-run load concurrency
+        required: false
+        default: "256"
         type: string
 
 env:
@@ -710,3 +727,60 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
           echo "Docker performance regression gates failed with status '${gate_status}'" >&2
           exit 1
+
+  docker-aggressive-long-run:
+    name: Docker aggressive long-run
+    runs-on: ubuntu-latest
+    needs:
+      - docker-performance-summary
+    if: needs.docker-performance-summary.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run))
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 360
+    env:
+      AGGRESSIVE_LONG_RUN_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run_seconds || '18000' }}
+      AGGRESSIVE_LONG_RUN_CONCURRENCY: ${{ github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run_concurrency || '256' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Download AMD64 Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-alpine-musl-amd64-image
+          path: ${{ runner.temp }}/oxibelt-image
+
+      - name: Load OxiBelt Docker image
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/oxibelt-alpine-musl-amd64.tar"
+
+      - name: Run aggressive long-run
+        env:
+          OXIBELT_DOCKER_IMAGE: oxibelt:alpine-musl-amd64
+          OXIBELT_PERF_SOAK_SECONDS: ${{ env.AGGRESSIVE_LONG_RUN_SECONDS }}
+          OXIBELT_PERF_CONCURRENCY: ${{ env.AGGRESSIVE_LONG_RUN_CONCURRENCY }}
+          OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-aggressive-long-run
+        run: |
+          if [[ ! "${AGGRESSIVE_LONG_RUN_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "aggressive_long_run_seconds must be a positive integer; got '${AGGRESSIVE_LONG_RUN_SECONDS}'" >&2
+            exit 2
+          fi
+          if [[ ! "${AGGRESSIVE_LONG_RUN_CONCURRENCY}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "aggressive_long_run_concurrency must be a positive integer; got '${AGGRESSIVE_LONG_RUN_CONCURRENCY}'" >&2
+            exit 2
+          fi
+
+          tests/scripts/run-proxy-performance.sh \
+            --profile soak \
+            --serving-type oxibelt-aggressive-long-run \
+            --comparators oxibelt
+
+      - name: Upload aggressive long-run artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-docker-aggressive-long-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/oxibelt-aggressive-long-run
+          if-no-files-found: ignore
+          retention-days: 0
