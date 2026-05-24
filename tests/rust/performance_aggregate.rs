@@ -201,6 +201,88 @@ fn aggregate_row(comparator: &str, scenario: &str, group: &str, rps: f64, p99_ms
     })
 }
 
+fn write_baseline_report(path: &Path, aggregates: Vec<Value>) {
+    fs::write(
+        path,
+        serde_json::to_string_pretty(&json!({ "aggregates": aggregates }))
+            .expect("baseline should serialize"),
+    )
+    .expect("baseline should be written");
+}
+
+fn write_reverse_proxy_h2(input_dir: &Path, oxibelt_rps: f64, nginx_rps: f64, oxibelt_p99: f64) {
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-h2", "h2", oxibelt_rps, 1.0, oxibelt_p99),
+            load_row("nginx-h2", "h2", nginx_rps, 1.0, 10.0),
+        ],
+    );
+}
+
+fn write_static_gate_rows(input_dir: &Path, oxibelt_rps: f64, nginx_rps: f64, caddy_rps: f64) {
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-static-16k-h1c", "h1c", oxibelt_rps, 1.0, 10.0),
+            load_row("nginx-static-16k-h1c", "h1c", nginx_rps, 1.0, 10.0),
+            load_row("caddy-static-16k-h1c", "h1c", caddy_rps, 1.0, 10.0),
+        ],
+    );
+}
+
+fn write_remote_signer_gate_rows(input_dir: &Path, remote_rps: f64, local_rps: f64) {
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-remote-signer-shard-1/run-1"),
+        vec![
+            handshake_row(
+                "oxibelt-local-key-tls-handshake-h2",
+                "h2",
+                local_rps,
+                3.0,
+                10.0,
+            ),
+            handshake_row(
+                "oxibelt-remote-signer-tls-handshake-h2",
+                "h2",
+                remote_rps,
+                3.0,
+                10.0,
+            ),
+        ],
+    );
+}
+
+fn write_feature_gate_rows(
+    input_dir: &Path,
+    waf_enforcing_rps: f64,
+    crs_enforcing_rps: f64,
+    monitor_p99: f64,
+    enforcing_p99: f64,
+) {
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, monitor_p99),
+            load_row(
+                "oxibelt-waf-enforcing",
+                "h2",
+                waf_enforcing_rps,
+                1.0,
+                enforcing_p99,
+            ),
+            load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, monitor_p99),
+            load_row(
+                "oxibelt-crs-enforcing",
+                "h2",
+                crs_enforcing_rps,
+                1.0,
+                enforcing_p99,
+            ),
+        ],
+    );
+}
+
 fn find_aggregate<'a>(report: &'a Value, comparator: &str, scenario: &str) -> &'a Value {
     report["aggregates"]
         .as_array()
@@ -257,6 +339,15 @@ fn find_regression_violation<'a>(report: &'a Value, gate: &str, scenario: &str) 
         .iter()
         .find(|violation| violation["gate"] == gate && violation["scenario"] == scenario)
         .unwrap_or_else(|| panic!("missing regression gate violation for {gate}/{scenario}"))
+}
+
+fn find_regression_advisory<'a>(report: &'a Value, gate: &str, scenario: &str) -> &'a Value {
+    report["regression_gates"]["advisories"]
+        .as_array()
+        .expect("regression gate advisories should be an array")
+        .iter()
+        .find(|advisory| advisory["gate"] == gate && advisory["scenario"] == scenario)
+        .unwrap_or_else(|| panic!("missing regression gate advisory for {gate}/{scenario}"))
 }
 
 fn assert_close(actual: f64, expected: f64) {
@@ -414,7 +505,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 4);
+    assert_eq!(report["schema_version"], 5);
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
     assert_eq!(oxibelt_h1["sample_count"], 25);
@@ -673,6 +764,236 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
             .as_f64()
             .expect("CRS median RPS should exist"),
         9200.0,
+    );
+}
+
+#[test]
+fn h2_ratio_gate_becomes_advisory_when_nginx_shifts_up() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h2(&input_dir, 100.0, 130.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "h2", "reverse-proxy", 100.0, 10.0),
+            aggregate_row("nginx", "h2", "reverse-proxy", 100.0, 10.0),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    assert_eq!(
+        report["regression_gates"]["violations"]
+            .as_array()
+            .expect("violations should be an array")
+            .len(),
+        0
+    );
+    let advisory = find_regression_advisory(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(advisory["disposition"], "advisory");
+    assert_close(
+        advisory["observed"]
+            .as_f64()
+            .expect("advisory ratio should exist"),
+        100.0 / 130.0,
+    );
+    assert!(
+        advisory["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("baseline comparator shift")
+    );
+
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains("### Advisories"));
+    assert!(markdown.contains("`h2_min_nginx_ratio`"));
+}
+
+#[test]
+fn h2_ratio_gate_blocks_when_oxibelt_regresses_against_baseline() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h2(&input_dir, 70.0, 100.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "h2", "reverse-proxy", 100.0, 10.0),
+            aggregate_row("nginx", "h2", "reverse-proxy", 100.0, 10.0),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(violation["disposition"], "blocking");
+    assert!(
+        violation["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("did not qualify for advisory pass")
+    );
+}
+
+#[test]
+fn static_and_remote_signer_ratio_gates_become_advisories_on_comparator_shift() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h2(&input_dir, 100.0, 100.0, 10.0);
+    write_static_gate_rows(&input_dir, 90.0, 100.0, 110.0);
+    write_remote_signer_gate_rows(&input_dir, 900.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "static-16k-h1c", "static-files", 90.0, 10.0),
+            aggregate_row("nginx", "static-16k-h1c", "static-files", 90.0, 10.0),
+            aggregate_row("caddy", "static-16k-h1c", "static-files", 90.0, 10.0),
+            aggregate_row(
+                "oxibelt",
+                "remote-signer-tls-handshake-h2",
+                "remote-signer",
+                900.0,
+                10.0,
+            ),
+            aggregate_row(
+                "oxibelt",
+                "local-key-tls-handshake-h2",
+                "remote-signer",
+                900.0,
+                10.0,
+            ),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    find_regression_advisory(&report, "static_16k_h1c_min_caddy_ratio", "static-16k-h1c");
+    find_regression_advisory(&report, "static_16k_h1c_min_nginx_ratio", "static-16k-h1c");
+    find_regression_advisory(
+        &report,
+        "remote_signer_handshake_min_local_ratio",
+        "tls-handshake-h2",
+    );
+}
+
+#[test]
+fn oxibelt_only_rps_and_p99_gates_become_advisories_when_baseline_stable() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h2(&input_dir, 100.0, 100.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 10000.0, 8500.0, 8.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "waf-monitor", "oxibelt-only", 13000.0, 10.0),
+            aggregate_row("oxibelt", "waf-enforcing", "oxibelt-only", 10000.0, 10.0),
+            aggregate_row("oxibelt", "crs-monitor", "oxibelt-only", 10000.0, 10.0),
+            aggregate_row("oxibelt", "crs-enforcing", "oxibelt-only", 8500.0, 10.0),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    find_regression_advisory(&report, "waf_enforcing_min_rps", "waf-enforcing");
+    find_regression_advisory(&report, "crs_enforcing_min_rps", "crs-enforcing");
+    find_regression_advisory(&report, "waf_enforce_p99_ratio", "waf-enforcing");
+    find_regression_advisory(&report, "crs_enforce_p99_ratio", "crs-enforcing");
+}
+
+#[test]
+fn threshold_misses_remain_blocking_when_baseline_report_is_unreadable() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("missing-performance-comparison.json");
+
+    write_reverse_proxy_h2(&input_dir, 70.0, 100.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(violation["disposition"], "blocking");
+    assert!(
+        violation["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("baseline-aware advisory unavailable")
+    );
+    let warnings = report["warnings"]
+        .as_array()
+        .expect("warnings should be an array")
+        .iter()
+        .map(|warning| warning.as_str().expect("warning should be text"))
+        .collect::<Vec<_>>();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("failed to read baseline performance report")),
+        "unreadable baseline should produce a warning: {warnings:?}"
     );
 }
 

@@ -17,6 +17,10 @@ const DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO: f64 = 0.95;
 const DEFAULT_WAF_ENFORCING_MIN_RPS: f64 = 11000.0;
 const DEFAULT_CRS_ENFORCING_MIN_RPS: f64 = 9000.0;
 const DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO: f64 = 1.20;
+const BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT: f64 = -3.0;
+const BASELINE_P99_REGRESSION_TOLERANCE_PERCENT: f64 = 5.0;
+const BASELINE_COMPARATOR_RPS_SHIFT_PERCENT: f64 = 3.0;
+const BASELINE_MONITOR_P99_IMPROVEMENT_PERCENT: f64 = -5.0;
 const SERVING_TYPES: [&str; 6] = [
     "reverse-proxy",
     "static-files",
@@ -282,6 +286,7 @@ struct RegressionGateThresholds {
 
 #[derive(Serialize)]
 struct RegressionGateViolation {
+    disposition: String,
     gate: String,
     group: String,
     scenario: String,
@@ -297,6 +302,28 @@ struct RegressionGateReport {
     status: String,
     thresholds: RegressionGateThresholds,
     violations: Vec<RegressionGateViolation>,
+    advisories: Vec<RegressionGateViolation>,
+}
+
+struct RegressionGateFindings {
+    violations: Vec<RegressionGateViolation>,
+    advisories: Vec<RegressionGateViolation>,
+}
+
+struct BaselineGateContext {
+    report: String,
+    aggregates: BTreeMap<(String, String), AggregateStats>,
+}
+
+enum GateDisposition {
+    Blocking { reason: String },
+    Advisory { reason: String },
+}
+
+#[derive(Clone, Copy)]
+enum GateMetric {
+    Rps,
+    P99,
 }
 
 #[derive(Clone, Copy)]
@@ -472,7 +499,12 @@ impl AggregateBuilder {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let report = aggregate(&args.input_dir, args.profile, args.expected_runs);
+    let report = aggregate(
+        &args.input_dir,
+        args.profile,
+        args.expected_runs,
+        args.baseline_report.as_deref(),
+    );
     fs::create_dir_all(&args.output_dir)?;
     fs::write(
         args.output_dir.join("performance-comparison.json"),
@@ -496,9 +528,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<usize>) -> Report {
+fn aggregate(
+    input_dir: &Path,
+    profile: Option<String>,
+    expected_runs: Option<usize>,
+    baseline_report: Option<&Path>,
+) -> Report {
     let mut warnings = WarningBag::default();
     let regression_gate_thresholds = regression_gate_thresholds(&mut warnings);
+    let baseline_gate_context = load_baseline_gate_context(baseline_report, &mut warnings);
     let discovered = discover_files(input_dir, &mut warnings);
     let mut artifact_discovery = ArtifactDiscovery {
         results_files: discovered.results.len(),
@@ -538,7 +576,11 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
     let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
     let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
     let remote_signer_comparisons = build_remote_signer_comparisons(&aggregate_map);
-    let regression_gates = build_regression_gate_report(&aggregate_map, regression_gate_thresholds);
+    let regression_gates = build_regression_gate_report(
+        &aggregate_map,
+        regression_gate_thresholds,
+        baseline_gate_context.as_ref(),
+    );
     let oxibelt_only_results = aggregate_map
         .iter()
         .filter(|((comparator, _), aggregate)| {
@@ -559,7 +601,7 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 4,
+        schema_version: 5,
         profile,
         expected_runs,
         artifact_discovery,
@@ -577,6 +619,46 @@ fn aggregate(input_dir: &Path, profile: Option<String>, expected_runs: Option<us
         warnings,
         warnings_omitted,
     }
+}
+
+fn load_baseline_gate_context(
+    baseline_report: Option<&Path>,
+    warnings: &mut WarningBag,
+) -> Option<BaselineGateContext> {
+    let Some(path) = baseline_report else {
+        warnings.push(
+            "baseline performance report was not provided; baseline-aware regression gate classification is unavailable",
+        );
+        return None;
+    };
+    let label = path.display().to_string();
+    let baseline = match fs::read_to_string(path)
+        .map_err(|error| error.to_string())
+        .and_then(|raw| {
+            serde_json::from_str::<BaselineReport>(&raw).map_err(|error| error.to_string())
+        }) {
+        Ok(report) => report,
+        Err(error) => {
+            warnings.push(format!(
+                "failed to read baseline performance report for regression gates: {error}; baseline-aware regression gate classification is unavailable"
+            ));
+            return None;
+        }
+    };
+    let aggregates = baseline
+        .aggregates
+        .into_iter()
+        .map(|aggregate| {
+            (
+                (aggregate.comparator.clone(), aggregate.scenario.clone()),
+                aggregate,
+            )
+        })
+        .collect();
+    Some(BaselineGateContext {
+        report: label,
+        aggregates,
+    })
 }
 
 fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFiles {
@@ -1395,61 +1477,76 @@ fn env_threshold(name: &str, default: f64, kind: ThresholdKind, warnings: &mut W
 fn build_regression_gate_report(
     aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
     thresholds: RegressionGateThresholds,
+    baseline: Option<&BaselineGateContext>,
 ) -> RegressionGateReport {
-    let mut violations = Vec::new();
+    let mut findings = RegressionGateFindings {
+        violations: Vec::new(),
+        advisories: Vec::new(),
+    };
 
     collect_comparator_ratio_regression_gate(
         aggregates,
+        baseline,
         "h2_min_nginx_ratio",
         ScenarioGroup::ReverseProxy,
         "h2",
         Comparator::Nginx,
         thresholds.h2_min_nginx_ratio,
-        &mut violations,
+        &mut findings,
     );
-    collect_static_regression_gate(aggregates, thresholds, &mut violations);
+    collect_static_regression_gate(aggregates, baseline, thresholds, &mut findings);
     collect_comparator_ratio_regression_gate(
         aggregates,
+        baseline,
         "static_16k_h1c_min_nginx_ratio",
         ScenarioGroup::StaticFiles,
         "static-16k-h1c",
         Comparator::Nginx,
         thresholds.static_16k_h1c_min_nginx_ratio,
-        &mut violations,
+        &mut findings,
     );
-    collect_remote_signer_handshake_regression_gate(aggregates, thresholds, &mut violations);
+    collect_remote_signer_handshake_regression_gate(
+        aggregates,
+        baseline,
+        thresholds,
+        &mut findings,
+    );
     collect_min_rps_regression_gate(
         aggregates,
+        baseline,
         "waf_enforcing_min_rps",
         "waf-enforcing",
         thresholds.waf_enforcing_min_rps,
-        &mut violations,
+        &mut findings,
     );
     collect_min_rps_regression_gate(
         aggregates,
+        baseline,
         "crs_enforcing_min_rps",
         "crs-enforcing",
         thresholds.crs_enforcing_min_rps,
-        &mut violations,
+        &mut findings,
     );
     collect_p99_ratio_regression_gate(
         aggregates,
+        baseline,
         "waf_enforce_p99_ratio",
         "waf-monitor",
         "waf-enforcing",
         thresholds.waf_crs_max_enforce_p99_ratio,
-        &mut violations,
+        &mut findings,
     );
     collect_p99_ratio_regression_gate(
         aggregates,
+        baseline,
         "crs_enforce_p99_ratio",
         "crs-monitor",
         "crs-enforcing",
         thresholds.waf_crs_max_enforce_p99_ratio,
-        &mut violations,
+        &mut findings,
     );
 
-    let status = if violations.is_empty() {
+    let status = if findings.violations.is_empty() {
         "pass"
     } else {
         "fail"
@@ -1457,14 +1554,16 @@ fn build_regression_gate_report(
     RegressionGateReport {
         status: status.to_owned(),
         thresholds,
-        violations,
+        violations: findings.violations,
+        advisories: findings.advisories,
     }
 }
 
 fn collect_static_regression_gate(
     aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
     thresholds: RegressionGateThresholds,
-    violations: &mut Vec<RegressionGateViolation>,
+    findings: &mut RegressionGateFindings,
 ) {
     let gate = "static_16k_h1c_min_caddy_ratio";
     let scenario = "static-16k-h1c";
@@ -1478,7 +1577,7 @@ fn collect_static_regression_gate(
     };
     let Some(oxibelt_rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, scenario) else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             Some("oxibelt"),
@@ -1488,7 +1587,7 @@ fn collect_static_regression_gate(
     };
     if oxibelt_rps <= 0.0 {
         push_invalid_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             oxibelt_rps,
@@ -1502,7 +1601,7 @@ fn collect_static_regression_gate(
     }
     let Some(caddy_rps) = aggregate_median_rps(aggregates, Comparator::Caddy, scenario) else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             Some("caddy"),
@@ -1512,7 +1611,7 @@ fn collect_static_regression_gate(
     };
     if caddy_rps <= 0.0 {
         push_invalid_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             caddy_rps,
@@ -1527,30 +1626,42 @@ fn collect_static_regression_gate(
 
     let ratio = oxibelt_rps / caddy_rps;
     if ratio < threshold {
-        violations.push(RegressionGateViolation {
-            gate: gate.to_owned(),
-            group: group.to_owned(),
-            scenario: scenario.to_owned(),
-            metric: "median_rps_ratio".to_owned(),
-            observed: Some(ratio),
-            threshold,
-            comparator: Some("caddy".to_owned()),
-            message: format!(
-                "OxiBelt static-16k-h1c median RPS ratio {:.4} < {:.4} vs Caddy ({:.3} RPS vs {:.3} RPS)",
-                ratio, threshold, oxibelt_rps, caddy_rps
-            ),
-        });
+        let decision = classify_throughput_ratio_threshold_miss(
+            aggregates,
+            baseline,
+            scenario,
+            Comparator::Caddy,
+            scenario,
+        );
+        push_threshold_regression_gate_metric(
+            findings,
+            RegressionGateFindingInput {
+                gate,
+                group,
+                scenario,
+                metric: "median_rps_ratio",
+                observed: Some(ratio),
+                threshold,
+                comparator: Some("caddy"),
+                message: format!(
+                    "OxiBelt static-16k-h1c median RPS ratio {:.4} < {:.4} vs Caddy ({:.3} RPS vs {:.3} RPS)",
+                    ratio, threshold, oxibelt_rps, caddy_rps
+                ),
+            },
+            decision,
+        );
     }
 }
 
 fn collect_comparator_ratio_regression_gate(
     aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
     gate: &str,
     group: ScenarioGroup,
     scenario: &str,
     comparator: Comparator,
     threshold: f64,
-    violations: &mut Vec<RegressionGateViolation>,
+    findings: &mut RegressionGateFindings,
 ) {
     let comparator_name = comparator.as_str();
     let context = RegressionGateContext {
@@ -1561,7 +1672,7 @@ fn collect_comparator_ratio_regression_gate(
     };
     let Some(oxibelt_rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, scenario) else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             Some("oxibelt"),
@@ -1571,7 +1682,7 @@ fn collect_comparator_ratio_regression_gate(
     };
     if oxibelt_rps <= 0.0 {
         push_invalid_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             oxibelt_rps,
@@ -1585,7 +1696,7 @@ fn collect_comparator_ratio_regression_gate(
     }
     let Some(comparator_rps) = aggregate_median_rps(aggregates, comparator, scenario) else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             Some(comparator_name),
@@ -1595,7 +1706,7 @@ fn collect_comparator_ratio_regression_gate(
     };
     if comparator_rps <= 0.0 {
         push_invalid_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             comparator_rps,
@@ -1610,26 +1721,34 @@ fn collect_comparator_ratio_regression_gate(
 
     let ratio = oxibelt_rps / comparator_rps;
     if ratio < threshold {
-        violations.push(RegressionGateViolation {
-            gate: gate.to_owned(),
-            group: group.as_str().to_owned(),
-            scenario: scenario.to_owned(),
-            metric: "median_rps_ratio".to_owned(),
-            observed: Some(ratio),
-            threshold,
-            comparator: Some(comparator_name.to_owned()),
-            message: format!(
-                "OxiBelt {scenario} median RPS ratio {:.4} < {:.4} vs {comparator_name} ({:.3} RPS vs {:.3} RPS)",
-                ratio, threshold, oxibelt_rps, comparator_rps
-            ),
-        });
+        let decision = classify_throughput_ratio_threshold_miss(
+            aggregates, baseline, scenario, comparator, scenario,
+        );
+        push_threshold_regression_gate_metric(
+            findings,
+            RegressionGateFindingInput {
+                gate,
+                group: group.as_str(),
+                scenario,
+                metric: "median_rps_ratio",
+                observed: Some(ratio),
+                threshold,
+                comparator: Some(comparator_name),
+                message: format!(
+                    "OxiBelt {scenario} median RPS ratio {:.4} < {:.4} vs {comparator_name} ({:.3} RPS vs {:.3} RPS)",
+                    ratio, threshold, oxibelt_rps, comparator_rps
+                ),
+            },
+            decision,
+        );
     }
 }
 
 fn collect_remote_signer_handshake_regression_gate(
     aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
     thresholds: RegressionGateThresholds,
-    violations: &mut Vec<RegressionGateViolation>,
+    findings: &mut RegressionGateFindings,
 ) {
     let gate = "remote_signer_handshake_min_local_ratio";
     let scenario = "tls-handshake-h2";
@@ -1645,7 +1764,7 @@ fn collect_remote_signer_handshake_regression_gate(
     let Some(remote_rate) = aggregate_median_rps(aggregates, Comparator::Oxibelt, remote_scenario)
     else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             Some("remote-signer"),
@@ -1655,7 +1774,7 @@ fn collect_remote_signer_handshake_regression_gate(
     };
     if remote_rate <= 0.0 {
         push_invalid_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             remote_rate,
@@ -1670,7 +1789,7 @@ fn collect_remote_signer_handshake_regression_gate(
     let Some(local_rate) = aggregate_median_rps(aggregates, Comparator::Oxibelt, local_scenario)
     else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             Some("local-key"),
@@ -1680,7 +1799,7 @@ fn collect_remote_signer_handshake_regression_gate(
     };
     if local_rate <= 0.0 {
         push_invalid_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_rps",
             local_rate,
@@ -1695,32 +1814,44 @@ fn collect_remote_signer_handshake_regression_gate(
 
     let ratio = remote_rate / local_rate;
     if ratio < threshold {
-        violations.push(RegressionGateViolation {
-            gate: gate.to_owned(),
-            group: ScenarioGroup::RemoteSigner.as_str().to_owned(),
-            scenario: scenario.to_owned(),
-            metric: "median_rps_ratio".to_owned(),
-            observed: Some(ratio),
-            threshold,
-            comparator: Some("local-key".to_owned()),
-            message: format!(
-                "OxiBelt remote-signer cold H2 handshake median rate ratio {:.4} < {:.4} vs local key ({:.3} handshakes/s vs {:.3} handshakes/s)",
-                ratio, threshold, remote_rate, local_rate
-            ),
-        });
+        let decision = classify_throughput_ratio_threshold_miss(
+            aggregates,
+            baseline,
+            remote_scenario,
+            Comparator::Oxibelt,
+            local_scenario,
+        );
+        push_threshold_regression_gate_metric(
+            findings,
+            RegressionGateFindingInput {
+                gate,
+                group: ScenarioGroup::RemoteSigner.as_str(),
+                scenario,
+                metric: "median_rps_ratio",
+                observed: Some(ratio),
+                threshold,
+                comparator: Some("local-key"),
+                message: format!(
+                    "OxiBelt remote-signer cold H2 handshake median rate ratio {:.4} < {:.4} vs local key ({:.3} handshakes/s vs {:.3} handshakes/s)",
+                    ratio, threshold, remote_rate, local_rate
+                ),
+            },
+            decision,
+        );
     }
 }
 
 fn collect_min_rps_regression_gate(
     aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
     gate: &str,
     scenario: &str,
     threshold: f64,
-    violations: &mut Vec<RegressionGateViolation>,
+    findings: &mut RegressionGateFindings,
 ) {
     let Some(rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, scenario) else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             RegressionGateContext {
                 gate,
                 group: ScenarioGroup::OxibeltOnly.as_str(),
@@ -1733,30 +1864,52 @@ fn collect_min_rps_regression_gate(
         );
         return;
     };
+    if rps <= 0.0 {
+        push_invalid_regression_gate_metric(
+            findings,
+            RegressionGateContext {
+                gate,
+                group: ScenarioGroup::OxibeltOnly.as_str(),
+                scenario,
+                threshold,
+            },
+            "median_rps",
+            rps,
+            Some("oxibelt"),
+            format!("OxiBelt {scenario} median RPS must be positive; got {rps:.3}"),
+        );
+        return;
+    }
     if rps < threshold {
-        violations.push(RegressionGateViolation {
-            gate: gate.to_owned(),
-            group: ScenarioGroup::OxibeltOnly.as_str().to_owned(),
-            scenario: scenario.to_owned(),
-            metric: "median_rps".to_owned(),
-            observed: Some(rps),
-            threshold,
-            comparator: None,
-            message: format!(
-                "OxiBelt {scenario} median RPS {:.3} < {:.3}",
-                rps, threshold
-            ),
-        });
+        let decision = classify_absolute_rps_threshold_miss(aggregates, baseline, scenario);
+        push_threshold_regression_gate_metric(
+            findings,
+            RegressionGateFindingInput {
+                gate,
+                group: ScenarioGroup::OxibeltOnly.as_str(),
+                scenario,
+                metric: "median_rps",
+                observed: Some(rps),
+                threshold,
+                comparator: None,
+                message: format!(
+                    "OxiBelt {scenario} median RPS {:.3} < {:.3}",
+                    rps, threshold
+                ),
+            },
+            decision,
+        );
     }
 }
 
 fn collect_p99_ratio_regression_gate(
     aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
     gate: &str,
     monitor_scenario: &str,
     enforcing_scenario: &str,
     threshold: f64,
-    violations: &mut Vec<RegressionGateViolation>,
+    findings: &mut RegressionGateFindings,
 ) {
     let context = RegressionGateContext {
         gate,
@@ -1767,7 +1920,7 @@ fn collect_p99_ratio_regression_gate(
     let Some(monitor_p99) = aggregate_median_p99(aggregates, Comparator::Oxibelt, monitor_scenario)
     else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_p99_ms",
             Some(monitor_scenario),
@@ -1779,7 +1932,7 @@ fn collect_p99_ratio_regression_gate(
         aggregate_median_p99(aggregates, Comparator::Oxibelt, enforcing_scenario)
     else {
         push_missing_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_p99_ms",
             Some(enforcing_scenario),
@@ -1789,7 +1942,7 @@ fn collect_p99_ratio_regression_gate(
     };
     if monitor_p99 <= 0.0 {
         push_invalid_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_p99_ms",
             monitor_p99,
@@ -1803,7 +1956,7 @@ fn collect_p99_ratio_regression_gate(
     }
     if enforcing_p99 <= 0.0 {
         push_invalid_regression_gate_metric(
-            violations,
+            findings,
             context,
             "median_p99_ms",
             enforcing_p99,
@@ -1818,30 +1971,41 @@ fn collect_p99_ratio_regression_gate(
 
     let ratio = enforcing_p99 / monitor_p99;
     if ratio > threshold {
-        violations.push(RegressionGateViolation {
-            gate: gate.to_owned(),
-            group: ScenarioGroup::OxibeltOnly.as_str().to_owned(),
-            scenario: enforcing_scenario.to_owned(),
-            metric: "median_p99_ratio".to_owned(),
-            observed: Some(ratio),
-            threshold,
-            comparator: Some(monitor_scenario.to_owned()),
-            message: format!(
-                "OxiBelt {enforcing_scenario} median p99 ratio {:.4} > {:.4} vs {monitor_scenario} ({:.3}ms vs {:.3}ms)",
-                ratio, threshold, enforcing_p99, monitor_p99
-            ),
-        });
+        let decision = classify_p99_ratio_threshold_miss(
+            aggregates,
+            baseline,
+            monitor_scenario,
+            enforcing_scenario,
+        );
+        push_threshold_regression_gate_metric(
+            findings,
+            RegressionGateFindingInput {
+                gate,
+                group: ScenarioGroup::OxibeltOnly.as_str(),
+                scenario: enforcing_scenario,
+                metric: "median_p99_ratio",
+                observed: Some(ratio),
+                threshold,
+                comparator: Some(monitor_scenario),
+                message: format!(
+                    "OxiBelt {enforcing_scenario} median p99 ratio {:.4} > {:.4} vs {monitor_scenario} ({:.3}ms vs {:.3}ms)",
+                    ratio, threshold, enforcing_p99, monitor_p99
+                ),
+            },
+            decision,
+        );
     }
 }
 
 fn push_missing_regression_gate_metric(
-    violations: &mut Vec<RegressionGateViolation>,
+    findings: &mut RegressionGateFindings,
     context: RegressionGateContext<'_>,
     metric: &str,
     comparator: Option<&str>,
     message: impl Into<String>,
 ) {
-    violations.push(RegressionGateViolation {
+    findings.violations.push(RegressionGateViolation {
+        disposition: "blocking".to_owned(),
         gate: context.gate.to_owned(),
         group: context.group.to_owned(),
         scenario: context.scenario.to_owned(),
@@ -1854,14 +2018,15 @@ fn push_missing_regression_gate_metric(
 }
 
 fn push_invalid_regression_gate_metric(
-    violations: &mut Vec<RegressionGateViolation>,
+    findings: &mut RegressionGateFindings,
     context: RegressionGateContext<'_>,
     metric: &str,
     observed: f64,
     comparator: Option<&str>,
     message: impl Into<String>,
 ) {
-    violations.push(RegressionGateViolation {
+    findings.violations.push(RegressionGateViolation {
+        disposition: "blocking".to_owned(),
         gate: context.gate.to_owned(),
         group: context.group.to_owned(),
         scenario: context.scenario.to_owned(),
@@ -1871,6 +2036,266 @@ fn push_invalid_regression_gate_metric(
         comparator: comparator.map(str::to_owned),
         message: message.into(),
     });
+}
+
+struct RegressionGateFindingInput<'a> {
+    gate: &'a str,
+    group: &'a str,
+    scenario: &'a str,
+    metric: &'a str,
+    observed: Option<f64>,
+    threshold: f64,
+    comparator: Option<&'a str>,
+    message: String,
+}
+
+fn push_threshold_regression_gate_metric(
+    findings: &mut RegressionGateFindings,
+    input: RegressionGateFindingInput<'_>,
+    decision: GateDisposition,
+) {
+    let (target, disposition, message) = match decision {
+        GateDisposition::Blocking { reason } => (
+            &mut findings.violations,
+            "blocking",
+            format!("{}; {reason}", input.message),
+        ),
+        GateDisposition::Advisory { reason } => (
+            &mut findings.advisories,
+            "advisory",
+            format!("{}; advisory: {reason}", input.message),
+        ),
+    };
+    target.push(RegressionGateViolation {
+        disposition: disposition.to_owned(),
+        gate: input.gate.to_owned(),
+        group: input.group.to_owned(),
+        scenario: input.scenario.to_owned(),
+        metric: input.metric.to_owned(),
+        observed: input.observed,
+        threshold: input.threshold,
+        comparator: input.comparator.map(str::to_owned),
+        message,
+    });
+}
+
+fn classify_throughput_ratio_threshold_miss(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
+    oxibelt_scenario: &str,
+    comparator: Comparator,
+    comparator_scenario: &str,
+) -> GateDisposition {
+    let oxibelt_rps_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        Comparator::Oxibelt,
+        "oxibelt",
+        oxibelt_scenario,
+        GateMetric::Rps,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let oxibelt_p99_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        Comparator::Oxibelt,
+        "oxibelt",
+        oxibelt_scenario,
+        GateMetric::P99,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let comparator_rps_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        comparator,
+        comparator.as_str(),
+        comparator_scenario,
+        GateMetric::Rps,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+
+    if oxibelt_rps_delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
+        && oxibelt_p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
+        && comparator_rps_delta >= BASELINE_COMPARATOR_RPS_SHIFT_PERCENT
+    {
+        GateDisposition::Advisory {
+            reason: format!(
+                "baseline comparator shift from `{}`: OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%",
+                baseline_report_label(baseline)
+            ),
+        }
+    } else {
+        GateDisposition::Blocking {
+            reason: format!(
+                "baseline evidence from `{}` did not qualify for advisory pass: OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%",
+                baseline_report_label(baseline)
+            ),
+        }
+    }
+}
+
+fn classify_absolute_rps_threshold_miss(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
+    scenario: &str,
+) -> GateDisposition {
+    let rps_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        Comparator::Oxibelt,
+        "oxibelt",
+        scenario,
+        GateMetric::Rps,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let p99_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        Comparator::Oxibelt,
+        "oxibelt",
+        scenario,
+        GateMetric::P99,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+
+    if rps_delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
+        && p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
+    {
+        GateDisposition::Advisory {
+            reason: format!(
+                "baseline-stable OxiBelt row from `{}`: RPS {rps_delta:+.1}%, p99 {p99_delta:+.1}%",
+                baseline_report_label(baseline)
+            ),
+        }
+    } else {
+        GateDisposition::Blocking {
+            reason: format!(
+                "baseline evidence from `{}` did not qualify for advisory pass: OxiBelt RPS {rps_delta:+.1}%, p99 {p99_delta:+.1}%",
+                baseline_report_label(baseline)
+            ),
+        }
+    }
+}
+
+fn classify_p99_ratio_threshold_miss(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
+    monitor_scenario: &str,
+    enforcing_scenario: &str,
+) -> GateDisposition {
+    let enforcing_p99_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        Comparator::Oxibelt,
+        "oxibelt",
+        enforcing_scenario,
+        GateMetric::P99,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let monitor_p99_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        Comparator::Oxibelt,
+        "oxibelt",
+        monitor_scenario,
+        GateMetric::P99,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+
+    if enforcing_p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
+        && monitor_p99_delta <= BASELINE_MONITOR_P99_IMPROVEMENT_PERCENT
+    {
+        GateDisposition::Advisory {
+            reason: format!(
+                "baseline monitor p99 shift from `{}`: enforcing p99 {enforcing_p99_delta:+.1}%, monitor p99 {monitor_p99_delta:+.1}%",
+                baseline_report_label(baseline)
+            ),
+        }
+    } else {
+        GateDisposition::Blocking {
+            reason: format!(
+                "baseline evidence from `{}` did not qualify for advisory pass: enforcing p99 {enforcing_p99_delta:+.1}%, monitor p99 {monitor_p99_delta:+.1}%",
+                baseline_report_label(baseline)
+            ),
+        }
+    }
+}
+
+fn baseline_unavailable_blocking(error: String) -> GateDisposition {
+    GateDisposition::Blocking {
+        reason: format!("baseline-aware advisory unavailable: {error}"),
+    }
+}
+
+fn baseline_report_label(baseline: Option<&BaselineGateContext>) -> &str {
+    baseline
+        .map(|context| context.report.as_str())
+        .unwrap_or("-")
+}
+
+fn baseline_metric_delta_percent(
+    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    baseline: Option<&BaselineGateContext>,
+    current_comparator: Comparator,
+    baseline_comparator: &str,
+    scenario: &str,
+    metric: GateMetric,
+) -> std::result::Result<f64, String> {
+    let baseline =
+        baseline.ok_or_else(|| "no baseline performance report was provided".to_owned())?;
+    let metric_name = metric.name();
+    let before = baseline
+        .aggregates
+        .get(&(baseline_comparator.to_owned(), scenario.to_owned()))
+        .and_then(|aggregate| metric.value(aggregate))
+        .ok_or_else(|| {
+            format!("missing baseline {baseline_comparator} {scenario} {metric_name}")
+        })?;
+    let after = aggregates
+        .get(&(current_comparator, scenario.to_owned()))
+        .and_then(|aggregate| metric.value(aggregate))
+        .ok_or_else(|| {
+            format!(
+                "missing current {} {scenario} {metric_name}",
+                current_comparator.as_str()
+            )
+        })?;
+    if before <= 0.0 {
+        return Err(format!(
+            "baseline {baseline_comparator} {scenario} {metric_name} must be positive; got {before:.3}"
+        ));
+    }
+    Ok(((after - before) / before) * 100.0)
+}
+
+impl GateMetric {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Rps => "median RPS",
+            Self::P99 => "median p99",
+        }
+    }
+
+    fn value(self, aggregate: &AggregateStats) -> Option<f64> {
+        match self {
+            Self::Rps => aggregate.median_rps,
+            Self::P99 => aggregate.median_p99_ms,
+        }
+    }
 }
 
 fn aggregate_median_rps(
@@ -2288,9 +2713,10 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
-        "- Regression gates: `{}` ({} violation(s))",
+        "- Regression gates: `{}` ({} violation(s), {} advisory/advisories)",
         report.regression_gates.status,
-        report.regression_gates.violations.len()
+        report.regression_gates.violations.len(),
+        report.regression_gates.advisories.len()
     )
     .unwrap();
     writeln!(
@@ -2538,24 +2964,36 @@ fn write_regression_gate_table(markdown: &mut String, gates: &RegressionGateRepo
     writeln!(markdown, "## Regression gates\n").unwrap();
     writeln!(markdown, "Status: `{}`\n", gates.status).unwrap();
     if gates.violations.is_empty() {
-        writeln!(markdown, "None.\n").unwrap();
-        return;
+        writeln!(markdown, "Blocking violations: none.\n").unwrap();
+    } else {
+        writeln!(markdown, "### Blocking violations\n").unwrap();
+        write_regression_gate_findings(markdown, &gates.violations);
     }
 
+    if gates.advisories.is_empty() {
+        writeln!(markdown, "Advisories: none.\n").unwrap();
+    } else {
+        writeln!(markdown, "### Advisories\n").unwrap();
+        write_regression_gate_findings(markdown, &gates.advisories);
+    }
+}
+
+fn write_regression_gate_findings(markdown: &mut String, findings: &[RegressionGateViolation]) {
     writeln!(
         markdown,
-        "| Gate | Group | Scenario | Metric | Observed | Threshold | Comparator | Message |"
+        "| Disposition | Gate | Group | Scenario | Metric | Observed | Threshold | Comparator | Message |"
     )
     .unwrap();
     writeln!(
         markdown,
-        "| --- | --- | --- | --- | ---: | ---: | --- | --- |"
+        "| --- | --- | --- | --- | --- | ---: | ---: | --- | --- |"
     )
     .unwrap();
-    for violation in &gates.violations {
+    for violation in findings {
         writeln!(
             markdown,
-            "| `{}` | `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
+            violation.disposition,
             violation.gate,
             violation.group,
             violation.scenario,
