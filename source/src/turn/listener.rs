@@ -285,9 +285,11 @@ fn spawn_tcp_acceptor(
                 "connection_started",
               );
               let result = if let Some(acceptor) = conn_acceptor {
-                match acceptor.accept(stream).await {
-                  Ok(tls_stream) => serve_turn_stream(Box::new(tls_stream), peer_addr, stream_id, stream_pool, conn_config, conn_state, connection_drain, conn_edge).await,
-                  Err(error) => Err(anyhow::anyhow!(error).context("TURN TLS handshake failed")),
+                let handshake_timeout = Duration::from_millis(conn_config.idle_timeout_ms);
+                match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
+                  Ok(Ok(tls_stream)) => serve_turn_stream(Box::new(tls_stream), peer_addr, stream_id, stream_pool, conn_config, conn_state, connection_drain, conn_edge).await,
+                  Ok(Err(error)) => Err(anyhow::anyhow!(error).context("TURN TLS handshake failed")),
+                  Err(_) => Err(anyhow::anyhow!("TURN TLS handshake timed out")),
                 }
               } else {
                 serve_turn_stream(Box::new(stream), peer_addr, stream_id, stream_pool, conn_config, conn_state, connection_drain, conn_edge).await
@@ -436,7 +438,11 @@ async fn serve_proxy_stream(
   state: AppHandle,
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
-  let first = read_turn_frame(&mut downstream).await?;
+  let first = read_turn_frame_with_timeout(
+    &mut downstream,
+    Duration::from_millis(config.idle_timeout_ms),
+  )
+  .await?;
   if !proxy_auth_allows(&config, &first)? {
     return Ok(());
   }
@@ -457,6 +463,18 @@ async fn serve_proxy_stream(
   .await?;
   drop(selection);
   Ok(())
+}
+
+async fn read_turn_frame_with_timeout<R>(
+  reader: &mut R,
+  timeout: Duration,
+) -> anyhow::Result<Vec<u8>>
+where
+  R: AsyncRead + Unpin,
+{
+  tokio::time::timeout(timeout, read_turn_frame(reader))
+    .await
+    .map_err(|_| anyhow::anyhow!("TURN first frame timed out"))?
 }
 
 fn proxy_auth_allows(config: &WebRtcTurnListenerConfig, packet: &[u8]) -> anyhow::Result<bool> {

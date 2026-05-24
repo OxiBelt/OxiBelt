@@ -101,6 +101,18 @@ async fn expire_udp_sessions_aborts_expired_reader_task() -> anyhow::Result<()> 
 }
 
 #[tokio::test]
+async fn first_turn_frame_read_times_out_idle_stream() -> anyhow::Result<()> {
+  let (_client, mut server) = tokio::io::duplex(64);
+
+  let error = read_turn_frame_with_timeout(&mut server, Duration::from_millis(5))
+    .await
+    .expect_err("idle TURN TCP stream should time out before first frame");
+
+  assert_eq!(error.to_string(), "TURN first frame timed out");
+  Ok(())
+}
+
+#[tokio::test]
 async fn expire_udp_sessions_keeps_active_reader_task() -> anyhow::Result<()> {
   let mut sessions = HashMap::new();
   let (dropped, session) = udp_proxy_session(Instant::now()).await?;

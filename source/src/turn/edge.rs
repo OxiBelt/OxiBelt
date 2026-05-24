@@ -16,6 +16,8 @@ use super::auth::{self, AuthDecision};
 use super::listener::BoxedIo;
 use super::protocol::*;
 
+const STREAM_OUTBOUND_QUEUE_CAPACITY: usize = 32;
+
 #[derive(Clone, Default)]
 pub(super) struct EdgeState {
   allocations: Arc<Mutex<HashMap<EdgeClient, EdgeAllocation>>>,
@@ -30,7 +32,7 @@ enum EdgeClient {
 #[derive(Clone)]
 enum EdgeSender {
   Udp(Arc<UdpSocket>, SocketAddr),
-  Stream(mpsc::UnboundedSender<Vec<u8>>),
+  Stream(mpsc::Sender<Vec<u8>>),
 }
 
 struct EdgeAllocation {
@@ -55,7 +57,7 @@ pub(super) async fn serve_stream(
   edge: EdgeState,
 ) -> anyhow::Result<()> {
   let (mut reader, mut writer) = tokio::io::split(downstream);
-  let (tx, mut rx) = mpsc::unbounded_channel();
+  let (tx, mut rx) = mpsc::channel(STREAM_OUTBOUND_QUEUE_CAPACITY);
   let client = EdgeClient::Stream(stream_id);
   let idle = tokio::time::sleep(Duration::from_millis(config.idle_timeout_ms));
   tokio::pin!(idle);
@@ -429,8 +431,12 @@ async fn send(sender: &EdgeSender, bytes: Vec<u8>) -> anyhow::Result<()> {
       socket.send_to(&bytes, addr).await?;
     }
     EdgeSender::Stream(tx) => {
-      tx.send(bytes)
-        .map_err(|_| anyhow::anyhow!("TURN stream closed"))?;
+      tx.try_send(bytes).map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => {
+          anyhow::anyhow!("TURN stream outbound queue is full")
+        }
+        mpsc::error::TrySendError::Closed(_) => anyhow::anyhow!("TURN stream closed"),
+      })?;
     }
   }
   Ok(())
@@ -512,7 +518,7 @@ mod tests {
     let now = Instant::now();
     let mut allocation = EdgeAllocation {
       relay: Arc::new(bind_loopback_udp().await),
-      sender: EdgeSender::Stream(mpsc::unbounded_channel().0),
+      sender: EdgeSender::Stream(mpsc::channel(1).0),
       transaction_id: [7; 12],
       permissions: HashMap::from([
         (
@@ -562,7 +568,7 @@ mod tests {
       client,
       EdgeAllocation {
         relay: Arc::new(bind_loopback_udp().await),
-        sender: EdgeSender::Stream(mpsc::unbounded_channel().0),
+        sender: EdgeSender::Stream(mpsc::channel(1).0),
         transaction_id: [3; 12],
         permissions: HashMap::new(),
         channels: HashMap::new(),
@@ -579,5 +585,24 @@ mod tests {
     UdpSocket::bind("127.0.0.1:0")
       .await
       .expect("bind loopback UDP")
+  }
+
+  #[tokio::test]
+  async fn stream_sender_rejects_when_outbound_queue_is_full() -> anyhow::Result<()> {
+    let (tx, _rx) = mpsc::channel(1);
+    let sender = EdgeSender::Stream(tx);
+
+    send(&sender, vec![1]).await?;
+    let error = send(&sender, vec![2])
+      .await
+      .expect_err("full stream queue must reject more relay data");
+
+    assert!(
+      error
+        .to_string()
+        .contains("TURN stream outbound queue is full"),
+      "unexpected error: {error:#}"
+    );
+    Ok(())
   }
 }
