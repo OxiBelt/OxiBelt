@@ -25,9 +25,11 @@ pub(super) fn candidate_config(
   let mut config = base.clone();
   config.waf.enabled = true;
   if !include_active_rules {
+    config.waf.rule_groups.clear();
     config.waf.rules.clear();
     config.waf.crs.enabled = false;
     for route in &mut config.routes {
+      route.waf.rule_groups.clear();
       route.waf.rules.clear();
     }
   }

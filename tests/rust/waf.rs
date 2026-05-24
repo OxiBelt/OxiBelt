@@ -11,13 +11,14 @@ use oxibelt::dynamic_policy::DynamicPolicyContext;
 use oxibelt::waf::{
     BodyNeed, HeaderMutation, OxiRuleCandidate, OxiRuleDevtoolsCheckRequest,
     OxiRuleDevtoolsEvalRequest, OxiRuleDevtoolsReplayRequest, OxiRuleFixture,
-    OxiRuleRequestFixture, OxiRuleResponseFixture, OxiRuleStreamFixture,
-    PersonProofIssuedClearance, PersonProofMode, WafBodyInput, WafEngine, WafPhase, WafProtocol,
-    WafRequestInput, WafResponseInput, WafStreamDirection, WafStreamInput, WafStreamProtocol,
-    WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
-    WafWebSocketStreamMetadata, WafWebTransportStreamKind, WafWebTransportStreamMetadata,
-    check_oxirule, compile_access_log_fields, cost_oxirule, crs_compatibility_matrix,
-    explain_oxirule, replay_oxirule, test_oxirule,
+    OxiRuleGroupCandidate, OxiRuleRequestFixture, OxiRuleResponseFixture, OxiRuleStreamFixture,
+    PersonProofIssuedClearance, PersonProofMode, WafBodyInput, WafConditionMerge, WafEngine,
+    WafPhase, WafProtocol, WafRequestInput, WafResponseInput, WafRuleGroupConfig,
+    WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata,
+    WafTransportMetadataInput, WafTransportNetwork, WafWebSocketStreamMetadata,
+    WafWebTransportStreamKind, WafWebTransportStreamMetadata, check_oxirule,
+    compile_access_log_fields, cost_oxirule, crs_compatibility_matrix, explain_oxirule,
+    replay_oxirule, test_oxirule,
 };
 use ring::digest;
 
@@ -46,6 +47,15 @@ fn devtools_rule(name: &str, phase: WafPhase, content: &str) -> OxiRuleCandidate
         phase: Some(phase),
         priority: Some(100),
         route: None,
+    }
+}
+
+fn devtools_group(name: &str, when: &str) -> WafRuleGroupConfig {
+    WafRuleGroupConfig {
+        name: name.to_string(),
+        when: Some(when.to_string()),
+        merge_condition_as: WafConditionMerge::And,
+        actions: Vec::new(),
     }
 }
 
@@ -85,6 +95,126 @@ fn stream_fixture(payload: &str) -> OxiRuleFixture {
         }),
         ..OxiRuleFixture::default()
     }
+}
+
+#[test]
+fn oxirule_devtools_candidate_only_scrubs_active_rule_groups() {
+    let mut config = minimal_devtools_config("oxirule-devtools-active-group-scrub");
+    config.waf.enabled = true;
+    config.waf.rule_groups.push(devtools_group(
+        "secret-admin",
+        "Request.Http.Path == '/secret'",
+    ));
+    config.routes[0].waf.rule_groups.push(devtools_group(
+        "route-secret",
+        "Request.Http.Path == '/route-secret'",
+    ));
+
+    let global_probe = devtools_rule(
+        "probe-secret-policy",
+        WafPhase::Request,
+        r#"
+groups = ["secret-admin"]
+
+[[actions]]
+type = "reject"
+status = 418
+"#,
+    );
+
+    let blocked_global = test_oxirule(
+        &config,
+        OxiRuleDevtoolsEvalRequest {
+            rule: global_probe.clone(),
+            groups: Vec::new(),
+            include_active_rules: false,
+            fixture: request_fixture("/secret"),
+            expected: None,
+        },
+    );
+    assert!(
+        !blocked_global.ok,
+        "candidate-only test should not resolve active global groups: {:?}",
+        blocked_global.diagnostics
+    );
+    assert!(
+        blocked_global
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic
+                .message
+                .contains("references unknown rule group secret-admin")),
+        "unexpected diagnostics: {:?}",
+        blocked_global.diagnostics
+    );
+
+    let allowed_candidate_group = test_oxirule(
+        &config,
+        OxiRuleDevtoolsEvalRequest {
+            rule: global_probe,
+            groups: vec![OxiRuleGroupCandidate {
+                content: r#"
+[[rule_groups]]
+name = "secret-admin"
+when = "Request.Http.Path == '/secret'"
+"#
+                .to_string(),
+                route: None,
+                name: Some("secret-admin".to_string()),
+            }],
+            include_active_rules: false,
+            fixture: request_fixture("/secret"),
+            expected: None,
+        },
+    );
+    assert!(
+        allowed_candidate_group.ok,
+        "candidate-supplied groups should remain usable: {:?}",
+        allowed_candidate_group.diagnostics
+    );
+    assert_eq!(
+        allowed_candidate_group
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(418)
+    );
+
+    let mut route_probe = devtools_rule(
+        "probe-route-secret-policy",
+        WafPhase::Request,
+        r#"
+groups = ["route-secret"]
+
+[[actions]]
+type = "reject"
+status = 451
+"#,
+    );
+    route_probe.route = Some("app-root".to_string());
+
+    let blocked_route = test_oxirule(
+        &config,
+        OxiRuleDevtoolsEvalRequest {
+            rule: route_probe,
+            groups: Vec::new(),
+            include_active_rules: false,
+            fixture: request_fixture("/route-secret"),
+            expected: None,
+        },
+    );
+    assert!(
+        !blocked_route.ok,
+        "candidate-only test should not resolve active route groups: {:?}",
+        blocked_route.diagnostics
+    );
+    assert!(
+        blocked_route.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("references unknown rule group route-secret")),
+        "unexpected diagnostics: {:?}",
+        blocked_route.diagnostics
+    );
 }
 
 #[test]

@@ -178,7 +178,7 @@ oxibelt oxirule template render --name admin-path --var path_prefix=/admin --var
 oxibelt oxirule false-positive --finding finding.json
 ```
 
-The matching Admin API endpoints live under `/admin/v1/waf/oxirule/*` and are synchronous and stateless. They accept inline candidate OxiRule content plus optional inline OxiRule group content, compile it against the active configuration context, and return JSON fields such as `ok`, `diagnostics`, `matched_rules`, `actions`, `terminal`, `mutations`, `tags`, `stream_close`, `body_need`, `cost_warnings`, and `explain_steps`. The API does not write files or install rules; use `POST /admin/v1/files/sync` for deployment.
+The matching Admin API endpoints live under `/admin/v1/waf/oxirule/*` and are synchronous and stateless. They accept inline candidate OxiRule content plus optional inline OxiRule group content, compile it against the active configuration context, and return JSON fields such as `ok`, `diagnostics`, `matched_rules`, `actions`, `terminal`, `mutations`, `tags`, `stream_close`, `body_need`, `cost_warnings`, and `explain_steps`. Candidate-only requests with `include_active_rules = false` do not include active WAF rules or rule groups in the evaluation context. The API does not write files or install rules; use `POST /admin/v1/files/sync` for deployment.
 
 Fixtures can target request, response, or stream phase. Stream fixtures evaluate the rule engine's `WafStreamInput` shape for WebSocket/WebTransport metadata and payloads; they do not create live upgraded sessions. Replay accepts uploaded NDJSON fixture lines and does not read server-side log files.
 
