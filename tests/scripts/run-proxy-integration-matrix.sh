@@ -1887,6 +1887,8 @@ if [[ "${CASE_NEED_KUBERNETES_SERVER}" == "1" ]]; then
     -e EXPECTED_TOKEN=matrix-kubernetes-token \
     -e INITIAL_ENDPOINT_IP="${http_container_ip}" \
     -e UPDATED_ENDPOINT_IP="${alt_container_ip}" \
+    -e MODIFIED_DELAY_SECONDS=5.0 \
+    -e DELETED_DELAY_SECONDS=4.0 \
     "${mock_kubernetes_image}" >/dev/null
 fi
 
