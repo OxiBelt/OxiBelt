@@ -56,7 +56,10 @@ enabled = true
 max_http_version = "h2"
 
 [proxy.http2]
-adaptive_window = true
+adaptive_window = false
+initial_stream_window_bytes = 1048576
+initial_connection_window_bytes = 16777216
+max_frame_size_bytes = 65535
 max_concurrent_streams = 1024
 max_send_buf_size = 1048576
 keep_alive_interval_ms = 0

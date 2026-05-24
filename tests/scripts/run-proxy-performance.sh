@@ -1186,8 +1186,8 @@ run_oxibelt_h2_split_loads() {
   run_load "oxibelt-h2-upstream-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
 
   if [[ "${profile}" == "benchmark" ]]; then
-    start_oxibelt baseline-h2-manual-window oxibelt
-    run_load "oxibelt-h2-manual-http2-tuning" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+    start_oxibelt baseline-h2-adaptive-window oxibelt
+    run_load "oxibelt-h2-adaptive-window" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
   fi
 }
 

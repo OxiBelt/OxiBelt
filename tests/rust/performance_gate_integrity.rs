@@ -788,6 +788,9 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
     for (scenario, expected_accept) in [
         ("baseline", 0.5),
         ("baseline-no-http3", 0.5),
+        ("baseline-h2-adaptive-window", 0.5),
+        ("baseline-upstream-h2", 0.5),
+        ("baseline-upstream-h2c", 0.5),
         ("cache", 0.5),
         ("crs-enforcing", 0.5),
         ("crs-monitor", 0.5),
@@ -847,6 +850,92 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
             "{} should pin QUIC socket worker multiplier",
             path.display()
         );
+    }
+}
+
+#[test]
+fn oxibelt_performance_fixtures_pin_h2_window_profile() {
+    for entry in fs::read_dir(oxibelt_performance_fixture_root())
+        .expect("OxiBelt performance fixture root should be readable")
+    {
+        let entry = entry.expect("fixture directory entry should be readable");
+        let file_type = entry
+            .file_type()
+            .expect("fixture directory entry type should be readable");
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let scenario = entry
+            .file_name()
+            .into_string()
+            .expect("fixture directory should use UTF-8 name");
+        let path = entry.path().join("config/oxibelt.toml");
+        if !path.exists() {
+            continue;
+        }
+
+        let config_text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let value: toml::Value = toml::from_str(&config_text)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+        let http2 = value
+            .get("proxy")
+            .and_then(toml::Value::as_table)
+            .and_then(|proxy| proxy.get("http2"))
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("{} should contain proxy.http2", path.display()));
+
+        if scenario == "baseline-h2-adaptive-window" {
+            assert_eq!(
+                http2.get("adaptive_window").and_then(toml::Value::as_bool),
+                Some(true),
+                "{} should keep the adaptive-window diagnostic fixture",
+                path.display()
+            );
+            for key in [
+                "initial_stream_window_bytes",
+                "initial_connection_window_bytes",
+                "max_frame_size_bytes",
+            ] {
+                assert!(
+                    !http2.contains_key(key),
+                    "{} should not pin manual {key} in the adaptive-window diagnostic fixture",
+                    path.display()
+                );
+            }
+        } else {
+            assert_eq!(
+                http2.get("adaptive_window").and_then(toml::Value::as_bool),
+                Some(false),
+                "{} should use the fixed HTTP/2 performance baseline",
+                path.display()
+            );
+            assert_eq!(
+                http2
+                    .get("initial_stream_window_bytes")
+                    .and_then(toml::Value::as_integer),
+                Some(1_048_576),
+                "{} should pin initial stream window",
+                path.display()
+            );
+            assert_eq!(
+                http2
+                    .get("initial_connection_window_bytes")
+                    .and_then(toml::Value::as_integer),
+                Some(16_777_216),
+                "{} should pin initial connection window",
+                path.display()
+            );
+            assert_eq!(
+                http2
+                    .get("max_frame_size_bytes")
+                    .and_then(toml::Value::as_integer),
+                Some(65_535),
+                "{} should pin max frame size",
+                path.display()
+            );
+        }
     }
 }
 

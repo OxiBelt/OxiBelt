@@ -15,7 +15,7 @@ use crate::proxy::http::body::{
   self, BodyTimeoutKind, ProxyBody, boxed_error, error_indicates_body_timeout,
 };
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
-use crate::proxy::http::request::{RebuildRequestOptions, proxy_body, rebuild_request_parts};
+use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
 use crate::proxy::http::response::{
   apply_security_headers, apply_sticky_cookie, text_response, waf_terminal_response,
 };
@@ -199,7 +199,6 @@ impl PlainProxyFastPath {
       state.config.limits.max_request_body_bytes as usize,
       client_body_timeout,
       request_body_definitely_empty,
-      state.config.proxy.http.trailers != TrailerMode::Pass,
     );
     let outbound = Request::from_parts(parts, body).map(|body| {
       fast_path_outbound_request_body(
@@ -541,22 +540,13 @@ fn fast_path_request_body<B>(
   max_body_bytes: usize,
   timeout: std::time::Duration,
   definitely_empty: bool,
-  drop_trailers: bool,
 ) -> ProxyBody
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
 {
-  if definitely_empty {
+  if body.is_end_stream() || definitely_empty {
     return empty_body();
-  }
-
-  if drop_trailers && body.size_hint().upper() == Some(0) {
-    return empty_body();
-  }
-
-  if body.is_end_stream() {
-    return proxy_body(body);
   }
 
   body::with_read_timeout(

@@ -12,6 +12,8 @@ use crate::config::{Config, HttpVersion, ProxyProtocolEgressMode};
 use crate::lifecycle::ConnectionDrain;
 use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 
+mod body_shortcuts;
+
 mod common {
   include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -51,32 +53,6 @@ impl Body for PanicBody {
 
   fn size_hint(&self) -> SizeHint {
     SizeHint::new()
-  }
-}
-
-struct TrailerOnlyBody {
-  yielded: bool,
-}
-
-impl Body for TrailerOnlyBody {
-  type Data = Bytes;
-  type Error = body::BoxError;
-
-  fn poll_frame(
-    mut self: Pin<&mut Self>,
-    _cx: &mut Context<'_>,
-  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    if self.yielded {
-      return Poll::Ready(None);
-    }
-    self.yielded = true;
-    let mut trailers = http::HeaderMap::new();
-    trailers.insert("x-trailer", "kept".parse().unwrap());
-    Poll::Ready(Some(Ok(Frame::trailers(trailers))))
-  }
-
-  fn size_hint(&self) -> SizeHint {
-    SizeHint::with_exact(0)
   }
 }
 
@@ -212,13 +188,7 @@ async fn h1_definitely_empty_request_body_shortcut_does_not_poll_body() {
       request.version(),
       request.headers()
     ));
-    let body = fast_path_request_body(
-      request.into_body(),
-      1024,
-      Duration::from_millis(100),
-      true,
-      true,
-    );
+    let body = fast_path_request_body(request.into_body(), 1024, Duration::from_millis(100), true);
     let bytes = body
       .collect()
       .await
@@ -226,34 +196,6 @@ async fn h1_definitely_empty_request_body_shortcut_does_not_poll_body() {
       .to_bytes();
     assert!(bytes.is_empty());
   }
-}
-
-#[tokio::test]
-async fn h2_zero_size_hint_is_empty_only_when_trailers_are_dropped() {
-  let dropped = fast_path_request_body(
-    TrailerOnlyBody { yielded: false },
-    1024,
-    Duration::from_millis(100),
-    false,
-    true,
-  )
-  .collect()
-  .await
-  .expect("dropped trailer-only body should collect");
-  assert!(dropped.trailers().is_none());
-  assert!(dropped.to_bytes().is_empty());
-
-  let passed = fast_path_request_body(
-    TrailerOnlyBody { yielded: false },
-    1024,
-    Duration::from_millis(100),
-    false,
-    false,
-  )
-  .collect()
-  .await
-  .expect("passed trailer-only body should collect");
-  assert_eq!(passed.trailers().unwrap()["x-trailer"], "kept");
 }
 
 #[tokio::test]
