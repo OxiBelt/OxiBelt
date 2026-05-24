@@ -459,8 +459,8 @@ fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
         .expect("workflow should define docker-aggressive-long-run");
 
     assert!(
-        workflow.contains("schedule:") && workflow.contains("cron: \"17 3 * * *\""),
-        "workflow should schedule the aggressive long-run at 03:17 UTC"
+        workflow.contains("schedule:") && workflow.contains("cron: \"0 0 * * *\""),
+        "workflow should schedule the aggressive long-run at 00:00 UTC"
     );
     for input in [
         "aggressive_long_run:",
