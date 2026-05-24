@@ -27,6 +27,7 @@ mod stream;
 mod telemetry;
 mod tls;
 mod turn;
+mod turn_queue;
 mod upstream_pool;
 mod workers;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
@@ -47,6 +48,7 @@ pub use sni_forward::*;
 pub use stream::*;
 pub use telemetry::*;
 pub use tls::*;
+use turn::RawWebRtcTurnListenerConfig;
 pub use turn::*;
 pub use upstream_pool::*;
 pub use workers::*;
@@ -141,7 +143,7 @@ struct RawConfig {
   #[serde(default)]
   stream_listeners: Vec<StreamListenerConfig>,
   #[serde(default)]
-  webrtc_turn_listeners: Vec<WebRtcTurnListenerConfig>,
+  webrtc_turn_listeners: Vec<RawWebRtcTurnListenerConfig>,
   #[serde(default)]
   routes: Vec<RouteConfig>,
   #[serde(default)]
@@ -155,6 +157,11 @@ impl TryFrom<RawConfig> for Config {
     let parallelism = WorkerParallelism::detect();
     let runtime = RuntimeConfig::resolve(raw.runtime, parallelism)?;
     let quic = QuicConfig::resolve(raw.quic, runtime.worker_multipliers, parallelism)?;
+    let webrtc_turn_listeners = raw
+      .webrtc_turn_listeners
+      .into_iter()
+      .map(|listener| listener.resolve(parallelism.available))
+      .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(Self {
       config: raw.config,
       logging: raw.logging,
@@ -183,7 +190,7 @@ impl TryFrom<RawConfig> for Config {
       turn_upstream_pools: raw.turn_upstream_pools,
       sni_forward: raw.sni_forward,
       stream_listeners: raw.stream_listeners,
-      webrtc_turn_listeners: raw.webrtc_turn_listeners,
+      webrtc_turn_listeners,
       routes: raw.routes,
       waf: raw.waf,
       source_paths: ConfigSourcePaths::default(),
@@ -2894,6 +2901,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "realm",
       "relay_bind_ip",
       "relay_port_range",
+      "stream_outbound_queue_capacity",
       "tcp_pool",
       "tls",
       "tls_pool",

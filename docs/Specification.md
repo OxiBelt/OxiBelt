@@ -83,7 +83,7 @@ Upgrade and extended protocol behavior:
 - CONNECT tunneling targets the selected route upstream origin, not the downstream request target.
 - WebTransport forwarding is supported for downstream HTTP/3 extended CONNECT requests when the selected upstream also uses HTTP/3 and has `webtransport = true`.
 - Native OxiRule stream-phase WAF rules can inspect WebTransport stream chunks and datagrams in both directions before forwarding and can close the active session with `close_stream`. The CRS compatibility layer does not inspect WebSocket or WebTransport stream payloads.
-- WebRTC media forwarding is supported through TURN listeners. Signaling HTTP requests can still be routed and inspected as ordinary HTTP traffic, while TURN media payloads are forwarded outside WAF inspection.
+- WebRTC media forwarding is supported through TURN listeners. Signaling HTTP requests can still be routed and inspected as ordinary HTTP traffic, while TURN media payloads are forwarded outside WAF inspection. TURN `edge_relay` TCP/TLS outbound queues are bounded per downstream connection by `stream_outbound_queue_capacity`; the default is `32`, `"auto"` resolves conservatively from available parallelism with a `32..=64` clamp, explicit values are limited to `1..=256`, and full queues fail closed.
 
 ## TLS and Identity
 

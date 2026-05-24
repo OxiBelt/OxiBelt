@@ -1369,6 +1369,7 @@ impl ListenerSupervisor {
           listener.bind_udp,
           listener.bind_tcp,
           listener.bind_tls,
+          listener.stream_outbound_queue_capacity,
           tcp_options,
         )
       })
@@ -1383,6 +1384,7 @@ impl ListenerSupervisor {
           key.bind_udp,
           key.bind_tcp,
           key.bind_tls,
+          key.stream_outbound_queue_capacity,
           key.tcp_options,
         )
       })

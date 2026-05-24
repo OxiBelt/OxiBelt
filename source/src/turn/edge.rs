@@ -16,8 +16,6 @@ use super::auth::{self, AuthDecision};
 use super::listener::BoxedIo;
 use super::protocol::*;
 
-const STREAM_OUTBOUND_QUEUE_CAPACITY: usize = 32;
-
 #[derive(Clone, Default)]
 pub(super) struct EdgeState {
   allocations: Arc<Mutex<HashMap<EdgeClient, EdgeAllocation>>>,
@@ -57,7 +55,7 @@ pub(super) async fn serve_stream(
   edge: EdgeState,
 ) -> anyhow::Result<()> {
   let (mut reader, mut writer) = tokio::io::split(downstream);
-  let (tx, mut rx) = mpsc::channel(STREAM_OUTBOUND_QUEUE_CAPACITY);
+  let (tx, mut rx) = stream_outbound_channel(&config);
   let client = EdgeClient::Stream(stream_id);
   let idle = tokio::time::sleep(Duration::from_millis(config.idle_timeout_ms));
   tokio::pin!(idle);
@@ -77,6 +75,12 @@ pub(super) async fn serve_stream(
       _ = &mut drain_close => return Ok(()),
     }
   }
+}
+
+fn stream_outbound_channel(
+  config: &WebRtcTurnListenerConfig,
+) -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
+  mpsc::channel(config.stream_outbound_queue_capacity)
 }
 
 pub(super) async fn handle_udp_packet(
@@ -512,6 +516,9 @@ async fn send_allocation_mismatch(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config::{
+    TurnAuthConfig, TurnListenerTlsConfig, TurnRelayPortRange, WebRtcTurnListenerMode,
+  };
 
   #[tokio::test]
   async fn allocation_state_expiry_removes_permissions_and_channels() {
@@ -581,6 +588,21 @@ mod tests {
     assert!(!allocations.contains_key(&client));
   }
 
+  #[test]
+  fn stream_outbound_channel_uses_configured_capacity() {
+    let config = edge_relay_config_with_stream_queue_capacity(2);
+    let (tx, _rx) = stream_outbound_channel(&config);
+
+    tx.try_send(vec![1]).expect("first queued frame should fit");
+    tx.try_send(vec![2])
+      .expect("second queued frame should fit");
+    let error = tx
+      .try_send(vec![3])
+      .expect_err("configured stream queue capacity should be enforced");
+
+    assert!(matches!(error, mpsc::error::TrySendError::Full(_)));
+  }
+
   async fn bind_loopback_udp() -> UdpSocket {
     UdpSocket::bind("127.0.0.1:0")
       .await
@@ -604,5 +626,31 @@ mod tests {
       "unexpected error: {error:#}"
     );
     Ok(())
+  }
+
+  fn edge_relay_config_with_stream_queue_capacity(
+    stream_outbound_queue_capacity: usize,
+  ) -> WebRtcTurnListenerConfig {
+    WebRtcTurnListenerConfig {
+      name: "edge-relay".to_string(),
+      mode: WebRtcTurnListenerMode::EdgeRelay,
+      bind_udp: None,
+      bind_tcp: Some("127.0.0.1:0".parse().expect("socket addr")),
+      bind_tls: None,
+      idle_timeout_ms: 75_000,
+      realm: "example.test".to_string(),
+      auth: TurnAuthConfig::default(),
+      udp_pool: None,
+      tcp_pool: None,
+      tls_pool: None,
+      public_ip: Some("127.0.0.1".parse().expect("ip addr")),
+      relay_bind_ip: Some("127.0.0.1".parse().expect("ip addr")),
+      relay_port_range: Some(TurnRelayPortRange {
+        start: 49152,
+        end: 49160,
+      }),
+      stream_outbound_queue_capacity,
+      tls: TurnListenerTlsConfig::default(),
+    }
   }
 }

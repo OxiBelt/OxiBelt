@@ -4695,6 +4695,125 @@ mode = "pass_through"
 }
 
 #[test]
+fn webrtc_turn_edge_relay_stream_queue_defaults_to_32() {
+    let temp_dir = common::TempDir::new("turn-edge-stream-queue-default");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-edge-stream-queue-default");
+    let raw = edge_relay_turn_config_toml(&cert_path, &key_path, "");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("TURN edge relay listener should validate");
+    assert_eq!(
+        config.webrtc_turn_listeners[0].stream_outbound_queue_capacity,
+        32
+    );
+}
+
+#[test]
+fn webrtc_turn_edge_relay_stream_queue_accepts_fixed_capacity() {
+    let temp_dir = common::TempDir::new("turn-edge-stream-queue-fixed");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-edge-stream-queue-fixed");
+    let raw =
+        edge_relay_turn_config_toml(&cert_path, &key_path, "stream_outbound_queue_capacity = 64");
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("TURN edge relay listener should validate");
+    assert_eq!(
+        config.webrtc_turn_listeners[0].stream_outbound_queue_capacity,
+        64
+    );
+}
+
+#[test]
+fn webrtc_turn_edge_relay_stream_queue_auto_is_conservative() {
+    let temp_dir = common::TempDir::new("turn-edge-stream-queue-auto");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-edge-stream-queue-auto");
+    let raw = edge_relay_turn_config_toml(
+        &cert_path,
+        &key_path,
+        r#"stream_outbound_queue_capacity = "auto""#,
+    );
+    let expected = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1)
+        .saturating_mul(8)
+        .clamp(32, 64);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("TURN edge relay listener should validate");
+    assert_eq!(
+        config.webrtc_turn_listeners[0].stream_outbound_queue_capacity,
+        expected
+    );
+}
+
+#[test]
+fn webrtc_turn_edge_relay_stream_queue_rejects_unsafe_values() {
+    let temp_dir = common::TempDir::new("turn-edge-stream-queue-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-edge-stream-queue-invalid");
+
+    for (setting, expected) in [
+        (
+            "stream_outbound_queue_capacity = 0",
+            "stream outbound queue capacity must be greater than 0",
+        ),
+        (
+            "stream_outbound_queue_capacity = 257",
+            "stream_outbound_queue_capacity must be at most 256",
+        ),
+        (
+            r#"stream_outbound_queue_capacity = "large""#,
+            "stream outbound queue capacity string must be \"auto\"",
+        ),
+    ] {
+        let raw = edge_relay_turn_config_toml(&cert_path, &key_path, setting);
+        let error = toml::from_str::<Config>(&raw)
+            .expect_err("unsafe TURN stream queue capacity should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn webrtc_turn_proxy_pool_rejects_stream_queue_capacity() {
+    let temp_dir = common::TempDir::new("turn-proxy-stream-queue");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "turn-proxy-stream-queue");
+    let raw = format!(
+        r#"
+{}
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "proxy_pool"
+bind_udp = "127.0.0.1:0"
+stream_outbound_queue_capacity = 64
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let error =
+        toml::from_str::<Config>(&raw).expect_err("proxy_pool stream queue capacity should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("stream_outbound_queue_capacity is only valid when mode = \"edge_relay\""),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn turn_upstream_pool_rejects_invalid_scheme() {
     let temp_dir = common::TempDir::new("turn-invalid-scheme");
     let (cert_path, key_path) =
@@ -4726,6 +4845,33 @@ udp_pool = "turn-pool"
         error.to_string().contains("must use turn://"),
         "unexpected error: {error}"
     );
+}
+
+fn edge_relay_turn_config_toml(cert_path: &Path, key_path: &Path, listener_extra: &str) -> String {
+    format!(
+        r#"
+{}
+
+[[webrtc_turn_listeners]]
+name = "edge-relay"
+mode = "edge_relay"
+bind_tcp = "127.0.0.1:0"
+realm = "example.test"
+public_ip = "127.0.0.1"
+relay_bind_ip = "127.0.0.1"
+{}
+
+[webrtc_turn_listeners.relay_port_range]
+start = 49152
+end = 49160
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+rest_shared_secret = "turn-secret"
+"#,
+        common::minimal_config_toml(cert_path, key_path),
+        listener_extra
+    )
 }
 
 #[test]

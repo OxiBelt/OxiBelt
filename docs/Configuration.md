@@ -1731,6 +1731,7 @@ realm = "example.test"
 public_ip = "203.0.113.10"
 relay_bind_ip = "0.0.0.0"
 idle_timeout_ms = 75000
+stream_outbound_queue_capacity = "auto" # auto or 1..256; default is 32
 
 [webrtc_turn_listeners.relay_port_range]
 start = 49152
@@ -1744,7 +1745,7 @@ username = "media-user"
 password_env = "OXIBELT_TURN_MEDIA_PASSWORD"
 ```
 
-`mode = "edge_relay"` makes OxiBelt allocate UDP relay sockets and advertise `public_ip` with a port from `relay_port_range`. It requires enforced TURN authentication and rejects open relay configurations. TURN over TLS reuses `[tls]` certificate material by default; set `[webrtc_turn_listeners.tls] cert_chain` plus exactly one of `private_key` or `remote_signer_key_id` to override it for a listener. `remote_signer_key_id` uses the global `[tls.remote_signer]` socket and token. TURN payloads are protocol-forwarded only; OxiRule/WAF inspection applies to signaling HTTP, not SRTP/media payloads.
+`mode = "edge_relay"` makes OxiBelt allocate UDP relay sockets and advertise `public_ip` with a port from `relay_port_range`. It requires enforced TURN authentication and rejects open relay configurations. TCP and TLS edge-relay outbound queues are bounded per downstream connection by `stream_outbound_queue_capacity`; omitted configs use `32`, `"auto"` resolves conservatively from available parallelism with a `32..=64` clamp, and explicit values must be `1..=256`. Full queues fail closed by closing the affected TURN stream rather than buffering without bound. TURN over TLS reuses `[tls]` certificate material by default; set `[webrtc_turn_listeners.tls] cert_chain` plus exactly one of `private_key` or `remote_signer_key_id` to override it for a listener. `remote_signer_key_id` uses the global `[tls.remote_signer]` socket and token. TURN payloads are protocol-forwarded only; OxiRule/WAF inspection applies to signaling HTTP, not SRTP/media payloads.
 
 Route-level WAF example:
 

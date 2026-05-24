@@ -856,6 +856,10 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 #[webrtc_turn_listeners.auth]
 # mode = "validate" # pass_through | validate | enforce
 # rest_shared_secret_env = "OXIBELT_TURN_REST_SECRET"
+#
+# For mode = "edge_relay", TCP/TLS outbound queues default to 32 frames per
+# connection. Set stream_outbound_queue_capacity = "auto" or an integer from
+# 1 to 256 on the listener when edge_relay burst tolerance needs tuning.
 
 [[routes]]
 name = "app-root"

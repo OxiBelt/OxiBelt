@@ -6,6 +6,10 @@ use anyhow::{anyhow, bail};
 use serde::Deserialize;
 use url::Url;
 
+use super::turn_queue::{
+  DEFAULT_TURN_STREAM_OUTBOUND_QUEUE_CAPACITY, TurnStreamOutboundQueueCapacitySetting,
+  default_turn_stream_outbound_queue_capacity,
+};
 use super::{
   Config, LoadBalancingAlgorithm, TlsServerResumptionConfig, UpstreamPoolServerState,
   default_client_idle_timeout_ms, default_health_check_healthy_threshold,
@@ -137,6 +141,13 @@ impl Config {
       listener.auth.validate(&listener.name)?;
       match listener.mode {
         WebRtcTurnListenerMode::ProxyPool => {
+          if listener.stream_outbound_queue_capacity != DEFAULT_TURN_STREAM_OUTBOUND_QUEUE_CAPACITY
+          {
+            bail!(
+              "WebRTC TURN listener {} stream_outbound_queue_capacity is only valid when mode = \"edge_relay\"",
+              listener.name
+            );
+          }
           if listener.auth.mode == TurnAuthMode::Enforce {
             bail!(
               "WebRTC TURN listener {} proxy_pool allows auth.mode = \"pass_through\" or \"validate\"",
@@ -235,6 +246,79 @@ impl Config {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+pub(super) struct RawWebRtcTurnListenerConfig {
+  name: String,
+  #[serde(default)]
+  mode: WebRtcTurnListenerMode,
+  #[serde(default)]
+  bind_udp: Option<SocketAddr>,
+  #[serde(default)]
+  bind_tcp: Option<SocketAddr>,
+  #[serde(default)]
+  bind_tls: Option<SocketAddr>,
+  #[serde(default = "default_client_idle_timeout_ms")]
+  idle_timeout_ms: u64,
+  #[serde(default = "default_turn_realm")]
+  realm: String,
+  #[serde(default)]
+  auth: TurnAuthConfig,
+  #[serde(default)]
+  udp_pool: Option<String>,
+  #[serde(default)]
+  tcp_pool: Option<String>,
+  #[serde(default)]
+  tls_pool: Option<String>,
+  #[serde(default)]
+  public_ip: Option<IpAddr>,
+  #[serde(default)]
+  relay_bind_ip: Option<IpAddr>,
+  #[serde(default)]
+  relay_port_range: Option<TurnRelayPortRange>,
+  #[serde(default)]
+  stream_outbound_queue_capacity: Option<TurnStreamOutboundQueueCapacitySetting>,
+  #[serde(default)]
+  tls: TurnListenerTlsConfig,
+}
+
+impl RawWebRtcTurnListenerConfig {
+  pub(super) fn resolve(
+    self,
+    available_parallelism: usize,
+  ) -> anyhow::Result<WebRtcTurnListenerConfig> {
+    if self.mode == WebRtcTurnListenerMode::ProxyPool
+      && self.stream_outbound_queue_capacity.is_some()
+    {
+      bail!(
+        "WebRTC TURN listener {} stream_outbound_queue_capacity is only valid when mode = \"edge_relay\"",
+        self.name
+      );
+    }
+    let stream_outbound_queue_capacity = match self.stream_outbound_queue_capacity {
+      Some(setting) => setting.resolve(&self.name, available_parallelism)?,
+      None => DEFAULT_TURN_STREAM_OUTBOUND_QUEUE_CAPACITY,
+    };
+    Ok(WebRtcTurnListenerConfig {
+      name: self.name,
+      mode: self.mode,
+      bind_udp: self.bind_udp,
+      bind_tcp: self.bind_tcp,
+      bind_tls: self.bind_tls,
+      idle_timeout_ms: self.idle_timeout_ms,
+      realm: self.realm,
+      auth: self.auth,
+      udp_pool: self.udp_pool,
+      tcp_pool: self.tcp_pool,
+      tls_pool: self.tls_pool,
+      public_ip: self.public_ip,
+      relay_bind_ip: self.relay_bind_ip,
+      relay_port_range: self.relay_port_range,
+      stream_outbound_queue_capacity,
+      tls: self.tls,
+    })
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WebRtcTurnListenerConfig {
   pub name: String,
   #[serde(default)]
@@ -263,6 +347,8 @@ pub struct WebRtcTurnListenerConfig {
   pub relay_bind_ip: Option<IpAddr>,
   #[serde(default)]
   pub relay_port_range: Option<TurnRelayPortRange>,
+  #[serde(default = "default_turn_stream_outbound_queue_capacity")]
+  pub stream_outbound_queue_capacity: usize,
   #[serde(default)]
   pub tls: TurnListenerTlsConfig,
 }
