@@ -88,6 +88,9 @@ pub(super) fn validate_expect(
 }
 
 pub(super) fn strip_accepted_expect(headers: &mut HeaderMap) {
+  if !headers.contains_key(EXPECT) {
+    return;
+  }
   if headers
     .get_all(EXPECT)
     .iter()

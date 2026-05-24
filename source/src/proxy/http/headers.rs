@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::str::FromStr;
 
 use http::Request;
@@ -82,19 +83,23 @@ pub(crate) fn add_forwarded_headers(
   mode: ForwardedHeaderMode,
 ) {
   remove_inbound_forwarded_headers(headers, mode);
-  let forwarded_for = forwarded_client_addr.ip().to_string();
+  let forwarded_ip = forwarded_client_addr.ip();
   match mode {
     ForwardedHeaderMode::Overwrite => {
-      set_header(headers, "x-forwarded-for", &forwarded_for);
+      headers.insert(
+        HeaderName::from_static("x-forwarded-for"),
+        ip_header_value(forwarded_ip),
+      );
     }
     ForwardedHeaderMode::Append => {
+      let forwarded_for = forwarded_ip.to_string();
       append_csv_header(headers, "x-forwarded-for", &forwarded_for);
     }
   }
 
   headers.insert(
     HeaderName::from_static("x-forwarded-proto"),
-    HeaderValue::from_str(scheme).unwrap_or_else(|_| HeaderValue::from_static("https")),
+    forwarded_proto_header_value(scheme),
   );
 
   if let Ok(value) = HeaderValue::from_str(host) {
@@ -145,6 +150,10 @@ fn default_port_for_optional_scheme(scheme: &str) -> Option<u16> {
 }
 
 fn remove_inbound_forwarded_headers(headers: &mut HeaderMap, mode: ForwardedHeaderMode) {
+  if !has_inbound_forwarded_headers(headers, mode) {
+    return;
+  }
+
   headers.remove(FORWARDED);
   if mode == ForwardedHeaderMode::Overwrite {
     headers.remove(HeaderName::from_static("x-forwarded-for"));
@@ -154,10 +163,56 @@ fn remove_inbound_forwarded_headers(headers: &mut HeaderMap, mode: ForwardedHead
   headers.remove(HeaderName::from_static("x-forwarded-port"));
 }
 
-fn set_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
-  let header_name = HeaderName::from_static(name);
-  if let Ok(header_value) = HeaderValue::from_str(value) {
-    headers.insert(header_name, header_value);
+fn has_inbound_forwarded_headers(headers: &HeaderMap, mode: ForwardedHeaderMode) -> bool {
+  headers.contains_key(FORWARDED)
+    || (mode == ForwardedHeaderMode::Overwrite && headers.contains_key("x-forwarded-for"))
+    || headers.contains_key("x-forwarded-host")
+    || headers.contains_key("x-forwarded-proto")
+    || headers.contains_key("x-forwarded-port")
+}
+
+fn forwarded_proto_header_value(scheme: &str) -> HeaderValue {
+  match scheme {
+    "http" => HeaderValue::from_static("http"),
+    "https" => HeaderValue::from_static("https"),
+    _ => HeaderValue::from_str(scheme).unwrap_or_else(|_| HeaderValue::from_static("https")),
+  }
+}
+
+fn ip_header_value(ip: IpAddr) -> HeaderValue {
+  match ip {
+    IpAddr::V4(addr) => {
+      let octets = addr.octets();
+      let mut buf = [0u8; 15];
+      let mut len = 0;
+      for (index, octet) in octets.into_iter().enumerate() {
+        if index > 0 {
+          buf[len] = b'.';
+          len += 1;
+        }
+        len += write_u8_decimal(octet, &mut buf[len..]);
+      }
+      HeaderValue::from_bytes(&buf[..len]).expect("IPv4 text is a valid header value")
+    }
+    IpAddr::V6(addr) => {
+      HeaderValue::from_str(&addr.to_string()).expect("IPv6 text is a valid header value")
+    }
+  }
+}
+
+fn write_u8_decimal(value: u8, output: &mut [u8]) -> usize {
+  if value >= 100 {
+    output[0] = b'0' + value / 100;
+    output[1] = b'0' + (value / 10) % 10;
+    output[2] = b'0' + value % 10;
+    3
+  } else if value >= 10 {
+    output[0] = b'0' + value / 10;
+    output[1] = b'0' + value % 10;
+    2
+  } else {
+    output[0] = b'0' + value;
+    1
   }
 }
 
@@ -192,6 +247,10 @@ fn port_header_value(port: u16) -> HeaderValue {
 }
 
 pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+  if !has_hop_by_hop_headers(headers) {
+    return;
+  }
+
   if headers.contains_key(CONNECTION) {
     let mut dynamic_tokens: Option<Vec<HeaderName>> = None;
     let mut remove_close_header = false;
@@ -241,6 +300,17 @@ pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
   if remove_te {
     headers.remove(TE);
   }
+}
+
+fn has_hop_by_hop_headers(headers: &HeaderMap) -> bool {
+  headers.contains_key(CONNECTION)
+    || headers.contains_key("keep-alive")
+    || headers.contains_key(PROXY_AUTHENTICATE)
+    || headers.contains_key(PROXY_AUTHORIZATION)
+    || headers.contains_key(TRAILER)
+    || headers.contains_key(TRANSFER_ENCODING)
+    || headers.contains_key(UPGRADE)
+    || headers.contains_key(TE)
 }
 
 fn fixed_connection_token(
@@ -430,6 +500,22 @@ mod tests {
   }
 
   #[test]
+  fn forwarded_headers_format_ipv6_client_ip() {
+    let mut headers = HeaderMap::new();
+
+    add_forwarded_headers(
+      &mut headers,
+      "[2001:db8::10]:5443".parse().unwrap(),
+      "example.test",
+      "https",
+      443,
+      ForwardedHeaderMode::Overwrite,
+    );
+
+    assert_eq!(headers["x-forwarded-for"], "2001:db8::10");
+  }
+
+  #[test]
   fn hop_by_hop_stripping_removes_connection_tokens_and_fixed_headers() {
     let mut headers = HeaderMap::new();
     headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, x-hop"));
@@ -445,6 +531,18 @@ mod tests {
     assert!(!headers.contains_key("keep-alive"));
     assert!(!headers.contains_key(TRANSFER_ENCODING));
     assert!(!headers.contains_key(UPGRADE));
+  }
+
+  #[test]
+  fn hop_by_hop_stripping_keeps_ordinary_headers_on_empty_fast_path() {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-length", HeaderValue::from_static("2"));
+    headers.insert("content-type", HeaderValue::from_static("text/plain"));
+
+    strip_hop_by_hop_headers(&mut headers);
+
+    assert_eq!(headers["content-length"], "2");
+    assert_eq!(headers["content-type"], "text/plain");
   }
 
   #[test]

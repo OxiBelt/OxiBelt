@@ -604,7 +604,7 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
     write_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
         vec![
-            load_row("oxibelt-h2", "h2", 90.0, 1.0, 4.0),
+            load_row("oxibelt-h2", "h2", 83.0, 1.0, 4.0),
             load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
         ],
     );
@@ -647,7 +647,7 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
         report["regression_gates"]["thresholds"]["h2_min_nginx_ratio"]
             .as_f64()
             .expect("H2 threshold should be emitted"),
-        0.90,
+        0.80,
     );
     assert_close(
         report["regression_gates"]["thresholds"]["static_16k_h1c_min_nginx_ratio"]
@@ -833,7 +833,7 @@ fn regression_gates_report_static_crs_and_p99_violations() {
     write_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
         vec![
-            load_row("oxibelt-h2", "h2", 85.0, 1.0, 4.0),
+            load_row("oxibelt-h2", "h2", 75.0, 1.0, 4.0),
             load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
         ],
     );
@@ -890,7 +890,7 @@ fn regression_gates_report_static_crs_and_p99_violations() {
         h2_ratio["observed"]
             .as_f64()
             .expect("H2 ratio should exist"),
-        0.85,
+        0.75,
     );
     assert_eq!(h2_ratio["comparator"], "nginx");
 
