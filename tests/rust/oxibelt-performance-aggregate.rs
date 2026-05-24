@@ -334,6 +334,14 @@ struct RegressionGateContext<'a> {
     threshold: f64,
 }
 
+struct ComparatorRatioGate<'a> {
+    gate: &'a str,
+    group: ScenarioGroup,
+    scenario: &'a str,
+    comparator: Comparator,
+    threshold: f64,
+}
+
 #[derive(Serialize)]
 struct AcceptMultiplierSummary {
     scenario_count: usize,
@@ -1487,22 +1495,26 @@ fn build_regression_gate_report(
     collect_comparator_ratio_regression_gate(
         aggregates,
         baseline,
-        "h2_min_nginx_ratio",
-        ScenarioGroup::ReverseProxy,
-        "h2",
-        Comparator::Nginx,
-        thresholds.h2_min_nginx_ratio,
+        ComparatorRatioGate {
+            gate: "h2_min_nginx_ratio",
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h2",
+            comparator: Comparator::Nginx,
+            threshold: thresholds.h2_min_nginx_ratio,
+        },
         &mut findings,
     );
     collect_static_regression_gate(aggregates, baseline, thresholds, &mut findings);
     collect_comparator_ratio_regression_gate(
         aggregates,
         baseline,
-        "static_16k_h1c_min_nginx_ratio",
-        ScenarioGroup::StaticFiles,
-        "static-16k-h1c",
-        Comparator::Nginx,
-        thresholds.static_16k_h1c_min_nginx_ratio,
+        ComparatorRatioGate {
+            gate: "static_16k_h1c_min_nginx_ratio",
+            group: ScenarioGroup::StaticFiles,
+            scenario: "static-16k-h1c",
+            comparator: Comparator::Nginx,
+            threshold: thresholds.static_16k_h1c_min_nginx_ratio,
+        },
         &mut findings,
     );
     collect_remote_signer_handshake_regression_gate(
@@ -1656,27 +1668,27 @@ fn collect_static_regression_gate(
 fn collect_comparator_ratio_regression_gate(
     aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
     baseline: Option<&BaselineGateContext>,
-    gate: &str,
-    group: ScenarioGroup,
-    scenario: &str,
-    comparator: Comparator,
-    threshold: f64,
+    gate: ComparatorRatioGate<'_>,
     findings: &mut RegressionGateFindings,
 ) {
-    let comparator_name = comparator.as_str();
+    let comparator_name = gate.comparator.as_str();
     let context = RegressionGateContext {
-        gate,
-        group: group.as_str(),
-        scenario,
-        threshold,
+        gate: gate.gate,
+        group: gate.group.as_str(),
+        scenario: gate.scenario,
+        threshold: gate.threshold,
     };
-    let Some(oxibelt_rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, scenario) else {
+    let Some(oxibelt_rps) = aggregate_median_rps(aggregates, Comparator::Oxibelt, gate.scenario)
+    else {
         push_missing_regression_gate_metric(
             findings,
             context,
             "median_rps",
             Some("oxibelt"),
-            format!("missing OxiBelt {scenario} median RPS; cannot evaluate {gate}"),
+            format!(
+                "missing OxiBelt {} median RPS; cannot evaluate {}",
+                gate.scenario, gate.gate
+            ),
         );
         return;
     };
@@ -1688,19 +1700,23 @@ fn collect_comparator_ratio_regression_gate(
             oxibelt_rps,
             Some("oxibelt"),
             format!(
-                "OxiBelt {scenario} median RPS must be positive; got {:.3}",
-                oxibelt_rps
+                "OxiBelt {} median RPS must be positive; got {:.3}",
+                gate.scenario, oxibelt_rps
             ),
         );
         return;
     }
-    let Some(comparator_rps) = aggregate_median_rps(aggregates, comparator, scenario) else {
+    let Some(comparator_rps) = aggregate_median_rps(aggregates, gate.comparator, gate.scenario)
+    else {
         push_missing_regression_gate_metric(
             findings,
             context,
             "median_rps",
             Some(comparator_name),
-            format!("missing {comparator_name} {scenario} median RPS; cannot evaluate {gate}"),
+            format!(
+                "missing {comparator_name} {} median RPS; cannot evaluate {}",
+                gate.scenario, gate.gate
+            ),
         );
         return;
     };
@@ -1712,31 +1728,35 @@ fn collect_comparator_ratio_regression_gate(
             comparator_rps,
             Some(comparator_name),
             format!(
-                "{comparator_name} {scenario} median RPS must be positive; got {:.3}",
-                comparator_rps
+                "{comparator_name} {} median RPS must be positive; got {:.3}",
+                gate.scenario, comparator_rps
             ),
         );
         return;
     }
 
     let ratio = oxibelt_rps / comparator_rps;
-    if ratio < threshold {
+    if ratio < gate.threshold {
         let decision = classify_throughput_ratio_threshold_miss(
-            aggregates, baseline, scenario, comparator, scenario,
+            aggregates,
+            baseline,
+            gate.scenario,
+            gate.comparator,
+            gate.scenario,
         );
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
-                gate,
-                group: group.as_str(),
-                scenario,
+                gate: gate.gate,
+                group: gate.group.as_str(),
+                scenario: gate.scenario,
                 metric: "median_rps_ratio",
                 observed: Some(ratio),
-                threshold,
+                threshold: gate.threshold,
                 comparator: Some(comparator_name),
                 message: format!(
-                    "OxiBelt {scenario} median RPS ratio {:.4} < {:.4} vs {comparator_name} ({:.3} RPS vs {:.3} RPS)",
-                    ratio, threshold, oxibelt_rps, comparator_rps
+                    "OxiBelt {} median RPS ratio {:.4} < {:.4} vs {comparator_name} ({:.3} RPS vs {:.3} RPS)",
+                    gate.scenario, ratio, gate.threshold, oxibelt_rps, comparator_rps
                 ),
             },
             decision,
