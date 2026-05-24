@@ -24,7 +24,7 @@ on:
         default: "5"
         type: string
       aggressive_long_run:
-        description: Run the scheduled aggressive long-run job after Docker performance summary
+        description: Run the scheduled aggressive long-run job after Docker performance
         required: false
         default: false
         type: boolean
@@ -732,8 +732,8 @@ jobs:
     name: Docker aggressive long-run
     runs-on: ubuntu-latest
     needs:
-      - docker-performance-summary
-    if: needs.docker-performance-summary.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run))
+      - docker-performance
+    if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run))
     permissions:
       actions: read
       contents: read

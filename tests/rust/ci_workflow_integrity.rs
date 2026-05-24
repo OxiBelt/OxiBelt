@@ -474,12 +474,12 @@ fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
     }
     assert_eq!(
         long_run.needs,
-        vec!["docker-performance-summary".to_owned()],
-        "aggressive long-run should start after the Docker performance summary"
+        vec!["docker-performance".to_owned()],
+        "aggressive long-run should start after the Docker performance matrix"
     );
     assert!(
-        workflow.contains("if: needs.docker-performance-summary.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run))"),
-        "aggressive long-run should run only after successful summary on schedule or explicit manual dispatch"
+        workflow.contains("if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run))"),
+        "aggressive long-run should run only after successful Docker performance on schedule or explicit manual dispatch"
     );
     assert!(
         workflow.contains("timeout-minutes: 360"),
