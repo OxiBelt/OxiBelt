@@ -595,10 +595,6 @@ jobs:
         id: select-amd64-v3
         run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported
 
-      - name: Select AMD64 v4 Docker image artifact
-        id: select-amd64-v4
-        run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v4 --allow-unsupported
-
       - name: Download AMD64 v2 Docker image artifact
         if: steps.select-amd64-v2.outputs.supported == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -613,13 +609,6 @@ jobs:
           name: ${{ steps.select-amd64-v3.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image/x86-64-v3
 
-      - name: Download AMD64 v4 Docker image artifact
-        if: steps.select-amd64-v4.outputs.supported == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: ${{ steps.select-amd64-v4.outputs.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image/x86-64-v4
-
       - name: Load AMD64 v2 OxiBelt Docker image
         if: steps.select-amd64-v2.outputs.supported == 'true'
         env:
@@ -632,12 +621,6 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-v3.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/x86-64-v3/${OXIBELT_IMAGE_TAR}"
 
-      - name: Load AMD64 v4 OxiBelt Docker image
-        if: steps.select-amd64-v4.outputs.supported == 'true'
-        env:
-          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-v4.outputs.image_tar }}
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/x86-64-v4/${OXIBELT_IMAGE_TAR}"
-
       - name: Run Docker performance profile
         env:
           AMD64_V2_SUPPORTED: ${{ steps.select-amd64-v2.outputs.supported }}
@@ -646,9 +629,6 @@ jobs:
           AMD64_V3_SUPPORTED: ${{ steps.select-amd64-v3.outputs.supported }}
           AMD64_V3_IMAGE_TAG: ${{ steps.select-amd64-v3.outputs.image_tag }}
           AMD64_V3_MISSING_FEATURES: ${{ steps.select-amd64-v3.outputs.missing_features }}
-          AMD64_V4_SUPPORTED: ${{ steps.select-amd64-v4.outputs.supported }}
-          AMD64_V4_IMAGE_TAG: ${{ steps.select-amd64-v4.outputs.image_tag }}
-          AMD64_V4_MISSING_FEATURES: ${{ steps.select-amd64-v4.outputs.missing_features }}
           PERFORMANCE_SHARD: ${{ matrix.shard }}
         run: |
           if [[ ! "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -657,7 +637,7 @@ jobs:
           fi
 
           failed_iterations=()
-          for target_cpu in x86-64-v2 x86-64-v3 x86-64-v4; do
+          for target_cpu in x86-64-v2 x86-64-v3; do
             case "${target_cpu}" in
               x86-64-v2)
                 supported="${AMD64_V2_SUPPORTED}"
@@ -668,11 +648,6 @@ jobs:
                 supported="${AMD64_V3_SUPPORTED}"
                 image_tag="${AMD64_V3_IMAGE_TAG}"
                 missing_features="${AMD64_V3_MISSING_FEATURES}"
-                ;;
-              x86-64-v4)
-                supported="${AMD64_V4_SUPPORTED}"
-                image_tag="${AMD64_V4_IMAGE_TAG}"
-                missing_features="${AMD64_V4_MISSING_FEATURES}"
                 ;;
             esac
 
@@ -827,7 +802,7 @@ jobs:
             --output-dir "${RUNNER_TEMP}/oxibelt-performance-comparison"
             --profile "${PERFORMANCE_PROFILE}"
             --expected-shards 20
-            --expected-target-cpus x86-64-v2,x86-64-v3,x86-64-v4
+            --expected-target-cpus x86-64-v2,x86-64-v3
             --primary-target-cpu x86-64-v3
           )
           if [[ "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then

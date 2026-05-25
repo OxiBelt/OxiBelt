@@ -340,6 +340,11 @@ fn amd64_docker_image_job_builds_cpu_level_artifacts() {
 #[test]
 fn docker_performance_job_uses_sharded_repeated_sampling() {
     let workflow = workflow_text();
+    let performance_job = workflow
+        .split_once("  docker-performance:\n")
+        .and_then(|(_, rest)| rest.split_once("\n  docker-performance-summary:"))
+        .map(|(job, _)| job)
+        .expect("workflow should contain docker-performance before its summary job");
 
     assert!(
         workflow.contains("performance_iterations:"),
@@ -390,32 +395,36 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         workflow.contains("OXIBELT_PERF_REGRESSION_GATE_MODE: warn"),
         "docker-performance should defer noisy per-iteration regression gates to the summary job"
     );
-    for target_cpu in ["x86-64-v2", "x86-64-v3", "x86-64-v4"] {
+    for target_cpu in ["x86-64-v2", "x86-64-v3"] {
         assert!(
-            workflow.contains(&format!(
+            performance_job.contains(&format!(
                 "tests/scripts/select-amd64-docker-image-artifact.sh {target_cpu} --allow-unsupported"
             )),
             "docker-performance should select the {target_cpu} artifact with unsupported-runner handling"
         );
     }
     assert!(
+        !performance_job.contains("x86-64-v4"),
+        "docker-performance should not include x86-64-v4 in its benchmark target set"
+    );
+    assert!(
         workflow.contains("unsupported-cpu.json"),
         "docker-performance should upload unsupported CPU markers instead of benchmark rows"
     );
-    for target_cpu in ["v2", "v3", "v4"] {
+    for target_cpu in ["v2", "v3"] {
         assert!(
-            workflow.contains(&format!(
+            performance_job.contains(&format!(
                 "steps.select-amd64-{target_cpu}.outputs.supported == 'true'"
             )),
             "docker-performance should only download and load supported AMD64 {target_cpu} artifacts"
         );
     }
     assert!(
-        workflow.contains("for target_cpu in x86-64-v2 x86-64-v3 x86-64-v4; do"),
+        performance_job.contains("for target_cpu in x86-64-v2 x86-64-v3; do"),
         "docker-performance should run each supported AMD64 ISA target in the same matrix job"
     );
     assert!(
-        workflow.contains("OXIBELT_AMD64_TARGET_CPU=\"${target_cpu}\""),
+        performance_job.contains("OXIBELT_AMD64_TARGET_CPU=\"${target_cpu}\""),
         "docker-performance should record each AMD64 target CPU in per-run summaries"
     );
     assert!(
@@ -461,6 +470,11 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
 #[test]
 fn docker_performance_summary_aggregates_uploaded_artifacts() {
     let workflow = workflow_text();
+    let summary_job = workflow
+        .split_once("  docker-performance-summary:\n")
+        .and_then(|(_, rest)| rest.split_once("\n  docker-aggressive-long-run:"))
+        .map(|(job, _)| job)
+        .expect("workflow should contain docker-performance-summary before aggressive long-run");
     let jobs = parse_jobs(&workflow);
     let summary = jobs
         .get("docker-performance-summary")
@@ -512,6 +526,14 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         workflow.contains("--expected-shards 20"),
         "summary job should expect the expanded 20-shard performance matrix"
+    );
+    assert!(
+        summary_job.contains("--expected-target-cpus x86-64-v2,x86-64-v3"),
+        "summary job should expect the benchmarked AMD64 target CPUs"
+    );
+    assert!(
+        !summary_job.contains("--expected-target-cpus x86-64-v2,x86-64-v3,x86-64-v4"),
+        "summary job should not require x86-64-v4 benchmark artifacts"
     );
     assert!(
         workflow.contains("--baseline-report \"${BASELINE_REPORT}\""),
