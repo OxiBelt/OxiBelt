@@ -1,4 +1,7 @@
-use anyhow::bail;
+use std::collections::BTreeMap;
+
+use anyhow::{Context, bail};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::cli::*;
@@ -152,50 +155,101 @@ pub(crate) fn plan_rate_limit(args: &RateLimitArgs) -> anyhow::Result<RequestPla
 }
 
 pub(crate) fn plan_mitigate(args: &MitigateArgs) -> anyhow::Result<RequestPlan> {
-  match args.playbook.as_str() {
-    "vaultwarden-bruteforce" => plan_vaultwarden_bruteforce(args),
-    _ => bail!("unknown mitigation playbook {}", args.playbook),
-  }
-}
-
-fn plan_vaultwarden_bruteforce(args: &MitigateArgs) -> anyhow::Result<RequestPlan> {
-  let path_prefix = args.path_prefix.as_deref().unwrap_or("/identity");
-  let (subject_type, subject, route_name, path_prefix) = policy_subject(
-    "client_ip",
-    &args.source,
-    args.route.as_deref(),
-    Some(path_prefix),
-  );
+  let catalog: MitigationProfileCatalog =
+    serde_json::from_value(read_json_file(&args.profile_file)?).with_context(|| {
+      format!(
+        "failed to parse mitigation profile file {}",
+        args.profile_file.display()
+      )
+    })?;
+  let profile = catalog.profiles.get(&args.profile).with_context(|| {
+    format!(
+      "mitigation profile {} was not found in {}",
+      args.profile,
+      args.profile_file.display()
+    )
+  })?;
+  let path_prefix = args
+    .path_prefix
+    .as_deref()
+    .or(profile.path_prefix.as_deref());
+  let route = args.route.as_deref().or(profile.route_name.as_deref());
+  let (subject_type, subject, route_name, path_prefix) =
+    policy_subject("client_ip", &args.source, route, path_prefix);
   let name = args
     .name
     .clone()
-    .unwrap_or_else(|| mitigation_name("vaultwarden-bruteforce", &subject_type, &subject));
+    .unwrap_or_else(|| mitigation_profile_name(&args.profile, &subject_type, &subject));
   let reason = reason_or_default(
-    args.reason.as_deref(),
-    &format!("vaultwarden brute-force mitigation for {}", args.source),
+    args.reason.as_deref().or(profile.reason.as_deref()),
+    &format!("oxibeltctl mitigate {} {}", args.profile, args.source),
   )?;
+  let mode = if args.dry_run {
+    "dry_run"
+  } else {
+    profile.mode.as_deref().unwrap_or("enforce")
+  };
   post_json(
     "/admin/v1/dynamic-policies/apply",
     json!({
       "enabled": true,
-      "priority": args.priority,
-      "source": "oxibeltctl-playbook",
+      "priority": args.priority.or(profile.priority).unwrap_or(100),
+      "source": profile.source.as_deref().unwrap_or("oxibeltctl-profile"),
       "name": name,
-      "action": "reject",
+      "action": &profile.action,
       "subject_type": subject_type,
       "subject": subject,
       "route_name": route_name,
       "path_prefix": path_prefix,
-      "method": args.method.as_ref().map(|method| method.to_ascii_uppercase()),
-      "status": 429,
+      "method": args.method.as_ref().or(profile.method.as_ref()).map(|method| method.to_ascii_uppercase()),
+      "rate": profile.rate.as_ref(),
+      "burst": profile.burst,
+      "status": profile.status,
+      "body": profile.body.as_ref(),
       "reason": reason,
-      "code": "vaultwarden.bruteforce",
-      "ttl_seconds": args.ttl.unwrap_or(900),
-      "mode": policy_mode(args.dry_run),
+      "code": profile.code.as_ref(),
+      "ttl_seconds": args.ttl.or(profile.ttl_seconds),
+      "mode": mode,
     }),
     "dynamic-policy:Apply",
     "*",
   )
+}
+
+#[derive(Debug, Deserialize)]
+struct MitigationProfileCatalog {
+  profiles: BTreeMap<String, MitigationProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MitigationProfile {
+  action: String,
+  #[serde(default)]
+  source: Option<String>,
+  #[serde(default)]
+  priority: Option<i32>,
+  #[serde(default)]
+  route_name: Option<String>,
+  #[serde(default)]
+  path_prefix: Option<String>,
+  #[serde(default)]
+  method: Option<String>,
+  #[serde(default)]
+  rate: Option<String>,
+  #[serde(default)]
+  burst: Option<i32>,
+  #[serde(default)]
+  status: Option<i32>,
+  #[serde(default)]
+  body: Option<String>,
+  #[serde(default)]
+  reason: Option<String>,
+  #[serde(default)]
+  code: Option<String>,
+  #[serde(default)]
+  ttl_seconds: Option<i64>,
+  #[serde(default)]
+  mode: Option<String>,
 }
 
 fn audit_endpoint(args: &DynamicPolicyAuditArgs) -> String {
@@ -267,7 +321,22 @@ fn default_rate_limit_burst(rate: &str) -> i32 {
 }
 
 fn mitigation_name(action: &str, subject_type: &str, subject: &str) -> String {
-  let sanitized = subject
+  format!(
+    "{action}-{subject_type}-{}",
+    sanitized_name_component(subject)
+  )
+}
+
+fn mitigation_profile_name(profile: &str, subject_type: &str, subject: &str) -> String {
+  format!(
+    "mitigate-{}-{subject_type}-{}",
+    sanitized_name_component(profile),
+    sanitized_name_component(subject)
+  )
+}
+
+fn sanitized_name_component(value: &str) -> String {
+  value
     .chars()
     .map(|character| {
       if character.is_ascii_alphanumeric() {
@@ -276,6 +345,5 @@ fn mitigation_name(action: &str, subject_type: &str, subject: &str) -> String {
         '-'
       }
     })
-    .collect::<String>();
-  format!("{action}-{subject_type}-{sanitized}")
+    .collect::<String>()
 }

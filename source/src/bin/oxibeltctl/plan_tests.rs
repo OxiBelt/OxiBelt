@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use http::Method;
@@ -332,15 +332,32 @@ fn rate_limit_source_accepts_rps_and_default_burst() {
 }
 
 #[test]
-fn mitigate_vaultwarden_bruteforce_renders_builtin_playbook() {
+fn mitigate_profile_file_renders_apply_policy() {
+  let profile_file = write_temp_file(
+    "mitigation-profile",
+    r#"{
+      "profiles": {
+        "login-bruteforce": {
+          "action": "reject",
+          "path_prefix": "/identity",
+          "status": 429,
+          "code": "login.bruteforce",
+          "ttl_seconds": 900,
+          "reason": "login brute-force mitigation"
+        }
+      }
+    }"#,
+  );
   let parsed = Cli::try_parse_from([
     "oxibeltctl",
     "mitigate",
-    "vaultwarden-bruteforce",
+    "login-bruteforce",
+    "--profile-file",
+    profile_file.to_str().expect("profile path should be UTF-8"),
     "--source",
     "203.0.113.13",
   ])
-  .expect("mitigate playbook should parse");
+  .expect("mitigate profile should parse");
   let runtime = tokio::runtime::Builder::new_current_thread()
     .enable_all()
     .build()
@@ -349,6 +366,7 @@ fn mitigate_vaultwarden_bruteforce_renders_builtin_playbook() {
   let plan = runtime
     .block_on(plan_command(&client, &parsed.command))
     .expect("plan");
+  let _ = std::fs::remove_file(&profile_file);
 
   assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
   assert_eq!(
@@ -356,21 +374,147 @@ fn mitigate_vaultwarden_bruteforce_renders_builtin_playbook() {
     Some(json!({
       "enabled": true,
       "priority": 100,
-      "source": "oxibeltctl-playbook",
-      "name": "vaultwarden-bruteforce-client_ip_path-203-0-113-13--identity",
+      "source": "oxibeltctl-profile",
+      "name": "mitigate-login-bruteforce-client_ip_path-203-0-113-13--identity",
       "action": "reject",
       "subject_type": "client_ip_path",
       "subject": "203.0.113.13|/identity",
       "route_name": null,
       "path_prefix": "/identity",
       "method": null,
+      "rate": null,
+      "burst": null,
       "status": 429,
-      "reason": "vaultwarden brute-force mitigation for 203.0.113.13",
-      "code": "vaultwarden.bruteforce",
+      "body": null,
+      "reason": "login brute-force mitigation",
+      "code": "login.bruteforce",
       "ttl_seconds": 900,
       "mode": "enforce",
     }))
   );
+}
+
+#[test]
+fn mitigate_profile_cli_options_override_profile_shape() {
+  let profile_file = write_temp_file(
+    "mitigation-profile-overrides",
+    r#"{
+      "profiles": {
+        "login-bruteforce": {
+          "action": "reject",
+          "source": "operator-profiles",
+          "priority": 50,
+          "path_prefix": "/identity",
+          "method": "get",
+          "status": 429,
+          "reason": "profile reason",
+          "ttl_seconds": 900,
+          "mode": "enforce"
+        }
+      }
+    }"#,
+  );
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "mitigate",
+    "login-bruteforce",
+    "--profile-file",
+    profile_file.to_str().expect("profile path should be UTF-8"),
+    "--source",
+    "203.0.113.14",
+    "--path-prefix",
+    "/login",
+    "--route",
+    "app",
+    "--method",
+    "post",
+    "--priority",
+    "7",
+    "--ttl",
+    "30m",
+    "--reason",
+    "operator override",
+    "--name",
+    "custom-profile-name",
+    "--dry-run",
+  ])
+  .expect("mitigate profile should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+  let _ = std::fs::remove_file(&profile_file);
+
+  assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
+  assert_eq!(
+    plan.body,
+    Some(json!({
+      "enabled": true,
+      "priority": 7,
+      "source": "operator-profiles",
+      "name": "custom-profile-name",
+      "action": "reject",
+      "subject_type": "client_ip_path",
+      "subject": "203.0.113.14|/login",
+      "route_name": "app",
+      "path_prefix": "/login",
+      "method": "POST",
+      "rate": null,
+      "burst": null,
+      "status": 429,
+      "body": null,
+      "reason": "operator override",
+      "code": null,
+      "ttl_seconds": 1800,
+      "mode": "dry_run",
+    }))
+  );
+}
+
+#[test]
+fn mitigate_unknown_profile_fails() {
+  let profile_file = write_temp_file(
+    "mitigation-profile-missing",
+    r#"{"profiles":{"known":{"action":"reject","ttl_seconds":60}}}"#,
+  );
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "mitigate",
+    "missing",
+    "--profile-file",
+    profile_file.to_str().expect("profile path should be UTF-8"),
+    "--source",
+    "203.0.113.15",
+  ])
+  .expect("mitigate profile should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let error = match runtime.block_on(plan_command(&client, &parsed.command)) {
+    Ok(_) => panic!("unknown profile should fail"),
+    Err(error) => error,
+  };
+  let _ = std::fs::remove_file(&profile_file);
+
+  assert!(error.to_string().contains("mitigation profile missing"));
+}
+
+#[test]
+fn mitigate_requires_profile_file() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "mitigate",
+    "login-bruteforce",
+    "--source",
+    "203.0.113.16",
+  ]);
+  assert!(parsed.is_err(), "mitigate should require --profile-file");
 }
 
 #[test]
@@ -396,6 +540,19 @@ fn dynamic_policy_audit_builds_query_endpoint() {
     "/admin/v1/dynamic-policies/audit?limit=25&policy_id=42"
   );
   assert_eq!(plan.permission.action, "dynamic-policy:ReadAudit");
+}
+
+fn write_temp_file(label: &str, content: &str) -> std::path::PathBuf {
+  let nanos = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .expect("clock should be after Unix epoch")
+    .as_nanos();
+  let path = std::env::temp_dir().join(format!(
+    "oxibeltctl-{label}-{}-{nanos}.json",
+    std::process::id()
+  ));
+  std::fs::write(&path, content).expect("temp profile should be written");
+  path
 }
 
 fn dummy_client() -> AdminClient {

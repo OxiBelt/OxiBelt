@@ -440,7 +440,9 @@ pub(crate) struct RateLimitSubjectArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct MitigateArgs {
-  pub(crate) playbook: String,
+  pub(crate) profile: String,
+  #[arg(long = "profile-file", value_name = "FILE")]
+  pub(crate) profile_file: PathBuf,
   #[arg(long)]
   pub(crate) source: String,
   #[arg(long, value_parser = parse_ttl_seconds)]
@@ -449,8 +451,8 @@ pub(crate) struct MitigateArgs {
   pub(crate) reason: Option<String>,
   #[arg(long)]
   pub(crate) name: Option<String>,
-  #[arg(long, default_value_t = 100)]
-  pub(crate) priority: i32,
+  #[arg(long)]
+  pub(crate) priority: Option<i32>,
   #[arg(long)]
   pub(crate) route: Option<String>,
   #[arg(long = "path-prefix")]

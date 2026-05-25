@@ -706,7 +706,7 @@ source = "oxibeltctl"
 max_active_policies = 200
 
 [[dynamic_policy.automation_api.source_quotas]]
-source = "oxibeltctl-playbook"
+source = "oxibeltctl-profile"
 max_active_policies = 100
 
 [dynamic_policy.matching]
@@ -1100,15 +1100,35 @@ oxibeltctl block ip 203.0.113.10 --ttl 1h --reason 'incident response'
 oxibeltctl allow cidr 203.0.113.0/24 --ttl 30m --route app-root
 oxibeltctl challenge --person-proof ip 203.0.113.11 --ttl 10m
 oxibeltctl rate-limit source 203.0.113.12 --rps 1 --ttl 10m
-oxibeltctl mitigate vaultwarden-bruteforce --source 203.0.113.13
+oxibeltctl mitigate login-bruteforce --profile-file ./mitigation-profiles.json --source 203.0.113.13
 ```
 
-The built-in `vaultwarden-bruteforce` mitigation playbook renders a dynamic
-`reject` policy through `/admin/v1/dynamic-policies/apply` with source
-`oxibeltctl-playbook`, code `vaultwarden.bruteforce`, status `429`, default
-path prefix `/identity`, and default TTL `15m`. Common options such as
-`--ttl`, `--name`, `--priority`, `--route`, `--path-prefix`, `--method`, and
-`--dry-run` may override the rendered policy shape.
+`oxibeltctl mitigate <profile>` renders a user-defined local JSON profile into
+a dynamic policy through `/admin/v1/dynamic-policies/apply`. Profiles live under
+a top-level `profiles` object:
+
+```json
+{
+  "profiles": {
+    "login-bruteforce": {
+      "action": "reject",
+      "path_prefix": "/identity",
+      "status": 429,
+      "code": "login.bruteforce",
+      "ttl_seconds": 900,
+      "reason": "login brute-force mitigation"
+    }
+  }
+}
+```
+
+Profile `action` is required. Optional fields are `source`, `priority`,
+`route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`,
+`reason`, `code`, `ttl_seconds`, and `mode`. If `source` is omitted, the CLI
+uses `oxibeltctl-profile`; if `name` is omitted, it derives a deterministic
+`mitigate-<profile>-<subject_type>-<subject>` name. Common options such as
+`--ttl`, `--reason`, `--name`, `--priority`, `--route`, `--path-prefix`,
+`--method`, and `--dry-run` may override the rendered policy shape.
 
 Container images keep `ENTRYPOINT` on `oxibelt` but include the CLI for
 same-container operations:
