@@ -21,6 +21,8 @@ const BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT: f64 = -3.0;
 const BASELINE_P99_REGRESSION_TOLERANCE_PERCENT: f64 = 5.0;
 const BASELINE_COMPARATOR_RPS_SHIFT_PERCENT: f64 = 3.0;
 const BASELINE_MONITOR_P99_IMPROVEMENT_PERCENT: f64 = -5.0;
+const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
+const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
 const SERVING_TYPES: [&str; 6] = [
     "reverse-proxy",
     "static-files",
@@ -31,6 +33,8 @@ const SERVING_TYPES: [&str; 6] = [
 ];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type AggregateMap = BTreeMap<(String, Comparator, String), AggregateStats>;
+type PrimaryAggregateMap = BTreeMap<(Comparator, String), AggregateStats>;
 
 #[derive(Parser)]
 #[command(about = "Aggregate OxiBelt Docker performance artifacts")]
@@ -45,6 +49,10 @@ struct Args {
     expected_runs: Option<usize>,
     #[arg(long)]
     expected_shards: Option<usize>,
+    #[arg(long, value_delimiter = ',')]
+    expected_target_cpus: Vec<String>,
+    #[arg(long, default_value = DEFAULT_AMD64_TARGET_CPU)]
+    primary_target_cpu: String,
     #[arg(long)]
     baseline_report: Option<PathBuf>,
 }
@@ -137,6 +145,7 @@ struct UnsupportedCpuDiscovery {
 #[derive(Clone)]
 struct BenchmarkRow {
     source_file: String,
+    amd64_target_cpu: String,
     label: String,
     comparator: Comparator,
     scenario: String,
@@ -155,6 +164,7 @@ struct BenchmarkRow {
 
 #[derive(Default)]
 struct AggregateBuilder {
+    amd64_target_cpu: String,
     label: String,
     comparator: Option<Comparator>,
     scenario: String,
@@ -174,6 +184,8 @@ struct AggregateBuilder {
 
 #[derive(Clone, Deserialize, Serialize)]
 struct AggregateStats {
+    #[serde(default = "default_amd64_target_cpu")]
+    amd64_target_cpu: String,
     label: String,
     comparator: String,
     scenario: String,
@@ -196,7 +208,7 @@ struct AggregateStats {
     source_files: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct RatioResult {
     status: String,
     ratio: Option<f64>,
@@ -205,8 +217,9 @@ struct RatioResult {
     reason: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ScenarioComparison {
+    amd64_target_cpu: String,
     scenario: String,
     group: String,
     oxibelt: Option<AggregateStats>,
@@ -222,7 +235,7 @@ struct ComparisonGroups {
     static_files: Vec<ScenarioComparison>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct AcceptMultiplierRatio {
     status: String,
     ratio: Option<f64>,
@@ -231,15 +244,16 @@ struct AcceptMultiplierRatio {
     reason: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct AcceptMultiplierComparison {
+    amd64_target_cpu: String,
     scenario: String,
     accept_0_5: Option<AggregateStats>,
     accept_1_0: Option<AggregateStats>,
     accept_1_0_vs_0_5: AcceptMultiplierRatio,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct RemoteSignerRatio {
     status: String,
     throughput_ratio: Option<f64>,
@@ -252,8 +266,9 @@ struct RemoteSignerRatio {
     reason: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct RemoteSignerComparison {
+    amd64_target_cpu: String,
     scenario: String,
     local_key: Option<AggregateStats>,
     remote_signer: Option<AggregateStats>,
@@ -297,6 +312,7 @@ struct RegressionGateThresholds {
 
 #[derive(Serialize)]
 struct RegressionGateViolation {
+    amd64_target_cpu: String,
     disposition: String,
     gate: String,
     group: String,
@@ -339,6 +355,7 @@ enum GateMetric {
 
 #[derive(Clone, Copy)]
 struct RegressionGateContext<'a> {
+    amd64_target_cpu: &'a str,
     gate: &'a str,
     group: &'a str,
     scenario: &'a str,
@@ -373,6 +390,7 @@ struct RemoteSignerSummary {
 
 #[derive(Serialize)]
 struct MissingComparatorRow {
+    amd64_target_cpu: String,
     group: String,
     scenario: String,
     comparator: String,
@@ -381,9 +399,35 @@ struct MissingComparatorRow {
 }
 
 #[derive(Serialize)]
+struct Amd64IsaComparison {
+    scenario: String,
+    group: String,
+    result_type: Option<String>,
+    protocol_or_mode: Option<String>,
+    primary_target_cpu: String,
+    primary: Option<AggregateStats>,
+    variants: Vec<Amd64IsaVariantComparison>,
+}
+
+#[derive(Serialize)]
+struct Amd64IsaVariantComparison {
+    amd64_target_cpu: String,
+    target: Option<AggregateStats>,
+    rps_ratio_vs_primary: Option<f64>,
+    rps_delta_percent_vs_primary: Option<f64>,
+    p99_ratio_vs_primary: Option<f64>,
+    p99_delta_percent_vs_primary: Option<f64>,
+    status: String,
+    reason: Option<String>,
+    text: String,
+}
+
+#[derive(Serialize)]
 struct Report {
     schema_version: u32,
     profile: Option<String>,
+    primary_target_cpu: String,
+    expected_target_cpus: Vec<String>,
     expected_runs: Option<usize>,
     expected_shards: Option<usize>,
     artifact_discovery: ArtifactDiscovery,
@@ -391,6 +435,7 @@ struct Report {
     comparisons: ComparisonGroups,
     accept_multiplier_comparisons: Vec<AcceptMultiplierComparison>,
     remote_signer_comparisons: Vec<RemoteSignerComparison>,
+    amd64_isa_comparisons: Vec<Amd64IsaComparison>,
     oxibelt_only_results: Vec<AggregateStats>,
     skipped_or_missing_comparator_rows: Vec<MissingComparatorRow>,
     regression_gates: RegressionGateReport,
@@ -426,6 +471,7 @@ struct DeltaSummary {
 
 #[derive(Serialize)]
 struct PerformanceDeltaRow {
+    amd64_target_cpu: String,
     group: String,
     scenario: String,
     comparator: String,
@@ -447,6 +493,9 @@ struct PerformanceDeltaRow {
 
 impl AggregateBuilder {
     fn push(&mut self, row: BenchmarkRow) {
+        if self.amd64_target_cpu.is_empty() {
+            self.amd64_target_cpu = row.amd64_target_cpu;
+        }
         if self.label.is_empty() {
             self.label = row.label;
         }
@@ -493,6 +542,7 @@ impl AggregateBuilder {
             .to_owned();
 
         AggregateStats {
+            amd64_target_cpu: self.amd64_target_cpu,
             label: self.label,
             comparator,
             scenario: self.scenario,
@@ -524,6 +574,8 @@ fn main() -> Result<()> {
         args.profile,
         args.expected_runs,
         args.expected_shards,
+        args.expected_target_cpus,
+        args.primary_target_cpu,
         args.baseline_report.as_deref(),
     );
     fs::create_dir_all(&args.output_dir)?;
@@ -554,11 +606,16 @@ fn aggregate(
     profile: Option<String>,
     expected_runs: Option<usize>,
     expected_shards: Option<usize>,
+    expected_target_cpus: Vec<String>,
+    primary_target_cpu: String,
     baseline_report: Option<&Path>,
 ) -> Report {
     let mut warnings = WarningBag::default();
+    let expected_target_cpus = normalize_expected_target_cpus(expected_target_cpus, &mut warnings);
+    let primary_target_cpu = normalize_primary_target_cpu(primary_target_cpu, &mut warnings);
     let regression_gate_thresholds = regression_gate_thresholds(&mut warnings);
-    let baseline_gate_context = load_baseline_gate_context(baseline_report, &mut warnings);
+    let baseline_gate_context =
+        load_baseline_gate_context(baseline_report, &primary_target_cpu, &mut warnings);
     let discovered = discover_files(input_dir, &mut warnings);
     let unsupported_artifact_dirs = unsupported_artifact_dirs(&discovered.unsupported_cpu_markers);
     let results = discovered
@@ -588,6 +645,7 @@ fn aggregate(
         profile.as_deref(),
         expected_runs,
         expected_shards,
+        &expected_target_cpus,
         &mut artifact_discovery,
         &mut warnings,
     );
@@ -601,11 +659,15 @@ fn aggregate(
         }
     }
 
-    let mut builders: BTreeMap<(Comparator, String), AggregateBuilder> = BTreeMap::new();
+    let mut builders: BTreeMap<(String, Comparator, String), AggregateBuilder> = BTreeMap::new();
     for results_path in results {
         for row in parse_results_file(input_dir, results_path, &mut warnings) {
             builders
-                .entry((row.comparator, row.scenario.clone()))
+                .entry((
+                    row.amd64_target_cpu.clone(),
+                    row.comparator,
+                    row.scenario.clone(),
+                ))
                 .or_default()
                 .push(row);
         }
@@ -620,14 +682,24 @@ fn aggregate(
     let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
     let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
     let remote_signer_comparisons = build_remote_signer_comparisons(&aggregate_map);
+    let primary_reverse_proxy = primary_scenario_comparisons(&reverse_proxy, &primary_target_cpu);
+    let primary_static_files = primary_scenario_comparisons(&static_files, &primary_target_cpu);
+    let primary_accept_multiplier_comparisons =
+        primary_accept_multiplier_comparisons(&accept_multiplier_comparisons, &primary_target_cpu);
+    let primary_remote_signer_comparisons =
+        primary_remote_signer_comparisons(&remote_signer_comparisons, &primary_target_cpu);
+    let primary_aggregates = primary_aggregate_map(&aggregate_map, &primary_target_cpu);
     let regression_gates = build_regression_gate_report(
-        &aggregate_map,
+        &primary_aggregates,
         regression_gate_thresholds,
         baseline_gate_context.as_ref(),
+        &primary_target_cpu,
     );
+    let amd64_isa_comparisons =
+        build_amd64_isa_comparisons(&aggregate_map, &expected_target_cpus, &primary_target_cpu);
     let oxibelt_only_results = aggregate_map
         .iter()
-        .filter(|((comparator, _), aggregate)| {
+        .filter(|((_, comparator, _), aggregate)| {
             *comparator == Comparator::Oxibelt
                 && aggregate.group == ScenarioGroup::OxibeltOnly.as_str()
         })
@@ -636,17 +708,24 @@ fn aggregate(
     let skipped_or_missing_comparator_rows = skipped_or_missing_rows(&reverse_proxy, &static_files);
     let aggregates = aggregate_map.into_values().collect::<Vec<_>>();
     let summary = ReportSummary {
-        reverse_proxy: summarize_group(&reverse_proxy),
-        static_files: summarize_group(&static_files),
-        accept_multipliers: summarize_accept_multiplier_comparisons(&accept_multiplier_comparisons),
-        remote_signer: summarize_remote_signer_comparisons(&remote_signer_comparisons),
-        oxibelt_only_row_count: oxibelt_only_results.len(),
+        reverse_proxy: summarize_group(&primary_reverse_proxy),
+        static_files: summarize_group(&primary_static_files),
+        accept_multipliers: summarize_accept_multiplier_comparisons(
+            &primary_accept_multiplier_comparisons,
+        ),
+        remote_signer: summarize_remote_signer_comparisons(&primary_remote_signer_comparisons),
+        oxibelt_only_row_count: oxibelt_only_results
+            .iter()
+            .filter(|row| row.amd64_target_cpu == primary_target_cpu)
+            .count(),
     };
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 6,
+        schema_version: 7,
         profile,
+        primary_target_cpu,
+        expected_target_cpus,
         expected_runs,
         expected_shards,
         artifact_discovery,
@@ -657,6 +736,7 @@ fn aggregate(
         },
         accept_multiplier_comparisons,
         remote_signer_comparisons,
+        amd64_isa_comparisons,
         oxibelt_only_results,
         skipped_or_missing_comparator_rows,
         regression_gates,
@@ -666,8 +746,98 @@ fn aggregate(
     }
 }
 
+fn default_amd64_target_cpu() -> String {
+    DEFAULT_AMD64_TARGET_CPU.to_owned()
+}
+
+fn normalize_expected_target_cpus(
+    expected_target_cpus: Vec<String>,
+    warnings: &mut WarningBag,
+) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for target in expected_target_cpus {
+        let target = target.trim();
+        if target.is_empty() {
+            continue;
+        }
+        if !is_known_amd64_target_cpu(target) {
+            warnings.push(format!(
+                "ignoring unknown expected AMD64 target CPU: {target}"
+            ));
+            continue;
+        }
+        if !normalized.iter().any(|existing| existing == target) {
+            normalized.push(target.to_owned());
+        }
+    }
+    normalized
+}
+
+fn normalize_primary_target_cpu(primary_target_cpu: String, warnings: &mut WarningBag) -> String {
+    let target = primary_target_cpu.trim();
+    if is_known_amd64_target_cpu(target) {
+        target.to_owned()
+    } else {
+        warnings.push(format!(
+            "unknown primary AMD64 target CPU {primary_target_cpu:?}; using {DEFAULT_AMD64_TARGET_CPU}"
+        ));
+        DEFAULT_AMD64_TARGET_CPU.to_owned()
+    }
+}
+
+fn is_known_amd64_target_cpu(target: &str) -> bool {
+    AMD64_TARGET_CPUS.contains(&target)
+}
+
+fn primary_aggregate_map(
+    aggregates: &AggregateMap,
+    primary_target_cpu: &str,
+) -> PrimaryAggregateMap {
+    aggregates
+        .iter()
+        .filter(|((target, _, _), _)| target == primary_target_cpu)
+        .map(|((_, comparator, scenario), aggregate)| {
+            ((*comparator, scenario.clone()), aggregate.clone())
+        })
+        .collect()
+}
+
+fn primary_scenario_comparisons(
+    comparisons: &[ScenarioComparison],
+    primary_target_cpu: &str,
+) -> Vec<ScenarioComparison> {
+    comparisons
+        .iter()
+        .filter(|comparison| comparison.amd64_target_cpu == primary_target_cpu)
+        .cloned()
+        .collect()
+}
+
+fn primary_accept_multiplier_comparisons(
+    comparisons: &[AcceptMultiplierComparison],
+    primary_target_cpu: &str,
+) -> Vec<AcceptMultiplierComparison> {
+    comparisons
+        .iter()
+        .filter(|comparison| comparison.amd64_target_cpu == primary_target_cpu)
+        .cloned()
+        .collect()
+}
+
+fn primary_remote_signer_comparisons(
+    comparisons: &[RemoteSignerComparison],
+    primary_target_cpu: &str,
+) -> Vec<RemoteSignerComparison> {
+    comparisons
+        .iter()
+        .filter(|comparison| comparison.amd64_target_cpu == primary_target_cpu)
+        .cloned()
+        .collect()
+}
+
 fn load_baseline_gate_context(
     baseline_report: Option<&Path>,
+    primary_target_cpu: &str,
     warnings: &mut WarningBag,
 ) -> Option<BaselineGateContext> {
     let Some(path) = baseline_report else {
@@ -693,6 +863,7 @@ fn load_baseline_gate_context(
     let aggregates = baseline
         .aggregates
         .into_iter()
+        .filter(|aggregate| aggregate.amd64_target_cpu == primary_target_cpu)
         .map(|aggregate| {
             (
                 (aggregate.comparator.clone(), aggregate.scenario.clone()),
@@ -803,9 +974,14 @@ fn unsupported_artifact_dirs(markers: &[PathBuf]) -> BTreeSet<PathBuf> {
 }
 
 fn unsupported_shard_id(input_dir: &Path, profile: Option<&str>, marker: &Path) -> Option<String> {
-    let artifact_name = marker.strip_prefix(input_dir).ok()?.components().next()?;
+    let mut components = marker.strip_prefix(input_dir).ok()?.components();
+    let artifact_name = components.next()?;
     let artifact_name = artifact_name.as_os_str().to_string_lossy();
     let artifact_name = artifact_name.as_ref();
+    let target_cpu = components.next().and_then(|component| {
+        let component = component.as_os_str().to_string_lossy();
+        is_known_amd64_target_cpu(component.as_ref()).then(|| component.to_string())
+    });
 
     let remainder = if let Some(profile) = profile {
         let prefix = format!("oxibelt-docker-performance-{profile}-");
@@ -814,7 +990,10 @@ fn unsupported_shard_id(input_dir: &Path, profile: Option<&str>, marker: &Path) 
         artifact_name
     };
     let (serving_type, shard) = remainder.rsplit_once("-shard-")?;
-    Some(format!("{serving_type}/shard-{shard}"))
+    Some(match target_cpu {
+        Some(target_cpu) => format!("{serving_type}/shard-{shard}/{target_cpu}"),
+        None => format!("{serving_type}/shard-{shard}"),
+    })
 }
 
 fn add_expected_artifact_warnings(
@@ -822,6 +1001,7 @@ fn add_expected_artifact_warnings(
     profile: Option<&str>,
     expected_runs: Option<usize>,
     expected_shards: Option<usize>,
+    expected_target_cpus: &[String],
     artifact_discovery: &mut ArtifactDiscovery,
     warnings: &mut WarningBag,
 ) {
@@ -848,27 +1028,59 @@ fn add_expected_artifact_warnings(
             let artifact_name =
                 format!("oxibelt-docker-performance-{profile}-{serving_type}-shard-{shard}");
             let artifact_dir = input_dir.join(&artifact_name);
+            if expected_target_cpus.is_empty() {
+                if artifact_dir.join("unsupported-cpu.json").exists() {
+                    continue;
+                }
+                expected_results_files += expected_runs;
+                if !artifact_dir.exists() {
+                    artifact_discovery
+                        .missing_expected_paths
+                        .push(artifact_name.clone());
+                    warnings.push(format!(
+                        "missing expected artifact directory: {artifact_name}"
+                    ));
+                    continue;
+                }
+                for run in 1..=expected_runs {
+                    let expected = artifact_dir.join(format!("run-{run}/results.json"));
+                    if !expected.exists() {
+                        let missing = format!("{artifact_name}/run-{run}/results.json");
+                        artifact_discovery
+                            .missing_expected_paths
+                            .push(missing.clone());
+                        warnings.push(format!("missing expected results file: {missing}"));
+                    }
+                }
+                continue;
+            }
+
             if artifact_dir.join("unsupported-cpu.json").exists() {
                 continue;
             }
-            expected_results_files += expected_runs;
-            if !artifact_dir.exists() {
-                artifact_discovery
-                    .missing_expected_paths
-                    .push(artifact_name.clone());
-                warnings.push(format!(
-                    "missing expected artifact directory: {artifact_name}"
-                ));
-                continue;
-            }
-            for run in 1..=expected_runs {
-                let expected = artifact_dir.join(format!("run-{run}/results.json"));
-                if !expected.exists() {
-                    let missing = format!("{artifact_name}/run-{run}/results.json");
+            for target in expected_target_cpus {
+                let target_dir = artifact_dir.join(target);
+                if target_dir.join("unsupported-cpu.json").exists() {
+                    continue;
+                }
+                expected_results_files += expected_runs;
+                if !target_dir.exists() {
+                    let missing = format!("{artifact_name}/{target}");
                     artifact_discovery
                         .missing_expected_paths
                         .push(missing.clone());
-                    warnings.push(format!("missing expected results file: {missing}"));
+                    warnings.push(format!("missing expected artifact directory: {missing}"));
+                    continue;
+                }
+                for run in 1..=expected_runs {
+                    let expected = target_dir.join(format!("run-{run}/results.json"));
+                    if !expected.exists() {
+                        let missing = format!("{artifact_name}/{target}/run-{run}/results.json");
+                        artifact_discovery
+                            .missing_expected_paths
+                            .push(missing.clone());
+                        warnings.push(format!("missing expected results file: {missing}"));
+                    }
                 }
             }
         }
@@ -1032,6 +1244,11 @@ fn parse_result_value(
 
     Some(BenchmarkRow {
         source_file: source_file.to_owned(),
+        amd64_target_cpu: string_field(object.get("amd64_target_cpu"))
+            .filter(|target| is_known_amd64_target_cpu(target))
+            .map(str::to_owned)
+            .or_else(|| infer_amd64_target_cpu_from_path(source_file))
+            .unwrap_or_else(default_amd64_target_cpu),
         label: label.to_owned(),
         comparator,
         scenario: scenario.to_owned(),
@@ -1047,6 +1264,12 @@ fn parse_result_value(
         skipped,
         reason,
     })
+}
+
+fn infer_amd64_target_cpu_from_path(path: &str) -> Option<String> {
+    path.split(['/', '\\'])
+        .find(|component| is_known_amd64_target_cpu(component))
+        .map(str::to_owned)
 }
 
 fn normalize_label(label: &str) -> Option<(Comparator, &str)> {
@@ -1157,26 +1380,26 @@ fn integer_field(
 
 fn build_group_comparisons(
     group: ScenarioGroup,
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &AggregateMap,
 ) -> Vec<ScenarioComparison> {
     let mut scenarios = BTreeSet::new();
-    for ((comparator, scenario), aggregate) in aggregates {
+    for ((target, comparator, scenario), aggregate) in aggregates {
         if *comparator == Comparator::Oxibelt && aggregate.group == group.as_str() {
-            scenarios.insert(scenario.clone());
+            scenarios.insert((target.clone(), scenario.clone()));
         }
     }
 
     scenarios
         .into_iter()
-        .map(|scenario| {
+        .map(|(target, scenario)| {
             let oxibelt = aggregates
-                .get(&(Comparator::Oxibelt, scenario.clone()))
+                .get(&(target.clone(), Comparator::Oxibelt, scenario.clone()))
                 .cloned();
             let nginx = aggregates
-                .get(&(Comparator::Nginx, scenario.clone()))
+                .get(&(target.clone(), Comparator::Nginx, scenario.clone()))
                 .cloned();
             let caddy = aggregates
-                .get(&(Comparator::Caddy, scenario.clone()))
+                .get(&(target.clone(), Comparator::Caddy, scenario.clone()))
                 .cloned();
             let oxibelt_vs_nginx =
                 ratio_result(oxibelt.as_ref(), nginx.as_ref(), Comparator::Nginx);
@@ -1184,6 +1407,7 @@ fn build_group_comparisons(
                 ratio_result(oxibelt.as_ref(), caddy.as_ref(), Comparator::Caddy);
 
             ScenarioComparison {
+                amd64_target_cpu: target,
                 scenario,
                 group: group.as_str().to_owned(),
                 oxibelt,
@@ -1197,31 +1421,40 @@ fn build_group_comparisons(
 }
 
 fn build_accept_multiplier_comparisons(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &AggregateMap,
 ) -> Vec<AcceptMultiplierComparison> {
     let mut scenarios = BTreeSet::new();
-    for ((comparator, scenario), aggregate) in aggregates {
+    for ((target, comparator, scenario), aggregate) in aggregates {
         if *comparator == Comparator::Oxibelt
             && aggregate.group == ScenarioGroup::AcceptMultipliers.as_str()
             && let Some(base) = accept_multiplier_base_scenario(scenario)
         {
-            scenarios.insert(base.to_owned());
+            scenarios.insert((target.clone(), base.to_owned()));
         }
     }
 
     scenarios
         .into_iter()
-        .map(|scenario| {
+        .map(|(target, scenario)| {
             let accept_0_5 = aggregates
-                .get(&(Comparator::Oxibelt, format!("accept-0_5-{scenario}")))
+                .get(&(
+                    target.clone(),
+                    Comparator::Oxibelt,
+                    format!("accept-0_5-{scenario}"),
+                ))
                 .cloned();
             let accept_1_0 = aggregates
-                .get(&(Comparator::Oxibelt, format!("accept-1_0-{scenario}")))
+                .get(&(
+                    target.clone(),
+                    Comparator::Oxibelt,
+                    format!("accept-1_0-{scenario}"),
+                ))
                 .cloned();
             let accept_1_0_vs_0_5 =
                 accept_multiplier_ratio(accept_1_0.as_ref(), accept_0_5.as_ref());
 
             AcceptMultiplierComparison {
+                amd64_target_cpu: target,
                 scenario,
                 accept_0_5,
                 accept_1_0,
@@ -1231,32 +1464,39 @@ fn build_accept_multiplier_comparisons(
         .collect()
 }
 
-fn build_remote_signer_comparisons(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
-) -> Vec<RemoteSignerComparison> {
+fn build_remote_signer_comparisons(aggregates: &AggregateMap) -> Vec<RemoteSignerComparison> {
     let mut scenarios = BTreeSet::new();
-    for ((comparator, scenario), aggregate) in aggregates {
+    for ((target, comparator, scenario), aggregate) in aggregates {
         if *comparator == Comparator::Oxibelt
             && aggregate.group == ScenarioGroup::RemoteSigner.as_str()
             && let Some(base) = remote_signer_base_scenario(scenario)
         {
-            scenarios.insert(base.to_owned());
+            scenarios.insert((target.clone(), base.to_owned()));
         }
     }
 
     scenarios
         .into_iter()
-        .map(|scenario| {
+        .map(|(target, scenario)| {
             let local_key = aggregates
-                .get(&(Comparator::Oxibelt, format!("local-key-{scenario}")))
+                .get(&(
+                    target.clone(),
+                    Comparator::Oxibelt,
+                    format!("local-key-{scenario}"),
+                ))
                 .cloned();
             let remote_signer = aggregates
-                .get(&(Comparator::Oxibelt, format!("remote-signer-{scenario}")))
+                .get(&(
+                    target.clone(),
+                    Comparator::Oxibelt,
+                    format!("remote-signer-{scenario}"),
+                ))
                 .cloned();
             let remote_signer_vs_local_key =
                 remote_signer_ratio(remote_signer.as_ref(), local_key.as_ref());
 
             RemoteSignerComparison {
+                amd64_target_cpu: target,
                 scenario,
                 local_key,
                 remote_signer,
@@ -1264,6 +1504,176 @@ fn build_remote_signer_comparisons(
             }
         })
         .collect()
+}
+
+fn build_amd64_isa_comparisons(
+    aggregates: &AggregateMap,
+    expected_target_cpus: &[String],
+    primary_target_cpu: &str,
+) -> Vec<Amd64IsaComparison> {
+    let target_cpus = amd64_isa_target_cpus(aggregates, expected_target_cpus);
+    let mut scenarios = BTreeSet::new();
+    for ((_, comparator, scenario), aggregate) in aggregates {
+        if *comparator == Comparator::Oxibelt {
+            scenarios.insert((aggregate.group.clone(), scenario.clone()));
+        }
+    }
+
+    scenarios
+        .into_iter()
+        .map(|(group, scenario)| {
+            let primary = aggregates
+                .get(&(
+                    primary_target_cpu.to_owned(),
+                    Comparator::Oxibelt,
+                    scenario.clone(),
+                ))
+                .cloned();
+            let (result_type, protocol_or_mode) =
+                isa_metadata(primary.as_ref(), aggregates, &scenario);
+            let variants = target_cpus
+                .iter()
+                .filter(|target| target.as_str() != primary_target_cpu)
+                .map(|target| {
+                    let target_stats = aggregates
+                        .get(&(target.clone(), Comparator::Oxibelt, scenario.clone()))
+                        .cloned();
+                    amd64_isa_variant_comparison(target, primary.as_ref(), target_stats)
+                })
+                .collect();
+
+            Amd64IsaComparison {
+                scenario,
+                group,
+                result_type,
+                protocol_or_mode,
+                primary_target_cpu: primary_target_cpu.to_owned(),
+                primary,
+                variants,
+            }
+        })
+        .collect()
+}
+
+fn amd64_isa_target_cpus(
+    aggregates: &AggregateMap,
+    expected_target_cpus: &[String],
+) -> Vec<String> {
+    if !expected_target_cpus.is_empty() {
+        return expected_target_cpus.to_vec();
+    }
+
+    let mut targets = BTreeSet::new();
+    for ((target, comparator, _), _) in aggregates {
+        if *comparator == Comparator::Oxibelt {
+            targets.insert(target.clone());
+        }
+    }
+    targets.into_iter().collect()
+}
+
+fn isa_metadata(
+    primary: Option<&AggregateStats>,
+    aggregates: &AggregateMap,
+    scenario: &str,
+) -> (Option<String>, Option<String>) {
+    if let Some(primary) = primary {
+        return (
+            primary.result_type.clone(),
+            primary.protocol_or_mode.clone(),
+        );
+    }
+    aggregates
+        .iter()
+        .find(|((_, comparator, aggregate_scenario), _)| {
+            *comparator == Comparator::Oxibelt && aggregate_scenario == scenario
+        })
+        .map(|(_, aggregate)| {
+            (
+                aggregate.result_type.clone(),
+                aggregate.protocol_or_mode.clone(),
+            )
+        })
+        .unwrap_or((None, None))
+}
+
+fn amd64_isa_variant_comparison(
+    target: &str,
+    primary: Option<&AggregateStats>,
+    target_stats: Option<AggregateStats>,
+) -> Amd64IsaVariantComparison {
+    let (status, reason, text, rps_ratio_vs_primary, p99_ratio_vs_primary) =
+        match (primary, target_stats.as_ref()) {
+            (None, _) => (
+                "missing_primary".to_owned(),
+                Some("missing primary target row".to_owned()),
+                "missing primary target row".to_owned(),
+                None,
+                None,
+            ),
+            (Some(_), None) => (
+                "missing_target".to_owned(),
+                Some("missing target row".to_owned()),
+                "missing target row".to_owned(),
+                None,
+                None,
+            ),
+            (Some(primary), Some(target_stats)) => {
+                let rps_ratio = ratio(target_stats.median_rps, primary.median_rps);
+                let p99_ratio = ratio(target_stats.median_p99_ms, primary.median_p99_ms);
+                if rps_ratio.is_none() {
+                    (
+                        "no_samples".to_owned(),
+                        Some("missing usable target or primary RPS".to_owned()),
+                        "missing usable target or primary RPS".to_owned(),
+                        rps_ratio,
+                        p99_ratio,
+                    )
+                } else {
+                    (
+                        "ok".to_owned(),
+                        None,
+                        format!(
+                            "RPS {}, p99 {} vs primary",
+                            format_percent(percent_delta(
+                                primary.median_rps,
+                                target_stats.median_rps
+                            )),
+                            format_percent(percent_delta(
+                                primary.median_p99_ms,
+                                target_stats.median_p99_ms
+                            ))
+                        ),
+                        rps_ratio,
+                        p99_ratio,
+                    )
+                }
+            }
+        };
+    let rps_delta_percent_vs_primary = primary.and_then(|primary| {
+        percent_delta(
+            primary.median_rps,
+            target_stats.as_ref().and_then(|stats| stats.median_rps),
+        )
+    });
+    let p99_delta_percent_vs_primary = primary.and_then(|primary| {
+        percent_delta(
+            primary.median_p99_ms,
+            target_stats.as_ref().and_then(|stats| stats.median_p99_ms),
+        )
+    });
+
+    Amd64IsaVariantComparison {
+        amd64_target_cpu: target.to_owned(),
+        target: target_stats,
+        rps_ratio_vs_primary,
+        rps_delta_percent_vs_primary,
+        p99_ratio_vs_primary,
+        p99_delta_percent_vs_primary,
+        status,
+        reason,
+        text,
+    }
 }
 
 fn ratio_result(
@@ -1578,9 +1988,10 @@ fn env_threshold(name: &str, default: f64, kind: ThresholdKind, warnings: &mut W
 }
 
 fn build_regression_gate_report(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     thresholds: RegressionGateThresholds,
     baseline: Option<&BaselineGateContext>,
+    primary_target_cpu: &str,
 ) -> RegressionGateReport {
     let mut findings = RegressionGateFindings {
         violations: Vec::new(),
@@ -1590,6 +2001,7 @@ fn build_regression_gate_report(
     collect_comparator_ratio_regression_gate(
         aggregates,
         baseline,
+        primary_target_cpu,
         ComparatorRatioGate {
             gate: "h2_min_nginx_ratio",
             group: ScenarioGroup::ReverseProxy,
@@ -1599,10 +2011,17 @@ fn build_regression_gate_report(
         },
         &mut findings,
     );
-    collect_static_regression_gate(aggregates, baseline, thresholds, &mut findings);
+    collect_static_regression_gate(
+        aggregates,
+        baseline,
+        primary_target_cpu,
+        thresholds,
+        &mut findings,
+    );
     collect_comparator_ratio_regression_gate(
         aggregates,
         baseline,
+        primary_target_cpu,
         ComparatorRatioGate {
             gate: "static_16k_h1c_min_nginx_ratio",
             group: ScenarioGroup::StaticFiles,
@@ -1615,12 +2034,14 @@ fn build_regression_gate_report(
     collect_remote_signer_handshake_regression_gate(
         aggregates,
         baseline,
+        primary_target_cpu,
         thresholds,
         &mut findings,
     );
     collect_min_rps_regression_gate(
         aggregates,
         baseline,
+        primary_target_cpu,
         "waf_enforcing_min_rps",
         "waf-enforcing",
         thresholds.waf_enforcing_min_rps,
@@ -1629,6 +2050,7 @@ fn build_regression_gate_report(
     collect_min_rps_regression_gate(
         aggregates,
         baseline,
+        primary_target_cpu,
         "crs_enforcing_min_rps",
         "crs-enforcing",
         thresholds.crs_enforcing_min_rps,
@@ -1637,6 +2059,7 @@ fn build_regression_gate_report(
     collect_p99_ratio_regression_gate(
         aggregates,
         baseline,
+        primary_target_cpu,
         "waf_enforce_p99_ratio",
         "waf-monitor",
         "waf-enforcing",
@@ -1646,6 +2069,7 @@ fn build_regression_gate_report(
     collect_p99_ratio_regression_gate(
         aggregates,
         baseline,
+        primary_target_cpu,
         "crs_enforce_p99_ratio",
         "crs-monitor",
         "crs-enforcing",
@@ -1667,8 +2091,9 @@ fn build_regression_gate_report(
 }
 
 fn collect_static_regression_gate(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
+    primary_target_cpu: &str,
     thresholds: RegressionGateThresholds,
     findings: &mut RegressionGateFindings,
 ) {
@@ -1677,6 +2102,7 @@ fn collect_static_regression_gate(
     let group = ScenarioGroup::StaticFiles.as_str();
     let threshold = thresholds.static_16k_h1c_min_caddy_ratio;
     let context = RegressionGateContext {
+        amd64_target_cpu: primary_target_cpu,
         gate,
         group,
         scenario,
@@ -1743,6 +2169,7 @@ fn collect_static_regression_gate(
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
+                amd64_target_cpu: primary_target_cpu,
                 gate,
                 group,
                 scenario,
@@ -1761,13 +2188,15 @@ fn collect_static_regression_gate(
 }
 
 fn collect_comparator_ratio_regression_gate(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
+    primary_target_cpu: &str,
     gate: ComparatorRatioGate<'_>,
     findings: &mut RegressionGateFindings,
 ) {
     let comparator_name = gate.comparator.as_str();
     let context = RegressionGateContext {
+        amd64_target_cpu: primary_target_cpu,
         gate: gate.gate,
         group: gate.group.as_str(),
         scenario: gate.scenario,
@@ -1842,6 +2271,7 @@ fn collect_comparator_ratio_regression_gate(
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
+                amd64_target_cpu: primary_target_cpu,
                 gate: gate.gate,
                 group: gate.group.as_str(),
                 scenario: gate.scenario,
@@ -1860,8 +2290,9 @@ fn collect_comparator_ratio_regression_gate(
 }
 
 fn collect_remote_signer_handshake_regression_gate(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
+    primary_target_cpu: &str,
     thresholds: RegressionGateThresholds,
     findings: &mut RegressionGateFindings,
 ) {
@@ -1871,6 +2302,7 @@ fn collect_remote_signer_handshake_regression_gate(
     let remote_scenario = "remote-signer-tls-handshake-h2";
     let threshold = thresholds.remote_signer_handshake_min_local_ratio;
     let context = RegressionGateContext {
+        amd64_target_cpu: primary_target_cpu,
         gate,
         group: ScenarioGroup::RemoteSigner.as_str(),
         scenario,
@@ -1939,6 +2371,7 @@ fn collect_remote_signer_handshake_regression_gate(
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
+                amd64_target_cpu: primary_target_cpu,
                 gate,
                 group: ScenarioGroup::RemoteSigner.as_str(),
                 scenario,
@@ -1957,8 +2390,9 @@ fn collect_remote_signer_handshake_regression_gate(
 }
 
 fn collect_min_rps_regression_gate(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
+    primary_target_cpu: &str,
     gate: &str,
     scenario: &str,
     threshold: f64,
@@ -1968,6 +2402,7 @@ fn collect_min_rps_regression_gate(
         push_missing_regression_gate_metric(
             findings,
             RegressionGateContext {
+                amd64_target_cpu: primary_target_cpu,
                 gate,
                 group: ScenarioGroup::OxibeltOnly.as_str(),
                 scenario,
@@ -1983,6 +2418,7 @@ fn collect_min_rps_regression_gate(
         push_invalid_regression_gate_metric(
             findings,
             RegressionGateContext {
+                amd64_target_cpu: primary_target_cpu,
                 gate,
                 group: ScenarioGroup::OxibeltOnly.as_str(),
                 scenario,
@@ -2000,6 +2436,7 @@ fn collect_min_rps_regression_gate(
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
+                amd64_target_cpu: primary_target_cpu,
                 gate,
                 group: ScenarioGroup::OxibeltOnly.as_str(),
                 scenario,
@@ -2018,8 +2455,9 @@ fn collect_min_rps_regression_gate(
 }
 
 fn collect_p99_ratio_regression_gate(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
+    primary_target_cpu: &str,
     gate: &str,
     monitor_scenario: &str,
     enforcing_scenario: &str,
@@ -2027,6 +2465,7 @@ fn collect_p99_ratio_regression_gate(
     findings: &mut RegressionGateFindings,
 ) {
     let context = RegressionGateContext {
+        amd64_target_cpu: primary_target_cpu,
         gate,
         group: ScenarioGroup::OxibeltOnly.as_str(),
         scenario: enforcing_scenario,
@@ -2095,6 +2534,7 @@ fn collect_p99_ratio_regression_gate(
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
+                amd64_target_cpu: primary_target_cpu,
                 gate,
                 group: ScenarioGroup::OxibeltOnly.as_str(),
                 scenario: enforcing_scenario,
@@ -2120,6 +2560,7 @@ fn push_missing_regression_gate_metric(
     message: impl Into<String>,
 ) {
     findings.violations.push(RegressionGateViolation {
+        amd64_target_cpu: context.amd64_target_cpu.to_owned(),
         disposition: "blocking".to_owned(),
         gate: context.gate.to_owned(),
         group: context.group.to_owned(),
@@ -2141,6 +2582,7 @@ fn push_invalid_regression_gate_metric(
     message: impl Into<String>,
 ) {
     findings.violations.push(RegressionGateViolation {
+        amd64_target_cpu: context.amd64_target_cpu.to_owned(),
         disposition: "blocking".to_owned(),
         gate: context.gate.to_owned(),
         group: context.group.to_owned(),
@@ -2154,6 +2596,7 @@ fn push_invalid_regression_gate_metric(
 }
 
 struct RegressionGateFindingInput<'a> {
+    amd64_target_cpu: &'a str,
     gate: &'a str,
     group: &'a str,
     scenario: &'a str,
@@ -2182,6 +2625,7 @@ fn push_threshold_regression_gate_metric(
         ),
     };
     target.push(RegressionGateViolation {
+        amd64_target_cpu: input.amd64_target_cpu.to_owned(),
         disposition: disposition.to_owned(),
         gate: input.gate.to_owned(),
         group: input.group.to_owned(),
@@ -2195,7 +2639,7 @@ fn push_threshold_regression_gate_metric(
 }
 
 fn classify_throughput_ratio_threshold_miss(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
     oxibelt_scenario: &str,
     comparator: Comparator,
@@ -2256,7 +2700,7 @@ fn classify_throughput_ratio_threshold_miss(
 }
 
 fn classify_absolute_rps_threshold_miss(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
     scenario: &str,
 ) -> GateDisposition {
@@ -2303,7 +2747,7 @@ fn classify_absolute_rps_threshold_miss(
 }
 
 fn classify_p99_ratio_threshold_miss(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
     monitor_scenario: &str,
     enforcing_scenario: &str,
@@ -2363,7 +2807,7 @@ fn baseline_report_label(baseline: Option<&BaselineGateContext>) -> &str {
 }
 
 fn baseline_metric_delta_percent(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
     current_comparator: Comparator,
     baseline_comparator: &str,
@@ -2414,7 +2858,7 @@ impl GateMetric {
 }
 
 fn aggregate_median_rps(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     comparator: Comparator,
     scenario: &str,
 ) -> Option<f64> {
@@ -2424,7 +2868,7 @@ fn aggregate_median_rps(
 }
 
 fn aggregate_median_p99(
-    aggregates: &BTreeMap<(Comparator, String), AggregateStats>,
+    aggregates: &PrimaryAggregateMap,
     comparator: Comparator,
     scenario: &str,
 ) -> Option<f64> {
@@ -2533,6 +2977,7 @@ fn collect_missing_row(
         return;
     }
     rows.push(MissingComparatorRow {
+        amd64_target_cpu: comparison.amd64_target_cpu.clone(),
         group: comparison.group.clone(),
         scenario: comparison.scenario.clone(),
         comparator: comparator.as_str().to_owned(),
@@ -2551,7 +2996,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         Ok(report) => report,
         Err(error) => {
             return DeltaReport {
-                schema_version: 1,
+                schema_version: 2,
                 baseline_report: baseline_label,
                 summary: DeltaSummary::default(),
                 rows: Vec::new(),
@@ -2562,11 +3007,12 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         }
     };
 
-    let baseline_map = aggregate_lookup(&baseline.aggregates);
-    let current_map = aggregate_lookup(&current.aggregates);
+    let baseline_map = aggregate_lookup(&baseline.aggregates, &current.primary_target_cpu);
+    let current_map = aggregate_lookup(&current.aggregates, &current.primary_target_cpu);
     let mut rows = Vec::new();
     collect_delta_rows(
         &current.comparisons.reverse_proxy,
+        &current.primary_target_cpu,
         Comparator::Nginx,
         &baseline_map,
         &current_map,
@@ -2574,6 +3020,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
     );
     collect_delta_rows(
         &current.comparisons.reverse_proxy,
+        &current.primary_target_cpu,
         Comparator::Caddy,
         &baseline_map,
         &current_map,
@@ -2581,6 +3028,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
     );
     collect_delta_rows(
         &current.comparisons.static_files,
+        &current.primary_target_cpu,
         Comparator::Nginx,
         &baseline_map,
         &current_map,
@@ -2588,6 +3036,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
     );
     collect_delta_rows(
         &current.comparisons.static_files,
+        &current.primary_target_cpu,
         Comparator::Caddy,
         &baseline_map,
         &current_map,
@@ -2595,7 +3044,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
     );
 
     DeltaReport {
-        schema_version: 1,
+        schema_version: 2,
         baseline_report: baseline_label,
         summary: summarize_delta_rows(&rows),
         rows,
@@ -2603,9 +3052,13 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
     }
 }
 
-fn aggregate_lookup(aggregates: &[AggregateStats]) -> BTreeMap<(String, String), &AggregateStats> {
+fn aggregate_lookup<'a>(
+    aggregates: &'a [AggregateStats],
+    primary_target_cpu: &str,
+) -> BTreeMap<(String, String), &'a AggregateStats> {
     aggregates
         .iter()
+        .filter(|aggregate| aggregate.amd64_target_cpu == primary_target_cpu)
         .map(|aggregate| {
             (
                 (aggregate.comparator.clone(), aggregate.scenario.clone()),
@@ -2617,6 +3070,7 @@ fn aggregate_lookup(aggregates: &[AggregateStats]) -> BTreeMap<(String, String),
 
 fn collect_delta_rows(
     comparisons: &[ScenarioComparison],
+    primary_target_cpu: &str,
     comparator: Comparator,
     baseline: &BTreeMap<(String, String), &AggregateStats>,
     current: &BTreeMap<(String, String), &AggregateStats>,
@@ -2624,9 +3078,13 @@ fn collect_delta_rows(
 ) {
     let comparator_name = comparator.as_str();
     for comparison in comparisons {
+        if comparison.amd64_target_cpu != primary_target_cpu {
+            continue;
+        }
         let oxibelt_key = ("oxibelt".to_owned(), comparison.scenario.clone());
         let comparator_key = (comparator_name.to_owned(), comparison.scenario.clone());
         rows.push(delta_row(
+            &comparison.amd64_target_cpu,
             &comparison.group,
             &comparison.scenario,
             comparator_name,
@@ -2639,6 +3097,7 @@ fn collect_delta_rows(
 }
 
 fn delta_row(
+    amd64_target_cpu: &str,
     group: &str,
     scenario: &str,
     comparator: &str,
@@ -2656,6 +3115,7 @@ fn delta_row(
     let before_oxibelt_p99_ms = before_oxibelt.and_then(|stats| stats.median_p99_ms);
     let after_oxibelt_p99_ms = after_oxibelt.and_then(|stats| stats.median_p99_ms);
     let mut row = PerformanceDeltaRow {
+        amd64_target_cpu: amd64_target_cpu.to_owned(),
         group: group.to_owned(),
         scenario: scenario.to_owned(),
         comparator: comparator.to_owned(),
@@ -2792,14 +3252,28 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
-        "- Unsupported AMD64 v3 runner artifacts: `{}`",
+        "- Primary AMD64 target CPU: `{}`",
+        report.primary_target_cpu
+    )
+    .unwrap();
+    if !report.expected_target_cpus.is_empty() {
+        writeln!(
+            markdown,
+            "- Expected AMD64 target CPUs: `{}`",
+            report.expected_target_cpus.join("`, `")
+        )
+        .unwrap();
+    }
+    writeln!(
+        markdown,
+        "- Unsupported AMD64 target artifacts: `{}`",
         report.artifact_discovery.unsupported_cpu.count
     )
     .unwrap();
     if !report.artifact_discovery.unsupported_cpu.shards.is_empty() {
         writeln!(
             markdown,
-            "- Unsupported AMD64 v3 shards excluded: `{}`",
+            "- Unsupported AMD64 target shards excluded: `{}`",
             report
                 .artifact_discovery
                 .unsupported_cpu
@@ -2846,6 +3320,12 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- AMD64 ISA comparisons: `{}` scenario(s)",
+        report.amd64_isa_comparisons.len()
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- Regression gates: `{}` ({} violation(s), {} advisory/advisories)",
         report.regression_gates.status,
         report.regression_gates.violations.len(),
@@ -2871,6 +3351,7 @@ fn render_markdown(report: &Report) -> String {
     );
     write_accept_multiplier_table(&mut markdown, &report.accept_multiplier_comparisons);
     write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
+    write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
     write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
     write_missing_table(&mut markdown, &report.skipped_or_missing_comparator_rows);
     write_regression_gate_table(&mut markdown, &report.regression_gates);
@@ -2935,19 +3416,20 @@ fn write_comparison_table(markdown: &mut String, title: &str, comparisons: &[Sce
 
     writeln!(
         markdown,
-        "| Scenario | OxiBelt median rate/sec | nginx median rate/sec | OxiBelt vs nginx | Caddy median rate/sec | OxiBelt vs Caddy | OxiBelt median p95 ms | OxiBelt median p99 ms |"
+        "| Target CPU | Scenario | OxiBelt median rate/sec | nginx median rate/sec | OxiBelt vs nginx | Caddy median rate/sec | OxiBelt vs Caddy | OxiBelt median p95 ms | OxiBelt median p99 ms |"
     )
     .unwrap();
     writeln!(
         markdown,
-        "| --- | ---: | ---: | --- | ---: | --- | ---: | ---: |"
+        "| --- | --- | ---: | ---: | --- | ---: | --- | ---: | ---: |"
     )
     .unwrap();
     for comparison in comparisons {
         let oxibelt = comparison.oxibelt.as_ref();
         writeln!(
             markdown,
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} |",
+            "| `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} |",
+            comparison.amd64_target_cpu,
             comparison.scenario,
             format_number(oxibelt.and_then(|stats| stats.median_rps)),
             format_number(comparison.nginx.as_ref().and_then(|stats| stats.median_rps)),
@@ -2974,12 +3456,12 @@ fn write_accept_multiplier_table(
 
     writeln!(
         markdown,
-        "| Scenario | accept = 0.5 median rate/sec | accept = 1.0 median rate/sec | 1.0 / 0.5 | accept = 0.5 median p95 ms | accept = 1.0 median p95 ms | accept = 0.5 median p99 ms | accept = 1.0 median p99 ms |"
+        "| Target CPU | Scenario | accept = 0.5 median rate/sec | accept = 1.0 median rate/sec | 1.0 / 0.5 | accept = 0.5 median p95 ms | accept = 1.0 median p95 ms | accept = 0.5 median p99 ms | accept = 1.0 median p99 ms |"
     )
     .unwrap();
     writeln!(
         markdown,
-        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |"
+        "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |"
     )
     .unwrap();
     for comparison in comparisons {
@@ -2987,7 +3469,8 @@ fn write_accept_multiplier_table(
         let accept_1_0 = comparison.accept_1_0.as_ref();
         writeln!(
             markdown,
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} |",
+            "| `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} |",
+            comparison.amd64_target_cpu,
             comparison.scenario,
             format_number(accept_0_5.and_then(|stats| stats.median_rps)),
             format_number(accept_1_0.and_then(|stats| stats.median_rps)),
@@ -3011,16 +3494,17 @@ fn write_remote_signer_table(markdown: &mut String, comparisons: &[RemoteSignerC
 
     writeln!(
         markdown,
-        "| Scenario | Local-key median rate/sec | Remote-signer median rate/sec | Remote signer vs local key | Local-key median p99 ms | Remote-signer median p99 ms |"
+        "| Target CPU | Scenario | Local-key median rate/sec | Remote-signer median rate/sec | Remote signer vs local key | Local-key median p99 ms | Remote-signer median p99 ms |"
     )
     .unwrap();
-    writeln!(markdown, "| --- | ---: | ---: | --- | ---: | ---: |").unwrap();
+    writeln!(markdown, "| --- | --- | ---: | ---: | --- | ---: | ---: |").unwrap();
     for comparison in comparisons {
         let local_key = comparison.local_key.as_ref();
         let remote_signer = comparison.remote_signer.as_ref();
         writeln!(
             markdown,
-            "| `{}` | {} | {} | {} | {} | {} |",
+            "| `{}` | `{}` | {} | {} | {} | {} | {} |",
+            comparison.amd64_target_cpu,
             comparison.scenario,
             format_number(local_key.and_then(|stats| stats.median_rps)),
             format_number(remote_signer.and_then(|stats| stats.median_rps)),
@@ -3029,6 +3513,60 @@ fn write_remote_signer_table(markdown: &mut String, comparisons: &[RemoteSignerC
             format_number(remote_signer.and_then(|stats| stats.median_p99_ms)),
         )
         .unwrap();
+    }
+    writeln!(markdown).unwrap();
+}
+
+fn write_amd64_isa_table(markdown: &mut String, comparisons: &[Amd64IsaComparison]) {
+    writeln!(markdown, "## AMD64 ISA comparison\n").unwrap();
+    if comparisons.is_empty() {
+        writeln!(markdown, "No AMD64 ISA comparison rows were found.\n").unwrap();
+        return;
+    }
+
+    writeln!(
+        markdown,
+        "| Group | Scenario | Target CPU | Primary median rate/sec | Target median rate/sec | Target RPS delta | Primary median p99 ms | Target median p99 ms | Target p99 delta | Status |"
+    )
+    .unwrap();
+    writeln!(
+        markdown,
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+    )
+    .unwrap();
+    for comparison in comparisons {
+        for variant in &comparison.variants {
+            writeln!(
+                markdown,
+                "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | `{}` |",
+                comparison.group,
+                comparison.scenario,
+                variant.amd64_target_cpu,
+                format_number(
+                    comparison
+                        .primary
+                        .as_ref()
+                        .and_then(|stats| stats.median_rps)
+                ),
+                format_number(variant.target.as_ref().and_then(|stats| stats.median_rps)),
+                format_percent(variant.rps_delta_percent_vs_primary),
+                format_number(
+                    comparison
+                        .primary
+                        .as_ref()
+                        .and_then(|stats| stats.median_p99_ms)
+                ),
+                format_number(
+                    variant
+                        .target
+                        .as_ref()
+                        .and_then(|stats| stats.median_p99_ms)
+                ),
+                format_percent(variant.p99_delta_percent_vs_primary),
+                variant.status,
+            )
+            .unwrap();
+        }
     }
     writeln!(markdown).unwrap();
 }
@@ -3042,18 +3580,19 @@ fn write_oxibelt_only_table(markdown: &mut String, rows: &[AggregateStats]) {
 
     writeln!(
         markdown,
-        "| Label | Type | Protocol/mode | Samples | Median rate/sec | Median p95 ms | Median p99 ms | Errors | Skipped |"
+        "| Target CPU | Label | Type | Protocol/mode | Samples | Median rate/sec | Median p95 ms | Median p99 ms | Errors | Skipped |"
     )
     .unwrap();
     writeln!(
         markdown,
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
     )
     .unwrap();
     for row in rows {
         writeln!(
             markdown,
-            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} |",
+            "| `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} |",
+            row.amd64_target_cpu,
             row.label,
             row.result_type.as_deref().unwrap_or("-"),
             row.protocol_or_mode.as_deref().unwrap_or("-"),
@@ -3078,15 +3617,15 @@ fn write_missing_table(markdown: &mut String, rows: &[MissingComparatorRow]) {
 
     writeln!(
         markdown,
-        "| Group | Scenario | Comparator | Status | Reason |"
+        "| Target CPU | Group | Scenario | Comparator | Status | Reason |"
     )
     .unwrap();
-    writeln!(markdown, "| --- | --- | --- | --- | --- |").unwrap();
+    writeln!(markdown, "| --- | --- | --- | --- | --- | --- |").unwrap();
     for row in rows {
         writeln!(
             markdown,
-            "| `{}` | `{}` | `{}` | `{}` | {} |",
-            row.group, row.scenario, row.comparator, row.status, row.reason
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | {} |",
+            row.amd64_target_cpu, row.group, row.scenario, row.comparator, row.status, row.reason
         )
         .unwrap();
     }
@@ -3114,18 +3653,19 @@ fn write_regression_gate_table(markdown: &mut String, gates: &RegressionGateRepo
 fn write_regression_gate_findings(markdown: &mut String, findings: &[RegressionGateViolation]) {
     writeln!(
         markdown,
-        "| Disposition | Gate | Group | Scenario | Metric | Observed | Threshold | Comparator | Message |"
+        "| Target CPU | Disposition | Gate | Group | Scenario | Metric | Observed | Threshold | Comparator | Message |"
     )
     .unwrap();
     writeln!(
         markdown,
-        "| --- | --- | --- | --- | --- | ---: | ---: | --- | --- |"
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |"
     )
     .unwrap();
     for violation in findings {
         writeln!(
             markdown,
-            "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
+            violation.amd64_target_cpu,
             violation.disposition,
             violation.gate,
             violation.group,
@@ -3186,18 +3726,19 @@ fn render_delta_markdown(report: &DeltaReport) -> String {
     } else {
         writeln!(
             markdown,
-            "| Group | Scenario | Comparator | OxiBelt RPS delta | Comparator RPS delta | Ratio delta | OxiBelt p99 delta | Classification | Reason |"
+            "| Target CPU | Group | Scenario | Comparator | OxiBelt RPS delta | Comparator RPS delta | Ratio delta | OxiBelt p99 delta | Classification | Reason |"
         )
         .unwrap();
         writeln!(
             markdown,
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |"
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |"
         )
         .unwrap();
         for row in &report.rows {
             writeln!(
                 markdown,
-                "| `{}` | `{}` | `{}` | {} | {} | {} | {} | `{}` | {} |",
+                "| `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | `{}` | {} |",
+                row.amd64_target_cpu,
                 row.group,
                 row.scenario,
                 row.comparator,
@@ -3312,7 +3853,15 @@ mod tests {
         )
         .expect("ignored unsupported result should be writable");
 
-        let report = aggregate(&input_dir, Some("smoke".to_owned()), Some(5), Some(2), None);
+        let report = aggregate(
+            &input_dir,
+            Some("smoke".to_owned()),
+            Some(5),
+            Some(2),
+            Vec::new(),
+            DEFAULT_AMD64_TARGET_CPU.to_owned(),
+            None,
+        );
 
         assert_eq!(report.artifact_discovery.results_files, 0);
         assert!(report.aggregates.is_empty());
@@ -3345,6 +3894,54 @@ mod tests {
     }
 
     #[test]
+    fn target_cpu_unsupported_markers_are_excluded_from_expected_results() {
+        let input_dir = temp_dir("target-unsupported");
+        let artifact_dir =
+            input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/x86-64-v4");
+        fs::create_dir_all(&artifact_dir).expect("unsupported target dir should be creatable");
+        fs::write(
+            artifact_dir.join("unsupported-cpu.json"),
+            r#"{"schema_version":1,"required_target_cpu":"x86-64-v4"}"#,
+        )
+        .expect("unsupported marker should be writable");
+
+        let report = aggregate(
+            &input_dir,
+            Some("smoke".to_owned()),
+            Some(1),
+            Some(1),
+            vec![
+                "x86-64-v2".to_owned(),
+                "x86-64-v3".to_owned(),
+                "x86-64-v4".to_owned(),
+            ],
+            DEFAULT_AMD64_TARGET_CPU.to_owned(),
+            None,
+        );
+
+        assert_eq!(report.artifact_discovery.unsupported_cpu.count, 1);
+        assert_eq!(
+            report.artifact_discovery.unsupported_cpu.shards,
+            vec!["reverse-proxy/shard-1/x86-64-v4".to_owned()]
+        );
+        assert_eq!(
+            report.artifact_discovery.expected_results_files,
+            Some(SERVING_TYPES.len() * 3 - 1)
+        );
+        assert!(
+            !report
+                .artifact_discovery
+                .missing_expected_paths
+                .iter()
+                .any(|path| path
+                    == "oxibelt-docker-performance-smoke-reverse-proxy-shard-1/x86-64-v4/run-1/results.json"),
+            "unsupported target should not be reported as a missing expected result"
+        );
+
+        fs::remove_dir_all(input_dir).ok();
+    }
+
+    #[test]
     fn unsupported_cpu_markers_are_rendered_in_markdown() {
         let input_dir = temp_dir("markdown");
         let artifact_dir =
@@ -3361,12 +3958,16 @@ mod tests {
             Some("benchmark".to_owned()),
             Some(5),
             Some(20),
+            Vec::new(),
+            DEFAULT_AMD64_TARGET_CPU.to_owned(),
             None,
         );
         let markdown = render_markdown(&report);
 
-        assert!(markdown.contains("Unsupported AMD64 v3 runner artifacts: `1`"));
-        assert!(markdown.contains("Unsupported AMD64 v3 shards excluded: `static-files/shard-20`"));
+        assert!(markdown.contains("Unsupported AMD64 target artifacts: `1`"));
+        assert!(
+            markdown.contains("Unsupported AMD64 target shards excluded: `static-files/shard-20`")
+        );
 
         fs::remove_dir_all(input_dir).ok();
     }

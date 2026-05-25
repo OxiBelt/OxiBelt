@@ -7,6 +7,7 @@ usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
+  OXIBELT_AMD64_TARGET_CPU         AMD64 target CPU label recorded in result rows
   OXIBELT_NGINX_IMAGE              nginx comparator image (default: nginx:mainline-alpine)
   OXIBELT_CADDY_IMAGE              Caddy comparator image (default: caddy:2-alpine)
   OXIBELT_PERF_DURATION_SECONDS    load duration override
@@ -511,6 +512,7 @@ start_perf_upstreams() {
 
 append_result() {
   local json="$1"
+  json="$(jq -c --arg target "${amd64_target_cpu}" '. + {amd64_target_cpu: $target}' <<<"${json}")"
   printf '%s\n' "${json}" >>"${results_jsonl}"
   local label type protocol skipped requests rps p95 p99 errors
   label="$(jq -r '.label // "unknown"' <<<"${json}")"

@@ -80,6 +80,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         "## Reverse proxy comparison",
         "## Static file comparison",
         "## Accept multiplier comparison",
+        "## AMD64 ISA comparison",
         "## OxiBelt-only results",
         "## Skipped/missing comparator rows",
         "## Regression gates",
@@ -121,6 +122,16 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
         "p99_ms": p99_ms,
         "errors": 1
     })
+}
+
+fn with_target_cpu(mut row: Value, target_cpu: &str) -> Value {
+    row.as_object_mut()
+        .expect("row should be a JSON object")
+        .insert(
+            "amd64_target_cpu".to_owned(),
+            Value::String(target_cpu.to_owned()),
+        );
+    row
 }
 
 fn load_row_without_rps(label: &str, protocol: &str, p50_ms: f64, p99_ms: f64) -> Value {
@@ -292,6 +303,33 @@ fn find_aggregate<'a>(report: &'a Value, comparator: &str, scenario: &str) -> &'
             aggregate["comparator"] == comparator && aggregate["scenario"] == scenario
         })
         .unwrap_or_else(|| panic!("missing aggregate for {comparator}/{scenario}"))
+}
+
+fn find_aggregate_for_target<'a>(
+    report: &'a Value,
+    target_cpu: &str,
+    comparator: &str,
+    scenario: &str,
+) -> &'a Value {
+    report["aggregates"]
+        .as_array()
+        .expect("aggregates should be an array")
+        .iter()
+        .find(|aggregate| {
+            aggregate["amd64_target_cpu"] == target_cpu
+                && aggregate["comparator"] == comparator
+                && aggregate["scenario"] == scenario
+        })
+        .unwrap_or_else(|| panic!("missing aggregate for {target_cpu}/{comparator}/{scenario}"))
+}
+
+fn find_isa_comparison<'a>(report: &'a Value, scenario: &str) -> &'a Value {
+    report["amd64_isa_comparisons"]
+        .as_array()
+        .expect("AMD64 ISA comparisons should be an array")
+        .iter()
+        .find(|comparison| comparison["scenario"] == scenario)
+        .unwrap_or_else(|| panic!("missing AMD64 ISA comparison for {scenario}"))
 }
 
 fn find_delta<'a>(report: &'a Value, group: &str, scenario: &str, comparator: &str) -> &'a Value {
@@ -505,7 +543,8 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 6);
+    assert_eq!(report["schema_version"], 7);
+    assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
     assert_eq!(oxibelt_h1["sample_count"], 25);
@@ -765,6 +804,100 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
             .expect("CRS median RPS should exist"),
         9200.0,
     );
+}
+
+#[test]
+fn separates_amd64_target_cpus_and_reports_isa_deltas() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    for (target, oxibelt_rps) in [
+        ("x86-64-v2", 10.0),
+        ("x86-64-v3", 90.0),
+        ("x86-64-v4", 120.0),
+    ] {
+        write_results_array(
+            &input_dir.join(format!(
+                "oxibelt-docker-performance-smoke-reverse-proxy-shard-1/{target}/run-1"
+            )),
+            vec![
+                with_target_cpu(load_row("oxibelt-h2", "h2", oxibelt_rps, 1.0, 4.0), target),
+                with_target_cpu(load_row("nginx-h2", "h2", 100.0, 1.0, 4.0), target),
+            ],
+        );
+    }
+
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/x86-64-v3/run-1"),
+        vec![
+            with_target_cpu(
+                load_row("oxibelt-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+                "x86-64-v3",
+            ),
+            with_target_cpu(
+                load_row("nginx-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+                "x86-64-v3",
+            ),
+            with_target_cpu(
+                load_row("caddy-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+                "x86-64-v3",
+            ),
+        ],
+    );
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--primary-target-cpu".to_owned(),
+            "x86-64-v3".to_owned(),
+            "--expected-target-cpus".to_owned(),
+            "x86-64-v2,x86-64-v3,x86-64-v4".to_owned(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    assert_eq!(
+        find_aggregate_for_target(&report, "x86-64-v2", "oxibelt", "h2")["sample_count"],
+        1
+    );
+    assert_eq!(
+        find_aggregate_for_target(&report, "x86-64-v3", "oxibelt", "h2")["sample_count"],
+        1
+    );
+
+    let h2 = find_isa_comparison(&report, "h2");
+    let variants = h2["variants"]
+        .as_array()
+        .expect("ISA variants should be an array");
+    let v2 = variants
+        .iter()
+        .find(|variant| variant["amd64_target_cpu"] == "x86-64-v2")
+        .expect("v2 ISA comparison should exist");
+    let v4 = variants
+        .iter()
+        .find(|variant| variant["amd64_target_cpu"] == "x86-64-v4")
+        .expect("v4 ISA comparison should exist");
+    assert_close(
+        v2["rps_delta_percent_vs_primary"]
+            .as_f64()
+            .expect("v2 RPS delta should exist"),
+        ((10.0 - 90.0) / 90.0) * 100.0,
+    );
+    assert_close(
+        v4["rps_delta_percent_vs_primary"]
+            .as_f64()
+            .expect("v4 RPS delta should exist"),
+        ((120.0 - 90.0) / 90.0) * 100.0,
+    );
+
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains("## AMD64 ISA comparison"));
+    assert!(markdown.contains("| `reverse-proxy` | `h2` | `x86-64-v2` |"));
 }
 
 #[test]

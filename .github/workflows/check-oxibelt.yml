@@ -587,47 +587,68 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
 
-      - name: Select AMD64 Docker image artifact
-        id: select-amd64-image
+      - name: Select AMD64 v2 Docker image artifact
+        id: select-amd64-v2
+        run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v2 --allow-unsupported
+
+      - name: Select AMD64 v3 Docker image artifact
+        id: select-amd64-v3
         run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported
 
-      - name: Record unsupported AMD64 v3 runner
-        if: steps.select-amd64-image.outputs.supported != 'true'
-        env:
-          PERFORMANCE_SHARD: ${{ matrix.shard }}
-          TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}
-          MISSING_FEATURES: ${{ steps.select-amd64-image.outputs.missing_features }}
-        run: |
-          artifact_dir="${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}"
-          mkdir -p "${artifact_dir}"
-          printf '{\n' >"${artifact_dir}/unsupported-cpu.json"
-          printf '  "schema_version": 1,\n' >>"${artifact_dir}/unsupported-cpu.json"
-          printf '  "profile": "%s",\n' "${PERFORMANCE_PROFILE}" >>"${artifact_dir}/unsupported-cpu.json"
-          printf '  "serving_type": "%s",\n' "${PERFORMANCE_SERVING_TYPE}" >>"${artifact_dir}/unsupported-cpu.json"
-          printf '  "shard": %s,\n' "${PERFORMANCE_SHARD}" >>"${artifact_dir}/unsupported-cpu.json"
-          printf '  "required_target_cpu": "%s",\n' "${TARGET_CPU}" >>"${artifact_dir}/unsupported-cpu.json"
-          printf '  "missing_features": "%s"\n' "${MISSING_FEATURES}" >>"${artifact_dir}/unsupported-cpu.json"
-          printf '}\n' >>"${artifact_dir}/unsupported-cpu.json"
-          echo "::warning title=AMD64 v3 unsupported::Skipping Docker performance ${PERFORMANCE_PROFILE}/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}; runner CPU is missing ${MISSING_FEATURES}"
+      - name: Select AMD64 v4 Docker image artifact
+        id: select-amd64-v4
+        run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v4 --allow-unsupported
 
-      - name: Download AMD64 Docker image artifact
-        if: steps.select-amd64-image.outputs.supported == 'true'
+      - name: Download AMD64 v2 Docker image artifact
+        if: steps.select-amd64-v2.outputs.supported == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image
+          name: ${{ steps.select-amd64-v2.outputs.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/x86-64-v2
 
-      - name: Load OxiBelt Docker image
-        if: steps.select-amd64-image.outputs.supported == 'true'
+      - name: Download AMD64 v3 Docker image artifact
+        if: steps.select-amd64-v3.outputs.supported == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ steps.select-amd64-v3.outputs.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/x86-64-v3
+
+      - name: Download AMD64 v4 Docker image artifact
+        if: steps.select-amd64-v4.outputs.supported == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ steps.select-amd64-v4.outputs.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/x86-64-v4
+
+      - name: Load AMD64 v2 OxiBelt Docker image
+        if: steps.select-amd64-v2.outputs.supported == 'true'
         env:
-          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-v2.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/x86-64-v2/${OXIBELT_IMAGE_TAR}"
+
+      - name: Load AMD64 v3 OxiBelt Docker image
+        if: steps.select-amd64-v3.outputs.supported == 'true'
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-v3.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/x86-64-v3/${OXIBELT_IMAGE_TAR}"
+
+      - name: Load AMD64 v4 OxiBelt Docker image
+        if: steps.select-amd64-v4.outputs.supported == 'true'
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-v4.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/x86-64-v4/${OXIBELT_IMAGE_TAR}"
 
       - name: Run Docker performance profile
-        if: steps.select-amd64-image.outputs.supported == 'true'
         env:
-          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
-          OXIBELT_AMD64_TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}
+          AMD64_V2_SUPPORTED: ${{ steps.select-amd64-v2.outputs.supported }}
+          AMD64_V2_IMAGE_TAG: ${{ steps.select-amd64-v2.outputs.image_tag }}
+          AMD64_V2_MISSING_FEATURES: ${{ steps.select-amd64-v2.outputs.missing_features }}
+          AMD64_V3_SUPPORTED: ${{ steps.select-amd64-v3.outputs.supported }}
+          AMD64_V3_IMAGE_TAG: ${{ steps.select-amd64-v3.outputs.image_tag }}
+          AMD64_V3_MISSING_FEATURES: ${{ steps.select-amd64-v3.outputs.missing_features }}
+          AMD64_V4_SUPPORTED: ${{ steps.select-amd64-v4.outputs.supported }}
+          AMD64_V4_IMAGE_TAG: ${{ steps.select-amd64-v4.outputs.image_tag }}
+          AMD64_V4_MISSING_FEATURES: ${{ steps.select-amd64-v4.outputs.missing_features }}
           PERFORMANCE_SHARD: ${{ matrix.shard }}
         run: |
           if [[ ! "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -636,16 +657,64 @@ jobs:
           fi
 
           failed_iterations=()
-          for iteration in $(seq 1 "${PERFORMANCE_ITERATIONS}"); do
-            echo "Running Docker performance profile ${PERFORMANCE_PROFILE} serving type ${PERFORMANCE_SERVING_TYPE} shard ${PERFORMANCE_SHARD}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
-            status=0
-            OXIBELT_TEST_ARTIFACT_DIR="${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}/run-${iteration}" \
-              tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --serving-type "${PERFORMANCE_SERVING_TYPE}" --comparators oxibelt,nginx,caddy || status=$?
-            if [[ "${status}" != "0" ]]; then
-              failed_iterations+=("${iteration}:${status}")
-              echo "::error title=Docker performance iteration failed::profile=${PERFORMANCE_PROFILE} serving_type=${PERFORMANCE_SERVING_TYPE} shard=${PERFORMANCE_SHARD} iteration=${iteration} status=${status}"
+          for target_cpu in x86-64-v2 x86-64-v3 x86-64-v4; do
+            case "${target_cpu}" in
+              x86-64-v2)
+                supported="${AMD64_V2_SUPPORTED}"
+                image_tag="${AMD64_V2_IMAGE_TAG}"
+                missing_features="${AMD64_V2_MISSING_FEATURES}"
+                ;;
+              x86-64-v3)
+                supported="${AMD64_V3_SUPPORTED}"
+                image_tag="${AMD64_V3_IMAGE_TAG}"
+                missing_features="${AMD64_V3_MISSING_FEATURES}"
+                ;;
+              x86-64-v4)
+                supported="${AMD64_V4_SUPPORTED}"
+                image_tag="${AMD64_V4_IMAGE_TAG}"
+                missing_features="${AMD64_V4_MISSING_FEATURES}"
+                ;;
+            esac
+
+            target_artifact_dir="${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}/${target_cpu}"
+            if [[ "${supported}" != "true" ]]; then
+              mkdir -p "${target_artifact_dir}"
+              jq -n \
+                --arg profile "${PERFORMANCE_PROFILE}" \
+                --arg serving_type "${PERFORMANCE_SERVING_TYPE}" \
+                --arg required_target_cpu "${target_cpu}" \
+                --arg missing_features "${missing_features}" \
+                --argjson shard "${PERFORMANCE_SHARD}" \
+                '{
+                  schema_version: 1,
+                  profile: $profile,
+                  serving_type: $serving_type,
+                  shard: $shard,
+                  required_target_cpu: $required_target_cpu,
+                  missing_features: $missing_features
+                }' >"${target_artifact_dir}/unsupported-cpu.json"
+              echo "::warning title=AMD64 target unsupported::Skipping Docker performance ${PERFORMANCE_PROFILE}/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}/${target_cpu}; runner CPU is missing ${missing_features}"
+              continue
             fi
+
+            for iteration in $(seq 1 "${PERFORMANCE_ITERATIONS}"); do
+              echo "Running Docker performance profile ${PERFORMANCE_PROFILE} serving type ${PERFORMANCE_SERVING_TYPE} shard ${PERFORMANCE_SHARD}, target ${target_cpu}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
+              status=0
+              OXIBELT_DOCKER_IMAGE="${image_tag}" \
+              OXIBELT_AMD64_TARGET_CPU="${target_cpu}" \
+              OXIBELT_TEST_ARTIFACT_DIR="${target_artifact_dir}/run-${iteration}" \
+                tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --serving-type "${PERFORMANCE_SERVING_TYPE}" --comparators oxibelt,nginx,caddy || status=$?
+              if [[ "${status}" != "0" ]]; then
+                failed_iterations+=("${target_cpu}:${iteration}:${status}")
+                echo "::error title=Docker performance iteration failed::profile=${PERFORMANCE_PROFILE} serving_type=${PERFORMANCE_SERVING_TYPE} shard=${PERFORMANCE_SHARD} target_cpu=${target_cpu} iteration=${iteration} status=${status}"
+              fi
+            done
           done
+
+          if ! find "${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}" -path '*/run-*/results.json' -print -quit 2>/dev/null | grep -q .; then
+            echo "Docker performance produced no supported target results for ${PERFORMANCE_PROFILE}/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}" >&2
+            exit 1
+          fi
 
           if (( ${#failed_iterations[@]} > 0 )); then
             printf 'Docker performance failed in %d iteration(s): %s\n' "${#failed_iterations[@]}" "${failed_iterations[*]}" >&2
@@ -758,6 +827,8 @@ jobs:
             --output-dir "${RUNNER_TEMP}/oxibelt-performance-comparison"
             --profile "${PERFORMANCE_PROFILE}"
             --expected-shards 20
+            --expected-target-cpus x86-64-v2,x86-64-v3,x86-64-v4
+            --primary-target-cpu x86-64-v3
           )
           if [[ "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
             aggregate_args+=(--expected-runs "${PERFORMANCE_ITERATIONS}")
@@ -796,7 +867,7 @@ jobs:
           results_files="$(jq -r '.artifact_discovery.results_files // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           unsupported_count="$(jq -r '.artifact_discovery.unsupported_cpu.count // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if [[ "${results_files}" == "0" ]]; then
-            echo "Docker performance produced no results.json files; unsupported AMD64 v3 runner artifacts: ${unsupported_count}" >&2
+            echo "Docker performance produced no results.json files; unsupported AMD64 target artifacts: ${unsupported_count}" >&2
             exit 1
           fi
 
