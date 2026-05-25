@@ -370,6 +370,13 @@ struct ComparatorRatioGate<'a> {
     threshold: f64,
 }
 
+struct P99RatioGate<'a> {
+    gate: &'a str,
+    monitor_scenario: &'a str,
+    enforcing_scenario: &'a str,
+    threshold: f64,
+}
+
 #[derive(Serialize)]
 struct AcceptMultiplierSummary {
     scenario_count: usize,
@@ -1564,7 +1571,7 @@ fn amd64_isa_target_cpus(
     }
 
     let mut targets = BTreeSet::new();
-    for ((target, comparator, _), _) in aggregates {
+    for (target, comparator, _) in aggregates.keys() {
         if *comparator == Comparator::Oxibelt {
             targets.insert(target.clone());
         }
@@ -2060,20 +2067,24 @@ fn build_regression_gate_report(
         aggregates,
         baseline,
         primary_target_cpu,
-        "waf_enforce_p99_ratio",
-        "waf-monitor",
-        "waf-enforcing",
-        thresholds.waf_crs_max_enforce_p99_ratio,
+        P99RatioGate {
+            gate: "waf_enforce_p99_ratio",
+            monitor_scenario: "waf-monitor",
+            enforcing_scenario: "waf-enforcing",
+            threshold: thresholds.waf_crs_max_enforce_p99_ratio,
+        },
         &mut findings,
     );
     collect_p99_ratio_regression_gate(
         aggregates,
         baseline,
         primary_target_cpu,
-        "crs_enforce_p99_ratio",
-        "crs-monitor",
-        "crs-enforcing",
-        thresholds.waf_crs_max_enforce_p99_ratio,
+        P99RatioGate {
+            gate: "crs_enforce_p99_ratio",
+            monitor_scenario: "crs-monitor",
+            enforcing_scenario: "crs-enforcing",
+            threshold: thresholds.waf_crs_max_enforce_p99_ratio,
+        },
         &mut findings,
     );
 
@@ -2458,39 +2469,43 @@ fn collect_p99_ratio_regression_gate(
     aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
     primary_target_cpu: &str,
-    gate: &str,
-    monitor_scenario: &str,
-    enforcing_scenario: &str,
-    threshold: f64,
+    gate: P99RatioGate<'_>,
     findings: &mut RegressionGateFindings,
 ) {
     let context = RegressionGateContext {
         amd64_target_cpu: primary_target_cpu,
-        gate,
+        gate: gate.gate,
         group: ScenarioGroup::OxibeltOnly.as_str(),
-        scenario: enforcing_scenario,
-        threshold,
+        scenario: gate.enforcing_scenario,
+        threshold: gate.threshold,
     };
-    let Some(monitor_p99) = aggregate_median_p99(aggregates, Comparator::Oxibelt, monitor_scenario)
+    let Some(monitor_p99) =
+        aggregate_median_p99(aggregates, Comparator::Oxibelt, gate.monitor_scenario)
     else {
         push_missing_regression_gate_metric(
             findings,
             context,
             "median_p99_ms",
-            Some(monitor_scenario),
-            format!("missing OxiBelt {monitor_scenario} median p99; cannot evaluate {gate}"),
+            Some(gate.monitor_scenario),
+            format!(
+                "missing OxiBelt {} median p99; cannot evaluate {}",
+                gate.monitor_scenario, gate.gate
+            ),
         );
         return;
     };
     let Some(enforcing_p99) =
-        aggregate_median_p99(aggregates, Comparator::Oxibelt, enforcing_scenario)
+        aggregate_median_p99(aggregates, Comparator::Oxibelt, gate.enforcing_scenario)
     else {
         push_missing_regression_gate_metric(
             findings,
             context,
             "median_p99_ms",
-            Some(enforcing_scenario),
-            format!("missing OxiBelt {enforcing_scenario} median p99; cannot evaluate {gate}"),
+            Some(gate.enforcing_scenario),
+            format!(
+                "missing OxiBelt {} median p99; cannot evaluate {}",
+                gate.enforcing_scenario, gate.gate
+            ),
         );
         return;
     };
@@ -2500,10 +2515,10 @@ fn collect_p99_ratio_regression_gate(
             context,
             "median_p99_ms",
             monitor_p99,
-            Some(monitor_scenario),
+            Some(gate.monitor_scenario),
             format!(
-                "OxiBelt {monitor_scenario} median p99 must be positive; got {:.3}ms",
-                monitor_p99
+                "OxiBelt {} median p99 must be positive; got {:.3}ms",
+                gate.monitor_scenario, monitor_p99
             ),
         );
         return;
@@ -2514,37 +2529,42 @@ fn collect_p99_ratio_regression_gate(
             context,
             "median_p99_ms",
             enforcing_p99,
-            Some(enforcing_scenario),
+            Some(gate.enforcing_scenario),
             format!(
-                "OxiBelt {enforcing_scenario} median p99 must be positive; got {:.3}ms",
-                enforcing_p99
+                "OxiBelt {} median p99 must be positive; got {:.3}ms",
+                gate.enforcing_scenario, enforcing_p99
             ),
         );
         return;
     }
 
     let ratio = enforcing_p99 / monitor_p99;
-    if ratio > threshold {
+    if ratio > gate.threshold {
         let decision = classify_p99_ratio_threshold_miss(
             aggregates,
             baseline,
-            monitor_scenario,
-            enforcing_scenario,
+            gate.monitor_scenario,
+            gate.enforcing_scenario,
         );
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
                 amd64_target_cpu: primary_target_cpu,
-                gate,
+                gate: gate.gate,
                 group: ScenarioGroup::OxibeltOnly.as_str(),
-                scenario: enforcing_scenario,
+                scenario: gate.enforcing_scenario,
                 metric: "median_p99_ratio",
                 observed: Some(ratio),
-                threshold,
-                comparator: Some(monitor_scenario),
+                threshold: gate.threshold,
+                comparator: Some(gate.monitor_scenario),
                 message: format!(
-                    "OxiBelt {enforcing_scenario} median p99 ratio {:.4} > {:.4} vs {monitor_scenario} ({:.3}ms vs {:.3}ms)",
-                    ratio, threshold, enforcing_p99, monitor_p99
+                    "OxiBelt {} median p99 ratio {:.4} > {:.4} vs {} ({:.3}ms vs {:.3}ms)",
+                    gate.enforcing_scenario,
+                    ratio,
+                    gate.threshold,
+                    gate.monitor_scenario,
+                    enforcing_p99,
+                    monitor_p99
                 ),
             },
             decision,
@@ -3068,6 +3088,17 @@ fn aggregate_lookup<'a>(
         .collect()
 }
 
+struct DeltaRowInput<'a> {
+    amd64_target_cpu: &'a str,
+    group: &'a str,
+    scenario: &'a str,
+    comparator: &'a str,
+    before_oxibelt: Option<&'a AggregateStats>,
+    after_oxibelt: Option<&'a AggregateStats>,
+    before_comparator: Option<&'a AggregateStats>,
+    after_comparator: Option<&'a AggregateStats>,
+}
+
 fn collect_delta_rows(
     comparisons: &[ScenarioComparison],
     primary_target_cpu: &str,
@@ -3083,42 +3114,33 @@ fn collect_delta_rows(
         }
         let oxibelt_key = ("oxibelt".to_owned(), comparison.scenario.clone());
         let comparator_key = (comparator_name.to_owned(), comparison.scenario.clone());
-        rows.push(delta_row(
-            &comparison.amd64_target_cpu,
-            &comparison.group,
-            &comparison.scenario,
-            comparator_name,
-            baseline.get(&oxibelt_key).copied(),
-            current.get(&oxibelt_key).copied(),
-            baseline.get(&comparator_key).copied(),
-            current.get(&comparator_key).copied(),
-        ));
+        rows.push(delta_row(DeltaRowInput {
+            amd64_target_cpu: &comparison.amd64_target_cpu,
+            group: &comparison.group,
+            scenario: &comparison.scenario,
+            comparator: comparator_name,
+            before_oxibelt: baseline.get(&oxibelt_key).copied(),
+            after_oxibelt: current.get(&oxibelt_key).copied(),
+            before_comparator: baseline.get(&comparator_key).copied(),
+            after_comparator: current.get(&comparator_key).copied(),
+        }));
     }
 }
 
-fn delta_row(
-    amd64_target_cpu: &str,
-    group: &str,
-    scenario: &str,
-    comparator: &str,
-    before_oxibelt: Option<&AggregateStats>,
-    after_oxibelt: Option<&AggregateStats>,
-    before_comparator: Option<&AggregateStats>,
-    after_comparator: Option<&AggregateStats>,
-) -> PerformanceDeltaRow {
-    let before_oxibelt_rps = before_oxibelt.and_then(|stats| stats.median_rps);
-    let after_oxibelt_rps = after_oxibelt.and_then(|stats| stats.median_rps);
-    let before_comparator_rps = before_comparator.and_then(|stats| stats.median_rps);
-    let after_comparator_rps = after_comparator.and_then(|stats| stats.median_rps);
+fn delta_row(input: DeltaRowInput<'_>) -> PerformanceDeltaRow {
+    let before_oxibelt_rps = input.before_oxibelt.and_then(|stats| stats.median_rps);
+    let after_oxibelt_rps = input.after_oxibelt.and_then(|stats| stats.median_rps);
+    let before_comparator_rps = input.before_comparator.and_then(|stats| stats.median_rps);
+    let after_comparator_rps = input.after_comparator.and_then(|stats| stats.median_rps);
     let before_ratio = ratio(before_oxibelt_rps, before_comparator_rps);
     let after_ratio = ratio(after_oxibelt_rps, after_comparator_rps);
-    let before_oxibelt_p99_ms = before_oxibelt.and_then(|stats| stats.median_p99_ms);
-    let after_oxibelt_p99_ms = after_oxibelt.and_then(|stats| stats.median_p99_ms);
+    let before_oxibelt_p99_ms = input.before_oxibelt.and_then(|stats| stats.median_p99_ms);
+    let after_oxibelt_p99_ms = input.after_oxibelt.and_then(|stats| stats.median_p99_ms);
     let mut row = PerformanceDeltaRow {
-        amd64_target_cpu: amd64_target_cpu.to_owned(),
-        group: group.to_owned(),
-        scenario: scenario.to_owned(),
-        comparator: comparator.to_owned(),
+        amd64_target_cpu: input.amd64_target_cpu.to_owned(),
+        group: input.group.to_owned(),
+        scenario: input.scenario.to_owned(),
+        comparator: input.comparator.to_owned(),
         before_oxibelt_rps,
         after_oxibelt_rps,
         oxibelt_rps_delta_percent: percent_delta(before_oxibelt_rps, after_oxibelt_rps),
