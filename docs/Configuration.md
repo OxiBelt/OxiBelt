@@ -1014,7 +1014,7 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
-Actions use `service:Action` syntax. Initial services are `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
+Actions use `service:Action` syntax. Initial services are `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
 
 OxiRule development API requests that set `include_active_rules = true` evaluate active WAF policy as well as the submitted candidate, so they require the same devtools action on `oxirule/*`; replay uses `replay/*`.
 
@@ -1073,6 +1073,7 @@ connection_url_env = "OXIBELT_SHARED_STATE_URL"
 oxibeltctl status
 oxibeltctl doctor
 oxibeltctl support-bundle --redact
+oxibeltctl runtime introspection --redact
 oxibeltctl config diff source/config/oxibelt.toml
 oxibeltctl lifecycle drain
 oxibeltctl auth check --action config:GetStatus --resource '*'
@@ -1145,6 +1146,7 @@ Admin config and downstream TLS endpoints:
 - `POST /admin/v1/diagnostics/preflight`
 - `GET /admin/v1/diagnostics/support-bundle`
 - `GET /admin/v1/runtime/snapshot`
+- `GET /admin/v1/runtime/introspection`
 
 Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, and downstream TLS operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
 
@@ -1195,6 +1197,13 @@ JSON to stdout. Unredacted bundles are not supported.
 `GET /admin/v1/runtime/snapshot?redact=true` returns the runtime snapshot
 section used by the support bundle and requires `runtime:ReadSnapshot` on
 `oxibelt:<namespace>:runtime:snapshot/current`.
+
+`GET /admin/v1/runtime/introspection?redact=true` returns the redacted runtime
+snapshot plus live active connection, request, stream, WebSocket,
+WebTransport, stream-listener, and TURN TCP/TLS counters. It requires the
+separate `runtime:ReadIntrospection` action on
+`oxibelt:<namespace>:runtime:introspection/current`; `runtime:ReadSnapshot`
+does not authorize this endpoint.
 
 OxiBelt initializes the IPM schema when `[ipm].backend` is configured:
 

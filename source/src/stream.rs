@@ -13,6 +13,7 @@ use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::ConnectionPermit;
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::proxy_protocol_egress;
+use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppHandle;
 
 pub(crate) struct StreamListenerTask {
@@ -184,12 +185,17 @@ async fn serve_stream_listener(
           }
         };
         let connection_shutdown = shutdown.clone();
+        let snapshot = state.snapshot();
         let connection_drain = ConnectionDrain::new(
           connection_shutdown,
-          state.snapshot().lifecycle.subscribe(),
+          snapshot.lifecycle.subscribe(),
           long_connection_close_delay,
         );
+        let introspection_guard = snapshot
+          .runtime_introspection
+          .guard(RuntimeCounter::StreamListenerConnection);
         connections.spawn(async move {
+          let _introspection_guard = introspection_guard;
           let result = proxy_stream_connection(
             downstream,
             peer_addr,

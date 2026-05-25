@@ -34,6 +34,7 @@ pub(super) async fn admin_diagnostics_response(
     "/admin/v1/diagnostics/preflight"
       | "/admin/v1/diagnostics/support-bundle"
       | "/admin/v1/runtime/snapshot"
+      | "/admin/v1/runtime/introspection"
   ) {
     return None;
   }
@@ -119,6 +120,18 @@ pub(super) async fn admin_diagnostics_response(
       let active = state.snapshot();
       let snapshot = crate::diagnostics::build_runtime_snapshot(active.as_ref());
       Some(json_response(StatusCode::OK, &snapshot))
+    }
+    (&::http::Method::GET, "/admin/v1/runtime/introspection") => {
+      if !authorization.is_allowed("runtime:ReadIntrospection", "introspection/current") {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      if let Err(response) = require_redact(&request) {
+        return Some(*response);
+      }
+      let active = state.snapshot();
+      let introspection =
+        crate::runtime_introspection::build_runtime_introspection(active.as_ref());
+      Some(json_response(StatusCode::OK, &introspection))
     }
     _ => Some(text_response(
       StatusCode::METHOD_NOT_ALLOWED,

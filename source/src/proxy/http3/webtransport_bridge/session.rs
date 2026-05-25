@@ -21,6 +21,7 @@ use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::response::text_response;
 use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContext};
+use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::waf::{WafStreamClose, WafStreamDirection, WafWebTransportStreamKind};
 
@@ -227,6 +228,9 @@ pub(super) async fn accept_webtransport_session(
   let upstream = Arc::new(upstream);
   let stream_waf = prepared.stream_waf.take();
   let stream_waf_state = stream_waf.as_ref().map(|_| snapshot.clone());
+  let introspection_guard = snapshot
+    .runtime_introspection
+    .guard(RuntimeCounter::WebTransportSession);
   snapshot.metrics.record_webtransport_session_start(
     &snapshot.config.metrics,
     &prepared.route_name,
@@ -247,6 +251,7 @@ pub(super) async fn accept_webtransport_session(
       upstream,
       connect_stream: stream,
       _connection_permits: connection_permits,
+      _introspection_guard: introspection_guard,
       stream_waf_state,
       metrics_state: snapshot,
       stream_waf,

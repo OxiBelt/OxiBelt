@@ -31,6 +31,7 @@ use crate::proxy::http::static_files::StaticFilesRuntime;
 use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
+use crate::runtime_introspection::RuntimeIntrospectionState;
 use crate::shared_state::SharedState;
 use crate::sni_forward::SniForwardTable;
 use crate::telemetry::TelemetryRuntime;
@@ -195,6 +196,7 @@ pub struct AppSnapshot {
   pub ipm: IpmRuntime,
   pub dynamic_policy: DynamicPolicyRuntime,
   pub external_auth: ExternalAuthRuntime,
+  pub runtime_introspection: Arc<RuntimeIntrospectionState>,
   pub lifecycle: Arc<LifecycleState>,
   pub shared_state: Option<Arc<SharedState>>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
@@ -285,6 +287,9 @@ impl AppSnapshot {
       .context("failed to build dynamic policy runtime")?;
     let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
       .context("failed to build external auth runtime")?;
+    let runtime_introspection = previous
+      .map(|snapshot| snapshot.runtime_introspection.clone())
+      .unwrap_or_default();
     let mitigation = MitigationSink::new(&config, metrics.clone())
       .await
       .context("failed to build mitigation sink")?;
@@ -358,6 +363,7 @@ impl AppSnapshot {
       ipm,
       dynamic_policy,
       external_auth,
+      runtime_introspection,
       lifecycle,
       shared_state,
       tls_server_config,
@@ -426,6 +432,7 @@ impl AppSnapshot {
       ipm,
       dynamic_policy: previous.dynamic_policy.clone(),
       external_auth,
+      runtime_introspection: previous.runtime_introspection.clone(),
       lifecycle: previous.lifecycle.clone(),
       shared_state: previous.shared_state.clone(),
       tls_server_config: previous.tls_server_config.clone(),

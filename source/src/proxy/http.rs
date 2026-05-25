@@ -23,6 +23,7 @@ use crate::ipm::{IpmDecision, IpmRequestContext, resource as ipm_resource};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
+use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::telemetry::{TelemetryRuntime, TraceContext};
 use crate::waf::{
@@ -2296,7 +2297,13 @@ async fn handle_upgrade_request(
   let websocket_stream_waf = if websocket_upgrade { stream_waf } else { None };
   let connection_limit_hold =
     TunnelConnectionLimitHold::capture(request_connection_permit, connection_limit_context);
+  let websocket_guard = websocket_upgrade.then(|| {
+    state
+      .runtime_introspection
+      .guard(RuntimeCounter::WebSocketTunnel)
+  });
   tokio::spawn(async move {
+    let _websocket_guard = websocket_guard;
     let _connection_limit_hold = connection_limit_hold;
     let result = async {
       let downstream = downstream_upgrade.await?;

@@ -493,6 +493,18 @@ argon2id_memory_mib = 128
 #[[ipm.bindings]]
 # group = "platform-admins"
 # policy = "diagnostics-preflight-read"
+#
+#[[ipm.policies]]
+# name = "runtime-introspection-read"
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["runtime:ReadIntrospection"]
+# resources = ["oxibelt:oxibelt:runtime:introspection/current"]
+#
+#[[ipm.bindings]]
+# group = "platform-admins"
+# policy = "runtime-introspection-read"
 
 [admin.tls]
 enabled = false

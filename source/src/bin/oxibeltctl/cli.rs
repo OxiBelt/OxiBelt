@@ -48,6 +48,7 @@ pub(crate) enum Command {
   Status,
   Doctor(DoctorArgs),
   SupportBundle(SupportBundleArgs),
+  Runtime(RuntimeCommand),
   Config(ConfigCommand),
   Tls(TlsCommand),
   Lifecycle(LifecycleCommand),
@@ -78,6 +79,23 @@ pub(crate) struct SupportBundleArgs {
   pub(crate) redact: bool,
   #[arg(long = "external-probe", value_name = "KIND")]
   pub(crate) external_probes: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RuntimeCommand {
+  #[command(subcommand)]
+  pub(crate) command: RuntimeSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RuntimeSubcommand {
+  Introspection(RuntimeIntrospectionArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RuntimeIntrospectionArgs {
+  #[arg(long, required = true)]
+  pub(crate) redact: bool,
 }
 
 #[derive(Debug, Args)]

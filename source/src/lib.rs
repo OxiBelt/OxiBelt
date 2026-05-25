@@ -38,6 +38,7 @@ pub mod reload;
 pub mod remote_signer;
 pub mod routes;
 pub mod runtime;
+pub mod runtime_introspection;
 pub mod server;
 pub mod shared_state;
 pub(crate) mod sni_forward;

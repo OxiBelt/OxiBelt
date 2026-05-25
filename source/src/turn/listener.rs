@@ -17,6 +17,7 @@ use url::Url;
 use crate::config::{Config, TurnAuthMode, WebRtcTurnListenerConfig, WebRtcTurnListenerMode};
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
+use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppHandle;
 use crate::tls;
 use crate::tls::TlsResumptionState;
@@ -264,11 +265,18 @@ fn spawn_tcp_acceptor(
                 continue;
               }
             };
+            let snapshot = state.snapshot();
             let connection_drain = ConnectionDrain::new(
               shutdown.clone(),
-              state.snapshot().lifecycle.subscribe(),
+              snapshot.lifecycle.subscribe(),
               long_connection_close_delay,
             );
+            let counter = if is_tls {
+              RuntimeCounter::TurnTlsConnection
+            } else {
+              RuntimeCounter::TurnTcpConnection
+            };
+            let introspection_guard = snapshot.runtime_introspection.guard(counter);
             let conn_config = config.clone();
             let conn_state = state.clone();
             let conn_edge = edge.clone();
@@ -281,6 +289,7 @@ fn spawn_tcp_acceptor(
             next_stream_id = next_stream_id.wrapping_add(1024);
             let stream_id = next_stream_id;
             connections.spawn(async move {
+              let _introspection_guard = introspection_guard;
               conn_state.snapshot().metrics.record_turn_event(
                 &conn_config.name,
                 if conn_acceptor.is_some() { "tls" } else { "tcp" },

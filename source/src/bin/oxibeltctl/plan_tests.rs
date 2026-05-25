@@ -66,6 +66,39 @@ fn support_bundle_cli_requires_redact() {
   assert!(missing.is_err(), "support-bundle should require --redact");
 }
 
+#[test]
+fn runtime_introspection_uses_redacted_endpoint_and_permission() {
+  let command = Command::Runtime(RuntimeCommand {
+    command: RuntimeSubcommand::Introspection(RuntimeIntrospectionArgs { redact: true }),
+  });
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &command))
+    .expect("plan");
+
+  assert_eq!(plan.method, Method::GET);
+  assert_eq!(plan.endpoint, "/admin/v1/runtime/introspection?redact=true");
+  assert_eq!(plan.permission.action, "runtime:ReadIntrospection");
+  assert_eq!(plan.permission.resource, "introspection/current");
+}
+
+#[test]
+fn runtime_introspection_cli_requires_redact() {
+  let parsed = Cli::try_parse_from(["oxibeltctl", "runtime", "introspection", "--redact"])
+    .expect("runtime introspection --redact should parse");
+  assert!(matches!(parsed.command, Command::Runtime(_)));
+
+  let missing = Cli::try_parse_from(["oxibeltctl", "runtime", "introspection"]);
+  assert!(
+    missing.is_err(),
+    "runtime introspection should require --redact"
+  );
+}
+
 fn dummy_client() -> AdminClient {
   oxibelt::tls::install_default_provider().expect("provider");
   let options = AdminClientOptions::new(

@@ -34,6 +34,7 @@ use crate::proxy::http::response::text_response;
 use crate::proxy::{http, http3};
 use crate::proxy_protocol;
 use crate::reload::{ReloadManager, ReloadTrigger};
+use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::{BoundStreamListener, StreamListenerTask};
 use crate::tcp_hop;
@@ -613,6 +614,7 @@ async fn admin_response(
   if path == "/admin/v1/diagnostics/preflight"
     || path == "/admin/v1/diagnostics/support-bundle"
     || path == "/admin/v1/runtime/snapshot"
+    || path == "/admin/v1/runtime/introspection"
   {
     return admin_diagnostics::admin_diagnostics_response(
       request,
@@ -2041,6 +2043,9 @@ async fn handle_connection(
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let _global_permit = acquire_global_connection_permit(&handshake_state)?;
+  let _https_connection_guard = handshake_state
+    .runtime_introspection
+    .guard(RuntimeCounter::DownstreamHttpsTcpConnection);
   let (stream, peer_addr) = proxy_protocol::accept_proxy_header(
     stream,
     peer_addr,
@@ -2116,6 +2121,11 @@ async fn handle_connection(
   };
 
   let request_count = Arc::new(AtomicUsize::new(0));
+  let request_counter = if negotiated == b"h2" {
+    RuntimeCounter::Http2Stream
+  } else {
+    RuntimeCounter::Http1Request
+  };
   let request_state = handshake_state.clone();
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = request_state.clone();
@@ -2124,6 +2134,7 @@ async fn handle_connection(
     let connection_limit_context = connection_limit_context.clone();
     let drain = drain.clone();
     async move {
+      let _request_guard = state.runtime_introspection.guard(request_counter);
       Ok::<_, Infallible>(
         if request_count.fetch_add(1, Ordering::Relaxed)
           >= state.config.limits.max_requests_per_connection
@@ -2151,6 +2162,9 @@ async fn handle_connection(
   });
 
   if negotiated == b"h2" {
+    let _http2_connection_guard = handshake_state
+      .runtime_introspection
+      .guard(RuntimeCounter::Http2Connection);
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     builder.timer(TokioTimer::new());
     crate::h2_tuning::apply_server_defaults(&mut builder, &handshake_state.config.proxy.http2);
@@ -2169,6 +2183,9 @@ async fn handle_connection(
     };
     result.map_err(|error| anyhow::anyhow!(error))?;
   } else {
+    let _http1_connection_guard = handshake_state
+      .runtime_introspection
+      .guard(RuntimeCounter::Http1Connection);
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
       .timer(TokioTimer::new())
@@ -2468,6 +2485,9 @@ mod admin_diagnostics_tests;
 
 #[cfg(test)]
 mod admin_json_tests;
+
+#[cfg(test)]
+mod admin_runtime_introspection_tests;
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,7 @@ use super::super::super::H3RequestStream;
 use super::connection_limits::WebTransportSessionPermits;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::stream_waf::StreamWafRequestContext;
+use crate::runtime_introspection::RuntimeCounterGuard;
 use crate::state::AppSnapshot;
 use crate::telemetry::{TelemetryStart, TraceContext};
 
@@ -14,6 +15,7 @@ pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSessio
   pub(super) upstream: Arc<web_transport_quinn::Session>,
   pub(super) connect_stream: H3RequestStream,
   pub(super) _connection_permits: WebTransportSessionPermits,
+  pub(super) _introspection_guard: RuntimeCounterGuard,
   pub(super) stream_waf_state: Option<Arc<AppSnapshot>>,
   pub(super) metrics_state: Arc<AppSnapshot>,
   pub(super) stream_waf: Option<StreamWafRequestContext>,

@@ -34,6 +34,7 @@ pub(crate) async fn plan_command(
     Command::Status => get("/admin/v1/config/status", "config:GetStatus", "*"),
     Command::Doctor(args) => plan_doctor(args),
     Command::SupportBundle(args) => plan_support_bundle(args),
+    Command::Runtime(command) => plan_runtime(command),
     Command::Config(command) => plan_config(client, command).await,
     Command::Tls(command) => plan_tls(client, command).await,
     Command::Lifecycle(command) => plan_lifecycle(command),
@@ -74,6 +75,21 @@ fn plan_support_bundle(args: &SupportBundleArgs) -> anyhow::Result<RequestPlan> 
     "diagnostics:ReadSupportBundle",
     "support-bundle/current",
   )
+}
+
+fn plan_runtime(command: &RuntimeCommand) -> anyhow::Result<RequestPlan> {
+  match &command.command {
+    RuntimeSubcommand::Introspection(args) => {
+      if !args.redact {
+        bail!("runtime introspection requires --redact");
+      }
+      get(
+        "/admin/v1/runtime/introspection?redact=true",
+        "runtime:ReadIntrospection",
+        "introspection/current",
+      )
+    }
+  }
 }
 
 fn plan_doctor(args: &DoctorArgs) -> anyhow::Result<RequestPlan> {

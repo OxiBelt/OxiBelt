@@ -554,7 +554,7 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "RunProbe",
       "ReadSupportBundle",
     ],
-    "runtime" => &["ReadSnapshot"],
+    "runtime" => &["ReadSnapshot", "ReadIntrospection"],
     "route" => &["Invoke"],
     "stream" => &["Connect"],
     "turn" => &["Allocate"],
