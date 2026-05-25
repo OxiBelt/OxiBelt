@@ -360,25 +360,33 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         workflow.contains("OXIBELT_PERF_REGRESSION_GATE_MODE: warn"),
         "docker-performance should defer noisy per-iteration regression gates to the summary job"
     );
-    assert!(
-        workflow.contains(
-            "tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported"
-        ),
-        "docker-performance should force the x86-64-v3 artifact with unsupported-runner handling"
-    );
+    for target_cpu in ["x86-64-v2", "x86-64-v3", "x86-64-v4"] {
+        assert!(
+            workflow.contains(&format!(
+                "tests/scripts/select-amd64-docker-image-artifact.sh {target_cpu} --allow-unsupported"
+            )),
+            "docker-performance should select the {target_cpu} artifact with unsupported-runner handling"
+        );
+    }
     assert!(
         workflow.contains("unsupported-cpu.json"),
         "docker-performance should upload unsupported CPU markers instead of benchmark rows"
     );
+    for target_cpu in ["v2", "v3", "v4"] {
+        assert!(
+            workflow.contains(&format!(
+                "steps.select-amd64-{target_cpu}.outputs.supported == 'true'"
+            )),
+            "docker-performance should only download and load supported AMD64 {target_cpu} artifacts"
+        );
+    }
     assert!(
-        workflow.contains("steps.select-amd64-image.outputs.supported == 'true'"),
-        "docker-performance should only download and run the image when the runner supports v3"
+        workflow.contains("for target_cpu in x86-64-v2 x86-64-v3 x86-64-v4; do"),
+        "docker-performance should run each supported AMD64 ISA target in the same matrix job"
     );
     assert!(
-        workflow.contains(
-            "OXIBELT_AMD64_TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}"
-        ),
-        "docker-performance should record the AMD64 target CPU in per-run summaries"
+        workflow.contains("OXIBELT_AMD64_TARGET_CPU=\"${target_cpu}\""),
+        "docker-performance should record each AMD64 target CPU in per-run summaries"
     );
     assert!(
         workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),
@@ -393,16 +401,16 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should record iteration failures and continue the shard"
     );
     assert!(
-        workflow.contains("failed_iterations+=(\"${iteration}:${status}\")"),
-        "docker-performance should keep a shard-local list of failed iterations"
+        workflow.contains("failed_iterations+=(\"${target_cpu}:${iteration}:${status}\")"),
+        "docker-performance should keep a shard-local list of failed target iterations"
     );
     assert!(
         workflow.contains("if (( ${#failed_iterations[@]} > 0 )); then"),
         "docker-performance should fail after all configured iterations have run"
     );
     assert!(
-        workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}/run-${iteration}\""),
-        "docker-performance should isolate artifacts by serving type, shard, and iteration"
+        workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${target_artifact_dir}/run-${iteration}\""),
+        "docker-performance should isolate artifacts by serving type, shard, target CPU, and iteration"
     );
     assert!(
         workflow.contains(
