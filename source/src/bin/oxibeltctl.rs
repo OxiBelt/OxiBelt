@@ -10,6 +10,8 @@ mod cli;
 mod doctor;
 #[path = "oxibeltctl/doctor_plan.rs"]
 mod doctor_plan;
+#[path = "oxibeltctl/dynamic_policy_plan.rs"]
+mod dynamic_policy_plan;
 #[path = "oxibeltctl/output.rs"]
 mod output;
 #[path = "oxibeltctl/plan.rs"]

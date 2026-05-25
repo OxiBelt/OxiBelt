@@ -17,7 +17,7 @@ use crate::config::{
   Config, ConnectionLimitIdentityMode, ErrorResponseMode, ForwardedClientIpSource, HttpVersion,
   ProxyHttp2Config, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig,
 };
-use crate::dynamic_policy::DynamicPolicyRequest;
+use crate::dynamic_policy::{DynamicPolicyRequest, DynamicPolicyTerminal};
 use crate::external_auth::{ExternalAuthOutcome, ExternalAuthTerminal};
 use crate::ipm::{IpmDecision, IpmRequestContext, resource as ipm_resource};
 use crate::lifecycle::ConnectionDrain;
@@ -629,8 +629,50 @@ where
     Default::default()
   };
   access_log.dynamic_policy = dynamic_policy.context;
+  let mut dynamic_challenge_response_mutations = Vec::new();
   if let Some(terminal) = dynamic_policy.terminal {
-    return text_response(terminal.status, &terminal.body);
+    match terminal {
+      DynamicPolicyTerminal::Text { status, body } => return text_response(status, &body),
+      DynamicPolicyTerminal::Challenge { status } => {
+        if !state.waf.has_person_proof_api_path(request_uri.path()) {
+          access_log.ensure_request_ids();
+          let decision = match state.waf.evaluate_dynamic_person_proof_challenge(
+            WafRequestInput {
+              request_id: access_log.request_id(),
+              transaction_id: access_log.transaction_id(),
+              received_at_unix_ms: access_log.request_received_at_unix_ms,
+              method: &request_method,
+              uri: &request_uri,
+              version: request_version,
+              headers: request.headers(),
+              body: None,
+              peer_addr: client_addr,
+              downstream_host: &host,
+              downstream_scheme,
+              route_name: &resolved.route.name,
+              tcp_max_hop,
+              tls: tls.as_ref(),
+              protocol,
+              transport_network,
+              transport_metadata,
+              tags: tags_ref(&tags),
+              dynamic_policy: &access_log.dynamic_policy,
+            },
+            status,
+          ) {
+            Ok(decision) => decision,
+            Err(error) => {
+              warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
+              return text_response(StatusCode::FORBIDDEN, "person proof challenge failed");
+            }
+          };
+          if let Some(terminal) = decision.terminal {
+            return waf_terminal_response(terminal, &decision.response_header_mutations);
+          }
+          dynamic_challenge_response_mutations.extend(decision.response_header_mutations);
+        }
+      }
+    }
   }
 
   if state.waf.has_person_proof_api_path(request_uri.path()) {
@@ -708,7 +750,7 @@ where
   };
   let request_body = captured_body.as_ref().map(waf_body_input);
 
-  let request_waf = if request_waf_enabled {
+  let mut request_waf = if request_waf_enabled {
     access_log.ensure_request_ids();
     state.waf.evaluate_request(WafRequestInput {
       request_id: access_log.request_id(),
@@ -734,6 +776,9 @@ where
   } else {
     Default::default()
   };
+  request_waf
+    .response_header_mutations
+    .extend(dynamic_challenge_response_mutations);
 
   if !request_waf.tags.is_empty() {
     let tags = tags.get_or_insert_with(HashMap::new);

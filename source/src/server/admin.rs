@@ -19,6 +19,8 @@ use crate::state::{AppHandle, AppSnapshot};
 
 use super::{AdminActor, AdminAuthorization};
 
+mod dynamic_policy_query;
+
 const ADMIN_JSON_BODY_LIMIT: usize = 64 * 1024;
 
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
@@ -535,12 +537,15 @@ pub(super) async fn dynamic_policy_response(
   path: &str,
 ) -> Option<Response<ProxyBody>> {
   if path != "/admin/v1/dynamic-policies"
+    && path != "/admin/v1/dynamic-policies/apply"
+    && path != "/admin/v1/dynamic-policies/audit"
     && path != "/admin/v1/dynamic-policies/export"
     && path != "/admin/v1/dynamic-policies/import"
     && !path.starts_with("/admin/v1/dynamic-policies/")
   {
     return None;
   }
+  let query = request.uri().query().map(str::to_string);
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/dynamic-policies") => {
       if !allowed(authorization, "dynamic-policy:List", "*") {
@@ -567,6 +572,46 @@ pub(super) async fn dynamic_policy_response(
           .await
         {
           Ok(policy) => json_response(StatusCode::CREATED, &policy),
+          Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        },
+      );
+    }
+    (&::http::Method::POST, "/admin/v1/dynamic-policies/apply") => {
+      if !allowed(authorization, "dynamic-policy:Apply", "*") {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      let body = match collect_admin_json::<DynamicPolicyAdminCreate>(request).await {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      return Some(
+        match state
+          .snapshot()
+          .dynamic_policy
+          .admin_apply(&authorization.actor.name, body)
+          .await
+        {
+          Ok(policy) => json_response(StatusCode::OK, &policy),
+          Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        },
+      );
+    }
+    (&::http::Method::GET, "/admin/v1/dynamic-policies/audit") => {
+      if !allowed(authorization, "dynamic-policy:ReadAudit", "*") {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      let (policy_id, limit) = match dynamic_policy_query::audit_query(query.as_deref()) {
+        Ok(query) => query,
+        Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
+      };
+      return Some(
+        match state
+          .snapshot()
+          .dynamic_policy
+          .admin_audit(policy_id, limit)
+          .await
+        {
+          Ok(audit) => json_response(StatusCode::OK, &json!({ "audit": audit })),
           Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
         },
       );
@@ -603,7 +648,7 @@ pub(super) async fn dynamic_policy_response(
     _ => {}
   }
 
-  let Some(id) = policy_id_from_path(path) else {
+  let Some(id) = dynamic_policy_query::policy_id_from_path(path) else {
     return Some(text_response(StatusCode::NOT_FOUND, "not found"));
   };
   Some(match *method {
@@ -653,13 +698,6 @@ pub(super) async fn dynamic_policy_response(
     }
     _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
   })
-}
-
-fn policy_id_from_path(path: &str) -> Option<i64> {
-  path
-    .strip_prefix("/admin/v1/dynamic-policies/")?
-    .parse()
-    .ok()
 }
 
 async fn collect_admin_json<T>(request: hyper::Request<Incoming>) -> Result<T, Response<ProxyBody>>

@@ -526,7 +526,15 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
     ],
     "upstream-pool" => &["List", "Get", "AddServer", "UpdateServer", "RemoveServer"],
     "dynamic-policy" => &[
-      "List", "Get", "Create", "Update", "Delete", "Import", "Export",
+      "List",
+      "Get",
+      "Create",
+      "Apply",
+      "Update",
+      "Delete",
+      "Import",
+      "Export",
+      "ReadAudit",
     ],
     "waf" => &[
       "GetRuleHits",

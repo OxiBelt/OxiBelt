@@ -107,6 +107,14 @@ fn sign_row(row: &mut PolicyRow, key: &[u8; 32]) {
   ));
 }
 
+fn terminal_status(terminal: &DynamicPolicyTerminal) -> StatusCode {
+  match terminal {
+    DynamicPolicyTerminal::Text { status, .. } | DynamicPolicyTerminal::Challenge { status } => {
+      *status
+    }
+  }
+}
+
 #[test]
 fn client_ip_subject_requires_valid_ip() {
   let error = validate_policy_row(
@@ -156,7 +164,7 @@ fn client_ip_cidr_subject_canonicalizes_and_matches() {
 
   assert!(outcome.context.matched);
   assert_eq!(
-    outcome.terminal.as_ref().map(|terminal| terminal.status),
+    outcome.terminal.as_ref().map(terminal_status),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 }
@@ -172,6 +180,62 @@ fn rate_limit_requires_rate_and_burst() {
   )
   .expect_err("missing rate and burst should fail");
   assert!(error.to_string().contains("requires rate"));
+}
+
+#[test]
+fn challenge_policy_returns_challenge_terminal() {
+  let policy = policy(
+    1,
+    DynamicPolicyAction::Challenge,
+    DynamicPolicySubjectType::Ip,
+    "203.0.113.10",
+  );
+  let outcome = evaluate_snapshot(
+    &test_config(),
+    Metrics::new().as_ref(),
+    &snapshot(vec![policy]),
+    DynamicPolicyRequest {
+      client_ip: "203.0.113.10".parse().unwrap(),
+      route_name: "app-route",
+      method: &Method::GET,
+      path: "/",
+    },
+    LimitState::new(None).as_ref(),
+  );
+
+  assert!(outcome.context.matched);
+  assert_eq!(outcome.context.action.as_deref(), Some("challenge"));
+  assert!(matches!(
+    outcome.terminal,
+    Some(DynamicPolicyTerminal::Challenge {
+      status: StatusCode::TOO_MANY_REQUESTS
+    })
+  ));
+}
+
+#[test]
+fn challenge_rows_default_to_forbidden_and_reject_unsupported_fields() {
+  let challenge = validate_policy_row(
+    row(1, "challenge", "client_ip", "203.0.113.10"),
+    &test_config(),
+    "test",
+    &route_names(),
+    None,
+  )
+  .expect("challenge row should validate");
+  assert_eq!(challenge.status, StatusCode::FORBIDDEN);
+
+  let mut with_body = row(2, "challenge", "client_ip", "203.0.113.10");
+  with_body.body = Some("not used".to_string());
+  let error = validate_policy_row(with_body, &test_config(), "test", &route_names(), None)
+    .expect_err("challenge body should fail");
+  assert!(error.to_string().contains("does not support body"));
+
+  let mut with_rate = row(3, "challenge", "client_ip", "203.0.113.10");
+  with_rate.rate = Some("1r/s".to_string());
+  let error = validate_policy_row(with_rate, &test_config(), "test", &route_names(), None)
+    .expect_err("challenge rate should fail");
+  assert!(error.to_string().contains("does not support rate"));
 }
 
 #[test]
@@ -236,7 +300,7 @@ fn noncanonical_ipv6_client_ip_rate_limit_subject_canonicalizes_and_matches() {
   assert!(first.context.matched);
   assert!(first.terminal.is_none());
   assert_eq!(
-    second.terminal.as_ref().map(|terminal| terminal.status),
+    second.terminal.as_ref().map(terminal_status),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 }
@@ -280,10 +344,7 @@ fn noncanonical_ipv6_composite_subjects_canonicalize_and_reject() {
   );
   assert!(route_outcome.context.matched);
   assert_eq!(
-    route_outcome
-      .terminal
-      .as_ref()
-      .map(|terminal| terminal.status),
+    route_outcome.terminal.as_ref().map(terminal_status),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 
@@ -301,10 +362,7 @@ fn noncanonical_ipv6_composite_subjects_canonicalize_and_reject() {
   );
   assert!(path_outcome.context.matched);
   assert_eq!(
-    path_outcome
-      .terminal
-      .as_ref()
-      .map(|terminal| terminal.status),
+    path_outcome.terminal.as_ref().map(terminal_status),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 }
@@ -335,7 +393,7 @@ fn matching_client_ip_path_rejects_request() {
   assert!(outcome.context.matched);
   assert_eq!(outcome.context.action.as_deref(), Some("reject"));
   assert_eq!(
-    outcome.terminal.as_ref().map(|terminal| terminal.status),
+    outcome.terminal.as_ref().map(terminal_status),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 }
@@ -408,7 +466,7 @@ fn dynamic_rate_limit_denies_after_burst() {
   assert!(first.context.matched);
   assert!(first.terminal.is_none());
   assert_eq!(
-    second.terminal.as_ref().map(|terminal| terminal.status),
+    second.terminal.as_ref().map(terminal_status),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 }

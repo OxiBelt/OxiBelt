@@ -9,9 +9,11 @@ use super::{DynamicPolicyRuntime, PolicyRow, signature};
 mod quota;
 mod store;
 mod validation;
+mod write;
 use quota::enforce_policy_quotas;
 use store::*;
 use validation::*;
+use write::*;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DynamicPolicyAdminCreate {
@@ -98,6 +100,20 @@ pub struct DynamicPolicyAdminImport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DynamicPolicyAdminAuditRecord {
+  pub id: i64,
+  pub namespace: String,
+  pub policy_id: Option<i64>,
+  pub actor: String,
+  pub operation: String,
+  pub source: Option<String>,
+  pub name: Option<String>,
+  pub outcome: String,
+  pub error: Option<String>,
+  pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DynamicPolicyAdminRecord {
   pub id: i64,
   pub namespace: String,
@@ -143,16 +159,42 @@ impl DynamicPolicyRuntime {
     input: DynamicPolicyAdminCreate,
   ) -> anyhow::Result<DynamicPolicyAdminRecord> {
     let inner = self.admin_inner()?;
-    validate_create(&inner, &input)?;
+    if let Err(error) = validate_create(&inner, &input) {
+      audit_rejected(
+        &inner,
+        None,
+        actor,
+        "create",
+        &input.source,
+        &input.name,
+        &error,
+      )
+      .await;
+      return Err(error);
+    }
     let mut tx = begin_admin_write(&inner).await?;
-    enforce_policy_quotas(
+    if let Err(error) = enforce_policy_quotas(
       &mut tx,
       &inner,
       &input.source,
       None,
       input.enabled.unwrap_or(true),
     )
-    .await?;
+    .await
+    {
+      let _ = tx.rollback().await;
+      audit_rejected(
+        &inner,
+        None,
+        actor,
+        "create",
+        &input.source,
+        &input.name,
+        &error,
+      )
+      .await;
+      return Err(error);
+    }
     let id = insert_policy(&mut tx, &inner.namespace, actor, &input).await?;
     sign_policy(&mut tx, &inner, id).await?;
     bump_generation_tx(&mut tx, &inner.namespace).await?;
@@ -174,6 +216,106 @@ impl DynamicPolicyRuntime {
       .context("created dynamic policy disappeared")
   }
 
+  pub async fn admin_apply(
+    &self,
+    actor: &str,
+    input: DynamicPolicyAdminCreate,
+  ) -> anyhow::Result<DynamicPolicyAdminRecord> {
+    let inner = self.admin_inner()?;
+    if let Err(error) = validate_create(&inner, &input) {
+      audit_rejected(
+        &inner,
+        None,
+        actor,
+        "apply",
+        &input.source,
+        &input.name,
+        &error,
+      )
+      .await;
+      return Err(error);
+    }
+    let mut tx = begin_admin_write(&inner).await?;
+    let existing =
+      policy_ids_by_source_name_tx(&mut tx, &inner.namespace, &input.source, &input.name).await?;
+    let id = if let Some((&id, duplicates)) = existing.split_first() {
+      if let Err(error) = enforce_policy_quotas(
+        &mut tx,
+        &inner,
+        &input.source,
+        Some(id),
+        input.enabled.unwrap_or(true),
+      )
+      .await
+      {
+        let _ = tx.rollback().await;
+        audit_rejected(
+          &inner,
+          Some(id),
+          actor,
+          "apply",
+          &input.source,
+          &input.name,
+          &error,
+        )
+        .await;
+        return Err(error);
+      }
+      replace_policy(&mut tx, &inner.namespace, actor, id, &input).await?;
+      if !duplicates.is_empty() {
+        sqlx::query("UPDATE oxibelt_dynamic_policies SET enabled = false, updated_at = now(), writer_identity = $3, signature_version = NULL, row_signature = NULL WHERE namespace = $1 AND id = ANY($2)")
+          .bind(inner.namespace.as_ref())
+          .bind(duplicates)
+          .bind(actor)
+          .execute(&mut *tx)
+          .await?;
+      }
+      id
+    } else {
+      if let Err(error) = enforce_policy_quotas(
+        &mut tx,
+        &inner,
+        &input.source,
+        None,
+        input.enabled.unwrap_or(true),
+      )
+      .await
+      {
+        let _ = tx.rollback().await;
+        audit_rejected(
+          &inner,
+          None,
+          actor,
+          "apply",
+          &input.source,
+          &input.name,
+          &error,
+        )
+        .await;
+        return Err(error);
+      }
+      insert_policy(&mut tx, &inner.namespace, actor, &input).await?
+    };
+    sign_policy(&mut tx, &inner, id).await?;
+    bump_generation_tx(&mut tx, &inner.namespace).await?;
+    audit_tx(
+      &mut tx,
+      &inner.namespace,
+      Some(id),
+      actor,
+      "apply",
+      &input.source,
+      &input.name,
+      "applied",
+      None,
+    )
+    .await?;
+    tx.commit().await?;
+    select_admin_record(&inner.pool, &inner.namespace, id)
+      .await?
+      .context("applied dynamic policy disappeared")
+  }
+
   pub async fn admin_patch(
     &self,
     actor: &str,
@@ -185,11 +327,38 @@ impl DynamicPolicyRuntime {
     let Some(existing) = select_admin_record_tx(&mut tx, &inner.namespace, id).await? else {
       return Ok(None);
     };
-    validate_patch(&inner, &input)?;
-    validate_patch_merged(&inner, &existing, &input)?;
+    if let Err(error) =
+      validate_patch(&inner, &input).and_then(|_| validate_patch_merged(&inner, &existing, &input))
+    {
+      let _ = tx.rollback().await;
+      audit_rejected(
+        &inner,
+        Some(id),
+        actor,
+        "patch",
+        input.source.as_deref().unwrap_or(&existing.source),
+        input.name.as_deref().unwrap_or(&existing.name),
+        &error,
+      )
+      .await;
+      return Err(error);
+    }
     let source = input.source.as_deref().unwrap_or(&existing.source);
     let enabled = input.enabled.unwrap_or(existing.enabled);
-    enforce_policy_quotas(&mut tx, &inner, source, Some(id), enabled).await?;
+    if let Err(error) = enforce_policy_quotas(&mut tx, &inner, source, Some(id), enabled).await {
+      let _ = tx.rollback().await;
+      audit_rejected(
+        &inner,
+        Some(id),
+        actor,
+        "patch",
+        source,
+        input.name.as_deref().unwrap_or(&existing.name),
+        &error,
+      )
+      .await;
+      return Err(error);
+    }
     update_policy(&mut tx, &inner.namespace, actor, id, &input).await?;
     sign_policy(&mut tx, &inner, id).await?;
     bump_generation_tx(&mut tx, &inner.namespace).await?;
@@ -254,19 +423,46 @@ impl DynamicPolicyRuntime {
     let mut tx = begin_admin_write(&inner).await?;
     let mut ids = Vec::with_capacity(input.policies.len());
     for policy in input.policies {
-      validate_create(&inner, &policy)?;
+      if let Err(error) = validate_create(&inner, &policy) {
+        let _ = tx.rollback().await;
+        audit_rejected(
+          &inner,
+          None,
+          actor,
+          "import",
+          &policy.source,
+          &policy.name,
+          &error,
+        )
+        .await;
+        return Err(error);
+      }
       let existing =
         policy_ids_by_source_name_tx(&mut tx, &inner.namespace, &policy.source, &policy.name)
           .await?;
       let id = if let Some((&id, duplicates)) = existing.split_first() {
-        enforce_policy_quotas(
+        if let Err(error) = enforce_policy_quotas(
           &mut tx,
           &inner,
           &policy.source,
           Some(id),
           policy.enabled.unwrap_or(true),
         )
-        .await?;
+        .await
+        {
+          let _ = tx.rollback().await;
+          audit_rejected(
+            &inner,
+            Some(id),
+            actor,
+            "import",
+            &policy.source,
+            &policy.name,
+            &error,
+          )
+          .await;
+          return Err(error);
+        }
         replace_policy(&mut tx, &inner.namespace, actor, id, &policy).await?;
         if !duplicates.is_empty() {
           sqlx::query("UPDATE oxibelt_dynamic_policies SET enabled = false, updated_at = now(), writer_identity = $3, signature_version = NULL, row_signature = NULL WHERE namespace = $1 AND id = ANY($2)")
@@ -278,14 +474,28 @@ impl DynamicPolicyRuntime {
         }
         id
       } else {
-        enforce_policy_quotas(
+        if let Err(error) = enforce_policy_quotas(
           &mut tx,
           &inner,
           &policy.source,
           None,
           policy.enabled.unwrap_or(true),
         )
-        .await?;
+        .await
+        {
+          let _ = tx.rollback().await;
+          audit_rejected(
+            &inner,
+            None,
+            actor,
+            "import",
+            &policy.source,
+            &policy.name,
+            &error,
+          )
+          .await;
+          return Err(error);
+        }
         insert_policy(&mut tx, &inner.namespace, actor, &policy).await?
       };
       sign_policy(&mut tx, &inner, id).await?;
@@ -316,6 +526,15 @@ impl DynamicPolicyRuntime {
     Ok(records)
   }
 
+  pub async fn admin_audit(
+    &self,
+    policy_id: Option<i64>,
+    limit: i64,
+  ) -> anyhow::Result<Vec<DynamicPolicyAdminAuditRecord>> {
+    let inner = self.admin_inner()?;
+    select_audit_records(&inner.pool, &inner.namespace, policy_id, limit).await
+  }
+
   fn admin_inner(&self) -> anyhow::Result<Arc<super::DynamicPolicyInner>> {
     let Some(inner) = &self.inner else {
       bail!("dynamic policy is disabled");
@@ -327,162 +546,28 @@ impl DynamicPolicyRuntime {
   }
 }
 
-async fn begin_admin_write(
+async fn audit_rejected(
   inner: &super::DynamicPolicyInner,
-) -> anyhow::Result<Transaction<'static, Postgres>> {
-  let mut tx = inner.pool.begin().await?;
-  sqlx::query("LOCK TABLE oxibelt_dynamic_policies IN SHARE ROW EXCLUSIVE MODE")
-    .execute(&mut *tx)
-    .await?;
-  Ok(tx)
-}
-
-async fn insert_policy(
-  tx: &mut Transaction<'_, Postgres>,
-  namespace: &str,
+  policy_id: Option<i64>,
   actor: &str,
-  input: &DynamicPolicyAdminCreate,
-) -> anyhow::Result<i64> {
-  let id: i64 = sqlx::query_scalar(
-    "INSERT INTO oxibelt_dynamic_policies
-       (namespace, enabled, priority, name, source, action, subject_type, subject, route_name,
-        method, path_prefix, rate, burst, status, body, reason, code, mode, writer_identity,
-        expires_at)
-     VALUES
-       ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-        CASE
-          WHEN $20::bigint IS NOT NULL THEN now() + ($20::bigint * interval '1 second')
-          WHEN $21::text IS NOT NULL THEN $21::timestamptz
-          ELSE NULL
-        END)
-     RETURNING id",
+  operation: &str,
+  source: &str,
+  name: &str,
+  error: &anyhow::Error,
+) {
+  let error = error.to_string();
+  let _ = audit(
+    &inner.pool,
+    &inner.namespace,
+    policy_id,
+    actor,
+    operation,
+    source,
+    name,
+    "rejected",
+    Some(&error),
   )
-  .bind(namespace)
-  .bind(input.enabled.unwrap_or(true))
-  .bind(input.priority.unwrap_or(100))
-  .bind(&input.name)
-  .bind(&input.source)
-  .bind(&input.action)
-  .bind(&input.subject_type)
-  .bind(&input.subject)
-  .bind(&input.route_name)
-  .bind(&input.method)
-  .bind(&input.path_prefix)
-  .bind(&input.rate)
-  .bind(input.burst)
-  .bind(input.status)
-  .bind(&input.body)
-  .bind(&input.reason)
-  .bind(&input.code)
-  .bind(input.mode.as_deref().unwrap_or("enforce"))
-  .bind(actor)
-  .bind(input.ttl_seconds)
-  .bind(&input.expires_at)
-  .fetch_one(&mut **tx)
-  .await?;
-  Ok(id)
-}
-
-async fn replace_policy(
-  tx: &mut Transaction<'_, Postgres>,
-  namespace: &str,
-  actor: &str,
-  id: i64,
-  input: &DynamicPolicyAdminCreate,
-) -> anyhow::Result<()> {
-  sqlx::query(
-    "UPDATE oxibelt_dynamic_policies
-        SET enabled = $3, priority = $4, name = $5, source = $6, action = $7,
-            subject_type = $8, subject = $9, route_name = $10, method = $11,
-            path_prefix = $12, rate = $13, burst = $14, status = $15, body = $16,
-            reason = $17, code = $18, mode = $19, writer_identity = $20,
-            expires_at = CASE
-              WHEN $21::bigint IS NOT NULL THEN now() + ($21::bigint * interval '1 second')
-              WHEN $22::text IS NOT NULL THEN $22::timestamptz
-              ELSE NULL
-            END,
-            signature_version = NULL, row_signature = NULL, updated_at = now()
-      WHERE namespace = $1 AND id = $2",
-  )
-  .bind(namespace)
-  .bind(id)
-  .bind(input.enabled.unwrap_or(true))
-  .bind(input.priority.unwrap_or(100))
-  .bind(&input.name)
-  .bind(&input.source)
-  .bind(&input.action)
-  .bind(&input.subject_type)
-  .bind(&input.subject)
-  .bind(&input.route_name)
-  .bind(&input.method)
-  .bind(&input.path_prefix)
-  .bind(&input.rate)
-  .bind(input.burst)
-  .bind(input.status)
-  .bind(&input.body)
-  .bind(&input.reason)
-  .bind(&input.code)
-  .bind(input.mode.as_deref().unwrap_or("enforce"))
-  .bind(actor)
-  .bind(input.ttl_seconds)
-  .bind(&input.expires_at)
-  .execute(&mut **tx)
-  .await?;
-  Ok(())
-}
-
-async fn update_policy(
-  tx: &mut Transaction<'_, Postgres>,
-  namespace: &str,
-  actor: &str,
-  id: i64,
-  input: &DynamicPolicyAdminPatch,
-) -> anyhow::Result<()> {
-  sqlx::query(
-    "UPDATE oxibelt_dynamic_policies
-        SET enabled = COALESCE($3, enabled), priority = COALESCE($4, priority),
-            name = COALESCE($5, name), source = COALESCE($6, source),
-            action = COALESCE($7, action), subject_type = COALESCE($8, subject_type),
-            subject = COALESCE($9, subject), route_name = COALESCE($10, route_name),
-            method = COALESCE($11, method), path_prefix = COALESCE($12, path_prefix),
-            rate = COALESCE($13, rate), burst = COALESCE($14, burst),
-            status = COALESCE($15, status), body = COALESCE($16, body),
-            reason = COALESCE($17, reason), code = COALESCE($18, code),
-            mode = COALESCE($19, mode), writer_identity = $20,
-            expires_at = CASE
-              WHEN $21::bigint IS NOT NULL THEN now() + ($21::bigint * interval '1 second')
-              WHEN $22::text IS NOT NULL THEN $22::timestamptz
-              ELSE expires_at
-            END,
-            signature_version = NULL, row_signature = NULL, updated_at = now()
-      WHERE namespace = $1 AND id = $2",
-  )
-  .bind(namespace)
-  .bind(id)
-  .bind(input.enabled)
-  .bind(input.priority)
-  .bind(&input.name)
-  .bind(&input.source)
-  .bind(&input.action)
-  .bind(&input.subject_type)
-  .bind(&input.subject)
-  .bind(&input.route_name)
-  .bind(&input.method)
-  .bind(&input.path_prefix)
-  .bind(&input.rate)
-  .bind(input.burst)
-  .bind(input.status)
-  .bind(&input.body)
-  .bind(&input.reason)
-  .bind(&input.code)
-  .bind(&input.mode)
-  .bind(actor)
-  .bind(input.ttl_seconds)
-  .bind(&input.expires_at)
-  .execute(&mut **tx)
-  .await?;
-  Ok(())
+  .await;
 }
 
 async fn sign_policy(

@@ -41,10 +41,12 @@ pub(crate) async fn plan_command(
     Command::Pool(command) => plan_pool(command),
     Command::Waf(command) => plan_waf(command),
     Command::OxiRule(command) => plan_oxirule(command),
-    Command::DynamicPolicy(command) => plan_dynamic_policy(command),
-    Command::Block(args) => plan_mitigation("reject", args),
-    Command::Allow(args) => plan_mitigation("allow", args),
-    Command::RateLimit(args) => plan_rate_limit(args),
+    Command::DynamicPolicy(command) => crate::dynamic_policy_plan::plan_dynamic_policy(command),
+    Command::Block(args) => crate::dynamic_policy_plan::plan_mitigation("reject", args),
+    Command::Allow(args) => crate::dynamic_policy_plan::plan_mitigation("allow", args),
+    Command::Challenge(args) => crate::dynamic_policy_plan::plan_challenge(args),
+    Command::RateLimit(args) => crate::dynamic_policy_plan::plan_rate_limit(args),
+    Command::Mitigate(args) => crate::dynamic_policy_plan::plan_mitigate(args),
     Command::Cache(command) => plan_cache(command),
     Command::Ipm(command) => plan_ipm(command),
     Command::Auth(command) => match &command.command {
@@ -293,103 +295,6 @@ fn plan_oxirule(command: &OxiRuleCommand) -> anyhow::Result<RequestPlan> {
   }
 }
 
-fn plan_dynamic_policy(command: &DynamicPolicyCommand) -> anyhow::Result<RequestPlan> {
-  match &command.command {
-    DynamicPolicySubcommand::List => get("/admin/v1/dynamic-policies", "dynamic-policy:List", "*"),
-    DynamicPolicySubcommand::Get(args) => get(
-      &format!("/admin/v1/dynamic-policies/{}", args.id),
-      "dynamic-policy:Get",
-      &args.id.to_string(),
-    ),
-    DynamicPolicySubcommand::Create(args) => post_json(
-      "/admin/v1/dynamic-policies",
-      read_json_file(&args.json)?,
-      "dynamic-policy:Create",
-      "*",
-    ),
-    DynamicPolicySubcommand::Patch(args) => patch_json(
-      &format!("/admin/v1/dynamic-policies/{}", args.id),
-      read_json_file(&args.json)?,
-      "dynamic-policy:Update",
-      &args.id.to_string(),
-    ),
-    DynamicPolicySubcommand::Delete(args) => delete(
-      &format!("/admin/v1/dynamic-policies/{}", args.id),
-      "dynamic-policy:Delete",
-      &args.id.to_string(),
-    ),
-    DynamicPolicySubcommand::Export => get(
-      "/admin/v1/dynamic-policies/export",
-      "dynamic-policy:Export",
-      "*",
-    ),
-    DynamicPolicySubcommand::Import(args) => post_json(
-      "/admin/v1/dynamic-policies/import",
-      read_json_file(&args.json)?,
-      "dynamic-policy:Import",
-      "*",
-    ),
-  }
-}
-
-fn plan_mitigation(action: &str, args: &MitigationArgs) -> anyhow::Result<RequestPlan> {
-  let (subject_type, values) = match &args.subject {
-    MitigationSubject::Ip(values) => ("client_ip", values),
-    MitigationSubject::Cidr(values) => ("client_ip_cidr", values),
-  };
-  let name = values
-    .name
-    .clone()
-    .unwrap_or_else(|| mitigation_name(action, subject_type, &values.subject));
-  post_json(
-    "/admin/v1/dynamic-policies",
-    json!({
-      "enabled": true,
-      "priority": values.priority,
-      "source": "oxibeltctl",
-      "name": name,
-      "action": action,
-      "subject_type": subject_type,
-      "subject": values.subject,
-      "reason": values.reason,
-      "ttl_seconds": values.ttl,
-      "mode": "enforce",
-    }),
-    "dynamic-policy:Create",
-    "*",
-  )
-}
-
-fn plan_rate_limit(args: &RateLimitArgs) -> anyhow::Result<RequestPlan> {
-  let (subject_type, values) = match &args.subject {
-    RateLimitSubject::Ip(values) => ("client_ip", values),
-    RateLimitSubject::Cidr(values) => ("client_ip_cidr", values),
-  };
-  let name = values
-    .name
-    .clone()
-    .unwrap_or_else(|| mitigation_name("rate-limit", subject_type, &values.subject));
-  post_json(
-    "/admin/v1/dynamic-policies",
-    json!({
-      "enabled": true,
-      "priority": values.priority,
-      "source": "oxibeltctl",
-      "name": name,
-      "action": "rate_limit",
-      "subject_type": subject_type,
-      "subject": values.subject,
-      "rate": values.rate,
-      "burst": values.burst,
-      "reason": values.reason,
-      "ttl_seconds": values.ttl,
-      "mode": "enforce",
-    }),
-    "dynamic-policy:Create",
-    "*",
-  )
-}
-
 fn plan_cache(command: &CacheCommand) -> anyhow::Result<RequestPlan> {
   match &command.command {
     CacheSubcommand::Warm(args) => post_json(
@@ -489,7 +394,7 @@ async fn etag_or_current(client: &AdminClient, etag: &Option<String>) -> anyhow:
   }
 }
 
-fn get(endpoint: &str, action: &str, resource: &str) -> anyhow::Result<RequestPlan> {
+pub(crate) fn get(endpoint: &str, action: &str, resource: &str) -> anyhow::Result<RequestPlan> {
   get_with_filter(endpoint, action, resource, None)
 }
 
@@ -518,7 +423,7 @@ fn post_empty(endpoint: &str, action: &str, resource: &str) -> anyhow::Result<Re
   )
 }
 
-fn post_json(
+pub(crate) fn post_json(
   endpoint: &str,
   body: Value,
   action: &str,
@@ -546,7 +451,7 @@ fn post_json_with_etag(
   Ok(plan)
 }
 
-fn patch_json(
+pub(crate) fn patch_json(
   endpoint: &str,
   body: Value,
   action: &str,
@@ -562,7 +467,7 @@ fn patch_json(
   })
 }
 
-fn delete(endpoint: &str, action: &str, resource: &str) -> anyhow::Result<RequestPlan> {
+pub(crate) fn delete(endpoint: &str, action: &str, resource: &str) -> anyhow::Result<RequestPlan> {
   Ok(RequestPlan {
     method: Method::DELETE,
     endpoint: endpoint.to_string(),
@@ -644,7 +549,7 @@ fn read_text_file(path: &Path) -> anyhow::Result<String> {
   std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
 }
 
-fn read_json_file(path: &Path) -> anyhow::Result<Value> {
+pub(crate) fn read_json_file(path: &Path) -> anyhow::Result<Value> {
   let raw = read_text_file(path)?;
   serde_json::from_str(&raw).with_context(|| format!("failed to parse JSON {}", path.display()))
 }
@@ -707,20 +612,6 @@ fn path_id(value: &str) -> anyhow::Result<&str> {
     bail!("Admin path identifier must not be empty or contain '/', '?', or '#'");
   }
   Ok(value)
-}
-
-fn mitigation_name(action: &str, subject_type: &str, subject: &str) -> String {
-  let sanitized = subject
-    .chars()
-    .map(|character| {
-      if character.is_ascii_alphanumeric() {
-        character
-      } else {
-        '-'
-      }
-    })
-    .collect::<String>();
-  format!("{action}-{subject_type}-{sanitized}")
 }
 
 #[cfg(test)]

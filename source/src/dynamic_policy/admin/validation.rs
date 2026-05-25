@@ -203,6 +203,14 @@ pub(super) fn validate_policy_fields(
   validate_mode(mode)?;
   match action {
     "allow" | "reject" => {}
+    "challenge" => {
+      if rate.is_some() || burst.is_some() {
+        bail!("dynamic policy challenge action does not support rate or burst");
+      }
+      if body.is_some() {
+        bail!("dynamic policy challenge action does not support body");
+      }
+    }
     "rate_limit" => {
       let Some(rate) = rate else {
         bail!("dynamic policy rate_limit action requires rate");

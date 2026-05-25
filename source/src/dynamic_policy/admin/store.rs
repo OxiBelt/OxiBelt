@@ -1,7 +1,7 @@
 use anyhow::Context;
 use sqlx::{Pool, Postgres, Row, Transaction};
 
-use super::DynamicPolicyAdminRecord;
+use super::{DynamicPolicyAdminAuditRecord, DynamicPolicyAdminRecord};
 use crate::dynamic_policy::{PolicyRow, policy_row_from_pg};
 
 pub(super) async fn select_policy_row_tx(
@@ -82,6 +82,29 @@ pub(super) async fn select_admin_record_tx(
   row.as_ref().map(admin_record_from_row).transpose()
 }
 
+pub(super) async fn select_audit_records(
+  pool: &Pool<Postgres>,
+  namespace: &str,
+  policy_id: Option<i64>,
+  limit: i64,
+) -> anyhow::Result<Vec<DynamicPolicyAdminAuditRecord>> {
+  let rows = sqlx::query(
+    "SELECT id, namespace, policy_id, actor, operation, source, name, outcome, error,
+            created_at::text AS created_at
+       FROM oxibelt_dynamic_policy_audit
+      WHERE namespace = $1
+        AND ($2::bigint IS NULL OR policy_id = $2)
+      ORDER BY id DESC
+      LIMIT $3",
+  )
+  .bind(namespace)
+  .bind(policy_id)
+  .bind(limit)
+  .fetch_all(pool)
+  .await?;
+  rows.iter().map(audit_record_from_row).collect()
+}
+
 fn admin_record_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<DynamicPolicyAdminRecord> {
   Ok(DynamicPolicyAdminRecord {
     id: row.try_get("id")?,
@@ -109,6 +132,23 @@ fn admin_record_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<DynamicP
     expires_at: row.try_get("expires_at")?,
     created_at: row.try_get("created_at")?,
     updated_at: row.try_get("updated_at")?,
+  })
+}
+
+fn audit_record_from_row(
+  row: &sqlx::postgres::PgRow,
+) -> anyhow::Result<DynamicPolicyAdminAuditRecord> {
+  Ok(DynamicPolicyAdminAuditRecord {
+    id: row.try_get("id")?,
+    namespace: row.try_get("namespace")?,
+    policy_id: row.try_get("policy_id")?,
+    actor: row.try_get("actor")?,
+    operation: row.try_get("operation")?,
+    source: row.try_get("source")?,
+    name: row.try_get("name")?,
+    outcome: row.try_get("outcome")?,
+    error: row.try_get("error")?,
+    created_at: row.try_get("created_at")?,
   })
 }
 

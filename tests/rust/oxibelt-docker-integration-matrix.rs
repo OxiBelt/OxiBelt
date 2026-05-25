@@ -904,6 +904,8 @@ run_case_checks() {
   create_policy_blocks_after_refresh
   patch_to_dry_run_stops_blocking
   import_upserts_existing_policy
+  apply_upserts_policy_without_duplicate_active_rows
+  audit_lists_applied_and_rejected_rows
   delete_disables_policy
   tampered_signature_keeps_last_good_snapshot
   default_source_quota_blocks_spoofed_source_rotation
@@ -961,6 +963,44 @@ import_upserts_existing_policy() {
   assert_body_jq "${old_request}" '.path == "/origin/app/identity/login"'
   request="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 203.0.113.61")"
   assert_response_jq "${request}" '.body == "import block"'
+}
+
+apply_upserts_policy_without_duplicate_active_rows() {
+  local response request old_request active_count second_policy_id
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/apply" 200 "POST" '{"source":"oxibeltctl","name":"panic-login","action":"reject","subject_type":"client_ip_path","subject":"203.0.113.63|/app/identity","path_prefix":"/app/identity","status":429,"body":"apply block v1","reason":"operator panic button","code":"panic.login","ttl_seconds":3600}' "Authorization: Bearer matrix-security-token")"
+  apply_policy_id="$(policy_json_field "${response}" '.id')"
+  assert_response_jq "${response}" '.body | fromjson | .source == "oxibeltctl" and .name == "panic-login" and .signature_version == "hmac-sha256-v1"'
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/apply" 200 "POST" '{"source":"oxibeltctl","name":"panic-login","action":"reject","subject_type":"client_ip_path","subject":"203.0.113.64|/app/identity","path_prefix":"/app/identity","status":429,"body":"apply block v2","reason":"operator panic button update","code":"panic.login","ttl_seconds":3600}' "Authorization: Bearer matrix-security-token")"
+  second_policy_id="$(policy_json_field "${response}" '.id')"
+  if [[ "${second_policy_id}" != "${apply_policy_id}" ]]; then
+    fail_with_diagnostics "apply should replace the existing dynamic policy id"
+  fi
+  active_count="$(postgres_query "SELECT count(*) FROM oxibelt_dynamic_policies WHERE namespace = 'matrix-dynamic-api' AND source = 'oxibeltctl' AND name = 'panic-login' AND enabled = true;")"
+  if [[ "${active_count}" != "1" ]]; then
+    fail_with_diagnostics "apply should leave exactly one active source/name policy"
+  fi
+
+  wait_for_dynamic_policy_refresh
+  old_request="$(client_request_with_headers "example.test" "/app/identity/login" 200 "GET" "" "X-Forwarded-For: 203.0.113.63")"
+  assert_body_jq "${old_request}" '.path == "/origin/app/identity/login"'
+  request="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 203.0.113.64")"
+  assert_response_jq "${request}" '.body == "apply block v2"'
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/${apply_policy_id}" 200 "DELETE" "" "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${response}" '.body | fromjson | .ok == true'
+}
+
+audit_lists_applied_and_rejected_rows() {
+  local response audit policy_audit
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/apply" 400 "POST" '{"source":"audit-reject","name":"bad-challenge","action":"challenge","subject_type":"client_ip","subject":"203.0.113.65","body":"challenge body is invalid","reason":"invalid challenge","ttl_seconds":3600}' "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${response}" '.body | contains("challenge action does not support body")'
+
+  audit="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/audit?limit=50" 200 "GET" "" "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${audit}" '.body | fromjson | .audit | map(select(.operation == "apply" and .outcome == "rejected" and .source == "audit-reject" and .name == "bad-challenge" and (.error | contains("does not support body")))) | length == 1'
+
+  policy_audit="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/audit?limit=20&policy_id=${apply_policy_id}" 200 "GET" "" "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${policy_audit}" ".body | fromjson | .audit | map(select(.policy_id == ${apply_policy_id} and .operation == \"apply\" and .outcome == \"applied\")) | length >= 1"
 }
 
 delete_disables_policy() {

@@ -5,7 +5,7 @@ use http::{Request, Response, StatusCode};
 use tracing::warn;
 
 use crate::config::{HttpVersion, UpstreamConfig};
-use crate::dynamic_policy::DynamicPolicyRequest;
+use crate::dynamic_policy::{DynamicPolicyRequest, DynamicPolicyTerminal};
 use crate::external_auth::ExternalAuthOutcome;
 use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
@@ -112,10 +112,61 @@ pub(crate) async fn prepare_webtransport(
   } else {
     Default::default()
   };
-  if let Some(terminal) = dynamic_policy.terminal {
-    return Err(Box::new(text_response(terminal.status, &terminal.body)));
-  }
   let dynamic_policy_context = dynamic_policy.context;
+  let mut dynamic_challenge_response_mutations = Vec::new();
+  if let Some(terminal) = dynamic_policy.terminal {
+    match terminal {
+      DynamicPolicyTerminal::Text { status, body } => {
+        return Err(Box::new(text_response(status, &body)));
+      }
+      DynamicPolicyTerminal::Challenge { status } => {
+        if !state.waf.has_person_proof_api_path(request_uri.path()) {
+          let request_id = crate::waf::new_access_log_id();
+          let transaction_id = crate::waf::new_access_log_id();
+          let decision = state
+            .waf
+            .evaluate_dynamic_person_proof_challenge(
+              WafRequestInput {
+                request_id: &request_id,
+                transaction_id: &transaction_id,
+                received_at_unix_ms,
+                method: &request_method,
+                uri: &request_uri,
+                version: http::Version::HTTP_3,
+                headers: request.headers(),
+                body: None,
+                peer_addr,
+                downstream_host: &host,
+                downstream_scheme: "https",
+                route_name: &resolved.route.name,
+                tcp_max_hop: None,
+                tls,
+                protocol: WafProtocol::Webtransport,
+                transport_network: WafTransportNetwork::Udp,
+                transport_metadata,
+                tags: tags_ref(&tags),
+                dynamic_policy: &dynamic_policy_context,
+              },
+              status,
+            )
+            .map_err(|error| {
+              warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
+              Box::new(text_response(
+                StatusCode::FORBIDDEN,
+                "person proof challenge failed",
+              ))
+            })?;
+          if let Some(terminal) = decision.terminal {
+            return Err(Box::new(waf_terminal_response(
+              terminal,
+              &decision.response_header_mutations,
+            )));
+          }
+          dynamic_challenge_response_mutations.extend(decision.response_header_mutations);
+        }
+      }
+    }
+  }
 
   let mut auth_request = request.clone();
   if let Some(provider) = resolved.route.external_auth.as_deref() {
@@ -140,7 +191,7 @@ pub(crate) async fn prepare_webtransport(
   let request_headers = auth_request.headers().clone();
 
   let mut request_ids = None;
-  let request_waf = if state.waf.enabled() {
+  let mut request_waf = if state.waf.enabled() {
     let request_id = crate::waf::new_access_log_id();
     let transaction_id = crate::waf::new_access_log_id();
     let decision = state.waf.evaluate_request(WafRequestInput {
@@ -169,6 +220,9 @@ pub(crate) async fn prepare_webtransport(
   } else {
     Default::default()
   };
+  request_waf
+    .response_header_mutations
+    .extend(dynamic_challenge_response_mutations);
 
   if !request_waf.tags.is_empty() {
     let tags = tags.get_or_insert_with(HashMap::new);

@@ -59,7 +59,9 @@ pub(crate) enum Command {
   DynamicPolicy(DynamicPolicyCommand),
   Block(MitigationArgs),
   Allow(MitigationArgs),
+  Challenge(ChallengeArgs),
   RateLimit(RateLimitArgs),
+  Mitigate(MitigateArgs),
   Cache(CacheCommand),
   Ipm(IpmCommand),
   Auth(AuthCommand),
@@ -315,8 +317,10 @@ pub(crate) enum DynamicPolicySubcommand {
   List,
   Get(IdArg),
   Create(JsonFileArg),
+  Apply(JsonFileArg),
   Patch(PatchJsonArg),
   Delete(IdArg),
+  Audit(DynamicPolicyAuditArgs),
   Export,
   Import(JsonFileArg),
 }
@@ -340,6 +344,14 @@ pub(crate) struct PatchJsonArg {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct DynamicPolicyAuditArgs {
+  #[arg(long)]
+  pub(crate) policy_id: Option<i64>,
+  #[arg(long, default_value_t = 100)]
+  pub(crate) limit: i64,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct JsonInputArg {
   #[arg(value_name = "JSON_OR_FILE")]
   pub(crate) input: String,
@@ -351,16 +363,16 @@ pub(crate) struct MitigationArgs {
   pub(crate) subject: MitigationSubject,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub(crate) enum MitigationSubject {
   Ip(MitigationSubjectArgs),
   Cidr(MitigationSubjectArgs),
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub(crate) struct MitigationSubjectArgs {
   pub(crate) subject: String,
-  #[arg(long)]
+  #[arg(long, value_parser = parse_ttl_seconds)]
   pub(crate) ttl: Option<i64>,
   #[arg(long)]
   pub(crate) reason: Option<String>,
@@ -368,6 +380,22 @@ pub(crate) struct MitigationSubjectArgs {
   pub(crate) name: Option<String>,
   #[arg(long, default_value_t = 100)]
   pub(crate) priority: i32,
+  #[arg(long)]
+  pub(crate) route: Option<String>,
+  #[arg(long = "path-prefix")]
+  pub(crate) path_prefix: Option<String>,
+  #[arg(long)]
+  pub(crate) method: Option<String>,
+  #[arg(long)]
+  pub(crate) dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ChallengeArgs {
+  #[arg(long = "person-proof", required = true)]
+  pub(crate) person_proof: bool,
+  #[command(subcommand)]
+  pub(crate) subject: MitigationSubject,
 }
 
 #[derive(Debug, Args)]
@@ -378,6 +406,7 @@ pub(crate) struct RateLimitArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum RateLimitSubject {
+  Source(RateLimitSubjectArgs),
   Ip(RateLimitSubjectArgs),
   Cidr(RateLimitSubjectArgs),
 }
@@ -385,11 +414,13 @@ pub(crate) enum RateLimitSubject {
 #[derive(Debug, Args)]
 pub(crate) struct RateLimitSubjectArgs {
   pub(crate) subject: String,
+  #[arg(long, conflicts_with = "rps")]
+  pub(crate) rate: Option<String>,
+  #[arg(long, conflicts_with = "rate")]
+  pub(crate) rps: Option<f64>,
   #[arg(long)]
-  pub(crate) rate: String,
-  #[arg(long)]
-  pub(crate) burst: i32,
-  #[arg(long)]
+  pub(crate) burst: Option<i32>,
+  #[arg(long, value_parser = parse_ttl_seconds)]
   pub(crate) ttl: Option<i64>,
   #[arg(long)]
   pub(crate) reason: Option<String>,
@@ -397,6 +428,37 @@ pub(crate) struct RateLimitSubjectArgs {
   pub(crate) name: Option<String>,
   #[arg(long, default_value_t = 100)]
   pub(crate) priority: i32,
+  #[arg(long)]
+  pub(crate) route: Option<String>,
+  #[arg(long = "path-prefix")]
+  pub(crate) path_prefix: Option<String>,
+  #[arg(long)]
+  pub(crate) method: Option<String>,
+  #[arg(long)]
+  pub(crate) dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MitigateArgs {
+  pub(crate) playbook: String,
+  #[arg(long)]
+  pub(crate) source: String,
+  #[arg(long, value_parser = parse_ttl_seconds)]
+  pub(crate) ttl: Option<i64>,
+  #[arg(long)]
+  pub(crate) reason: Option<String>,
+  #[arg(long)]
+  pub(crate) name: Option<String>,
+  #[arg(long, default_value_t = 100)]
+  pub(crate) priority: i32,
+  #[arg(long)]
+  pub(crate) route: Option<String>,
+  #[arg(long = "path-prefix")]
+  pub(crate) path_prefix: Option<String>,
+  #[arg(long)]
+  pub(crate) method: Option<String>,
+  #[arg(long)]
+  pub(crate) dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -547,6 +609,30 @@ fn parse_external_probe(value: &str) -> Result<ExternalProbeKind, String> {
   value
     .parse()
     .map_err(|error: anyhow::Error| error.to_string())
+}
+
+fn parse_ttl_seconds(value: &str) -> Result<i64, String> {
+  let value = value.trim();
+  if value.is_empty() {
+    return Err("ttl must not be empty".to_string());
+  }
+  let (number, multiplier) = match value.as_bytes().last().copied() {
+    Some(b's') | Some(b'S') => (&value[..value.len() - 1], 1_i64),
+    Some(b'm') | Some(b'M') => (&value[..value.len() - 1], 60_i64),
+    Some(b'h') | Some(b'H') => (&value[..value.len() - 1], 3_600_i64),
+    Some(b'd') | Some(b'D') => (&value[..value.len() - 1], 86_400_i64),
+    Some(byte) if byte.is_ascii_digit() => (value, 1_i64),
+    _ => return Err("ttl must be seconds or use s, m, h, or d suffix".to_string()),
+  };
+  let amount = number
+    .parse::<i64>()
+    .map_err(|_| "ttl amount must be an integer".to_string())?;
+  if amount <= 0 {
+    return Err("ttl must be greater than 0".to_string());
+  }
+  amount
+    .checked_mul(multiplier)
+    .ok_or_else(|| "ttl is too large".to_string())
 }
 
 #[cfg(test)]

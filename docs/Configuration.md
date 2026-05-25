@@ -701,6 +701,14 @@ signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
 source = "vaultwarden"
 max_active_policies = 100
 
+[[dynamic_policy.automation_api.source_quotas]]
+source = "oxibeltctl"
+max_active_policies = 200
+
+[[dynamic_policy.automation_api.source_quotas]]
+source = "oxibeltctl-playbook"
+max_active_policies = 100
+
 [dynamic_policy.matching]
 trust_route_name = true
 normalize_path = true
@@ -720,11 +728,13 @@ connect_timeout_ms = 3000
 
 Dynamic policy is an opt-in PostgreSQL-backed policy snapshot for external security automation. The selected backend comes from `dynamic_policy.backend`, then `shared_state.dynamic_policy_backend`, then `shared_state.default_backend`, and must be a PostgreSQL shared-state backend. PostgreSQL is only the policy source: OxiBelt creates dedicated `oxibelt_dynamic_policies`, `oxibelt_dynamic_policy_generation`, and `oxibelt_dynamic_policy_audit` tables, periodically loads active rows into an immutable in-memory snapshot, and never runs PostgreSQL queries from the request hot path. Legacy external translators, such as a Vaultwarden stdout sidecar, may write this supported policy API table while `dynamic_policy.automation_api.enabled = false`; they should not write `oxibelt_shared_state` or `oxibelt_shared_counters`.
 
-When `[dynamic_policy.automation_api]` is enabled, `[admin]` must also be enabled and `signature_key_env` must point to base64 for exactly 32 random bytes. The Admin API signs rows with HMAC-SHA256 and the snapshot loader rejects active rows whose `signature_version` or `row_signature` does not verify. `require_ttl = true` requires `expires_at` or `ttl_seconds` for Admin-created/imported active policies and for active signed rows loaded into a snapshot. Admin create, import, and patch writes enforce `dynamic_policy.max_policies` before they can add another active row, so the automation API cannot create a snapshot that would exceed the loader cap. Explicit `source_quotas` bound active policies for the matching source. `default_source_quota` bounds the shared bucket for all sources that do not have an explicit `source_quotas` entry, preventing clients from rotating arbitrary source names to gain fresh quota.
+When `[dynamic_policy.automation_api]` is enabled, `[admin]` must also be enabled and `signature_key_env` must point to base64 for exactly 32 random bytes. The Admin API signs rows with HMAC-SHA256 and the snapshot loader rejects active rows whose `signature_version` or `row_signature` does not verify. `require_ttl = true` requires `expires_at` or `ttl_seconds` for Admin-created/imported/applied active policies and for active signed rows loaded into a snapshot. Admin create, import, apply, and patch writes enforce `dynamic_policy.max_policies` before they can add another active row, so the automation API cannot create a snapshot that would exceed the loader cap. Explicit `source_quotas` bound active policies for the matching source. `default_source_quota` bounds the shared bucket for all sources that do not have an explicit `source_quotas` entry, preventing clients from rotating arbitrary source names to gain fresh quota.
 
-Active rows must match `shared_state.namespace`, have `enabled = true`, and be unexpired. `action` is `allow`, `reject`, or `rate_limit`; `subject_type` is `client_ip`, `client_ip_cidr`, `client_ip_route`, or `client_ip_path`. Composite subjects use a pipe separator: `client_ip` stores `203.0.113.10`, `client_ip_cidr` stores `203.0.113.0/24`, `client_ip_route` stores `203.0.113.10|app-route`, and `client_ip_path` stores `203.0.113.10|/identity`. IP portions are parsed and canonicalized when snapshots load, including equivalent IPv6 spellings such as expanded uppercase addresses. `client_ip_route` rows require `route_name`; `client_ip_path` rows require `path_prefix`. Optional `method`, `route_name`, and `path_prefix` further narrow the match. `mode = "dry_run"` records a match without applying an `allow`, `reject`, or `rate_limit`; `mode = "enforce"` applies the selected policy.
+Active rows must match `shared_state.namespace`, have `enabled = true`, and be unexpired. `action` is `allow`, `reject`, `rate_limit`, or `challenge`; `subject_type` is `client_ip`, `client_ip_cidr`, `client_ip_route`, or `client_ip_path`. Composite subjects use a pipe separator: `client_ip` stores `203.0.113.10`, `client_ip_cidr` stores `203.0.113.0/24`, `client_ip_route` stores `203.0.113.10|app-route`, and `client_ip_path` stores `203.0.113.10|/identity`. IP portions are parsed and canonicalized when snapshots load, including equivalent IPv6 spellings such as expanded uppercase addresses. `client_ip_route` rows require `route_name`; `client_ip_path` rows require `path_prefix`. Optional `method`, `route_name`, and `path_prefix` further narrow the match. `mode = "dry_run"` records a match without applying an `allow`, `reject`, `rate_limit`, or `challenge`; `mode = "enforce"` applies the selected policy.
 
-When multiple policies match, OxiBelt chooses the most specific match before applying the action: rows with `route_name` beat route-agnostic rows, longer `path_prefix` beats shorter prefixes, exact IP subjects beat CIDR subjects, longer CIDR prefixes beat shorter prefixes, then lower `priority`, then lower `id`. The first enforcing `allow` permits the request; the first enforcing `reject` or `rate_limit` applies as usual. If only dry-run policies match, `DynamicPolicy.*` context is populated and the request continues.
+`challenge` is a v1 Person proof dynamic action. It uses the built-in Person proof session, verify, and OpenAPI paths from `[waf.person_proof]`; dynamic rows only choose whether the challenge applies and may override the response `status` for the issued challenge. If `status` is omitted, `challenge` defaults to `403`, independent of `dynamic_policy.default_status`. `challenge` rows reject `rate`, `burst`, and `body`, because those fields belong to `rate_limit` and text `reject` responses. Requests that already carry valid Person proof clearance pass through; Person proof API paths bypass only dynamic `challenge` so the browser can fetch session/verify/OpenAPI documents without a challenge loop. Dynamic `reject` and `rate_limit` still apply to those paths.
+
+When multiple policies match, OxiBelt chooses the most specific match before applying the action: rows with `route_name` beat route-agnostic rows, longer `path_prefix` beats shorter prefixes, exact IP subjects beat CIDR subjects, longer CIDR prefixes beat shorter prefixes, then lower `priority`, then lower `id`. The first enforcing `allow` permits the request; the first enforcing `reject`, `rate_limit`, or `challenge` applies as usual. If only dry-run policies match, `DynamicPolicy.*` context is populated and the request continues.
 
 OxiBelt initializes the policy API schema:
 
@@ -1014,7 +1024,7 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
-Actions use `service:Action` syntax. Initial services are `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
+Actions use `service:Action` syntax. Initial services are `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. Dynamic policy automation uses `dynamic-policy:List`, `dynamic-policy:Get`, `dynamic-policy:Create`, `dynamic-policy:Apply`, `dynamic-policy:Update`, `dynamic-policy:Delete`, `dynamic-policy:Export`, `dynamic-policy:Import`, and `dynamic-policy:ReadAudit`. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
 
 OxiRule development API requests that set `include_active_rules = true` evaluate active WAF policy as well as the submitted candidate, so they require the same devtools action on `oxirule/*`; replay uses `replay/*`.
 
@@ -1078,6 +1088,27 @@ oxibeltctl config diff source/config/oxibelt.toml
 oxibeltctl lifecycle drain
 oxibeltctl auth check --action config:GetStatus --resource '*'
 ```
+
+Dynamic mitigation commands are panic-button wrappers around the dynamic policy
+automation API. Durations accept seconds or `s`, `m`, `h`, and `d` suffixes;
+`--dry-run` records match context without enforcing the action. If `--reason`
+is omitted, `oxibeltctl` sends a non-empty operational reason derived from the
+command.
+
+```sh
+oxibeltctl block ip 203.0.113.10 --ttl 1h --reason 'incident response'
+oxibeltctl allow cidr 203.0.113.0/24 --ttl 30m --route app-root
+oxibeltctl challenge --person-proof ip 203.0.113.11 --ttl 10m
+oxibeltctl rate-limit source 203.0.113.12 --rps 1 --ttl 10m
+oxibeltctl mitigate vaultwarden-bruteforce --source 203.0.113.13
+```
+
+The built-in `vaultwarden-bruteforce` mitigation playbook renders a dynamic
+`reject` policy through `/admin/v1/dynamic-policies/apply` with source
+`oxibeltctl-playbook`, code `vaultwarden.bruteforce`, status `429`, default
+path prefix `/identity`, and default TTL `15m`. Common options such as
+`--ttl`, `--name`, `--priority`, `--route`, `--path-prefix`, `--method`, and
+`--dry-run` may override the rendered policy shape.
 
 Container images keep `ENTRYPOINT` on `oxibelt` but include the CLI for
 same-container operations:
@@ -1292,12 +1323,16 @@ Dynamic policy automation endpoints:
 - `GET /admin/v1/dynamic-policies`
 - `GET /admin/v1/dynamic-policies/{id}`
 - `POST /admin/v1/dynamic-policies`
+- `POST /admin/v1/dynamic-policies/apply`
 - `PATCH /admin/v1/dynamic-policies/{id}`
 - `DELETE /admin/v1/dynamic-policies/{id}`
+- `GET /admin/v1/dynamic-policies/audit?limit=&policy_id=`
 - `GET /admin/v1/dynamic-policies/export`
 - `POST /admin/v1/dynamic-policies/import`
 
-Create/import JSON accepts `source`, `name`, `action`, `subject_type`, `subject`, optional `route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`, `reason`, `code`, `mode`, and either `expires_at` or `ttl_seconds` when TTL is required. Create, import, and patch reject changes that would exceed either the global active policy cap or the matching source quota bucket. Import payloads use `{ "policies": [...] }` and upsert by `namespace + source + name`; duplicate rows beyond the lowest `id` are disabled. `DELETE` disables the row instead of physically removing it.
+Create/import/apply JSON accepts `source`, `name`, `action`, `subject_type`, `subject`, optional `route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`, `reason`, `code`, `mode`, and either `expires_at` or `ttl_seconds` when TTL is required. Create, import, apply, and patch reject changes that would exceed either the global active policy cap or the matching source quota bucket. Raw `POST /admin/v1/dynamic-policies` preserves create semantics. `POST /admin/v1/dynamic-policies/apply` is the operator UX upsert endpoint: it creates or replaces the row selected by `namespace + source + name`, disables duplicate rows beyond the lowest `id`, and is intended for repeat panic-button clicks that should not consume extra quota. Import payloads use `{ "policies": [...] }` and upsert by `namespace + source + name`; duplicate rows beyond the lowest `id` are disabled. `DELETE` disables the row instead of physically removing it.
+
+`GET /admin/v1/dynamic-policies/audit` returns recent audit rows as `{ "audit": [...] }`. `limit` defaults to `100` and is capped at `1000`; `policy_id` restricts results to one policy. Dynamic policy create, apply, import, patch, and delete successes are audited, and validation or quota rejects are written as best-effort audit rows with `outcome = "rejected"`. The audit actor is derived from Admin authentication and authorization, not from JSON supplied by a CLI or automation client.
 
 Admin purge endpoints:
 

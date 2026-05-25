@@ -75,6 +75,7 @@ struct DynamicPolicy {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum DynamicPolicyAction {
   Allow,
+  Challenge,
   Reject,
   RateLimit,
 }
@@ -83,6 +84,7 @@ impl DynamicPolicyAction {
   fn as_str(self) -> &'static str {
     match self {
       Self::Allow => "allow",
+      Self::Challenge => "challenge",
       Self::Reject => "reject",
       Self::RateLimit => "rate_limit",
     }
@@ -135,9 +137,9 @@ pub struct DynamicPolicyContext {
 }
 
 #[derive(Debug, Clone)]
-pub struct DynamicPolicyTerminal {
-  pub status: StatusCode,
-  pub body: String,
+pub enum DynamicPolicyTerminal {
+  Text { status: StatusCode, body: String },
+  Challenge { status: StatusCode },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -354,6 +356,22 @@ fn evaluate_snapshot(
         terminal: None,
       }
     }
+    DynamicPolicyAction::Challenge => {
+      info!(
+        policy_id = policy.id,
+        policy_name = %policy.name,
+        action = "challenge",
+        route = request.route_name,
+        client_ip = %request.client_ip,
+        "dynamic policy challenged request"
+      );
+      DynamicPolicyOutcome {
+        context,
+        terminal: Some(DynamicPolicyTerminal::Challenge {
+          status: policy.status,
+        }),
+      }
+    }
     DynamicPolicyAction::Reject => {
       metrics.record_dynamic_policy_reject();
       info!(
@@ -366,7 +384,7 @@ fn evaluate_snapshot(
       );
       DynamicPolicyOutcome {
         context,
-        terminal: Some(DynamicPolicyTerminal {
+        terminal: Some(DynamicPolicyTerminal::Text {
           status: policy.status,
           body: policy.body.clone(),
         }),
@@ -392,7 +410,7 @@ fn evaluate_snapshot(
         );
         return DynamicPolicyOutcome {
           context,
-          terminal: Some(DynamicPolicyTerminal {
+          terminal: Some(DynamicPolicyTerminal::Text {
             status,
             body: policy.body.clone(),
           }),
@@ -779,6 +797,7 @@ fn validate_policy_row(
 
   let action = match action.as_str() {
     "allow" => DynamicPolicyAction::Allow,
+    "challenge" => DynamicPolicyAction::Challenge,
     "reject" => DynamicPolicyAction::Reject,
     "rate_limit" => DynamicPolicyAction::RateLimit,
     _ => bail!("dynamic policy {id} has unsupported action {action}"),
@@ -831,7 +850,21 @@ fn validate_policy_row(
     .map(validate_status)
     .transpose()
     .with_context(|| format!("dynamic policy {id} has invalid status"))?
-    .unwrap_or(StatusCode::from_u16(config.default_status).expect("validated default status"));
+    .unwrap_or_else(|| {
+      if action == DynamicPolicyAction::Challenge {
+        StatusCode::FORBIDDEN
+      } else {
+        StatusCode::from_u16(config.default_status).expect("validated default status")
+      }
+    });
+  if action == DynamicPolicyAction::Challenge {
+    if body.is_some() {
+      bail!("dynamic policy {id} challenge action does not support body");
+    }
+    if rate.is_some() || burst.is_some() {
+      bail!("dynamic policy {id} challenge action does not support rate or burst");
+    }
+  }
   let body = body.unwrap_or_else(|| config.default_body.clone());
   validate_string_len("dynamic policy body", &body, MAX_DYNAMIC_POLICY_BODY_BYTES)?;
 

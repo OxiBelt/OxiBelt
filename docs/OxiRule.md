@@ -781,7 +781,7 @@ Context.Mode: 'enforcing' | 'monitor' # effective mode for the current rule, or 
 
 ```text
 DynamicPolicy.Matched: Bool
-DynamicPolicy.Action: 'allow' | 'reject' | 'rate_limit' | Null
+DynamicPolicy.Action: 'allow' | 'reject' | 'rate_limit' | 'challenge' | Null
 DynamicPolicy.Name: String | Null
 DynamicPolicy.Reason: String | Null
 DynamicPolicy.Code: String | Null
@@ -789,7 +789,7 @@ DynamicPolicy.Mode: 'enforce' | 'dry_run' | Null
 DynamicPolicy.Source: String | Null
 ```
 
-`DynamicPolicy.*` is read-only request context from OxiBelt's in-memory dynamic policy snapshot. It does not perform SQL or any other external I/O while evaluating an OxiRule expression. Terminal dynamic policy rejects happen before request-phase OxiRule evaluation, so these fields are mainly useful for requests that matched an allowed dynamic `allow`, non-terminal `rate_limit`, or `dry_run` policy and for response/access-log expressions.
+`DynamicPolicy.*` is read-only request context from OxiBelt's in-memory dynamic policy snapshot. It does not perform SQL or any other external I/O while evaluating an OxiRule expression. Terminal dynamic policy rejects and Person proof challenges happen before request-phase OxiRule evaluation, so these fields are mainly useful for requests that matched an allowed dynamic `allow`, non-terminal `rate_limit`, valid-clearance `challenge`, or `dry_run` policy and for response/access-log expressions.
 
 ```text
 Request.Id: String

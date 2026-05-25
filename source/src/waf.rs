@@ -39,6 +39,7 @@ mod pattern_set;
 mod person_proof;
 mod person_proof_api;
 mod person_proof_config;
+mod person_proof_dynamic;
 mod person_proof_policy;
 mod person_proof_v2;
 mod plan;
@@ -1565,11 +1566,14 @@ impl WafEngine {
         )?,
       );
     }
-    let person_proof_policies = global_rules
+    let mut person_proof_policies = global_rules
       .iter()
       .chain(route_rules.values().flat_map(|rules| rules.iter()))
       .flat_map(|rule| rule.person_proof_policies.iter().cloned())
       .collect::<Vec<_>>();
+    if config.dynamic_policy.enabled {
+      person_proof_policies.push(person_proof_dynamic::policy(&config.waf.person_proof));
+    }
     let person_proof = PersonProofEngine::from_policies_with_previous(
       person_proof_policies,
       config.waf.limits.max_person_proof_reuse_tokens,
@@ -1695,6 +1699,30 @@ impl WafEngine {
 
   pub fn person_proof_openapi_document(&self, openapi_path: &str) -> Option<String> {
     person_proof_api::openapi_document(&self.person_proof, openapi_path)
+  }
+
+  pub fn evaluate_dynamic_person_proof_challenge(
+    &self,
+    input: WafRequestInput<'_>,
+    status: StatusCode,
+  ) -> anyhow::Result<RequestWafDecision> {
+    let mut decision = RequestWafDecision::default();
+    let person_proof = self.person_proof.evaluate_request(input);
+    if person_proof.rate_limited {
+      return Ok(person_proof_rate_limited_decision());
+    }
+    if let Some(mutation) = self
+      .person_proof
+      .clearance_response_mutation(&person_proof)?
+    {
+      decision.response_header_mutations.push(mutation);
+    }
+    if person_proof.state == PersonProofState::Valid {
+      return Ok(decision);
+    }
+    let policy = person_proof_dynamic::challenge_policy(&self.person_proof, status)?;
+    decision.terminal = Some(self.person_proof.issue_challenge(input, policy)?);
+    Ok(decision)
   }
 
   pub fn begin_person_proof_session_challenge(

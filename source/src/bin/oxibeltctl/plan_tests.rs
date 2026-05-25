@@ -196,6 +196,208 @@ fn runtime_introspection_cli_requires_redact() {
   );
 }
 
+#[test]
+fn block_ip_uses_apply_with_duration_route_and_dry_run() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "block",
+    "ip",
+    "203.0.113.10",
+    "--ttl",
+    "1h",
+    "--route",
+    "admin",
+    "--reason",
+    "incident response",
+    "--dry-run",
+  ])
+  .expect("block command should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.method, Method::POST);
+  assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
+  assert_eq!(plan.permission.action, "dynamic-policy:Apply");
+  assert_eq!(
+    plan.body,
+    Some(json!({
+      "enabled": true,
+      "priority": 100,
+      "source": "oxibeltctl",
+      "name": "reject-client_ip_route-203-0-113-10-admin",
+      "action": "reject",
+      "subject_type": "client_ip_route",
+      "subject": "203.0.113.10|admin",
+      "route_name": "admin",
+      "path_prefix": null,
+      "method": null,
+      "reason": "incident response",
+      "ttl_seconds": 3600,
+      "mode": "dry_run",
+    }))
+  );
+}
+
+#[test]
+fn challenge_person_proof_uses_dynamic_challenge_action() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "challenge",
+    "--person-proof",
+    "ip",
+    "203.0.113.11",
+    "--ttl",
+    "2h",
+  ])
+  .expect("challenge command should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
+  assert_eq!(
+    plan.body,
+    Some(json!({
+      "enabled": true,
+      "priority": 100,
+      "source": "oxibeltctl",
+      "name": "challenge-client_ip-203-0-113-11",
+      "action": "challenge",
+      "subject_type": "client_ip",
+      "subject": "203.0.113.11",
+      "route_name": null,
+      "path_prefix": null,
+      "method": null,
+      "reason": "oxibeltctl challenge 203.0.113.11",
+      "ttl_seconds": 7200,
+      "mode": "enforce",
+    }))
+  );
+}
+
+#[test]
+fn rate_limit_source_accepts_rps_and_default_burst() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rate-limit",
+    "source",
+    "203.0.113.12",
+    "--rps",
+    "1",
+    "--ttl",
+    "10m",
+  ])
+  .expect("rate-limit source command should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
+  assert_eq!(
+    plan.body,
+    Some(json!({
+      "enabled": true,
+      "priority": 100,
+      "source": "oxibeltctl",
+      "name": "rate-limit-client_ip-203-0-113-12",
+      "action": "rate_limit",
+      "subject_type": "client_ip",
+      "subject": "203.0.113.12",
+      "route_name": null,
+      "path_prefix": null,
+      "method": null,
+      "rate": "1r/s",
+      "burst": 1,
+      "reason": "oxibeltctl rate-limit 203.0.113.12",
+      "ttl_seconds": 600,
+      "mode": "enforce",
+    }))
+  );
+}
+
+#[test]
+fn mitigate_vaultwarden_bruteforce_renders_builtin_playbook() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "mitigate",
+    "vaultwarden-bruteforce",
+    "--source",
+    "203.0.113.13",
+  ])
+  .expect("mitigate playbook should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
+  assert_eq!(
+    plan.body,
+    Some(json!({
+      "enabled": true,
+      "priority": 100,
+      "source": "oxibeltctl-playbook",
+      "name": "vaultwarden-bruteforce-client_ip_path-203-0-113-13--identity",
+      "action": "reject",
+      "subject_type": "client_ip_path",
+      "subject": "203.0.113.13|/identity",
+      "route_name": null,
+      "path_prefix": "/identity",
+      "method": null,
+      "status": 429,
+      "reason": "vaultwarden brute-force mitigation for 203.0.113.13",
+      "code": "vaultwarden.bruteforce",
+      "ttl_seconds": 900,
+      "mode": "enforce",
+    }))
+  );
+}
+
+#[test]
+fn dynamic_policy_audit_builds_query_endpoint() {
+  let command = Command::DynamicPolicy(DynamicPolicyCommand {
+    command: DynamicPolicySubcommand::Audit(DynamicPolicyAuditArgs {
+      policy_id: Some(42),
+      limit: 25,
+    }),
+  });
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &command))
+    .expect("plan");
+
+  assert_eq!(plan.method, Method::GET);
+  assert_eq!(
+    plan.endpoint,
+    "/admin/v1/dynamic-policies/audit?limit=25&policy_id=42"
+  );
+  assert_eq!(plan.permission.action, "dynamic-policy:ReadAudit");
+}
+
 fn dummy_client() -> AdminClient {
   oxibelt::tls::install_default_provider().expect("provider");
   let options = AdminClientOptions::new(

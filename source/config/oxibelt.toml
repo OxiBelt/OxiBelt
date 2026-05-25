@@ -637,6 +637,12 @@ signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
 # [[dynamic_policy.automation_api.source_quotas]]
 # source = "vaultwarden"
 # max_active_policies = 100
+# [[dynamic_policy.automation_api.source_quotas]]
+# source = "oxibeltctl"
+# max_active_policies = 200
+# [[dynamic_policy.automation_api.source_quotas]]
+# source = "oxibeltctl-playbook"
+# max_active_policies = 100 # built-in playbooks such as vaultwarden-bruteforce
 
 [dynamic_policy.matching]
 trust_route_name = true
