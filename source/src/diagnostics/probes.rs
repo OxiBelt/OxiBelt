@@ -9,9 +9,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
-use crate::config::{
-  Config, DatabaseTlsMode, HttpVersion, SharedStateBackendConfig, SharedStateBackendKind,
-};
+use crate::config::{Config, DatabaseTlsMode, SharedStateBackendConfig, SharedStateBackendKind};
 
 use super::{DiagnosticReport, DiagnosticSeverity, DoctorOptions, ExternalProbeKind};
 
@@ -22,10 +20,10 @@ pub(super) async fn run_external_probes(
 ) {
   for probe in options.expanded_external_probes() {
     match probe {
-      ExternalProbeKind::SharedState => probe_shared_state(config, report).await,
-      ExternalProbeKind::IpmStore => probe_ipm_store(config, report).await,
-      ExternalProbeKind::RemoteSigner => probe_remote_signer(config, report).await,
-      ExternalProbeKind::Upstream => probe_upstreams(config, report).await,
+      ExternalProbeKind::SharedState => probe_shared_state(config, options, report).await,
+      ExternalProbeKind::IpmStore => probe_ipm_store(config, options, report).await,
+      ExternalProbeKind::RemoteSigner => probe_remote_signer(config, options, report).await,
+      ExternalProbeKind::Upstream => probe_upstreams(config, options, report).await,
       ExternalProbeKind::All => {}
     }
   }
@@ -38,28 +36,42 @@ pub(super) fn external_probe_target_resources(
   let mut resources = BTreeSet::new();
   for probe in options.expanded_external_probes() {
     match probe {
-      ExternalProbeKind::SharedState => collect_shared_state_targets(config, &mut resources),
-      ExternalProbeKind::IpmStore => collect_ipm_store_targets(config, &mut resources),
-      ExternalProbeKind::RemoteSigner => collect_remote_signer_targets(config, &mut resources),
-      ExternalProbeKind::Upstream => collect_upstream_targets(config, &mut resources),
+      ExternalProbeKind::SharedState => {
+        collect_shared_state_targets(config, options, &mut resources)
+      }
+      ExternalProbeKind::IpmStore => collect_ipm_store_targets(config, options, &mut resources),
+      ExternalProbeKind::RemoteSigner => {
+        collect_remote_signer_targets(config, options, &mut resources)
+      }
+      ExternalProbeKind::Upstream => collect_upstream_targets(config, options, &mut resources),
       ExternalProbeKind::All => {}
     }
   }
   resources.into_iter().collect()
 }
 
-fn collect_shared_state_targets(config: &Config, resources: &mut BTreeSet<String>) {
+fn collect_shared_state_targets(
+  config: &Config,
+  options: &DoctorOptions,
+  resources: &mut BTreeSet<String>,
+) {
   if !config.shared_state.enabled {
     return;
   }
   for backend in &config.shared_state.backends {
-    if let Some(resource) = shared_state_backend_resource("shared_state", backend) {
+    if let Some(resource) =
+      shared_state_backend_resource("shared_state", backend, options.allow_secret_env_probes)
+    {
       resources.insert(resource);
     }
   }
 }
 
-fn collect_ipm_store_targets(config: &Config, resources: &mut BTreeSet<String>) {
+fn collect_ipm_store_targets(
+  config: &Config,
+  options: &DoctorOptions,
+  resources: &mut BTreeSet<String>,
+) {
   if !config.ipm.enabled {
     return;
   }
@@ -74,12 +86,21 @@ fn collect_ipm_store_targets(config: &Config, resources: &mut BTreeSet<String>) 
   else {
     return;
   };
-  if let Some(resource) = shared_state_backend_resource("ipm_store", backend) {
+  if let Some(resource) =
+    shared_state_backend_resource("ipm_store", backend, options.allow_secret_env_probes)
+  {
     resources.insert(resource);
   }
 }
 
-fn collect_remote_signer_targets(config: &Config, resources: &mut BTreeSet<String>) {
+fn collect_remote_signer_targets(
+  config: &Config,
+  options: &DoctorOptions,
+  resources: &mut BTreeSet<String>,
+) {
+  if !options.allow_secret_env_probes {
+    return;
+  }
   if config.tls.remote_signer.enabled {
     resources.insert(format!(
       "probe/remote_signer/unix/{}",
@@ -88,11 +109,12 @@ fn collect_remote_signer_targets(config: &Config, resources: &mut BTreeSet<Strin
   }
 }
 
-fn collect_upstream_targets(config: &Config, resources: &mut BTreeSet<String>) {
+fn collect_upstream_targets(
+  config: &Config,
+  options: &DoctorOptions,
+  resources: &mut BTreeSet<String>,
+) {
   for upstream in &config.upstreams {
-    if upstream.max_http_version == HttpVersion::H3 {
-      continue;
-    }
     if let Some(resource) = tcp_resource_from_url("upstream", &upstream.origin, None) {
       resources.insert(resource);
     }
@@ -103,10 +125,40 @@ fn collect_upstream_targets(config: &Config, resources: &mut BTreeSet<String>) {
         resources.insert(resource);
       }
     }
+    for discovery in &pool.discovery {
+      if discovery.token_env.is_some() && !options.allow_secret_env_probes {
+        continue;
+      }
+      if let Some(endpoint) = &discovery.endpoint
+        && let Some(resource) = tcp_resource_from_url("upstream", endpoint, None)
+      {
+        resources.insert(resource);
+      }
+      if let Some(resource) = discovery_dns_resource(discovery) {
+        resources.insert(resource);
+      }
+    }
   }
 }
 
-fn shared_state_backend_resource(kind: &str, backend: &SharedStateBackendConfig) -> Option<String> {
+fn discovery_dns_resource(
+  discovery: &crate::config::UpstreamPoolDiscoveryConfig,
+) -> Option<String> {
+  if discovery.provider != crate::config::UpstreamDiscoveryProvider::Dns {
+    return None;
+  }
+  let name = discovery.name.as_deref()?.to_ascii_lowercase();
+  Some(format!("probe/upstream/dns/{name}"))
+}
+
+fn shared_state_backend_resource(
+  kind: &str,
+  backend: &SharedStateBackendConfig,
+  allow_secret_env: bool,
+) -> Option<String> {
+  if backend.connection_url_env.is_some() && !allow_secret_env {
+    return None;
+  }
   let raw = backend
     .connection_url_with_prefix(&format!("shared_state.backends.{}", backend.name))
     .ok()?;
@@ -132,7 +184,11 @@ fn normalized_probe_host(host: &str) -> String {
   }
 }
 
-async fn probe_shared_state(config: &Config, report: &mut DiagnosticReport) {
+async fn probe_shared_state(
+  config: &Config,
+  options: &DoctorOptions,
+  report: &mut DiagnosticReport,
+) {
   if !config.shared_state.enabled {
     report.probe(
       "shared_state",
@@ -143,11 +199,15 @@ async fn probe_shared_state(config: &Config, report: &mut DiagnosticReport) {
     return;
   }
   for backend in &config.shared_state.backends {
+    if backend.connection_url_env.is_some() && !options.allow_secret_env_probes {
+      probe_secret_env_skipped(report, "shared_state", &backend.name);
+      continue;
+    }
     probe_shared_state_backend(backend, report, "shared_state").await;
   }
 }
 
-async fn probe_ipm_store(config: &Config, report: &mut DiagnosticReport) {
+async fn probe_ipm_store(config: &Config, options: &DoctorOptions, report: &mut DiagnosticReport) {
   if !config.ipm.enabled {
     report.probe("ipm_store", "ipm", "skipped", "IPM is disabled");
     return;
@@ -178,6 +238,10 @@ async fn probe_ipm_store(config: &Config, report: &mut DiagnosticReport) {
     );
     return;
   };
+  if backend.connection_url_env.is_some() && !options.allow_secret_env_probes {
+    probe_secret_env_skipped(report, "ipm_store", name);
+    return;
+  }
   probe_postgres_backend(backend, report, "ipm_store").await;
 }
 
@@ -206,7 +270,11 @@ async fn probe_postgres_backend(
   }
 }
 
-async fn probe_remote_signer(config: &Config, report: &mut DiagnosticReport) {
+async fn probe_remote_signer(
+  config: &Config,
+  options: &DoctorOptions,
+  report: &mut DiagnosticReport,
+) {
   if !config.tls.remote_signer.enabled {
     report.probe(
       "remote_signer",
@@ -214,6 +282,10 @@ async fn probe_remote_signer(config: &Config, report: &mut DiagnosticReport) {
       "skipped",
       "remote signer is disabled",
     );
+    return;
+  }
+  if !options.allow_secret_env_probes {
+    probe_secret_env_skipped(report, "remote_signer", "tls.remote_signer");
     return;
   }
   match remote_signer_describe_key(config) {
@@ -227,68 +299,18 @@ async fn probe_remote_signer(config: &Config, report: &mut DiagnosticReport) {
   }
 }
 
-async fn probe_upstreams(config: &Config, report: &mut DiagnosticReport) {
-  for upstream in &config.upstreams {
-    if upstream.max_http_version == HttpVersion::H3 {
-      report.probe(
-        "upstream",
-        &upstream.name,
-        "skipped",
-        "HTTP/3 upstream probes are not implemented in doctor v1",
-      );
-      continue;
-    }
-    probe_url_connect(
-      report,
-      "upstream",
-      &upstream.name,
-      &upstream.origin,
-      upstream.connect_timeout_ms,
-    )
-    .await;
-  }
-  for pool in &config.upstream_pools {
-    for (index, server) in pool.servers.iter().enumerate() {
-      let target = server
-        .id
-        .as_deref()
-        .map(|id| format!("{}.{}", pool.name, id))
-        .unwrap_or_else(|| format!("{}.server{index}", pool.name));
-      probe_url_connect(report, "upstream", &target, &server.origin, 3_000).await;
-    }
-  }
+async fn probe_upstreams(config: &Config, options: &DoctorOptions, report: &mut DiagnosticReport) {
+  super::discovery_probe::probe_discovery(config, options, report).await;
+  super::upstream_probe::probe_upstreams(config, report).await;
 }
 
-async fn probe_url_connect(
-  report: &mut DiagnosticReport,
-  kind: &str,
-  target: &str,
-  url: &Url,
-  timeout_ms: u64,
-) {
-  let Some(host) = url.host_str() else {
-    push_probe_error(report, kind, target, anyhow!("URL is missing host"));
-    return;
-  };
-  let Some(port) = url.port_or_known_default() else {
-    push_probe_error(report, kind, target, anyhow!("URL is missing port"));
-    return;
-  };
-  match tokio::time::timeout(
-    Duration::from_millis(timeout_ms),
-    tokio::net::TcpStream::connect((host, port)),
-  )
-  .await
-  {
-    Ok(Ok(_)) => report.probe(
-      kind,
-      target,
-      "ok",
-      format!("TCP connect to {host}:{port} succeeded"),
-    ),
-    Ok(Err(error)) => push_probe_error(report, kind, target, error.into()),
-    Err(_) => push_probe_error(report, kind, target, anyhow!("connect timed out")),
-  }
+fn probe_secret_env_skipped(report: &mut DiagnosticReport, kind: &str, target: &str) {
+  report.probe(
+    kind,
+    target,
+    "skipped",
+    "probe requires a configured secret environment variable and is disabled for candidate diagnostics",
+  );
 }
 
 fn push_probe_error(report: &mut DiagnosticReport, kind: &str, target: &str, error: anyhow::Error) {

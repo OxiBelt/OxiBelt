@@ -2484,6 +2484,9 @@ fn unique_nonempty(values: impl IntoIterator<Item = String>) -> Vec<String> {
 mod admin_diagnostics_tests;
 
 #[cfg(test)]
+mod admin_diagnostics_probe_tests;
+
+#[cfg(test)]
 mod admin_json_tests;
 
 #[cfg(test)]

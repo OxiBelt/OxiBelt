@@ -6,12 +6,16 @@ use oxibelt::admin_client::{AdminClient, AdminClientOptions, read_token};
 
 #[path = "oxibeltctl/cli.rs"]
 mod cli;
+#[path = "oxibeltctl/doctor.rs"]
+mod doctor;
+#[path = "oxibeltctl/doctor_plan.rs"]
+mod doctor_plan;
 #[path = "oxibeltctl/output.rs"]
 mod output;
 #[path = "oxibeltctl/plan.rs"]
 mod plan;
 
-use cli::{AdminArgs, Cli, selected_token_env};
+use cli::{AdminArgs, Cli, Command, selected_token_env};
 use output::{print_permission_hint, print_response};
 use plan::plan_command;
 
@@ -26,6 +30,9 @@ async fn main() {
 async fn run() -> anyhow::Result<()> {
   let cli = Cli::parse();
   oxibelt::tls::install_default_provider()?;
+  if doctor::run_local_if_requested(&cli.command).await? {
+    return Ok(());
+  }
   let client = build_client(&cli.admin)?;
   let request = plan_command(&client, &cli.command).await?;
   let response = client
@@ -36,6 +43,18 @@ async fn run() -> anyhow::Result<()> {
       request.if_match.as_deref(),
     )
     .await?;
+  if let Command::Doctor(args) = &cli.command {
+    if response.status.is_success() {
+      doctor::print_report_body(&response.body, args)?;
+    } else {
+      print_response(&response, cli.admin.output, &request.filter)?;
+      if response.status == http::StatusCode::FORBIDDEN {
+        print_permission_hint(&request.permission);
+      }
+      bail!("Admin request failed with {}", response.status);
+    }
+    return Ok(());
+  }
   print_response(&response, cli.admin.output, &request.filter)?;
   if response.status == http::StatusCode::FORBIDDEN {
     print_permission_hint(&request.permission);

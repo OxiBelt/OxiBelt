@@ -140,7 +140,6 @@ async fn diagnostics_candidate_upstream_probe_requires_target_permission() {
     test_admin_control(),
     shutdown_rx,
   ));
-
   let body = candidate_upstream_probe_body(&cert_path, &key_path, probe_addr);
   let response =
     admin_post_json_response(admin_addr, "/admin/v1/diagnostics/preflight", &body).await;
@@ -206,6 +205,7 @@ async fn diagnostics_candidate_upstream_probe_allows_authorized_target() {
     test_admin_control(),
     shutdown_rx,
   ));
+  let probe_task = spawn_health_probe_responder(probe_listener);
 
   let body = candidate_upstream_probe_body(&cert_path, &key_path, probe_addr);
   let response =
@@ -217,10 +217,10 @@ async fn diagnostics_candidate_upstream_probe_allows_authorized_target() {
     "authorized candidate upstream probe should run: {}",
     log_safe_text(&response)
   );
-  tokio::time::timeout(std::time::Duration::from_secs(1), probe_listener.accept())
+  tokio::time::timeout(std::time::Duration::from_secs(1), probe_task)
     .await
-    .expect("target listener should receive an authorized probe connection")
-    .expect("target listener accept should succeed");
+    .expect("target health responder should not time out")
+    .expect("target health responder should complete");
 
   let _ = shutdown.send(true);
   task.abort();
@@ -691,6 +691,24 @@ async fn read_admin_response(mut stream: TcpStream) -> String {
   .expect("admin response should not time out")
   .expect("admin response should read");
   String::from_utf8_lossy(&response).into_owned()
+}
+
+fn spawn_health_probe_responder(listener: TcpListener) -> tokio::task::JoinHandle<()> {
+  tokio::spawn(async move {
+    let (mut stream, _) = listener
+      .accept()
+      .await
+      .expect("target listener should receive an authorized probe connection");
+    let mut request = [0_u8; 512];
+    let _ = stream
+      .read(&mut request)
+      .await
+      .expect("target listener should read health probe request");
+    stream
+      .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+      .await
+      .expect("target listener should write health probe response");
+  })
 }
 
 fn log_safe_text(input: &str) -> String {

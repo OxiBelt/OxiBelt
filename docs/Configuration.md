@@ -26,14 +26,14 @@ oxibelt --config source/config/oxibelt.toml --check
 Run the production preflight doctor without starting listeners:
 
 ```sh
-oxibelt --config source/config/oxibelt.toml --doctor
+oxibeltctl doctor --config source/config/oxibelt.toml
 ```
 
-`--doctor` emits a human-readable report by default and exits non-zero for
-`error` or `critical` findings. Use `--doctor-format json` for automation,
-`--doctor-fail-on critical|error|warning` to tune deploy gates, and repeat
-`--doctor-external-probe shared_state|ipm_store|remote_signer|upstream|all` to
-run explicit dependency probes. Without `--doctor-external-probe`, doctor only
+`oxibeltctl doctor` emits a human-readable report by default and exits non-zero
+for `error` or `critical` findings. Use `--format json` for automation,
+`--fail-on critical|error|warning` to tune deploy gates, and repeat
+`--external-probe shared_state|ipm_store|remote_signer|upstream|all` to run
+explicit dependency probes. Without `--external-probe`, doctor only
 loads and validates configuration plus local files, directories, and Unix
 socket permissions; it does not connect to upstreams, databases, Redis, or the
 remote signer.
@@ -1151,8 +1151,8 @@ Admin config and downstream TLS endpoints:
 Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, and downstream TLS operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
 
 Admin diagnostics endpoints return the same production preflight report shape as
-`--doctor`: `ok`, `profile`, severity `summary`, `findings`, and optional
-`probes`. `GET /admin/v1/diagnostics/preflight` diagnoses the active runtime
+`oxibeltctl doctor`: `ok`, `profile`, severity `summary`, `findings`, and
+optional `probes`. `GET /admin/v1/diagnostics/preflight` diagnoses the active runtime
 configuration and requires `diagnostics:ReadPreflight` on
 `oxibelt:<namespace>:diagnostics:preflight/current`. `POST
 /admin/v1/diagnostics/preflight` accepts JSON such as:

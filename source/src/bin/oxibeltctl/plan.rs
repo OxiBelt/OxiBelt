@@ -32,7 +32,7 @@ pub(crate) async fn plan_command(
 ) -> anyhow::Result<RequestPlan> {
   match command {
     Command::Status => get("/admin/v1/config/status", "config:GetStatus", "*"),
-    Command::Doctor(args) => plan_doctor(args),
+    Command::Doctor(args) => crate::doctor_plan::plan_doctor(args),
     Command::SupportBundle(args) => plan_support_bundle(args),
     Command::Runtime(command) => plan_runtime(command),
     Command::Config(command) => plan_config(client, command).await,
@@ -89,26 +89,6 @@ fn plan_runtime(command: &RuntimeCommand) -> anyhow::Result<RequestPlan> {
         "introspection/current",
       )
     }
-  }
-}
-
-fn plan_doctor(args: &DoctorArgs) -> anyhow::Result<RequestPlan> {
-  match &args.candidate {
-    Some(path) => post_json(
-      "/admin/v1/diagnostics/preflight",
-      json!({
-        "format": "toml",
-        "config": read_text_file(path)?,
-        "external_probes": args.external_probes,
-      }),
-      "diagnostics:RunPreflight",
-      "preflight/candidate",
-    ),
-    None => get(
-      "/admin/v1/diagnostics/preflight",
-      "diagnostics:ReadPreflight",
-      "preflight/current",
-    ),
   }
 }
 

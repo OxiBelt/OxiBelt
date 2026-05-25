@@ -92,7 +92,7 @@ fn discovered_servers_unchanged(
   Ok(existing == *servers)
 }
 
-async fn discover_servers(
+pub(crate) async fn discover_servers(
   client: &ControlHttpClient,
   discovery: &UpstreamPoolDiscoveryConfig,
 ) -> anyhow::Result<(Vec<UpstreamPoolServerConfig>, Duration)> {

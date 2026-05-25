@@ -44,8 +44,19 @@ pub(super) async fn admin_diagnostics_response(
       if !authorization.is_allowed("diagnostics:ReadPreflight", "preflight/current") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
+      let options = match preflight_options(&request) {
+        Ok(options) => options,
+        Err(response) => return Some(*response),
+      }
+      .with_secret_env_probes();
+      if let Some(response) = ensure_probe_permissions(authorization, &options) {
+        return Some(response);
+      }
       let config = state.snapshot().config.clone();
-      let report = crate::diagnostics::diagnose_config(config, &DoctorOptions::default()).await;
+      if let Some(response) = ensure_probe_target_permissions(authorization, &config, &options) {
+        return Some(response);
+      }
+      let report = crate::diagnostics::diagnose_config(config, &options).await;
       Some(json_response(StatusCode::OK, &report))
     }
     (&::http::Method::POST, "/admin/v1/diagnostics/preflight") => {
@@ -64,6 +75,7 @@ pub(super) async fn admin_diagnostics_response(
       }
       let options = DoctorOptions {
         external_probes: body.external_probes,
+        allow_secret_env_probes: false,
       };
       if let Some(response) = ensure_probe_permissions(authorization, &options) {
         return Some(response);
@@ -90,7 +102,8 @@ pub(super) async fn admin_diagnostics_response(
       let options = match support_bundle_options(&request) {
         Ok(options) => options,
         Err(response) => return Some(*response),
-      };
+      }
+      .with_secret_env_probes();
       if let Some(response) = ensure_probe_permissions(authorization, &options) {
         return Some(response);
       }
@@ -170,6 +183,18 @@ fn support_bundle_options(
   request: &hyper::Request<Incoming>,
 ) -> Result<DoctorOptions, Box<Response<ProxyBody>>> {
   require_redact(request)?;
+  external_probe_options(request)
+}
+
+fn preflight_options(
+  request: &hyper::Request<Incoming>,
+) -> Result<DoctorOptions, Box<Response<ProxyBody>>> {
+  external_probe_options(request)
+}
+
+fn external_probe_options(
+  request: &hyper::Request<Incoming>,
+) -> Result<DoctorOptions, Box<Response<ProxyBody>>> {
   let mut external_probes = Vec::new();
   for (key, value) in query_pairs(request) {
     if key == "external_probe" {
@@ -184,7 +209,10 @@ fn support_bundle_options(
       }
     }
   }
-  Ok(DoctorOptions { external_probes })
+  Ok(DoctorOptions {
+    external_probes,
+    allow_secret_env_probes: false,
+  })
 }
 
 fn require_redact(request: &hyper::Request<Incoming>) -> Result<(), Box<Response<ProxyBody>>> {
@@ -250,6 +278,7 @@ mod tests {
     let auth = AdminAuthorization::new(&actor, &ipm, &context);
     let options = DoctorOptions {
       external_probes: vec![ExternalProbeKind::SharedState],
+      allow_secret_env_probes: false,
     };
 
     assert!(ensure_probe_permissions(&auth, &options).is_some());
@@ -267,6 +296,7 @@ mod tests {
     let context = IpmRequestContext::default();
     let options = DoctorOptions {
       external_probes: vec![ExternalProbeKind::All],
+      allow_secret_env_probes: false,
     };
 
     let (actor, ipm) = authorization(

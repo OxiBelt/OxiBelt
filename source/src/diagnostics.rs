@@ -8,8 +8,12 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 
 mod checks;
+mod discovery_probe;
 mod probes;
 mod support_bundle;
+mod system;
+mod tls_checks;
+mod upstream_probe;
 
 pub use support_bundle::{
   RuntimeSnapshot, SupportBundle, build_runtime_snapshot, build_support_bundle,
@@ -63,9 +67,15 @@ impl FromStr for ExternalProbeKind {
 #[derive(Debug, Clone, Default)]
 pub struct DoctorOptions {
   pub external_probes: Vec<ExternalProbeKind>,
+  pub allow_secret_env_probes: bool,
 }
 
 impl DoctorOptions {
+  pub fn with_secret_env_probes(mut self) -> Self {
+    self.allow_secret_env_probes = true;
+    self
+  }
+
   pub fn expanded_external_probes(&self) -> Vec<ExternalProbeKind> {
     let mut probes = Vec::new();
     let requested_all = self.external_probes.contains(&ExternalProbeKind::All);
@@ -141,7 +151,7 @@ impl DiagnosticSeverity {
   }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DiagnosticSummary {
   pub critical: usize,
   pub error: usize,
@@ -149,7 +159,7 @@ pub struct DiagnosticSummary {
   pub info: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiagnosticFinding {
   pub id: String,
   pub severity: DiagnosticSeverity,
@@ -159,7 +169,7 @@ pub struct DiagnosticFinding {
   pub remediation: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiagnosticProbe {
   pub kind: String,
   pub target: String,
@@ -167,10 +177,10 @@ pub struct DiagnosticProbe {
   pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiagnosticReport {
   pub ok: bool,
-  pub profile: &'static str,
+  pub profile: String,
   pub summary: DiagnosticSummary,
   pub findings: Vec<DiagnosticFinding>,
   pub probes: Vec<DiagnosticProbe>,
@@ -180,7 +190,7 @@ impl DiagnosticReport {
   fn new() -> Self {
     Self {
       ok: true,
-      profile: "production",
+      profile: "production".to_string(),
       summary: DiagnosticSummary::default(),
       findings: Vec::new(),
       probes: Vec::new(),
@@ -303,6 +313,8 @@ async fn diagnose_valid_config(config: Config, options: &DoctorOptions) -> Diagn
   checks::diagnose_upgrades(&config, &mut report);
   checks::diagnose_remote_signer_local(&config, &mut report);
   checks::diagnose_deploy_hygiene(&config, &mut report);
+  system::diagnose_system(&config, &mut report);
+  tls_checks::diagnose_tls(&config, &mut report);
   probes::run_external_probes(&config, options, &mut report).await;
   report.finish()
 }
@@ -454,6 +466,7 @@ origin = "http://[::1]"
     let config: Config = toml::from_str(&raw).expect("config should parse");
     let options = DoctorOptions {
       external_probes: vec![ExternalProbeKind::All],
+      allow_secret_env_probes: true,
     };
     let resources = external_probe_target_resources(&config, &options);
 
@@ -475,6 +488,106 @@ origin = "http://[::1]"
         .iter()
         .all(|resource| !resource.contains("secret") && !resource.contains("token=")),
       "target resources should not include credentials or query strings: {resources:#?}"
+    );
+  }
+
+  #[test]
+  fn external_probe_target_resources_skip_secret_env_candidate_targets() {
+    let temp_dir = common::TempDir::new("diagnostics-secret-env-targets");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "diagnostics-secret-env-targets");
+    let raw = format!(
+      r#"
+{}
+
+[shared_state]
+enabled = true
+
+[[shared_state.backends]]
+name = "redis-env"
+kind = "redis"
+connection_url_env = "PATH"
+
+[[upstream_pools]]
+name = "secret-discovery"
+
+[[upstream_pools.discovery]]
+provider = "consul"
+endpoint = "http://Token-Probe.Example:8500"
+service = "api"
+token_env = "PATH"
+"#,
+      common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let options = DoctorOptions {
+      external_probes: vec![ExternalProbeKind::All],
+      allow_secret_env_probes: false,
+    };
+    let resources = external_probe_target_resources(&config, &options);
+
+    assert!(
+      resources
+        .iter()
+        .all(|resource| !resource.contains("token-probe.example")),
+      "candidate probe target resources must not include token_env discovery endpoints: {resources:#?}"
+    );
+    assert!(
+      resources
+        .iter()
+        .all(|resource| !resource.starts_with("probe/shared_state/tcp/")),
+      "candidate probe target resources must not resolve connection_url_env backends: {resources:#?}"
+    );
+
+    let active_options = options.with_secret_env_probes();
+    let active_resources = external_probe_target_resources(&config, &active_options);
+    assert!(
+      active_resources
+        .iter()
+        .any(|resource| resource == "probe/upstream/tcp/token-probe.example:8500"),
+      "active-config probes should still expose authorized token_env discovery targets: {active_resources:#?}"
+    );
+  }
+
+  #[tokio::test]
+  async fn candidate_discovery_probe_skips_token_env_without_reading_secret() {
+    let temp_dir = common::TempDir::new("diagnostics-secret-env-discovery");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "diagnostics-secret-env-discovery");
+    let raw = format!(
+      r#"
+{}
+
+[[upstream_pools]]
+name = "secret-discovery"
+
+[[upstream_pools.discovery]]
+provider = "kubernetes"
+endpoint = "http://Token-Probe.Example:8080"
+namespace = "default"
+service = "api"
+port = 8080
+token_env = "PATH"
+"#,
+      common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let options = DoctorOptions {
+      external_probes: vec![ExternalProbeKind::Upstream],
+      allow_secret_env_probes: false,
+    };
+    let mut report = DiagnosticReport::new();
+
+    discovery_probe::probe_discovery(&config, &options, &mut report).await;
+
+    assert!(
+      report.probes.iter().any(|probe| {
+        probe.kind == "upstream"
+          && probe.status == "skipped"
+          && probe.message.contains("disabled for candidate diagnostics")
+      }),
+      "candidate discovery probe should be skipped instead of reading token_env: {:#?}",
+      report.probes
     );
   }
 

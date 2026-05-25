@@ -52,6 +52,13 @@ cargo run --manifest-path source/Cargo.toml -- \
   --dump-effective-config
 ```
 
+Run the production preflight doctor without starting listeners:
+
+```sh
+cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- \
+  doctor --config source/config/oxibelt.toml
+```
+
 Enable hot reload at startup:
 
 ```sh
@@ -155,6 +162,16 @@ keeping the container entrypoint on `oxibelt`. For example:
 ```sh
 docker exec -it oxibelt oxibeltctl status
 docker exec -it oxibelt oxibeltctl lifecycle drain
+```
+
+Run a mounted configuration through local preflight by overriding the entrypoint:
+
+```sh
+docker run --rm --entrypoint /usr/local/bin/oxibeltctl \
+  --mount type=bind,src=/mnt/user0/oxibelt/config,dst=/etc/oxibelt/config,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/cert,dst=/etc/oxibelt/cert,readonly \
+  --mount type=bind,src=/mnt/user0/oxibelt/oxirule,dst=/etc/oxibelt/oxirule,readonly \
+  oxibelt doctor --config /etc/oxibelt/config/oxibelt.toml
 ```
 
 Example hardened local run:

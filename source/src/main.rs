@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use oxibelt::config::{Config, HotReloadMode, RuntimeOverrides};
-use oxibelt::diagnostics::{DoctorFailOn, DoctorOptions, DoctorOutputFormat, ExternalProbeKind};
 use tokio::runtime::{Builder, Runtime};
 
 #[derive(Debug, Parser)]
@@ -21,18 +20,6 @@ struct Cli {
 
   #[arg(long)]
   check: bool,
-
-  #[arg(long)]
-  doctor: bool,
-
-  #[arg(long, value_name = "FORMAT", value_parser = parse_doctor_output_format, default_value = "text")]
-  doctor_format: DoctorOutputFormat,
-
-  #[arg(long, value_name = "SEVERITY", value_parser = parse_doctor_fail_on, default_value = "error")]
-  doctor_fail_on: DoctorFailOn,
-
-  #[arg(long = "doctor-external-probe", value_name = "KIND", value_parser = parse_external_probe)]
-  doctor_external_probes: Vec<ExternalProbeKind>,
 
   #[arg(long)]
   dump_effective_config: bool,
@@ -128,27 +115,6 @@ fn main() -> anyhow::Result<()> {
     .config
     .as_ref()
     .ok_or_else(|| anyhow::anyhow!("--config is required"))?;
-  if cli.doctor {
-    let runtime = Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .context("failed to build Tokio runtime")?;
-    let options = DoctorOptions {
-      external_probes: cli.doctor_external_probes,
-    };
-    let report = runtime.block_on(oxibelt::diagnostics::diagnose_config_path(
-      config_path,
-      &options,
-    ));
-    match cli.doctor_format {
-      DoctorOutputFormat::Text => print!("{}", oxibelt::diagnostics::format_text(&report)),
-      DoctorOutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-    }
-    if report.fails_on(cli.doctor_fail_on) {
-      std::process::exit(1);
-    }
-    return Ok(());
-  }
 
   let runtime_overrides = RuntimeOverrides {
     hot_reload_mode: cli.hot_reload_mode,
@@ -391,24 +357,6 @@ fn print_report(report: oxibelt::waf::OxiRuleDevtoolsReport) -> anyhow::Result<(
 }
 
 fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
-  value
-    .parse()
-    .map_err(|error: anyhow::Error| error.to_string())
-}
-
-fn parse_doctor_output_format(value: &str) -> Result<DoctorOutputFormat, String> {
-  value
-    .parse()
-    .map_err(|error: anyhow::Error| error.to_string())
-}
-
-fn parse_doctor_fail_on(value: &str) -> Result<DoctorFailOn, String> {
-  value
-    .parse()
-    .map_err(|error: anyhow::Error| error.to_string())
-}
-
-fn parse_external_probe(value: &str) -> Result<ExternalProbeKind, String> {
   value
     .parse()
     .map_err(|error: anyhow::Error| error.to_string())

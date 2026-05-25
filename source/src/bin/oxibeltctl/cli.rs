@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use oxibelt::admin_client::{BREAK_GLASS_TOKEN_ENV, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_ADMIN_URL};
+use oxibelt::diagnostics::{DoctorFailOn, DoctorOutputFormat, ExternalProbeKind};
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -67,10 +68,16 @@ pub(crate) enum Command {
 
 #[derive(Debug, Args)]
 pub(crate) struct DoctorArgs {
+  #[arg(long, value_name = "FILE", conflicts_with = "candidate")]
+  pub(crate) config: Option<PathBuf>,
   #[arg(long, value_name = "FILE")]
   pub(crate) candidate: Option<PathBuf>,
-  #[arg(long = "external-probe", value_name = "KIND")]
-  pub(crate) external_probes: Vec<String>,
+  #[arg(long, value_name = "FORMAT", value_parser = parse_doctor_output_format, default_value = "text")]
+  pub(crate) format: DoctorOutputFormat,
+  #[arg(long = "fail-on", value_name = "SEVERITY", value_parser = parse_doctor_fail_on, default_value = "error")]
+  pub(crate) fail_on: DoctorFailOn,
+  #[arg(long = "external-probe", value_name = "KIND", value_parser = parse_external_probe)]
+  pub(crate) external_probes: Vec<ExternalProbeKind>,
 }
 
 #[derive(Debug, Args)]
@@ -522,6 +529,24 @@ pub(crate) fn selected_token_env(args: &AdminArgs) -> &str {
   } else {
     args.token_env.as_deref().unwrap_or(DEFAULT_ADMIN_TOKEN_ENV)
   }
+}
+
+fn parse_doctor_output_format(value: &str) -> Result<DoctorOutputFormat, String> {
+  value
+    .parse()
+    .map_err(|error: anyhow::Error| error.to_string())
+}
+
+fn parse_doctor_fail_on(value: &str) -> Result<DoctorFailOn, String> {
+  value
+    .parse()
+    .map_err(|error: anyhow::Error| error.to_string())
+}
+
+fn parse_external_probe(value: &str) -> Result<ExternalProbeKind, String> {
+  value
+    .parse()
+    .map_err(|error: anyhow::Error| error.to_string())
 }
 
 #[cfg(test)]
