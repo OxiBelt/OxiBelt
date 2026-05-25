@@ -1711,16 +1711,16 @@ impl WafEngine {
     if person_proof.rate_limited {
       return Ok(person_proof_rate_limited_decision());
     }
-    if let Some(mutation) = self
-      .person_proof
-      .clearance_response_mutation(&person_proof)?
+    let policy = person_proof_dynamic::challenge_policy(&self.person_proof, status)?;
+    if person_proof.state == PersonProofState::Valid
+      && person_proof.policy_key.as_deref() == Some(policy.key.as_str())
     {
-      decision.response_header_mutations.push(mutation);
-    }
-    if person_proof.state == PersonProofState::Valid {
+      let mutation = self
+        .person_proof
+        .clearance_response_mutation(&person_proof)?;
+      decision.response_header_mutations.extend(mutation);
       return Ok(decision);
     }
-    let policy = person_proof_dynamic::challenge_policy(&self.person_proof, status)?;
     decision.terminal = Some(self.person_proof.issue_challenge(input, policy)?);
     Ok(decision)
   }

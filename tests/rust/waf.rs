@@ -5972,6 +5972,96 @@ connection_url = "postgres://oxibelt:oxibelt@127.0.0.1:5432/oxibelt"
 }
 
 #[test]
+fn dynamic_person_proof_challenge_rejects_unrelated_configured_clearance() {
+    let temp_dir = common::TempDir::new("waf-dynamic-person-proof-unrelated-clearance");
+    let (cert_path, key_path) = common::create_self_signed_cert(
+        temp_dir.path(),
+        "waf-dynamic-person-proof-unrelated-clearance",
+    );
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[dynamic_policy]
+enabled = true
+backend = "dynamic-policy-test"
+
+[shared_state]
+enabled = true
+dynamic_policy_backend = "dynamic-policy-test"
+
+[[shared_state.backends]]
+name = "dynamic-policy-test"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@127.0.0.1:5432/oxibelt"
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-configured-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+
+    let configured_challenge =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let challenge = configured_challenge
+        .terminal
+        .as_ref()
+        .expect("configured Person proof should challenge");
+    let configured_clearance = complete_pow_person_proof(
+        &engine,
+        request_input(&method, &uri, &headers, &tags, client_addr),
+        &challenge.body,
+        4,
+    );
+
+    let mut dynamic_headers = HeaderMap::new();
+    dynamic_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "__oxibelt_person_proof={}",
+            extract_cookie_value(&configured_clearance)
+        ))
+        .unwrap(),
+    );
+    let dynamic_decision = engine
+        .evaluate_dynamic_person_proof_challenge(
+            request_input(&method, &uri, &dynamic_headers, &tags, client_addr),
+            StatusCode::FORBIDDEN,
+        )
+        .expect("dynamic challenge should evaluate");
+
+    assert_eq!(
+        dynamic_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn person_proof_accepts_configured_header_and_bearer_sources_in_order() {
     let temp_dir = common::TempDir::new("waf-person-proof-source-list");
     let (cert_path, key_path) =
