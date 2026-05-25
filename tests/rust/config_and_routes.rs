@@ -3021,6 +3021,56 @@ connection_url = "redis://:secret@redis.example:6379/0"
 }
 
 #[test]
+fn effective_config_dump_redacts_upstream_origin_sensitive_url_parts() {
+    let temp_dir = common::TempDir::new("upstream-origin-redacted");
+    let config_path = write_loadable_config(&temp_dir, "upstream-origin-redacted", |raw| {
+        raw.replace(
+            "origin = \"https://app.internal.example\"",
+            "origin = \"https://user:secret@app.internal.example/private?token=secret#frag\"",
+        )
+        .replace(
+            "[[routes]]",
+            r#"[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "https://pooluser:poolsecret@pool.internal.example/base?pool_token=secret#poolfrag"
+
+[[routes]]"#,
+        )
+    });
+
+    let value = Config::load_effective_toml_redacted(&config_path).unwrap();
+    let upstreams = value
+        .get("upstreams")
+        .and_then(toml::Value::as_array)
+        .expect("effective TOML should contain upstreams");
+    assert_eq!(
+        upstreams[0].get("origin").and_then(toml::Value::as_str),
+        Some("https://app.internal.example/private")
+    );
+    let pools = value
+        .get("upstream_pools")
+        .and_then(toml::Value::as_array)
+        .expect("effective TOML should contain upstream pools");
+    let servers = pools[0]
+        .get("servers")
+        .and_then(toml::Value::as_array)
+        .expect("effective TOML should contain upstream pool servers");
+    assert_eq!(
+        servers[0].get("origin").and_then(toml::Value::as_str),
+        Some("https://pool.internal.example/base")
+    );
+
+    let redacted = toml::to_string_pretty(&value).expect("redacted TOML should serialize");
+    assert!(!redacted.contains("user:secret"));
+    assert!(!redacted.contains("token=secret"));
+    assert!(!redacted.contains("pooluser:poolsecret"));
+    assert!(!redacted.contains("pool_token=secret"));
+}
+
+#[test]
 fn effective_config_dump_redacts_break_glass_access_hashes() {
     let temp_dir = common::TempDir::new("ipm-break-glass-redacted");
     let hash = test_argon2id_hash("break-glass-secret", 8);

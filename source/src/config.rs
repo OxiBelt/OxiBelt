@@ -2998,6 +2998,26 @@ fn redact_effective_toml(value: &mut toml::Value) {
       }
     }
   }
+  if let Some(upstreams) = value
+    .get_mut("upstreams")
+    .and_then(toml::Value::as_array_mut)
+  {
+    for upstream in upstreams {
+      redact_toml_url_sensitive_parts(upstream, &["origin"]);
+    }
+  }
+  if let Some(pools) = value
+    .get_mut("upstream_pools")
+    .and_then(toml::Value::as_array_mut)
+  {
+    for pool in pools {
+      if let Some(servers) = pool.get_mut("servers").and_then(toml::Value::as_array_mut) {
+        for server in servers {
+          redact_toml_url_sensitive_parts(server, &["origin"]);
+        }
+      }
+    }
+  }
 }
 
 fn redact_toml_path(value: &mut toml::Value, path: &[&str]) {
@@ -3014,6 +3034,44 @@ fn redact_toml_path(value: &mut toml::Value, path: &[&str]) {
   if let Some(secret) = current.get_mut(*last) {
     *secret = toml::Value::String(REDACTED_TOML_VALUE.to_string());
   }
+}
+
+fn redact_toml_url_sensitive_parts(value: &mut toml::Value, path: &[&str]) {
+  let Some((last, parents)) = path.split_last() else {
+    return;
+  };
+  let mut current = value;
+  for key in parents {
+    let Some(next) = current.get_mut(*key) else {
+      return;
+    };
+    current = next;
+  }
+  let Some(origin) = current.get_mut(*last) else {
+    return;
+  };
+  let Some(redacted) = origin.as_str().and_then(redact_url_sensitive_parts) else {
+    return;
+  };
+  *origin = toml::Value::String(redacted);
+}
+
+fn redact_url_sensitive_parts(raw: &str) -> Option<String> {
+  let Ok(mut url) = Url::parse(raw) else {
+    return None;
+  };
+  if url.username().is_empty()
+    && url.password().is_none()
+    && url.query().is_none()
+    && url.fragment().is_none()
+  {
+    return None;
+  }
+  let _ = url.set_username("");
+  let _ = url.set_password(None);
+  url.set_query(None);
+  url.set_fragment(None);
+  Some(url.to_string())
 }
 
 fn set_toml_integer_path(
