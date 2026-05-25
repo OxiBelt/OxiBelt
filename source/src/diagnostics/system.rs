@@ -13,6 +13,7 @@ pub(super) fn diagnose_system(config: &Config, report: &mut DiagnosticReport) {
   diagnose_udp_buffers(config, report);
   diagnose_conntrack(config, report);
   diagnose_cgroup_cpu(config, report);
+  #[cfg(target_arch = "x86_64")]
   diagnose_x86_64_v3(report);
   diagnose_low_port_capability(config, report);
   diagnose_write_dirs(config, report);
@@ -178,31 +179,29 @@ fn cgroup_v2_cpu_quota() -> Option<f64> {
   (period > 0.0).then_some(quota / period)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn diagnose_x86_64_v3(report: &mut DiagnosticReport) {
-  #[cfg(target_arch = "x86_64")]
-  {
-    let Some(raw) = std::fs::read_to_string("/proc/cpuinfo").ok() else {
-      return;
-    };
-    let Some(flags) = raw.lines().find_map(|line| line.strip_prefix("flags")) else {
-      return;
-    };
-    let missing = [
-      "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe",
-    ]
-    .into_iter()
-    .filter(|flag| !flags.split_whitespace().any(|value| value == *flag))
-    .collect::<Vec<_>>();
-    if !missing.is_empty() {
-      report.push(
-        DiagnosticSeverity::Info,
-        "system.x86_64_v3_flags_missing",
-        "system",
-        "/proc/cpuinfo",
-        format!("CPU flags are missing x86-64-v3 features: {}", missing.join(", ")),
-        "Use a baseline image on this host, or deploy x86-64-v3 optimized builds only on compatible nodes.",
-      );
-    }
+  let Some(raw) = std::fs::read_to_string("/proc/cpuinfo").ok() else {
+    return;
+  };
+  let Some(flags) = raw.lines().find_map(|line| line.strip_prefix("flags")) else {
+    return;
+  };
+  let missing = [
+    "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe",
+  ]
+  .into_iter()
+  .filter(|flag| !flags.split_whitespace().any(|value| value == *flag))
+  .collect::<Vec<_>>();
+  if !missing.is_empty() {
+    report.push(
+      DiagnosticSeverity::Info,
+      "system.x86_64_v3_flags_missing",
+      "system",
+      "/proc/cpuinfo",
+      format!("CPU flags are missing x86-64-v3 features: {}", missing.join(", ")),
+      "Use a baseline image on this host, or deploy x86-64-v3 optimized builds only on compatible nodes.",
+    );
   }
 }
 
