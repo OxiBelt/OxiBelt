@@ -9,6 +9,11 @@ use crate::config::Config;
 
 mod checks;
 mod probes;
+mod support_bundle;
+
+pub use support_bundle::{
+  RuntimeSnapshot, SupportBundle, build_runtime_snapshot, build_support_bundle,
+};
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

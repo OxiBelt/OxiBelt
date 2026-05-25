@@ -1072,6 +1072,7 @@ connection_url_env = "OXIBELT_SHARED_STATE_URL"
 ```sh
 oxibeltctl status
 oxibeltctl doctor
+oxibeltctl support-bundle --redact
 oxibeltctl config diff source/config/oxibelt.toml
 oxibeltctl lifecycle drain
 oxibeltctl auth check --action config:GetStatus --resource '*'
@@ -1142,6 +1143,8 @@ Admin config and downstream TLS endpoints:
 - `POST /admin/v1/ipm/simulate`
 - `GET /admin/v1/diagnostics/preflight`
 - `POST /admin/v1/diagnostics/preflight`
+- `GET /admin/v1/diagnostics/support-bundle`
+- `GET /admin/v1/runtime/snapshot`
 
 Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, and downstream TLS operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
 
@@ -1178,6 +1181,20 @@ For example, allow `upstream` probes to one origin with
 `probe/upstream/tcp/api.example.test:443`; use a wildcard such as
 `probe/upstream/tcp/*` only for intentionally delegated broad reachability
 checks.
+
+`GET /admin/v1/diagnostics/support-bundle?redact=true` returns a single
+redacted JSON support bundle for sharing during incident response. It requires
+`diagnostics:ReadSupportBundle` on
+`oxibelt:<namespace>:diagnostics:support-bundle/current`. Repeated
+`external_probe=KIND` query parameters run the same optional doctor probes and
+therefore require the same `diagnostics:RunProbe` coarse and target
+permissions before any network or Unix socket probe is opened. The bundled
+`oxibeltctl support-bundle --redact` command calls this endpoint and prints the
+JSON to stdout. Unredacted bundles are not supported.
+
+`GET /admin/v1/runtime/snapshot?redact=true` returns the runtime snapshot
+section used by the support bundle and requires `runtime:ReadSnapshot` on
+`oxibelt:<namespace>:runtime:snapshot/current`.
 
 OxiBelt initializes the IPM schema when `[ipm].backend` is configured:
 

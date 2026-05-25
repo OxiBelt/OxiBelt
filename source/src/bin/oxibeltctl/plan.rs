@@ -33,6 +33,7 @@ pub(crate) async fn plan_command(
   match command {
     Command::Status => get("/admin/v1/config/status", "config:GetStatus", "*"),
     Command::Doctor(args) => plan_doctor(args),
+    Command::SupportBundle(args) => plan_support_bundle(args),
     Command::Config(command) => plan_config(client, command).await,
     Command::Tls(command) => plan_tls(client, command).await,
     Command::Lifecycle(command) => plan_lifecycle(command),
@@ -64,6 +65,17 @@ pub(crate) async fn plan_command(
   }
 }
 
+fn plan_support_bundle(args: &SupportBundleArgs) -> anyhow::Result<RequestPlan> {
+  if !args.redact {
+    bail!("support-bundle requires --redact");
+  }
+  get(
+    &support_bundle_endpoint(&args.external_probes),
+    "diagnostics:ReadSupportBundle",
+    "support-bundle/current",
+  )
+}
+
 fn plan_doctor(args: &DoctorArgs) -> anyhow::Result<RequestPlan> {
   match &args.candidate {
     Some(path) => post_json(
@@ -82,6 +94,18 @@ fn plan_doctor(args: &DoctorArgs) -> anyhow::Result<RequestPlan> {
       "preflight/current",
     ),
   }
+}
+
+fn support_bundle_endpoint(external_probes: &[String]) -> String {
+  let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+  serializer.append_pair("redact", "true");
+  for probe in external_probes {
+    serializer.append_pair("external_probe", probe);
+  }
+  format!(
+    "/admin/v1/diagnostics/support-bundle?{}",
+    serializer.finish()
+  )
 }
 
 async fn plan_config(client: &AdminClient, command: &ConfigCommand) -> anyhow::Result<RequestPlan> {

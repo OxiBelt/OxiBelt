@@ -226,6 +226,238 @@ async fn diagnostics_candidate_upstream_probe_allows_authorized_target() {
   task.abort();
 }
 
+#[tokio::test]
+async fn support_bundle_requires_redact_and_permission() {
+  let temp_dir = common::TempDir::new("admin-support-bundle-permission");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-support-bundle-permission");
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("admin listener should bind");
+  let addr = listener
+    .local_addr()
+    .expect("admin listener address should be available");
+  let config = admin_listener_policy_config(
+    &cert_path,
+    &key_path,
+    addr,
+    &["diagnostics:ReadSupportBundle".to_string()],
+    &["oxibelt:oxibelt:diagnostics:support-bundle/current".to_string()],
+    None,
+  );
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let state = AppHandle::new(snapshot);
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = tokio::spawn(serve_admin_listener(
+    listener,
+    addr,
+    state,
+    test_admin_control(),
+    shutdown_rx,
+  ));
+
+  let missing_redact = admin_get_response(addr, "/admin/v1/diagnostics/support-bundle").await;
+  assert!(
+    missing_redact.starts_with("HTTP/1.1 400 Bad Request"),
+    "support bundle should require redact=true: {}",
+    log_safe_text(&missing_redact)
+  );
+
+  let response = admin_get_response(addr, "/admin/v1/diagnostics/support-bundle?redact=true").await;
+  assert!(
+    response.starts_with("HTTP/1.1 200 OK")
+      && response.contains(r#""metadata""#)
+      && response.contains(r#""runtime_snapshot""#)
+      && response.contains(r#""redacted":true"#),
+    "support bundle should return redacted JSON sections: {}",
+    log_safe_text(&response)
+  );
+
+  let _ = shutdown.send(true);
+  task.abort();
+
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("admin listener should bind");
+  let addr = listener
+    .local_addr()
+    .expect("admin listener address should be available");
+  let config = admin_listener_diagnostics_config(&cert_path, &key_path, addr, false, &[]);
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let state = AppHandle::new(snapshot);
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = tokio::spawn(serve_admin_listener(
+    listener,
+    addr,
+    state,
+    test_admin_control(),
+    shutdown_rx,
+  ));
+
+  let response = admin_get_response(addr, "/admin/v1/diagnostics/support-bundle?redact=true").await;
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden"),
+    "support bundle should require diagnostics:ReadSupportBundle: {}",
+    log_safe_text(&response)
+  );
+
+  let _ = shutdown.send(true);
+  task.abort();
+}
+
+#[tokio::test]
+async fn support_bundle_external_probe_requires_target_permission() {
+  let temp_dir = common::TempDir::new("admin-support-bundle-probe-target");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-support-bundle-probe-target");
+  let admin_listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("admin listener should bind");
+  let admin_addr = admin_listener
+    .local_addr()
+    .expect("admin listener address should be available");
+  let probe_listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("probe listener should bind");
+  let probe_addr = probe_listener
+    .local_addr()
+    .expect("probe listener address should be available");
+  let config = admin_listener_policy_config(
+    &cert_path,
+    &key_path,
+    admin_addr,
+    &[
+      "diagnostics:ReadSupportBundle".to_string(),
+      "diagnostics:RunProbe".to_string(),
+    ],
+    &[
+      "oxibelt:oxibelt:diagnostics:support-bundle/current".to_string(),
+      "oxibelt:oxibelt:diagnostics:probe/upstream".to_string(),
+    ],
+    Some(format!("http://127.0.0.1:{}", probe_addr.port())),
+  );
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let state = AppHandle::new(snapshot);
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = tokio::spawn(serve_admin_listener(
+    admin_listener,
+    admin_addr,
+    state,
+    test_admin_control(),
+    shutdown_rx,
+  ));
+
+  let response = admin_get_response(
+    admin_addr,
+    "/admin/v1/diagnostics/support-bundle?redact=true&external_probe=upstream",
+  )
+  .await;
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden"),
+    "support bundle upstream probe should require target permission: {}",
+    log_safe_text(&response)
+  );
+  assert!(
+    tokio::time::timeout(
+      std::time::Duration::from_millis(150),
+      probe_listener.accept()
+    )
+    .await
+    .is_err(),
+    "target listener should not receive a connection when support bundle target permission is missing"
+  );
+
+  let _ = shutdown.send(true);
+  task.abort();
+}
+
+#[tokio::test]
+async fn runtime_snapshot_requires_redact_and_permission() {
+  let temp_dir = common::TempDir::new("admin-runtime-snapshot");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-runtime-snapshot");
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("admin listener should bind");
+  let addr = listener
+    .local_addr()
+    .expect("admin listener address should be available");
+  let config = admin_listener_policy_config(
+    &cert_path,
+    &key_path,
+    addr,
+    &["runtime:ReadSnapshot".to_string()],
+    &["oxibelt:oxibelt:runtime:snapshot/current".to_string()],
+    None,
+  );
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let state = AppHandle::new(snapshot);
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = tokio::spawn(serve_admin_listener(
+    listener,
+    addr,
+    state,
+    test_admin_control(),
+    shutdown_rx,
+  ));
+
+  let missing_redact = admin_get_response(addr, "/admin/v1/runtime/snapshot").await;
+  assert!(
+    missing_redact.starts_with("HTTP/1.1 400 Bad Request"),
+    "runtime snapshot should require redact=true: {}",
+    log_safe_text(&missing_redact)
+  );
+  let response = admin_get_response(addr, "/admin/v1/runtime/snapshot?redact=true").await;
+  assert!(
+    response.starts_with("HTTP/1.1 200 OK")
+      && response.contains(r#""lifecycle""#)
+      && response.contains(r#""process""#),
+    "runtime snapshot should return JSON: {}",
+    log_safe_text(&response)
+  );
+
+  let _ = shutdown.send(true);
+  task.abort();
+
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("admin listener should bind");
+  let addr = listener
+    .local_addr()
+    .expect("admin listener address should be available");
+  let config = admin_listener_diagnostics_config(&cert_path, &key_path, addr, false, &[]);
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let state = AppHandle::new(snapshot);
+  let (shutdown, shutdown_rx) = watch::channel(false);
+  let task = tokio::spawn(serve_admin_listener(
+    listener,
+    addr,
+    state,
+    test_admin_control(),
+    shutdown_rx,
+  ));
+
+  let response = admin_get_response(addr, "/admin/v1/runtime/snapshot?redact=true").await;
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden"),
+    "runtime snapshot should require runtime:ReadSnapshot: {}",
+    log_safe_text(&response)
+  );
+
+  let _ = shutdown.send(true);
+  task.abort();
+}
+
 fn admin_listener_diagnostics_config(
   cert_path: &Path,
   key_path: &Path,
@@ -253,6 +485,65 @@ fn admin_listener_diagnostics_config(
   resources.extend(probe_resources.iter().cloned());
   let actions = toml_string_array(&actions);
   let resources = toml_string_array(&resources);
+  raw.push_str(&format!(
+    r#"
+
+[admin]
+enabled = true
+bind = "{admin_bind}"
+bearer_token_env = "{ADMIN_TOKEN_ENV}"
+transport = "plaintext_allowlist"
+
+[ipm]
+enabled = true
+
+[[ipm.principals]]
+id = "diagnostics"
+subject = "diagnostics@example.com"
+
+[[ipm.credentials]]
+name = "diagnostics-token"
+principal = "diagnostics"
+bearer_token_env = "{ADMIN_TOKEN_ENV}"
+
+[[ipm.policies]]
+name = "diagnostics"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = {actions}
+resources = {resources}
+
+[[ipm.bindings]]
+principal = "diagnostics"
+policy = "diagnostics"
+"#
+  ));
+  parse_config(&raw)
+}
+
+fn admin_listener_policy_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+  actions: &[String],
+  resources: &[String],
+  upstream_origin: Option<String>,
+) -> Config {
+  let mut raw = common::minimal_config_toml(cert_path, key_path)
+    .replace("unprivileged_mode = true", "unprivileged_mode = false")
+    .replace(
+      "https_bind = \"127.0.0.1:8443\"",
+      "https_bind = \"127.0.0.1:0\"",
+    );
+  if let Some(origin) = upstream_origin {
+    raw = raw.replace(
+      "origin = \"https://app.internal.example\"",
+      &format!("origin = \"{origin}\""),
+    );
+  }
+  let actions = toml_string_array(actions);
+  let resources = toml_string_array(resources);
   raw.push_str(&format!(
     r#"
 

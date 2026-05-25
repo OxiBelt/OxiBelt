@@ -472,6 +472,7 @@ fn validate_ipm_service(field: &str, service: &str) -> anyhow::Result<()> {
       | "waf"
       | "lifecycle"
       | "diagnostics"
+      | "runtime"
       | "route"
       | "stream"
       | "turn"
@@ -547,7 +548,13 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "PlanOxiRuleFalsePositive",
     ],
     "lifecycle" => &["Get", "Drain", "Undrain"],
-    "diagnostics" => &["ReadPreflight", "RunPreflight", "RunProbe"],
+    "diagnostics" => &[
+      "ReadPreflight",
+      "RunPreflight",
+      "RunProbe",
+      "ReadSupportBundle",
+    ],
+    "runtime" => &["ReadSnapshot"],
     "route" => &["Invoke"],
     "stream" => &["Connect"],
     "turn" => &["Allocate"],

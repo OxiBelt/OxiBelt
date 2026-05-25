@@ -610,10 +610,14 @@ async fn admin_response(
   {
     return response;
   }
-  if path == "/admin/v1/diagnostics/preflight" {
+  if path == "/admin/v1/diagnostics/preflight"
+    || path == "/admin/v1/diagnostics/support-bundle"
+    || path == "/admin/v1/runtime/snapshot"
+  {
     return admin_diagnostics::admin_diagnostics_response(
       request,
       state.clone(),
+      admin_control.clone(),
       &authorization,
       &method,
       &path,

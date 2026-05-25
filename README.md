@@ -87,6 +87,7 @@ authorization:
 
 ```sh
 cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- status
+cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- support-bundle --redact
 cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- auth check --action config:GetStatus --resource '*'
 ```
 

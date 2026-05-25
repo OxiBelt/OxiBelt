@@ -47,6 +47,7 @@ pub(crate) enum OutputFormat {
 pub(crate) enum Command {
   Status,
   Doctor(DoctorArgs),
+  SupportBundle(SupportBundleArgs),
   Config(ConfigCommand),
   Tls(TlsCommand),
   Lifecycle(LifecycleCommand),
@@ -67,6 +68,14 @@ pub(crate) enum Command {
 pub(crate) struct DoctorArgs {
   #[arg(long, value_name = "FILE")]
   pub(crate) candidate: Option<PathBuf>,
+  #[arg(long = "external-probe", value_name = "KIND")]
+  pub(crate) external_probes: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SupportBundleArgs {
+  #[arg(long, required = true)]
+  pub(crate) redact: bool,
   #[arg(long = "external-probe", value_name = "KIND")]
   pub(crate) external_probes: Vec<String>,
 }
