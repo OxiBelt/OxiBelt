@@ -32,12 +32,12 @@ impl<'a> AdminAuthorization<'a> {
   }
 }
 
-pub(super) fn admin_actor(
+pub(super) async fn admin_actor(
   request: &hyper::Request<Incoming>,
   config: &Config,
   ipm: &IpmRuntime,
 ) -> Option<AdminActor> {
-  let actor = ipm.admin_actor_from_headers(request.headers())?;
+  let actor = ipm.admin_actor_from_headers(request.headers()).await?;
   if !config.ipm.enabled && actor.principal != "bootstrap-admin" {
     return None;
   }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, bail};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use http::HeaderMap;
+use tokio::sync::Semaphore;
 
 use crate::config::{
   IpmConditionConfig, IpmConditionOperator, IpmCredentialConfig, IpmPolicyConfig, IpmPolicyEffect,
@@ -12,6 +13,8 @@ use crate::config::{
 };
 
 mod store;
+
+const BREAK_GLASS_AUTH_CONCURRENCY: usize = 1;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IpmActor {
@@ -52,12 +55,7 @@ struct IpmRuntimeInner {
   group_bindings: HashMap<String, Vec<String>>,
   legacy_admin_env: String,
   allow_legacy_bootstrap: bool,
-}
-
-#[derive(Clone, Copy)]
-enum CredentialScope {
-  Admin,
-  Downstream,
+  break_glass_verifier: Arc<Semaphore>,
 }
 
 impl IpmRuntime {
@@ -137,6 +135,7 @@ impl IpmRuntime {
         group_bindings,
         legacy_admin_env: config.admin.bearer_token_env.clone(),
         allow_legacy_bootstrap: !config.ipm.enabled,
+        break_glass_verifier: break_glass_verifier(),
       }),
     })
   }
@@ -153,25 +152,28 @@ impl IpmRuntime {
     self.actor_from_bearer(bearer)
   }
 
-  pub fn admin_actor_from_headers(&self, headers: &HeaderMap) -> Option<IpmActor> {
+  pub async fn admin_actor_from_headers(&self, headers: &HeaderMap) -> Option<IpmActor> {
     let bearer = headers
       .get(http::header::AUTHORIZATION)
       .and_then(|value| value.to_str().ok())
       .and_then(|value| value.strip_prefix("Bearer "))?;
-    self.admin_actor_from_bearer(bearer)
+    self.admin_actor_from_bearer(bearer).await
   }
 
   pub fn actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
-    self.actor_from_bearer_for_scope(bearer, CredentialScope::Downstream)
+    self.actor_from_regular_bearer(bearer)
   }
 
-  pub fn admin_actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
-    self.actor_from_bearer_for_scope(bearer, CredentialScope::Admin)
+  pub async fn admin_actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
+    if let Some(actor) = self.actor_from_regular_bearer(bearer) {
+      return Some(actor);
+    }
+    self.break_glass_actor_from_bearer(bearer).await
   }
 
-  fn actor_from_bearer_for_scope(&self, bearer: &str, scope: CredentialScope) -> Option<IpmActor> {
+  fn actor_from_regular_bearer(&self, bearer: &str) -> Option<IpmActor> {
     for credential in &self.inner.credentials {
-      if credential_matches(credential, bearer, scope)
+      if credential_matches(credential, bearer)
         && let Some(actor) = self.inner.principals.get(&credential.principal)
       {
         let mut actor = actor.clone();
@@ -190,6 +192,23 @@ impl IpmRuntime {
       });
     }
 
+    None
+  }
+
+  async fn break_glass_actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
+    for credential in &self.inner.credentials {
+      let Some(hash) = credential.break_glass_access_token_hash.as_deref() else {
+        continue;
+      };
+      if bearer_matches_argon2id_hash_bounded(self.inner.break_glass_verifier.clone(), hash, bearer)
+        .await
+        && let Some(actor) = self.inner.principals.get(&credential.principal)
+      {
+        let mut actor = actor.clone();
+        actor.name = credential.name.clone();
+        return Some(actor);
+      }
+    }
     None
   }
 
@@ -276,6 +295,7 @@ impl IpmRuntime {
         group_bindings: HashMap::new(),
         legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
         allow_legacy_bootstrap: false,
+        break_glass_verifier: break_glass_verifier(),
       }),
     }
   }
@@ -494,21 +514,36 @@ fn bearer_matches_env(env_name: &str, actual: &str) -> bool {
   })
 }
 
-fn credential_matches(
-  credential: &IpmCredentialConfig,
-  bearer: &str,
-  scope: CredentialScope,
+fn credential_matches(credential: &IpmCredentialConfig, bearer: &str) -> bool {
+  bearer_matches_env(&credential.bearer_token_env, bearer)
+}
+
+async fn bearer_matches_argon2id_hash_bounded(
+  verifier: Arc<Semaphore>,
+  hash: &str,
+  actual: &str,
 ) -> bool {
-  if bearer_matches_env(&credential.bearer_token_env, bearer) {
-    return true;
-  }
-  if !matches!(scope, CredentialScope::Admin) {
+  if hash.trim().is_empty() || actual.is_empty() {
     return false;
   }
-  credential
-    .break_glass_access_token_hash
-    .as_deref()
-    .is_some_and(|hash| bearer_matches_argon2id_hash(hash, bearer))
+  let Ok(permit) = verifier.try_acquire_owned() else {
+    tracing::debug!("break-glass access verification limiter is saturated");
+    return false;
+  };
+  let hash = hash.to_string();
+  let actual = actual.to_string();
+  match tokio::task::spawn_blocking(move || {
+    let _permit = permit;
+    bearer_matches_argon2id_hash(&hash, &actual)
+  })
+  .await
+  {
+    Ok(result) => result,
+    Err(error) => {
+      tracing::warn!(error = %error, "break-glass access verification task failed");
+      false
+    }
+  }
 }
 
 fn bearer_matches_argon2id_hash(hash: &str, actual: &str) -> bool {
@@ -521,6 +556,10 @@ fn bearer_matches_argon2id_hash(hash: &str, actual: &str) -> bool {
   Argon2::default()
     .verify_password(actual.as_bytes(), &parsed)
     .is_ok()
+}
+
+fn break_glass_verifier() -> Arc<Semaphore> {
+  Arc::new(Semaphore::new(BREAK_GLASS_AUTH_CONCURRENCY))
 }
 
 fn now_unix() -> anyhow::Result<i64> {

@@ -495,7 +495,7 @@ async fn admin_response(
     .collect::<std::collections::HashMap<_, _>>();
   let path = uri.path().to_string();
   let admin_context = admin_request_context(&request, peer_addr);
-  let actor = admin_actor(&request, &snapshot.config, &snapshot.ipm);
+  let actor = admin_actor(&request, &snapshot.config, &snapshot.ipm).await;
 
   if path == "/cache/purge" || path == "/cache/purge-prefix" || path == "/cache/purge-tag" {
     if method != ::http::Method::POST {

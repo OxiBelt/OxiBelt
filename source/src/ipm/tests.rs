@@ -17,6 +17,7 @@ fn runtime_with_policy(policy: IpmPolicyConfig) -> IpmRuntime {
       group_bindings: HashMap::new(),
       legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
       allow_legacy_bootstrap: false,
+      break_glass_verifier: break_glass_verifier(),
     }),
   }
 }
@@ -193,6 +194,7 @@ fn legacy_bootstrap_bearer_is_ignored_when_disabled() {
       group_bindings: HashMap::new(),
       legacy_admin_env: "PATH".to_string(),
       allow_legacy_bootstrap: false,
+      break_glass_verifier: break_glass_verifier(),
     }),
   };
 
@@ -212,6 +214,7 @@ fn legacy_bootstrap_bearer_still_works_when_allowed() {
       group_bindings: HashMap::new(),
       legacy_admin_env: "PATH".to_string(),
       allow_legacy_bootstrap: true,
+      break_glass_verifier: break_glass_verifier(),
     }),
   };
 
@@ -222,8 +225,8 @@ fn legacy_bootstrap_bearer_still_works_when_allowed() {
   assert_eq!(actor.groups, vec!["ipm-admin".to_string()]);
 }
 
-#[test]
-fn break_glass_access_bearer_is_admin_only() {
+#[tokio::test]
+async fn break_glass_access_bearer_is_admin_only() {
   let actor = IpmActor {
     name: "break-glass-token".to_string(),
     principal: "break-glass-admin".to_string(),
@@ -245,15 +248,125 @@ fn break_glass_access_bearer_is_admin_only() {
       group_bindings: HashMap::new(),
       legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
       allow_legacy_bootstrap: false,
+      break_glass_verifier: break_glass_verifier(),
     }),
   };
 
   assert!(runtime.actor_from_bearer("recovery-secret").is_none());
   let actor = runtime
     .admin_actor_from_bearer("recovery-secret")
+    .await
     .expect("break-glass access credential should authenticate on admin listeners");
   assert_eq!(actor.name, "break-glass-token");
   assert_eq!(actor.principal, "break-glass-admin");
+}
+
+#[tokio::test]
+async fn break_glass_access_fails_closed_when_limiter_is_saturated() {
+  let actor = IpmActor {
+    name: "break-glass-token".to_string(),
+    principal: "break-glass-admin".to_string(),
+    subject: "break-glass".to_string(),
+    groups: vec!["ipm-admin".to_string()],
+  };
+  let runtime = IpmRuntime {
+    inner: Arc::new(IpmRuntimeInner {
+      namespace: "oxibelt".to_string(),
+      credentials: vec![IpmCredentialConfig {
+        name: "break-glass-token".to_string(),
+        principal: "break-glass-admin".to_string(),
+        bearer_token_env: String::new(),
+        break_glass_access_token_hash: Some(test_argon2id_hash("recovery-secret")),
+      }],
+      principals: HashMap::from([("break-glass-admin".to_string(), actor)]),
+      policies: HashMap::new(),
+      principal_bindings: HashMap::new(),
+      group_bindings: HashMap::new(),
+      legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
+      allow_legacy_bootstrap: false,
+      break_glass_verifier: Arc::new(tokio::sync::Semaphore::new(0)),
+    }),
+  };
+
+  assert!(
+    runtime
+      .admin_actor_from_bearer("recovery-secret")
+      .await
+      .is_none()
+  );
+}
+
+#[tokio::test]
+async fn low_cost_admin_credentials_do_not_need_break_glass_limiter() {
+  let bearer = std::env::var("PATH").expect("PATH should be available for tests");
+  let actor = IpmActor {
+    name: "normal-token".to_string(),
+    principal: "admin".to_string(),
+    subject: "admin@example.com".to_string(),
+    groups: vec!["ipm-admin".to_string()],
+  };
+  let runtime = IpmRuntime {
+    inner: Arc::new(IpmRuntimeInner {
+      namespace: "oxibelt".to_string(),
+      credentials: vec![
+        IpmCredentialConfig {
+          name: "normal-token".to_string(),
+          principal: "admin".to_string(),
+          bearer_token_env: "PATH".to_string(),
+          break_glass_access_token_hash: None,
+        },
+        IpmCredentialConfig {
+          name: "break-glass-token".to_string(),
+          principal: "admin".to_string(),
+          bearer_token_env: String::new(),
+          break_glass_access_token_hash: Some(test_argon2id_hash("recovery-secret")),
+        },
+      ],
+      principals: HashMap::from([("admin".to_string(), actor)]),
+      policies: HashMap::new(),
+      principal_bindings: HashMap::new(),
+      group_bindings: HashMap::new(),
+      legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
+      allow_legacy_bootstrap: false,
+      break_glass_verifier: Arc::new(tokio::sync::Semaphore::new(0)),
+    }),
+  };
+
+  let actor = runtime
+    .admin_actor_from_bearer(&bearer)
+    .await
+    .expect("normal bearer credential should not use break-glass limiter");
+  assert_eq!(actor.name, "normal-token");
+  assert_eq!(actor.principal, "admin");
+}
+
+#[tokio::test]
+async fn legacy_bootstrap_does_not_need_break_glass_limiter() {
+  let bearer = std::env::var("PATH").expect("PATH should be available for tests");
+  let runtime = IpmRuntime {
+    inner: Arc::new(IpmRuntimeInner {
+      namespace: "oxibelt".to_string(),
+      credentials: vec![IpmCredentialConfig {
+        name: "break-glass-token".to_string(),
+        principal: "break-glass-admin".to_string(),
+        bearer_token_env: String::new(),
+        break_glass_access_token_hash: Some(test_argon2id_hash("recovery-secret")),
+      }],
+      principals: HashMap::new(),
+      policies: HashMap::new(),
+      principal_bindings: HashMap::new(),
+      group_bindings: HashMap::new(),
+      legacy_admin_env: "PATH".to_string(),
+      allow_legacy_bootstrap: true,
+      break_glass_verifier: Arc::new(tokio::sync::Semaphore::new(0)),
+    }),
+  };
+
+  let actor = runtime
+    .admin_actor_from_bearer(&bearer)
+    .await
+    .expect("legacy bootstrap should not use break-glass limiter");
+  assert_eq!(actor.principal, "bootstrap-admin");
 }
 
 fn test_argon2id_hash(secret: &str) -> String {
