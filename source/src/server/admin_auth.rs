@@ -37,7 +37,7 @@ pub(super) fn admin_actor(
   config: &Config,
   ipm: &IpmRuntime,
 ) -> Option<AdminActor> {
-  let actor = ipm.actor_from_headers(request.headers())?;
+  let actor = ipm.admin_actor_from_headers(request.headers())?;
   if !config.ipm.enabled && actor.principal != "bootstrap-admin" {
     return None;
   }

@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use http::HeaderMap;
 
 use crate::config::{
@@ -51,6 +52,12 @@ struct IpmRuntimeInner {
   group_bindings: HashMap<String, Vec<String>>,
   legacy_admin_env: String,
   allow_legacy_bootstrap: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CredentialScope {
+  Admin,
+  Downstream,
 }
 
 impl IpmRuntime {
@@ -146,9 +153,25 @@ impl IpmRuntime {
     self.actor_from_bearer(bearer)
   }
 
+  pub fn admin_actor_from_headers(&self, headers: &HeaderMap) -> Option<IpmActor> {
+    let bearer = headers
+      .get(http::header::AUTHORIZATION)
+      .and_then(|value| value.to_str().ok())
+      .and_then(|value| value.strip_prefix("Bearer "))?;
+    self.admin_actor_from_bearer(bearer)
+  }
+
   pub fn actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
+    self.actor_from_bearer_for_scope(bearer, CredentialScope::Downstream)
+  }
+
+  pub fn admin_actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
+    self.actor_from_bearer_for_scope(bearer, CredentialScope::Admin)
+  }
+
+  fn actor_from_bearer_for_scope(&self, bearer: &str, scope: CredentialScope) -> Option<IpmActor> {
     for credential in &self.inner.credentials {
-      if bearer_matches_env(&credential.bearer_token_env, bearer)
+      if credential_matches(credential, bearer, scope)
         && let Some(actor) = self.inner.principals.get(&credential.principal)
       {
         let mut actor = actor.clone();
@@ -228,6 +251,7 @@ impl IpmRuntime {
         name: credential.name.clone(),
         principal: credential.principal.clone(),
         bearer_token_env: credential.bearer_token_env.clone(),
+        break_glass_access: credential.break_glass_access_token_hash.is_some(),
       })
       .collect::<Vec<_>>();
     credentials.sort_by(|left, right| left.name.cmp(&right.name));
@@ -283,6 +307,7 @@ pub struct RedactedIpmCredential {
   pub name: String,
   pub principal: String,
   pub bearer_token_env: String,
+  pub break_glass_access: bool,
 }
 
 pub fn resource(namespace: &str, service: &str, name: &str) -> String {
@@ -452,6 +477,9 @@ fn ip_condition(actual: &str, expected: &[String], positive: bool) -> bool {
 }
 
 fn bearer_matches_env(env_name: &str, actual: &str) -> bool {
+  if env_name.trim().is_empty() {
+    return false;
+  }
   std::env::var(env_name).ok().is_some_and(|expected| {
     if expected.is_empty() {
       return false;
@@ -464,6 +492,35 @@ fn bearer_matches_env(env_name: &str, actual: &str) -> bool {
       .ct_eq(actual_digest.as_ref())
       .into()
   })
+}
+
+fn credential_matches(
+  credential: &IpmCredentialConfig,
+  bearer: &str,
+  scope: CredentialScope,
+) -> bool {
+  if bearer_matches_env(&credential.bearer_token_env, bearer) {
+    return true;
+  }
+  if !matches!(scope, CredentialScope::Admin) {
+    return false;
+  }
+  credential
+    .break_glass_access_token_hash
+    .as_deref()
+    .is_some_and(|hash| bearer_matches_argon2id_hash(hash, bearer))
+}
+
+fn bearer_matches_argon2id_hash(hash: &str, actual: &str) -> bool {
+  if hash.trim().is_empty() || actual.is_empty() {
+    return false;
+  }
+  let Ok(parsed) = PasswordHash::new(hash) else {
+    return false;
+  };
+  Argon2::default()
+    .verify_password(actual.as_bytes(), &parsed)
+    .is_ok()
 }
 
 fn now_unix() -> anyhow::Result<i64> {
@@ -495,228 +552,4 @@ pub fn validate_authorization_input(action: &str, resource: &str) -> anyhow::Res
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn runtime_with_policy(policy: IpmPolicyConfig) -> IpmRuntime {
-    let actor = IpmActor {
-      name: "deployer-token".to_string(),
-      principal: "deployer".to_string(),
-      subject: "deployer@example.com".to_string(),
-      groups: vec!["ops".to_string()],
-    };
-    IpmRuntime {
-      inner: Arc::new(IpmRuntimeInner {
-        namespace: "oxibelt".to_string(),
-        credentials: Vec::new(),
-        principals: HashMap::from([("deployer".to_string(), actor)]),
-        policies: HashMap::from([("test".to_string(), policy)]),
-        principal_bindings: HashMap::from([("deployer".to_string(), vec!["test".to_string()])]),
-        group_bindings: HashMap::new(),
-        legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
-        allow_legacy_bootstrap: false,
-      }),
-    }
-  }
-
-  #[test]
-  fn explicit_deny_wins_over_allow() {
-    let runtime = runtime_with_policy(IpmPolicyConfig {
-      name: "test".to_string(),
-      version: "2026-05-23".to_string(),
-      statements: vec![
-        IpmPolicyStatementConfig {
-          effect: IpmPolicyEffect::Allow,
-          actions: vec!["config:*".to_string()],
-          resources: vec!["*".to_string()],
-          conditions: Vec::new(),
-        },
-        IpmPolicyStatementConfig {
-          effect: IpmPolicyEffect::Deny,
-          actions: vec!["config:Load".to_string()],
-          resources: vec!["*".to_string()],
-          conditions: Vec::new(),
-        },
-      ],
-    });
-    let actor = runtime.inner.principals["deployer"].clone();
-
-    assert_eq!(
-      runtime.authorize(
-        &actor,
-        "config:Load",
-        "oxibelt:oxibelt:config:*",
-        &IpmRequestContext::default()
-      ),
-      IpmDecision::Deny
-    );
-    assert_eq!(
-      runtime.authorize(
-        &actor,
-        "config:Validate",
-        "oxibelt:oxibelt:config:*",
-        &IpmRequestContext::default()
-      ),
-      IpmDecision::Allow
-    );
-  }
-
-  #[test]
-  fn conditions_must_match() {
-    let runtime = runtime_with_policy(IpmPolicyConfig {
-      name: "test".to_string(),
-      version: "2026-05-23".to_string(),
-      statements: vec![IpmPolicyStatementConfig {
-        effect: IpmPolicyEffect::Allow,
-        actions: vec!["route:Invoke".to_string()],
-        resources: vec!["oxibelt:oxibelt:route:app".to_string()],
-        conditions: vec![IpmConditionConfig {
-          operator: IpmConditionOperator::StringEquals,
-          key: "request.method".to_string(),
-          values: vec!["GET".to_string()],
-        }],
-      }],
-    });
-    let actor = runtime.inner.principals["deployer"].clone();
-    let mut context = IpmRequestContext {
-      method: Some("POST".to_string()),
-      ..IpmRequestContext::default()
-    };
-
-    assert_eq!(
-      runtime.authorize(
-        &actor,
-        "route:Invoke",
-        "oxibelt:oxibelt:route:app",
-        &context
-      ),
-      IpmDecision::Deny
-    );
-    context.method = Some("GET".to_string());
-    assert_eq!(
-      runtime.authorize(
-        &actor,
-        "route:Invoke",
-        "oxibelt:oxibelt:route:app",
-        &context
-      ),
-      IpmDecision::Allow
-    );
-  }
-
-  #[test]
-  fn missing_condition_values_do_not_match_negative_operators() {
-    let runtime = runtime_with_policy(IpmPolicyConfig {
-      name: "test".to_string(),
-      version: "2026-05-23".to_string(),
-      statements: vec![
-        IpmPolicyStatementConfig {
-          effect: IpmPolicyEffect::Allow,
-          actions: vec!["route:Invoke".to_string()],
-          resources: vec!["oxibelt:oxibelt:route:app".to_string()],
-          conditions: vec![IpmConditionConfig {
-            operator: IpmConditionOperator::StringNotEquals,
-            key: "request.method".to_string(),
-            values: vec!["POST".to_string()],
-          }],
-        },
-        IpmPolicyStatementConfig {
-          effect: IpmPolicyEffect::Allow,
-          actions: vec!["stream:Connect".to_string()],
-          resources: vec!["oxibelt:oxibelt:stream:app".to_string()],
-          conditions: vec![IpmConditionConfig {
-            operator: IpmConditionOperator::NotIpAddress,
-            key: "request.source_ip".to_string(),
-            values: vec!["192.0.2.0/24".to_string()],
-          }],
-        },
-      ],
-    });
-    let actor = runtime.inner.principals["deployer"].clone();
-
-    assert_eq!(
-      runtime.authorize(
-        &actor,
-        "route:Invoke",
-        "oxibelt:oxibelt:route:app",
-        &IpmRequestContext::default()
-      ),
-      IpmDecision::Deny
-    );
-    assert_eq!(
-      runtime.authorize(
-        &actor,
-        "stream:Connect",
-        "oxibelt:oxibelt:stream:app",
-        &IpmRequestContext::default()
-      ),
-      IpmDecision::Deny
-    );
-
-    let context = IpmRequestContext {
-      method: Some("GET".to_string()),
-      source_ip: Some("198.51.100.10".parse().expect("test IP should parse")),
-      ..IpmRequestContext::default()
-    };
-    assert_eq!(
-      runtime.authorize(
-        &actor,
-        "route:Invoke",
-        "oxibelt:oxibelt:route:app",
-        &context
-      ),
-      IpmDecision::Allow
-    );
-    assert_eq!(
-      runtime.authorize(
-        &actor,
-        "stream:Connect",
-        "oxibelt:oxibelt:stream:app",
-        &context
-      ),
-      IpmDecision::Allow
-    );
-  }
-
-  #[test]
-  fn legacy_bootstrap_bearer_is_ignored_when_disabled() {
-    let bearer = std::env::var("PATH").expect("PATH should be available for tests");
-    let runtime = IpmRuntime {
-      inner: Arc::new(IpmRuntimeInner {
-        namespace: "oxibelt".to_string(),
-        credentials: Vec::new(),
-        principals: HashMap::new(),
-        policies: HashMap::new(),
-        principal_bindings: HashMap::new(),
-        group_bindings: HashMap::new(),
-        legacy_admin_env: "PATH".to_string(),
-        allow_legacy_bootstrap: false,
-      }),
-    };
-
-    assert!(runtime.actor_from_bearer(&bearer).is_none());
-  }
-
-  #[test]
-  fn legacy_bootstrap_bearer_still_works_when_allowed() {
-    let bearer = std::env::var("PATH").expect("PATH should be available for tests");
-    let runtime = IpmRuntime {
-      inner: Arc::new(IpmRuntimeInner {
-        namespace: "oxibelt".to_string(),
-        credentials: Vec::new(),
-        principals: HashMap::new(),
-        policies: HashMap::new(),
-        principal_bindings: HashMap::new(),
-        group_bindings: HashMap::new(),
-        legacy_admin_env: "PATH".to_string(),
-        allow_legacy_bootstrap: true,
-      }),
-    };
-
-    let actor = runtime
-      .actor_from_bearer(&bearer)
-      .expect("legacy bootstrap actor should be returned");
-    assert_eq!(actor.principal, "bootstrap-admin");
-    assert_eq!(actor.groups, vec!["ipm-admin".to_string()]);
-  }
-}
+mod tests;

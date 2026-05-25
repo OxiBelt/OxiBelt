@@ -82,6 +82,20 @@ POST /admin/v1/lifecycle/drain
 POST /admin/v1/lifecycle/undrain
 ```
 
+The `oxibeltctl` operations CLI wraps the Admin API without bypassing IPM
+authorization:
+
+```sh
+cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- status
+cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- auth check --action config:GetStatus --resource '*'
+```
+
+For break-glass recovery, `oxibeltctl --break-glass-access ...` reads the
+operator token from `OXIBELT_BREAK_GLASS_TOKEN`, while OxiBelt stores only an
+Argon2id PHC hash in `[[ipm.credentials]].break_glass_access_token_hash`.
+Break-glass access credentials are accepted on the Admin listener only and are
+ignored for downstream route IPM requests.
+
 ## Documentation
 
 - [Technical specification](docs/Specification.md): proxy behavior, request pipeline, runtime model, security posture, and non-goals.
@@ -132,6 +146,14 @@ The standard container layout is:
 /etc/oxibelt/config   OxiBelt TOML configuration and included modules
 /etc/oxibelt/cert     TLS certificates, private keys, CA roots, OCSP, ECH files
 /etc/oxibelt/oxirule  External .oxirule.toml rule files
+```
+
+The image also bundles `/usr/local/bin/oxibeltctl` for Admin API operations while
+keeping the container entrypoint on `oxibelt`. For example:
+
+```sh
+docker exec -it oxibelt oxibeltctl status
+docker exec -it oxibelt oxibeltctl lifecycle drain
 ```
 
 Example hardened local run:

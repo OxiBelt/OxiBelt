@@ -2584,12 +2584,19 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "credentials",
       "enabled",
       "fail_closed",
+      "break_glass",
       "namespace",
       "policies",
       "principals",
       "trust",
     ][..],
-    "ipm.credentials" => &["bearer_token_env", "name", "principal"][..],
+    "ipm.break_glass" => &["argon2id_memory_mib"][..],
+    "ipm.credentials" => &[
+      "bearer_token_env",
+      "break_glass_access_token_hash",
+      "name",
+      "principal",
+    ][..],
     "ipm.principals" => &["groups", "id", "subject"][..],
     "ipm.policies" => &["name", "statements", "version"][..],
     "ipm.policies.statements" => &["actions", "conditions", "effect", "resources"][..],
@@ -2963,6 +2970,15 @@ fn redact_effective_toml(value: &mut toml::Value) {
   {
     for backend in backends {
       redact_toml_path(backend, &["connection_url"]);
+    }
+  }
+  if let Some(credentials) = value
+    .get_mut("ipm")
+    .and_then(|ipm| ipm.get_mut("credentials"))
+    .and_then(toml::Value::as_array_mut)
+  {
+    for credential in credentials {
+      redact_toml_path(credential, &["break_glass_access_token_hash"]);
     }
   }
   if let Some(listeners) = value

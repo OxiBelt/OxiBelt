@@ -19,6 +19,20 @@ use oxibelt::config::{
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
 
+fn test_argon2id_hash(secret: &str, memory_kib: u32) -> String {
+    use argon2::password_hash::SaltString;
+    use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
+
+    let params = Params::new(memory_kib, 1, 1, None).expect("test Argon2id params should build");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let salt = SaltString::encode_b64(b"oxibelt-test-salt")
+        .expect("test salt should be valid base64 salt");
+    argon2
+        .hash_password(secret.as_bytes(), &salt)
+        .expect("test Argon2id hash should build")
+        .to_string()
+}
+
 #[test]
 fn config_parses_trusted_upstream_ca_certificates() {
     let temp_dir = common::TempDir::new("config");
@@ -3007,6 +3021,43 @@ connection_url = "redis://:secret@redis.example:6379/0"
 }
 
 #[test]
+fn effective_config_dump_redacts_break_glass_access_hashes() {
+    let temp_dir = common::TempDir::new("ipm-break-glass-redacted");
+    let hash = test_argon2id_hash("break-glass-secret", 8);
+    let config_path = write_loadable_config(&temp_dir, "ipm-break-glass-redacted", |raw| {
+        raw.replace(
+            "[[upstreams]]",
+            &format!(
+                r#"[ipm]
+enabled = true
+
+[ipm.break_glass]
+argon2id_memory_mib = 1
+
+[[ipm.principals]]
+id = "break-glass-admin"
+subject = "break-glass"
+groups = ["ipm-admin"]
+
+[[ipm.credentials]]
+name = "break-glass-token"
+principal = "break-glass-admin"
+break_glass_access_token_hash = "{hash}"
+
+[[upstreams]]"#
+            ),
+        )
+    });
+
+    let redacted =
+        toml::to_string_pretty(&Config::load_effective_toml_redacted(&config_path).unwrap())
+            .expect("redacted TOML should serialize");
+
+    assert!(redacted.contains("break_glass_access_token_hash = \"<redacted>\""));
+    assert!(!redacted.contains(&hash));
+}
+
+#[test]
 fn effective_config_dump_redacts_webrtc_turn_auth_secrets() {
     let temp_dir = common::TempDir::new("turn-redacted");
     let config_path = write_loadable_config(&temp_dir, "turn-redacted", |raw| {
@@ -3273,6 +3324,96 @@ policy = "config-read"
         IpmPolicyEffect::Allow
     ));
     assert_eq!(config.ipm.bindings[0].group.as_deref(), Some("operators"));
+}
+
+#[test]
+fn ipm_break_glass_access_credential_uses_argon2id_hash() {
+    let temp_dir = common::TempDir::new("ipm-break-glass");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ipm-break-glass");
+    let hash = test_argon2id_hash("break-glass-secret", 8);
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[ipm]
+enabled = true
+namespace = "default"
+
+[ipm.break_glass]
+argon2id_memory_mib = 1
+
+[[ipm.principals]]
+id = "break-glass-admin"
+subject = "break-glass"
+groups = ["ipm-admin"]
+
+[[ipm.credentials]]
+name = "break-glass-token"
+principal = "break-glass-admin"
+break_glass_access_token_hash = "{hash}"
+    "#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.ipm.break_glass.argon2id_memory_mib, 1);
+    assert_eq!(config.ipm.credentials[0].bearer_token_env, "");
+    assert!(
+        config.ipm.credentials[0]
+            .break_glass_access_token_hash
+            .is_some()
+    );
+}
+
+#[test]
+fn ipm_break_glass_access_hash_cannot_exceed_configured_memory() {
+    let temp_dir = common::TempDir::new("ipm-break-glass-memory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "ipm-break-glass-memory");
+    let hash = test_argon2id_hash("break-glass-secret", 2048);
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[ipm]
+enabled = true
+namespace = "default"
+
+[ipm.break_glass]
+argon2id_memory_mib = 1
+
+[[ipm.principals]]
+id = "break-glass-admin"
+subject = "break-glass"
+groups = ["ipm-admin"]
+
+[[ipm.credentials]]
+name = "break-glass-token"
+principal = "break-glass-admin"
+break_glass_access_token_hash = "{hash}"
+    "#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("hash memory above configured limit should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("above ipm.break_glass.argon2id_memory_mib"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[test]

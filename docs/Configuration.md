@@ -898,6 +898,9 @@ enabled = false
 namespace = "oxibelt"
 fail_closed = true
 
+[ipm.break_glass]
+argon2id_memory_mib = 128
+
 [[ipm.principals]]
 id = "upstream-ops"
 subject = "upstream-ops@example.com"
@@ -1015,7 +1018,9 @@ Actions use `service:Action` syntax. Initial services are `ipm`, `config`, `cach
 
 OxiRule development API requests that set `include_active_rules = true` evaluate active WAF policy as well as the submitted candidate, so they require the same devtools action on `oxirule/*`; replay uses `replay/*`.
 
-`[ipm].backend` optionally names a PostgreSQL `[[shared_state.backends]]` entry used to initialize the `oxibelt_ipm_*` operational tables. If `backend` is omitted and no shared-state default backend is configured, OxiBelt uses static TOML-defined IPM principals, credentials, policies, and bindings only. With `[ipm].enabled = true`, each `[[ipm.credentials]]` bearer-token environment variable must be set and non-empty at startup.
+`[ipm].backend` optionally names a PostgreSQL `[[shared_state.backends]]` entry used to initialize the `oxibelt_ipm_*` operational tables. If `backend` is omitted and no shared-state default backend is configured, OxiBelt uses static TOML-defined IPM principals, credentials, policies, and bindings only. With `[ipm].enabled = true`, each normal `[[ipm.credentials]]` bearer-token environment variable must be set and non-empty at startup.
+
+`[ipm.break_glass].argon2id_memory_mib` limits the Argon2id memory parameter accepted for break-glass access token hashes. The default is `128` MiB and the maximum configurable value is `16384` MiB. This bound is checked at configuration load time before any supplied break-glass token can be verified.
 
 ```toml
 [ipm]
@@ -1023,6 +1028,9 @@ enabled = true
 namespace = "oxibelt"
 backend = "cluster"
 fail_closed = true
+
+[ipm.break_glass]
+argon2id_memory_mib = 128
 
 [[ipm.principals]]
 id = "admin"
@@ -1056,6 +1064,64 @@ name = "cluster"
 kind = "postgres"
 connection_url_env = "OXIBELT_SHARED_STATE_URL"
 ```
+
+`oxibeltctl` is the bundled operations CLI for these Admin APIs. It defaults to
+`http://127.0.0.1:9092`, reads `OXIBELT_ADMIN_TOKEN`, and sends the same
+`Authorization: Bearer <token>` requests as any other Admin API client:
+
+```sh
+oxibeltctl status
+oxibeltctl doctor
+oxibeltctl config diff source/config/oxibelt.toml
+oxibeltctl lifecycle drain
+oxibeltctl auth check --action config:GetStatus --resource '*'
+```
+
+Container images keep `ENTRYPOINT` on `oxibelt` but include the CLI for
+same-container operations:
+
+```sh
+docker exec -it oxibelt oxibeltctl status
+```
+
+`oxibeltctl` does not grant special authority based on Linux UID, container
+root, or `docker exec --user root`. A `403 Forbidden` means the bearer token
+authenticated but IPM denied the requested action/resource; use
+`oxibeltctl auth check --action ACTION --resource RESOURCE` with a token that
+can run `ipm:Simulate`, then adjust IPM policy or use an explicit break-glass
+credential.
+
+For break-glass recovery, configure a separate full-access credential and keep
+its plaintext secret separate from the day-to-day Admin token. OxiBelt stores
+only the Argon2id PHC hash:
+
+```toml
+[ipm.break_glass]
+argon2id_memory_mib = 128
+
+[[ipm.principals]]
+id = "break-glass-admin"
+subject = "break-glass"
+groups = ["ipm-admin"]
+
+[[ipm.credentials]]
+name = "break-glass-token"
+principal = "break-glass-admin"
+break_glass_access_token_hash = "$argon2id$v=19$m=131072,t=3,p=1$..."
+```
+
+Generate the hash with an Argon2id tool using a memory parameter at or below
+`argon2id_memory_mib` (`m=131072` is 128 MiB). `oxibeltctl
+--break-glass-access ...` only switches the token source to
+`OXIBELT_BREAK_GLASS_TOKEN`; it does not bypass Admin authentication or IPM.
+Break-glass access credentials are Admin-listener-only: downstream route IPM
+requests ignore them even if a client sends the token as `Authorization:
+Bearer ...`. If a VPN, bastion, or upstream proxy container should gate
+emergency access, configure that component to authenticate the operator first
+and then use the break-glass token only when calling the Admin listener. Limit
+break-glass use with loopback-only or management-network-only Admin listeners,
+TLS or mTLS for non-loopback access, short-lived secret handling, and rotation
+after use.
 
 Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
 

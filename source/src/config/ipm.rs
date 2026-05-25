@@ -25,6 +25,8 @@ pub struct IpmConfig {
   pub bindings: Vec<IpmPolicyBindingConfig>,
   #[serde(default)]
   pub trust: Vec<IpmTrustMappingConfig>,
+  #[serde(default)]
+  pub break_glass: IpmBreakGlassConfig,
 }
 
 impl Default for IpmConfig {
@@ -39,6 +41,7 @@ impl Default for IpmConfig {
       policies: Vec::new(),
       bindings: Vec::new(),
       trust: Vec::new(),
+      break_glass: IpmBreakGlassConfig::default(),
     }
   }
 }
@@ -47,7 +50,24 @@ impl Default for IpmConfig {
 pub struct IpmCredentialConfig {
   pub name: String,
   pub principal: String,
+  #[serde(default)]
   pub bearer_token_env: String,
+  #[serde(default)]
+  pub break_glass_access_token_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+pub struct IpmBreakGlassConfig {
+  #[serde(default = "default_break_glass_argon2id_memory_mib")]
+  pub argon2id_memory_mib: u32,
+}
+
+impl Default for IpmBreakGlassConfig {
+  fn default() -> Self {
+    Self {
+      argon2id_memory_mib: default_break_glass_argon2id_memory_mib(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
@@ -172,6 +192,7 @@ impl Config {
   pub(super) fn validate_ipm(&self) -> anyhow::Result<()> {
     validate_runtime_identifier("ipm.namespace", &self.ipm.namespace)?;
     validate_optional_non_empty("ipm.backend", self.ipm.backend.as_deref())?;
+    validate_break_glass_argon2id_memory_mib(self.ipm.break_glass.argon2id_memory_mib)?;
     if self.ipm.enabled
       && let Some(backend_name) = self.ipm_backend_name()
     {
@@ -209,10 +230,33 @@ impl Config {
     for credential in &self.ipm.credentials {
       validate_runtime_identifier("ipm.credentials.name", &credential.name)?;
       validate_runtime_identifier("ipm.credentials.principal", &credential.principal)?;
-      validate_optional_non_empty(
-        "ipm.credentials.bearer_token_env",
-        Some(&credential.bearer_token_env),
-      )?;
+      let has_bearer_env = !credential.bearer_token_env.trim().is_empty();
+      let has_break_glass_hash = credential
+        .break_glass_access_token_hash
+        .as_deref()
+        .is_some_and(|hash| !hash.trim().is_empty());
+      if has_bearer_env == has_break_glass_hash {
+        bail!(
+          "ipm credential {} must set exactly one of bearer_token_env or break_glass_access_token_hash",
+          credential.name
+        );
+      }
+      if has_bearer_env {
+        validate_optional_non_empty(
+          "ipm.credentials.bearer_token_env",
+          Some(&credential.bearer_token_env),
+        )?;
+      }
+      if let Some(hash) = credential.break_glass_access_token_hash.as_deref() {
+        validate_argon2id_hash_memory(
+          &format!(
+            "ipm credential {} break_glass_access_token_hash",
+            credential.name
+          ),
+          hash,
+          self.ipm.break_glass.argon2id_memory_mib,
+        )?;
+      }
       if !credential_names.insert(credential.name.as_str()) {
         bail!("duplicate ipm credential {}", credential.name);
       }
@@ -224,6 +268,7 @@ impl Config {
         );
       }
       if self.ipm.enabled
+        && has_bearer_env
         && std::env::var(&credential.bearer_token_env)
           .ok()
           .is_none_or(|token| token.is_empty())
@@ -295,6 +340,50 @@ impl Config {
 
     Ok(())
   }
+}
+
+fn validate_break_glass_argon2id_memory_mib(memory_mib: u32) -> anyhow::Result<()> {
+  if memory_mib == 0 || memory_mib > max_break_glass_argon2id_memory_mib() {
+    bail!(
+      "ipm.break_glass.argon2id_memory_mib must be between 1 and {}",
+      max_break_glass_argon2id_memory_mib()
+    );
+  }
+  Ok(())
+}
+
+fn validate_argon2id_hash_memory(
+  field: &str,
+  hash: &str,
+  max_memory_mib: u32,
+) -> anyhow::Result<()> {
+  if !hash.starts_with("$argon2id$") {
+    bail!("{field} must be an Argon2id PHC string");
+  }
+  argon2::PasswordHash::new(hash).with_context(|| format!("{field} is not a valid PHC string"))?;
+  let Some(memory_kib) = argon2id_memory_kib(hash) else {
+    bail!("{field} must include an Argon2id memory parameter");
+  };
+  let max_memory_kib = max_memory_mib.saturating_mul(1024);
+  if memory_kib > max_memory_kib {
+    bail!(
+      "{field} requires {memory_kib} KiB, above ipm.break_glass.argon2id_memory_mib = {max_memory_mib} MiB"
+    );
+  }
+  Ok(())
+}
+
+fn argon2id_memory_kib(hash: &str) -> Option<u32> {
+  hash
+    .split('$')
+    .find(|segment| segment.contains("m="))
+    .and_then(|params| {
+      params.split(',').find_map(|part| {
+        part
+          .strip_prefix("m=")
+          .and_then(|value| value.parse::<u32>().ok())
+      })
+    })
 }
 
 pub(crate) fn validate_ipm_action(field: &str, action: &str) -> anyhow::Result<()> {
@@ -472,6 +561,14 @@ fn default_ipm_namespace() -> String {
 
 fn default_ipm_policy_version() -> String {
   "2026-05-23".to_string()
+}
+
+fn default_break_glass_argon2id_memory_mib() -> u32 {
+  128
+}
+
+fn max_break_glass_argon2id_memory_mib() -> u32 {
+  16 * 1024
 }
 
 fn default_true() -> bool {

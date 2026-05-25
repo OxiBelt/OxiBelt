@@ -384,6 +384,11 @@ namespace = "oxibelt"
 # backend = "cluster" # optional PostgreSQL shared_state backend for oxibelt_ipm_* tables
 fail_closed = true
 
+[ipm.break_glass]
+# Argon2id memory limit for break-glass access token hashes.
+# The default is 128 MiB; values may be raised up to 16384 MiB.
+argon2id_memory_mib = 128
+
 #[[ipm.principals]]
 # id = "admin"
 # subject = "admin@example.com"
@@ -393,6 +398,20 @@ fail_closed = true
 # name = "admin-env-token"
 # principal = "admin"
 # bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+#
+## Break-glass access credentials are Admin-API-only and are ignored by
+## downstream route IPM. Store only an Argon2id PHC hash here; operators pass
+## the plaintext token through OXIBELT_BREAK_GLASS_TOKEN when invoking
+## oxibeltctl --break-glass-access.
+#[[ipm.principals]]
+# id = "break-glass-admin"
+# subject = "break-glass"
+# groups = ["ipm-admin"]
+#
+#[[ipm.credentials]]
+# name = "break-glass-token"
+# principal = "break-glass-admin"
+# break_glass_access_token_hash = "$argon2id$v=19$m=131072,t=3,p=1$..."
 
 #[[ipm.policies]]
 # name = "admin-full-access"

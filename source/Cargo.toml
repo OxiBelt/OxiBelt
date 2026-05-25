@@ -13,6 +13,7 @@ fuzzing = []
 [dependencies]
 anyhow = "1"
 aho-corasick = "1.1.4"
+argon2 = { version = "0.5", features = ["std"] }
 async-compression = { version = "0.4", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 base64 = "0.22"
 bytes = "1"

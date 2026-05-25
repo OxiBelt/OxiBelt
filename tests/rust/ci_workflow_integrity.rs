@@ -221,6 +221,36 @@ fn alpine_dockerfile_builder_copies_workspace_members() {
 }
 
 #[test]
+fn alpine_dockerfile_bundles_oxibeltctl() {
+    let dockerfile = dockerfile_text();
+
+    assert!(
+        dockerfile.contains("--bin oxibeltctl"),
+        "source/ops/Dockerfile.alpine should build the oxibeltctl operations CLI"
+    );
+    assert!(
+        dockerfile
+            .contains("cp \"target/${OXIBELT_RUST_TARGET}/release/oxibeltctl\" /tmp/oxibeltctl")
+            && dockerfile.contains("cp target/release/oxibeltctl /tmp/oxibeltctl"),
+        "source/ops/Dockerfile.alpine should stage oxibeltctl for target and host builds"
+    );
+    assert!(
+        dockerfile.contains("COPY --from=builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl"),
+        "source/ops/Dockerfile.alpine should copy oxibeltctl into the runtime image"
+    );
+    assert!(
+        dockerfile.contains("chmod 0755 /usr/local/bin/oxibeltctl"),
+        "source/ops/Dockerfile.alpine should make oxibeltctl executable"
+    );
+    assert!(
+        dockerfile.contains(
+            "ENTRYPOINT [\"/usr/local/bin/oxibelt\", \"--config\", \"/etc/oxibelt/config/oxibelt.toml\"]"
+        ),
+        "source/ops/Dockerfile.alpine should keep oxibelt as the container entrypoint"
+    );
+}
+
+#[test]
 fn source_structure_job_stays_independent() {
     let workflow = workflow_text();
     let jobs = parse_jobs(&workflow);
