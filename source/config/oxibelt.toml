@@ -420,6 +420,11 @@ argon2id_memory_mib = 128
 # effect = "allow"
 # actions = ["*"]
 # resources = ["*"]
+#
+## To delegate protected [admin] or [ipm] configuration changes without full
+## access, grant admin:UpdateConfig on oxibelt:<namespace>:admin:config and/or
+## ipm:UpdateConfig on oxibelt:<namespace>:ipm:config in addition to the base
+## config operation such as config:Load, config:Rollback, or config:SyncFiles.
 
 #[[ipm.bindings]]
 # group = "platform-admins"

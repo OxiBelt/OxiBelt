@@ -455,11 +455,10 @@ pub(super) async fn admin_config_response(
       if let Some(response) = admin_control::validate_config_payload(&payload) {
         return response;
       }
-      let actor_can_manage_ipm = authorization.is_allowed("ipm:*", "*");
       admin_control
         .load_config(
           authorization.actor.name.clone(),
-          actor_can_manage_ipm,
+          admin_control::control_plane_config_permissions(authorization),
           if_match,
           payload.config,
         )
@@ -471,7 +470,11 @@ pub(super) async fn admin_config_response(
         return permission_denied(authorization.actor, "config:Rollback");
       }
       admin_control
-        .rollback_config(authorization.actor.name.clone(), if_match_header(&request))
+        .rollback_config(
+          authorization.actor.name.clone(),
+          admin_control::control_plane_config_permissions(authorization),
+          if_match_header(&request),
+        )
         .await
         .into_http()
     }
@@ -558,7 +561,12 @@ pub(super) async fn admin_files_response(
     };
   }
   admin_control
-    .sync_files(authorization.actor.name.clone(), if_match, payload)
+    .sync_files(
+      authorization.actor.name.clone(),
+      admin_control::control_plane_config_permissions(authorization),
+      if_match,
+      payload,
+    )
     .await
     .into_http()
 }

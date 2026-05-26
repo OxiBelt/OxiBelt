@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ::http::StatusCode;
 use anyhow::{anyhow, bail};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{info, warn};
@@ -15,14 +15,19 @@ use crate::routes::RouteTable;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::waf::WafEngine;
 
-use super::{ListenerSupervisor, admin::json_response};
+use super::{ListenerSupervisor, admin::json_response, admin_auth::AdminAuthorization};
 
 mod file_sync;
 mod load_scope;
+mod request;
 #[cfg(test)]
 mod tests;
 
-use load_scope::validate_admin_config_load_scope;
+pub(super) use load_scope::{ControlPlaneConfigPermissions, validate_control_plane_config_scope};
+pub(super) use request::{
+  AdminApplyMode, AdminConfigPayload, AdminControlCommand, AdminFileOperation,
+  AdminFileOperationKind, AdminFileRoot, AdminFilesSyncRequest,
+};
 
 pub(super) const ADMIN_CONFIG_BODY_LIMIT: usize = 1024 * 1024;
 
@@ -54,92 +59,10 @@ pub(super) struct RollbackSnapshot {
   effective_config: Option<String>,
 }
 
-pub(super) enum AdminControlCommand {
-  LoadConfig {
-    actor: String,
-    actor_can_manage_ipm: bool,
-    if_match: Option<String>,
-    raw: String,
-    respond: oneshot::Sender<AdminControlResponse>,
-  },
-  RollbackConfig {
-    actor: String,
-    if_match: Option<String>,
-    respond: oneshot::Sender<AdminControlResponse>,
-  },
-  ReloadDownstreamTls {
-    actor: String,
-    if_match: Option<String>,
-    respond: oneshot::Sender<AdminControlResponse>,
-  },
-  SyncFiles {
-    actor: String,
-    if_match: Option<String>,
-    request: AdminFilesSyncRequest,
-    respond: oneshot::Sender<AdminControlResponse>,
-  },
-}
-
+#[derive(Debug)]
 pub(super) struct AdminControlResponse {
   pub(super) status: StatusCode,
   pub(super) body: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct AdminConfigPayload {
-  #[serde(default = "default_config_format")]
-  pub(super) format: String,
-  pub(super) config: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct AdminFilesSyncRequest {
-  #[serde(default)]
-  pub(super) apply: AdminApplyMode,
-  #[serde(default)]
-  pub(super) operations: Vec<AdminFileOperation>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum AdminApplyMode {
-  #[default]
-  None,
-  #[serde(rename = "oxirule", alias = "oxi_rule")]
-  OxiRule,
-  Full,
-  DownstreamTls,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct AdminFileOperation {
-  #[serde(rename = "op", alias = "type")]
-  pub(super) op: AdminFileOperationKind,
-  pub(super) root: AdminFileRoot,
-  pub(super) path: String,
-  #[serde(default)]
-  pub(super) expected_sha256: Option<String>,
-  #[serde(default)]
-  pub(super) content: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum AdminFileOperationKind {
-  Put,
-  Delete,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum AdminFileRoot {
-  Config,
-  #[serde(rename = "oxirule", alias = "oxi_rule")]
-  OxiRule,
-  #[serde(rename = "oxirule_group", alias = "oxi_rule_group")]
-  OxiRuleGroup,
-  #[serde(rename = "oxirule_rulepack", alias = "oxi_rulepack")]
-  OxiRuleRulepack,
 }
 
 impl AdminControlHandle {
@@ -178,14 +101,14 @@ impl AdminControlHandle {
   pub(super) async fn load_config(
     &self,
     actor: String,
-    actor_can_manage_ipm: bool,
+    control_plane_permissions: ControlPlaneConfigPermissions,
     if_match: Option<String>,
     raw: String,
   ) -> AdminControlResponse {
     self
       .request(|respond| AdminControlCommand::LoadConfig {
         actor,
-        actor_can_manage_ipm,
+        control_plane_permissions,
         if_match,
         raw,
         respond,
@@ -196,11 +119,13 @@ impl AdminControlHandle {
   pub(super) async fn rollback_config(
     &self,
     actor: String,
+    control_plane_permissions: ControlPlaneConfigPermissions,
     if_match: Option<String>,
   ) -> AdminControlResponse {
     self
       .request(|respond| AdminControlCommand::RollbackConfig {
         actor,
+        control_plane_permissions,
         if_match,
         respond,
       })
@@ -224,12 +149,14 @@ impl AdminControlHandle {
   pub(super) async fn sync_files(
     &self,
     actor: String,
+    control_plane_permissions: ControlPlaneConfigPermissions,
     if_match: Option<String>,
     request: AdminFilesSyncRequest,
   ) -> AdminControlResponse {
     self
       .request(|respond| AdminControlCommand::SyncFiles {
         actor,
+        control_plane_permissions,
         if_match,
         request,
         respond,
@@ -277,6 +204,15 @@ impl AdminControlResponse {
   }
 }
 
+pub(super) fn control_plane_config_permissions(
+  authorization: &AdminAuthorization<'_>,
+) -> ControlPlaneConfigPermissions {
+  ControlPlaneConfigPermissions {
+    admin_update_config: authorization.is_allowed("admin:UpdateConfig", "config"),
+    ipm_update_config: authorization.is_allowed("ipm:UpdateConfig", "config"),
+  }
+}
+
 pub(super) async fn handle_admin_control_command(
   command: AdminControlCommand,
   state: &AppHandle,
@@ -288,14 +224,14 @@ pub(super) async fn handle_admin_control_command(
   match command {
     AdminControlCommand::LoadConfig {
       actor,
-      actor_can_manage_ipm,
+      control_plane_permissions,
       if_match,
       raw,
       respond,
     } => {
       let response = apply_config_load(
         &actor,
-        actor_can_manage_ipm,
+        control_plane_permissions,
         if_match,
         raw,
         state,
@@ -309,11 +245,20 @@ pub(super) async fn handle_admin_control_command(
     }
     AdminControlCommand::RollbackConfig {
       actor,
+      control_plane_permissions,
       if_match,
       respond,
     } => {
-      let response =
-        apply_config_rollback(&actor, if_match, state, listeners, control, rollback).await;
+      let response = apply_config_rollback(
+        &actor,
+        control_plane_permissions,
+        if_match,
+        state,
+        listeners,
+        control,
+        rollback,
+      )
+      .await;
       let _ = respond.send(response);
     }
     AdminControlCommand::ReloadDownstreamTls {
@@ -327,12 +272,14 @@ pub(super) async fn handle_admin_control_command(
     }
     AdminControlCommand::SyncFiles {
       actor,
+      control_plane_permissions,
       if_match,
       request,
       respond,
     } => {
       let response = file_sync::apply_file_sync(
         &actor,
+        control_plane_permissions,
         if_match,
         request,
         state,
@@ -350,7 +297,7 @@ pub(super) async fn handle_admin_control_command(
 #[allow(clippy::too_many_arguments)]
 async fn apply_config_load(
   actor: &str,
-  actor_can_manage_ipm: bool,
+  control_plane_permissions: ControlPlaneConfigPermissions,
   if_match: Option<String>,
   raw: String,
   state: &AppHandle,
@@ -371,13 +318,20 @@ async fn apply_config_load(
     }
   };
   if let Err(response) =
-    validate_admin_config_load_scope(actor_can_manage_ipm, &active.config, &config)
+    validate_control_plane_config_scope(control_plane_permissions, &active.config, &config)
   {
     record_operation(
       control,
       "config_load",
       "rejected",
-      Some("admin or IPM configuration changes require ipm:*".to_string()),
+      Some(
+        response
+          .body
+          .get("error")
+          .and_then(|value| value.as_str())
+          .unwrap_or("admin or IPM configuration changes require additional permissions")
+          .to_string(),
+      ),
     )
     .await;
     return response;
@@ -429,6 +383,7 @@ async fn apply_config_load(
 
 async fn apply_config_rollback(
   actor: &str,
+  control_plane_permissions: ControlPlaneConfigPermissions,
   if_match: Option<String>,
   state: &AppHandle,
   listeners: &mut ListenerSupervisor,
@@ -438,10 +393,34 @@ async fn apply_config_rollback(
   if let Err(response) = check_if_match(control, if_match).await {
     return response;
   }
-  let Some(previous) = rollback.take() else {
+  let Some(previous) = rollback.as_ref() else {
     return AdminControlResponse::error(StatusCode::CONFLICT, "no rollback snapshot is available");
   };
   let current = state.snapshot().as_ref().clone();
+  if let Err(response) = validate_control_plane_config_scope(
+    control_plane_permissions,
+    &current.config,
+    &previous.snapshot.config,
+  ) {
+    record_operation(
+      control,
+      "config_rollback",
+      "rejected",
+      Some(
+        response
+          .body
+          .get("error")
+          .and_then(|value| value.as_str())
+          .unwrap_or("admin or IPM configuration changes require additional permissions")
+          .to_string(),
+      ),
+    )
+    .await;
+    return response;
+  }
+  let previous = rollback
+    .take()
+    .expect("rollback snapshot should exist after permission check");
   let current_effective = control.state.lock().await.effective_config.clone();
   let pending = match listeners.prepare(&previous.snapshot).await {
     Ok(pending) => pending,
@@ -712,10 +691,6 @@ async fn record_operation(
 
 pub(super) fn etag_for_revision(revision: u64) -> String {
   format!("\"oxibelt-config-{revision}\"")
-}
-
-fn default_config_format() -> String {
-  "toml".to_string()
 }
 
 pub(super) fn validate_config_payload(

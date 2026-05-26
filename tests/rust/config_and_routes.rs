@@ -3602,6 +3602,60 @@ policy = "diagnostics-preflight"
 }
 
 #[test]
+fn ipm_config_accepts_control_plane_config_update_actions() {
+    unsafe {
+        std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+    }
+    let temp_dir = common::TempDir::new("ipm-control-plane-actions");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "ipm-control-plane-actions");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[ipm]
+enabled = true
+namespace = "default"
+
+[[ipm.principals]]
+id = "deployer"
+subject = "oidc:ci/deployer"
+groups = ["operators"]
+
+[[ipm.credentials]]
+name = "deployer-token"
+principal = "deployer"
+bearer_token_env = "OXIBELT_IPM_TOKEN_TEST"
+
+[[ipm.policies]]
+name = "control-plane-config"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["admin:UpdateConfig", "admin:*", "ipm:UpdateConfig", "ipm:*"]
+resources = [
+    "oxibelt:default:admin:config",
+    "oxibelt:default:admin:*",
+    "oxibelt:default:ipm:config",
+    "oxibelt:default:ipm:*",
+]
+
+[[ipm.bindings]]
+group = "operators"
+policy = "control-plane-config"
+    "#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+}
+
+#[test]
 fn ipm_config_rejects_unknown_action_resource_condition_and_legacy_token_store() {
     unsafe {
         std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
@@ -3671,6 +3725,21 @@ policy = "policy"
         error
             .to_string()
             .contains("unsupported action waf:Teleport"),
+        "unexpected error: {error}"
+    );
+
+    let unknown_admin_action = base
+        .replace("{action}", "admin:Teleport")
+        .replace("{resource}", "oxibelt:default:admin:*")
+        .replace("{condition}", "");
+    let config: Config = toml::from_str(&unknown_admin_action).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("unknown Admin action should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported action admin:Teleport"),
         "unexpected error: {error}"
     );
 

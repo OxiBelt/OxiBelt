@@ -464,7 +464,8 @@ fn validate_ipm_condition_key(key: &str) -> anyhow::Result<()> {
 fn validate_ipm_service(field: &str, service: &str) -> anyhow::Result<()> {
   if matches!(
     service,
-    "ipm"
+    "admin"
+      | "ipm"
       | "config"
       | "cache"
       | "upstream-pool"
@@ -485,6 +486,7 @@ fn validate_ipm_service(field: &str, service: &str) -> anyhow::Result<()> {
 
 fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
   match service {
+    "admin" => &["UpdateConfig"],
     "ipm" => &[
       "ListPrincipals",
       "GetPrincipal",
@@ -505,6 +507,7 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "CreateBinding",
       "DeleteBinding",
       "Simulate",
+      "UpdateConfig",
     ],
     "config" => &[
       "GetStatus",
