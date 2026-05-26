@@ -16,6 +16,8 @@ mod dynamic_policy_plan;
 mod output;
 #[path = "oxibeltctl/plan.rs"]
 mod plan;
+#[path = "oxibeltctl/profile_catalog.rs"]
+mod profile_catalog;
 
 use cli::{AdminArgs, Cli, Command, selected_token_env};
 use output::{print_permission_hint, print_response};

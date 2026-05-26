@@ -441,8 +441,32 @@ pub(crate) struct RateLimitSubjectArgs {
 #[derive(Debug, Args)]
 pub(crate) struct MitigateArgs {
   pub(crate) profile: String,
-  #[arg(long = "profile-file", value_name = "FILE")]
-  pub(crate) profile_file: PathBuf,
+  #[arg(
+    long = "profile-file",
+    value_name = "FILE",
+    required_unless_present = "profile_url",
+    conflicts_with = "profile_url"
+  )]
+  pub(crate) profile_file: Option<PathBuf>,
+  #[arg(
+    long = "profile-url",
+    value_name = "URL",
+    required_unless_present = "profile_file",
+    conflicts_with = "profile_file"
+  )]
+  pub(crate) profile_url: Option<Url>,
+  #[arg(
+    long = "profile-ca-cert",
+    value_name = "FILE",
+    requires = "profile_url"
+  )]
+  pub(crate) profile_ca_certs: Vec<PathBuf>,
+  #[arg(long = "profile-token-env", requires = "profile_url")]
+  pub(crate) profile_token_env: Option<String>,
+  #[arg(long = "profile-sha256", requires = "profile_url")]
+  pub(crate) profile_sha256: Option<String>,
+  #[arg(long = "allow-insecure-profile-url", requires = "profile_url")]
+  pub(crate) allow_insecure_profile_url: bool,
   #[arg(long)]
   pub(crate) source: String,
   #[arg(long, value_parser = parse_ttl_seconds)]

@@ -1,11 +1,9 @@
-use std::collections::BTreeMap;
-
 use anyhow::{Context, bail};
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::cli::*;
 use crate::plan::{RequestPlan, delete, get, patch_json, post_json, read_json_file};
+use crate::profile_catalog::MitigationProfileCatalog;
 
 pub(crate) fn plan_dynamic_policy(command: &DynamicPolicyCommand) -> anyhow::Result<RequestPlan> {
   match &command.command {
@@ -154,19 +152,14 @@ pub(crate) fn plan_rate_limit(args: &RateLimitArgs) -> anyhow::Result<RequestPla
   )
 }
 
-pub(crate) fn plan_mitigate(args: &MitigateArgs) -> anyhow::Result<RequestPlan> {
-  let catalog: MitigationProfileCatalog =
-    serde_json::from_value(read_json_file(&args.profile_file)?).with_context(|| {
-      format!(
-        "failed to parse mitigation profile file {}",
-        args.profile_file.display()
-      )
-    })?;
+pub(crate) fn plan_mitigate(
+  args: &MitigateArgs,
+  catalog: &MitigationProfileCatalog,
+) -> anyhow::Result<RequestPlan> {
   let profile = catalog.profiles.get(&args.profile).with_context(|| {
     format!(
-      "mitigation profile {} was not found in {}",
-      args.profile,
-      args.profile_file.display()
+      "mitigation profile {} was not found in catalog",
+      args.profile
     )
   })?;
   let path_prefix = args
@@ -214,42 +207,6 @@ pub(crate) fn plan_mitigate(args: &MitigateArgs) -> anyhow::Result<RequestPlan> 
     "dynamic-policy:Apply",
     "*",
   )
-}
-
-#[derive(Debug, Deserialize)]
-struct MitigationProfileCatalog {
-  profiles: BTreeMap<String, MitigationProfile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MitigationProfile {
-  action: String,
-  #[serde(default)]
-  source: Option<String>,
-  #[serde(default)]
-  priority: Option<i32>,
-  #[serde(default)]
-  route_name: Option<String>,
-  #[serde(default)]
-  path_prefix: Option<String>,
-  #[serde(default)]
-  method: Option<String>,
-  #[serde(default)]
-  rate: Option<String>,
-  #[serde(default)]
-  burst: Option<i32>,
-  #[serde(default)]
-  status: Option<i32>,
-  #[serde(default)]
-  body: Option<String>,
-  #[serde(default)]
-  reason: Option<String>,
-  #[serde(default)]
-  code: Option<String>,
-  #[serde(default)]
-  ttl_seconds: Option<i64>,
-  #[serde(default)]
-  mode: Option<String>,
 }
 
 fn audit_endpoint(args: &DynamicPolicyAuditArgs) -> String {

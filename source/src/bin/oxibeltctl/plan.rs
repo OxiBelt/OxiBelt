@@ -46,7 +46,11 @@ pub(crate) async fn plan_command(
     Command::Allow(args) => crate::dynamic_policy_plan::plan_mitigation("allow", args),
     Command::Challenge(args) => crate::dynamic_policy_plan::plan_challenge(args),
     Command::RateLimit(args) => crate::dynamic_policy_plan::plan_rate_limit(args),
-    Command::Mitigate(args) => crate::dynamic_policy_plan::plan_mitigate(args),
+    Command::Mitigate(args) => {
+      let catalog =
+        crate::profile_catalog::load_mitigation_profile_catalog(args, client.timeout()).await?;
+      crate::dynamic_policy_plan::plan_mitigate(args, &catalog)
+    }
     Command::Cache(command) => plan_cache(command),
     Command::Ipm(command) => plan_ipm(command),
     Command::Auth(command) => match &command.command {
@@ -617,3 +621,7 @@ fn path_id(value: &str) -> anyhow::Result<&str> {
 #[cfg(test)]
 #[path = "plan_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "profile_catalog_tests.rs"]
+mod profile_catalog_tests;

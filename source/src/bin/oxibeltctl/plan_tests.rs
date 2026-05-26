@@ -506,7 +506,7 @@ fn mitigate_unknown_profile_fails() {
 }
 
 #[test]
-fn mitigate_requires_profile_file() {
+fn mitigate_requires_profile_catalog_source() {
   let parsed = Cli::try_parse_from([
     "oxibeltctl",
     "mitigate",
@@ -514,7 +514,40 @@ fn mitigate_requires_profile_file() {
     "--source",
     "203.0.113.16",
   ]);
-  assert!(parsed.is_err(), "mitigate should require --profile-file");
+  assert!(
+    parsed.is_err(),
+    "mitigate should require a profile catalog source"
+  );
+}
+
+#[test]
+fn mitigate_accepts_exactly_one_profile_catalog_source() {
+  let both = Cli::try_parse_from([
+    "oxibeltctl",
+    "mitigate",
+    "login-bruteforce",
+    "--profile-file",
+    "profiles.json",
+    "--profile-url",
+    "https://profiles.example.test/catalog.json",
+    "--source",
+    "203.0.113.16",
+  ]);
+  assert!(
+    both.is_err(),
+    "mitigate should reject both --profile-file and --profile-url"
+  );
+
+  let url = Cli::try_parse_from([
+    "oxibeltctl",
+    "mitigate",
+    "login-bruteforce",
+    "--profile-url",
+    "https://profiles.example.test/catalog.json",
+    "--source",
+    "203.0.113.16",
+  ]);
+  assert!(url.is_ok(), "mitigate should accept --profile-url");
 }
 
 #[test]

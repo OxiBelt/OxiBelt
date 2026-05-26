@@ -1101,11 +1101,21 @@ oxibeltctl allow cidr 203.0.113.0/24 --ttl 30m --route app-root
 oxibeltctl challenge --person-proof ip 203.0.113.11 --ttl 10m
 oxibeltctl rate-limit source 203.0.113.12 --rps 1 --ttl 10m
 oxibeltctl mitigate login-bruteforce --profile-file ./mitigation-profiles.json --source 203.0.113.13
+oxibeltctl mitigate login-bruteforce \
+  --profile-url https://profiles.example.test/oxibelt/mitigation-profiles.json \
+  --profile-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --source 203.0.113.13
+oxibeltctl mitigate login-bruteforce \
+  --profile-url http://profiles.internal/oxibelt/mitigation-profiles.json \
+  --allow-insecure-profile-url \
+  --source 203.0.113.13
 ```
 
 `oxibeltctl mitigate <profile>` renders a user-defined local JSON profile into
-a dynamic policy through `/admin/v1/dynamic-policies/apply`. Profiles live under
-a top-level `profiles` object:
+a dynamic policy through `/admin/v1/dynamic-policies/apply`. Profiles can be
+read from a local `--profile-file` or downloaded once from `--profile-url`;
+exactly one source is required. The downloaded document uses the same top-level
+`profiles` object:
 
 ```json
 {
@@ -1129,6 +1139,14 @@ uses `oxibeltctl-profile`; if `name` is omitted, it derives a deterministic
 `mitigate-<profile>-<subject_type>-<subject>` name. Common options such as
 `--ttl`, `--reason`, `--name`, `--priority`, `--route`, `--path-prefix`,
 `--method`, and `--dry-run` may override the rendered policy shape.
+
+Remote profile URLs must use HTTPS by default. Use `--profile-ca-cert FILE` for
+private CAs, `--profile-token-env ENV` to send a bearer token only to the
+profile URL, and `--profile-sha256 HEX` to pin the downloaded bytes before JSON
+parsing. URL usernames and passwords are rejected; use `--profile-token-env`
+instead. Plain HTTP mirrors are allowed only with
+`--allow-insecure-profile-url`, which is intended for trusted internal
+networks.
 
 Container images keep `ENTRYPOINT` on `oxibelt` but include the CLI for
 same-container operations:

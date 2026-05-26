@@ -90,6 +90,10 @@ impl AdminClient {
     })
   }
 
+  pub fn timeout(&self) -> Duration {
+    self.options.timeout
+  }
+
   pub async fn request_json(
     &self,
     method: Method,
