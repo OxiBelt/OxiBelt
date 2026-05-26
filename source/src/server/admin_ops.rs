@@ -27,6 +27,7 @@ pub(super) fn admin_waf_response(
   if path != "/admin/v1/waf/rule-hits"
     && path != "/admin/v1/waf/rule-costs"
     && path != "/admin/v1/waf/crs/compatibility"
+    && path != "/admin/v1/waf/rulepacks"
   {
     return None;
   }
@@ -40,6 +41,7 @@ pub(super) fn admin_waf_response(
     "/admin/v1/waf/rule-hits" => "waf:GetRuleHits",
     "/admin/v1/waf/rule-costs" => "waf:GetRuleCosts",
     "/admin/v1/waf/crs/compatibility" => "waf:GetCrsCompatibility",
+    "/admin/v1/waf/rulepacks" => "waf:ListOxiRulePacks",
     _ => return None,
   };
   if !authorization.is_allowed(action, "*") {
@@ -57,6 +59,10 @@ pub(super) fn admin_waf_response(
     "/admin/v1/waf/crs/compatibility" => Some(admin::json_response(
       StatusCode::OK,
       &crate::waf::crs_compatibility_matrix(),
+    )),
+    "/admin/v1/waf/rulepacks" => Some(admin::json_response(
+      StatusCode::OK,
+      &json!({ "rulepacks": super::admin_rulepacks::active_rulepack_summaries(&snapshot.config) }),
     )),
     _ => None,
   }
@@ -429,7 +435,12 @@ pub(super) async fn admin_config_response(
       let current = toml::from_str::<toml::Value>(&current_raw)
         .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
       let mut changes = Vec::new();
-      diff_toml_values("", Some(&current), Some(&candidate), &mut changes);
+      super::admin_config_diff::diff_toml_values(
+        "",
+        Some(&current),
+        Some(&candidate),
+        &mut changes,
+      );
       admin::json_response(StatusCode::OK, &json!({ "changes": changes }))
     }
     (&::http::Method::POST, "/admin/v1/config/load") => {
@@ -627,6 +638,23 @@ fn file_sync_operation_permissions(
         &operation.path,
       )
     }
+    (admin_control::AdminFileRoot::OxiRuleRulepack, admin_control::AdminFileOperationKind::Put) => {
+      waf_file_permission(
+        operation.root,
+        "waf:PutOxiRulePack",
+        "oxirule-rulepack",
+        &operation.path,
+      )
+    }
+    (
+      admin_control::AdminFileRoot::OxiRuleRulepack,
+      admin_control::AdminFileOperationKind::Delete,
+    ) => waf_file_permission(
+      operation.root,
+      "waf:DeleteOxiRulePack",
+      "oxirule-rulepack",
+      &operation.path,
+    ),
   }
 }
 
@@ -705,33 +733,4 @@ fn if_match_header(request: &hyper::Request<Incoming>) -> Option<String> {
     .get(::http::header::IF_MATCH)
     .and_then(|value| value.to_str().ok())
     .map(str::to_string)
-}
-
-fn diff_toml_values(
-  path: &str,
-  left: Option<&toml::Value>,
-  right: Option<&toml::Value>,
-  changes: &mut Vec<serde_json::Value>,
-) {
-  match (left, right) {
-    (Some(toml::Value::Table(left)), Some(toml::Value::Table(right))) => {
-      let keys = left
-        .keys()
-        .chain(right.keys())
-        .collect::<std::collections::BTreeSet<_>>();
-      for key in keys {
-        let child = if path.is_empty() {
-          key.to_string()
-        } else {
-          format!("{path}.{key}")
-        };
-        diff_toml_values(&child, left.get(key), right.get(key), changes);
-      }
-    }
-    (Some(left), Some(right)) if left == right => {}
-    (None, Some(_)) => changes.push(json!({ "path": path, "op": "add" })),
-    (Some(_), None) => changes.push(json!({ "path": path, "op": "remove" })),
-    (Some(_), Some(_)) => changes.push(json!({ "path": path, "op": "change" })),
-    (None, None) => {}
-  }
 }

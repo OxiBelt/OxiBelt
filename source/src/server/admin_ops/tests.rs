@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{IpmPolicyConfig, IpmPolicyEffect, IpmPolicyStatementConfig};
+use crate::config::{Config, IpmPolicyConfig, IpmPolicyEffect, IpmPolicyStatementConfig};
 use crate::ipm::{IpmActor, IpmRequestContext, IpmRuntime};
 
 mod common {
@@ -157,6 +157,18 @@ fn config_sync_files_does_not_authorize_oxirule_files() {
     Err(FileSyncPermissionError::Denied("waf:DeleteOxiRuleGroup"))
   );
 
+  let rulepack_put = sync_request(
+    admin_control::AdminApplyMode::None,
+    vec![put(
+      admin_control::AdminFileRoot::OxiRuleRulepack,
+      "rulepacks/main.oxirule-rulepack.toml",
+    )],
+  );
+  assert_eq!(
+    check_file_sync_permissions(&authorization, &rulepack_put),
+    Err(FileSyncPermissionError::Denied("waf:PutOxiRulePack"))
+  );
+
   let reload = sync_request(
     admin_control::AdminApplyMode::OxiRule,
     vec![put(admin_control::AdminFileRoot::Config, "runtime.toml")],
@@ -167,6 +179,69 @@ fn config_sync_files_does_not_authorize_oxirule_files() {
   );
 }
 
+#[tokio::test]
+async fn waf_rulepack_list_endpoint_requires_list_permission() {
+  let temp_dir = common::TempDir::new("admin-waf-rulepacks");
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  let rulepack_dir = temp_dir.path().join("oxirule").join("rulepacks");
+  std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+  std::fs::create_dir_all(&cert_dir).expect("cert dir should be created");
+  std::fs::create_dir_all(&rulepack_dir).expect("rulepack dir should be created");
+  let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "admin-waf-rulepacks");
+  std::fs::write(
+    rulepack_dir.join("main.oxirule-rulepack.toml"),
+    r#"
+[rulepack]
+schema_version = 1
+name = "main"
+version = "0.1.0"
+
+[[group_files]]
+content = '''
+[[rule_groups]]
+name = "main-group"
+when = "true"
+'''
+"#,
+  )
+  .expect("rulepack should be written");
+  let config_path = config_dir.join("oxibelt.toml");
+  std::fs::write(
+    &config_path,
+    format!(
+      "{}\n{}",
+      common::minimal_config_toml_with_paths(
+        cert_path.file_name().unwrap().to_str().unwrap(),
+        key_path.file_name().unwrap().to_str().unwrap(),
+      ),
+      r#"
+[waf]
+enabled = true
+rulepack_files = ["rulepacks/main.oxirule-rulepack.toml"]
+"#
+    ),
+  )
+  .expect("config should be written");
+  let config = Config::load(&config_path).expect("config should load");
+  config.validate().expect("config should validate");
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let (actor, ipm) = actor_and_ipm(&["waf:ListOxiRulePacks"], &["*"]);
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+
+  let response = admin_waf_response(
+    &snapshot,
+    &authorization,
+    &::http::Method::GET,
+    "/admin/v1/waf/rulepacks",
+  )
+  .expect("rulepack list should be handled");
+  assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[test]
 fn waf_file_permissions_authorize_matching_operations() {
   let (actor, ipm) = actor_and_ipm(
@@ -175,10 +250,13 @@ fn waf_file_permissions_authorize_matching_operations() {
       "waf:DeleteOxiRule",
       "waf:PutOxiRuleGroup",
       "waf:DeleteOxiRuleGroup",
+      "waf:PutOxiRulePack",
+      "waf:DeleteOxiRulePack",
     ],
     &[
       "oxibelt:oxibelt:waf:oxirule/*",
       "oxibelt:oxibelt:waf:oxirule-group/*",
+      "oxibelt:oxibelt:waf:oxirule-rulepack/*",
     ],
   );
   let context = IpmRequestContext::default();
@@ -201,6 +279,14 @@ fn waf_file_permissions_authorize_matching_operations() {
       delete(
         admin_control::AdminFileRoot::OxiRuleGroup,
         "groups/b.oxirule-group.toml",
+      ),
+      put(
+        admin_control::AdminFileRoot::OxiRuleRulepack,
+        "rulepacks/a.oxirule-rulepack.toml",
+      ),
+      delete(
+        admin_control::AdminFileRoot::OxiRuleRulepack,
+        "rulepacks/b.oxirule-rulepack.toml",
       ),
     ],
   );

@@ -51,14 +51,14 @@ Container deployments use three purpose-specific directories:
 ```text
 /etc/oxibelt/config   TOML configuration and included TOML modules
 /etc/oxibelt/cert     TLS certificates, keys, CA roots, OCSP, and ECH files
-/etc/oxibelt/oxirule  External .oxirule.toml rule files
+/etc/oxibelt/oxirule  External .oxirule.toml, .oxirule-group.toml, and .oxirule-rulepack.toml files
 ```
 
 Relative paths are resolved by purpose:
 
 - `include`: relative to the TOML file that declares it.
 - TLS, CA, OCSP, PostgreSQL TLS, and ECH files: under the cert directory.
-- External OxiRule files: under the oxirule directory.
+- External OxiRule rule, group, CRS, and rulepack files: under the oxirule directory.
 
 Runtime file paths must be relative, normalized paths without `.` or `..` components. They must resolve to existing regular files under the correct purpose-specific directory before startup continues.
 
@@ -1024,7 +1024,7 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
-Actions use `service:Action` syntax. Initial services are `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. Dynamic policy automation uses `dynamic-policy:List`, `dynamic-policy:Get`, `dynamic-policy:Create`, `dynamic-policy:Apply`, `dynamic-policy:Update`, `dynamic-policy:Delete`, `dynamic-policy:Export`, `dynamic-policy:Import`, and `dynamic-policy:ReadAudit`. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
+Actions use `service:Action` syntax. Initial services are `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. Dynamic policy automation uses `dynamic-policy:List`, `dynamic-policy:Get`, `dynamic-policy:Create`, `dynamic-policy:Apply`, `dynamic-policy:Update`, `dynamic-policy:Delete`, `dynamic-policy:Export`, `dynamic-policy:Import`, and `dynamic-policy:ReadAudit`. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:PutOxiRulePack`, `waf:DeleteOxiRulePack`, `waf:ListOxiRulePacks`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:oxirule-rulepack/rulepacks/admin.oxirule-rulepack.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
 
 OxiRule development API requests that set `include_active_rules = true` evaluate active WAF policy as well as the submitted candidate, so they require the same devtools action on `oxirule/*`; replay uses `replay/*`.
 
@@ -1295,7 +1295,7 @@ Admin file sync endpoint:
 
 - `POST /admin/v1/files/sync`
 
-File sync authorizes each operation by root and operation type. `root = "config"` requires `config:SyncFiles`, and config deletes also require `config:SyncFiles` on resource `delete`. `root = "oxirule"` requires `waf:PutOxiRule` or `waf:DeleteOxiRule` on `oxibelt:<namespace>:waf:oxirule/<path>` and only accepts `.oxirule.toml` paths. `root = "oxirule_group"` requires `waf:PutOxiRuleGroup` or `waf:DeleteOxiRuleGroup` on `oxibelt:<namespace>:waf:oxirule-group/<path>` and only accepts `.oxirule-group.toml` paths. `apply = "oxirule"` requires `waf:ReloadOxiRule` on `*`, `apply = "full"` also requires `config:Load`, and `apply = "downstream_tls"` also requires `config:ReloadDownstreamTls`. The request body is explicit: missing files are never implicitly removed.
+File sync authorizes each operation by root and operation type. `root = "config"` requires `config:SyncFiles`, and config deletes also require `config:SyncFiles` on resource `delete`. `root = "oxirule"` requires `waf:PutOxiRule` or `waf:DeleteOxiRule` on `oxibelt:<namespace>:waf:oxirule/<path>` and only accepts `.oxirule.toml` paths. `root = "oxirule_group"` requires `waf:PutOxiRuleGroup` or `waf:DeleteOxiRuleGroup` on `oxibelt:<namespace>:waf:oxirule-group/<path>` and only accepts `.oxirule-group.toml` paths. `root = "oxirule_rulepack"` requires `waf:PutOxiRulePack` or `waf:DeleteOxiRulePack` on `oxibelt:<namespace>:waf:oxirule-rulepack/<path>` and only accepts `.oxirule-rulepack.toml` paths. `apply = "oxirule"` requires `waf:ReloadOxiRule` on `*`, `apply = "full"` also requires `config:Load`, and `apply = "downstream_tls"` also requires `config:ReloadDownstreamTls`. The request body is explicit: missing files are never implicitly removed.
 
 ```json
 {
@@ -1318,7 +1318,7 @@ File sync authorizes each operation by root and operation type. `root = "config"
 }
 ```
 
-`root` is `config`, `oxirule`, or `oxirule_group`. Paths are UTF-8 relative paths, normalized, and must stay under the configured root. The two WAF roots share the configured OxiRule directory but are separated by suffix: use `oxirule` for `.oxirule.toml` rule files and `oxirule_group` for `.oxirule-group.toml` shared group files. `put` writes `content`, optionally guarded by `expected_sha256`; `delete` removes exactly the named file. `apply` defaults to `none`; `oxirule` reloads rule policy from disk, `full` reloads the full TOML/runtime view from disk, and `downstream_tls` reloads downstream TLS material. File sync commits with same-directory temporary files and restores touched files if validation or apply fails. The endpoint is not a certificate lifecycle API: private key upload, ACME credentials, DNS provider credentials, and ACME issuance are out of scope.
+`root` is `config`, `oxirule`, `oxirule_group`, or `oxirule_rulepack`. Paths are UTF-8 relative paths, normalized, and must stay under the configured root. The WAF roots share the configured OxiRule directory but are separated by suffix: use `oxirule` for `.oxirule.toml` rule files, `oxirule_group` for `.oxirule-group.toml` shared group files, and `oxirule_rulepack` for `.oxirule-rulepack.toml` manifests. `put` writes `content`, optionally guarded by `expected_sha256`; `delete` removes exactly the named file. `apply` defaults to `none`; `oxirule` reloads rule policy from disk, `full` reloads the full TOML/runtime view from disk, and `downstream_tls` reloads downstream TLS material. File sync commits with same-directory temporary files and restores touched files if validation or apply fails. The endpoint is not a certificate lifecycle API: private key upload, ACME credentials, DNS provider credentials, and ACME issuance are out of scope.
 
 Admin lifecycle endpoints:
 
@@ -1341,8 +1341,9 @@ Admin WAF telemetry endpoint:
 - `GET /admin/v1/waf/oxirule/templates`
 - `POST /admin/v1/waf/oxirule/templates/render`
 - `POST /admin/v1/waf/oxirule/false-positive`
+- `GET /admin/v1/waf/rulepacks`
 
-These endpoints require the matching `waf:*` IPM actions. Rule hits returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`. Rule costs returns OxiRule evaluation counters and total/average runtime in nanoseconds using the same authenticated rule metadata; CRS rule cost accounting is intentionally not exposed through the public metrics listener. CRS rule hit entries also include `tags`, `tuned_hits`, latest observed anomaly scores, and latest blocking scores when available. The CRS compatibility endpoint returns the OxiBelt-supported CRS release lines, supported directives/operators/transforms/variables/actions, accepted-but-ignored syntax, fail-closed policy, and known unsupported surfaces.
+These endpoints require the matching `waf:*` IPM actions. Rule hits returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`. Rule costs returns OxiRule evaluation counters and total/average runtime in nanoseconds using the same authenticated rule metadata; CRS rule cost accounting is intentionally not exposed through the public metrics listener. CRS rule hit entries also include `tags`, `tuned_hits`, latest observed anomaly scores, and latest blocking scores when available. The CRS compatibility endpoint returns the OxiBelt-supported CRS release lines, supported directives/operators/transforms/variables/actions, accepted-but-ignored syntax, fail-closed policy, and known unsupported surfaces. Rulepacks returns active loaded manifest summaries, including name, version, default mode, rule and group-file counts, loaded files, and optional source commit metadata.
 
 OxiRule development endpoints are synchronous and stateless: they never write rule files or install policy. `check`, `test`, `explain`, `cost`, and `replay` accept inline candidate rule content plus optional inline OxiRule group files, compile them against the active configuration context, and return JSON with `ok`, `diagnostics`, `matched_rules`, `actions`, `terminal`, `mutations`, `tags`, `stream_close`, `body_need`, `cost_warnings`, and `explain_steps` where relevant. Fixtures support request, response, and stream-phase inputs; stream fixtures evaluate `WafStreamInput` only and do not create live WebSocket or WebTransport sessions. Template endpoints expose built-in `vaultwarden`, `gitea`, `nextcloud`, `generic-login`, and `admin-path` templates. The false-positive endpoint returns suggested TOML changes for CRS allowlists/overrides or native OxiRule monitor/condition tuning; it does not mutate configuration.
 
@@ -1510,7 +1511,40 @@ reason = "editor intentionally submits HTML"
 
 `max_body_inspection_bytes` controls the request body, response body, and native stream payload prefix captured for OxiRule and CRS body inspection. The default is `1048576` bytes. Bytes after this prefix are forwarded or replayed without inspection and are reflected through `Body.IsTruncated` or `Stream.Payload.IsTruncated`. The same value also bounds WebSocket stream-WAF frame buffering: an individual WebSocket frame payload larger than this value is closed fail-closed instead of being buffered for prefix inspection.
 
-Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. Reusable rule groups are configured under `[[waf.rule_groups]]` or `[[routes.waf.rule_groups]]` and are referenced from rules with `groups = ["name"]`. Shared group files can be loaded with `[waf] rule_group_files = ["groups/*.oxirule-group.toml"]` and route-level `rule_group_files`. Each group file uses a top-level `[[rule_groups]]` array and the same fields as inline `WafRuleGroupConfig`. Exact file paths must exist; glob entries may match zero files and are loaded in sorted order. External rule entries use `path` and resolve under the oxirule directory. A rule entry may use inline `when`, `groups`, or both; `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry.
+Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. Reusable rule groups are configured under `[[waf.rule_groups]]` or `[[routes.waf.rule_groups]]` and are referenced from rules with `groups = ["name"]`. Shared group files can be loaded with `[waf] rule_group_files = ["groups/*.oxirule-group.toml"]` and route-level `rule_group_files`. Rulepacks can be loaded with `[waf] rulepack_files = ["rulepacks/*.oxirule-rulepack.toml"]` and route-level `rulepack_files`. Each group file uses a top-level `[[rule_groups]]` array and the same fields as inline `WafRuleGroupConfig`. Each rulepack file uses a `[rulepack]` manifest plus `[[rules]]` and/or `[[group_files]]`, then expands into the same native OxiRule rule and group configuration. Exact file paths must exist; glob entries may match zero files and are loaded in sorted order. External rule, group, and rulepack paths resolve under the oxirule directory. A rule entry may use inline `when`, `groups`, or both; `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry.
+
+Rulepack manifests must end with `.oxirule-rulepack.toml`:
+
+```toml
+[waf]
+enabled = true
+rulepack_files = ["rulepacks/*.oxirule-rulepack.toml"]
+
+# /etc/oxibelt/oxirule/rulepacks/admin.oxirule-rulepack.toml
+[rulepack]
+schema_version = 1
+name = "admin-path"
+version = "0.1.0"
+default_mode = "monitor" # monitor | enforcing
+
+[[variables]]
+name = "admin_cidr"
+default = "10.0.0.0/8"
+
+[[rules]]
+name = "admin-path-allowlist"
+phase = "request"
+priority = 100
+content = '''
+when = "Request.Http.Path.startsWith('/admin') && !Request.Client.Ip.inCidr('{{admin_cidr}}')"
+
+[[actions]]
+type = "reject"
+status = 403
+'''
+```
+
+Rules inside a rulepack may use inline `content` or a `path` to a `.oxirule.toml` file under the oxirule directory. `[[group_files]]` entries may use inline `content` or a `path` to a `.oxirule-group.toml` file. OxiBelt renders declared variables from defaults at load time; required variables without defaults are intended for `oxibeltctl rulepack render` or `oxibeltctl rulepack apply --var KEY=VALUE`.
 
 ```toml
 [[waf.rules]]

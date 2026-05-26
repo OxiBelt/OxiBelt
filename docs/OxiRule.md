@@ -161,6 +161,44 @@ Condition fragments are processed in `groups` array order, followed by the rule'
 
 Actions from referenced groups and the rule are collected, sorted by action `priority` with lower values first, and executed in stable declaration order for equal priorities. Action `priority` defaults to `0`. Terminal actions still stop later actions after sorting.
 
+## Rulepacks
+
+Rulepacks package OxiRule rules and shared group files into a manifest that can be loaded from `[waf] rulepack_files` or route-level `rulepack_files`. A rulepack manifest must end with `.oxirule-rulepack.toml` and uses schema version `1`.
+
+```toml
+[rulepack]
+schema_version = 1
+name = "generic-login"
+version = "0.1.0"
+default_mode = "monitor"
+targets = ["generic-login"]
+requires = []
+
+[[variables]]
+name = "login_path"
+default = "/login"
+
+[[rules]]
+name = "generic-login-rate-limit"
+phase = "request"
+priority = 100
+content = '''
+when = "Request.Http.Path == '{{login_path}}'"
+
+[[actions]]
+type = "rate_limit"
+name = "login"
+key = "client_ip_path"
+rate = "5/min"
+burst = 5
+status = 429
+'''
+```
+
+Each `[[rules]]` entry declares the rule metadata and uses either inline `content` or `path = "rules/name.oxirule.toml"`. Each `[[group_files]]` entry uses either inline `content` or `path = "groups/name.oxirule-group.toml"`. Referenced paths resolve under the OxiRule directory and must stay normalized relative paths. `default_mode` defaults to `monitor`; rule-level `mode` overrides it.
+
+Use `oxibeltctl rulepack inspect`, `render`, `check`, and `apply` to work with local files, directories, HTTPS bundles, or `git+https://` repositories. URL installs require `--sha256` unless `--allow-unpinned-rulepack` is set; `git+https://` installs require `--git-ref` and record the resolved commit in the installed manifest.
+
 ## Development Tools
 
 OxiBelt includes local and Admin API OxiRule development tools for validating and exercising rules before writing or applying them.

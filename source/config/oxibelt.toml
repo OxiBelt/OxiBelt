@@ -435,6 +435,9 @@ argon2id_memory_mib = 128
 #   "waf:DeleteOxiRule",
 #   "waf:PutOxiRuleGroup",
 #   "waf:DeleteOxiRuleGroup",
+#   "waf:PutOxiRulePack",
+#   "waf:DeleteOxiRulePack",
+#   "waf:ListOxiRulePacks",
 #   "waf:CheckOxiRule",
 #   "waf:CheckOxiRuleGroup",
 #   "waf:TestOxiRule",
@@ -445,6 +448,7 @@ argon2id_memory_mib = 128
 # resources = [
 #   "oxibelt:oxibelt:waf:oxirule/*",
 #   "oxibelt:oxibelt:waf:oxirule-group/*",
+#   "oxibelt:oxibelt:waf:oxirule-rulepack/*",
 #   "oxibelt:oxibelt:waf:replay/*",
 # ]
 #
@@ -676,6 +680,8 @@ enabled = false
 mode = "enforcing" # enforcing | monitor
 fail_policy = "closed"
 duplicate_metadata_policy = "fail_closed"
+# rulepack_files = ["rulepacks/*.oxirule-rulepack.toml"]
+# rule_group_files = ["groups/*.oxirule-group.toml"]
 
 [waf.limits]
 max_rule_runtime_ms = 5

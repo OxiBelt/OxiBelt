@@ -138,6 +138,8 @@ pub(super) enum AdminFileRoot {
   OxiRule,
   #[serde(rename = "oxirule_group", alias = "oxi_rule_group")]
   OxiRuleGroup,
+  #[serde(rename = "oxirule_rulepack", alias = "oxi_rulepack")]
+  OxiRuleRulepack,
 }
 
 impl AdminControlHandle {

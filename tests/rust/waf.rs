@@ -8599,6 +8599,163 @@ status = 451
 }
 
 #[test]
+fn oxirule_rulepack_files_load_for_global_and_route_scopes() {
+    let temp_dir = common::TempDir::new("waf-rulepack-files");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rulepack_dir = temp_dir.path().join("oxirule").join("rulepacks");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rulepack_dir).expect("failed to create rulepack directory");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "waf-rulepack-files");
+    std::fs::write(
+        rulepack_dir.join("global.oxirule-rulepack.toml"),
+        r#"
+[rulepack]
+schema_version = 1
+name = "global-pack"
+version = "0.1.0"
+default_mode = "enforcing"
+
+[[rules]]
+name = "global-rulepack-rule"
+phase = "request"
+priority = 1
+content = '''
+when = "Request.Http.Path == '/global-pack'"
+
+[[actions]]
+type = "reject"
+status = 403
+'''
+"#,
+    )
+    .expect("failed to write global rulepack");
+    std::fs::write(
+        rulepack_dir.join("route.oxirule-rulepack.toml"),
+        r#"
+[rulepack]
+schema_version = 1
+name = "route-pack"
+version = "0.1.0"
+default_mode = "enforcing"
+
+[[rules]]
+name = "route-rulepack-rule"
+phase = "request"
+priority = 1
+content = '''
+when = "Request.Http.Path == '/route-pack'"
+
+[[actions]]
+type = "reject"
+status = 451
+'''
+"#,
+    )
+    .expect("failed to write route rulepack");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+rulepack_files = ["rulepacks/global.oxirule-rulepack.toml"]
+
+[routes.waf]
+rulepack_files = ["rulepacks/route.oxirule-rulepack.toml"]
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load rulepacks");
+    config.validate().expect("config should validate");
+    assert!(config.source_paths.oxirule_files.iter().any(|path| {
+        path.file_name()
+            .is_some_and(|name| name == "global.oxirule-rulepack.toml")
+    }));
+    assert_eq!(config.waf.rulepack_summaries().len(), 1);
+    assert_eq!(config.routes[0].waf.rulepack_summaries().len(), 1);
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let global = evaluate_simple_request(&engine, "/global-pack");
+    let route = evaluate_simple_request(&engine, "/route-pack");
+
+    assert_eq!(
+        global.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        route.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+}
+
+#[test]
+fn duplicate_oxirule_rulepack_names_are_rejected() {
+    let temp_dir = common::TempDir::new("waf-rulepack-duplicates");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rulepack_dir = temp_dir.path().join("oxirule").join("rulepacks");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rulepack_dir).expect("failed to create rulepack directory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "waf-rulepack-duplicates");
+    let pack = r#"
+[rulepack]
+schema_version = 1
+name = "duplicate-pack"
+version = "0.1.0"
+
+[[group_files]]
+content = '''
+[[rule_groups]]
+name = "duplicate-group"
+when = "true"
+'''
+"#;
+    std::fs::write(rulepack_dir.join("a.oxirule-rulepack.toml"), pack)
+        .expect("failed to write rulepack");
+    std::fs::write(rulepack_dir.join("b.oxirule-rulepack.toml"), pack)
+        .expect("failed to write rulepack");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+rulepack_files = ["rulepacks/*.oxirule-rulepack.toml"]
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let error = Config::load(&config_path).expect_err("duplicate rulepacks should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate OxiRule rulepack name"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
 fn external_rule_file_groups_are_not_exported() {
     let temp_dir = common::TempDir::new("waf-external-rule-group-local-only");
     let config_dir = temp_dir.path().join("config");

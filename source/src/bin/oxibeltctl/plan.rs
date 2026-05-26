@@ -41,6 +41,7 @@ pub(crate) async fn plan_command(
     Command::Pool(command) => plan_pool(command),
     Command::Waf(command) => plan_waf(command),
     Command::OxiRule(command) => plan_oxirule(command),
+    Command::Rulepack(command) => crate::rulepack::plan_rulepack(client, command).await,
     Command::DynamicPolicy(command) => crate::dynamic_policy_plan::plan_dynamic_policy(command),
     Command::Block(args) => crate::dynamic_policy_plan::plan_mitigation("reject", args),
     Command::Allow(args) => crate::dynamic_policy_plan::plan_mitigation("allow", args),

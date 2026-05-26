@@ -18,6 +18,8 @@ mod output;
 mod plan;
 #[path = "oxibeltctl/profile_catalog.rs"]
 mod profile_catalog;
+#[path = "oxibeltctl/rulepack.rs"]
+mod rulepack;
 
 use cli::{AdminArgs, Cli, Command, selected_token_env};
 use output::{print_permission_hint, print_response};
@@ -37,7 +39,13 @@ async fn run() -> anyhow::Result<()> {
   if doctor::run_local_if_requested(&cli.command).await? {
     return Ok(());
   }
+  if rulepack::run_local_if_requested(&cli.command).await? {
+    return Ok(());
+  }
   let client = build_client(&cli.admin)?;
+  if rulepack::run_remote_if_requested(&client, &cli.command, cli.admin.output).await? {
+    return Ok(());
+  }
   let request = plan_command(&client, &cli.command).await?;
   let response = client
     .request_json(

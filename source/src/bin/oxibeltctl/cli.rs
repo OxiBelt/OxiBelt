@@ -5,6 +5,10 @@ use oxibelt::admin_client::{BREAK_GLASS_TOKEN_ENV, DEFAULT_ADMIN_TOKEN_ENV, DEFA
 use oxibelt::diagnostics::{DoctorFailOn, DoctorOutputFormat, ExternalProbeKind};
 use url::Url;
 
+#[path = "rulepack_cli.rs"]
+mod rulepack_cli;
+pub(crate) use rulepack_cli::*;
+
 #[derive(Debug, Parser)]
 #[command(name = "oxibeltctl")]
 #[command(about = "OxiBelt operations CLI")]
@@ -56,6 +60,7 @@ pub(crate) enum Command {
   Pool(PoolCommand),
   Waf(WafCommand),
   OxiRule(OxiRuleCommand),
+  Rulepack(RulepackCommand),
   DynamicPolicy(DynamicPolicyCommand),
   Block(MitigationArgs),
   Allow(MitigationArgs),

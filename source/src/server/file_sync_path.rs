@@ -4,6 +4,7 @@ use super::admin_control::AdminFileRoot;
 
 const OXIRULE_FILE_SUFFIX: &str = ".oxirule.toml";
 const OXIRULE_GROUP_FILE_SUFFIX: &str = ".oxirule-group.toml";
+const OXIRULE_RULEPACK_FILE_SUFFIX: &str = ".oxirule-rulepack.toml";
 
 pub(super) fn normalized_relative_path(path: &str) -> Result<String, String> {
   if path.trim().is_empty() {
@@ -44,6 +45,12 @@ pub(super) fn validate_root_path(root: AdminFileRoot, normalized_path: &str) -> 
     AdminFileRoot::OxiRuleGroup if normalized_path.ends_with(OXIRULE_GROUP_FILE_SUFFIX) => Ok(()),
     AdminFileRoot::OxiRuleGroup => {
       Err("root oxirule_group can only manage .oxirule-group.toml files".to_string())
+    }
+    AdminFileRoot::OxiRuleRulepack if normalized_path.ends_with(OXIRULE_RULEPACK_FILE_SUFFIX) => {
+      Ok(())
+    }
+    AdminFileRoot::OxiRuleRulepack => {
+      Err("root oxirule_rulepack can only manage .oxirule-rulepack.toml files".to_string())
     }
   }
 }

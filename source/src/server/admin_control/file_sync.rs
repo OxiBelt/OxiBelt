@@ -138,7 +138,7 @@ fn resolve_sync_target(
       .config_dir
       .as_ref()
       .ok_or_else(|| anyhow!("active configuration does not have a config directory"))?,
-    AdminFileRoot::OxiRule | AdminFileRoot::OxiRuleGroup => config
+    AdminFileRoot::OxiRule | AdminFileRoot::OxiRuleGroup | AdminFileRoot::OxiRuleRulepack => config
       .source_paths
       .oxirule_dir
       .as_ref()
@@ -179,6 +179,9 @@ fn validate_sync_content(root: AdminFileRoot, content: &str) -> anyhow::Result<(
     AdminFileRoot::OxiRule => {}
     AdminFileRoot::OxiRuleGroup => {
       crate::waf::validate_external_rule_group_file(content)?;
+    }
+    AdminFileRoot::OxiRuleRulepack => {
+      crate::waf::validate_rulepack_manifest(content)?;
     }
   }
   Ok(())
@@ -442,6 +445,37 @@ when = "true"
   }
 
   #[test]
+  fn file_sync_put_validates_oxirule_rulepack_files() {
+    let (_temp_dir, config) = load_temp_config("admin-file-sync-rulepack");
+    let valid = put_request(
+      AdminFileRoot::OxiRuleRulepack,
+      "rulepacks/main.oxirule-rulepack.toml",
+      r#"
+[rulepack]
+schema_version = 1
+name = "main"
+version = "0.1.0"
+
+[[group_files]]
+content = '''
+[[rule_groups]]
+name = "main-group"
+when = "true"
+'''
+"#,
+    );
+    let committed = commit_file_sync(&valid, &config).expect("rulepack file should sync");
+    assert_eq!(committed.len(), 1);
+
+    let invalid = put_request(
+      AdminFileRoot::OxiRuleRulepack,
+      "rulepacks/bad.oxirule-rulepack.toml",
+      "[rulepack]\nschema_version = 1\nname = \"bad\"\nversion = \"0.1.0\"\n",
+    );
+    assert!(commit_file_sync(&invalid, &config).is_err());
+  }
+
+  #[test]
   fn file_sync_rejects_cross_type_oxirule_paths() {
     let (_temp_dir, config) = load_temp_config("admin-file-sync-cross-type");
     let oxirule_dir = config
@@ -473,6 +507,22 @@ when = "true"
     };
     assert!(error.contains("root oxirule_group can only manage .oxirule-group.toml files"));
     assert!(!oxirule_dir.join("rules/main.oxirule.toml").exists());
+
+    let rulepack_path_as_group = put_request(
+      AdminFileRoot::OxiRuleGroup,
+      "rulepacks/main.oxirule-rulepack.toml",
+      "",
+    );
+    let error = match commit_file_sync(&rulepack_path_as_group, &config) {
+      Ok(_) => panic!("rulepack file path should not sync through OxiRule group root"),
+      Err(error) => error.to_string(),
+    };
+    assert!(error.contains("root oxirule_group can only manage .oxirule-group.toml files"));
+    assert!(
+      !oxirule_dir
+        .join("rulepacks/main.oxirule-rulepack.toml")
+        .exists()
+    );
 
     let existing_group = oxirule_dir.join("groups/main.oxirule-group.toml");
     std::fs::create_dir_all(

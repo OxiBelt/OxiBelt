@@ -30,6 +30,7 @@ mod crs;
 mod defaults;
 mod devtools;
 mod expression;
+mod external_files;
 mod functions;
 mod metadata;
 mod mitigation_action;
@@ -44,6 +45,7 @@ mod person_proof_policy;
 mod person_proof_v2;
 mod plan;
 mod rule_groups;
+mod rulepacks;
 mod runtime_helpers;
 
 use access_log_record::AccessLogJsonValue;
@@ -91,6 +93,11 @@ pub use plan::BodyNeed;
 use plan::{WafRoutePlan, phase_plan};
 use rule_groups::{RuleGroupScope, resolve_rule, validate_rule_group_scope};
 pub use rule_groups::{WafConditionMerge, WafRuleGroupConfig};
+pub use rulepacks::{
+  RULEPACK_FILE_SUFFIX, RulepackModeOverride, RulepackReferencedFile, RulepackReferencedFileKind,
+  RulepackRenderOptions, WafRulepackSummary, inspect_rulepack, referenced_rulepack_files,
+  render_rulepack_for_install, validate_rulepack_manifest,
+};
 use runtime_helpers::{
   body_size, ip_in_cidr, pattern_set_matches, request_metadata_has_duplicates, version_string,
 };
@@ -115,6 +122,8 @@ pub struct WafConfig {
   #[serde(default)]
   pub functions: Vec<WafFunctionConfig>,
   #[serde(default)]
+  pub rulepack_files: Vec<PathBuf>,
+  #[serde(default)]
   pub rule_group_files: Vec<PathBuf>,
   #[serde(default)]
   pub rule_groups: Vec<WafRuleGroupConfig>,
@@ -122,6 +131,14 @@ pub struct WafConfig {
   pub rules: Vec<WafRuleConfig>,
   #[serde(default)]
   pub pattern_sets: Vec<WafPatternSetConfig>,
+  #[serde(skip)]
+  rulepack_base_dir: Option<PathBuf>,
+  #[serde(skip)]
+  rulepack_files_resolved: Vec<PathBuf>,
+  #[serde(skip)]
+  rulepack_files_logical: Vec<PathBuf>,
+  #[serde(skip)]
+  loaded_rulepacks: Vec<WafRulepackSummary>,
   #[serde(skip)]
   rule_group_files_resolved: Vec<PathBuf>,
   #[serde(skip)]
@@ -139,10 +156,15 @@ impl Default for WafConfig {
       crs: WafCrsConfig::default(),
       person_proof: WafPersonProofConfig::default(),
       functions: Vec::new(),
+      rulepack_files: Vec::new(),
       rule_group_files: Vec::new(),
       rule_groups: Vec::new(),
       rules: Vec::new(),
       pattern_sets: Vec::new(),
+      rulepack_base_dir: None,
+      rulepack_files_resolved: Vec::new(),
+      rulepack_files_logical: Vec::new(),
+      loaded_rulepacks: Vec::new(),
       rule_group_files_resolved: Vec::new(),
       rule_group_files_logical: Vec::new(),
     }
@@ -154,11 +176,21 @@ pub struct RouteWafConfig {
   #[serde(default)]
   pub functions: Vec<WafFunctionConfig>,
   #[serde(default)]
+  pub rulepack_files: Vec<PathBuf>,
+  #[serde(default)]
   pub rule_group_files: Vec<PathBuf>,
   #[serde(default)]
   pub rule_groups: Vec<WafRuleGroupConfig>,
   #[serde(default)]
   pub rules: Vec<WafRuleConfig>,
+  #[serde(skip)]
+  rulepack_base_dir: Option<PathBuf>,
+  #[serde(skip)]
+  rulepack_files_resolved: Vec<PathBuf>,
+  #[serde(skip)]
+  rulepack_files_logical: Vec<PathBuf>,
+  #[serde(skip)]
+  loaded_rulepacks: Vec<WafRulepackSummary>,
   #[serde(skip)]
   rule_group_files_resolved: Vec<PathBuf>,
   #[serde(skip)]
@@ -615,86 +647,6 @@ struct ExternalRuleFile {
 struct ExternalRuleGroupFile {
   #[serde(default)]
   rule_groups: Vec<WafRuleGroupConfig>,
-}
-
-impl WafConfig {
-  pub fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
-    self.crs.resolve_relative_paths(base_dir)?;
-    let (resolved, logical) =
-      resolve_rule_group_file_paths("waf.rule_group_files", base_dir, &self.rule_group_files)?;
-    self.rule_group_files_resolved = resolved;
-    self.rule_group_files_logical = logical;
-    for rule in &mut self.rules {
-      resolve_rule_path(rule, base_dir)?;
-    }
-    Ok(())
-  }
-
-  pub fn load_external_rules(&mut self) -> anyhow::Result<()> {
-    let mut external_groups =
-      load_external_rule_groups("global WAF", &self.rule_group_files_resolved)?;
-    self.rule_groups.append(&mut external_groups);
-    for rule in &mut self.rules {
-      load_external_rule(rule)?;
-    }
-    Ok(())
-  }
-
-  pub fn loaded_rule_paths(&self) -> Vec<PathBuf> {
-    let mut paths = self
-      .rules
-      .iter()
-      .filter_map(|rule| {
-        rule
-          .loaded_from_logical_path
-          .clone()
-          .or_else(|| rule.loaded_from_path.clone())
-      })
-      .collect::<Vec<_>>();
-    paths.extend(self.rule_group_files_logical.iter().cloned());
-    paths.extend(self.crs.loaded_paths());
-    paths
-  }
-}
-
-impl RouteWafConfig {
-  pub fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
-    let (resolved, logical) = resolve_rule_group_file_paths(
-      "routes.waf.rule_group_files",
-      base_dir,
-      &self.rule_group_files,
-    )?;
-    self.rule_group_files_resolved = resolved;
-    self.rule_group_files_logical = logical;
-    for rule in &mut self.rules {
-      resolve_rule_path(rule, base_dir)?;
-    }
-    Ok(())
-  }
-
-  pub fn load_external_rules(&mut self) -> anyhow::Result<()> {
-    let mut external_groups =
-      load_external_rule_groups("route WAF", &self.rule_group_files_resolved)?;
-    self.rule_groups.append(&mut external_groups);
-    for rule in &mut self.rules {
-      load_external_rule(rule)?;
-    }
-    Ok(())
-  }
-
-  pub fn loaded_rule_paths(&self) -> Vec<PathBuf> {
-    self
-      .rules
-      .iter()
-      .filter_map(|rule| {
-        rule
-          .loaded_from_logical_path
-          .clone()
-          .or_else(|| rule.loaded_from_path.clone())
-      })
-      .chain(self.rule_group_files_logical.iter().cloned())
-      .collect()
-  }
 }
 
 fn resolve_rule_group_file_paths(
