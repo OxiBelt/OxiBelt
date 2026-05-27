@@ -18,6 +18,8 @@ use super::{
 #[cfg(test)]
 mod tests;
 
+pub(super) const OXIRULE_REPLAY_BODY_LIMIT: usize = 4 * 1024 * 1024;
+
 pub(super) fn admin_waf_response(
   snapshot: &AppSnapshot,
   authorization: &AdminAuthorization<'_>,
@@ -75,7 +77,6 @@ pub(super) async fn admin_waf_devtools_response(
   method: &::http::Method,
   path: &str,
 ) -> Option<Response<ProxyBody>> {
-  const REPLAY_BODY_LIMIT: usize = 4 * 1024 * 1024;
   match (method, path) {
     (&::http::Method::POST, "/admin/v1/waf/oxirule/check") => {
       let body = match collect_admin_json::<crate::waf::OxiRuleDevtoolsCheckRequest>(request).await
@@ -166,7 +167,7 @@ pub(super) async fn admin_waf_devtools_response(
     (&::http::Method::POST, "/admin/v1/waf/oxirule/replay") => {
       let body = match collect_admin_json_with_limit::<crate::waf::OxiRuleDevtoolsReplayRequest>(
         request,
-        REPLAY_BODY_LIMIT,
+        OXIRULE_REPLAY_BODY_LIMIT,
       )
       .await
       {

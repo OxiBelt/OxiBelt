@@ -486,7 +486,7 @@ fn validate_ipm_service(field: &str, service: &str) -> anyhow::Result<()> {
 
 fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
   match service {
-    "admin" => &["UpdateConfig"],
+    "admin" => &["ReadMetadata", "UpdateConfig"],
     "ipm" => &[
       "ListPrincipals",
       "GetPrincipal",

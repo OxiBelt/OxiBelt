@@ -3636,8 +3636,9 @@ name = "control-plane-config"
 
 [[ipm.policies.statements]]
 effect = "allow"
-actions = ["admin:UpdateConfig", "admin:*", "ipm:UpdateConfig", "ipm:*"]
+actions = ["admin:ReadMetadata", "admin:UpdateConfig", "admin:*", "ipm:UpdateConfig", "ipm:*"]
 resources = [
+    "oxibelt:default:admin:metadata/openapi",
     "oxibelt:default:admin:config",
     "oxibelt:default:admin:*",
     "oxibelt:default:ipm:config",

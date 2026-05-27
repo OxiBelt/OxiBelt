@@ -50,6 +50,7 @@ mod admin_config_diff;
 mod admin_control;
 mod admin_diagnostics;
 mod admin_ipm;
+mod admin_metadata;
 mod admin_ops;
 mod admin_rulepacks;
 mod connection_errors;
@@ -529,6 +530,12 @@ async fn admin_response(
     return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
   };
   let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context);
+
+  if let Some(response) =
+    admin_metadata::admin_metadata_response(snapshot.as_ref(), &authorization, &method, &path)
+  {
+    return response;
+  }
 
   if path == "/admin/v1/config/status"
     || path == "/admin/v1/config/effective"

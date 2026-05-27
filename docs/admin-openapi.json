@@ -1,0 +1,2355 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OxiBelt Admin API",
+    "version": "v1",
+    "description": "Authenticated OxiBelt Admin API contract for control-plane automation."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "The configured OxiBelt Admin listener."
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "metadata",
+      "description": "API metadata and feature discovery."
+    },
+    {
+      "name": "config",
+      "description": "Runtime configuration validation, diff, load, rollback, and TLS reload."
+    },
+    {
+      "name": "files",
+      "description": "Explicit config and OxiRule file synchronization."
+    },
+    {
+      "name": "cache",
+      "description": "Cache diagnostics, warming, and purging."
+    },
+    {
+      "name": "waf",
+      "description": "WAF telemetry, rulepack summaries, and OxiRule development tools."
+    },
+    {
+      "name": "lifecycle",
+      "description": "Admin-controlled drain state."
+    },
+    {
+      "name": "diagnostics",
+      "description": "Preflight reports and support bundles."
+    },
+    {
+      "name": "runtime",
+      "description": "Runtime snapshots and live introspection."
+    },
+    {
+      "name": "ipm",
+      "description": "Identity Permission Management reads and authorization simulation."
+    },
+    {
+      "name": "dynamic-policy",
+      "description": "Dynamic policy automation."
+    },
+    {
+      "name": "upstream-pools",
+      "description": "Runtime upstream-pool inspection and server control."
+    }
+  ],
+  "paths": {
+    "/admin/v1/openapi.json": {
+      "get": {
+        "tags": [
+          "metadata"
+        ],
+        "operationId": "getAdminOpenApi",
+        "summary": "Fetch the Admin API OpenAPI 3.1 contract.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/capabilities": {
+      "get": {
+        "tags": [
+          "metadata"
+        ],
+        "operationId": "getAdminCapabilities",
+        "summary": "Fetch enabled Admin API capabilities and server limits.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Capabilities and limits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminCapabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/version": {
+      "get": {
+        "tags": [
+          "metadata"
+        ],
+        "operationId": "getAdminVersion",
+        "summary": "Fetch Admin API and package version metadata.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Version metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminVersion"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/status": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "getConfigStatus",
+        "summary": "Fetch active config revision, ETag, rollback state, and last operation.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/effective": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "getEffectiveConfig",
+        "summary": "Fetch the redacted active effective TOML and ETag.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/validate": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "validateConfig",
+        "summary": "Validate candidate TOML against active config path roots.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ConfigPayload"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/diff": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "diffConfig",
+        "summary": "Diff candidate effective config against the active effective config.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ConfigPayload"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/load": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "loadConfig",
+        "summary": "Install a validated runtime-only config snapshot.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ConfigPayload"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/rollback": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "rollbackConfig",
+        "summary": "Restore the last-good runtime snapshot.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/EmptyJson"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          }
+        }
+      }
+    },
+    "/admin/v1/tls/downstream": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "getDownstreamTlsStatus",
+        "summary": "Fetch downstream TLS material status.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/tls/downstream/reload": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "reloadDownstreamTls",
+        "summary": "Reload downstream TLS certificate, key, and static OCSP files.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/EmptyJson"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          }
+        }
+      }
+    },
+    "/admin/v1/files/sync": {
+      "post": {
+        "tags": [
+          "files"
+        ],
+        "operationId": "syncAdminFiles",
+        "summary": "Synchronize explicit config or OxiRule files and optionally apply changes.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/FileSyncRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/cache/key-explain": {
+      "post": {
+        "tags": [
+          "cache"
+        ],
+        "operationId": "explainCacheKey",
+        "summary": "Explain cache key construction for a request.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CacheKeyExplainRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/cache/warm": {
+      "post": {
+        "tags": [
+          "cache"
+        ],
+        "operationId": "warmCache",
+        "summary": "Warm one or more cacheable URLs.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CacheWarmRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/cache/purge": {
+      "post": {
+        "tags": [
+          "cache"
+        ],
+        "operationId": "purgeCache",
+        "summary": "Purge cache entries by exact URL, path prefix, or tag.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CachePurgeRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/rule-hits": {
+      "get": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "getWafRuleHits",
+        "summary": "Fetch active WAF rule hit counters.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/rule-costs": {
+      "get": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "getWafRuleCosts",
+        "summary": "Fetch active OxiRule runtime cost counters.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/crs/compatibility": {
+      "get": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "getCrsCompatibility",
+        "summary": "Fetch CRS compatibility metadata.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/rulepacks": {
+      "get": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "listWafRulepacks",
+        "summary": "List active OxiRule rulepack summaries.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/check": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "checkOxiRule",
+        "summary": "Compile and statically check candidate OxiRule content.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/OxiRuleCheckRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/cost": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "estimateOxiRuleCost",
+        "summary": "Estimate candidate OxiRule cost.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/OxiRuleCheckRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/test": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "testOxiRule",
+        "summary": "Evaluate candidate OxiRule content against one fixture.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/OxiRuleEvalRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/explain": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "explainOxiRule",
+        "summary": "Evaluate and explain candidate OxiRule content against one fixture.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/OxiRuleEvalRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/replay": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "replayOxiRule",
+        "summary": "Replay candidate OxiRule content against NDJSON fixtures.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/OxiRuleReplayRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/templates": {
+      "get": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "listOxiRuleTemplates",
+        "summary": "List built-in OxiRule templates.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/templates/render": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "renderOxiRuleTemplate",
+        "summary": "Render a built-in OxiRule template.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/OxiRuleTemplateRenderRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/false-positive": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "planOxiRuleFalsePositive",
+        "summary": "Plan CRS or OxiRule false-positive tuning.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/lifecycle": {
+      "get": {
+        "tags": [
+          "lifecycle"
+        ],
+        "operationId": "getLifecycle",
+        "summary": "Fetch admin drain state.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/lifecycle/drain": {
+      "post": {
+        "tags": [
+          "lifecycle"
+        ],
+        "operationId": "drainLifecycle",
+        "summary": "Start admin drain.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/EmptyJson"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/lifecycle/undrain": {
+      "post": {
+        "tags": [
+          "lifecycle"
+        ],
+        "operationId": "undrainLifecycle",
+        "summary": "Clear admin drain.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/EmptyJson"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/diagnostics/preflight": {
+      "get": {
+        "tags": [
+          "diagnostics"
+        ],
+        "operationId": "getDiagnosticsPreflight",
+        "summary": "Run diagnostics against the active runtime config.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ExternalProbe"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "diagnostics"
+        ],
+        "operationId": "runDiagnosticsPreflight",
+        "summary": "Run diagnostics against candidate TOML.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/PreflightRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/diagnostics/support-bundle": {
+      "get": {
+        "tags": [
+          "diagnostics"
+        ],
+        "operationId": "getSupportBundle",
+        "summary": "Fetch a redacted support bundle.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Redact"
+          },
+          {
+            "$ref": "#/components/parameters/ExternalProbe"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/runtime/snapshot": {
+      "get": {
+        "tags": [
+          "runtime"
+        ],
+        "operationId": "getRuntimeSnapshot",
+        "summary": "Fetch the redacted runtime snapshot.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Redact"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/runtime/introspection": {
+      "get": {
+        "tags": [
+          "runtime"
+        ],
+        "operationId": "getRuntimeIntrospection",
+        "summary": "Fetch redacted runtime snapshot plus live counters.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Redact"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/principals": {
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "listIpmPrincipals",
+        "summary": "List IPM principals.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/credentials": {
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "listIpmCredentials",
+        "summary": "List redacted IPM credentials.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/policies": {
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "listIpmPolicies",
+        "summary": "List IPM policies.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/bindings": {
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "listIpmBindings",
+        "summary": "List IPM bindings.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/simulate": {
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "simulateIpm",
+        "summary": "Simulate IPM authorization for an action and resource.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmSimulationRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/dynamic-policies": {
+      "get": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "listDynamicPolicies",
+        "summary": "List active dynamic policies.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "createDynamicPolicy",
+        "summary": "Create a dynamic policy row.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/DynamicPolicyWrite"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/dynamic-policies/apply": {
+      "post": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "applyDynamicPolicy",
+        "summary": "Create or replace a dynamic policy selected by namespace, source, and name.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/DynamicPolicyWrite"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/dynamic-policies/audit": {
+      "get": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "getDynamicPolicyAudit",
+        "summary": "List recent dynamic-policy audit rows.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/dynamic-policies/export": {
+      "get": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "exportDynamicPolicies",
+        "summary": "Export dynamic policies.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/dynamic-policies/import": {
+      "post": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "importDynamicPolicies",
+        "summary": "Import dynamic policies by namespace, source, and name.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/DynamicPolicyImport"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/dynamic-policies/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/DynamicPolicyId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "getDynamicPolicy",
+        "summary": "Fetch one dynamic policy.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "patchDynamicPolicy",
+        "summary": "Patch one dynamic policy.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "deleteDynamicPolicy",
+        "summary": "Disable one dynamic policy.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/upstream-pools": {
+      "get": {
+        "tags": [
+          "upstream-pools"
+        ],
+        "operationId": "listUpstreamPools",
+        "summary": "List runtime upstream-pool snapshots.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/upstream-pools/{pool}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Pool"
+        }
+      ],
+      "get": {
+        "tags": [
+          "upstream-pools"
+        ],
+        "operationId": "getUpstreamPool",
+        "summary": "Fetch one runtime upstream-pool snapshot.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/upstream-pools/{pool}/servers": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Pool"
+        }
+      ],
+      "post": {
+        "tags": [
+          "upstream-pools"
+        ],
+        "operationId": "addUpstreamPoolServer",
+        "summary": "Add a runtime-managed upstream-pool server.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/UpstreamPoolServerCreate"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/upstream-pools/{pool}/servers/{server_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Pool"
+        },
+        {
+          "$ref": "#/components/parameters/ServerId"
+        }
+      ],
+      "patch": {
+        "tags": [
+          "upstream-pools"
+        ],
+        "operationId": "updateUpstreamPoolServer",
+        "summary": "Update runtime state for an upstream-pool server.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/UpstreamPoolServerPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "upstream-pools"
+        ],
+        "operationId": "removeUpstreamPoolServer",
+        "summary": "Remove a runtime-managed upstream-pool server.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Admin bearer token supplied by IPM credentials or bootstrap Admin token."
+      }
+    },
+    "parameters": {
+      "IfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Active config ETag from config status or effective config."
+      },
+      "Redact": {
+        "name": "redact",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "ExternalProbe": {
+        "name": "external_probe",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "shared_state",
+              "ipm_store",
+              "remote_signer",
+              "upstream"
+            ]
+          }
+        },
+        "style": "form",
+        "explode": true
+      },
+      "DynamicPolicyId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "Pool": {
+        "name": "pool",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ServerId": {
+        "name": "server_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "requestBodies": {
+      "EmptyJson": {
+        "required": false,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "JsonObject": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "ConfigPayload": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "config"
+              ],
+              "properties": {
+                "config": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "FileSyncRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "operations"
+              ],
+              "properties": {
+                "apply": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "oxirule",
+                    "full",
+                    "downstream_tls"
+                  ],
+                  "default": "none"
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "op",
+                      "root",
+                      "path"
+                    ],
+                    "properties": {
+                      "op": {
+                        "type": "string",
+                        "enum": [
+                          "put",
+                          "delete"
+                        ]
+                      },
+                      "root": {
+                        "type": "string",
+                        "enum": [
+                          "config",
+                          "oxirule",
+                          "oxirule_group",
+                          "oxirule_rulepack"
+                        ]
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "expected_sha256": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "content": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "CacheKeyExplainRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "method",
+                "scheme",
+                "host",
+                "uri"
+              ],
+              "properties": {
+                "policy": {
+                  "type": "string"
+                },
+                "method": {
+                  "type": "string"
+                },
+                "scheme": {
+                  "type": "string"
+                },
+                "host": {
+                  "type": "string"
+                },
+                "uri": {
+                  "type": "string"
+                },
+                "headers": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "response_headers": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "CacheWarmRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "items"
+              ],
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "scheme",
+                      "host",
+                      "uri"
+                    ],
+                    "properties": {
+                      "policy": {
+                        "type": "string"
+                      },
+                      "method": {
+                        "type": "string",
+                        "enum": [
+                          "GET",
+                          "HEAD"
+                        ]
+                      },
+                      "scheme": {
+                        "type": "string"
+                      },
+                      "host": {
+                        "type": "string"
+                      },
+                      "uri": {
+                        "type": "string"
+                      },
+                      "headers": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "CachePurgeRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "exact",
+                    "prefix",
+                    "tag"
+                  ]
+                },
+                "policy": {
+                  "type": "string"
+                },
+                "scheme": {
+                  "type": "string"
+                },
+                "host": {
+                  "type": "string"
+                },
+                "uri": {
+                  "type": "string"
+                },
+                "path_prefix": {
+                  "type": "string"
+                },
+                "tag": {
+                  "type": "string"
+                },
+                "partition": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "OxiRuleCheckRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "rule"
+              ],
+              "properties": {
+                "rule": {
+                  "type": "string"
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "include_active_rules": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "OxiRuleEvalRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "rule",
+                "fixture"
+              ],
+              "properties": {
+                "rule": {
+                  "type": "string"
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fixture": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "include_active_rules": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "OxiRuleReplayRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "rule",
+                "input"
+              ],
+              "properties": {
+                "rule": {
+                  "type": "string"
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "input": {
+                  "type": "string"
+                },
+                "include_active_rules": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "OxiRuleTemplateRenderRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "vars": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "PreflightRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "config"
+              ],
+              "properties": {
+                "format": {
+                  "type": "string",
+                  "const": "toml",
+                  "default": "toml"
+                },
+                "config": {
+                  "type": "string"
+                },
+                "external_probes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "shared_state",
+                      "ipm_store",
+                      "remote_signer",
+                      "upstream"
+                    ]
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "IpmSimulationRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "action",
+                "resource"
+              ],
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "resource": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "DynamicPolicyWrite": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "source": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "action": {
+                  "type": "string"
+                },
+                "subject_type": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                },
+                "ttl_seconds": {
+                  "type": "integer"
+                },
+                "expires_at": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "DynamicPolicyImport": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "policies"
+              ],
+              "properties": {
+                "policies": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "UpstreamPoolServerCreate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "id",
+                "origin"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string"
+                },
+                "state": {
+                  "$ref": "#/components/schemas/UpstreamPoolServerState"
+                },
+                "weight": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_conns": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "backup": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "UpstreamPoolServerPatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "$ref": "#/components/schemas/UpstreamPoolServerState"
+                },
+                "weight": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_conns": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "backup": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "JsonObject": {
+        "description": "JSON object response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "Bad request.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid bearer token.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Authenticated actor is not authorized by IPM.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PreconditionFailed": {
+        "description": "If-Match ETag precondition failed.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "Request body is too large.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AdminCapabilities": {
+        "type": "object",
+        "required": [
+          "api_version",
+          "package_version",
+          "features",
+          "limits"
+        ],
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "v1"
+          },
+          "package_version": {
+            "type": "string"
+          },
+          "features": {
+            "type": "object",
+            "required": [
+              "config_load",
+              "file_sync",
+              "dynamic_policy",
+              "ipm_store",
+              "waf_devtools",
+              "runtime_introspection",
+              "cache_admin",
+              "upstream_pool_runtime_control"
+            ],
+            "properties": {
+              "config_load": {
+                "type": "boolean"
+              },
+              "file_sync": {
+                "type": "boolean"
+              },
+              "dynamic_policy": {
+                "type": "boolean"
+              },
+              "ipm_store": {
+                "type": "boolean"
+              },
+              "waf_devtools": {
+                "type": "boolean"
+              },
+              "runtime_introspection": {
+                "type": "boolean"
+              },
+              "cache_admin": {
+                "type": "boolean"
+              },
+              "upstream_pool_runtime_control": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "limits": {
+            "type": "object",
+            "required": [
+              "admin_json_body_bytes",
+              "config_body_bytes",
+              "oxirule_replay_body_bytes",
+              "dynamic_policy_body_bytes"
+            ],
+            "properties": {
+              "admin_json_body_bytes": {
+                "type": "integer"
+              },
+              "config_body_bytes": {
+                "type": "integer"
+              },
+              "oxirule_replay_body_bytes": {
+                "type": "integer"
+              },
+              "dynamic_policy_body_bytes": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminVersion": {
+        "type": "object",
+        "required": [
+          "api_version",
+          "package_name",
+          "package_version"
+        ],
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "v1"
+          },
+          "package_name": {
+            "type": "string"
+          },
+          "package_version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpstreamPoolServerState": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "drain",
+          "down",
+          "maintenance"
+        ]
+      }
+    }
+  }
+}

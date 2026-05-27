@@ -1,0 +1,138 @@
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
+
+use serde_json::Value;
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("source crate should live under the repository root")
+        .to_path_buf()
+}
+
+fn openapi() -> Value {
+    let raw = fs::read_to_string(repo_root().join("docs/admin-openapi.json"))
+        .expect("Admin OpenAPI document should be readable");
+    serde_json::from_str(&raw).expect("Admin OpenAPI document should parse as JSON")
+}
+
+#[test]
+fn admin_openapi_is_31_and_covers_current_v1_paths() {
+    let spec = openapi();
+    assert_eq!(spec["openapi"], "3.1.0");
+
+    let expected = expected_operations();
+    let documented = documented_operations(&spec);
+    assert_eq!(
+        documented, expected,
+        "docs/admin-openapi.json must cover every current /admin/v1 operation exactly"
+    );
+}
+
+#[test]
+fn admin_metadata_operations_declare_bearer_security() {
+    let spec = openapi();
+    for path in [
+        "/admin/v1/openapi.json",
+        "/admin/v1/capabilities",
+        "/admin/v1/version",
+    ] {
+        let security = spec["paths"][path]["get"]["security"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} must declare operation-level security"));
+        assert!(
+            security
+                .iter()
+                .any(|entry| entry.get("bearerAuth").is_some()),
+            "{path} must declare bearerAuth security"
+        );
+    }
+}
+
+fn documented_operations(spec: &Value) -> BTreeSet<(String, String)> {
+    let paths = spec["paths"]
+        .as_object()
+        .expect("OpenAPI paths should be an object");
+    let mut documented = BTreeSet::new();
+    for (path, item) in paths {
+        if !path.starts_with("/admin/v1/") {
+            continue;
+        }
+        let item = item.as_object().expect("path item should be an object");
+        for method in ["get", "post", "patch", "delete"] {
+            if item.contains_key(method) {
+                documented.insert((method.to_string(), path.to_string()));
+            }
+        }
+    }
+    documented
+}
+
+fn expected_operations() -> BTreeSet<(String, String)> {
+    [
+        ("get", "/admin/v1/openapi.json"),
+        ("get", "/admin/v1/capabilities"),
+        ("get", "/admin/v1/version"),
+        ("get", "/admin/v1/config/status"),
+        ("get", "/admin/v1/config/effective"),
+        ("post", "/admin/v1/config/validate"),
+        ("post", "/admin/v1/config/diff"),
+        ("post", "/admin/v1/config/load"),
+        ("post", "/admin/v1/config/rollback"),
+        ("get", "/admin/v1/tls/downstream"),
+        ("post", "/admin/v1/tls/downstream/reload"),
+        ("post", "/admin/v1/files/sync"),
+        ("post", "/admin/v1/cache/key-explain"),
+        ("post", "/admin/v1/cache/warm"),
+        ("post", "/admin/v1/cache/purge"),
+        ("get", "/admin/v1/waf/rule-hits"),
+        ("get", "/admin/v1/waf/rule-costs"),
+        ("get", "/admin/v1/waf/crs/compatibility"),
+        ("get", "/admin/v1/waf/rulepacks"),
+        ("post", "/admin/v1/waf/oxirule/check"),
+        ("post", "/admin/v1/waf/oxirule/cost"),
+        ("post", "/admin/v1/waf/oxirule/test"),
+        ("post", "/admin/v1/waf/oxirule/explain"),
+        ("post", "/admin/v1/waf/oxirule/replay"),
+        ("get", "/admin/v1/waf/oxirule/templates"),
+        ("post", "/admin/v1/waf/oxirule/templates/render"),
+        ("post", "/admin/v1/waf/oxirule/false-positive"),
+        ("get", "/admin/v1/lifecycle"),
+        ("post", "/admin/v1/lifecycle/drain"),
+        ("post", "/admin/v1/lifecycle/undrain"),
+        ("get", "/admin/v1/diagnostics/preflight"),
+        ("post", "/admin/v1/diagnostics/preflight"),
+        ("get", "/admin/v1/diagnostics/support-bundle"),
+        ("get", "/admin/v1/runtime/snapshot"),
+        ("get", "/admin/v1/runtime/introspection"),
+        ("get", "/admin/v1/ipm/principals"),
+        ("get", "/admin/v1/ipm/credentials"),
+        ("get", "/admin/v1/ipm/policies"),
+        ("get", "/admin/v1/ipm/bindings"),
+        ("post", "/admin/v1/ipm/simulate"),
+        ("get", "/admin/v1/dynamic-policies"),
+        ("post", "/admin/v1/dynamic-policies"),
+        ("post", "/admin/v1/dynamic-policies/apply"),
+        ("get", "/admin/v1/dynamic-policies/audit"),
+        ("get", "/admin/v1/dynamic-policies/export"),
+        ("post", "/admin/v1/dynamic-policies/import"),
+        ("get", "/admin/v1/dynamic-policies/{id}"),
+        ("patch", "/admin/v1/dynamic-policies/{id}"),
+        ("delete", "/admin/v1/dynamic-policies/{id}"),
+        ("get", "/admin/v1/upstream-pools"),
+        ("get", "/admin/v1/upstream-pools/{pool}"),
+        ("post", "/admin/v1/upstream-pools/{pool}/servers"),
+        (
+            "patch",
+            "/admin/v1/upstream-pools/{pool}/servers/{server_id}",
+        ),
+        (
+            "delete",
+            "/admin/v1/upstream-pools/{pool}/servers/{server_id}",
+        ),
+    ]
+    .into_iter()
+    .map(|(method, path)| (method.to_string(), path.to_string()))
+    .collect()
+}

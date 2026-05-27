@@ -21,7 +21,7 @@ use super::{AdminActor, AdminAuthorization};
 
 mod dynamic_policy_query;
 
-const ADMIN_JSON_BODY_LIMIT: usize = 64 * 1024;
+pub(super) const ADMIN_JSON_BODY_LIMIT: usize = 64 * 1024;
 
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
   authorization.is_allowed(action, resource_name)

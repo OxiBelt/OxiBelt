@@ -111,3 +111,7 @@ path = "../tests/rust/performance_gate_integrity.rs"
 [[test]]
 name = "performance_aggregate"
 path = "../tests/rust/performance_aggregate.rs"
+
+[[test]]
+name = "admin_openapi_contract"
+path = "../tests/rust/admin_openapi_contract.rs"
