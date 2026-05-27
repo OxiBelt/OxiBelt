@@ -799,6 +799,18 @@ fn oxibelt_aggressive_long_run_fixture_pins_connect_stability_profile() {
         .and_then(|upstreams| upstreams.first())
         .and_then(toml::Value::as_table)
         .unwrap_or_else(|| panic!("{} should contain an upstream", path.display()));
+    let minimum_slow_post_timeout_ms = 240_000;
+    for timeout_key in ["request_timeout_ms", "first_byte_timeout_ms"] {
+        let timeout = upstream
+            .get(timeout_key)
+            .and_then(toml::Value::as_integer)
+            .unwrap_or_else(|| panic!("{} should set upstream {timeout_key}", path.display()));
+        assert!(
+            timeout >= minimum_slow_post_timeout_ms,
+            "{} should keep upstream {timeout_key} at least {minimum_slow_post_timeout_ms}ms so the 180s slow-post stress reaches resource checks instead of the default 30s timeout",
+            path.display()
+        );
+    }
     assert_eq!(
         upstream
             .get("pool_max_idle_per_host")
