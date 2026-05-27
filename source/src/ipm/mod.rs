@@ -14,6 +14,8 @@ use crate::config::{
 };
 
 mod admin;
+mod admin_bindings;
+mod admin_references;
 mod admin_support;
 mod admin_types;
 mod refresh;
