@@ -436,6 +436,26 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
             && nginx_dockerfile.contains("-march=${NGINX_TARGET_CPU}"),
         "nginx comparator image should pin mainline nginx, build HTTP/3, and use the requested target CPU"
     );
+    for flag in [
+        "-U_FORTIFY_SOURCE",
+        "-D_FORTIFY_SOURCE=3",
+        "-fstack-protector-strong",
+        "-fstack-clash-protection",
+        "-fcf-protection=full",
+        "-fPIE",
+        "-fno-plt",
+        "-Wformat-security",
+        "-Werror=format-security",
+        "-Wl,-z,relro",
+        "-Wl,-z,now",
+        "-Wl,-z,noexecstack",
+        "-pie",
+    ] {
+        assert!(
+            nginx_dockerfile.contains(flag),
+            "nginx comparator image should include GCC hardening flag {flag}"
+        );
+    }
     assert!(
         caddy_dockerfile.contains("ARG CADDY_VERSION=2.11.2")
             && caddy_dockerfile.contains("FROM caddy:${CADDY_VERSION}-builder-alpine AS builder")

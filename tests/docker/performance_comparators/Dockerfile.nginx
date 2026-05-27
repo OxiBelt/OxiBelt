@@ -38,8 +38,8 @@ RUN case "${NGINX_TARGET_CPU}" in \
       --with-http_v2_module \
       --with-http_v3_module \
       --with-threads \
-      --with-cc-opt="-O2 -pipe -march=${NGINX_TARGET_CPU}" \
-      --with-ld-opt="-Wl,--as-needed" && \
+      --with-cc-opt="-O2 -pipe -march=${NGINX_TARGET_CPU} -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fcf-protection=full -fPIE -fno-plt -Wformat -Wformat-security -Werror=format-security" \
+      --with-ld-opt="-Wl,--as-needed -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -pie" && \
     make -j"$(nproc)" && \
     make install
 
@@ -56,7 +56,7 @@ COPY --from=builder /usr/local/nginx /usr/local/nginx
 
 LABEL org.opencontainers.image.title="OxiBelt performance nginx comparator" \
       org.opencontainers.image.version="${NGINX_VERSION}" \
-      org.opencontainers.image.description="nginx comparator built with HTTP/3 and AMD64 target CPU tuning" \
+      org.opencontainers.image.description="nginx comparator built with HTTP/3, GCC hardening, and AMD64 target CPU tuning" \
       org.oxibelt.performance.comparator="nginx" \
       org.oxibelt.performance.amd64_target_cpu="${NGINX_TARGET_CPU}"
 
