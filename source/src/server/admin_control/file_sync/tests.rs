@@ -59,6 +59,32 @@ fn load_temp_config_with_include(name: &str) -> (common::TempDir, Config) {
   (temp_dir, config)
 }
 
+#[cfg(unix)]
+fn load_temp_config_with_symlinked_glob_include(name: &str) -> (common::TempDir, Config) {
+  let temp_dir = common::TempDir::new(name);
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  let oxirule_dir = temp_dir.path().join("oxirule");
+  std::fs::create_dir_all(config_dir.join("conf.d")).expect("config include dir should be created");
+  std::fs::create_dir_all(&cert_dir).expect("cert dir should be created");
+  std::fs::create_dir_all(&oxirule_dir).expect("oxirule dir should be created");
+  let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, name);
+  let config_path = config_dir.join("oxibelt.toml");
+  std::fs::write(
+    &config_path,
+    "include = \"alias/conf.d/*.toml\"\n".to_string()
+      + &common::minimal_config_toml_with_paths(
+        cert_path.file_name().unwrap().to_str().unwrap(),
+        key_path.file_name().unwrap().to_str().unwrap(),
+      ),
+  )
+  .expect("config entry should be written");
+  std::os::unix::fs::symlink(".", config_dir.join("alias"))
+    .expect("config alias symlink should be created");
+  let config = Config::load(&config_path).expect("config should load");
+  (temp_dir, config)
+}
+
 fn config_dir(config: &Config) -> &Path {
   config
     .source_paths
@@ -294,6 +320,62 @@ fn file_sync_scope_rejects_symlinked_config_alias_admin_change_without_permissio
       .expect("error should be a string")
       .contains("admin:UpdateConfig")
   );
+}
+
+#[cfg(unix)]
+#[test]
+fn file_sync_scope_rejects_symlinked_glob_config_alias_admin_change_without_permission() {
+  let (_temp_dir, config) =
+    load_temp_config_with_symlinked_glob_include("file-sync-symlink-glob-scope");
+  let mut request = put_request(
+    AdminFileRoot::Config,
+    "alias/conf.d/evil.toml",
+    "[admin]\nbind = \"127.0.0.1:19092\"\n",
+  );
+  request.apply = AdminApplyMode::Full;
+
+  let response = validate_file_sync_control_plane_scope(
+    &request,
+    &config,
+    ControlPlaneConfigPermissions::default(),
+  )
+  .expect_err("symlinked glob include should not hide staged admin changes");
+
+  assert_eq!(response.status, StatusCode::FORBIDDEN);
+  assert!(
+    response.body["error"]
+      .as_str()
+      .expect("error should be a string")
+      .contains("admin:UpdateConfig")
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn file_sync_scope_loads_benign_symlinked_glob_config_alias_override() {
+  let (_temp_dir, config) =
+    load_temp_config_with_symlinked_glob_include("file-sync-symlink-glob-benign");
+  let request = put_request(
+    AdminFileRoot::Config,
+    "alias/conf.d/benign.toml",
+    "# staged benign include\n",
+  );
+
+  let candidate = file_sync_control_plane_candidate(&request, &config)
+    .expect("candidate should load")
+    .expect("config file sync should build a candidate");
+  assert!(
+    candidate
+      .source_paths
+      .config_files
+      .contains(&config_dir(&config).join("conf.d/benign.toml"))
+  );
+  validate_file_sync_control_plane_scope(
+    &request,
+    &config,
+    ControlPlaneConfigPermissions::default(),
+  )
+  .expect("benign symlinked glob include should remain allowed");
 }
 
 #[cfg(unix)]

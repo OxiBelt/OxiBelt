@@ -198,7 +198,7 @@ fn expand_include_entry(
     )?]);
   }
 
-  let pattern = pattern_path.to_str().ok_or_else(|| {
+  let pattern_text = pattern_path.to_str().ok_or_else(|| {
     anyhow!(
       "configuration include pattern in {} is not valid UTF-8: {}",
       source_path.display(),
@@ -206,7 +206,7 @@ fn expand_include_entry(
     )
   })?;
   let mut paths = Vec::new();
-  for path in glob::glob(pattern).with_context(|| {
+  for path in glob::glob(pattern_text).with_context(|| {
     format!(
       "invalid configuration include pattern {}",
       pattern_path.display()
@@ -230,14 +230,30 @@ fn expand_include_entry(
       }
     }
   }
-  let pattern = glob::Pattern::new(pattern).with_context(|| {
+  let mut override_patterns = vec![glob::Pattern::new(pattern_text).with_context(|| {
     format!(
       "invalid configuration include pattern {}",
       pattern_path.display()
     )
-  })?;
+  })?];
+  if let Some(canonical_pattern_text) = canonicalize_glob_pattern_prefix(&pattern_path)?
+    && canonical_pattern_text != pattern_text
+  {
+    override_patterns.push(
+      glob::Pattern::new(&canonical_pattern_text).with_context(|| {
+        format!(
+          "invalid canonical configuration include pattern {}",
+          canonical_pattern_text
+        )
+      })?,
+    );
+  }
   for (path, content) in overrides {
-    if content.is_some() && pattern.matches_path(path) {
+    if content.is_some()
+      && override_patterns
+        .iter()
+        .any(|pattern| pattern.matches_path(path))
+    {
       paths.push(canonicalize_local_config_file_with_overrides(
         "configuration include",
         path,
@@ -254,6 +270,48 @@ fn expand_include_entry(
 
 fn has_glob_pattern(entry: &str) -> bool {
   entry.chars().any(|ch| matches!(ch, '*' | '?' | '['))
+}
+
+fn canonicalize_glob_pattern_prefix(pattern_path: &Path) -> anyhow::Result<Option<String>> {
+  let mut fixed_prefix = PathBuf::new();
+  let mut glob_suffix = PathBuf::new();
+  let mut found_glob_component = false;
+
+  for component in pattern_path.components() {
+    let component_text = component.as_os_str().to_str().ok_or_else(|| {
+      anyhow!(
+        "configuration include pattern is not valid UTF-8: {}",
+        pattern_path.display()
+      )
+    })?;
+    let component_path = Path::new(component.as_os_str());
+    if !found_glob_component && !has_glob_pattern(component_text) {
+      fixed_prefix.push(component_path);
+    } else {
+      found_glob_component = true;
+      glob_suffix.push(component_path);
+    }
+  }
+
+  if !found_glob_component {
+    return Ok(None);
+  }
+
+  let prefix = if fixed_prefix.as_os_str().is_empty() {
+    Path::new(".")
+  } else {
+    fixed_prefix.as_path()
+  };
+  let mut canonical_pattern =
+    canonicalize_local_config_file_target("configuration include pattern", prefix)?;
+  canonical_pattern.push(glob_suffix);
+  let canonical_pattern = canonical_pattern.to_str().ok_or_else(|| {
+    anyhow!(
+      "canonical configuration include pattern is not valid UTF-8: {}",
+      canonical_pattern.display()
+    )
+  })?;
+  Ok(Some(canonical_pattern.to_string()))
 }
 
 fn merge_toml_values(
