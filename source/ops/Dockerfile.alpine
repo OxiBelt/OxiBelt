@@ -39,6 +39,7 @@ RUN if command -v apk >/dev/null 2>&1; then \
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
 COPY source ./source
+COPY docs/admin-openapi.json ./docs/admin-openapi.json
 COPY fuzz ./fuzz
 COPY --from=person-proof-ui /repo/source/assets/person-proof-challenge.html ./source/assets/person-proof-challenge.html
 RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
@@ -67,13 +68,13 @@ RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
         export LIBRARY_PATH="/tmp/oxibelt-libgcc:$(dirname "${libgcc_s_path}")${LIBRARY_PATH:+:${LIBRARY_PATH}}"; \
       fi && \
       cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibeltctl --target "${OXIBELT_RUST_TARGET}" && \
-      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt" /tmp/oxibelt; \
-      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt-keysigner" /tmp/oxibelt-keysigner; \
+      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt" /tmp/oxibelt && \
+      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt-keysigner" /tmp/oxibelt-keysigner && \
       cp "target/${OXIBELT_RUST_TARGET}/release/oxibeltctl" /tmp/oxibeltctl; \
     else \
       cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibeltctl && \
-      cp target/release/oxibelt /tmp/oxibelt; \
-      cp target/release/oxibelt-keysigner /tmp/oxibelt-keysigner; \
+      cp target/release/oxibelt /tmp/oxibelt && \
+      cp target/release/oxibelt-keysigner /tmp/oxibelt-keysigner && \
       cp target/release/oxibeltctl /tmp/oxibeltctl; \
     fi
 
