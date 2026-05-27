@@ -62,6 +62,7 @@ fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
         "runtime_introspection": true,
         "cache_admin": true,
         "upstream_pool_runtime_control": true,
+        "admin_audit": snapshot.config.admin.audit.enabled,
       },
       "limits": {
         "admin_json_body_bytes": ADMIN_JSON_BODY_LIMIT,

@@ -74,6 +74,7 @@ fn expected_operations() -> BTreeSet<(String, String)> {
         ("get", "/admin/v1/openapi.json"),
         ("get", "/admin/v1/capabilities"),
         ("get", "/admin/v1/version"),
+        ("get", "/admin/v1/audit"),
         ("get", "/admin/v1/config/status"),
         ("get", "/admin/v1/config/effective"),
         ("post", "/admin/v1/config/validate"),

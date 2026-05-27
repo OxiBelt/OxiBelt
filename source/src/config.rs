@@ -1675,8 +1675,34 @@ impl Config {
 
   fn validate_admin(&self) -> anyhow::Result<()> {
     self.validate_legacy_admin_authorization()?;
+    validate_optional_non_empty("admin.audit.backend", self.admin.audit.backend.as_deref())?;
+    if self.admin.audit.queue_capacity == 0 {
+      bail!("admin.audit.queue_capacity must be greater than 0");
+    }
     if !self.admin.enabled {
+      if self.admin.audit.enabled {
+        bail!("admin.audit.enabled requires admin.enabled = true");
+      }
       return Ok(());
+    }
+    if self.admin.audit.enabled {
+      let Some(backend_name) = self.admin.audit.backend.as_deref() else {
+        bail!("admin.audit.enabled requires admin.audit.backend");
+      };
+      if !self.shared_state.enabled {
+        bail!("admin.audit.backend requires shared_state.enabled = true");
+      }
+      let Some(backend) = self
+        .shared_state
+        .backends
+        .iter()
+        .find(|backend| backend.name == backend_name)
+      else {
+        bail!("admin.audit.backend references unknown shared_state backend {backend_name}");
+      };
+      if backend.kind != SharedStateBackendKind::Postgres {
+        bail!("admin.audit.backend {backend_name} must use kind = \"postgres\"");
+      }
     }
     if !self.ipm.enabled {
       if self.admin.bearer_token_env.trim().is_empty() {
@@ -2562,6 +2588,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "cache.policies.rules" => &["mime_types", "store"][..],
     "admin" => &[
       "allow_insecure_plaintext",
+      "audit",
       "bearer_token_env",
       "bind",
       "cache_purge_signing",
@@ -2572,6 +2599,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "token_store",
       "transport",
     ][..],
+    "admin.audit" => &["backend", "enabled", "queue_capacity"][..],
     "admin.cache_purge_signing" => &[
       "enabled",
       "key_env",
@@ -4391,6 +4419,8 @@ pub struct AdminConfig {
   #[serde(default)]
   pub cache_purge_signing: AdminCachePurgeSigningConfig,
   #[serde(default)]
+  pub audit: AdminAuditConfig,
+  #[serde(default)]
   pub tls: AdminTlsConfig,
   #[serde(default, rename = "rbac")]
   legacy_rbac: Option<LegacyAdminRbacConfig>,
@@ -4408,9 +4438,30 @@ impl Default for AdminConfig {
       allow_insecure_plaintext: false,
       plaintext_allowed_source_cidrs: default_admin_plaintext_allowed_source_cidrs(),
       cache_purge_signing: AdminCachePurgeSigningConfig::default(),
+      audit: AdminAuditConfig::default(),
       tls: AdminTlsConfig::default(),
       legacy_rbac: None,
       legacy_token_store: None,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AdminAuditConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub backend: Option<String>,
+  #[serde(default = "default_admin_audit_queue_capacity")]
+  pub queue_capacity: usize,
+}
+
+impl Default for AdminAuditConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      backend: None,
+      queue_capacity: default_admin_audit_queue_capacity(),
     }
   }
 }
@@ -5584,6 +5635,10 @@ fn default_database_access_log_connect_timeout_ms() -> u64 {
 }
 
 fn default_database_access_log_queue_capacity() -> usize {
+  1024
+}
+
+fn default_admin_audit_queue_capacity() -> usize {
   1024
 }
 

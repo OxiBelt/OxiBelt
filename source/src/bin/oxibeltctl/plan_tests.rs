@@ -575,6 +575,37 @@ fn dynamic_policy_audit_builds_query_endpoint() {
   assert_eq!(plan.permission.action, "dynamic-policy:ReadAudit");
 }
 
+#[test]
+fn admin_audit_builds_query_endpoint() {
+  let command = Command::Audit(AdminAuditArgs {
+    outcome: Some("rejected".to_string()),
+    actor: Some("ops-token".to_string()),
+    principal: Some("ops".to_string()),
+    service: Some("config".to_string()),
+    operation: Some("post.config.load".to_string()),
+    request_id: Some("req-123".to_string()),
+    path_prefix: Some("/admin/v1/config".to_string()),
+    before_id: Some(50),
+    limit: 25,
+  });
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &command))
+    .expect("plan");
+
+  assert_eq!(plan.method, Method::GET);
+  assert_eq!(
+    plan.endpoint,
+    "/admin/v1/audit?limit=25&outcome=rejected&actor=ops-token&principal=ops&service=config&operation=post.config.load&request_id=req-123&path_prefix=%2Fadmin%2Fv1%2Fconfig&before_id=50"
+  );
+  assert_eq!(plan.permission.action, "admin:ReadAudit");
+  assert_eq!(plan.permission.resource, "audit/admin");
+}
+
 fn write_temp_file(label: &str, content: &str) -> std::path::PathBuf {
   let nanos = SystemTime::now()
     .duration_since(UNIX_EPOCH)

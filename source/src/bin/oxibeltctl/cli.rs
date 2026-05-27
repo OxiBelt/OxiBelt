@@ -54,6 +54,7 @@ pub(crate) enum OutputFormat {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
   Status,
+  Audit(AdminAuditArgs),
   Doctor(DoctorArgs),
   SupportBundle(SupportBundleArgs),
   Runtime(RuntimeCommand),
@@ -74,6 +75,28 @@ pub(crate) enum Command {
   Ipm(IpmCommand),
   Auth(AuthCommand),
   Files(FilesCommand),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminAuditArgs {
+  #[arg(long)]
+  pub(crate) outcome: Option<String>,
+  #[arg(long)]
+  pub(crate) actor: Option<String>,
+  #[arg(long)]
+  pub(crate) principal: Option<String>,
+  #[arg(long)]
+  pub(crate) service: Option<String>,
+  #[arg(long)]
+  pub(crate) operation: Option<String>,
+  #[arg(long = "request-id")]
+  pub(crate) request_id: Option<String>,
+  #[arg(long = "path-prefix")]
+  pub(crate) path_prefix: Option<String>,
+  #[arg(long = "before-id")]
+  pub(crate) before_id: Option<i64>,
+  #[arg(long, default_value_t = 100)]
+  pub(crate) limit: i64,
 }
 
 #[derive(Debug, Args)]

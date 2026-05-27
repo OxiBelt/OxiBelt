@@ -32,6 +32,11 @@ pub(crate) async fn plan_command(
 ) -> anyhow::Result<RequestPlan> {
   match command {
     Command::Status => get("/admin/v1/config/status", "config:GetStatus", "*"),
+    Command::Audit(args) => get(
+      &admin_audit_endpoint(args),
+      "admin:ReadAudit",
+      "audit/admin",
+    ),
     Command::Doctor(args) => crate::doctor_plan::plan_doctor(args),
     Command::SupportBundle(args) => plan_support_bundle(args),
     Command::Runtime(command) => plan_runtime(command),
@@ -71,6 +76,36 @@ pub(crate) async fn plan_command(
       ),
     },
   }
+}
+
+fn admin_audit_endpoint(args: &AdminAuditArgs) -> String {
+  let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+  serializer.append_pair("limit", &args.limit.to_string());
+  if let Some(outcome) = &args.outcome {
+    serializer.append_pair("outcome", outcome);
+  }
+  if let Some(actor) = &args.actor {
+    serializer.append_pair("actor", actor);
+  }
+  if let Some(principal) = &args.principal {
+    serializer.append_pair("principal", principal);
+  }
+  if let Some(service) = &args.service {
+    serializer.append_pair("service", service);
+  }
+  if let Some(operation) = &args.operation {
+    serializer.append_pair("operation", operation);
+  }
+  if let Some(request_id) = &args.request_id {
+    serializer.append_pair("request_id", request_id);
+  }
+  if let Some(path_prefix) = &args.path_prefix {
+    serializer.append_pair("path_prefix", path_prefix);
+  }
+  if let Some(before_id) = args.before_id {
+    serializer.append_pair("before_id", &before_id.to_string());
+  }
+  format!("/admin/v1/audit?{}", serializer.finish())
 }
 
 fn plan_support_bundle(args: &SupportBundleArgs) -> anyhow::Result<RequestPlan> {

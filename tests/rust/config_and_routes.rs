@@ -2524,6 +2524,57 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 }
 
 #[test]
+fn admin_audit_requires_postgres_shared_state_backend() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+    }
+    let temp_dir = common::TempDir::new("admin-audit-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "admin-audit-config");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+backend = "postgres-main"
+
+[shared_state]
+enabled = true
+namespace = "matrix"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert!(config.admin.audit.enabled);
+    assert_eq!(config.admin.audit.backend.as_deref(), Some("postgres-main"));
+
+    let invalid = raw.replace("kind = \"postgres\"", "kind = \"redis\"");
+    let config: Config = toml::from_str(&invalid).expect("invalid config should parse");
+    let error = config
+        .validate()
+        .expect_err("Redis admin audit backend should fail validation");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.audit.backend postgres-main must use kind = \"postgres\""),
+        "{error}"
+    );
+}
+
+#[test]
 fn ipm_store_rejects_non_postgres_backend() {
     let temp_dir = common::TempDir::new("ipm-store-redis");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ipm-store-redis");

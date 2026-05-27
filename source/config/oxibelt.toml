@@ -372,6 +372,11 @@ transport = "auto" # auto | tls | plaintext_allowlist | plaintext
 allow_insecure_plaintext = false
 plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
 
+[admin.audit]
+enabled = false
+# backend = "cluster" # PostgreSQL shared_state backend for oxibelt_admin_audit
+queue_capacity = 1024
+
 [admin.cache_purge_signing]
 enabled = false
 key_env = "OXIBELT_CACHE_PURGE_HMAC_KEY"

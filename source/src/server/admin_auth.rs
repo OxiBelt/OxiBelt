@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use hyper::body::Incoming;
 
+use crate::admin_audit::AdminAuditHandle;
 use crate::config::Config;
 use crate::ipm::{IpmActor, IpmDecision, IpmRequestContext, IpmRuntime, resource};
 use crate::proxy::http::headers::extract_host;
@@ -12,6 +13,7 @@ pub(super) struct AdminAuthorization<'a> {
   pub(super) actor: &'a AdminActor,
   pub(super) ipm: &'a IpmRuntime,
   context: &'a IpmRequestContext,
+  audit: Option<AdminAuditHandle>,
 }
 
 impl<'a> AdminAuthorization<'a> {
@@ -24,11 +26,40 @@ impl<'a> AdminAuthorization<'a> {
       actor,
       ipm,
       context,
+      audit: None,
+    }
+  }
+
+  pub(super) fn new_with_audit(
+    actor: &'a AdminActor,
+    ipm: &'a IpmRuntime,
+    context: &'a IpmRequestContext,
+    audit: AdminAuditHandle,
+  ) -> Self {
+    Self {
+      actor,
+      ipm,
+      context,
+      audit: Some(audit),
     }
   }
 
   pub(super) fn is_allowed(&self, action: &str, resource_name: &str) -> bool {
-    admin_actor_is_allowed(self, action, resource_name)
+    let resource = resource(
+      self.ipm.namespace(),
+      service_for_action(action),
+      resource_name,
+    );
+    let allowed = matches!(
+      self
+        .ipm
+        .authorize(self.actor, action, &resource, self.context),
+      IpmDecision::Allow
+    );
+    if let Some(audit) = &self.audit {
+      audit.record_authorization(action, &resource, allowed);
+    }
+    allowed
   }
 }
 
@@ -42,27 +73,6 @@ pub(super) async fn admin_actor(
     return None;
   }
   Some(actor)
-}
-
-pub(super) fn admin_actor_is_allowed(
-  authorization: &AdminAuthorization<'_>,
-  action: &str,
-  resource_name: &str,
-) -> bool {
-  let resource = resource(
-    authorization.ipm.namespace(),
-    service_for_action(action),
-    resource_name,
-  );
-  matches!(
-    authorization.ipm.authorize(
-      authorization.actor,
-      action,
-      &resource,
-      authorization.context
-    ),
-    IpmDecision::Allow
-  )
 }
 
 pub(super) fn admin_request_context<B>(

@@ -7,6 +7,7 @@ use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 
 use super::admin_control;
+use crate::admin_audit::AdminAuditHandle;
 
 pub(super) async fn collect_admin_json<T>(
   request: hyper::Request<Incoming>,
@@ -24,6 +25,7 @@ pub(super) async fn collect_admin_json_with_limit<T>(
 where
   T: for<'de> Deserialize<'de>,
 {
+  let audit = AdminAuditHandle::from_request(&request);
   let bytes = Limited::new(request.into_body(), limit)
     .collect()
     .await
@@ -35,6 +37,9 @@ where
       }
     })?
     .to_bytes();
+  if let Some(audit) = audit {
+    audit.record_json_body(&bytes);
+  }
   serde_json::from_slice(&bytes)
     .map_err(|_| text_response(StatusCode::BAD_REQUEST, "invalid JSON request body"))
 }

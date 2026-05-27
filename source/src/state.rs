@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
+use crate::admin_audit::AdminAuditRuntime;
 use crate::cache::ResponseCache;
 use crate::config::{Config, HttpVersion, ProxyHttp2Config, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
@@ -198,6 +199,7 @@ pub struct AppSnapshot {
   pub external_auth: ExternalAuthRuntime,
   pub runtime_introspection: Arc<RuntimeIntrospectionState>,
   pub lifecycle: Arc<LifecycleState>,
+  pub admin_audit: AdminAuditRuntime,
   pub shared_state: Option<Arc<SharedState>>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
@@ -296,6 +298,9 @@ impl AppSnapshot {
     let lifecycle = previous
       .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
+    let admin_audit = AdminAuditRuntime::new(&config)
+      .await
+      .context("failed to build admin audit runtime")?;
     let tls_server_config = tls::build_server_config_with_resumption(
       &config.tls,
       &config.listeners,
@@ -365,6 +370,7 @@ impl AppSnapshot {
       external_auth,
       runtime_introspection,
       lifecycle,
+      admin_audit,
       shared_state,
       tls_server_config,
       admin_tls_server_config,
@@ -434,6 +440,7 @@ impl AppSnapshot {
       external_auth,
       runtime_introspection: previous.runtime_introspection.clone(),
       lifecycle: previous.lifecycle.clone(),
+      admin_audit: previous.admin_audit.clone(),
       shared_state: previous.shared_state.clone(),
       tls_server_config: previous.tls_server_config.clone(),
       admin_tls_server_config: previous.admin_tls_server_config.clone(),

@@ -20,6 +20,7 @@ use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
+use crate::admin_audit::AdminAuditHandle;
 use crate::config::{
   AdminTransportMode, Config, ConnectionLimitIdentityMode, RuntimeOverrides,
   UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
@@ -44,6 +45,8 @@ use crate::upstream_control;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod admin;
+mod admin_audit_endpoint;
+mod admin_audit_gate;
 mod admin_auth;
 mod admin_body;
 mod admin_config_diff;
@@ -480,6 +483,33 @@ where
 }
 
 async fn admin_response(
+  mut request: hyper::Request<Incoming>,
+  state: AppHandle,
+  admin_control: AdminControlHandle,
+  peer_addr: SocketAddr,
+  listener_bind: SocketAddr,
+  scheme: &'static str,
+) -> Response<ProxyBody> {
+  let (audit, audit_reservation) =
+    match admin_audit_gate::reserve_or_reject(&mut request, &state, peer_addr, scheme) {
+      Ok(reservation) => reservation,
+      Err(response) => return *response,
+    };
+  let response = admin_response_inner(
+    request,
+    state.clone(),
+    admin_control,
+    peer_addr,
+    listener_bind,
+    scheme,
+  )
+  .await;
+  let event = audit.finish(response.status());
+  audit_reservation.commit(event);
+  response
+}
+
+async fn admin_response_inner(
   request: hyper::Request<Incoming>,
   state: AppHandle,
   admin_control: AdminControlHandle,
@@ -499,6 +529,7 @@ async fn admin_response(
     .collect::<std::collections::HashMap<_, _>>();
   let path = uri.path().to_string();
   let admin_context = admin_request_context(&request, peer_addr);
+  let audit = AdminAuditHandle::from_request(&request);
   let actor = admin_actor(&request, &snapshot.config, &snapshot.ipm).await;
 
   if path == "/cache/purge" || path == "/cache/purge-prefix" || path == "/cache/purge-tag" {
@@ -520,7 +551,14 @@ async fn admin_response(
       Some(actor) => actor,
       None => return text_response(StatusCode::UNAUTHORIZED, "unauthorized"),
     };
-    let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context);
+    if let Some(audit) = &audit {
+      audit.set_actor(&actor.name, &actor.principal, &actor.subject, &actor.groups);
+    }
+    let authorization = if let Some(audit) = audit.clone() {
+      AdminAuthorization::new_with_audit(&actor, &snapshot.ipm, &admin_context, audit)
+    } else {
+      AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context)
+    };
     let response =
       admin::cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &authorization);
     return response;
@@ -529,7 +567,24 @@ async fn admin_response(
   let Some(actor) = actor else {
     return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
   };
-  let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context);
+  if let Some(audit) = &audit {
+    audit.set_actor(&actor.name, &actor.principal, &actor.subject, &actor.groups);
+  }
+  let authorization = if let Some(audit) = audit.clone() {
+    AdminAuthorization::new_with_audit(&actor, &snapshot.ipm, &admin_context, audit)
+  } else {
+    AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context)
+  };
+
+  if path == "/admin/v1/audit" {
+    return admin_audit_endpoint::admin_audit_response(
+      snapshot.as_ref(),
+      &authorization,
+      &method,
+      uri.query(),
+    )
+    .await;
+  }
 
   if let Some(response) =
     admin_metadata::admin_metadata_response(snapshot.as_ref(), &authorization, &method, &path)
@@ -2488,6 +2543,9 @@ fn unique_nonempty(values: impl IntoIterator<Item = String>) -> Vec<String> {
   }
   unique
 }
+
+#[cfg(test)]
+mod admin_audit_tests;
 
 #[cfg(test)]
 mod admin_diagnostics_tests;

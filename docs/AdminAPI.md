@@ -10,15 +10,23 @@ The running Admin listener serves the same contract and metadata through:
 - `GET /admin/v1/openapi.json`
 - `GET /admin/v1/capabilities`
 - `GET /admin/v1/version`
+- `GET /admin/v1/audit`
 
-All three metadata endpoints require normal Admin bearer authentication and
+The three metadata endpoints require normal Admin bearer authentication and
 `admin:ReadMetadata` through IPM. The resource names are
 `metadata/openapi`, `metadata/capabilities`, and `metadata/version`, which map
 to resources such as `oxibelt:<namespace>:admin:metadata/openapi`.
+`GET /admin/v1/audit` requires `admin:ReadAudit` on `audit/admin`.
 
 `/admin/v1/capabilities` reports the API version, package version, compiled
 or configured Admin features, and request-size limits used by the Admin API.
 `/admin/v1/version` reports the API version, package name, and package version.
+When `[admin.audit]` is enabled, `/admin/v1/audit` returns unified Admin
+request audit records as `{ "audit": [...] }`; otherwise it returns `409`.
+Records include actor, peer, method, path, authorization action/resource,
+outcome, status, and a redacted request summary. Request bodies are summarized
+with byte count, top-level JSON keys, and selected safe scalar fields, not
+stored as raw payloads.
 
 The legacy signed query purge endpoints under `/cache/purge*` are documented
 in `docs/Configuration.md`; they are intentionally outside the first
