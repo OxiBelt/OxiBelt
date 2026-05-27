@@ -102,9 +102,12 @@ pub(super) fn request_summary_from_query(query: Option<&str>) -> Value {
   let mut keys = Vec::new();
   let mut safe_values = serde_json::Map::new();
   for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-    keys.push(key.to_string());
+    keys.push(sanitize_audit_text(&key));
     if is_safe_query_key(&key) {
-      safe_values.insert(key.to_string(), json!(truncate_value(&value, 256)));
+      safe_values.insert(
+        key.to_string(),
+        json!(truncate_and_sanitize_value(&value, 256)),
+      );
     }
   }
   keys.sort();
@@ -172,6 +175,9 @@ pub(super) fn json_body_summary(bytes: &[u8]) -> Value {
   match serde_json::from_slice::<Value>(bytes) {
     Ok(Value::Object(map)) => {
       let mut keys = map.keys().cloned().collect::<Vec<_>>();
+      for key in &mut keys {
+        *key = sanitize_audit_text(key);
+      }
       keys.sort();
       body.insert("json_top_level_keys".to_string(), json!(keys));
       let mut safe_fields = serde_json::Map::new();
@@ -219,7 +225,7 @@ fn is_safe_body_key(key: &str) -> bool {
 
 fn safe_json_value(value: &Value) -> Option<Value> {
   match value {
-    Value::String(value) => Some(json!(truncate_value(value, 256))),
+    Value::String(value) => Some(json!(truncate_and_sanitize_value(value, 256))),
     Value::Bool(value) => Some(json!(value)),
     Value::Number(value) => Some(Value::Number(value.clone())),
     Value::Array(values) => Some(json!({ "array_items": values.len() })),
@@ -228,12 +234,49 @@ fn safe_json_value(value: &Value) -> Option<Value> {
   }
 }
 
+pub(super) fn sanitize_summary_for_storage(value: &Value) -> Value {
+  match value {
+    Value::String(value) => Value::String(sanitize_audit_text(value)),
+    Value::Array(values) => Value::Array(values.iter().map(sanitize_summary_for_storage).collect()),
+    Value::Object(values) => {
+      let mut sanitized = serde_json::Map::new();
+      for (key, value) in values {
+        sanitized.insert(
+          sanitize_audit_text(key),
+          sanitize_summary_for_storage(value),
+        );
+      }
+      Value::Object(sanitized)
+    }
+    _ => value.clone(),
+  }
+}
+
+fn truncate_and_sanitize_value(value: &str, max: usize) -> String {
+  sanitize_audit_text(&truncate_value(value, max))
+}
+
 fn truncate_value(value: &str, max: usize) -> String {
   if value.len() <= max {
     return value.to_string();
   }
   let truncated = value.chars().take(max).collect::<String>();
   format!("{truncated}...")
+}
+
+fn sanitize_audit_text(value: &str) -> String {
+  if !value.chars().any(char::is_control) {
+    return value.to_string();
+  }
+  let mut sanitized = String::with_capacity(value.len());
+  for ch in value.chars() {
+    if ch.is_control() {
+      sanitized.push_str(&format!("\\u{:04x}", ch as u32));
+    } else {
+      sanitized.push(ch);
+    }
+  }
+  sanitized
 }
 
 pub(super) fn random_request_id() -> String {
@@ -302,6 +345,46 @@ mod tests {
   }
 
   #[test]
+  fn request_summary_sanitizes_query_control_text() {
+    let summary = request_summary_from_query(Some("limit=%00&%00=x&path_prefix=%1Fadmin"));
+
+    assert_no_control_text(&summary);
+    assert_eq!(summary["query"]["limit"], "\\u0000");
+    assert_eq!(summary["query"]["path_prefix"], "\\u001fadmin");
+    assert_eq!(
+      summary["query_keys"]
+        .as_array()
+        .expect("query keys should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("query key should be a string"))
+        .collect::<Vec<_>>(),
+      ["\\u0000", "limit", "path_prefix"]
+    );
+  }
+
+  #[test]
+  fn json_body_summary_sanitizes_safe_fields_and_top_level_keys() {
+    let summary = json_body_summary(
+      br#"{
+        "na\u0000me": "not-allowlisted",
+        "name": "safe\u0000field",
+        "source": "line\u001fend"
+      }"#,
+    );
+
+    assert_no_control_text(&summary);
+    assert_eq!(summary["safe_fields"]["name"], "safe\\u0000field");
+    assert_eq!(summary["safe_fields"]["source"], "line\\u001fend");
+    let keys = summary["json_top_level_keys"]
+      .as_array()
+      .expect("top-level keys should be an array")
+      .iter()
+      .map(|value| value.as_str().expect("top-level key should be a string"))
+      .collect::<Vec<_>>();
+    assert!(keys.contains(&"na\\u0000me"));
+  }
+
+  #[test]
   fn descriptor_extracts_service_operation_and_targets() {
     let descriptor = describe_request(&Method::PATCH, "/admin/v1/upstream-pools/app/servers/blue");
 
@@ -315,5 +398,31 @@ mod tests {
       Some("upstream-pool-server")
     );
     assert_eq!(descriptor.target_id.as_deref(), Some("app/blue"));
+  }
+
+  fn assert_no_control_text(value: &Value) {
+    match value {
+      Value::String(value) => {
+        assert!(
+          !value.chars().any(char::is_control),
+          "string contains control character: {value:?}"
+        );
+      }
+      Value::Array(values) => {
+        for value in values {
+          assert_no_control_text(value);
+        }
+      }
+      Value::Object(values) => {
+        for (key, value) in values {
+          assert!(
+            !key.chars().any(char::is_control),
+            "key contains control character: {key:?}"
+          );
+          assert_no_control_text(value);
+        }
+      }
+      _ => {}
+    }
   }
 }

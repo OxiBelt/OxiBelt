@@ -11,7 +11,7 @@ use tracing::warn;
 
 use crate::config::{DatabaseTlsMode, SharedStateBackendConfig};
 
-use super::{AdminAuditEvent, AdminAuditQuery, AdminAuditRecord};
+use super::{AdminAuditEvent, AdminAuditQuery, AdminAuditRecord, request};
 
 type AttemptFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 type SleepFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -141,7 +141,9 @@ async fn insert_record(
   namespace: &str,
   event: &AdminAuditEvent,
 ) -> anyhow::Result<()> {
-  let request_summary = serde_json::to_string(&event.request_summary)?;
+  let request_summary = serde_json::to_string(&request::sanitize_summary_for_storage(
+    &event.request_summary,
+  ))?;
   sqlx::query(
     "INSERT INTO oxibelt_admin_audit
        (namespace, request_id, actor, principal, subject, groups, peer, source_ip, scheme,
@@ -265,6 +267,31 @@ mod tests {
     assert_eq!(retry_delay(100), Duration::from_millis(3_200));
   }
 
+  #[test]
+  fn storage_summary_sanitizes_nested_control_text_before_serializing() {
+    let summary = json!({
+      "outer\0": [
+        "value\0",
+        {
+          "inner": "bad\u{1f}",
+          "ok": true,
+          "count": 7,
+          "nothing": null,
+        },
+      ],
+    });
+
+    let sanitized = request::sanitize_summary_for_storage(&summary);
+
+    assert_no_control_text(&sanitized);
+    assert_eq!(sanitized["outer\\u0000"][0], "value\\u0000");
+    assert_eq!(sanitized["outer\\u0000"][1]["inner"], "bad\\u001f");
+    assert_eq!(sanitized["outer\\u0000"][1]["ok"], true);
+    assert_eq!(sanitized["outer\\u0000"][1]["count"], 7);
+    assert!(sanitized["outer\\u0000"][1]["nothing"].is_null());
+    serde_json::to_string(&sanitized).expect("sanitized summary should serialize");
+  }
+
   #[tokio::test]
   async fn retry_insert_loop_retries_same_event_until_success() {
     let event = AdminAuditEvent {
@@ -312,5 +339,31 @@ mod tests {
 
     let attempts = attempts.lock().expect("attempts lock poisoned");
     assert_eq!(attempts.as_slice(), ["req-retry", "req-retry"]);
+  }
+
+  fn assert_no_control_text(value: &serde_json::Value) {
+    match value {
+      serde_json::Value::String(value) => {
+        assert!(
+          !value.chars().any(char::is_control),
+          "string contains control character: {value:?}"
+        );
+      }
+      serde_json::Value::Array(values) => {
+        for value in values {
+          assert_no_control_text(value);
+        }
+      }
+      serde_json::Value::Object(values) => {
+        for (key, value) in values {
+          assert!(
+            !key.chars().any(char::is_control),
+            "key contains control character: {key:?}"
+          );
+          assert_no_control_text(value);
+        }
+      }
+      _ => {}
+    }
   }
 }
