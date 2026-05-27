@@ -1,18 +1,33 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, bail};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use http::HeaderMap;
 use tokio::sync::Semaphore;
+use tracing::warn;
 
 use crate::config::{
-  IpmConditionConfig, IpmConditionOperator, IpmCredentialConfig, IpmPolicyConfig, IpmPolicyEffect,
+  IpmConditionConfig, IpmConditionOperator, IpmPolicyConfig, IpmPolicyEffect,
   IpmPolicyStatementConfig,
 };
 
+mod admin;
+mod admin_support;
+mod admin_types;
+mod refresh;
+mod snapshot;
 mod store;
+mod token;
+pub use admin_types::*;
+pub(crate) use snapshot::{
+  IpmBindingRuntime, IpmCredentialRuntime, IpmPolicyRuntime, IpmPrincipalRuntime, IpmSnapshot,
+  merge_store_snapshot, static_snapshot,
+};
+pub use snapshot::{
+  IpmSnapshotCounts, RedactedIpmBinding, RedactedIpmCredential, RedactedIpmPolicy,
+};
 
 const BREAK_GLASS_AUTH_CONCURRENCY: usize = 1;
 
@@ -41,6 +56,13 @@ pub enum IpmDecision {
   Deny,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpmEntrySource {
+  Config,
+  Store,
+}
+
 #[derive(Clone)]
 pub struct IpmRuntime {
   inner: Arc<IpmRuntimeInner>,
@@ -48,18 +70,47 @@ pub struct IpmRuntime {
 
 struct IpmRuntimeInner {
   namespace: String,
-  credentials: Vec<IpmCredentialConfig>,
-  principals: HashMap<String, IpmActor>,
-  policies: HashMap<String, IpmPolicyConfig>,
-  principal_bindings: HashMap<String, Vec<String>>,
-  group_bindings: HashMap<String, Vec<String>>,
+  static_snapshot: Arc<IpmSnapshot>,
+  snapshot: RwLock<Arc<IpmSnapshot>>,
+  store: Option<store::IpmStore>,
+  last_refresh: RwLock<IpmRefreshState>,
   legacy_admin_env: String,
   allow_legacy_bootstrap: bool,
   break_glass_verifier: Arc<Semaphore>,
 }
 
+#[derive(Debug, Clone)]
+struct IpmRefreshState {
+  ok: bool,
+  generation: i64,
+  error: Option<String>,
+}
+
+impl IpmRefreshState {
+  fn ok(generation: i64) -> Self {
+    Self {
+      ok: true,
+      generation,
+      error: None,
+    }
+  }
+
+  fn failed(generation: i64, error: String) -> Self {
+    Self {
+      ok: false,
+      generation,
+      error: Some(error),
+    }
+  }
+}
+
 impl IpmRuntime {
   pub async fn new(config: &crate::config::Config) -> anyhow::Result<Self> {
+    let static_snapshot = static_snapshot(config)?;
+    let mut active_snapshot = static_snapshot.clone();
+    let mut store_runtime = None;
+    let mut refresh_state = IpmRefreshState::ok(active_snapshot.generation);
+
     if config.ipm.enabled
       && let Some(backend_name) = config.ipm_backend_name()
     {
@@ -76,72 +127,56 @@ impl IpmRuntime {
           store::init_postgres(&pool)
             .await
             .context("failed to initialize IPM PostgreSQL tables")?;
+          let store = store::IpmStore::new(pool, config.ipm.namespace.clone());
+          match store.load_snapshot(&static_snapshot).await {
+            Ok(snapshot) => {
+              active_snapshot = snapshot;
+              refresh_state = IpmRefreshState::ok(active_snapshot.generation);
+            }
+            Err(error) if !config.ipm.fail_closed => {
+              let message = error.to_string();
+              warn!(error = %message, "IPM PostgreSQL snapshot load failed; using static IPM config only");
+              refresh_state = IpmRefreshState::failed(active_snapshot.generation, message);
+            }
+            Err(error) => return Err(error).context("failed to load IPM PostgreSQL snapshot"),
+          }
+          store_runtime = Some(store);
         }
         Err(error) if !config.ipm.fail_closed => {
           tracing::warn!(error = %error, "IPM PostgreSQL connection failed; using static IPM config only");
+          refresh_state = IpmRefreshState::failed(active_snapshot.generation, error.to_string());
         }
         Err(error) => return Err(error).context("failed to connect IPM PostgreSQL backend"),
       }
     }
 
-    let principals = config
-      .ipm
-      .principals
-      .iter()
-      .map(|principal| {
-        (
-          principal.id.clone(),
-          IpmActor {
-            name: principal.id.clone(),
-            principal: principal.id.clone(),
-            subject: principal.subject.clone(),
-            groups: principal.groups.clone(),
-          },
-        )
-      })
-      .collect::<HashMap<_, _>>();
-
-    let policies = config
-      .ipm
-      .policies
-      .iter()
-      .map(|policy| (policy.name.clone(), policy.clone()))
-      .collect::<HashMap<_, _>>();
-
-    let mut principal_bindings: HashMap<String, Vec<String>> = HashMap::new();
-    let mut group_bindings: HashMap<String, Vec<String>> = HashMap::new();
-    for binding in &config.ipm.bindings {
-      if let Some(principal) = &binding.principal {
-        principal_bindings
-          .entry(principal.clone())
-          .or_default()
-          .push(binding.policy.clone());
-      }
-      if let Some(group) = &binding.group {
-        group_bindings
-          .entry(group.clone())
-          .or_default()
-          .push(binding.policy.clone());
-      }
-    }
-
-    Ok(Self {
+    let runtime = Self {
       inner: Arc::new(IpmRuntimeInner {
         namespace: config.ipm.namespace.clone(),
-        credentials: config.ipm.credentials.clone(),
-        principals,
-        policies,
-        principal_bindings,
-        group_bindings,
+        static_snapshot: Arc::new(static_snapshot),
+        snapshot: RwLock::new(Arc::new(active_snapshot)),
+        store: store_runtime,
+        last_refresh: RwLock::new(refresh_state),
         legacy_admin_env: config.admin.bearer_token_env.clone(),
         allow_legacy_bootstrap: !config.ipm.enabled,
         break_glass_verifier: break_glass_verifier(),
       }),
-    })
+    };
+    runtime.spawn_store_refresh_task();
+    Ok(runtime)
   }
 
   pub fn namespace(&self) -> &str {
     &self.inner.namespace
+  }
+
+  pub(crate) fn snapshot(&self) -> Arc<IpmSnapshot> {
+    self
+      .inner
+      .snapshot
+      .read()
+      .expect("IPM snapshot lock poisoned")
+      .clone()
   }
 
   pub fn actor_from_headers(&self, headers: &HeaderMap) -> Option<IpmActor> {
@@ -172,12 +207,15 @@ impl IpmRuntime {
   }
 
   fn actor_from_regular_bearer(&self, bearer: &str) -> Option<IpmActor> {
-    for credential in &self.inner.credentials {
+    let snapshot = self.snapshot();
+    for credential in &snapshot.credentials {
       if credential_matches(credential, bearer)
-        && let Some(actor) = self.inner.principals.get(&credential.principal)
+        && let Some(principal) = snapshot.principals.get(&credential.principal)
+        && principal.enabled
       {
-        let mut actor = actor.clone();
+        let mut actor = principal.actor.clone();
         actor.name = credential.name.clone();
+        self.record_credential_use(credential);
         return Some(actor);
       }
     }
@@ -196,15 +234,20 @@ impl IpmRuntime {
   }
 
   async fn break_glass_actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
-    for credential in &self.inner.credentials {
+    let snapshot = self.snapshot();
+    for credential in &snapshot.credentials {
+      if !credential.is_active_at(now_unix().ok()) {
+        continue;
+      }
       let Some(hash) = credential.break_glass_access_token_hash.as_deref() else {
         continue;
       };
       if bearer_matches_argon2id_hash_bounded(self.inner.break_glass_verifier.clone(), hash, bearer)
         .await
-        && let Some(actor) = self.inner.principals.get(&credential.principal)
+        && let Some(principal) = snapshot.principals.get(&credential.principal)
+        && principal.enabled
       {
-        let mut actor = actor.clone();
+        let mut actor = principal.actor.clone();
         actor.name = credential.name.clone();
         return Some(actor);
       }
@@ -240,30 +283,36 @@ impl IpmRuntime {
   }
 
   pub fn list_principals(&self) -> Vec<IpmActor> {
-    let mut principals = self
-      .inner
+    let snapshot = self.snapshot();
+    let mut principals = snapshot
       .principals
       .values()
-      .cloned()
-      .collect::<Vec<IpmActor>>();
+      .map(|principal| principal.actor.clone())
+      .collect::<Vec<_>>();
     principals.sort_by(|left, right| left.principal.cmp(&right.principal));
     principals
   }
 
-  pub fn list_policies(&self) -> Vec<IpmPolicyConfig> {
-    let mut policies = self
-      .inner
+  pub fn list_policies(&self) -> Vec<RedactedIpmPolicy> {
+    let snapshot = self.snapshot();
+    let mut policies = snapshot
       .policies
       .values()
-      .cloned()
-      .collect::<Vec<IpmPolicyConfig>>();
+      .map(|policy| RedactedIpmPolicy {
+        name: policy.policy.name.clone(),
+        version: policy.policy.version.clone(),
+        statements: policy.policy.statements.clone(),
+        enabled: policy.enabled,
+        source: policy.source,
+      })
+      .collect::<Vec<_>>();
     policies.sort_by(|left, right| left.name.cmp(&right.name));
     policies
   }
 
   pub fn list_credentials(&self) -> Vec<RedactedIpmCredential> {
-    let mut credentials = self
-      .inner
+    let snapshot = self.snapshot();
+    let mut credentials = snapshot
       .credentials
       .iter()
       .map(|credential| RedactedIpmCredential {
@@ -271,10 +320,58 @@ impl IpmRuntime {
         principal: credential.principal.clone(),
         bearer_token_env: credential.bearer_token_env.clone(),
         break_glass_access: credential.break_glass_access_token_hash.is_some(),
+        source: credential.source,
+        enabled: credential.enabled,
+        revoked: credential.revoked,
+        expires_at: credential.expires_at.clone(),
+        token_prefix: credential.token_prefix.clone(),
+        previous_token_prefix: credential.previous_token_prefix.clone(),
+        previous_token_overlap_until: credential.previous_token_overlap_until.clone(),
       })
       .collect::<Vec<_>>();
     credentials.sort_by(|left, right| left.name.cmp(&right.name));
     credentials
+  }
+
+  pub fn list_bindings(&self) -> Vec<RedactedIpmBinding> {
+    let snapshot = self.snapshot();
+    let mut bindings = snapshot
+      .bindings
+      .iter()
+      .map(|binding| RedactedIpmBinding {
+        id: binding.id.clone(),
+        principal: binding.principal.clone(),
+        group: binding.group.clone(),
+        policy: binding.policy.clone(),
+        enabled: binding.enabled,
+        source: binding.source,
+      })
+      .collect::<Vec<_>>();
+    bindings.sort_by(|left, right| left.id.cmp(&right.id));
+    bindings
+  }
+
+  fn spawn_store_refresh_task(&self) {
+    refresh::spawn_store_refresh_task(&self.inner);
+  }
+
+  async fn refresh_store(&self) -> anyhow::Result<()> {
+    refresh::refresh_store_inner(&self.inner).await.map(|_| ())
+  }
+
+  fn record_credential_use(&self, credential: &IpmCredentialRuntime) {
+    if credential.source != IpmEntrySource::Store {
+      return;
+    }
+    let Some(store) = self.inner.store.clone() else {
+      return;
+    };
+    let credential_id = credential.name.clone();
+    tokio::spawn(async move {
+      if let Err(error) = store.record_credential_use(&credential_id).await {
+        warn!(credential = %credential_id, error = %error, "failed to update IPM credential last-used metadata");
+      }
+    });
   }
 
   #[cfg(test)]
@@ -285,14 +382,38 @@ impl IpmRuntime {
   ) -> Self {
     let principal = actor.principal.clone();
     let policy_name = policy.name.clone();
+    let snapshot = IpmSnapshot {
+      generation: 0,
+      fingerprint: 0,
+      credentials: Vec::new(),
+      principals: HashMap::from([(
+        principal.clone(),
+        IpmPrincipalRuntime {
+          actor,
+          enabled: true,
+          source: IpmEntrySource::Config,
+        },
+      )]),
+      policies: HashMap::from([(
+        policy_name.clone(),
+        IpmPolicyRuntime {
+          policy,
+          enabled: true,
+          source: IpmEntrySource::Config,
+        },
+      )]),
+      principal_bindings: HashMap::from([(principal, vec![policy_name])]),
+      group_bindings: HashMap::new(),
+      bindings: Vec::new(),
+      counts: IpmSnapshotCounts::default(),
+    };
     Self {
       inner: Arc::new(IpmRuntimeInner {
         namespace: namespace.to_string(),
-        credentials: Vec::new(),
-        principals: HashMap::from([(principal.clone(), actor)]),
-        policies: HashMap::from([(policy_name.clone(), policy)]),
-        principal_bindings: HashMap::from([(principal, vec![policy_name])]),
-        group_bindings: HashMap::new(),
+        static_snapshot: Arc::new(snapshot.clone()),
+        snapshot: RwLock::new(Arc::new(snapshot)),
+        store: None,
+        last_refresh: RwLock::new(IpmRefreshState::ok(0)),
         legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
         allow_legacy_bootstrap: false,
         break_glass_verifier: break_glass_verifier(),
@@ -300,16 +421,17 @@ impl IpmRuntime {
     }
   }
 
-  fn policies_for_actor(&self, actor: &IpmActor) -> Vec<&IpmPolicyConfig> {
+  fn policies_for_actor(&self, actor: &IpmActor) -> Vec<IpmPolicyConfig> {
+    let snapshot = self.snapshot();
     let mut names = Vec::new();
-    if let Some(policies) = self.inner.principal_bindings.get(&actor.principal) {
+    if let Some(policies) = snapshot.principal_bindings.get(&actor.principal) {
       names.extend(policies.iter().cloned());
     }
     for group in &actor.groups {
       if group == "ipm-admin" {
-        return vec![bootstrap_admin_policy()];
+        return vec![bootstrap_admin_policy().clone()];
       }
-      if let Some(policies) = self.inner.group_bindings.get(group) {
+      if let Some(policies) = snapshot.group_bindings.get(group) {
         names.extend(policies.iter().cloned());
       }
     }
@@ -317,17 +439,11 @@ impl IpmRuntime {
     names
       .into_iter()
       .filter(|name| seen.insert(name.clone()))
-      .filter_map(|name| self.inner.policies.get(&name))
+      .filter_map(|name| snapshot.policies.get(&name))
+      .filter(|policy| policy.enabled)
+      .map(|policy| policy.policy.clone())
       .collect()
   }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RedactedIpmCredential {
-  pub name: String,
-  pub principal: String,
-  pub bearer_token_env: String,
-  pub break_glass_access: bool,
 }
 
 pub fn resource(namespace: &str, service: &str, name: &str) -> String {
@@ -514,8 +630,26 @@ fn bearer_matches_env(env_name: &str, actual: &str) -> bool {
   })
 }
 
-fn credential_matches(credential: &IpmCredentialConfig, bearer: &str) -> bool {
-  bearer_matches_env(&credential.bearer_token_env, bearer)
+fn credential_matches(credential: &IpmCredentialRuntime, bearer: &str) -> bool {
+  let now = now_unix().ok();
+  if !credential.is_active_at(now) {
+    return false;
+  }
+  if !credential.bearer_token_env.is_empty() {
+    return bearer_matches_env(&credential.bearer_token_env, bearer);
+  }
+  if credential.token_hash.as_deref().is_some_and(|hash| {
+    token::token_hash_matches(credential.token_hash_alg.as_deref(), hash, bearer)
+  }) {
+    return true;
+  }
+  credential.previous_token_active_at(now)
+    && credential
+      .previous_token_hash
+      .as_deref()
+      .is_some_and(|hash| {
+        token::token_hash_matches(credential.token_hash_alg.as_deref(), hash, bearer)
+      })
 }
 
 async fn bearer_matches_argon2id_hash_bounded(

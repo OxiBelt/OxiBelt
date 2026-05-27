@@ -404,7 +404,7 @@ pub(crate) fn validate_ipm_action(field: &str, action: &str) -> anyhow::Result<(
   Ok(())
 }
 
-fn validate_ipm_statement(
+pub(crate) fn validate_ipm_statement(
   policy_name: &str,
   statement: &IpmPolicyStatementConfig,
 ) -> anyhow::Result<()> {
@@ -488,6 +488,7 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
   match service {
     "admin" => &["ReadMetadata", "UpdateConfig"],
     "ipm" => &[
+      "GetStatus",
       "ListPrincipals",
       "GetPrincipal",
       "CreatePrincipal",
@@ -497,6 +498,8 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "GetCredential",
       "CreateCredential",
       "UpdateCredential",
+      "RotateCredential",
+      "RevokeCredential",
       "DeleteCredential",
       "ListPolicies",
       "GetPolicy",
@@ -507,6 +510,7 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "CreateBinding",
       "DeleteBinding",
       "Simulate",
+      "ReadAudit",
       "UpdateConfig",
     ],
     "config" => &[

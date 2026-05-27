@@ -53,7 +53,7 @@ pub(crate) async fn plan_command(
       crate::dynamic_policy_plan::plan_mitigate(args, &catalog)
     }
     Command::Cache(command) => plan_cache(command),
-    Command::Ipm(command) => plan_ipm(command),
+    Command::Ipm(command) => crate::ipm_plan::plan_ipm(client, command).await,
     Command::Auth(command) => match &command.command {
       AuthSubcommand::Check(args) => post_json(
         "/admin/v1/ipm/simulate",
@@ -359,23 +359,6 @@ fn plan_cache_purge(purge: &CachePurgeCommand) -> anyhow::Result<RequestPlan> {
   }
 }
 
-fn plan_ipm(command: &IpmCommand) -> anyhow::Result<RequestPlan> {
-  match &command.command {
-    IpmSubcommand::List(args) => match &args.target {
-      IpmListTarget::Principals => get("/admin/v1/ipm/principals", "ipm:ListPrincipals", "*"),
-      IpmListTarget::Credentials => get("/admin/v1/ipm/credentials", "ipm:ListCredentials", "*"),
-      IpmListTarget::Policies => get("/admin/v1/ipm/policies", "ipm:ListPolicies", "*"),
-      IpmListTarget::Bindings => get("/admin/v1/ipm/bindings", "ipm:ListBindings", "*"),
-    },
-    IpmSubcommand::Simulate(args) => post_json(
-      "/admin/v1/ipm/simulate",
-      json!({ "action": args.action, "resource": args.resource }),
-      "ipm:Simulate",
-      "*",
-    ),
-  }
-}
-
 async fn current_etag(client: &AdminClient) -> anyhow::Result<String> {
   let response = client
     .request_json(Method::GET, "/admin/v1/config/status", None, None)
@@ -622,6 +605,10 @@ fn path_id(value: &str) -> anyhow::Result<&str> {
 #[cfg(test)]
 #[path = "plan_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ipm_plan_tests.rs"]
+mod ipm_plan_tests;
 
 #[cfg(test)]
 #[path = "profile_catalog_tests.rs"]

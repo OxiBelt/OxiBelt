@@ -1010,6 +1010,26 @@
         }
       }
     },
+    "/admin/v1/ipm/status": {
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "getIpmStatus",
+        "summary": "Fetch active IPM generation, ETag, counts, and refresh status.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/ipm/principals": {
       "get": {
         "tags": [
@@ -1026,6 +1046,151 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "createIpmPrincipal",
+        "summary": "Create a store-backed IPM principal.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmPrincipalCreate"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/principals/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IpmId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "getIpmPrincipal",
+        "summary": "Fetch one IPM principal.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "patchIpmPrincipal",
+        "summary": "Patch a store-backed IPM principal.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmPrincipalPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "deleteIpmPrincipal",
+        "summary": "Delete a store-backed IPM principal.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
           }
         }
       }
@@ -1048,6 +1213,247 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "createIpmCredential",
+        "summary": "Create an IPM credential and return its token once.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmCredentialCreate"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/credentials/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IpmId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "getIpmCredential",
+        "summary": "Fetch one redacted IPM credential.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "patchIpmCredential",
+        "summary": "Patch a store-backed IPM credential.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmCredentialPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "deleteIpmCredential",
+        "summary": "Delete a store-backed IPM credential.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/credentials/{id}/rotate": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IpmId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "rotateIpmCredential",
+        "summary": "Rotate an IPM credential token with previous-token overlap.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmCredentialRotate"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/credentials/{id}/revoke": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IpmId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "revokeIpmCredential",
+        "summary": "Revoke an IPM credential.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmCredentialRevoke"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
       }
     },
     "/admin/v1/ipm/policies": {
@@ -1068,6 +1474,151 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "createIpmPolicy",
+        "summary": "Create a store-backed IPM policy.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmPolicyWrite"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/policies/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IpmId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "getIpmPolicy",
+        "summary": "Fetch one IPM policy.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "patchIpmPolicy",
+        "summary": "Patch a store-backed IPM policy.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmPolicyWrite"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "deleteIpmPolicy",
+        "summary": "Delete a store-backed IPM policy.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          }
+        }
       }
     },
     "/admin/v1/ipm/bindings": {
@@ -1086,6 +1637,115 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "createIpmBinding",
+        "summary": "Create a store-backed IPM policy binding.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IpmBindingCreate"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/bindings/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IpmId"
+        }
+      ],
+      "delete": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "deleteIpmBinding",
+        "summary": "Delete a store-backed IPM policy binding.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          }
+        }
+      }
+    },
+    "/admin/v1/ipm/audit": {
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "listIpmAudit",
+        "summary": "List IPM mutation audit records.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
           }
         }
       }
@@ -1545,7 +2205,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Active config ETag from config status or effective config."
+        "description": "Active config or IPM ETag from the corresponding status endpoint."
       },
       "Redact": {
         "name": "redact",
@@ -1581,6 +2241,14 @@
         "required": true,
         "schema": {
           "type": "integer"
+        }
+      },
+      "IpmId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
         }
       },
       "Pool": {
@@ -2041,6 +2709,224 @@
           }
         }
       },
+      "IpmPrincipalCreate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "id",
+                "subject"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "IpmPrincipalPatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "subject": {
+                  "type": "string"
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "IpmCredentialCreate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "id",
+                "principal"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "principal": {
+                  "type": "string"
+                },
+                "ttl_seconds": {
+                  "type": "integer"
+                },
+                "expires_at": {
+                  "type": "string"
+                },
+                "no_expiry": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "IpmCredentialPatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "principal": {
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "ttl_seconds": {
+                  "type": "integer"
+                },
+                "expires_at": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "IpmCredentialRotate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "overlap_seconds": {
+                  "type": "integer",
+                  "default": 86400
+                },
+                "ttl_seconds": {
+                  "type": "integer"
+                },
+                "expires_at": {
+                  "type": "string"
+                },
+                "no_expiry": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "IpmCredentialRevoke": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "IpmPolicyWrite": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "statements": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "enabled": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      },
+      "IpmBindingCreate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "policy"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "principal": {
+                  "type": "string"
+                },
+                "group": {
+                  "type": "string"
+                },
+                "policy": {
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
       "DynamicPolicyWrite": {
         "required": true,
         "content": {
@@ -2205,6 +3091,16 @@
           }
         }
       },
+      "Conflict": {
+        "description": "Request conflicts with the active store mode or static IPM bootstrap entries.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "NotFound": {
         "description": "Resource not found.",
         "content": {
@@ -2217,6 +3113,16 @@
       },
       "PreconditionFailed": {
         "description": "If-Match ETag precondition failed.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PreconditionRequired": {
+        "description": "A mutating request omitted the required If-Match ETag.",
         "content": {
           "text/plain": {
             "schema": {
