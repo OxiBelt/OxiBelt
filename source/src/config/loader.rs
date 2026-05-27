@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 
-use super::resolve_local_config_file_path;
+use super::{canonicalize_local_config_file_target, resolve_local_config_file_path};
 
 pub(super) struct LoadedToml {
   pub(super) value: toml::Value,
@@ -94,10 +94,18 @@ fn canonicalize_config_file_or_override(
 ) -> anyhow::Result<PathBuf> {
   match absolute_path.canonicalize() {
     Ok(path) => Ok(path),
-    Err(error)
-      if error.kind() == std::io::ErrorKind::NotFound && overrides.contains_key(absolute_path) =>
-    {
-      Ok(absolute_path.to_path_buf())
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+      let canonical_path =
+        canonicalize_local_config_file_target("configuration file", absolute_path)?;
+      if overrides.contains_key(&canonical_path) || overrides.contains_key(absolute_path) {
+        return Ok(canonical_path);
+      }
+      Err(error).with_context(|| {
+        format!(
+          "failed to resolve configuration file {}",
+          absolute_path.display()
+        )
+      })
     }
     Err(error) => Err(error).with_context(|| {
       format!(
@@ -342,8 +350,14 @@ fn canonicalize_local_config_file_with_overrides(
 ) -> anyhow::Result<PathBuf> {
   let canonical_path = match path.canonicalize() {
     Ok(path) => path,
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound && overrides.contains_key(path) => {
-      path.to_path_buf()
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+      let canonical_path = canonicalize_local_config_file_target(field_name, path)?;
+      if overrides.contains_key(&canonical_path) || overrides.contains_key(path) {
+        canonical_path
+      } else {
+        return Err(error)
+          .with_context(|| format!("failed to resolve {field_name} {}", path.display()));
+      }
     }
     Err(error) => {
       return Err(error)

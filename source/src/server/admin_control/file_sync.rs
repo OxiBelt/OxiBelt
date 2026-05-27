@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ::http::StatusCode;
@@ -168,29 +168,74 @@ fn config_file_overrides(
     file_sync_path::validate_root_path(operation.root, &normalized_path)
       .map_err(|message| anyhow!("invalid file sync path: {message}"))?;
     let target = resolve_config_sync_target(active, &normalized_path)?;
-    match operation.op {
+    let staged = match operation.op {
       AdminFileOperationKind::Put => {
         let content = operation
           .content
           .as_ref()
           .ok_or_else(|| anyhow!("put operation requires content"))?;
-        overrides.insert(target, Some(content.clone()));
+        Some(content.clone())
       }
-      AdminFileOperationKind::Delete => {
-        overrides.insert(target, None);
-      }
+      AdminFileOperationKind::Delete => None,
+    };
+    if overrides.insert(target.clone(), staged).is_some() {
+      bail!(
+        "file sync request contains multiple config operations for {}",
+        target.display()
+      );
     }
   }
   Ok(overrides)
 }
 
-fn resolve_config_sync_target(config: &Config, path: &str) -> anyhow::Result<PathBuf> {
-  let base = config
+fn config_sync_base(config: &Config) -> anyhow::Result<&Path> {
+  config
     .source_paths
     .config_dir
-    .as_ref()
-    .ok_or_else(|| anyhow!("active configuration does not have a config directory"))?;
-  crate::config::resolve_local_config_file_path("admin file sync path", base, Path::new(path))
+    .as_deref()
+    .ok_or_else(|| anyhow!("active configuration does not have a config directory"))
+}
+
+fn resolve_config_sync_target(config: &Config, path: &str) -> anyhow::Result<PathBuf> {
+  let base = config_sync_base(config)?;
+  let target =
+    crate::config::resolve_local_config_file_path("admin file sync path", base, Path::new(path))?;
+  let canonical_base = base.canonicalize().with_context(|| {
+    format!(
+      "failed to resolve file sync base directory {}",
+      base.display()
+    )
+  })?;
+  let canonical_target =
+    crate::config::canonicalize_local_config_file_target("admin file sync path", &target)?;
+  if !canonical_target.starts_with(&canonical_base) {
+    bail!("file sync target must stay within the configured root");
+  }
+  Ok(canonical_target)
+}
+
+fn ensure_unique_config_sync_targets(
+  request: &AdminFilesSyncRequest,
+  config: &Config,
+) -> anyhow::Result<()> {
+  let mut targets = HashSet::new();
+  for (index, operation) in request.operations.iter().enumerate() {
+    if operation.root != AdminFileRoot::Config {
+      continue;
+    }
+    let normalized_path = file_sync_path::normalized_relative_path(&operation.path)
+      .map_err(|message| anyhow!("operation {index} has invalid file sync path: {message}"))?;
+    file_sync_path::validate_root_path(operation.root, &normalized_path)
+      .map_err(|message| anyhow!("operation {index} has invalid file sync path: {message}"))?;
+    let target = resolve_config_sync_target(config, &normalized_path)?;
+    if !targets.insert(target.clone()) {
+      bail!(
+        "file sync request contains multiple config operations for {}",
+        target.display()
+      );
+    }
+  }
+  Ok(())
 }
 
 fn commit_file_sync(
@@ -200,6 +245,7 @@ fn commit_file_sync(
   if request.operations.is_empty() || request.operations.len() > 128 {
     bail!("operations must contain 1 to 128 entries");
   }
+  ensure_unique_config_sync_targets(request, config)?;
   let mut committed = Vec::new();
   for (index, operation) in request.operations.iter().enumerate() {
     let normalized_path = file_sync_path::normalized_relative_path(&operation.path)
@@ -238,11 +284,11 @@ fn resolve_sync_target(
   file_sync_path::validate_root_path(root, &normalized_path).map_err(|message| anyhow!(message))?;
   let relative = Path::new(&normalized_path);
   let base = match root {
-    AdminFileRoot::Config => config
-      .source_paths
-      .config_dir
-      .as_ref()
-      .ok_or_else(|| anyhow!("active configuration does not have a config directory"))?,
+    AdminFileRoot::Config => {
+      let target = resolve_config_sync_target(config, &normalized_path)?;
+      ensure_parent_stays_under_base(config_sync_base(config)?, &target)?;
+      return Ok(target);
+    }
     AdminFileRoot::OxiRule | AdminFileRoot::OxiRuleGroup | AdminFileRoot::OxiRuleRulepack => config
       .source_paths
       .oxirule_dir

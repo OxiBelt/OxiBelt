@@ -3,6 +3,7 @@ use crate::server::admin_control::{
   AdminFileOperation, AdminFileOperationKind, AdminFileRoot, AdminFilesSyncRequest,
   ControlPlaneConfigPermissions,
 };
+use std::path::Path;
 
 mod common {
   include!(concat!(
@@ -31,6 +32,50 @@ fn load_temp_config(name: &str) -> (common::TempDir, Config) {
   .expect("config should be written");
   let config = Config::load(&config_path).expect("config should load");
   (temp_dir, config)
+}
+
+fn load_temp_config_with_include(name: &str) -> (common::TempDir, Config) {
+  let temp_dir = common::TempDir::new(name);
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  let oxirule_dir = temp_dir.path().join("oxirule");
+  std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+  std::fs::create_dir_all(&cert_dir).expect("cert dir should be created");
+  std::fs::create_dir_all(&oxirule_dir).expect("oxirule dir should be created");
+  let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, name);
+  let config_path = config_dir.join("oxibelt.toml");
+  let included_path = config_dir.join("included.toml");
+  std::fs::write(&config_path, "include = \"included.toml\"\n")
+    .expect("config entry should be written");
+  std::fs::write(
+    &included_path,
+    common::minimal_config_toml_with_paths(
+      cert_path.file_name().unwrap().to_str().unwrap(),
+      key_path.file_name().unwrap().to_str().unwrap(),
+    ),
+  )
+  .expect("included config should be written");
+  let config = Config::load(&config_path).expect("config should load");
+  (temp_dir, config)
+}
+
+fn config_dir(config: &Config) -> &Path {
+  config
+    .source_paths
+    .config_dir
+    .as_deref()
+    .expect("config dir should be set")
+}
+
+fn included_config_content(config: &Config) -> String {
+  std::fs::read_to_string(config_dir(config).join("included.toml"))
+    .expect("included config should be readable")
+}
+
+#[cfg(unix)]
+fn create_config_alias(config: &Config, alias: &str) {
+  std::os::unix::fs::symlink(".", config_dir(config).join(alias))
+    .expect("config alias symlink should be created");
 }
 
 fn put_request(root: AdminFileRoot, path: &str, content: &str) -> AdminFilesSyncRequest {
@@ -224,6 +269,77 @@ fn file_sync_scope_allows_regular_config_changes_without_control_plane_permissio
     ControlPlaneConfigPermissions::default(),
   )
   .expect("non-control-plane config changes should keep existing config permissions sufficient");
+}
+
+#[cfg(unix)]
+#[test]
+fn file_sync_scope_rejects_symlinked_config_alias_admin_change_without_permission() {
+  let (_temp_dir, config) = load_temp_config_with_include("file-sync-symlink-scope");
+  create_config_alias(&config, "alias");
+  let candidate = included_config_content(&config) + "\n[admin]\nbind = \"127.0.0.1:19092\"\n";
+  let mut request = put_request(AdminFileRoot::Config, "alias/included.toml", &candidate);
+  request.apply = AdminApplyMode::Full;
+
+  let response = validate_file_sync_control_plane_scope(
+    &request,
+    &config,
+    ControlPlaneConfigPermissions::default(),
+  )
+  .expect_err("symlinked config alias should not hide staged admin changes");
+
+  assert_eq!(response.status, StatusCode::FORBIDDEN);
+  assert!(
+    response.body["error"]
+      .as_str()
+      .expect("error should be a string")
+      .contains("admin:UpdateConfig")
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn file_sync_rejects_duplicate_canonical_config_targets() {
+  let (_temp_dir, config) = load_temp_config_with_include("file-sync-duplicate-canonical");
+  create_config_alias(&config, "alias");
+  let original = included_config_content(&config);
+  let request = AdminFilesSyncRequest {
+    apply: AdminApplyMode::None,
+    operations: vec![
+      AdminFileOperation {
+        op: AdminFileOperationKind::Put,
+        root: AdminFileRoot::Config,
+        path: "included.toml".to_string(),
+        expected_sha256: None,
+        content: Some(original.replace("level = \"info\"", "level = \"debug\"")),
+      },
+      AdminFileOperation {
+        op: AdminFileOperationKind::Put,
+        root: AdminFileRoot::Config,
+        path: "alias/included.toml".to_string(),
+        expected_sha256: None,
+        content: Some(original.replace("level = \"info\"", "level = \"warn\"")),
+      },
+    ],
+  };
+
+  let precheck_error =
+    config_file_overrides(&request, &config).expect_err("duplicate aliases should be rejected");
+  assert!(
+    precheck_error
+      .to_string()
+      .contains("multiple config operations")
+  );
+
+  let commit_error = match commit_file_sync(&request, &config) {
+    Ok(_) => panic!("duplicate aliases should not be committed"),
+    Err(error) => error,
+  };
+  assert!(
+    commit_error
+      .to_string()
+      .contains("multiple config operations")
+  );
+  assert_eq!(included_config_content(&config), original);
 }
 
 #[test]

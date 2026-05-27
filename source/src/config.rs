@@ -3176,6 +3176,56 @@ pub(crate) fn resolve_local_config_file_path(
   Ok(base_dir.join(path))
 }
 
+pub(crate) fn canonicalize_local_config_file_target(
+  field_name: &str,
+  path: &Path,
+) -> anyhow::Result<PathBuf> {
+  match path.canonicalize() {
+    Ok(path) => Ok(path),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+      canonicalize_missing_local_config_file_target(field_name, path)
+    }
+    Err(error) => {
+      Err(error).with_context(|| format!("failed to resolve {field_name} {}", path.display()))
+    }
+  }
+}
+
+fn canonicalize_missing_local_config_file_target(
+  field_name: &str,
+  path: &Path,
+) -> anyhow::Result<PathBuf> {
+  let mut missing_components = Vec::new();
+  let mut current = path;
+  loop {
+    if current
+      .try_exists()
+      .with_context(|| format!("failed to inspect {field_name} {}", current.display()))?
+    {
+      let mut canonical = current
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {field_name} {}", path.display()))?;
+      for component in missing_components.iter().rev() {
+        canonical.push(component);
+      }
+      return Ok(canonical);
+    }
+    let file_name = current.file_name().ok_or_else(|| {
+      anyhow!(
+        "failed to resolve {field_name} {} because no existing ancestor was found",
+        path.display()
+      )
+    })?;
+    missing_components.push(PathBuf::from(file_name));
+    current = current.parent().ok_or_else(|| {
+      anyhow!(
+        "failed to resolve {field_name} {} because no parent directory was found",
+        path.display()
+      )
+    })?;
+  }
+}
+
 pub(crate) fn resolve_existing_local_config_file_path_with_logical(
   field_name: &str,
   base_dir: &Path,
