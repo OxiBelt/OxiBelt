@@ -31,6 +31,20 @@ fn dockerfile_text() -> String {
         .expect("Alpine Dockerfile should be readable")
 }
 
+fn comparator_dockerfile_text(comparator: &str) -> String {
+    fs::read_to_string(repo_root().join(format!(
+        "tests/docker/performance_comparators/Dockerfile.{comparator}"
+    )))
+    .unwrap_or_else(|error| panic!("performance comparator Dockerfile should be readable: {error}"))
+}
+
+fn comparator_build_script_text() -> String {
+    fs::read_to_string(
+        repo_root().join("tests/scripts/build-performance-comparator-image-artifact.sh"),
+    )
+    .expect("performance comparator build script should be readable")
+}
+
 fn workspace_members() -> Vec<String> {
     let manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
         .expect("root Cargo.toml should be readable");
@@ -278,6 +292,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "generate-test-matrices",
         "linux-target-builds",
         "docker-alpine-musl-image-amd64",
+        "docker-alpine-comparator-musl-image-amd64",
         "docker-alpine-musl-image-other",
         "docker-integration-matrix",
         "remote-signer-dos-docker",
@@ -338,8 +353,102 @@ fn amd64_docker_image_job_builds_cpu_level_artifacts() {
 }
 
 #[test]
+fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let comparator_job = jobs
+        .get("docker-alpine-comparator-musl-image-amd64")
+        .expect("workflow should define the AMD64 comparator image job");
+    let script = comparator_build_script_text();
+    let nginx_dockerfile = comparator_dockerfile_text("nginx");
+    let caddy_dockerfile = comparator_dockerfile_text("caddy");
+
+    assert_eq!(
+        comparator_job.needs,
+        vec![
+            "test".to_owned(),
+            "test-riscv64-qemu".to_owned(),
+            "fuzz-smoke".to_owned()
+        ],
+        "comparator image builds should run in parallel with OxiBelt AMD64 image builds"
+    );
+    assert!(
+        workflow.contains("name: Docker comparator image (Alpine musl, amd64, ${{ matrix.comparator }}, ${{ matrix.target_cpu }})"),
+        "comparator image job should expose the comparator and target CPU in the job name"
+    );
+    for (comparator, target_cpu, artifact_name, image_tar) in [
+        (
+            "nginx",
+            "x86-64-v2",
+            "oxibelt-performance-nginx-x86-64-v2-image",
+            "oxibelt-performance-nginx-x86-64-v2.tar",
+        ),
+        (
+            "nginx",
+            "x86-64-v3",
+            "oxibelt-performance-nginx-x86-64-v3-image",
+            "oxibelt-performance-nginx-x86-64-v3.tar",
+        ),
+        (
+            "caddy",
+            "x86-64-v2",
+            "oxibelt-performance-caddy-x86-64-v2-image",
+            "oxibelt-performance-caddy-x86-64-v2.tar",
+        ),
+        (
+            "caddy",
+            "x86-64-v3",
+            "oxibelt-performance-caddy-x86-64-v3-image",
+            "oxibelt-performance-caddy-x86-64-v3.tar",
+        ),
+    ] {
+        assert!(
+            workflow.contains(&format!("comparator: {comparator}")),
+            "comparator image matrix should include {comparator}"
+        );
+        assert!(
+            workflow.contains(&format!("target_cpu: {target_cpu}")),
+            "comparator image matrix should include {target_cpu}"
+        );
+        assert!(
+            workflow.contains(&format!("artifact_name: {artifact_name}")),
+            "comparator image matrix should upload {artifact_name}"
+        );
+        assert!(
+            workflow.contains(&format!("image_tar: {image_tar}")),
+            "comparator image matrix should name {image_tar}"
+        );
+    }
+    assert!(
+        workflow.contains("tests/scripts/build-performance-comparator-image-artifact.sh"),
+        "workflow should use the comparator image artifact builder"
+    );
+    assert!(
+        script.contains("image_tag=\"oxibelt/performance-${comparator}:alpine-${target_cpu}\"")
+            && script.contains(
+                "image_tar=\"${output_dir%/}/oxibelt-performance-${comparator}-${target_cpu}.tar\""
+            ),
+        "comparator build script should produce deterministic tags and tar names"
+    );
+    assert!(
+        nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.1")
+            && nginx_dockerfile.contains("--with-http_v3_module")
+            && nginx_dockerfile.contains("-march=${NGINX_TARGET_CPU}"),
+        "nginx comparator image should pin mainline nginx, build HTTP/3, and use the requested target CPU"
+    );
+    assert!(
+        caddy_dockerfile.contains("ARG CADDY_VERSION=2.11.2")
+            && caddy_dockerfile.contains("FROM caddy:${CADDY_VERSION}-builder-alpine AS builder")
+            && caddy_dockerfile.contains("export GOAMD64=v2")
+            && caddy_dockerfile.contains("export GOAMD64=v3"),
+        "Caddy comparator image should pin Caddy and map OxiBelt target CPUs to GOAMD64 levels"
+    );
+}
+
+#[test]
 fn docker_performance_job_uses_sharded_repeated_sampling() {
     let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
     let performance_job = workflow
         .split_once("  docker-performance:\n")
         .and_then(|(_, rest)| rest.split_once("\n  docker-performance-summary:"))
@@ -395,6 +504,13 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         workflow.contains("OXIBELT_PERF_REGRESSION_GATE_MODE: warn"),
         "docker-performance should defer noisy per-iteration regression gates to the summary job"
     );
+    assert!(
+        jobs.get("docker-performance")
+            .expect("workflow should define docker-performance")
+            .needs
+            .contains(&"docker-alpine-comparator-musl-image-amd64".to_owned()),
+        "docker-performance should wait for target-specific comparator images"
+    );
     for target_cpu in ["x86-64-v2", "x86-64-v3"] {
         assert!(
             performance_job.contains(&format!(
@@ -426,6 +542,31 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     assert!(
         performance_job.contains("OXIBELT_AMD64_TARGET_CPU=\"${target_cpu}\""),
         "docker-performance should record each AMD64 target CPU in per-run summaries"
+    );
+    for (comparator, target_cpu) in [
+        ("nginx", "x86-64-v2"),
+        ("caddy", "x86-64-v2"),
+        ("nginx", "x86-64-v3"),
+        ("caddy", "x86-64-v3"),
+    ] {
+        assert!(
+            performance_job.contains(&format!(
+                "oxibelt-performance-{comparator}-{target_cpu}-image"
+            )),
+            "docker-performance should download the {comparator} {target_cpu} comparator artifact"
+        );
+        assert!(
+            performance_job.contains(&format!(
+                "oxibelt/performance-{comparator}:alpine-{target_cpu}"
+            )),
+            "docker-performance should pass the {comparator} {target_cpu} image tag"
+        );
+    }
+    assert!(
+        performance_job.contains("OXIBELT_NGINX_IMAGE=\"${nginx_image_tag}\"")
+            && performance_job.contains("OXIBELT_CADDY_IMAGE=\"${caddy_image_tag}\"")
+            && performance_job.contains("OXIBELT_NGINX_H3_MODE=required"),
+        "docker-performance should compare against target-specific comparator images and require nginx HTTP/3 in CI"
     );
     assert!(
         workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),

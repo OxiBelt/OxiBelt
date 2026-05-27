@@ -1,0 +1,67 @@
+ARG NGINX_VERSION=1.31.1
+ARG NGINX_RUNTIME_IMAGE=alpine:3.23
+
+FROM alpine:3.23 AS builder
+
+ARG NGINX_VERSION
+ARG NGINX_TARGET_CPU=x86-64-v2
+
+RUN apk add --no-cache \
+      build-base \
+      ca-certificates \
+      linux-headers \
+      openssl-dev \
+      pcre2-dev \
+      perl \
+      wget \
+      zlib-dev
+
+WORKDIR /tmp/nginx-build
+RUN case "${NGINX_TARGET_CPU}" in \
+      x86-64-v2|x86-64-v3) ;; \
+      *) echo "unsupported NGINX_TARGET_CPU=${NGINX_TARGET_CPU}" >&2; exit 1 ;; \
+    esac && \
+    wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" && \
+    tar -xzf "nginx-${NGINX_VERSION}.tar.gz" && \
+    cd "nginx-${NGINX_VERSION}" && \
+    ./configure \
+      --prefix=/usr/local/nginx \
+      --sbin-path=/usr/sbin/nginx \
+      --conf-path=/etc/nginx/nginx.conf \
+      --pid-path=/tmp/nginx.pid \
+      --lock-path=/tmp/nginx.lock \
+      --http-log-path=/var/log/nginx/access.log \
+      --error-log-path=/var/log/nginx/error.log \
+      --with-file-aio \
+      --with-http_gzip_static_module \
+      --with-http_ssl_module \
+      --with-http_v2_module \
+      --with-http_v3_module \
+      --with-threads \
+      --with-cc-opt="-O2 -pipe -march=${NGINX_TARGET_CPU}" \
+      --with-ld-opt="-Wl,--as-needed" && \
+    make -j"$(nproc)" && \
+    make install
+
+FROM ${NGINX_RUNTIME_IMAGE} AS runtime
+
+ARG NGINX_VERSION
+ARG NGINX_TARGET_CPU
+
+RUN apk add --no-cache ca-certificates openssl pcre2 zlib && \
+    mkdir -p /etc/nginx /var/log/nginx /usr/local/nginx/client_body_temp
+
+COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
+COPY --from=builder /usr/local/nginx /usr/local/nginx
+
+LABEL org.opencontainers.image.title="OxiBelt performance nginx comparator" \
+      org.opencontainers.image.version="${NGINX_VERSION}" \
+      org.opencontainers.image.description="nginx comparator built with HTTP/3 and AMD64 target CPU tuning" \
+      org.oxibelt.performance.comparator="nginx" \
+      org.oxibelt.performance.amd64_target_cpu="${NGINX_TARGET_CPU}"
+
+EXPOSE 8080/tcp
+EXPOSE 8443/tcp
+EXPOSE 8443/udp
+STOPSIGNAL SIGQUIT
+CMD ["nginx", "-g", "daemon off;"]

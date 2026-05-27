@@ -18,6 +18,11 @@ fn performance_script_text() -> String {
     fs::read_to_string(performance_script_path()).expect("performance script should be readable")
 }
 
+fn perf_probe_source_text() -> String {
+    fs::read_to_string(repo_root().join("tests/docker/perf_probe/src/main.rs"))
+        .expect("perf probe source should be readable")
+}
+
 fn oxibelt_performance_fixture_root() -> PathBuf {
     repo_root().join("tests/fixtures/oxibelt-docker-performance/oxibelt")
 }
@@ -111,6 +116,34 @@ fn run_static_loads_harness_for(
         .env("PROFILE", profile)
         .env("H3_MODE", h3_mode)
         .env("PROBE_RESULT", probe_result)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
+fn nginx_h3_mode_harness(mode: &str, supported: &str) -> HarnessRun {
+    let function = extract_bash_function(&performance_script_text(), "resolve_nginx_h3_mode");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-nginx-h3-mode-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    write_nginx_h3_mode_harness(&harness_path, &function);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("NGINX_H3_MODE", mode)
+        .env("NGINX_H3_SUPPORTED", supported)
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
@@ -385,6 +418,31 @@ h3_probe_succeeds() {{
 {functions}
 
 run_static_loads "${{COMPARATOR:?}}" "${{COMPARATOR:?}}" "${{H3_MODE:?}}"
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_nginx_h3_mode_harness(path: &Path, resolve_nginx_h3_mode: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+nginx_image=nginx-test
+nginx_h3_mode_override="${{NGINX_H3_MODE:?}}"
+nginx_h3_supported="${{NGINX_H3_SUPPORTED:?}}"
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{resolve_nginx_h3_mode}
+
+resolved="$(resolve_nginx_h3_mode)"
+printf 'MODE %s\n' "${{resolved}}" >>"${{events}}"
 "#
     );
     fs::write(path, harness).expect("Bash harness should be writable");
@@ -1389,6 +1447,33 @@ fn benchmark_static_nginx_optional_h3_probe_failure_records_skip() {
 }
 
 #[test]
+fn nginx_required_h3_mode_fails_when_module_is_missing() {
+    let run = nginx_h3_mode_harness("required", "0");
+
+    assert!(
+        !run.output.status.success(),
+        "required nginx HTTP/3 mode should fail when the image lacks the module"
+    );
+    assert!(
+        run.events.contains(
+            "FAIL OXIBELT_NGINX_H3_MODE=required but nginx image nginx-test does not report --with-http_v3_module"
+        ),
+        "required mode failure should identify the missing nginx HTTP/3 module"
+    );
+}
+
+#[test]
+fn nginx_auto_h3_mode_preserves_existing_optional_behavior() {
+    let run = nginx_h3_mode_harness("auto", "1");
+
+    assert!(run.output.status.success());
+    assert!(
+        run.events.contains("MODE optional"),
+        "auto mode should keep nginx HTTP/3 optional when the module is present"
+    );
+}
+
+#[test]
 fn high_volume_load_error_inside_budget_is_allowed() {
     let run = assert_result_harness(
         r#"{"type":"load","label":"oxibelt-smoke-soak","requests":1500000,"errors":1,"p99_ms":3}"#,
@@ -1580,8 +1665,10 @@ fn mandatory_and_optional_call_sites_are_explicit() {
         "Caddy HTTP/3 performance coverage must be mandatory"
     );
     assert!(
-        script.contains("nginx_h3_mode=optional"),
-        "nginx HTTP/3 should only be optional after image support is detected"
+        script.contains("OXIBELT_NGINX_H3_MODE")
+            && script.contains("resolve_nginx_h3_mode")
+            && script.contains("nginx_h3_mode=\"$(resolve_nginx_h3_mode)\""),
+        "nginx HTTP/3 mode should be explicitly configurable while preserving auto detection"
     );
     assert!(
         script.contains("OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO"),
@@ -1598,11 +1685,21 @@ fn mandatory_and_optional_call_sites_are_explicit() {
     );
     assert!(
         script.contains("run_common_loads nginx nginx \"${nginx_h3_mode}\""),
-        "nginx should use the explicit optional/disabled HTTP/3 mode"
+        "nginx should use the resolved HTTP/3 mode"
     );
     assert!(
         !script.contains("run_common_loads oxibelt oxibelt 1")
             && !script.contains("run_common_loads caddy caddy 1"),
         "mandatory HTTP/3 comparators must not use the legacy boolean supports_h3 flag"
+    );
+}
+
+#[test]
+fn perf_probe_h3_client_disables_grease_for_comparator_interop() {
+    let source = perf_probe_source_text();
+    assert_eq!(
+        source.matches("builder.send_grease(false);").count(),
+        2,
+        "perf-probe should disable HTTP/3 GREASE in load and stress clients so nginx comparator required H3 smoke measures proxy behavior instead of GREASE interop"
     );
 }

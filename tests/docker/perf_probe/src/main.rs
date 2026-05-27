@@ -1171,7 +1171,9 @@ async fn h3_connection_loop(
     .await?;
     let close_connection = h3_client.connection.clone();
     let h3_connection = h3_quinn::Connection::new(h3_client.connection);
-    let (mut driver, mut send_request) = h3::client::builder()
+    let mut builder = h3::client::builder();
+    builder.send_grease(false);
+    let (mut driver, mut send_request) = builder
         .build::<_, _, Bytes>(h3_connection)
         .await
         .context("failed to establish HTTP/3 client")?;
@@ -1821,7 +1823,9 @@ async fn stress_h3_cl0_data(args: &StressArgs) -> anyhow::Result<Option<u16>> {
     .await?;
     let close_connection = h3_client.connection.clone();
     let h3_connection = h3_quinn::Connection::new(h3_client.connection);
-    let (mut driver, mut send_request) = h3::client::builder()
+    let mut builder = h3::client::builder();
+    builder.send_grease(false);
+    let (mut driver, mut send_request) = builder
         .build::<_, _, Bytes>(h3_connection)
         .await
         .context("failed to establish HTTP/3 CL0 client")?;

@@ -349,6 +349,58 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
           retention-days: 0
 
+  docker-alpine-comparator-musl-image-amd64:
+    name: Docker comparator image (Alpine musl, amd64, ${{ matrix.comparator }}, ${{ matrix.target_cpu }})
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - test-riscv64-qemu
+      - fuzz-smoke
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - comparator: nginx
+            target_cpu: x86-64-v2
+            artifact_name: oxibelt-performance-nginx-x86-64-v2-image
+            image_tar: oxibelt-performance-nginx-x86-64-v2.tar
+          - comparator: nginx
+            target_cpu: x86-64-v3
+            artifact_name: oxibelt-performance-nginx-x86-64-v3-image
+            image_tar: oxibelt-performance-nginx-x86-64-v3.tar
+          - comparator: caddy
+            target_cpu: x86-64-v2
+            artifact_name: oxibelt-performance-caddy-x86-64-v2-image
+            image_tar: oxibelt-performance-caddy-x86-64-v2.tar
+          - comparator: caddy
+            target_cpu: x86-64-v3
+            artifact_name: oxibelt-performance-caddy-x86-64-v3-image
+            image_tar: oxibelt-performance-caddy-x86-64-v3.tar
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # 4.0.0
+
+      - name: Build comparator Docker image artifact
+        run: |
+          tests/scripts/build-performance-comparator-image-artifact.sh \
+            "${{ matrix.comparator }}" \
+            "linux/amd64" \
+            "${{ matrix.target_cpu }}" \
+            "${RUNNER_TEMP}/oxibelt-comparator-image"
+
+      - name: Upload comparator Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-comparator-image/${{ matrix.image_tar }}
+          retention-days: 0
+
   docker-alpine-musl-image-other:
     name: Docker image (Alpine musl, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -540,6 +592,7 @@ jobs:
       - docker-integration-matrix
       - remote-signer-dos-docker
       - browser-webdriver
+      - docker-alpine-comparator-musl-image-amd64
     permissions:
       actions: read
       contents: read
@@ -609,6 +662,30 @@ jobs:
           name: ${{ steps.select-amd64-v3.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image/x86-64-v3
 
+      - name: Download AMD64 v2 nginx comparator image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-performance-nginx-x86-64-v2-image
+          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/nginx
+
+      - name: Download AMD64 v2 Caddy comparator image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-performance-caddy-x86-64-v2-image
+          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/caddy
+
+      - name: Download AMD64 v3 nginx comparator image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-performance-nginx-x86-64-v3-image
+          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/nginx
+
+      - name: Download AMD64 v3 Caddy comparator image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-performance-caddy-x86-64-v3-image
+          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/caddy
+
       - name: Load AMD64 v2 OxiBelt Docker image
         if: steps.select-amd64-v2.outputs.supported == 'true'
         env:
@@ -621,14 +698,25 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-v3.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/x86-64-v3/${OXIBELT_IMAGE_TAR}"
 
+      - name: Load AMD64 comparator Docker images
+        run: |
+          docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v2/nginx/oxibelt-performance-nginx-x86-64-v2.tar"
+          docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v2/caddy/oxibelt-performance-caddy-x86-64-v2.tar"
+          docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/nginx/oxibelt-performance-nginx-x86-64-v3.tar"
+          docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/caddy/oxibelt-performance-caddy-x86-64-v3.tar"
+
       - name: Run Docker performance profile
         env:
           AMD64_V2_SUPPORTED: ${{ steps.select-amd64-v2.outputs.supported }}
           AMD64_V2_IMAGE_TAG: ${{ steps.select-amd64-v2.outputs.image_tag }}
           AMD64_V2_MISSING_FEATURES: ${{ steps.select-amd64-v2.outputs.missing_features }}
+          AMD64_V2_NGINX_IMAGE_TAG: oxibelt/performance-nginx:alpine-x86-64-v2
+          AMD64_V2_CADDY_IMAGE_TAG: oxibelt/performance-caddy:alpine-x86-64-v2
           AMD64_V3_SUPPORTED: ${{ steps.select-amd64-v3.outputs.supported }}
           AMD64_V3_IMAGE_TAG: ${{ steps.select-amd64-v3.outputs.image_tag }}
           AMD64_V3_MISSING_FEATURES: ${{ steps.select-amd64-v3.outputs.missing_features }}
+          AMD64_V3_NGINX_IMAGE_TAG: oxibelt/performance-nginx:alpine-x86-64-v3
+          AMD64_V3_CADDY_IMAGE_TAG: oxibelt/performance-caddy:alpine-x86-64-v3
           PERFORMANCE_SHARD: ${{ matrix.shard }}
         run: |
           if [[ ! "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -642,11 +730,15 @@ jobs:
               x86-64-v2)
                 supported="${AMD64_V2_SUPPORTED}"
                 image_tag="${AMD64_V2_IMAGE_TAG}"
+                nginx_image_tag="${AMD64_V2_NGINX_IMAGE_TAG}"
+                caddy_image_tag="${AMD64_V2_CADDY_IMAGE_TAG}"
                 missing_features="${AMD64_V2_MISSING_FEATURES}"
                 ;;
               x86-64-v3)
                 supported="${AMD64_V3_SUPPORTED}"
                 image_tag="${AMD64_V3_IMAGE_TAG}"
+                nginx_image_tag="${AMD64_V3_NGINX_IMAGE_TAG}"
+                caddy_image_tag="${AMD64_V3_CADDY_IMAGE_TAG}"
                 missing_features="${AMD64_V3_MISSING_FEATURES}"
                 ;;
             esac
@@ -676,6 +768,9 @@ jobs:
               echo "Running Docker performance profile ${PERFORMANCE_PROFILE} serving type ${PERFORMANCE_SERVING_TYPE} shard ${PERFORMANCE_SHARD}, target ${target_cpu}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
               status=0
               OXIBELT_DOCKER_IMAGE="${image_tag}" \
+              OXIBELT_NGINX_IMAGE="${nginx_image_tag}" \
+              OXIBELT_CADDY_IMAGE="${caddy_image_tag}" \
+              OXIBELT_NGINX_H3_MODE=required \
               OXIBELT_AMD64_TARGET_CPU="${target_cpu}" \
               OXIBELT_TEST_ARTIFACT_DIR="${target_artifact_dir}/run-${iteration}" \
                 tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --serving-type "${PERFORMANCE_SERVING_TYPE}" --comparators oxibelt,nginx,caddy || status=$?

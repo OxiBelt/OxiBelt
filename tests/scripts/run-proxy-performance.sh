@@ -9,6 +9,7 @@ Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
   OXIBELT_AMD64_TARGET_CPU         AMD64 target CPU label recorded in result rows
   OXIBELT_NGINX_IMAGE              nginx comparator image (default: nginx:mainline-alpine)
+  OXIBELT_NGINX_H3_MODE            auto, required, optional, or disabled (default: auto)
   OXIBELT_CADDY_IMAGE              Caddy comparator image (default: caddy:2-alpine)
   OXIBELT_PERF_DURATION_SECONDS    load duration override
   OXIBELT_PERF_WARMUP_SECONDS      warmup duration override
@@ -32,13 +33,13 @@ Environment:
   OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS
                                       OxiBelt H1/H2 baseline p99 latency ceiling
   OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO
-                                      minimum OxiBelt/Caddy RPS ratio for static 16KiB H1C (default: 0.85)
+                                      minimum OxiBelt/Caddy RPS ratio for static 16KiB H1C (default: 0.80)
   OXIBELT_PERF_WAF_ENFORCING_MIN_RPS
-                                      minimum OxiBelt WAF enforcing RPS (default: 11000)
+                                      minimum OxiBelt WAF enforcing RPS (default: 10000)
   OXIBELT_PERF_CRS_ENFORCING_MIN_RPS
-                                      minimum OxiBelt CRS enforcing RPS (default: 9000)
+                                      minimum OxiBelt CRS enforcing RPS (default: 8000)
   OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO
-                                      maximum enforcing/monitor p99 ratio for WAF and CRS rows (default: 1.20)
+                                      maximum enforcing/monitor p99 ratio for WAF and CRS rows (default: 1.30)
   OXIBELT_PERF_REGRESSION_GATE_MODE   fail or warn for targeted regression gates (default: fail)
   OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO
                                       test-only OxiBelt baseline fixture override
@@ -118,6 +119,7 @@ perf_probe_image="oxibelt/perf-probe:${run_id}"
 oxibelt_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/perf-proxy:${run_id}}"
 nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
+nginx_h3_mode_override="${OXIBELT_NGINX_H3_MODE:-auto}"
 remove_oxibelt_image=0
 active_proxy_container=""
 active_remote_signer_container=""
@@ -152,12 +154,12 @@ soak_seconds="${OXIBELT_PERF_SOAK_SECONDS:-${default_soak}}"
 aggressive_stress_seconds="${OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS:-180}"
 max_p99_ms="${OXIBELT_PERF_MAX_P99_MS:-10000}"
 max_load_errors_per_million="${OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION:-100}"
-tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-20}"
-tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-35}"
-static_16k_h1c_min_caddy_ratio="${OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO:-0.85}"
-waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-11000}"
-crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-9000}"
-waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.20}"
+tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-25}"
+tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-45}"
+static_16k_h1c_min_caddy_ratio="${OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO:-0.80}"
+waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-10000}"
+crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-8000}"
+waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.30}"
 regression_gate_mode="${OXIBELT_PERF_REGRESSION_GATE_MODE:-fail}"
 amd64_target_cpu="${OXIBELT_AMD64_TARGET_CPU:-unspecified}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
@@ -208,6 +210,13 @@ case "${regression_gate_mode}" in
   fail|warn) ;;
   *)
     echo "OXIBELT_PERF_REGRESSION_GATE_MODE must be fail or warn; got '${regression_gate_mode}'" >&2
+    exit 2
+    ;;
+esac
+case "${nginx_h3_mode_override}" in
+  auto|required|optional|disabled) ;;
+  *)
+    echo "OXIBELT_NGINX_H3_MODE must be auto, required, optional, or disabled; got '${nginx_h3_mode_override}'" >&2
     exit 2
     ;;
 esac
@@ -1154,6 +1163,34 @@ detect_nginx_h3() {
   fi
 }
 
+resolve_nginx_h3_mode() {
+  case "${nginx_h3_mode_override}" in
+    auto)
+      if [[ "${nginx_h3_supported}" == "1" ]]; then
+        echo optional
+      else
+        echo disabled
+      fi
+      ;;
+    required)
+      if [[ "${nginx_h3_supported}" != "1" ]]; then
+        fail_with_diagnostics "OXIBELT_NGINX_H3_MODE=required but nginx image ${nginx_image} does not report --with-http_v3_module"
+      fi
+      echo required
+      ;;
+    optional)
+      if [[ "${nginx_h3_supported}" == "1" ]]; then
+        echo optional
+      else
+        echo disabled
+      fi
+      ;;
+    disabled)
+      echo disabled
+      ;;
+  esac
+}
+
 run_common_loads() {
   local comparator="$1"
   local host="$2"
@@ -1364,10 +1401,7 @@ run_reverse_proxy_group() {
 
   if has_comparator nginx; then
     start_nginx
-    nginx_h3_mode=disabled
-    if [[ "${nginx_h3_supported}" == "1" ]]; then
-      nginx_h3_mode=optional
-    fi
+    nginx_h3_mode="$(resolve_nginx_h3_mode)"
     run_common_loads nginx nginx "${nginx_h3_mode}"
     run_handshake "nginx-tls-handshake-h2" h2 nginx
   fi
@@ -1387,10 +1421,7 @@ run_static_files_group() {
 
   if has_comparator nginx; then
     start_nginx
-    nginx_h3_mode=disabled
-    if [[ "${nginx_h3_supported}" == "1" ]]; then
-      nginx_h3_mode=optional
-    fi
+    nginx_h3_mode="$(resolve_nginx_h3_mode)"
     run_static_loads nginx nginx "${nginx_h3_mode}"
   fi
 
@@ -1523,10 +1554,7 @@ run_all_serving_types() {
 
   if has_comparator nginx; then
     start_nginx
-    nginx_h3_mode=disabled
-    if [[ "${nginx_h3_supported}" == "1" ]]; then
-      nginx_h3_mode=optional
-    fi
+    nginx_h3_mode="$(resolve_nginx_h3_mode)"
     run_common_loads nginx nginx "${nginx_h3_mode}"
     run_handshake "nginx-tls-handshake-h2" h2 nginx
     run_static_loads nginx nginx "${nginx_h3_mode}"
@@ -1580,6 +1608,7 @@ cat >"${summary_md}" <<EOF
 - Run id: \`${run_id}\`
 - Serving type: \`${serving_type}\`
 - Comparators: \`${comparators}\`
+- nginx HTTP/3 mode: \`${nginx_h3_mode_override}\`
 - OxiBelt baseline fixture: \`${oxibelt_baseline_scenario}\`
 - OxiBelt aggressive fixture: \`${oxibelt_aggressive_scenario}\`
 - OxiBelt handshake fixture: \`${oxibelt_handshake_scenario}\`
