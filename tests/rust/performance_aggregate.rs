@@ -901,21 +901,21 @@ fn separates_amd64_target_cpus_and_reports_isa_deltas() {
 }
 
 #[test]
-fn h2_ratio_gate_becomes_advisory_when_nginx_shifts_up() {
+fn h2_ratio_gate_becomes_advisory_when_baseline_gap_is_stable() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
     let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
 
-    write_reverse_proxy_h2(&input_dir, 100.0, 140.0, 10.0);
+    write_reverse_proxy_h2(&input_dir, 135.0, 205.0, 10.0);
     write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
     write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
     write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
     write_baseline_report(
         &baseline_path,
         vec![
-            aggregate_row("oxibelt", "h2", "reverse-proxy", 100.0, 10.0),
-            aggregate_row("nginx", "h2", "reverse-proxy", 100.0, 10.0),
+            aggregate_row("oxibelt", "h2", "reverse-proxy", 136.0, 10.0),
+            aggregate_row("nginx", "h2", "reverse-proxy", 206.0, 10.0),
         ],
     );
 
@@ -942,13 +942,13 @@ fn h2_ratio_gate_becomes_advisory_when_nginx_shifts_up() {
         advisory["observed"]
             .as_f64()
             .expect("advisory ratio should exist"),
-        100.0 / 140.0,
+        135.0 / 205.0,
     );
     assert!(
         advisory["message"]
             .as_str()
             .expect("message should be present")
-            .contains("baseline comparator shift")
+            .contains("baseline-stable ratio gap")
     );
 
     let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
@@ -958,13 +958,13 @@ fn h2_ratio_gate_becomes_advisory_when_nginx_shifts_up() {
 }
 
 #[test]
-fn h2_ratio_gate_blocks_when_oxibelt_regresses_against_baseline() {
+fn h2_ratio_gate_blocks_when_baseline_passes_and_current_misses() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
     let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
 
-    write_reverse_proxy_h2(&input_dir, 70.0, 100.0, 10.0);
+    write_reverse_proxy_h2(&input_dir, 100.0, 140.0, 10.0);
     write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
     write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
     write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
@@ -997,34 +997,112 @@ fn h2_ratio_gate_blocks_when_oxibelt_regresses_against_baseline() {
 }
 
 #[test]
-fn static_and_remote_signer_ratio_gates_become_advisories_on_comparator_shift() {
+fn h2_ratio_gate_blocks_when_oxibelt_rps_regresses_against_low_baseline() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h2(&input_dir, 95.0, 145.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "h2", "reverse-proxy", 100.0, 10.0),
+            aggregate_row("nginx", "h2", "reverse-proxy", 150.0, 10.0),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(violation["disposition"], "blocking");
+    assert!(
+        violation["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("OxiBelt RPS -5.0%")
+    );
+}
+
+#[test]
+fn h2_ratio_gate_blocks_when_oxibelt_p99_regresses_against_low_baseline() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h2(&input_dir, 99.0, 149.0, 11.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "h2", "reverse-proxy", 100.0, 10.0),
+            aggregate_row("nginx", "h2", "reverse-proxy", 150.0, 10.0),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(violation["disposition"], "blocking");
+    assert!(
+        violation["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("OxiBelt p99 +10.0%")
+    );
+}
+
+#[test]
+fn static_and_remote_signer_ratio_gates_become_advisories_when_baseline_gap_is_stable() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
     let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
 
     write_reverse_proxy_h2(&input_dir, 100.0, 100.0, 10.0);
-    write_static_gate_rows(&input_dir, 89.0, 100.0, 112.0);
-    write_remote_signer_gate_rows(&input_dir, 890.0, 1000.0);
+    write_static_gate_rows(&input_dir, 88.5, 99.5, 111.5);
+    write_remote_signer_gate_rows(&input_dir, 885.0, 995.0);
     write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
     write_baseline_report(
         &baseline_path,
         vec![
-            aggregate_row("oxibelt", "static-16k-h1c", "static-files", 90.0, 10.0),
-            aggregate_row("nginx", "static-16k-h1c", "static-files", 90.0, 10.0),
-            aggregate_row("caddy", "static-16k-h1c", "static-files", 90.0, 10.0),
+            aggregate_row("oxibelt", "static-16k-h1c", "static-files", 89.0, 10.0),
+            aggregate_row("nginx", "static-16k-h1c", "static-files", 100.0, 10.0),
+            aggregate_row("caddy", "static-16k-h1c", "static-files", 112.0, 10.0),
             aggregate_row(
                 "oxibelt",
                 "remote-signer-tls-handshake-h2",
                 "remote-signer",
-                900.0,
+                890.0,
                 10.0,
             ),
             aggregate_row(
                 "oxibelt",
                 "local-key-tls-handshake-h2",
                 "remote-signer",
-                900.0,
+                1000.0,
                 10.0,
             ),
         ],

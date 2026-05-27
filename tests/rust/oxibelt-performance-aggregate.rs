@@ -19,7 +19,6 @@ const DEFAULT_CRS_ENFORCING_MIN_RPS: f64 = 8000.0;
 const DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO: f64 = 1.30;
 const BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT: f64 = -3.0;
 const BASELINE_P99_REGRESSION_TOLERANCE_PERCENT: f64 = 5.0;
-const BASELINE_COMPARATOR_RPS_SHIFT_PERCENT: f64 = 3.0;
 const BASELINE_MONITOR_P99_IMPROVEMENT_PERCENT: f64 = -5.0;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
@@ -351,6 +350,12 @@ enum GateDisposition {
 enum GateMetric {
     Rps,
     P99,
+}
+
+struct ThroughputRatioDelta {
+    before_ratio: f64,
+    after_ratio: f64,
+    ratio_delta_percent: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -2176,6 +2181,7 @@ fn collect_static_regression_gate(
             scenario,
             Comparator::Caddy,
             scenario,
+            threshold,
         );
         push_threshold_regression_gate_metric(
             findings,
@@ -2278,6 +2284,7 @@ fn collect_comparator_ratio_regression_gate(
             gate.scenario,
             gate.comparator,
             gate.scenario,
+            gate.threshold,
         );
         push_threshold_regression_gate_metric(
             findings,
@@ -2378,6 +2385,7 @@ fn collect_remote_signer_handshake_regression_gate(
             remote_scenario,
             Comparator::Oxibelt,
             local_scenario,
+            threshold,
         );
         push_threshold_regression_gate_metric(
             findings,
@@ -2664,6 +2672,7 @@ fn classify_throughput_ratio_threshold_miss(
     oxibelt_scenario: &str,
     comparator: Comparator,
     comparator_scenario: &str,
+    threshold: f64,
 ) -> GateDisposition {
     let oxibelt_rps_delta = match baseline_metric_delta_percent(
         aggregates,
@@ -2698,22 +2707,40 @@ fn classify_throughput_ratio_threshold_miss(
         Ok(value) => value,
         Err(error) => return baseline_unavailable_blocking(error),
     };
+    let ratio_delta = match baseline_throughput_ratio_delta_percent(
+        aggregates,
+        baseline,
+        oxibelt_scenario,
+        comparator,
+        comparator_scenario,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
 
-    if oxibelt_rps_delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
+    if ratio_delta.before_ratio < threshold
+        && oxibelt_rps_delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
         && oxibelt_p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
-        && comparator_rps_delta >= BASELINE_COMPARATOR_RPS_SHIFT_PERCENT
+        && ratio_delta.ratio_delta_percent >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
     {
         GateDisposition::Advisory {
             reason: format!(
-                "baseline comparator shift from `{}`: OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%",
-                baseline_report_label(baseline)
+                "baseline-stable ratio gap from `{}`: baseline ratio {:.4} < threshold {:.4}, current ratio {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%",
+                baseline_report_label(baseline),
+                ratio_delta.before_ratio,
+                threshold,
+                ratio_delta.after_ratio,
+                ratio_delta.ratio_delta_percent,
             ),
         }
     } else {
         GateDisposition::Blocking {
             reason: format!(
-                "baseline evidence from `{}` did not qualify for advisory pass: OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%",
-                baseline_report_label(baseline)
+                "baseline evidence from `{}` did not qualify for advisory pass: baseline ratio {:.4}, current ratio {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%",
+                baseline_report_label(baseline),
+                ratio_delta.before_ratio,
+                ratio_delta.after_ratio,
+                ratio_delta.ratio_delta_percent,
             ),
         }
     }
@@ -2859,6 +2886,86 @@ fn baseline_metric_delta_percent(
         ));
     }
     Ok(((after - before) / before) * 100.0)
+}
+
+fn baseline_throughput_ratio_delta_percent(
+    aggregates: &PrimaryAggregateMap,
+    baseline: Option<&BaselineGateContext>,
+    oxibelt_scenario: &str,
+    comparator: Comparator,
+    comparator_scenario: &str,
+) -> std::result::Result<ThroughputRatioDelta, String> {
+    let baseline =
+        baseline.ok_or_else(|| "no baseline performance report was provided".to_owned())?;
+    let before_oxibelt =
+        baseline_gate_metric(baseline, "oxibelt", oxibelt_scenario, GateMetric::Rps)?;
+    let before_comparator = baseline_gate_metric(
+        baseline,
+        comparator.as_str(),
+        comparator_scenario,
+        GateMetric::Rps,
+    )?;
+    let after_oxibelt = current_gate_metric(
+        aggregates,
+        Comparator::Oxibelt,
+        oxibelt_scenario,
+        GateMetric::Rps,
+    )?;
+    let after_comparator =
+        current_gate_metric(aggregates, comparator, comparator_scenario, GateMetric::Rps)?;
+
+    let before_ratio = before_oxibelt / before_comparator;
+    let after_ratio = after_oxibelt / after_comparator;
+    Ok(ThroughputRatioDelta {
+        before_ratio,
+        after_ratio,
+        ratio_delta_percent: ((after_ratio - before_ratio) / before_ratio) * 100.0,
+    })
+}
+
+fn baseline_gate_metric(
+    baseline: &BaselineGateContext,
+    comparator: &str,
+    scenario: &str,
+    metric: GateMetric,
+) -> std::result::Result<f64, String> {
+    let metric_name = metric.name();
+    let value = baseline
+        .aggregates
+        .get(&(comparator.to_owned(), scenario.to_owned()))
+        .and_then(|aggregate| metric.value(aggregate))
+        .ok_or_else(|| format!("missing baseline {comparator} {scenario} {metric_name}"))?;
+    if value <= 0.0 {
+        return Err(format!(
+            "baseline {comparator} {scenario} {metric_name} must be positive; got {value:.3}"
+        ));
+    }
+    Ok(value)
+}
+
+fn current_gate_metric(
+    aggregates: &PrimaryAggregateMap,
+    comparator: Comparator,
+    scenario: &str,
+    metric: GateMetric,
+) -> std::result::Result<f64, String> {
+    let metric_name = metric.name();
+    let value = aggregates
+        .get(&(comparator, scenario.to_owned()))
+        .and_then(|aggregate| metric.value(aggregate))
+        .ok_or_else(|| {
+            format!(
+                "missing current {} {scenario} {metric_name}",
+                comparator.as_str()
+            )
+        })?;
+    if value <= 0.0 {
+        return Err(format!(
+            "current {} {scenario} {metric_name} must be positive; got {value:.3}",
+            comparator.as_str()
+        ));
+    }
+    Ok(value)
 }
 
 impl GateMetric {
