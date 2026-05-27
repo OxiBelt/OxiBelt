@@ -38,30 +38,20 @@ pub(super) enum AttemptFailure {
 }
 
 impl EffectiveRetryPolicy {
-  pub(super) fn disabled(config: &Config) -> Self {
+  pub(super) fn disabled_direct() -> Self {
     Self {
       enabled: false,
-      tries: config.proxy.retry.tries.max(1),
-      total_budget: Duration::from_millis(
-        config
-          .proxy
-          .retry
-          .total_budget_ms
-          .unwrap_or(config.proxy.retry.timeout_ms),
-      ),
-      per_attempt_timeout: config
-        .proxy
-        .retry
-        .per_attempt_timeout_ms
-        .map(Duration::from_millis),
-      on: config.proxy.retry.on.clone(),
-      retry_non_idempotent: config.proxy.retry.retry_non_idempotent,
-      backoff_base: Duration::from_millis(config.proxy.retry.backoff_base_ms),
-      backoff_max: Duration::from_millis(config.proxy.retry.backoff_max_ms),
-      jitter: config.proxy.retry.jitter,
-      reselect_pool_on_retry: config.proxy.retry.reselect_pool_on_retry,
-      exclude_failed_pool_upstreams: config.proxy.retry.exclude_failed_pool_upstreams,
-      report_passive_health: config.proxy.retry.report_passive_health,
+      tries: 1,
+      total_budget: Duration::ZERO,
+      per_attempt_timeout: None,
+      on: Vec::new(),
+      retry_non_idempotent: false,
+      backoff_base: Duration::ZERO,
+      backoff_max: Duration::ZERO,
+      jitter: false,
+      reselect_pool_on_retry: false,
+      exclude_failed_pool_upstreams: false,
+      report_passive_health: false,
     }
   }
 
@@ -123,10 +113,38 @@ impl EffectiveRetryPolicy {
     policy
   }
 
+  pub(super) fn for_direct_http_request(
+    config: &Config,
+    route: &RouteConfig,
+    method: &Method,
+  ) -> Self {
+    // Pool routes keep disabled retry metadata for passive-health status reporting.
+    // Direct upstream sends only need retry details when retry can actually run.
+    if !Self::http_retry_enabled(config, route, method) {
+      return Self::disabled_direct();
+    }
+    Self::for_http_request(config, route, method)
+  }
+
   pub(super) fn for_grpc_request(config: &Config, route: &RouteConfig, enabled: bool) -> Self {
     let mut policy = Self::for_route(config, route);
     policy.enabled = enabled;
     policy
+  }
+
+  fn http_retry_enabled(config: &Config, route: &RouteConfig, method: &Method) -> bool {
+    let retry = &config.proxy.retry;
+    let route_retry = route.retry.as_ref();
+    let enabled = route_retry
+      .and_then(|config| config.enabled)
+      .unwrap_or(retry.enabled);
+    if !enabled {
+      return false;
+    }
+    is_idempotent(method)
+      || route_retry
+        .and_then(|config| config.retry_non_idempotent)
+        .unwrap_or(retry.retry_non_idempotent)
   }
 
   pub(super) fn matches_failure(&self, failure: AttemptFailure) -> bool {
@@ -561,7 +579,7 @@ mod tests {
   use super::*;
   use crate::config::Config;
 
-  fn retry_policy(raw_retry: &str, route_retry: &str, method: Method) -> EffectiveRetryPolicy {
+  fn retry_config(raw_retry: &str, route_retry: &str) -> Config {
     let raw = format!(
       r#"
 [logging]
@@ -608,8 +626,21 @@ upstream = "app"
 {route_retry}
 "#
     );
-    let config: Config = toml::from_str(&raw).expect("config should parse");
+    toml::from_str(&raw).expect("config should parse")
+  }
+
+  fn retry_policy(raw_retry: &str, route_retry: &str, method: Method) -> EffectiveRetryPolicy {
+    let config = retry_config(raw_retry, route_retry);
     EffectiveRetryPolicy::for_http_request(&config, &config.routes[0], &method)
+  }
+
+  fn direct_retry_policy(
+    raw_retry: &str,
+    route_retry: &str,
+    method: Method,
+  ) -> EffectiveRetryPolicy {
+    let config = retry_config(raw_retry, route_retry);
+    EffectiveRetryPolicy::for_direct_http_request(&config, &config.routes[0], &method)
   }
 
   #[test]
@@ -651,6 +682,80 @@ retry_non_idempotent = true
       Method::POST,
     );
     assert!(enabled.enabled);
+  }
+
+  #[test]
+  fn direct_retry_policy_skips_disabled_retry_metadata() {
+    let policy = direct_retry_policy(
+      r#"
+[proxy.retry]
+enabled = false
+on = ["503"]
+"#,
+      "",
+      Method::GET,
+    );
+
+    assert!(!policy.enabled);
+    assert!(!policy.matches_failure(AttemptFailure::Status(StatusCode::SERVICE_UNAVAILABLE)));
+  }
+
+  #[test]
+  fn direct_retry_policy_keeps_enabled_retry_conditions() {
+    let policy = direct_retry_policy(
+      r#"
+[proxy.retry]
+enabled = true
+on = ["503"]
+"#,
+      "",
+      Method::GET,
+    );
+
+    assert!(policy.enabled);
+    assert!(policy.matches_failure(AttemptFailure::Status(StatusCode::SERVICE_UNAVAILABLE)));
+  }
+
+  #[test]
+  fn direct_retry_policy_honors_route_enable_override() {
+    let policy = direct_retry_policy(
+      r#"
+[proxy.retry]
+enabled = false
+on = ["502"]
+"#,
+      r#"
+
+[routes.retry]
+enabled = true
+on = ["503"]
+"#,
+      Method::GET,
+    );
+
+    assert!(policy.enabled);
+    assert!(policy.matches_failure(AttemptFailure::Status(StatusCode::SERVICE_UNAVAILABLE)));
+    assert!(!policy.matches_failure(AttemptFailure::Status(StatusCode::BAD_GATEWAY)));
+  }
+
+  #[test]
+  fn direct_retry_policy_keeps_non_idempotent_gate() {
+    let policy = direct_retry_policy(
+      r#"
+[proxy.retry]
+enabled = false
+"#,
+      r#"
+
+[routes.retry]
+enabled = true
+on = ["503"]
+"#,
+      Method::POST,
+    );
+
+    assert!(!policy.enabled);
+    assert!(!policy.matches_failure(AttemptFailure::Status(StatusCode::SERVICE_UNAVAILABLE)));
   }
 
   #[test]

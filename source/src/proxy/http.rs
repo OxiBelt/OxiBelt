@@ -1363,8 +1363,14 @@ where
           resolved.route,
           semantics::should_retry_grpc(&state.config),
         )
-      } else {
+      } else if pool_selection.is_some() {
         EffectiveRetryPolicy::for_http_request(&state.config, resolved.route, &request_method)
+      } else {
+        EffectiveRetryPolicy::for_direct_http_request(
+          &state.config,
+          resolved.route,
+          &request_method,
+        )
       };
       if let Some(selection) = pool_selection.take() {
         pool_failures_reported = true;
@@ -2984,7 +2990,7 @@ async fn background_refresh(
     state.metrics.record_cache_background_refresh_skip();
     return Ok(());
   };
-  let retry_policy = EffectiveRetryPolicy::disabled(&state.config);
+  let retry_policy = EffectiveRetryPolicy::disabled_direct();
   let response = send_with_retry(client, outbound, timeouts, &state, &retry_policy).await?;
   let (mut parts, body) = response.into_parts();
   if parts.status == StatusCode::NOT_MODIFIED {

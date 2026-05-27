@@ -148,8 +148,11 @@ impl PlainProxyFastPath {
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
     let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-    let retry_policy =
-      EffectiveRetryPolicy::for_http_request(&state.config, resolved.route, request.method());
+    let retry_policy = if pool_selection.is_some() {
+      EffectiveRetryPolicy::for_http_request(&state.config, resolved.route, request.method())
+    } else {
+      EffectiveRetryPolicy::for_direct_http_request(&state.config, resolved.route, request.method())
+    };
     let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
     let request_context =
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
