@@ -103,6 +103,25 @@ append_container_stderr() {
   fi
 }
 
+docker_build_with_retry() {
+  local attempt=1
+  local max_attempts=3
+  local status=0
+
+  while ((attempt <= max_attempts)); do
+    if docker build "$@"; then
+      return 0
+    fi
+    status=$?
+    if ((attempt == max_attempts)); then
+      return "${status}"
+    fi
+    echo "docker build failed on attempt ${attempt}/${max_attempts}; retrying" >&2
+    sleep 5
+    attempt=$((attempt + 1))
+  done
+}
+
 cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
   materialize \
   --suite docker \
@@ -1729,42 +1748,42 @@ fi
 docker network create "${network_name}" >/dev/null
 
 if [[ "${CASE_EXPECT_START}" == "success" || "${CASE_NEED_HTTP_UPSTREAM}" == "1" || "${CASE_NEED_HTTPS_UPSTREAM}" == "1" || "${CASE_NEED_ALT_UPSTREAM}" == "1" ]]; then
-  docker build \
+  docker_build_with_retry \
     -t "${mock_image}" \
     -f "${repo_root}/tests/docker/mock_upstream/Dockerfile" \
     "${repo_root}/tests/docker/mock_upstream" >/dev/null
 fi
 
 if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
-  docker build \
+  docker_build_with_retry \
     -t "${mock_dns_image}" \
     -f "${repo_root}/tests/docker/mock_dns/Dockerfile" \
     "${repo_root}/tests/docker/mock_dns" >/dev/null
 fi
 
 if [[ "${CASE_NEED_KUBERNETES_SERVER}" == "1" ]]; then
-  docker build \
+  docker_build_with_retry \
     -t "${mock_kubernetes_image}" \
     -f "${repo_root}/tests/docker/mock_kubernetes/Dockerfile" \
     "${repo_root}/tests/docker/mock_kubernetes" >/dev/null
 fi
 
 if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
-  docker build \
+  docker_build_with_retry \
     -t "${pq_probe_image}" \
     -f "${repo_root}/tests/docker/pq_probe/Dockerfile" \
     "${repo_root}/tests/docker/pq_probe" >/dev/null
 fi
 
 if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" || "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" || "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" || "${CASE_NEED_TURN_UDP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TCP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TLS_UPSTREAM}" == "1" ]]; then
-  docker build \
+  docker_build_with_retry \
     -t "${protocol_probe_image}" \
     -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
     "${repo_root}/tests/docker/protocol_probe" >/dev/null
 fi
 
 if [[ "${CASE_NEED_POSTGRES}" == "1" ]]; then
-  docker build \
+  docker_build_with_retry \
     -t "${postgres_image}" \
     -f "${repo_root}/tests/docker/postgres/Dockerfile" \
     "${repo_root}/tests/docker/postgres" >/dev/null
@@ -1791,7 +1810,7 @@ fi
 
 if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   remove_proxy_image=1
-  docker build \
+  docker_build_with_retry \
     -t "${proxy_image}" \
     -f "${repo_root}/source/ops/Dockerfile.alpine" \
     "${repo_root}" >/dev/null

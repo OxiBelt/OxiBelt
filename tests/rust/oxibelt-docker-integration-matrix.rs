@@ -2748,7 +2748,7 @@ TOML
 
   etag="$(admin_config_etag)"
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/load" 403 "POST" "${load_body}" "Authorization: Bearer matrix-upstream-token" "If-Match: ${etag}")"
-  assert_response_jq "${response}" '.body == "forbidden"'
+  assert_response_jq "${response}" '(.body | fromjson) as $body | $body.error.code == "permission_denied" and $body.error.message == "forbidden" and $body.error.details.action == "config:Load"'
 
   etag="$(admin_config_etag)"
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/load" 200 "POST" "${load_body}" "Authorization: Bearer matrix-admin-token" "If-Match: ${etag}")"
@@ -2795,7 +2795,7 @@ TOML
 
   etag="$(admin_config_etag)"
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/tls/downstream/reload" 403 "POST" "" "Authorization: Bearer matrix-viewer-token" "If-Match: ${etag}")"
-  assert_response_jq "${response}" '.body == "forbidden"'
+  assert_response_jq "${response}" '(.body | fromjson) as $body | $body.error.code == "permission_denied" and $body.error.message == "forbidden" and $body.error.details.action == "config:ReloadDownstreamTls"'
 
   etag="$(admin_config_etag)"
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/tls/downstream/reload" 200 "POST" "" "Authorization: Bearer matrix-admin-token" "If-Match: ${etag}")"
@@ -3762,13 +3762,13 @@ run_case_checks() {
   assert_response_jq "${response}" '.body | fromjson | length == 1'
 
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/primary" 403 "PATCH" '{"state":"down"}' "Authorization: Bearer matrix-viewer-token")"
-  assert_response_jq "${response}" '.body == "forbidden"'
+  assert_response_jq "${response}" '(.body | fromjson) as $body | $body.error.code == "permission_denied" and $body.error.message == "forbidden" and $body.error.details.action == "upstream-pool:UpdateServer"'
 
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool/servers/primary" 200 "PATCH" '{"state":"down"}' "Authorization: Bearer matrix-upstream-token")"
   assert_response_jq "${response}" '.body | fromjson | .ok == true'
 
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools" 401 "GET" "" "Authorization: Bearer wrong-token")"
-  assert_response_jq "${response}" '.body == "unauthorized"'
+  assert_response_jq "${response}" '(.body | fromjson) as $body | $body.error.code == "unauthorized" and $body.error.message == "unauthorized"'
 }
 "#,
             None,
@@ -4005,7 +4005,7 @@ run_case_checks() {
     "X-OxiBelt-Cache-Timestamp: 1700000000" \
     "X-OxiBelt-Cache-Nonce: matrix-signed-purge" \
     "X-OxiBelt-Cache-Signature: 8PmsDoehRk/B9RyQnNWI9mWFMgXw6brivm7pa/5Da08=")"
-  assert_response_jq "${replay}" '.body == "unauthorized"'
+  assert_response_jq "${replay}" '(.body | fromjson) as $body | $body.error.code == "unauthorized" and $body.error.message == "unauthorized"'
 }
 "#,
             None,
