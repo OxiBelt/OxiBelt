@@ -6,6 +6,7 @@ use oxibelt::admin_client::AdminClient;
 use serde_json::{Value, json};
 
 use super::cli::*;
+use crate::resource_hint;
 
 pub(crate) struct RequestPlan {
   pub(crate) method: Method,
@@ -18,7 +19,24 @@ pub(crate) struct RequestPlan {
 
 pub(crate) struct PermissionHint {
   pub(crate) action: String,
-  pub(crate) resource: String,
+  pub(crate) resources: Vec<String>,
+}
+
+impl PermissionHint {
+  pub(crate) fn new(action: &str, resource: &str) -> Self {
+    Self::with_resources(action, vec![resource.to_string()])
+  }
+
+  pub(crate) fn with_resources(action: &str, resources: Vec<String>) -> Self {
+    let mut resources = resource_hint::unique(resources);
+    if resources.is_empty() {
+      resources.push("*".to_string());
+    }
+    Self {
+      action: action.to_string(),
+      resources,
+    }
+  }
 }
 
 pub(crate) enum ResponseFilter {
@@ -64,7 +82,7 @@ pub(crate) async fn plan_command(
         "/admin/v1/ipm/simulate",
         json!({ "action": args.action, "resource": args.resource }),
         "ipm:Simulate",
-        "*",
+        resource_hint::ipm_simulation(),
       ),
     },
     Command::Files(command) => match &command.command {
@@ -226,7 +244,7 @@ fn plan_pool(command: &PoolCommand) -> anyhow::Result<RequestPlan> {
         "backup": args.backup,
       }),
       "upstream-pool:AddServer",
-      &args.pool,
+      &resource_hint::upstream_pool_server(&args.pool, &args.id),
     ),
     PoolSubcommand::UpdateServer(args) => pool_patch(
       &args.pool,
@@ -245,7 +263,7 @@ fn plan_pool(command: &PoolCommand) -> anyhow::Result<RequestPlan> {
         path_id(&args.server_id)?
       ),
       "upstream-pool:RemoveServer",
-      &args.pool,
+      &resource_hint::upstream_pool_server(&args.pool, &args.server_id),
     ),
     PoolSubcommand::Ready(args) => pool_state(args, "ready"),
     PoolSubcommand::Drain(args) => pool_state(args, "drain"),
@@ -337,18 +355,20 @@ fn plan_oxirule(command: &OxiRuleCommand) -> anyhow::Result<RequestPlan> {
 
 fn plan_cache(command: &CacheCommand) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    CacheSubcommand::Warm(args) => post_json(
-      "/admin/v1/cache/warm",
-      read_json_file(&args.json)?,
-      "cache:Warm",
-      "policy/*",
-    ),
-    CacheSubcommand::KeyExplain(args) => post_json(
-      "/admin/v1/cache/key-explain",
-      read_json_file(&args.json)?,
-      "cache:ExplainKey",
-      "policy/*",
-    ),
+    CacheSubcommand::Warm(args) => {
+      let body = read_json_file(&args.json)?;
+      let permission =
+        PermissionHint::with_resources("cache:Warm", resource_hint::cache_warm_target(&body));
+      post_json_with_permission("/admin/v1/cache/warm", body, permission)
+    }
+    CacheSubcommand::KeyExplain(args) => {
+      let body = read_json_file(&args.json)?;
+      let permission = PermissionHint::with_resources(
+        "cache:ExplainKey",
+        resource_hint::cache_key_explain_target(&body),
+      );
+      post_json_with_permission("/admin/v1/cache/key-explain", body, permission)
+    }
     CacheSubcommand::Purge(purge) => plan_cache_purge(purge),
   }
 }
@@ -366,6 +386,7 @@ fn plan_cache_purge(purge: &CachePurgeCommand) -> anyhow::Result<RequestPlan> {
       }),
       "cache:PurgeObject",
       &args.policy,
+      Some(&args.host),
     ),
     CachePurgeSubcommand::Prefix(args) => cache_purge(
       json!({
@@ -378,6 +399,7 @@ fn plan_cache_purge(purge: &CachePurgeCommand) -> anyhow::Result<RequestPlan> {
       }),
       "cache:PurgePrefix",
       &args.policy,
+      args.host.as_deref(),
     ),
     CachePurgeSubcommand::Tag(args) => cache_purge(
       json!({
@@ -390,6 +412,7 @@ fn plan_cache_purge(purge: &CachePurgeCommand) -> anyhow::Result<RequestPlan> {
       }),
       "cache:PurgeTag",
       &args.policy,
+      args.host.as_deref(),
     ),
   }
 }
@@ -452,12 +475,20 @@ pub(crate) fn post_json(
   action: &str,
   resource: &str,
 ) -> anyhow::Result<RequestPlan> {
+  post_json_with_permission(endpoint, body, PermissionHint::new(action, resource))
+}
+
+pub(crate) fn post_json_with_permission(
+  endpoint: &str,
+  body: Value,
+  permission: PermissionHint,
+) -> anyhow::Result<RequestPlan> {
   Ok(RequestPlan {
     method: Method::POST,
     endpoint: endpoint.to_string(),
     body: Some(body),
     if_match: None,
-    permission: permission(action, resource),
+    permission,
     filter: ResponseFilter::None,
   })
 }
@@ -480,23 +511,38 @@ pub(crate) fn patch_json(
   action: &str,
   resource: &str,
 ) -> anyhow::Result<RequestPlan> {
+  patch_json_with_permission(endpoint, body, PermissionHint::new(action, resource))
+}
+
+pub(crate) fn patch_json_with_permission(
+  endpoint: &str,
+  body: Value,
+  permission: PermissionHint,
+) -> anyhow::Result<RequestPlan> {
   Ok(RequestPlan {
     method: Method::PATCH,
     endpoint: endpoint.to_string(),
     body: Some(body),
     if_match: None,
-    permission: permission(action, resource),
+    permission,
     filter: ResponseFilter::None,
   })
 }
 
 pub(crate) fn delete(endpoint: &str, action: &str, resource: &str) -> anyhow::Result<RequestPlan> {
+  delete_with_permission(endpoint, PermissionHint::new(action, resource))
+}
+
+pub(crate) fn delete_with_permission(
+  endpoint: &str,
+  permission: PermissionHint,
+) -> anyhow::Result<RequestPlan> {
   Ok(RequestPlan {
     method: Method::DELETE,
     endpoint: endpoint.to_string(),
     body: None,
     if_match: None,
-    permission: permission(action, resource),
+    permission,
     filter: ResponseFilter::None,
   })
 }
@@ -526,7 +572,7 @@ fn pool_patch(pool: &str, server_id: &str, body: Value) -> anyhow::Result<Reques
     ),
     remove_nulls(body),
     "upstream-pool:UpdateServer",
-    pool,
+    &resource_hint::upstream_pool_server(pool, server_id),
   )
 }
 
@@ -552,20 +598,21 @@ fn oxirule_eval(
   )
 }
 
-fn cache_purge(body: Value, action: &str, policy: &str) -> anyhow::Result<RequestPlan> {
-  post_json(
+fn cache_purge(
+  body: Value,
+  action: &str,
+  policy: &str,
+  host: Option<&str>,
+) -> anyhow::Result<RequestPlan> {
+  post_json_with_permission(
     "/admin/v1/cache/purge",
     remove_nulls(body),
-    action,
-    &format!("policy/{policy}"),
+    PermissionHint::with_resources(action, resource_hint::cache_target(policy, host)),
   )
 }
 
 fn permission(action: &str, resource: &str) -> PermissionHint {
-  PermissionHint {
-    action: action.to_string(),
-    resource: resource.to_string(),
-  }
+  PermissionHint::new(action, resource)
 }
 
 fn read_text_file(path: &Path) -> anyhow::Result<String> {
@@ -640,6 +687,10 @@ fn path_id(value: &str) -> anyhow::Result<&str> {
 #[cfg(test)]
 #[path = "plan_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "resource_hint_plan_tests.rs"]
+mod resource_hint_plan_tests;
 
 #[cfg(test)]
 #[path = "ipm_plan_tests.rs"]

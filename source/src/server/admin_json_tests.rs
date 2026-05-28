@@ -467,7 +467,10 @@ name = "exact-default"
 [[ipm.policies.statements]]
 effect = "allow"
 actions = ["cache:PurgeObject"]
-resources = ["oxibelt:oxibelt:cache:policy/default"]
+resources = [
+  "oxibelt:oxibelt:cache:policy/default",
+  "oxibelt:oxibelt:cache:host/example.com",
+]
 
 [[ipm.bindings]]
 principal = "purger"

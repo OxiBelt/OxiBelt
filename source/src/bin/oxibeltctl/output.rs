@@ -31,18 +31,34 @@ pub(crate) fn print_permission_hint(permission: &PermissionHint) {
 }
 
 fn permission_hint_lines(permission: &PermissionHint) -> Vec<String> {
-  vec![
+  let mut lines = vec![
     "permission denied by Admin IPM".to_string(),
     format!("required action: {}", permission.action),
-    format!("required resource: {}", permission.resource),
-    format!(
-      "check with: oxibeltctl auth check --action {} --resource {}",
-      permission.action, permission.resource
-    ),
-    format!(
-      "break-glass access credential: set {BREAK_GLASS_TOKEN_ENV} and rerun with --break-glass-access"
-    ),
-  ]
+  ];
+  if permission.resources.len() == 1 {
+    let resource = &permission.resources[0];
+    lines.push(format!("required resource: {resource}"));
+    lines.push(format!(
+      "check with: oxibeltctl auth check --action {} --resource {resource}",
+      permission.action
+    ));
+  } else {
+    lines.push("required resources:".to_string());
+    for resource in &permission.resources {
+      lines.push(format!("  - {resource}"));
+    }
+    lines.push("check each resource with:".to_string());
+    for resource in &permission.resources {
+      lines.push(format!(
+        "  oxibeltctl auth check --action {} --resource {resource}",
+        permission.action
+      ));
+    }
+  }
+  lines.push(format!(
+    "break-glass access credential: set {BREAK_GLASS_TOKEN_ENV} and rerun with --break-glass-access"
+  ));
+  lines
 }
 
 fn filtered_body(response: &AdminResponse, filter: &ResponseFilter) -> anyhow::Result<Vec<u8>> {
@@ -67,7 +83,7 @@ mod tests {
   fn permission_hint_includes_auth_check_and_break_glass() {
     let lines = permission_hint_lines(&PermissionHint {
       action: "config:GetStatus".to_string(),
-      resource: "*".to_string(),
+      resources: vec!["*".to_string()],
     });
     assert!(lines.iter().any(|line| line.contains("permission denied")));
     assert!(lines.iter().any(|line| line.contains("auth check")));
@@ -75,6 +91,25 @@ mod tests {
       lines
         .iter()
         .any(|line| line.contains(BREAK_GLASS_TOKEN_ENV))
+    );
+  }
+
+  #[test]
+  fn permission_hint_lists_multiple_resources() {
+    let lines = permission_hint_lines(&PermissionHint {
+      action: "cache:PurgeObject".to_string(),
+      resources: vec!["policy/default".to_string(), "host/example.com".to_string()],
+    });
+    assert!(lines.iter().any(|line| line == "required resources:"));
+    assert!(
+      lines
+        .iter()
+        .any(|line| line.contains("--resource policy/default"))
+    );
+    assert!(
+      lines
+        .iter()
+        .any(|line| line.contains("--resource host/example.com"))
     );
   }
 }

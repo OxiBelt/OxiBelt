@@ -47,10 +47,7 @@ fn preflight_endpoint(external_probes: &[oxibelt::diagnostics::ExternalProbeKind
 }
 
 fn permission(action: &str, resource: &str) -> PermissionHint {
-  PermissionHint {
-    action: action.to_string(),
-    resource: resource.to_string(),
-  }
+  PermissionHint::new(action, resource)
 }
 
 fn read_text_file(path: &Path) -> anyhow::Result<String> {

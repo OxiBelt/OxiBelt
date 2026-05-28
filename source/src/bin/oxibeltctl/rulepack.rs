@@ -658,10 +658,7 @@ fn diagnostic_url(url: &Url) -> String {
 }
 
 fn permission(action: &str, resource: &str) -> PermissionHint {
-  PermissionHint {
-    action: action.to_string(),
-    resource: resource.to_string(),
-  }
+  PermissionHint::new(action, resource)
 }
 
 #[derive(Debug)]

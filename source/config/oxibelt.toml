@@ -430,6 +430,63 @@ argon2id_memory_mib = 128
 ## access, grant admin:UpdateConfig on oxibelt:<namespace>:admin:config and/or
 ## ipm:UpdateConfig on oxibelt:<namespace>:ipm:config in addition to the base
 ## config operation such as config:Load, config:Rollback, or config:SyncFiles.
+##
+## Resource-specific Admin examples. Dynamic components that contain reserved
+## characters are percent-encoded before IPM matching.
+#[[ipm.policies]]
+# name = "admin-resource-scopes-example"
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["cache:ExplainKey", "cache:Warm", "cache:PurgeObject"]
+# resources = [
+#   "oxibelt:oxibelt:cache:policy/default",
+#   "oxibelt:oxibelt:cache:host/example.com",
+# ]
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["dynamic-policy:Create", "dynamic-policy:Apply"]
+# resources = [
+#   "oxibelt:oxibelt:dynamic-policy:source/oxibeltctl/name/*",
+#   "oxibelt:oxibelt:dynamic-policy:route/app-root",
+# ]
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["upstream-pool:List"]
+# resources = ["oxibelt:oxibelt:upstream-pool:*"]
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["upstream-pool:Get"]
+# resources = ["oxibelt:oxibelt:upstream-pool:app-pool"]
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = ["upstream-pool:AddServer", "upstream-pool:UpdateServer"]
+# resources = ["oxibelt:oxibelt:upstream-pool:app-pool/server/*"]
+#
+#[[ipm.policies.statements]]
+# effect = "allow"
+# actions = [
+#   "ipm:GetStatus",
+#   "ipm:GetPrincipal",
+#   "ipm:CreateCredential",
+#   "ipm:CreateBinding",
+#   "ipm:ReadAudit",
+#   "ipm:Simulate",
+# ]
+# resources = [
+#   "oxibelt:oxibelt:ipm:status/current",
+#   "oxibelt:oxibelt:ipm:principal/admin",
+#   "oxibelt:oxibelt:ipm:credential/admin-env-token",
+#   "oxibelt:oxibelt:ipm:policy/admin-full-access",
+#   "oxibelt:oxibelt:ipm:binding/group.platform-admins.admin-full-access",
+#   "oxibelt:oxibelt:ipm:group/platform-admins",
+#   "oxibelt:oxibelt:ipm:audit/current",
+#   "oxibelt:oxibelt:ipm:simulation/current",
+# ]
 
 #[[ipm.bindings]]
 # group = "platform-admins"

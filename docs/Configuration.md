@@ -926,8 +926,17 @@ name = "upstream-pool-ops"
 
 [[ipm.policies.statements]]
 effect = "allow"
-actions = ["upstream-pool:*"]
+actions = ["upstream-pool:List", "upstream-pool:Get"]
 resources = ["oxibelt:oxibelt:upstream-pool:*"]
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = [
+  "upstream-pool:AddServer",
+  "upstream-pool:UpdateServer",
+  "upstream-pool:RemoveServer",
+]
+resources = ["oxibelt:oxibelt:upstream-pool:app-pool/server/*"]
 
 [[ipm.bindings]]
 group = "upstream-operators"
@@ -1027,6 +1036,21 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
 Actions use `service:Action` syntax. Initial services are `admin`, `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. Admin API metadata reads require `admin:ReadMetadata` on resources such as `oxibelt:<namespace>:admin:metadata/openapi`, and the unified Admin audit log requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin`. Protected control-plane configuration changes require `admin:UpdateConfig` on `oxibelt:<namespace>:admin:config` for `[admin]` changes and `ipm:UpdateConfig` on `oxibelt:<namespace>:ipm:config` for `[ipm]` changes, in addition to the base config operation permission. IPM administration uses `ipm:GetStatus`, `ipm:ListPrincipals`, `ipm:GetPrincipal`, `ipm:CreatePrincipal`, `ipm:UpdatePrincipal`, `ipm:DeletePrincipal`, `ipm:ListCredentials`, `ipm:GetCredential`, `ipm:CreateCredential`, `ipm:UpdateCredential`, `ipm:RotateCredential`, `ipm:RevokeCredential`, `ipm:DeleteCredential`, `ipm:ListPolicies`, `ipm:GetPolicy`, `ipm:CreatePolicy`, `ipm:UpdatePolicy`, `ipm:DeletePolicy`, `ipm:ListBindings`, `ipm:CreateBinding`, `ipm:DeleteBinding`, `ipm:ReadAudit`, and `ipm:Simulate`. Dynamic policy automation uses `dynamic-policy:List`, `dynamic-policy:Get`, `dynamic-policy:Create`, `dynamic-policy:Apply`, `dynamic-policy:Update`, `dynamic-policy:Delete`, `dynamic-policy:Export`, `dynamic-policy:Import`, and `dynamic-policy:ReadAudit`. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:PutOxiRulePack`, `waf:DeleteOxiRulePack`, `waf:ListOxiRulePacks`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:admin:config`, `oxibelt:oxibelt:admin:metadata/openapi`, `oxibelt:oxibelt:admin:audit/admin`, `oxibelt:oxibelt:ipm:config`, `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:oxirule-rulepack/rulepacks/admin.oxirule-rulepack.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
+
+Resource-specific Admin endpoints use typed resource names and may require
+multiple resources for one request. Cache operations use
+`oxibelt:<namespace>:cache:policy/<policy>` plus
+`oxibelt:<namespace>:cache:host/<normalized-host>`; hostless tag purge uses
+`host/*`. Dynamic policy writes use
+`oxibelt:<namespace>:dynamic-policy:source/<source>/name/<name>` and, when a
+route is present, `oxibelt:<namespace>:dynamic-policy:route/<route>`.
+Upstream-pool reads use `*` or `<pool>`, while server mutations use
+`oxibelt:<namespace>:upstream-pool:<pool>/server/<server_id>`. IPM resources
+are `status/current`, `principal/<id>`, `credential/<id>`, `policy/<name>`,
+`binding/<id>`, `group/<group>`, `audit/current`, and `simulation/current`.
+Dynamic resource components are percent-encoded when they contain reserved
+characters such as `/`, `:`, or spaces; wildcards such as `*` and
+`policy/*` continue to match through normal IPM wildcard evaluation.
 
 OxiRule development API requests that set `include_active_rules = true` evaluate active WAF policy as well as the submitted candidate, so they require the same devtools action on `oxirule/*`; replay uses `replay/*`.
 
@@ -1370,7 +1394,7 @@ Admin upstream-pool endpoints:
 - `PATCH /admin/v1/upstream-pools/{pool}/servers/{server_id}`
 - `DELETE /admin/v1/upstream-pools/{pool}/servers/{server_id}`
 
-Runtime server mutation accepts JSON fields `id`, `origin`, `state`, `weight`, `backup`, and `max_conns` where applicable. `DELETE` is limited to servers created by the admin API. Every admin mutation emits a structured audit log with actor, peer, operation, target, outcome, and validation error when rejected.
+Runtime server mutation accepts JSON fields `id`, `origin`, `state`, `weight`, `backup`, and `max_conns` where applicable. Pool list checks `upstream-pool:List` on `*`, pool get checks `upstream-pool:Get` on `<pool>`, and add, update, or remove server checks the matching action on `<pool>/server/<server_id>`. `DELETE` is limited to servers created by the admin API. Every admin mutation emits a structured audit log with actor, peer, operation, target, outcome, and validation error when rejected.
 
 Dynamic policy automation endpoints:
 
@@ -1384,7 +1408,7 @@ Dynamic policy automation endpoints:
 - `GET /admin/v1/dynamic-policies/export`
 - `POST /admin/v1/dynamic-policies/import`
 
-Create/import/apply JSON accepts `source`, `name`, `action`, `subject_type`, `subject`, optional `route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`, `reason`, `code`, `mode`, and either `expires_at` or `ttl_seconds` when TTL is required. Create, import, apply, and patch reject changes that would exceed either the global active policy cap or the matching source quota bucket. Raw `POST /admin/v1/dynamic-policies` preserves create semantics. `POST /admin/v1/dynamic-policies/apply` is the operator UX upsert endpoint: it creates or replaces the row selected by `namespace + source + name`, disables duplicate rows beyond the lowest `id`, and is intended for repeat panic-button clicks that should not consume extra quota. Import payloads use `{ "policies": [...] }` and upsert by `namespace + source + name`; duplicate rows beyond the lowest `id` are disabled. `DELETE` disables the row instead of physically removing it.
+Create/import/apply JSON accepts `source`, `name`, `action`, `subject_type`, `subject`, optional `route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`, `reason`, `code`, `mode`, and either `expires_at` or `ttl_seconds` when TTL is required. Create, import, and apply check `source/<source>/name/<name>` plus `route/<route_name>` when present before writing. Get, patch, and delete by ID first resolve the existing row, return `404` if absent, and then authorize the stored source/name/route; patch also authorizes the proposed source/name/route when those fields change. Create, import, apply, and patch reject changes that would exceed either the global active policy cap or the matching source quota bucket. Raw `POST /admin/v1/dynamic-policies` preserves create semantics. `POST /admin/v1/dynamic-policies/apply` is the operator UX upsert endpoint: it creates or replaces the row selected by `namespace + source + name`, disables duplicate rows beyond the lowest `id`, and is intended for repeat panic-button clicks that should not consume extra quota. Import payloads use `{ "policies": [...] }` and upsert by `namespace + source + name`; duplicate rows beyond the lowest `id` are disabled. `DELETE` disables the row instead of physically removing it.
 
 `GET /admin/v1/dynamic-policies/audit` returns recent audit rows as `{ "audit": [...] }`. `limit` defaults to `100` and is capped at `1000`; `policy_id` restricts results to one policy. Dynamic policy create, apply, import, patch, and delete successes are audited, and validation or quota rejects are written as best-effort audit rows with `outcome = "rejected"`. The audit actor is derived from Admin authentication and authorization, not from JSON supplied by a CLI or automation client.
 
@@ -1397,7 +1421,7 @@ POST /cache/purge-tag?policy=default&tag=release-2026-05-09
 POST /admin/v1/cache/purge
 ```
 
-The `/admin/v1/cache/purge` endpoint accepts JSON with `"type": "exact"`, `"prefix"`, or `"tag"`, plus the same selectors used by the query endpoints. Exact purge uses `policy`, `scheme`, `host`, `uri`, and optional `partition`; prefix purge uses `path_prefix`; tag purge uses `tag` plus optional `scheme`, `host`, and `partition`. It returns `{"purged": number}` and requires the matching `cache:PurgeObject`, `cache:PurgePrefix`, or `cache:PurgeTag` IPM action.
+The `/admin/v1/cache/purge` endpoint accepts JSON with `"type": "exact"`, `"prefix"`, or `"tag"`, plus the same selectors used by the query endpoints. Exact purge uses `policy`, `scheme`, `host`, `uri`, and optional `partition`; prefix purge uses `path_prefix`; tag purge uses `tag` plus optional `scheme`, `host`, and `partition`. It returns `{"purged": number}` and requires the matching `cache:PurgeObject`, `cache:PurgePrefix`, or `cache:PurgeTag` IPM action on both `policy/<policy>` and `host/<normalized-host>`. Tag purge without a host requires `host/*`.
 
 Query-string purge requests also accept optional `partition`. When `[admin.cache_purge_signing]` is enabled, the `/cache/purge*` query endpoints may authenticate with `X-OxiBelt-Cache-Timestamp`, `X-OxiBelt-Cache-Nonce`, and `X-OxiBelt-Cache-Signature` instead of a bearer token. The signature is base64 HMAC-SHA256 over `OXIBELT-CACHE-PURGE-V1\n{method}\n{path_and_query}\n{sha256(body)}\n{timestamp}\n{nonce}`; signed purge requests must use an empty body. The JSON v1 purge endpoint is bearer-token only.
 
@@ -1408,7 +1432,7 @@ POST /admin/v1/cache/key-explain
 POST /admin/v1/cache/warm
 ```
 
-`key-explain` requires `cache:ExplainKey` and accepts `{ "policy": "default", "method": "GET", "scheme": "https", "host": "example.test", "uri": "/asset.css", "headers": {}, "response_headers": {} }`. It returns the selected policy, partition, base key, optional variant key, Vary fields, and cacheability reasons. `warm` requires `cache:Warm` and accepts `{ "items": [{ "scheme": "https", "host": "example.test", "uri": "/asset.css", "method": "GET", "headers": {} }] }`; methods are limited to `GET` and `HEAD`, and each item returns `stored`, `not_cacheable`, `upstream_error`, or `validation_error`.
+`key-explain` requires `cache:ExplainKey` on both `policy/<policy>` and `host/<normalized-host>` and accepts `{ "policy": "default", "method": "GET", "scheme": "https", "host": "example.test", "uri": "/asset.css", "headers": {}, "response_headers": {} }`. It returns the selected policy, partition, base key, optional variant key, Vary fields, and cacheability reasons. `warm` requires `cache:Warm` on each item's effective cache policy and normalized host, and accepts `{ "items": [{ "scheme": "https", "host": "example.test", "uri": "/asset.css", "method": "GET", "headers": {} }] }`; methods are limited to `GET` and `HEAD`, and each item returns `stored`, `not_cacheable`, `upstream_error`, or `validation_error`. If any warm item is not authorized, the request returns one `403` and no warm request is issued.
 
 Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics include aggregate TLS server session storage diagnostic counters for stateful resumption cache calls and approximate lock/put timing. With `metrics.detail = "detailed"`, Prometheus also includes bounded-label HTTP, upstream, cache, TLS handshake, QUIC Retry, WebSocket, WebTransport, and TURN counters/histograms using route/upstream/protocol/status/cache-reason style labels. Cache miss reasons include lookup misses, fill lock timeouts, shared fill lock conflicts, and fills that completed without storing an entry. Detailed mode also emits `oxibelt_cache_fill_stage_duration_ms` with `route`, `policy`, `stage`, and `outcome` labels for `lock_wait`, `head_decision`, `body_collect`, `local_store`, and `shared_store`. `metrics.detail = "basic"` keeps only aggregate counters and gauges. `metrics.histogram_buckets_ms` must be a non-empty strictly increasing list of positive millisecond buckets. The public metrics listener omits detailed WAF rule names, IDs, modes, routes, and per-rule hit/cost counters because it is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoints for rule-level data.
 

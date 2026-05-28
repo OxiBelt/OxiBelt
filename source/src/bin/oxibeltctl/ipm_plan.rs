@@ -4,35 +4,55 @@ use oxibelt::admin_client::AdminClient;
 use serde_json::{Value, json};
 
 use crate::cli::*;
-use crate::plan::{RequestPlan, delete, get, patch_json, post_json, read_json_file};
+use crate::plan::{
+  PermissionHint, RequestPlan, delete, delete_with_permission, get, patch_json,
+  patch_json_with_permission, post_json, post_json_with_permission, read_json_file,
+};
+use crate::resource_hint;
 
 pub(crate) async fn plan_ipm(
   client: &AdminClient,
   command: &IpmCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmSubcommand::Status => get("/admin/v1/ipm/status", "ipm:GetStatus", "*"),
+    IpmSubcommand::Status => get(
+      "/admin/v1/ipm/status",
+      "ipm:GetStatus",
+      resource_hint::ipm_status(),
+    ),
     IpmSubcommand::List(args) => plan_legacy_list(args),
     IpmSubcommand::Simulate(args) => post_json(
       "/admin/v1/ipm/simulate",
       json!({ "action": args.action, "resource": args.resource }),
       "ipm:Simulate",
-      "*",
+      resource_hint::ipm_simulation(),
     ),
     IpmSubcommand::Principal(command) => plan_principal(client, command).await,
     IpmSubcommand::Credential(command) => plan_credential(client, command).await,
     IpmSubcommand::Policy(command) => plan_policy(client, command).await,
     IpmSubcommand::Binding(command) => plan_binding(client, command).await,
-    IpmSubcommand::Audit(args) => get(&audit_endpoint(args), "ipm:ReadAudit", "audit/ipm"),
+    IpmSubcommand::Audit(args) => get(
+      &audit_endpoint(args),
+      "ipm:ReadAudit",
+      resource_hint::ipm_audit(),
+    ),
   }
 }
 
 fn plan_legacy_list(args: &IpmListArgs) -> anyhow::Result<RequestPlan> {
   match &args.target {
-    IpmListTarget::Principals => get("/admin/v1/ipm/principals", "ipm:ListPrincipals", "*"),
-    IpmListTarget::Credentials => get("/admin/v1/ipm/credentials", "ipm:ListCredentials", "*"),
-    IpmListTarget::Policies => get("/admin/v1/ipm/policies", "ipm:ListPolicies", "*"),
-    IpmListTarget::Bindings => get("/admin/v1/ipm/bindings", "ipm:ListBindings", "*"),
+    IpmListTarget::Principals => get(
+      "/admin/v1/ipm/principals",
+      "ipm:ListPrincipals",
+      "principal/*",
+    ),
+    IpmListTarget::Credentials => get(
+      "/admin/v1/ipm/credentials",
+      "ipm:ListCredentials",
+      "credential/*",
+    ),
+    IpmListTarget::Policies => get("/admin/v1/ipm/policies", "ipm:ListPolicies", "policy/*"),
+    IpmListTarget::Bindings => get("/admin/v1/ipm/bindings", "ipm:ListBindings", "binding/*"),
   }
 }
 
@@ -41,11 +61,15 @@ async fn plan_principal(
   command: &IpmPrincipalCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmPrincipalSubcommand::List => get("/admin/v1/ipm/principals", "ipm:ListPrincipals", "*"),
+    IpmPrincipalSubcommand::List => get(
+      "/admin/v1/ipm/principals",
+      "ipm:ListPrincipals",
+      "principal/*",
+    ),
     IpmPrincipalSubcommand::Get(args) => get(
       &format!("/admin/v1/ipm/principals/{}", path_id(&args.id)?),
       "ipm:GetPrincipal",
-      &args.id,
+      &resource_hint::ipm_principal(&args.id),
     ),
     IpmPrincipalSubcommand::Create(args) => {
       let etag = ipm_etag_or_current(client, &args.etag).await?;
@@ -59,7 +83,7 @@ async fn plan_principal(
             "enabled": !args.disabled,
           }),
           "ipm:CreatePrincipal",
-          &args.id,
+          &resource_hint::ipm_principal(&args.id),
         )?,
         etag,
       )
@@ -80,7 +104,7 @@ async fn plan_principal(
             "enabled": enabled_flag(args.enable, args.disable),
           })),
           "ipm:UpdatePrincipal",
-          &args.id,
+          &resource_hint::ipm_principal(&args.id),
         )?,
         etag,
       )
@@ -91,7 +115,7 @@ async fn plan_principal(
         delete(
           &format!("/admin/v1/ipm/principals/{}", path_id(&args.id)?),
           "ipm:DeletePrincipal",
-          &args.id,
+          &resource_hint::ipm_principal(&args.id),
         )?,
         etag,
       )
@@ -104,16 +128,20 @@ async fn plan_credential(
   command: &IpmCredentialCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmCredentialSubcommand::List => get("/admin/v1/ipm/credentials", "ipm:ListCredentials", "*"),
+    IpmCredentialSubcommand::List => get(
+      "/admin/v1/ipm/credentials",
+      "ipm:ListCredentials",
+      "credential/*",
+    ),
     IpmCredentialSubcommand::Get(args) => get(
       &format!("/admin/v1/ipm/credentials/{}", path_id(&args.id)?),
       "ipm:GetCredential",
-      &args.id,
+      &resource_hint::ipm_credential(&args.id),
     ),
     IpmCredentialSubcommand::Create(args) => {
       let etag = ipm_etag_or_current(client, &args.etag).await?;
       with_etag(
-        post_json(
+        post_json_with_permission(
           "/admin/v1/ipm/credentials",
           remove_nulls(json!({
             "id": args.id,
@@ -121,8 +149,13 @@ async fn plan_credential(
             "ttl_seconds": args.expires,
             "no_expiry": args.no_expiry,
           })),
-          "ipm:CreateCredential",
-          &args.id,
+          PermissionHint::with_resources(
+            "ipm:CreateCredential",
+            vec![
+              resource_hint::ipm_credential(&args.id),
+              resource_hint::ipm_principal(&args.principal),
+            ],
+          ),
         )?,
         etag,
       )
@@ -130,15 +163,17 @@ async fn plan_credential(
     IpmCredentialSubcommand::Patch(args) => {
       let etag = ipm_etag_or_current(client, &args.etag).await?;
       with_etag(
-        patch_json(
+        patch_json_with_permission(
           &format!("/admin/v1/ipm/credentials/{}", path_id(&args.id)?),
           remove_nulls(json!({
             "principal": args.principal,
             "enabled": enabled_flag(args.enable, args.disable),
             "ttl_seconds": args.expires,
           })),
-          "ipm:UpdateCredential",
-          &args.id,
+          PermissionHint::with_resources(
+            "ipm:UpdateCredential",
+            credential_patch_resources(&args.id, args.principal.as_deref()),
+          ),
         )?,
         etag,
       )
@@ -154,7 +189,7 @@ async fn plan_credential(
             "no_expiry": args.no_expiry,
           })),
           "ipm:RotateCredential",
-          &args.id,
+          &resource_hint::ipm_credential(&args.id),
         )?,
         etag,
       )
@@ -166,7 +201,7 @@ async fn plan_credential(
           &format!("/admin/v1/ipm/credentials/{}/revoke", path_id(&args.id)?),
           remove_nulls(json!({ "reason": args.reason })),
           "ipm:RevokeCredential",
-          &args.id,
+          &resource_hint::ipm_credential(&args.id),
         )?,
         etag,
       )
@@ -177,7 +212,7 @@ async fn plan_credential(
         delete(
           &format!("/admin/v1/ipm/credentials/{}", path_id(&args.id)?),
           "ipm:DeleteCredential",
-          &args.id,
+          &resource_hint::ipm_credential(&args.id),
         )?,
         etag,
       )
@@ -190,20 +225,21 @@ async fn plan_policy(
   command: &IpmPolicyCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmPolicySubcommand::List => get("/admin/v1/ipm/policies", "ipm:ListPolicies", "*"),
+    IpmPolicySubcommand::List => get("/admin/v1/ipm/policies", "ipm:ListPolicies", "policy/*"),
     IpmPolicySubcommand::Get(args) => get(
       &format!("/admin/v1/ipm/policies/{}", path_id(&args.id)?),
       "ipm:GetPolicy",
-      &args.id,
+      &resource_hint::ipm_policy(&args.id),
     ),
     IpmPolicySubcommand::Create(args) => {
       let etag = ipm_etag_or_current(client, &args.etag).await?;
+      let body = read_json_file(&args.json)?;
+      let resource = resource_hint::ipm_policy_create_target(&body);
       with_etag(
-        post_json(
+        post_json_with_permission(
           "/admin/v1/ipm/policies",
-          read_json_file(&args.json)?,
-          "ipm:CreatePolicy",
-          "*",
+          body,
+          PermissionHint::new("ipm:CreatePolicy", &resource),
         )?,
         etag,
       )
@@ -215,7 +251,7 @@ async fn plan_policy(
           &format!("/admin/v1/ipm/policies/{}", path_id(&args.id)?),
           read_json_file(&args.json)?,
           "ipm:UpdatePolicy",
-          &args.id,
+          &resource_hint::ipm_policy(&args.id),
         )?,
         etag,
       )
@@ -226,7 +262,7 @@ async fn plan_policy(
         delete(
           &format!("/admin/v1/ipm/policies/{}", path_id(&args.id)?),
           "ipm:DeletePolicy",
-          &args.id,
+          &resource_hint::ipm_policy(&args.id),
         )?,
         etag,
       )
@@ -239,11 +275,11 @@ async fn plan_binding(
   command: &IpmBindingCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmBindingSubcommand::List => get("/admin/v1/ipm/bindings", "ipm:ListBindings", "*"),
+    IpmBindingSubcommand::List => get("/admin/v1/ipm/bindings", "ipm:ListBindings", "binding/*"),
     IpmBindingSubcommand::Create(args) => {
       let etag = ipm_etag_or_current(client, &args.etag).await?;
       with_etag(
-        post_json(
+        post_json_with_permission(
           "/admin/v1/ipm/bindings",
           remove_nulls(json!({
             "id": args.id,
@@ -252,8 +288,15 @@ async fn plan_binding(
             "policy": args.policy,
             "enabled": !args.disabled,
           })),
-          "ipm:CreateBinding",
-          args.id.as_deref().unwrap_or("*"),
+          PermissionHint::with_resources(
+            "ipm:CreateBinding",
+            resource_hint::ipm_binding_create_target(
+              args.id.as_deref(),
+              args.principal.as_deref(),
+              args.group.as_deref(),
+              &args.policy,
+            ),
+          ),
         )?,
         etag,
       )
@@ -261,10 +304,9 @@ async fn plan_binding(
     IpmBindingSubcommand::Delete(args) => {
       let etag = ipm_etag_or_current(client, &args.etag).await?;
       with_etag(
-        delete(
+        delete_with_permission(
           &format!("/admin/v1/ipm/bindings/{}", path_id(&args.id)?),
-          "ipm:DeleteBinding",
-          &args.id,
+          PermissionHint::new("ipm:DeleteBinding", &resource_hint::ipm_binding(&args.id)),
         )?,
         etag,
       )
@@ -308,6 +350,14 @@ fn enabled_flag(enable: bool, disable: bool) -> Option<bool> {
     (false, true) => Some(false),
     _ => None,
   }
+}
+
+fn credential_patch_resources(id: &str, principal: Option<&str>) -> Vec<String> {
+  let mut resources = vec![resource_hint::ipm_credential(id)];
+  if let Some(principal) = principal {
+    resources.push(resource_hint::ipm_principal(principal));
+  }
+  resources
 }
 
 fn audit_endpoint(args: &IpmAuditArgs) -> String {

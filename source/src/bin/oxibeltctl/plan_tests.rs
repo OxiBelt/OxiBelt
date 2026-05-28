@@ -57,7 +57,7 @@ fn current_doctor_includes_external_probe_query() {
     "/admin/v1/diagnostics/preflight?external_probe=shared_state&external_probe=upstream"
   );
   assert_eq!(plan.permission.action, "diagnostics:ReadPreflight");
-  assert_eq!(plan.permission.resource, "preflight/current");
+  assert_eq!(plan.permission.resources, vec!["preflight/current"]);
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn support_bundle_uses_redacted_endpoint() {
     "/admin/v1/diagnostics/support-bundle?redact=true&external_probe=shared_state&external_probe=upstream"
   );
   assert_eq!(plan.permission.action, "diagnostics:ReadSupportBundle");
-  assert_eq!(plan.permission.resource, "support-bundle/current");
+  assert_eq!(plan.permission.resources, vec!["support-bundle/current"]);
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn runtime_introspection_uses_redacted_endpoint_and_permission() {
   assert_eq!(plan.method, Method::GET);
   assert_eq!(plan.endpoint, "/admin/v1/runtime/introspection?redact=true");
   assert_eq!(plan.permission.action, "runtime:ReadIntrospection");
-  assert_eq!(plan.permission.resource, "introspection/current");
+  assert_eq!(plan.permission.resources, vec!["introspection/current"]);
 }
 
 #[test]
@@ -224,6 +224,13 @@ fn block_ip_uses_apply_with_duration_route_and_dry_run() {
   assert_eq!(plan.method, Method::POST);
   assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
   assert_eq!(plan.permission.action, "dynamic-policy:Apply");
+  assert_eq!(
+    plan.permission.resources,
+    vec![
+      "source/oxibeltctl/name/reject-client_ip_route-203-0-113-10-admin",
+      "route/admin"
+    ]
+  );
   assert_eq!(
     plan.body,
     Some(json!({
@@ -603,7 +610,7 @@ fn admin_audit_builds_query_endpoint() {
     "/admin/v1/audit?limit=25&outcome=rejected&actor=ops-token&principal=ops&service=config&operation=post.config.load&request_id=req-123&path_prefix=%2Fadmin%2Fv1%2Fconfig&before_id=50"
   );
   assert_eq!(plan.permission.action, "admin:ReadAudit");
-  assert_eq!(plan.permission.resource, "audit/admin");
+  assert_eq!(plan.permission.resources, vec!["audit/admin"]);
 }
 
 fn write_temp_file(label: &str, content: &str) -> std::path::PathBuf {

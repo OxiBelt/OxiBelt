@@ -35,6 +35,31 @@ outcome, status, and a redacted request summary. Request bodies are summarized
 with byte count, top-level JSON keys, and selected safe scalar fields, not
 stored as raw payloads.
 
+## Resource Scoping
+
+Admin authorization uses `oxibelt:<namespace>:<service>:<resource>` resource
+names. Resource components derived from operator input are normalized where the
+domain requires it, such as cache hosts, and reserved characters are
+percent-encoded before matching. Some mutating endpoints require more than one
+resource grant before any state change or warm/probe-like work starts.
+
+Resource-specific Admin/IPM resources include:
+
+- cache: `policy/<policy>` and `host/<normalized-host>`
+- dynamic policy: `source/<source>/name/<name>` and `route/<route>`
+- upstream pool: `<pool>` and `<pool>/server/<server_id>`
+- IPM: `status/current`, `principal/<id>`, `credential/<id>`,
+  `policy/<name>`, `binding/<id>`, `group/<group>`, `audit/current`, and
+  `simulation/current`
+
+Cache purge, key-explain, and warm operations check the effective cache policy
+and the normalized host. Tag purge without a host checks `host/*`. Dynamic
+policy create, apply, import, patch, and delete operations check the
+`source/<source>/name/<name>` target and, when present, the `route/<route>`
+target. Upstream server mutations check `<pool>/server/<server_id>`. IPM
+credential assignment checks both the credential and target principal; binding
+create checks the binding, target principal or group, and policy.
+
 The legacy signed query purge endpoints under `/cache/purge*` are documented
 in `docs/Configuration.md`; they are intentionally outside the first
 `/admin/v1/*` OpenAPI contract.

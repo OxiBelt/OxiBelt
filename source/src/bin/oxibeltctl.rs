@@ -20,6 +20,8 @@ mod output;
 mod plan;
 #[path = "oxibeltctl/profile_catalog.rs"]
 mod profile_catalog;
+#[path = "oxibeltctl/resource_hint.rs"]
+mod resource_hint;
 #[path = "oxibeltctl/rulepack.rs"]
 mod rulepack;
 

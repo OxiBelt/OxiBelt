@@ -3,7 +3,7 @@
   "info": {
     "title": "OxiBelt Admin API",
     "version": "v1",
-    "description": "Authenticated OxiBelt Admin API contract for control-plane automation."
+    "description": "Authenticated OxiBelt Admin API contract for control-plane automation. IPM authorization uses resource-specific Admin scopes such as cache policy/host, dynamic-policy source/name/route, upstream-pool server, and typed IPM resources."
   },
   "servers": [
     {
@@ -35,7 +35,7 @@
     },
     {
       "name": "cache",
-      "description": "Cache diagnostics, warming, and purging."
+      "description": "Cache diagnostics, warming, and purging. Mutations check policy/<policy> and host/<normalized-host> resources."
     },
     {
       "name": "waf",
@@ -55,15 +55,15 @@
     },
     {
       "name": "ipm",
-      "description": "Identity Permission Management reads and authorization simulation."
+      "description": "Identity Permission Management reads, mutations, and authorization simulation with typed resources such as principal/<id>, credential/<id>, policy/<name>, binding/<id>, audit/current, and simulation/current."
     },
     {
       "name": "dynamic-policy",
-      "description": "Dynamic policy automation."
+      "description": "Dynamic policy automation scoped by source/<source>/name/<name> and optional route/<route> resources."
     },
     {
       "name": "upstream-pools",
-      "description": "Runtime upstream-pool inspection and server control."
+      "description": "Runtime upstream-pool inspection and server control. Server mutations check <pool>/server/<server_id> resources."
     }
   ],
   "paths": {

@@ -1,0 +1,640 @@
+use std::net::SocketAddr;
+use std::time::{Duration, SystemTime};
+
+use ::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, Uri};
+use anyhow::bail;
+use hyper::body::Incoming;
+use serde::Deserialize;
+use serde_json::json;
+use tracing::info;
+
+use crate::proxy::http;
+use crate::proxy::http::body::ProxyBody;
+use crate::proxy::http::response::text_response;
+use crate::state::{AppHandle, AppSnapshot};
+
+use super::super::{
+  AdminActor, AdminAuditOutcome, AdminAuthorization, admin_audit, admin_resource,
+};
+use super::{collect_admin_json, json_response};
+
+fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
+  authorization.is_allowed(action, resource_name)
+}
+
+fn authorize_cache_target(
+  authorization: &AdminAuthorization<'_>,
+  action: &str,
+  policy: &str,
+  host: Option<&str>,
+) -> bool {
+  let policy_resource = admin_resource::cache_policy(policy);
+  if !allowed(authorization, action, &policy_resource) {
+    return false;
+  }
+  let host_resource = host
+    .map(admin_resource::cache_host)
+    .unwrap_or_else(|| "host/*".to_string());
+  allowed(authorization, action, &host_resource)
+}
+
+fn effective_warm_policy(
+  snapshot: &AppSnapshot,
+  host: &str,
+  requested_policy: Option<&str>,
+  uri: &Uri,
+) -> String {
+  snapshot
+    .route_table
+    .resolve(host, uri.path(), &snapshot.upstreams)
+    .and_then(|resolved| resolved.route.cache.as_deref())
+    .or(requested_policy)
+    .unwrap_or("default")
+    .to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCacheKeyExplainRequest {
+  #[serde(default)]
+  policy: Option<String>,
+  method: String,
+  scheme: String,
+  host: String,
+  uri: String,
+  #[serde(default)]
+  headers: std::collections::HashMap<String, String>,
+  #[serde(default)]
+  response_headers: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCacheWarmRequest {
+  items: Vec<AdminCacheWarmItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCacheWarmItem {
+  #[serde(default)]
+  policy: Option<String>,
+  #[serde(default)]
+  method: Option<String>,
+  scheme: String,
+  host: String,
+  uri: String,
+  #[serde(default)]
+  headers: std::collections::HashMap<String, String>,
+}
+
+struct PreparedCacheWarmItem {
+  policy: Option<String>,
+  scheme: String,
+  host: String,
+  uri: String,
+  method: Method,
+  headers: HeaderMap,
+}
+
+enum CacheWarmPlanItem {
+  Ready(PreparedCacheWarmItem),
+  ValidationError(serde_json::Value),
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCachePurgeJsonRequest {
+  #[serde(rename = "type")]
+  purge_type: String,
+  #[serde(default)]
+  policy: Option<String>,
+  #[serde(default)]
+  scheme: Option<String>,
+  #[serde(default)]
+  host: Option<String>,
+  #[serde(default)]
+  uri: Option<String>,
+  #[serde(default)]
+  path_prefix: Option<String>,
+  #[serde(default)]
+  tag: Option<String>,
+  #[serde(default)]
+  partition: Option<String>,
+}
+
+pub(in crate::server) fn signed_cache_purge_actor(
+  request: &hyper::Request<Incoming>,
+  snapshot: &AppSnapshot,
+  method: &::http::Method,
+) -> anyhow::Result<AdminActor> {
+  let content_length = request
+    .headers()
+    .get(::http::header::CONTENT_LENGTH)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.parse::<u64>().ok())
+    .unwrap_or(0);
+  if content_length != 0 {
+    bail!("signed cache purge requests must not include a body");
+  }
+  let path_and_query = request
+    .uri()
+    .path_and_query()
+    .map(|value| value.as_str())
+    .unwrap_or_else(|| request.uri().path());
+  let verified = crate::cache::signing::verify_cache_purge_signature(
+    request.headers(),
+    method,
+    path_and_query,
+    b"",
+    &snapshot.config.admin.cache_purge_signing,
+    SystemTime::now(),
+  )?;
+  let nonce_ttl = Duration::from_secs(snapshot.config.admin.cache_purge_signing.nonce_ttl_seconds);
+  if !snapshot
+    .cache
+    .remember_purge_nonce(&verified.nonce, nonce_ttl)
+  {
+    bail!("cache purge signature nonce was already used");
+  }
+  Ok(AdminActor {
+    name: "signed-cache-purge".to_string(),
+    principal: "signed-cache-purge".to_string(),
+    subject: "signed-cache-purge".to_string(),
+    groups: vec!["ipm-admin".to_string()],
+  })
+}
+
+pub(in crate::server) async fn cache_key_explain_response(
+  request: hyper::Request<Incoming>,
+  snapshot: &AppSnapshot,
+  authorization: &AdminAuthorization<'_>,
+  method: &::http::Method,
+) -> Response<ProxyBody> {
+  if *method != ::http::Method::POST {
+    return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+  }
+  let body = match collect_admin_json::<AdminCacheKeyExplainRequest>(request).await {
+    Ok(body) => body,
+    Err(response) => return response,
+  };
+  let policy = body.policy.as_deref().unwrap_or("default");
+  if !authorize_cache_target(authorization, "cache:ExplainKey", policy, Some(&body.host)) {
+    return text_response(StatusCode::FORBIDDEN, "forbidden");
+  }
+  let method = match Method::from_bytes(body.method.as_bytes()) {
+    Ok(method) => method,
+    Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid method"),
+  };
+  let uri = match body.uri.parse::<Uri>() {
+    Ok(uri) => uri,
+    Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid uri"),
+  };
+  let headers = match header_map_from_strings(body.headers) {
+    Ok(headers) => headers,
+    Err(message) => return text_response(StatusCode::BAD_REQUEST, message),
+  };
+  let response_headers = match header_map_from_strings(body.response_headers) {
+    Ok(headers) => headers,
+    Err(message) => return text_response(StatusCode::BAD_REQUEST, message),
+  };
+  let explain = snapshot.cache.explain_key(
+    crate::cache::CacheLookupContext {
+      policy_name: body.policy.as_deref(),
+      scheme: &body.scheme,
+      host: &body.host,
+      method: &method,
+      uri: &uri,
+      request_headers: &headers,
+    },
+    (!response_headers.is_empty()).then_some(&response_headers),
+  );
+  json_response(StatusCode::OK, &explain)
+}
+
+pub(in crate::server) async fn cache_warm_response(
+  request: hyper::Request<Incoming>,
+  state: AppHandle,
+  authorization: &AdminAuthorization<'_>,
+  method: &::http::Method,
+  peer_addr: SocketAddr,
+) -> Response<ProxyBody> {
+  if *method != ::http::Method::POST {
+    return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+  }
+  let body = match collect_admin_json::<AdminCacheWarmRequest>(request).await {
+    Ok(body) => body,
+    Err(response) => return response,
+  };
+  if body.items.is_empty() || body.items.len() > 128 {
+    return text_response(
+      StatusCode::BAD_REQUEST,
+      "items must contain 1 to 128 entries",
+    );
+  }
+  let snapshot = state.snapshot();
+  let mut plan = Vec::new();
+  for item in body.items {
+    let method = item.method.unwrap_or_else(|| "GET".to_string());
+    if method != "GET" && method != "HEAD" {
+      plan.push(CacheWarmPlanItem::ValidationError(
+        json!({ "uri": item.uri, "result": "validation_error" }),
+      ));
+      continue;
+    }
+    let request_method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
+    let uri = match item.uri.parse::<Uri>() {
+      Ok(uri) if !uri.path().is_empty() && uri.path().starts_with('/') => uri,
+      _ => {
+        plan.push(CacheWarmPlanItem::ValidationError(
+          json!({ "uri": item.uri, "result": "validation_error" }),
+        ));
+        continue;
+      }
+    };
+    let headers = match header_map_from_strings(item.headers) {
+      Ok(headers) => headers,
+      Err(_) => {
+        plan.push(CacheWarmPlanItem::ValidationError(
+          json!({ "uri": item.uri, "result": "validation_error" }),
+        ));
+        continue;
+      }
+    };
+    let effective_policy =
+      effective_warm_policy(&snapshot, &item.host, item.policy.as_deref(), &uri);
+    if !authorize_cache_target(
+      authorization,
+      "cache:Warm",
+      &effective_policy,
+      Some(&item.host),
+    ) {
+      return text_response(StatusCode::FORBIDDEN, "forbidden");
+    }
+    plan.push(CacheWarmPlanItem::Ready(PreparedCacheWarmItem {
+      policy: item.policy,
+      scheme: item.scheme,
+      host: item.host,
+      uri: item.uri,
+      method: request_method,
+      headers,
+    }));
+  }
+
+  let mut results = Vec::new();
+  for item in plan {
+    let item = match item {
+      CacheWarmPlanItem::Ready(item) => item,
+      CacheWarmPlanItem::ValidationError(result) => {
+        results.push(result);
+        continue;
+      }
+    };
+    match http::warm_cache_request(
+      state.clone(),
+      peer_addr,
+      &item.scheme,
+      &item.host,
+      &item.uri,
+      item.method,
+      item.headers,
+    )
+    .await
+    {
+      Ok(result) => results.push(json!({
+        "policy": item.policy,
+        "uri": item.uri,
+        "status": result.status,
+        "result": result.result,
+      })),
+      Err(error) => results.push(json!({
+        "policy": item.policy,
+        "uri": item.uri,
+        "result": "validation_error",
+        "error": error.to_string(),
+      })),
+    }
+  }
+  json_response(StatusCode::OK, &json!({ "items": results }))
+}
+
+pub(in crate::server) async fn cache_purge_json_response(
+  request: hyper::Request<Incoming>,
+  snapshot: &AppSnapshot,
+  authorization: &AdminAuthorization<'_>,
+  method: &::http::Method,
+  default_scheme: &'static str,
+  peer_addr: SocketAddr,
+) -> Response<ProxyBody> {
+  if *method != ::http::Method::POST {
+    return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+  }
+  let body = match collect_admin_json::<AdminCachePurgeJsonRequest>(request).await {
+    Ok(body) => body,
+    Err(response) => return response,
+  };
+  let policy = body.policy.as_deref().unwrap_or("default");
+  let partition = body.partition.as_deref();
+  let scheme = body.scheme.as_deref().unwrap_or(default_scheme);
+
+  let purged = match body.purge_type.as_str() {
+    "exact" => {
+      let Some(host) = body.host.as_deref() else {
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_json",
+          "missing host",
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing host");
+      };
+      let Some(uri) = body.uri.as_deref() else {
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_json",
+          "missing uri",
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing uri");
+      };
+      if !authorize_cache_target(authorization, "cache:PurgeObject", policy, Some(host)) {
+        return text_response(StatusCode::FORBIDDEN, "forbidden");
+      }
+      snapshot
+        .cache
+        .purge_exact_partition(policy, scheme, host, uri, partition)
+    }
+    "prefix" => {
+      let Some(host) = body.host.as_deref() else {
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_prefix_json",
+          "missing host",
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing host");
+      };
+      let Some(path_prefix) = body.path_prefix.as_deref() else {
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_prefix_json",
+          "missing path_prefix",
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing path_prefix");
+      };
+      if !authorize_cache_target(authorization, "cache:PurgePrefix", policy, Some(host)) {
+        return text_response(StatusCode::FORBIDDEN, "forbidden");
+      }
+      snapshot
+        .cache
+        .purge_prefix_partition(policy, scheme, host, path_prefix, partition)
+    }
+    "tag" => {
+      let Some(tag) = body.tag.as_deref() else {
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_tag_json",
+          "missing tag",
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing tag");
+      };
+      if !authorize_cache_target(
+        authorization,
+        "cache:PurgeTag",
+        policy,
+        body.host.as_deref(),
+      ) {
+        return text_response(StatusCode::FORBIDDEN, "forbidden");
+      }
+      snapshot.cache.purge_tag_partition(
+        policy,
+        tag,
+        body.scheme.as_deref(),
+        body.host.as_deref(),
+        partition,
+      )
+    }
+    _ => {
+      audit_rejected_cache_purge(
+        peer_addr,
+        authorization.actor,
+        "cache_purge_json",
+        "invalid type",
+      );
+      return text_response(StatusCode::BAD_REQUEST, "invalid type");
+    }
+  };
+
+  if body.purge_type == "tag" {
+    snapshot.metrics.record_cache_tag_purge();
+  } else {
+    snapshot.metrics.record_cache_purge();
+  }
+  admin_audit(
+    peer_addr,
+    authorization.actor,
+    match body.purge_type.as_str() {
+      "exact" => "cache_purge_json",
+      "prefix" => "cache_purge_prefix_json",
+      "tag" => "cache_purge_tag_json",
+      _ => "cache_purge_json",
+    },
+    None,
+    None,
+    AdminAuditOutcome::Applied,
+    None,
+  );
+  info!(
+    peer = %peer_addr,
+    actor = %authorization.actor.name,
+    policy,
+    purged,
+    purge_type = %body.purge_type,
+    "admin JSON cache purge completed"
+  );
+  json_response(StatusCode::OK, &json!({ "purged": purged }))
+}
+
+fn audit_rejected_cache_purge(
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  operation: &'static str,
+  reason: &'static str,
+) {
+  admin_audit(
+    peer_addr,
+    actor,
+    operation,
+    None,
+    None,
+    AdminAuditOutcome::Rejected,
+    Some(reason),
+  );
+}
+
+fn header_map_from_strings(
+  headers: std::collections::HashMap<String, String>,
+) -> Result<HeaderMap, &'static str> {
+  let mut map = HeaderMap::new();
+  for (name, value) in headers {
+    let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| "invalid header name")?;
+    let value = HeaderValue::from_str(&value).map_err(|_| "invalid header value")?;
+    map.append(name, value);
+  }
+  Ok(map)
+}
+
+pub(in crate::server) fn cache_purge_response(
+  snapshot: &AppSnapshot,
+  params: &std::collections::HashMap<String, String>,
+  path: &str,
+  scheme: &'static str,
+  peer_addr: SocketAddr,
+  authorization: &AdminAuthorization<'_>,
+) -> Response<ProxyBody> {
+  let policy = params
+    .get("policy")
+    .map(String::as_str)
+    .unwrap_or("default");
+  let (action, operation) = match path {
+    "/cache/purge" => ("cache:PurgeObject", "cache_purge"),
+    "/cache/purge-prefix" => ("cache:PurgePrefix", "cache_purge_prefix"),
+    "/cache/purge-tag" => ("cache:PurgeTag", "cache_purge_tag"),
+    _ => return text_response(StatusCode::NOT_FOUND, "not found"),
+  };
+  let partition = params.get("partition").map(String::as_str);
+  let purge_scheme = params.get("scheme").map(String::as_str).unwrap_or(scheme);
+  let host = params.get("host").map(String::as_str);
+  let purged = match path {
+    "/cache/purge" => {
+      let Some(host) = host else {
+        admin_audit(
+          peer_addr,
+          authorization.actor,
+          "cache_purge",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing host"),
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing host");
+      };
+      let Some(uri) = params.get("uri").map(String::as_str) else {
+        admin_audit(
+          peer_addr,
+          authorization.actor,
+          "cache_purge",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing uri"),
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing uri");
+      };
+      if !authorize_cache_target(authorization, action, policy, Some(host)) {
+        admin_audit(
+          peer_addr,
+          authorization.actor,
+          operation,
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("permission denied"),
+        );
+        return text_response(StatusCode::FORBIDDEN, "forbidden");
+      }
+      snapshot
+        .cache
+        .purge_exact_partition(policy, purge_scheme, host, uri, partition)
+    }
+    "/cache/purge-prefix" => {
+      let Some(host) = host else {
+        admin_audit(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_prefix",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing host"),
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing host");
+      };
+      let Some(path_prefix) = params.get("path_prefix").map(String::as_str) else {
+        admin_audit(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_prefix",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing path_prefix"),
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing path_prefix");
+      };
+      if !authorize_cache_target(authorization, action, policy, Some(host)) {
+        admin_audit(
+          peer_addr,
+          authorization.actor,
+          operation,
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("permission denied"),
+        );
+        return text_response(StatusCode::FORBIDDEN, "forbidden");
+      }
+      snapshot
+        .cache
+        .purge_prefix_partition(policy, purge_scheme, host, path_prefix, partition)
+    }
+    "/cache/purge-tag" => {
+      let Some(tag) = params.get("tag").map(String::as_str) else {
+        admin_audit(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_tag",
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("missing tag"),
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing tag");
+      };
+      if !authorize_cache_target(authorization, action, policy, host) {
+        admin_audit(
+          peer_addr,
+          authorization.actor,
+          operation,
+          None,
+          None,
+          AdminAuditOutcome::Rejected,
+          Some("permission denied"),
+        );
+        return text_response(StatusCode::FORBIDDEN, "forbidden");
+      }
+      snapshot.cache.purge_tag_partition(
+        policy,
+        tag,
+        params.get("scheme").map(String::as_str),
+        host,
+        partition,
+      )
+    }
+    _ => unreachable!("admin cache purge path checked before dispatch"),
+  };
+  if path == "/cache/purge-tag" {
+    snapshot.metrics.record_cache_tag_purge();
+  } else {
+    snapshot.metrics.record_cache_purge();
+  }
+  admin_audit(
+    peer_addr,
+    authorization.actor,
+    operation,
+    None,
+    None,
+    AdminAuditOutcome::Applied,
+    None,
+  );
+  info!(peer = %peer_addr, actor = %authorization.actor.name, policy, purged, "admin cache purge completed");
+  text_response(StatusCode::OK, &format!("purged={purged}\n"))
+}

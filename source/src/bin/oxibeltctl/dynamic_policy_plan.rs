@@ -2,8 +2,11 @@ use anyhow::{Context, bail};
 use serde_json::json;
 
 use crate::cli::*;
-use crate::plan::{RequestPlan, delete, get, patch_json, post_json, read_json_file};
+use crate::plan::{
+  PermissionHint, RequestPlan, delete, get, patch_json, post_json_with_permission, read_json_file,
+};
 use crate::profile_catalog::MitigationProfileCatalog;
+use crate::resource_hint;
 
 pub(crate) fn plan_dynamic_policy(command: &DynamicPolicyCommand) -> anyhow::Result<RequestPlan> {
   match &command.command {
@@ -11,30 +14,36 @@ pub(crate) fn plan_dynamic_policy(command: &DynamicPolicyCommand) -> anyhow::Res
     DynamicPolicySubcommand::Get(args) => get(
       &format!("/admin/v1/dynamic-policies/{}", args.id),
       "dynamic-policy:Get",
-      &args.id.to_string(),
-    ),
-    DynamicPolicySubcommand::Create(args) => post_json(
-      "/admin/v1/dynamic-policies",
-      read_json_file(&args.json)?,
-      "dynamic-policy:Create",
       "*",
     ),
-    DynamicPolicySubcommand::Apply(args) => post_json(
-      "/admin/v1/dynamic-policies/apply",
-      read_json_file(&args.json)?,
-      "dynamic-policy:Apply",
-      "*",
-    ),
+    DynamicPolicySubcommand::Create(args) => {
+      let body = read_json_file(&args.json)?;
+      let resources = resource_hint::dynamic_policy_target(&body);
+      post_json_with_permission(
+        "/admin/v1/dynamic-policies",
+        body,
+        PermissionHint::with_resources("dynamic-policy:Create", resources),
+      )
+    }
+    DynamicPolicySubcommand::Apply(args) => {
+      let body = read_json_file(&args.json)?;
+      let resources = resource_hint::dynamic_policy_target(&body);
+      post_json_with_permission(
+        "/admin/v1/dynamic-policies/apply",
+        body,
+        PermissionHint::with_resources("dynamic-policy:Apply", resources),
+      )
+    }
     DynamicPolicySubcommand::Patch(args) => patch_json(
       &format!("/admin/v1/dynamic-policies/{}", args.id),
       read_json_file(&args.json)?,
       "dynamic-policy:Update",
-      &args.id.to_string(),
+      "*",
     ),
     DynamicPolicySubcommand::Delete(args) => delete(
       &format!("/admin/v1/dynamic-policies/{}", args.id),
       "dynamic-policy:Delete",
-      &args.id.to_string(),
+      "*",
     ),
     DynamicPolicySubcommand::Audit(args) => {
       get(&audit_endpoint(args), "dynamic-policy:ReadAudit", "*")
@@ -44,12 +53,15 @@ pub(crate) fn plan_dynamic_policy(command: &DynamicPolicyCommand) -> anyhow::Res
       "dynamic-policy:Export",
       "*",
     ),
-    DynamicPolicySubcommand::Import(args) => post_json(
-      "/admin/v1/dynamic-policies/import",
-      read_json_file(&args.json)?,
-      "dynamic-policy:Import",
-      "*",
-    ),
+    DynamicPolicySubcommand::Import(args) => {
+      let body = read_json_file(&args.json)?;
+      let resources = resource_hint::dynamic_policy_import_target(&body);
+      post_json_with_permission(
+        "/admin/v1/dynamic-policies/import",
+        body,
+        PermissionHint::with_resources("dynamic-policy:Import", resources),
+      )
+    }
   }
 }
 
@@ -72,25 +84,26 @@ pub(crate) fn plan_mitigation(action: &str, args: &MitigationArgs) -> anyhow::Re
     values.reason.as_deref(),
     &format!("oxibeltctl {action} {subject}"),
   )?;
-  post_json(
+  let body = json!({
+    "enabled": true,
+    "priority": values.priority,
+    "source": "oxibeltctl",
+    "name": name,
+    "action": action,
+    "subject_type": subject_type,
+    "subject": subject,
+    "route_name": route_name,
+    "path_prefix": path_prefix,
+    "method": values.method.as_ref().map(|method| method.to_ascii_uppercase()),
+    "reason": reason,
+    "ttl_seconds": values.ttl,
+    "mode": policy_mode(values.dry_run),
+  });
+  let resources = resource_hint::dynamic_policy_target(&body);
+  post_json_with_permission(
     "/admin/v1/dynamic-policies/apply",
-    json!({
-      "enabled": true,
-      "priority": values.priority,
-      "source": "oxibeltctl",
-      "name": name,
-      "action": action,
-      "subject_type": subject_type,
-      "subject": subject,
-      "route_name": route_name,
-      "path_prefix": path_prefix,
-      "method": values.method.as_ref().map(|method| method.to_ascii_uppercase()),
-      "reason": reason,
-      "ttl_seconds": values.ttl,
-      "mode": policy_mode(values.dry_run),
-    }),
-    "dynamic-policy:Apply",
-    "*",
+    body,
+    PermissionHint::with_resources("dynamic-policy:Apply", resources),
   )
 }
 
@@ -128,27 +141,28 @@ pub(crate) fn plan_rate_limit(args: &RateLimitArgs) -> anyhow::Result<RequestPla
     values.reason.as_deref(),
     &format!("oxibeltctl rate-limit {subject}"),
   )?;
-  post_json(
+  let body = json!({
+    "enabled": true,
+    "priority": values.priority,
+    "source": "oxibeltctl",
+    "name": name,
+    "action": "rate_limit",
+    "subject_type": subject_type,
+    "subject": subject,
+    "route_name": route_name,
+    "path_prefix": path_prefix,
+    "method": values.method.as_ref().map(|method| method.to_ascii_uppercase()),
+    "rate": rate,
+    "burst": burst,
+    "reason": reason,
+    "ttl_seconds": values.ttl,
+    "mode": policy_mode(values.dry_run),
+  });
+  let resources = resource_hint::dynamic_policy_target(&body);
+  post_json_with_permission(
     "/admin/v1/dynamic-policies/apply",
-    json!({
-      "enabled": true,
-      "priority": values.priority,
-      "source": "oxibeltctl",
-      "name": name,
-      "action": "rate_limit",
-      "subject_type": subject_type,
-      "subject": subject,
-      "route_name": route_name,
-      "path_prefix": path_prefix,
-      "method": values.method.as_ref().map(|method| method.to_ascii_uppercase()),
-      "rate": rate,
-      "burst": burst,
-      "reason": reason,
-      "ttl_seconds": values.ttl,
-      "mode": policy_mode(values.dry_run),
-    }),
-    "dynamic-policy:Apply",
-    "*",
+    body,
+    PermissionHint::with_resources("dynamic-policy:Apply", resources),
   )
 }
 
@@ -182,30 +196,31 @@ pub(crate) fn plan_mitigate(
   } else {
     profile.mode.as_deref().unwrap_or("enforce")
   };
-  post_json(
+  let body = json!({
+    "enabled": true,
+    "priority": args.priority.or(profile.priority).unwrap_or(100),
+    "source": profile.source.as_deref().unwrap_or("oxibeltctl-profile"),
+    "name": name,
+    "action": &profile.action,
+    "subject_type": subject_type,
+    "subject": subject,
+    "route_name": route_name,
+    "path_prefix": path_prefix,
+    "method": args.method.as_ref().or(profile.method.as_ref()).map(|method| method.to_ascii_uppercase()),
+    "rate": profile.rate.as_ref(),
+    "burst": profile.burst,
+    "status": profile.status,
+    "body": profile.body.as_ref(),
+    "reason": reason,
+    "code": profile.code.as_ref(),
+    "ttl_seconds": args.ttl.or(profile.ttl_seconds),
+    "mode": mode,
+  });
+  let resources = resource_hint::dynamic_policy_target(&body);
+  post_json_with_permission(
     "/admin/v1/dynamic-policies/apply",
-    json!({
-      "enabled": true,
-      "priority": args.priority.or(profile.priority).unwrap_or(100),
-      "source": profile.source.as_deref().unwrap_or("oxibeltctl-profile"),
-      "name": name,
-      "action": &profile.action,
-      "subject_type": subject_type,
-      "subject": subject,
-      "route_name": route_name,
-      "path_prefix": path_prefix,
-      "method": args.method.as_ref().or(profile.method.as_ref()).map(|method| method.to_ascii_uppercase()),
-      "rate": profile.rate.as_ref(),
-      "burst": profile.burst,
-      "status": profile.status,
-      "body": profile.body.as_ref(),
-      "reason": reason,
-      "code": profile.code.as_ref(),
-      "ttl_seconds": args.ttl.or(profile.ttl_seconds),
-      "mode": mode,
-    }),
-    "dynamic-policy:Apply",
-    "*",
+    body,
+    PermissionHint::with_resources("dynamic-policy:Apply", resources),
   )
 }
 

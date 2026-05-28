@@ -28,7 +28,7 @@ fn ipm_status_uses_status_endpoint_and_permission() {
   assert_eq!(plan.method, Method::GET);
   assert_eq!(plan.endpoint, "/admin/v1/ipm/status");
   assert_eq!(plan.permission.action, "ipm:GetStatus");
-  assert_eq!(plan.permission.resource, "*");
+  assert_eq!(plan.permission.resources, vec!["status/current"]);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn ipm_credential_rotate_uses_default_overlap_and_explicit_etag() {
   );
   assert_eq!(plan.if_match, Some("ipm-etag-1".to_string()));
   assert_eq!(plan.permission.action, "ipm:RotateCredential");
-  assert_eq!(plan.permission.resource, "admin-token");
+  assert_eq!(plan.permission.resources, vec!["credential/admin-token"]);
   assert_eq!(
     plan.body,
     Some(json!({
@@ -69,6 +69,103 @@ fn ipm_credential_rotate_uses_default_overlap_and_explicit_etag() {
       "ttl_seconds": 604_800,
       "no_expiry": false,
     }))
+  );
+}
+
+#[test]
+fn ipm_credential_create_hints_credential_and_principal_resources() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "ipm",
+    "credential",
+    "create",
+    "deploy-token",
+    "--principal",
+    "deployer",
+    "--expires",
+    "1h",
+    "--etag",
+    "ipm-etag-1",
+  ])
+  .expect("credential create should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.permission.action, "ipm:CreateCredential");
+  assert_eq!(
+    plan.permission.resources,
+    vec!["credential/deploy-token", "principal/deployer"]
+  );
+}
+
+#[test]
+fn ipm_credential_patch_hints_target_principal_when_moving() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "ipm",
+    "credential",
+    "patch",
+    "deploy-token",
+    "--principal",
+    "release-admin",
+    "--etag",
+    "ipm-etag-1",
+  ])
+  .expect("credential patch should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.permission.action, "ipm:UpdateCredential");
+  assert_eq!(
+    plan.permission.resources,
+    vec!["credential/deploy-token", "principal/release-admin"]
+  );
+}
+
+#[test]
+fn ipm_binding_create_hints_binding_subject_and_policy_resources() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "ipm",
+    "binding",
+    "create",
+    "--group",
+    "platform-admins",
+    "--policy",
+    "admin-full-access",
+    "--etag",
+    "ipm-etag-1",
+  ])
+  .expect("binding create should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.permission.action, "ipm:CreateBinding");
+  assert_eq!(
+    plan.permission.resources,
+    vec![
+      "binding/group.platform-admins.admin-full-access",
+      "group/platform-admins",
+      "policy/admin-full-access"
+    ]
   );
 }
 

@@ -16,6 +16,67 @@ use super::admin::json_response;
 use super::admin_auth::AdminAuthorization;
 use super::admin_body::collect_admin_json;
 use super::admin_error;
+use super::admin_resource;
+
+fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
+  authorization.is_allowed(action, resource_name)
+}
+
+fn generated_binding_id(body: &IpmBindingCreate) -> String {
+  body
+    .id
+    .clone()
+    .unwrap_or_else(|| match (&body.principal, &body.group) {
+      (Some(principal), None) => format!("principal.{principal}.{}", body.policy),
+      (None, Some(group)) => format!("group.{group}.{}", body.policy),
+      _ => format!("binding.{}", body.policy),
+    })
+}
+
+fn authorize_ipm_credential_target(
+  authorization: &AdminAuthorization<'_>,
+  action: &str,
+  credential_id: &str,
+  principal: Option<&str>,
+) -> bool {
+  let credential_resource = admin_resource::ipm_credential(credential_id);
+  if !allowed(authorization, action, &credential_resource) {
+    return false;
+  }
+  if let Some(principal) = principal {
+    let principal_resource = admin_resource::ipm_principal(principal);
+    if !allowed(authorization, action, &principal_resource) {
+      return false;
+    }
+  }
+  true
+}
+
+fn authorize_ipm_binding_target(
+  authorization: &AdminAuthorization<'_>,
+  action: &str,
+  body: &IpmBindingCreate,
+) -> bool {
+  let binding_id = generated_binding_id(body);
+  let binding_resource = admin_resource::ipm_binding(&binding_id);
+  if !allowed(authorization, action, &binding_resource) {
+    return false;
+  }
+  if let Some(principal) = &body.principal {
+    let principal_resource = admin_resource::ipm_principal(principal);
+    if !allowed(authorization, action, &principal_resource) {
+      return false;
+    }
+  }
+  if let Some(group) = &body.group {
+    let group_resource = admin_resource::ipm_group(group);
+    if !allowed(authorization, action, &group_resource) {
+      return false;
+    }
+  }
+  let policy_resource = admin_resource::ipm_policy(&body.policy);
+  allowed(authorization, action, &policy_resource)
+}
 
 pub(super) async fn ipm_response(
   request: hyper::Request<Incoming>,
@@ -30,7 +91,7 @@ pub(super) async fn ipm_response(
 
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/ipm/status") => {
-      if !authorization.is_allowed("ipm:GetStatus", "*") {
+      if !allowed(authorization, "ipm:GetStatus", admin_resource::ipm_status()) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       return Some(json_response(
@@ -39,7 +100,7 @@ pub(super) async fn ipm_response(
       ));
     }
     (&::http::Method::GET, "/admin/v1/ipm/principals") => {
-      if !authorization.is_allowed("ipm:ListPrincipals", "*") {
+      if !allowed(authorization, "ipm:ListPrincipals", "principal/*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       return Some(json_response(
@@ -53,7 +114,8 @@ pub(super) async fn ipm_response(
         Ok(body) => body,
         Err(response) => return Some(response),
       };
-      if !authorization.is_allowed("ipm:CreatePrincipal", &body.id) {
+      let resource = admin_resource::ipm_principal(&body.id);
+      if !allowed(authorization, "ipm:CreatePrincipal", &resource) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       if let Some(response) = check_if_match(&state, if_match.as_deref()) {
@@ -72,7 +134,7 @@ pub(super) async fn ipm_response(
       );
     }
     (&::http::Method::GET, "/admin/v1/ipm/credentials") => {
-      if !authorization.is_allowed("ipm:ListCredentials", "*") {
+      if !allowed(authorization, "ipm:ListCredentials", "credential/*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       return Some(json_response(
@@ -86,7 +148,12 @@ pub(super) async fn ipm_response(
         Ok(body) => body,
         Err(response) => return Some(response),
       };
-      if !authorization.is_allowed("ipm:CreateCredential", &body.id) {
+      if !authorize_ipm_credential_target(
+        authorization,
+        "ipm:CreateCredential",
+        &body.id,
+        Some(&body.principal),
+      ) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       if let Some(response) = check_if_match(&state, if_match.as_deref()) {
@@ -105,7 +172,7 @@ pub(super) async fn ipm_response(
       );
     }
     (&::http::Method::GET, "/admin/v1/ipm/policies") => {
-      if !authorization.is_allowed("ipm:ListPolicies", "*") {
+      if !allowed(authorization, "ipm:ListPolicies", "policy/*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       return Some(json_response(
@@ -119,7 +186,8 @@ pub(super) async fn ipm_response(
         Ok(body) => body,
         Err(response) => return Some(response),
       };
-      if !authorization.is_allowed("ipm:CreatePolicy", &body.name) {
+      let resource = admin_resource::ipm_policy(&body.name);
+      if !allowed(authorization, "ipm:CreatePolicy", &resource) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       if let Some(response) = check_if_match(&state, if_match.as_deref()) {
@@ -138,7 +206,7 @@ pub(super) async fn ipm_response(
       );
     }
     (&::http::Method::GET, "/admin/v1/ipm/bindings") => {
-      if !authorization.is_allowed("ipm:ListBindings", "*") {
+      if !allowed(authorization, "ipm:ListBindings", "binding/*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       return Some(json_response(
@@ -152,8 +220,7 @@ pub(super) async fn ipm_response(
         Ok(body) => body,
         Err(response) => return Some(response),
       };
-      let resource = body.id.as_deref().unwrap_or("*");
-      if !authorization.is_allowed("ipm:CreateBinding", resource) {
+      if !authorize_ipm_binding_target(authorization, "ipm:CreateBinding", &body) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       if let Some(response) = check_if_match(&state, if_match.as_deref()) {
@@ -172,7 +239,7 @@ pub(super) async fn ipm_response(
       );
     }
     (&::http::Method::GET, "/admin/v1/ipm/audit") => {
-      if !authorization.is_allowed("ipm:ReadAudit", "*") {
+      if !allowed(authorization, "ipm:ReadAudit", admin_resource::ipm_audit()) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       let query = match audit_query(request.uri().query()) {
@@ -185,7 +252,11 @@ pub(super) async fn ipm_response(
       });
     }
     (&::http::Method::POST, "/admin/v1/ipm/simulate") => {
-      if !authorization.is_allowed("ipm:Simulate", "*") {
+      if !allowed(
+        authorization,
+        "ipm:Simulate",
+        admin_resource::ipm_simulation(),
+      ) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
       let body = match collect_admin_json::<IpmSimulationRequest>(request).await {
@@ -238,7 +309,8 @@ async fn principal_item_response(
 ) -> Response<ProxyBody> {
   match *method {
     ::http::Method::GET => {
-      if !authorization.is_allowed("ipm:GetPrincipal", id) {
+      let resource = admin_resource::ipm_principal(id);
+      if !allowed(authorization, "ipm:GetPrincipal", &resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       state
@@ -249,7 +321,8 @@ async fn principal_item_response(
         .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"))
     }
     ::http::Method::PATCH => {
-      if !authorization.is_allowed("ipm:UpdatePrincipal", id) {
+      let resource = admin_resource::ipm_principal(id);
+      if !allowed(authorization, "ipm:UpdatePrincipal", &resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       let if_match = request_if_match(&request);
@@ -271,7 +344,8 @@ async fn principal_item_response(
       }
     }
     ::http::Method::DELETE => {
-      if !authorization.is_allowed("ipm:DeletePrincipal", id) {
+      let resource = admin_resource::ipm_principal(id);
+      if !allowed(authorization, "ipm:DeletePrincipal", &resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       let if_match = request_if_match(&request);
@@ -301,7 +375,8 @@ async fn credential_item_response(
 ) -> Response<ProxyBody> {
   match *method {
     ::http::Method::GET => {
-      if !authorization.is_allowed("ipm:GetCredential", id) {
+      let resource = admin_resource::ipm_credential(id);
+      if !allowed(authorization, "ipm:GetCredential", &resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       state
@@ -312,7 +387,8 @@ async fn credential_item_response(
         .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"))
     }
     ::http::Method::PATCH => {
-      if !authorization.is_allowed("ipm:UpdateCredential", id) {
+      let credential_resource = admin_resource::ipm_credential(id);
+      if !allowed(authorization, "ipm:UpdateCredential", &credential_resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       let if_match = request_if_match(&request);
@@ -323,6 +399,14 @@ async fn credential_item_response(
         Ok(body) => body,
         Err(response) => return response,
       };
+      if !authorize_ipm_credential_target(
+        authorization,
+        "ipm:UpdateCredential",
+        id,
+        body.principal.as_deref(),
+      ) {
+        return text_response(StatusCode::FORBIDDEN, "forbidden");
+      }
       match state
         .snapshot()
         .ipm
@@ -334,7 +418,8 @@ async fn credential_item_response(
       }
     }
     ::http::Method::DELETE => {
-      if !authorization.is_allowed("ipm:DeleteCredential", id) {
+      let resource = admin_resource::ipm_credential(id);
+      if !allowed(authorization, "ipm:DeleteCredential", &resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       let if_match = request_if_match(&request);
@@ -365,7 +450,8 @@ async fn credential_rotate_response(
   if *method != ::http::Method::POST {
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
   }
-  if !authorization.is_allowed("ipm:RotateCredential", id) {
+  let resource = admin_resource::ipm_credential(id);
+  if !allowed(authorization, "ipm:RotateCredential", &resource) {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
   let if_match = request_if_match(&request);
@@ -397,7 +483,8 @@ async fn credential_revoke_response(
   if *method != ::http::Method::POST {
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
   }
-  if !authorization.is_allowed("ipm:RevokeCredential", id) {
+  let resource = admin_resource::ipm_credential(id);
+  if !allowed(authorization, "ipm:RevokeCredential", &resource) {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
   let if_match = request_if_match(&request);
@@ -428,7 +515,8 @@ async fn policy_item_response(
 ) -> Response<ProxyBody> {
   match *method {
     ::http::Method::GET => {
-      if !authorization.is_allowed("ipm:GetPolicy", id) {
+      let resource = admin_resource::ipm_policy(id);
+      if !allowed(authorization, "ipm:GetPolicy", &resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       state
@@ -439,7 +527,8 @@ async fn policy_item_response(
         .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"))
     }
     ::http::Method::PATCH => {
-      if !authorization.is_allowed("ipm:UpdatePolicy", id) {
+      let resource = admin_resource::ipm_policy(id);
+      if !allowed(authorization, "ipm:UpdatePolicy", &resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       let if_match = request_if_match(&request);
@@ -461,7 +550,8 @@ async fn policy_item_response(
       }
     }
     ::http::Method::DELETE => {
-      if !authorization.is_allowed("ipm:DeletePolicy", id) {
+      let resource = admin_resource::ipm_policy(id);
+      if !allowed(authorization, "ipm:DeletePolicy", &resource) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       let if_match = request_if_match(&request);
@@ -492,7 +582,8 @@ async fn binding_item_response(
   if *method != ::http::Method::DELETE {
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
   }
-  if !authorization.is_allowed("ipm:DeleteBinding", id) {
+  let resource = admin_resource::ipm_binding(id);
+  if !allowed(authorization, "ipm:DeleteBinding", &resource) {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
   let if_match = request_if_match(&request);
