@@ -179,6 +179,7 @@ mod tests {
       WafTransportNetwork::Tcp,
       WafTransportMetadataInput::default(),
       "https",
+      true,
       false,
     );
     access_log.set_route_name("app-root");

@@ -202,12 +202,8 @@ pub(super) async fn send_with_retry(
   state: &AppSnapshot,
   policy: &EffectiveRetryPolicy,
 ) -> anyhow::Result<Response<Incoming>> {
-  if !retry_body_can_be_buffered(&request, state) || !policy.enabled {
-    return match tokio::time::timeout(timeouts.upstream_first_byte, client.request(request)).await {
-      Ok(Ok(response)) => Ok(response),
-      Ok(Err(error)) => Err(error.into()),
-      Err(_) => Err(UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte).into()),
-    };
+  if !policy.enabled || !retry_body_can_be_buffered(&request, state) {
+    return send_one_shot(client, request, timeouts).await;
   }
 
   let (parts, body) = request.into_parts();
@@ -258,6 +254,18 @@ pub(super) async fn send_with_retry(
   }
 
   Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry budget exhausted")))
+}
+
+pub(super) async fn send_one_shot(
+  client: UpstreamClientRef<'_>,
+  request: Request<ProxyBody>,
+  timeouts: EffectiveTimeouts,
+) -> anyhow::Result<Response<Incoming>> {
+  match tokio::time::timeout(timeouts.upstream_first_byte, client.request(request)).await {
+    Ok(Ok(response)) => Ok(response),
+    Ok(Err(error)) => Err(error.into()),
+    Err(_) => Err(UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte).into()),
+  }
 }
 
 pub(super) struct PoolRetrySuccess {

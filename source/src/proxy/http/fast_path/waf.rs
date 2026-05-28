@@ -182,6 +182,7 @@ value = "yes"
       WafTransportNetwork::Tcp,
       WafTransportMetadataInput::default(),
       "https",
+      false,
       true,
     );
     let response = prepare_plain_fast_path_waf(
@@ -214,6 +215,7 @@ value = "yes"
       WafTransportNetwork::Tcp,
       WafTransportMetadataInput::default(),
       "https",
+      false,
       true,
     );
     let prepared = prepare_plain_fast_path_waf(

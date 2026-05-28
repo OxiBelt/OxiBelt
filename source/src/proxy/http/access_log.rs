@@ -24,6 +24,7 @@ pub(crate) struct SystemAccessLogContext<'a> {
   response_id: Option<String>,
   transaction_id: Option<String>,
   request: Option<SystemAccessLogRequest>,
+  metadata_enabled: bool,
   method: Method,
   version: Version,
   pub(super) request_received_at_unix_ms: u64,
@@ -59,6 +60,7 @@ impl<'a> SystemAccessLogContext<'a> {
     transport_network: WafTransportNetwork,
     transport_metadata: WafTransportMetadataInput<'a>,
     downstream_scheme: &'static str,
+    metadata_enabled: bool,
     capture_request: bool,
   ) -> Self {
     let request_snapshot = capture_request.then(|| SystemAccessLogRequest {
@@ -73,6 +75,7 @@ impl<'a> SystemAccessLogContext<'a> {
       response_id: None,
       transaction_id: None,
       request: request_snapshot,
+      metadata_enabled,
       method: request.method().clone(),
       version: request.version(),
       request_received_at_unix_ms: 0,
@@ -128,6 +131,9 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn set_route_name(&mut self, route_name: &str) {
+    if !self.metadata_enabled {
+      return;
+    }
     self.route_name.clear();
     self.route_name.push_str(route_name);
   }
@@ -140,6 +146,9 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn set_upstream(&mut self, upstream_name: &str, upstream_scheme: &str) {
+    if !self.metadata_enabled {
+      return;
+    }
     self.upstream_name.clear();
     self.upstream_name.push_str(upstream_name);
     self.upstream_scheme.clear();
@@ -147,6 +156,9 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn set_upstream_pool(&mut self, upstream_pool: String) {
+    if !self.metadata_enabled {
+      return;
+    }
     self.upstream_pool = Some(upstream_pool);
   }
 
@@ -226,6 +238,9 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn record_upstream_error(&mut self, code: &str, message: &str) {
+    if !self.metadata_enabled {
+      return;
+    }
     self.upstream_error_code = Some(code.to_string());
     self.upstream_error_message = Some(message.to_string());
   }
@@ -311,6 +326,7 @@ mod tests {
       WafTransportMetadataInput::default(),
       "https",
       false,
+      false,
     );
 
     assert!(context.request_id.is_none());
@@ -350,6 +366,7 @@ mod tests {
       WafTransportMetadataInput::default(),
       "https",
       true,
+      true,
     );
 
     let snapshot = context.request.as_ref().expect("snapshot should exist");
@@ -374,6 +391,7 @@ mod tests {
       WafTransportMetadataInput::default(),
       "https",
       false,
+      false,
     );
 
     assert!(context.downstream_host.is_empty());
@@ -387,5 +405,55 @@ mod tests {
 
     assert!(context.downstream_host.is_empty());
     assert!(context.tags().is_empty());
+  }
+
+  #[test]
+  fn metadata_is_lazy_until_needed() {
+    let request = Request::builder()
+      .uri("https://example.com/path")
+      .body(())
+      .expect("request should build");
+    let mut context = SystemAccessLogContext::new(
+      &request,
+      "127.0.0.1:12345".parse().unwrap(),
+      None,
+      None,
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      false,
+      false,
+    );
+
+    context.set_route_name("app");
+    context.set_upstream("backend", "http");
+    context.set_upstream_pool("pool".to_string());
+    context.record_upstream_error("connect_error", "upstream request failed");
+
+    assert_eq!(context.route_name_for_metrics(), "unmatched");
+    assert_eq!(context.upstream_name_for_metrics(), "none");
+    assert_eq!(context.upstream_protocol_for_metrics(), "none");
+    assert_eq!(context.upstream_outcome_for_metrics(), "success");
+    assert!(context.upstream_pool.is_none());
+
+    let mut context = SystemAccessLogContext::new(
+      &request,
+      "127.0.0.1:12345".parse().unwrap(),
+      None,
+      None,
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      true,
+      false,
+    );
+    context.set_route_name("app");
+    context.set_upstream("backend", "http");
+
+    assert_eq!(context.route_name_for_metrics(), "app");
+    assert_eq!(context.upstream_name_for_metrics(), "backend");
+    assert_eq!(context.upstream_protocol_for_metrics(), "http");
   }
 }

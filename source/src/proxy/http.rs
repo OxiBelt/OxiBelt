@@ -71,7 +71,7 @@ use self::response::{
   apply_security_headers, apply_sticky_cookie, draining_response, text_response,
   upstream_error_response, waf_terminal_response,
 };
-use self::retry::{EffectiveRetryPolicy, send_pool_with_retry, send_with_retry};
+use self::retry::{EffectiveRetryPolicy, send_one_shot, send_pool_with_retry, send_with_retry};
 use self::semantics::{configured_error_response, filter_trailers};
 use self::upstream::{UpstreamSelectionError, select_request_upstream};
 use self::uri::{rewrite_uri, validate_downstream_path};
@@ -334,6 +334,7 @@ where
   let system_access_log_enabled = state.system_access_log.enabled();
   let trace_context = state.telemetry.context_from_headers(request.headers());
   let telemetry_start = request_observability_start(&state, trace_context);
+  let access_log_metadata_enabled = system_access_log_enabled || telemetry_start.is_some();
   let mut access_log = SystemAccessLogContext::new(
     &request,
     peer_addr,
@@ -343,6 +344,7 @@ where
     transport_network,
     transport_metadata,
     downstream_scheme,
+    access_log_metadata_enabled,
     system_access_log_enabled,
   );
   let mut request_connection_permit = None;
@@ -916,13 +918,20 @@ where
     );
   }
 
+  let pool_cookie_header = if request_waf.upstream_override.is_none()
+    && (request_waf.upstream_pool_override.is_some() || resolved.route.upstream_pool.is_some())
+  {
+    request.headers().get(http::header::COOKIE)
+  } else {
+    None
+  };
   let selected = match select_request_upstream(
     state.as_ref(),
     &resolved,
     client_addr,
     &host,
     request.uri(),
-    request.headers().get(http::header::COOKIE),
+    pool_cookie_header,
     &request_waf,
   ) {
     Ok(selected) => selected,
@@ -930,7 +939,9 @@ where
   };
   let mut upstream = selected.upstream;
   let mut upstream_index = selected.upstream_index;
-  let pool_retry_cookie = request.headers().get(http::header::COOKIE).cloned();
+  let pool_retry_cookie = selected
+    .pool_name()
+    .and_then(|_| pool_cookie_header.cloned());
   if let Some(pool_name) = selected.pool_name() {
     if response_waf_enabled {
       access_log.upstream_pool = Some(pool_name.to_string());
@@ -1403,14 +1414,17 @@ where
           response
         })
       } else {
-        send_with_retry(client, outbound, timeouts, &state, &retry_policy)
-          .await
-          .map(|mut response| {
-            if let Some(capture) = early_hints_capture {
-              semantics::attach_interim_responses(&mut response, capture.take());
-            }
-            response
-          })
+        let result = if retry_policy.enabled {
+          send_with_retry(client, outbound, timeouts, &state, &retry_policy).await
+        } else {
+          send_one_shot(client, outbound, timeouts).await
+        };
+        result.map(|mut response| {
+          if let Some(capture) = early_hints_capture {
+            semantics::attach_interim_responses(&mut response, capture.take());
+          }
+          response
+        })
       }
     } else {
       send_one_shot_with_proxy_protocol(

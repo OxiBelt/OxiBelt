@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use http::header::{CONTENT_LENGTH, COOKIE, TRANSFER_ENCODING};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Body;
@@ -32,8 +32,8 @@ use crate::waf::{
 };
 
 use super::{
-  EffectiveRetryPolicy, EffectiveTimeouts, apply_alt_svc_header, send_pool_with_retry,
-  send_with_retry, with_downstream_response_timeout,
+  EffectiveRetryPolicy, EffectiveTimeouts, apply_alt_svc_header, send_one_shot,
+  send_pool_with_retry, send_with_retry, with_downstream_response_timeout,
 };
 
 mod small_response;
@@ -114,13 +114,20 @@ impl PlainProxyFastPath {
     B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
     B::Error: Into<body::BoxError> + Send + Sync + 'static,
   {
+    let pool_cookie_header = if request_waf.upstream_override.is_none()
+      && (request_waf.upstream_pool_override.is_some() || resolved.route.upstream_pool.is_some())
+    {
+      request.headers().get(COOKIE)
+    } else {
+      None
+    };
     let selected = match select_request_upstream(
       state.as_ref(),
       resolved,
       client_addr,
       host,
       request.uri(),
-      request.headers().get(http::header::COOKIE),
+      pool_cookie_header,
       &request_waf,
     ) {
       Ok(selected) => selected,
@@ -142,10 +149,7 @@ impl PlainProxyFastPath {
     }
     let pool_retry_context = if let Some(pool_name) = selected.pool_name() {
       access_log.set_upstream_pool(pool_name.to_string());
-      Some((
-        request.uri().clone(),
-        request.headers().get(http::header::COOKIE).cloned(),
-      ))
+      Some((request.uri().clone(), pool_cookie_header.cloned()))
     } else {
       None
     };
@@ -253,8 +257,10 @@ impl PlainProxyFastPath {
         pool_selection = Some(success.pool_selection);
         success.response
       })
-    } else {
+    } else if retry_policy.enabled {
       send_with_retry(client, outbound, timeouts, &state, &retry_policy).await
+    } else {
+      send_one_shot(client, outbound, timeouts).await
     } {
       Ok(response) => response,
       Err(error) => {
