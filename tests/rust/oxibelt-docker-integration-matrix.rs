@@ -2785,7 +2785,7 @@ TOML
   bad_body="$(jq -cn --arg content "[section]\n" '{apply:"none",operations:[{op:"put",root:"config",path:"bad-sync.toml",expected_sha256:"0000000000000000000000000000000000000000000000000000000000000000",content:$content}]}')"
   etag="$(admin_config_etag)"
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/files/sync" 400 "POST" "${bad_body}" "Authorization: Bearer matrix-admin-token" "If-Match: ${etag}")"
-  assert_response_jq "${response}" '.body | fromjson | .error | contains("expected_sha256")'
+  assert_response_jq "${response}" '.body | fromjson | .error.message | contains("expected_sha256")'
 
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/status" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
   assert_response_jq "${response}" '.body | fromjson | .last_operation.operation == "files_sync" and .last_operation.outcome == "rejected"'

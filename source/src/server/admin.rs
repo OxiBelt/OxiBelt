@@ -709,14 +709,18 @@ where
     .await
     .map_err(|error| {
       if error.downcast_ref::<LengthLimitError>().is_some() {
-        text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+        super::admin_error::error_response(
+          StatusCode::PAYLOAD_TOO_LARGE,
+          "request body is too large",
+        )
       } else {
-        text_response(StatusCode::BAD_REQUEST, "failed to read request body")
+        super::admin_error::error_response(StatusCode::BAD_REQUEST, "failed to read request body")
       }
     })?
     .to_bytes();
-  serde_json::from_slice(&bytes)
-    .map_err(|_| text_response(StatusCode::BAD_REQUEST, "invalid JSON request body"))
+  serde_json::from_slice(&bytes).map_err(|_| {
+    super::admin_error::error_response(StatusCode::BAD_REQUEST, "invalid JSON request body")
+  })
 }
 
 pub(super) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<ProxyBody> {

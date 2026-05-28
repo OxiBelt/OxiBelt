@@ -43,7 +43,6 @@ use crate::telemetry::TelemetryRuntime;
 use crate::turn::{BoundTurnListener, TurnListenerTask};
 use crate::upstream_control;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
-
 mod admin;
 mod admin_audit_endpoint;
 mod admin_audit_gate;
@@ -52,6 +51,7 @@ mod admin_body;
 mod admin_config_diff;
 mod admin_control;
 mod admin_diagnostics;
+mod admin_error;
 mod admin_ipm;
 mod admin_metadata;
 mod admin_ops;
@@ -65,10 +65,8 @@ use admin::json_response;
 use admin_auth::{AdminActor, AdminAuthorization, admin_actor, admin_request_context};
 use admin_body::collect_admin_json;
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
-
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
 const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
-
 pub async fn serve(
   state: AppHandle,
   config_path: Option<PathBuf>,
@@ -98,9 +96,7 @@ pub async fn serve(
   } else {
     None
   };
-
   drop(error_tx);
-
   if let Some(reload) = reload {
     serve_with_reload(
       state,
@@ -495,13 +491,17 @@ async fn admin_response(
       Ok(reservation) => reservation,
       Err(response) => return *response,
     };
-  let response = admin_response_inner(
-    request,
-    state.clone(),
-    admin_control,
-    peer_addr,
-    listener_bind,
-    scheme,
+  let response = admin_error::finalize_response(
+    admin_response_inner(
+      request,
+      state.clone(),
+      admin_control,
+      peer_addr,
+      listener_bind,
+      scheme,
+    )
+    .await,
+    &audit,
   )
   .await;
   let event = audit.finish(response.status());

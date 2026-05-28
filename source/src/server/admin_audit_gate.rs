@@ -4,8 +4,9 @@ use std::net::SocketAddr;
 
 use crate::admin_audit::{AdminAuditHandle, AdminAuditReservation};
 use crate::proxy::http::body::ProxyBody;
-use crate::proxy::http::response::text_response;
 use crate::state::AppHandle;
+
+use super::admin_error;
 
 pub(super) fn reserve_or_reject(
   request: &mut hyper::Request<Incoming>,
@@ -24,9 +25,11 @@ pub(super) fn reserve_or_reject(
       "admin audit unavailable",
     );
     audit_runtime.emit_unstored(event, &error);
-    Box::new(text_response(
+    Box::new(admin_error::error_envelope_response(
       ::http::StatusCode::SERVICE_UNAVAILABLE,
       "admin audit unavailable",
+      &audit.request_id(),
+      None,
     ))
   })?;
   request.extensions_mut().insert(audit.clone());

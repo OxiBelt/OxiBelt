@@ -199,6 +199,17 @@ impl AdminControlResponse {
     }
   }
 
+  fn error_with_details(
+    status: StatusCode,
+    message: impl Into<String>,
+    details: serde_json::Value,
+  ) -> Self {
+    Self {
+      status,
+      body: json!({ "error": message.into(), "details": details }),
+    }
+  }
+
   pub(super) fn into_http(self) -> ::http::Response<ProxyBody> {
     json_response(self.status, &self.body)
   }
@@ -641,13 +652,15 @@ async fn check_if_match(
   let expected = etag_for_revision(state.revision);
   match if_match {
     Some(value) if value == expected => Ok(()),
-    Some(_) => Err(AdminControlResponse::error(
+    Some(_) => Err(AdminControlResponse::error_with_details(
       StatusCode::PRECONDITION_FAILED,
       "If-Match does not match the active config revision",
+      json!({ "header": "If-Match", "expected": expected }),
     )),
-    None => Err(AdminControlResponse::error(
+    None => Err(AdminControlResponse::error_with_details(
       StatusCode::PRECONDITION_REQUIRED,
       "If-Match is required",
+      json!({ "header": "If-Match", "expected": expected }),
     )),
   }
 }

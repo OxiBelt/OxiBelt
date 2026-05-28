@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, bail};
 use http::{Method, StatusCode};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{Pool, Postgres};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -251,6 +251,29 @@ impl AdminAuditHandle {
     event.principal = Some(principal.to_string());
     event.subject = Some(subject.to_string());
     event.groups = groups.to_vec();
+  }
+
+  pub(crate) fn request_id(&self) -> String {
+    self
+      .inner
+      .lock()
+      .expect("admin audit lock poisoned")
+      .request_id
+      .clone()
+  }
+
+  pub(crate) fn error_details(&self, status: StatusCode) -> Option<Value> {
+    if status != StatusCode::FORBIDDEN {
+      return None;
+    }
+    let event = self.inner.lock().expect("admin audit lock poisoned");
+    match (&event.action, &event.resource) {
+      (Some(action), Some(resource)) => Some(json!({
+        "action": action,
+        "resource": resource,
+      })),
+      _ => None,
+    }
   }
 
   pub fn record_authorization(&self, action: &str, resource: &str, allowed: bool) {

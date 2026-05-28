@@ -2304,6 +2304,21 @@
         "description": "Admin bearer token supplied by IPM credentials or bootstrap Admin token."
       }
     },
+    "headers": {
+      "AdminRequestId": {
+        "description": "Per-request Admin audit identifier.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "AdminApiVersion": {
+        "description": "Admin API version.",
+        "schema": {
+          "type": "string",
+          "const": "v1"
+        }
+      }
+    },
     "parameters": {
       "IfMatch": {
         "name": "If-Match",
@@ -3159,6 +3174,14 @@
     "responses": {
       "JsonObject": {
         "description": "JSON object response.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
           "application/json": {
             "schema": {
@@ -3170,86 +3193,253 @@
       },
       "BadRequest": {
         "description": "Bad request.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
-          "text/plain": {
+          "application/json": {
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
             }
           }
         }
       },
       "Unauthorized": {
         "description": "Missing or invalid bearer token.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
-          "text/plain": {
+          "application/json": {
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
             }
           }
         }
       },
       "Forbidden": {
         "description": "Authenticated actor is not authorized by IPM.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
-          "text/plain": {
+          "application/json": {
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
             }
           }
         }
       },
       "Conflict": {
         "description": "Request conflicts with the active store mode or static IPM bootstrap entries.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
-          "text/plain": {
+          "application/json": {
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
             }
           }
         }
       },
       "NotFound": {
         "description": "Resource not found.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
-          "text/plain": {
+          "application/json": {
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
             }
           }
         }
       },
       "PreconditionFailed": {
         "description": "If-Match ETag precondition failed.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
-          "text/plain": {
+          "application/json": {
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
             }
           }
         }
       },
       "PreconditionRequired": {
         "description": "A mutating request omitted the required If-Match ETag.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
-          "text/plain": {
+          "application/json": {
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
             }
           }
         }
       },
       "PayloadTooLarge": {
         "description": "Request body is too large.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
         "content": {
-          "text/plain": {
+          "application/json": {
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "HTTP method is not allowed for this Admin endpoint.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "Admin control plane is unavailable.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "Internal Admin response encoding or control-plane error.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
             }
           }
         }
       }
     },
     "schemas": {
+      "AdminErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "error",
+          "request_id"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/AdminError"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "invalid_request",
+              "unauthorized",
+              "permission_denied",
+              "not_found",
+              "method_not_allowed",
+              "conflict",
+              "etag_mismatch",
+              "payload_too_large",
+              "precondition_required",
+              "control_plane_unavailable",
+              "internal_error"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
       "AdminCapabilities": {
         "type": "object",
         "required": [

@@ -4,9 +4,9 @@ use hyper::body::Incoming;
 use serde::Deserialize;
 
 use crate::proxy::http::body::ProxyBody;
-use crate::proxy::http::response::text_response;
 
 use super::admin_control;
+use super::admin_error;
 use crate::admin_audit::AdminAuditHandle;
 
 pub(super) async fn collect_admin_json<T>(
@@ -31,9 +31,9 @@ where
     .await
     .map_err(|error| {
       if error.downcast_ref::<LengthLimitError>().is_some() {
-        text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+        admin_error::error_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
       } else {
-        text_response(StatusCode::BAD_REQUEST, "failed to read request body")
+        admin_error::error_response(StatusCode::BAD_REQUEST, "failed to read request body")
       }
     })?
     .to_bytes();
@@ -41,5 +41,5 @@ where
     audit.record_json_body(&bytes);
   }
   serde_json::from_slice(&bytes)
-    .map_err(|_| text_response(StatusCode::BAD_REQUEST, "invalid JSON request body"))
+    .map_err(|_| admin_error::error_response(StatusCode::BAD_REQUEST, "invalid JSON request body"))
 }

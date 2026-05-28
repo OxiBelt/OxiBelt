@@ -72,7 +72,8 @@ async fn admin_v1_json_purge_removes_exact_prefix_and_tag_entries() {
   }
   let response = admin_json_purge_response(addr, r#"{"type":"exact","host":"example.com"}"#).await;
   assert!(
-    response.starts_with("HTTP/1.1 400 Bad Request"),
+    response.starts_with("HTTP/1.1 400 Bad Request")
+      && response.contains(r#""code":"invalid_request""#),
     "invalid JSON purge should be rejected: {}",
     log_safe_text(&response)
   );
@@ -80,7 +81,8 @@ async fn admin_v1_json_purge_removes_exact_prefix_and_tag_entries() {
   let large_body = "x".repeat(64 * 1024 + 1);
   let response = admin_json_purge_response(addr, &large_body).await;
   assert!(
-    response.starts_with("HTTP/1.1 413 Payload Too Large"),
+    response.starts_with("HTTP/1.1 413 Payload Too Large")
+      && response.contains(r#""code":"payload_too_large""#),
     "oversized JSON purge should be rejected before parsing: {}",
     log_safe_text(&response)
   );
@@ -133,7 +135,8 @@ async fn query_cache_purge_authorizes_specific_type_and_policy() {
   ] {
     let response = admin_query_purge_response(addr, path).await;
     assert!(
-      response.starts_with("HTTP/1.1 403 Forbidden"),
+      response.starts_with("HTTP/1.1 403 Forbidden")
+        && response.contains(r#""code":"permission_denied""#),
       "query purge should reject unauthorized type or policy: {}",
       log_safe_text(&response)
     );
@@ -206,14 +209,19 @@ async fn admin_metadata_endpoints_require_auth_and_ipm_permission() {
 
   let unauthenticated = admin_get_response(addr, "/admin/v1/openapi.json", false).await;
   assert!(
-    unauthenticated.starts_with("HTTP/1.1 401 Unauthorized"),
+    unauthenticated.starts_with("HTTP/1.1 401 Unauthorized")
+      && unauthenticated.contains(r#""code":"unauthorized""#)
+      && unauthenticated.contains(r#""request_id":""#),
     "metadata without auth should be rejected: {}",
     log_safe_text(&unauthenticated)
   );
 
   let forbidden = admin_get_response(addr, "/admin/v1/openapi.json", true).await;
   assert!(
-    forbidden.starts_with("HTTP/1.1 403 Forbidden"),
+    forbidden.starts_with("HTTP/1.1 403 Forbidden")
+      && forbidden.contains(r#""code":"permission_denied""#)
+      && forbidden.contains(r#""action":"admin:ReadMetadata""#)
+      && forbidden.contains(r#""resource":"oxibelt:oxibelt:admin:metadata/openapi""#),
     "metadata without admin:ReadMetadata should be forbidden: {}",
     log_safe_text(&forbidden)
   );

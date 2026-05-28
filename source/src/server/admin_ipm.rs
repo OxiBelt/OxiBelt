@@ -15,6 +15,7 @@ use crate::state::AppHandle;
 use super::admin::json_response;
 use super::admin_auth::AdminAuthorization;
 use super::admin_body::collect_admin_json;
+use super::admin_error;
 
 pub(super) async fn ipm_response(
   request: hyper::Request<Incoming>,
@@ -510,15 +511,19 @@ async fn binding_item_response(
 }
 
 fn check_if_match(state: &AppHandle, if_match: Option<&str>) -> Option<Response<ProxyBody>> {
-  match state.snapshot().ipm.check_if_match(if_match) {
+  let snapshot = state.snapshot();
+  let expected = snapshot.ipm.admin_status().etag;
+  match snapshot.ipm.check_if_match(if_match) {
     Ok(()) => None,
-    Err(IpmPreconditionError::Missing) => Some(text_response(
+    Err(IpmPreconditionError::Missing) => Some(admin_error::error_response_with_details(
       StatusCode::PRECONDITION_REQUIRED,
       "If-Match is required",
+      Some(json!({ "header": "If-Match", "expected": expected })),
     )),
-    Err(IpmPreconditionError::Stale) => Some(text_response(
+    Err(IpmPreconditionError::Stale) => Some(admin_error::error_response_with_details(
       StatusCode::PRECONDITION_FAILED,
       "If-Match does not match the active IPM generation",
+      Some(json!({ "header": "If-Match", "expected": expected })),
     )),
   }
 }

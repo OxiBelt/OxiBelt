@@ -49,7 +49,9 @@ async fn audit_queue_full_rejects_config_load_before_handler() {
 
   let response = admin_config_load_response(addr).await;
   assert!(
-    response.starts_with("HTTP/1.1 503 Service Unavailable"),
+    response.starts_with("HTTP/1.1 503 Service Unavailable")
+      && response.contains(r#""code":"control_plane_unavailable""#)
+      && response.contains(r#""request_id":""#),
     "full audit queue should reject before config load runs: {}",
     log_safe_text(&response)
   );

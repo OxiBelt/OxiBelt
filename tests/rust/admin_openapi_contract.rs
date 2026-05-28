@@ -50,6 +50,39 @@ fn admin_metadata_operations_declare_bearer_security() {
     }
 }
 
+#[test]
+fn admin_error_responses_use_json_envelope_and_headers() {
+    let spec = openapi();
+    for name in [
+        "BadRequest",
+        "Unauthorized",
+        "Forbidden",
+        "Conflict",
+        "NotFound",
+        "PreconditionFailed",
+        "PreconditionRequired",
+        "PayloadTooLarge",
+        "MethodNotAllowed",
+        "ServiceUnavailable",
+        "InternalError",
+    ] {
+        let response = &spec["components"]["responses"][name];
+        assert_eq!(
+            response["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AdminErrorEnvelope",
+            "{name} must use the Admin error envelope"
+        );
+        assert!(
+            response["headers"].get("X-OxiBelt-Request-Id").is_some(),
+            "{name} must declare X-OxiBelt-Request-Id"
+        );
+        assert!(
+            response["headers"].get("X-OxiBelt-API-Version").is_some(),
+            "{name} must declare X-OxiBelt-API-Version"
+        );
+    }
+}
+
 fn documented_operations(spec: &Value) -> BTreeSet<(String, String)> {
     let paths = spec["paths"]
         .as_object()

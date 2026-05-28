@@ -21,6 +21,13 @@ to resources such as `oxibelt:<namespace>:admin:metadata/openapi`.
 `/admin/v1/capabilities` reports the API version, package version, compiled
 or configured Admin features, and request-size limits used by the Admin API.
 `/admin/v1/version` reports the API version, package name, and package version.
+Admin listener responses include `X-OxiBelt-Request-Id` and
+`X-OxiBelt-API-Version`. Non-2xx Admin errors use a JSON envelope:
+`{ "error": { "code": "...", "message": "...", "details": { ... } },
+"request_id": "..." }`. `details` is omitted when there is no safe
+operation hint to expose. Permission denials may include the checked IPM
+`action` and resolved `resource`; ETag failures may include the `If-Match`
+header name and expected ETag.
 When `[admin.audit]` is enabled, `/admin/v1/audit` returns unified Admin
 request audit records as `{ "audit": [...] }`; otherwise it returns `409`.
 Records include actor, peer, method, path, authorization action/resource,
