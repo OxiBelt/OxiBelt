@@ -773,7 +773,7 @@ async fn upstream_response(
         .unwrap_or_default();
     let body = response_body(&query, &parts.uri, &parts.headers, &request_body, &name);
     let body = Bytes::from(body);
-    let streaming_response = query.get("response_chunk_delay_ms").is_some();
+    let streaming_response = query.contains_key("response_chunk_delay_ms");
     let response_body = response_body_stream(&query, body.clone());
     let mut response = Response::new(response_body);
     *response.status_mut() = status;
@@ -1842,9 +1842,8 @@ async fn stress_h3_cl0_data(args: &StressArgs) -> anyhow::Result<Option<u16>> {
                     .send_data(Bytes::from(vec![b'x'; args.chunk_bytes]))
                     .await
                     .is_err()
+                    || stream.finish().await.is_err()
                 {
-                    None
-                } else if stream.finish().await.is_err() {
                     None
                 } else {
                     match stream.recv_response().await {
@@ -2082,7 +2081,7 @@ fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
 }
 
 fn percentile_ms(histogram: &Histogram<u64>, percentile: f64) -> f64 {
-    if histogram.len() == 0 {
+    if histogram.is_empty() {
         0.0
     } else {
         histogram.value_at_percentile(percentile) as f64 / 1000.0

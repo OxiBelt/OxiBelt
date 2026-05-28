@@ -352,7 +352,7 @@ fn upsert_query<'a>(
   event: &'a MitigationEvent,
   validate_only: bool,
   shape: MitigationTableShape,
-) -> anyhow::Result<QueryBuilder<'a, Postgres>> {
+) -> anyhow::Result<QueryBuilder<Postgres>> {
   let initial_status = if event.min_count <= 1 {
     "pending"
   } else {
@@ -493,7 +493,8 @@ mod tests {
       MitigationTableShape::Managed,
     )
     .unwrap();
-    let sql = query.sql();
+    let sql_text = query.sql();
+    let sql = sql_text.as_str();
 
     assert!(sql.contains("status = CASE WHEN"));
     assert!(sql.contains(".status = 'observing'"));
@@ -525,7 +526,8 @@ mod tests {
       MitigationTableShape::Existing,
     )
     .unwrap();
-    let sql = query.sql();
+    let sql_text = query.sql();
+    let sql = sql_text.as_str();
 
     assert!(sql.contains("namespace, dedupe_key, status, count"));
     assert!(!sql.contains("intent, provider, target"));
