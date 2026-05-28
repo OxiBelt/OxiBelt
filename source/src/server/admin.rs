@@ -6,13 +6,13 @@ use serde_json::json;
 
 use crate::dynamic_policy::{
   DynamicPolicyAdminCreate, DynamicPolicyAdminImport, DynamicPolicyAdminPatch,
-  DynamicPolicyAdminRecord,
+  DynamicPolicyAdminRecord, DynamicPolicyPreconditionError, DynamicPolicyPreconditionErrorKind,
 };
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::state::AppHandle;
 
-use super::{AdminAuthorization, admin_resource};
+use super::{AdminAuthorization, admin_error, admin_resource};
 
 mod cache;
 mod dynamic_policy_query;
@@ -95,6 +95,19 @@ pub(super) async fn dynamic_policy_response(
   }
   let query = request.uri().query().map(str::to_string);
   match (method, path) {
+    (&::http::Method::GET, "/admin/v1/dynamic-policies/status") => {
+      if !allowed(
+        authorization,
+        "dynamic-policy:GetStatus",
+        admin_resource::dynamic_policy_status(),
+      ) {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      return Some(match state.snapshot().dynamic_policy.admin_status().await {
+        Ok(status) => json_response(StatusCode::OK, &status),
+        Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+      });
+    }
     (&::http::Method::GET, "/admin/v1/dynamic-policies") => {
       if !allowed(authorization, "dynamic-policy:List", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
@@ -105,6 +118,7 @@ pub(super) async fn dynamic_policy_response(
       });
     }
     (&::http::Method::POST, "/admin/v1/dynamic-policies") => {
+      let if_match = request_if_match(&request);
       let body = match collect_admin_json::<DynamicPolicyAdminCreate>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
@@ -122,15 +136,16 @@ pub(super) async fn dynamic_policy_response(
         match state
           .snapshot()
           .dynamic_policy
-          .admin_create(&authorization.actor.name, body)
+          .admin_create(&authorization.actor.name, body, if_match.as_deref())
           .await
         {
           Ok(policy) => json_response(StatusCode::CREATED, &policy),
-          Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          Err(error) => dynamic_policy_error_response(error),
         },
       );
     }
     (&::http::Method::POST, "/admin/v1/dynamic-policies/apply") => {
+      let if_match = request_if_match(&request);
       let body = match collect_admin_json::<DynamicPolicyAdminCreate>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
@@ -148,11 +163,11 @@ pub(super) async fn dynamic_policy_response(
         match state
           .snapshot()
           .dynamic_policy
-          .admin_apply(&authorization.actor.name, body)
+          .admin_apply(&authorization.actor.name, body, if_match.as_deref())
           .await
         {
           Ok(policy) => json_response(StatusCode::OK, &policy),
-          Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          Err(error) => dynamic_policy_error_response(error),
         },
       );
     }
@@ -186,6 +201,7 @@ pub(super) async fn dynamic_policy_response(
       });
     }
     (&::http::Method::POST, "/admin/v1/dynamic-policies/import") => {
+      let if_match = request_if_match(&request);
       let body = match collect_admin_json::<DynamicPolicyAdminImport>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
@@ -205,11 +221,11 @@ pub(super) async fn dynamic_policy_response(
         match state
           .snapshot()
           .dynamic_policy
-          .admin_import(&authorization.actor.name, body)
+          .admin_import(&authorization.actor.name, body, if_match.as_deref())
           .await
         {
           Ok(policies) => json_response(StatusCode::OK, &json!({ "policies": policies })),
-          Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          Err(error) => dynamic_policy_error_response(error),
         },
       );
     }
@@ -237,6 +253,7 @@ pub(super) async fn dynamic_policy_response(
       Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
     },
     ::http::Method::PATCH => {
+      let if_match = request_if_match(&request);
       let existing = match state.snapshot().dynamic_policy.admin_get(id).await {
         Ok(Some(policy)) => policy,
         Ok(None) => return Some(text_response(StatusCode::NOT_FOUND, "not found")),
@@ -257,15 +274,16 @@ pub(super) async fn dynamic_policy_response(
       match state
         .snapshot()
         .dynamic_policy
-        .admin_patch(&authorization.actor.name, id, body)
+        .admin_patch(&authorization.actor.name, id, body, if_match.as_deref())
         .await
       {
         Ok(Some(policy)) => json_response(StatusCode::OK, &policy),
         Ok(None) => text_response(StatusCode::NOT_FOUND, "not found"),
-        Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        Err(error) => dynamic_policy_error_response(error),
       }
     }
     ::http::Method::DELETE => {
+      let if_match = request_if_match(&request);
       let existing = match state.snapshot().dynamic_policy.admin_get(id).await {
         Ok(Some(policy)) => policy,
         Ok(None) => return Some(text_response(StatusCode::NOT_FOUND, "not found")),
@@ -283,16 +301,39 @@ pub(super) async fn dynamic_policy_response(
       match state
         .snapshot()
         .dynamic_policy
-        .admin_delete(&authorization.actor.name, id)
+        .admin_delete(&authorization.actor.name, id, if_match.as_deref())
         .await
       {
         Ok(true) => json_response(StatusCode::OK, &json!({ "ok": true })),
         Ok(false) => text_response(StatusCode::NOT_FOUND, "not found"),
-        Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        Err(error) => dynamic_policy_error_response(error),
       }
     }
     _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
   })
+}
+
+fn request_if_match(request: &hyper::Request<Incoming>) -> Option<String> {
+  request
+    .headers()
+    .get(::http::header::IF_MATCH)
+    .and_then(|value| value.to_str().ok())
+    .map(str::to_string)
+}
+
+fn dynamic_policy_error_response(error: anyhow::Error) -> Response<ProxyBody> {
+  if let Some(precondition) = error.downcast_ref::<DynamicPolicyPreconditionError>() {
+    let status = match precondition.kind() {
+      DynamicPolicyPreconditionErrorKind::Missing => StatusCode::PRECONDITION_REQUIRED,
+      DynamicPolicyPreconditionErrorKind::Stale => StatusCode::PRECONDITION_FAILED,
+    };
+    return admin_error::error_response_with_details(
+      status,
+      &error.to_string(),
+      Some(json!({ "header": "If-Match", "expected": precondition.expected() })),
+    );
+  }
+  text_response(StatusCode::BAD_REQUEST, &error.to_string())
 }
 
 async fn collect_admin_json<T>(request: hyper::Request<Incoming>) -> Result<T, Response<ProxyBody>>

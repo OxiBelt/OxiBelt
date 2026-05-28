@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use anyhow::{Context, bail};
+use serde::Serialize;
 
 use crate::config::{
   Config, UpstreamPoolConfig, UpstreamPoolServerConfig, UpstreamPoolServerSource,
@@ -8,20 +9,141 @@ use crate::config::{
 };
 use crate::state::{AppHandle, AppSnapshot};
 
+const MAX_RUNTIME_POOL_UPDATE_ATTEMPTS: usize = 8;
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct UpstreamPoolAdminStatus {
+  pub generation: u64,
+  pub etag: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum UpstreamPoolPreconditionErrorKind {
+  Missing,
+  Stale,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UpstreamPoolPreconditionError {
+  kind: UpstreamPoolPreconditionErrorKind,
+  expected: String,
+}
+
+impl UpstreamPoolPreconditionError {
+  pub(crate) fn kind(&self) -> UpstreamPoolPreconditionErrorKind {
+    self.kind
+  }
+
+  pub(crate) fn expected(&self) -> &str {
+    &self.expected
+  }
+}
+
+impl fmt::Display for UpstreamPoolPreconditionError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self.kind {
+      UpstreamPoolPreconditionErrorKind::Missing => write!(formatter, "If-Match is required"),
+      UpstreamPoolPreconditionErrorKind::Stale => {
+        write!(
+          formatter,
+          "If-Match does not match the active upstream-pool generation"
+        )
+      }
+    }
+  }
+}
+
+impl std::error::Error for UpstreamPoolPreconditionError {}
+
 pub(crate) async fn apply_runtime_pool_update<F>(state: &AppHandle, mutate: F) -> anyhow::Result<()>
 where
-  F: FnOnce(&mut Config) -> anyhow::Result<()>,
+  F: Fn(&mut Config) -> anyhow::Result<()>,
 {
-  let active = state.snapshot();
-  let mut config = active.config.clone();
-  mutate(&mut config)?;
-  if config.upstream_pools == active.config.upstream_pools {
-    return Ok(());
+  apply_runtime_pool_update_inner(state, None, mutate).await
+}
+
+pub(crate) async fn apply_runtime_pool_update_checked<F>(
+  state: &AppHandle,
+  if_match: Option<&str>,
+  mutate: F,
+) -> anyhow::Result<()>
+where
+  F: Fn(&mut Config) -> anyhow::Result<()>,
+{
+  apply_runtime_pool_update_inner(state, Some(if_match), mutate).await
+}
+
+async fn apply_runtime_pool_update_inner<F>(
+  state: &AppHandle,
+  if_match: Option<Option<&str>>,
+  mutate: F,
+) -> anyhow::Result<()>
+where
+  F: Fn(&mut Config) -> anyhow::Result<()>,
+{
+  for _ in 0..MAX_RUNTIME_POOL_UPDATE_ATTEMPTS {
+    let active = state.snapshot();
+    let expected_generation = if let Some(if_match) = if_match {
+      Some(check_if_match(active.as_ref(), if_match)?)
+    } else {
+      None
+    };
+    let mut config = active.config.clone();
+    mutate(&mut config)?;
+    if config.upstream_pools == active.config.upstream_pools {
+      return Ok(());
+    }
+    config.validate()?;
+    let snapshot = AppSnapshot::new_with_updated_upstream_pools(config, active.as_ref()).await?;
+    if state.replace_if_current(&active, snapshot) {
+      return Ok(());
+    }
+    let latest = state.snapshot();
+    if let Some(expected_generation) = expected_generation
+      && latest.upstream_pool_generation != expected_generation
+    {
+      return Err(
+        UpstreamPoolPreconditionError {
+          kind: UpstreamPoolPreconditionErrorKind::Stale,
+          expected: upstream_pool_etag(latest.upstream_pool_generation),
+        }
+        .into(),
+      );
+    }
   }
-  config.validate()?;
-  let snapshot = AppSnapshot::new_with_updated_upstream_pools(config, active.as_ref()).await?;
-  state.replace(snapshot);
-  Ok(())
+  bail!("upstream pool update conflicted with repeated runtime snapshot changes");
+}
+
+pub(crate) fn upstream_pool_status(snapshot: &AppSnapshot) -> UpstreamPoolAdminStatus {
+  UpstreamPoolAdminStatus {
+    generation: snapshot.upstream_pool_generation,
+    etag: upstream_pool_etag(snapshot.upstream_pool_generation),
+  }
+}
+
+pub(crate) fn upstream_pool_etag(generation: u64) -> String {
+  format!("\"oxibelt-upstream-pools-{generation}\"")
+}
+
+fn check_if_match(snapshot: &AppSnapshot, if_match: Option<&str>) -> anyhow::Result<u64> {
+  let expected = upstream_pool_etag(snapshot.upstream_pool_generation);
+  match if_match {
+    Some(value) if value == expected => Ok(snapshot.upstream_pool_generation),
+    Some(_) => Err(
+      UpstreamPoolPreconditionError {
+        kind: UpstreamPoolPreconditionErrorKind::Stale,
+        expected,
+      }
+      .into(),
+    ),
+    None => Err(
+      UpstreamPoolPreconditionError {
+        kind: UpstreamPoolPreconditionErrorKind::Missing,
+        expected,
+      }
+      .into(),
+    ),
+  }
 }
 
 pub(crate) fn find_pool_mut<'a>(

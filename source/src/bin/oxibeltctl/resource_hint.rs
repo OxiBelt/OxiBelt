@@ -49,6 +49,10 @@ pub(crate) fn dynamic_policy_route(route: &str) -> String {
   format!("route/{}", component(route))
 }
 
+pub(crate) fn dynamic_policy_status() -> &'static str {
+  "status/current"
+}
+
 pub(crate) fn dynamic_policy_target(body: &Value) -> Vec<String> {
   let mut resources = Vec::new();
   if let (Some(source), Some(name)) = (string_field(body, "source"), string_field(body, "name")) {
@@ -80,6 +84,10 @@ pub(crate) fn dynamic_policy_import_target(body: &Value) -> Vec<String> {
 
 pub(crate) fn upstream_pool_server(pool: &str, server_id: &str) -> String {
   format!("{}/server/{}", component(pool), component(server_id))
+}
+
+pub(crate) fn upstream_pool_status() -> &'static str {
+  "status/current"
 }
 
 pub(crate) fn ipm_status() -> &'static str {

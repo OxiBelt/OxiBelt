@@ -61,11 +61,13 @@ pub(crate) async fn plan_command(
     Command::Config(command) => plan_config(client, command).await,
     Command::Tls(command) => plan_tls(client, command).await,
     Command::Lifecycle(command) => plan_lifecycle(command),
-    Command::Pool(command) => plan_pool(command),
+    Command::Pool(command) => crate::pool_plan::plan_pool(client, command).await,
     Command::Waf(command) => plan_waf(command),
     Command::OxiRule(command) => plan_oxirule(command),
     Command::Rulepack(command) => crate::rulepack::plan_rulepack(client, command).await,
-    Command::DynamicPolicy(command) => crate::dynamic_policy_plan::plan_dynamic_policy(command),
+    Command::DynamicPolicy(command) => {
+      crate::dynamic_policy_plan::plan_dynamic_policy(client, command).await
+    }
     Command::Block(args) => crate::dynamic_policy_plan::plan_mitigation("reject", args),
     Command::Allow(args) => crate::dynamic_policy_plan::plan_mitigation("allow", args),
     Command::Challenge(args) => crate::dynamic_policy_plan::plan_challenge(args),
@@ -222,53 +224,6 @@ fn plan_lifecycle(command: &LifecycleCommand) -> anyhow::Result<RequestPlan> {
     LifecycleSubcommand::Undrain => {
       post_empty("/admin/v1/lifecycle/undrain", "lifecycle:Undrain", "*")
     }
-  }
-}
-
-fn plan_pool(command: &PoolCommand) -> anyhow::Result<RequestPlan> {
-  match &command.command {
-    PoolSubcommand::List => get("/admin/v1/upstream-pools", "upstream-pool:List", "*"),
-    PoolSubcommand::Get(args) => get(
-      &format!("/admin/v1/upstream-pools/{}", path_id(&args.pool)?),
-      "upstream-pool:Get",
-      &args.pool,
-    ),
-    PoolSubcommand::AddServer(args) => post_json(
-      &format!("/admin/v1/upstream-pools/{}/servers", path_id(&args.pool)?),
-      json!({
-        "id": args.id,
-        "origin": args.origin,
-        "state": args.state,
-        "weight": args.weight,
-        "max_conns": args.max_conns,
-        "backup": args.backup,
-      }),
-      "upstream-pool:AddServer",
-      &resource_hint::upstream_pool_server(&args.pool, &args.id),
-    ),
-    PoolSubcommand::UpdateServer(args) => pool_patch(
-      &args.pool,
-      &args.server_id,
-      json!({
-        "state": args.state,
-        "weight": args.weight,
-        "max_conns": args.max_conns,
-        "backup": args.backup,
-      }),
-    ),
-    PoolSubcommand::RemoveServer(args) => delete(
-      &format!(
-        "/admin/v1/upstream-pools/{}/servers/{}",
-        path_id(&args.pool)?,
-        path_id(&args.server_id)?
-      ),
-      "upstream-pool:RemoveServer",
-      &resource_hint::upstream_pool_server(&args.pool, &args.server_id),
-    ),
-    PoolSubcommand::Ready(args) => pool_state(args, "ready"),
-    PoolSubcommand::Drain(args) => pool_state(args, "drain"),
-    PoolSubcommand::Down(args) => pool_state(args, "down"),
-    PoolSubcommand::Maintenance(args) => pool_state(args, "maintenance"),
   }
 }
 
@@ -505,6 +460,11 @@ fn post_json_with_etag(
   Ok(plan)
 }
 
+pub(crate) fn with_etag(mut plan: RequestPlan, etag: String) -> anyhow::Result<RequestPlan> {
+  plan.if_match = Some(etag);
+  Ok(plan)
+}
+
 pub(crate) fn patch_json(
   endpoint: &str,
   body: Value,
@@ -561,23 +521,6 @@ fn config_file_post(
   )?;
   plan.if_match = etag;
   Ok(plan)
-}
-
-fn pool_patch(pool: &str, server_id: &str, body: Value) -> anyhow::Result<RequestPlan> {
-  patch_json(
-    &format!(
-      "/admin/v1/upstream-pools/{}/servers/{}",
-      path_id(pool)?,
-      path_id(server_id)?
-    ),
-    remove_nulls(body),
-    "upstream-pool:UpdateServer",
-    &resource_hint::upstream_pool_server(pool, server_id),
-  )
-}
-
-fn pool_state(args: &PoolServerArg, state: &str) -> anyhow::Result<RequestPlan> {
-  pool_patch(&args.pool, &args.server_id, json!({ "state": state }))
 }
 
 fn oxirule_eval(
@@ -666,14 +609,14 @@ fn parse_vars(vars: &[String]) -> anyhow::Result<serde_json::Map<String, Value>>
   Ok(map)
 }
 
-fn remove_nulls(mut value: Value) -> Value {
+pub(crate) fn remove_nulls(mut value: Value) -> Value {
   if let Value::Object(map) = &mut value {
     map.retain(|_, value| !value.is_null());
   }
   value
 }
 
-fn path_id(value: &str) -> anyhow::Result<&str> {
+pub(crate) fn path_id(value: &str) -> anyhow::Result<&str> {
   if value.is_empty()
     || value
       .chars()
@@ -683,6 +626,10 @@ fn path_id(value: &str) -> anyhow::Result<&str> {
   }
   Ok(value)
 }
+
+#[cfg(test)]
+#[path = "etag_plan_tests.rs"]
+mod etag_plan_tests;
 
 #[cfg(test)]
 #[path = "plan_tests.rs"]

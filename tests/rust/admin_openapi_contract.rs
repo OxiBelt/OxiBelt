@@ -83,6 +83,64 @@ fn admin_error_responses_use_json_envelope_and_headers() {
     }
 }
 
+#[test]
+fn dynamic_policy_and_upstream_mutations_declare_etag_preconditions() {
+    let spec = openapi();
+    for (method, path) in [
+        ("post", "/admin/v1/dynamic-policies"),
+        ("post", "/admin/v1/dynamic-policies/import"),
+        ("patch", "/admin/v1/dynamic-policies/{id}"),
+        ("delete", "/admin/v1/dynamic-policies/{id}"),
+        ("post", "/admin/v1/upstream-pools/{pool}/servers"),
+        (
+            "patch",
+            "/admin/v1/upstream-pools/{pool}/servers/{server_id}",
+        ),
+        (
+            "delete",
+            "/admin/v1/upstream-pools/{pool}/servers/{server_id}",
+        ),
+    ] {
+        let operation = &spec["paths"][path][method];
+        assert!(
+            operation["parameters"]
+                .as_array()
+                .is_some_and(|parameters| {
+                    parameters
+                        .iter()
+                        .any(|parameter| parameter["$ref"] == "#/components/parameters/IfMatch")
+                }),
+            "{method} {path} must require If-Match"
+        );
+        assert!(
+            operation["responses"].get("412").is_some(),
+            "{method} {path} must document stale If-Match"
+        );
+        assert!(
+            operation["responses"].get("428").is_some(),
+            "{method} {path} must document missing If-Match"
+        );
+    }
+
+    let apply = &spec["paths"]["/admin/v1/dynamic-policies/apply"]["post"];
+    assert!(
+        apply["parameters"].as_array().is_some_and(|parameters| {
+            parameters
+                .iter()
+                .any(|parameter| parameter["$ref"] == "#/components/parameters/IfMatchOptional")
+        }),
+        "dynamic-policy apply must document optional If-Match"
+    );
+    assert!(
+        apply["responses"].get("412").is_some(),
+        "dynamic-policy apply must document stale optional If-Match"
+    );
+    assert!(
+        apply["responses"].get("428").is_none(),
+        "dynamic-policy apply must not require If-Match"
+    );
+}
+
 fn documented_operations(spec: &Value) -> BTreeSet<(String, String)> {
     let paths = spec["paths"]
         .as_object()
@@ -165,6 +223,7 @@ fn expected_operations() -> BTreeSet<(String, String)> {
         ("post", "/admin/v1/ipm/simulate"),
         ("get", "/admin/v1/dynamic-policies"),
         ("post", "/admin/v1/dynamic-policies"),
+        ("get", "/admin/v1/dynamic-policies/status"),
         ("post", "/admin/v1/dynamic-policies/apply"),
         ("get", "/admin/v1/dynamic-policies/audit"),
         ("get", "/admin/v1/dynamic-policies/export"),
@@ -173,6 +232,7 @@ fn expected_operations() -> BTreeSet<(String, String)> {
         ("patch", "/admin/v1/dynamic-policies/{id}"),
         ("delete", "/admin/v1/dynamic-policies/{id}"),
         ("get", "/admin/v1/upstream-pools"),
+        ("get", "/admin/v1/upstream-pools/status"),
         ("get", "/admin/v1/upstream-pools/{pool}"),
         ("post", "/admin/v1/upstream-pools/{pool}/servers"),
         (

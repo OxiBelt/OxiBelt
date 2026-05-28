@@ -171,18 +171,40 @@ pub(super) async fn policy_ids_by_source_name_tx(
   Ok(ids)
 }
 
-pub(super) async fn bump_generation(pool: &Pool<Postgres>, namespace: &str) -> anyhow::Result<()> {
-  sqlx::query(
-    "INSERT INTO oxibelt_dynamic_policy_generation (namespace, generation, updated_at)
-     VALUES ($1, 1, now())
-     ON CONFLICT (namespace)
-     DO UPDATE SET generation = oxibelt_dynamic_policy_generation.generation + 1,
-                   updated_at = now()",
+pub(super) async fn select_generation(
+  pool: &Pool<Postgres>,
+  namespace: &str,
+) -> anyhow::Result<i64> {
+  let generation: Option<i64> = sqlx::query_scalar(
+    "SELECT generation FROM oxibelt_dynamic_policy_generation WHERE namespace = $1",
   )
   .bind(namespace)
-  .execute(pool)
+  .fetch_optional(pool)
   .await?;
-  Ok(())
+  Ok(generation.unwrap_or(0))
+}
+
+pub(super) async fn lock_generation_tx(
+  tx: &mut Transaction<'_, Postgres>,
+  namespace: &str,
+) -> anyhow::Result<i64> {
+  sqlx::query(
+    "INSERT INTO oxibelt_dynamic_policy_generation (namespace, generation, updated_at)
+     VALUES ($1, 0, now())
+     ON CONFLICT (namespace) DO NOTHING",
+  )
+  .bind(namespace)
+  .execute(&mut **tx)
+  .await?;
+  let generation = sqlx::query_scalar(
+    "SELECT generation FROM oxibelt_dynamic_policy_generation
+      WHERE namespace = $1
+      FOR UPDATE",
+  )
+  .bind(namespace)
+  .fetch_one(&mut **tx)
+  .await?;
+  Ok(generation)
 }
 
 pub(super) async fn bump_generation_tx(

@@ -205,6 +205,7 @@ pub(crate) struct PoolCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum PoolSubcommand {
+  Status,
   List,
   Get(PoolArg),
   AddServer(PoolAddServerArgs),
@@ -225,6 +226,8 @@ pub(crate) struct PoolArg {
 pub(crate) struct PoolServerArg {
   pub(crate) pool: String,
   pub(crate) server_id: String,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -242,6 +245,8 @@ pub(crate) struct PoolAddServerArgs {
   pub(crate) max_conns: usize,
   #[arg(long)]
   pub(crate) backup: bool,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -256,6 +261,8 @@ pub(crate) struct PoolUpdateServerArgs {
   pub(crate) max_conns: Option<usize>,
   #[arg(long)]
   pub(crate) backup: Option<bool>,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -345,15 +352,16 @@ pub(crate) struct DynamicPolicyCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum DynamicPolicySubcommand {
+  Status,
   List,
   Get(IdArg),
-  Create(JsonFileArg),
-  Apply(JsonFileArg),
-  Patch(PatchJsonArg),
-  Delete(IdArg),
+  Create(DynamicPolicyJsonArg),
+  Apply(DynamicPolicyJsonArg),
+  Patch(DynamicPolicyPatchArg),
+  Delete(DynamicPolicyMutatingIdArg),
   Audit(DynamicPolicyAuditArgs),
   Export,
-  Import(JsonFileArg),
+  Import(DynamicPolicyJsonArg),
 }
 
 #[derive(Debug, Args)]
@@ -372,6 +380,30 @@ pub(crate) struct PatchJsonArg {
   pub(crate) id: i64,
   #[arg(long = "json", value_name = "FILE")]
   pub(crate) json: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DynamicPolicyJsonArg {
+  #[arg(long = "json", value_name = "FILE")]
+  pub(crate) json: PathBuf,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DynamicPolicyPatchArg {
+  pub(crate) id: i64,
+  #[arg(long = "json", value_name = "FILE")]
+  pub(crate) json: PathBuf,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DynamicPolicyMutatingIdArg {
+  pub(crate) id: i64,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -419,6 +451,8 @@ pub(crate) struct MitigationSubjectArgs {
   pub(crate) method: Option<String>,
   #[arg(long)]
   pub(crate) dry_run: bool,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -467,6 +501,8 @@ pub(crate) struct RateLimitSubjectArgs {
   pub(crate) method: Option<String>,
   #[arg(long)]
   pub(crate) dry_run: bool,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -516,6 +552,8 @@ pub(crate) struct MitigateArgs {
   pub(crate) method: Option<String>,
   #[arg(long)]
   pub(crate) dry_run: bool,
+  #[arg(long)]
+  pub(crate) etag: Option<String>,
 }
 
 #[derive(Debug, Args)]

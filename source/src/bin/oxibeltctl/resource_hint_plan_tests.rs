@@ -16,6 +16,8 @@ fn pool_server_mutations_hint_server_resource() {
     "primary",
     "--state",
     "down",
+    "--etag",
+    "\"oxibelt-upstream-pools-0\"",
   ])
   .expect("pool update should parse");
   let runtime = tokio::runtime::Builder::new_current_thread()

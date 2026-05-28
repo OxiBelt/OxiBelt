@@ -531,8 +531,16 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "PurgePrefix",
       "PurgeTag",
     ],
-    "upstream-pool" => &["List", "Get", "AddServer", "UpdateServer", "RemoveServer"],
+    "upstream-pool" => &[
+      "GetStatus",
+      "List",
+      "Get",
+      "AddServer",
+      "UpdateServer",
+      "RemoveServer",
+    ],
     "dynamic-policy" => &[
+      "GetStatus",
       "List",
       "Get",
       "Create",

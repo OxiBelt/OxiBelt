@@ -1,15 +1,26 @@
 use anyhow::{Context, bail};
-use serde_json::json;
+use http::Method;
+use oxibelt::admin_client::AdminClient;
+use serde_json::{Value, json};
 
 use crate::cli::*;
 use crate::plan::{
   PermissionHint, RequestPlan, delete, get, patch_json, post_json_with_permission, read_json_file,
+  with_etag,
 };
 use crate::profile_catalog::MitigationProfileCatalog;
 use crate::resource_hint;
 
-pub(crate) fn plan_dynamic_policy(command: &DynamicPolicyCommand) -> anyhow::Result<RequestPlan> {
+pub(crate) async fn plan_dynamic_policy(
+  client: &AdminClient,
+  command: &DynamicPolicyCommand,
+) -> anyhow::Result<RequestPlan> {
   match &command.command {
+    DynamicPolicySubcommand::Status => get(
+      "/admin/v1/dynamic-policies/status",
+      "dynamic-policy:GetStatus",
+      resource_hint::dynamic_policy_status(),
+    ),
     DynamicPolicySubcommand::List => get("/admin/v1/dynamic-policies", "dynamic-policy:List", "*"),
     DynamicPolicySubcommand::Get(args) => get(
       &format!("/admin/v1/dynamic-policies/{}", args.id),
@@ -17,34 +28,52 @@ pub(crate) fn plan_dynamic_policy(command: &DynamicPolicyCommand) -> anyhow::Res
       "*",
     ),
     DynamicPolicySubcommand::Create(args) => {
+      let etag = dynamic_policy_etag_or_current(client, &args.etag).await?;
       let body = read_json_file(&args.json)?;
       let resources = resource_hint::dynamic_policy_target(&body);
-      post_json_with_permission(
-        "/admin/v1/dynamic-policies",
-        body,
-        PermissionHint::with_resources("dynamic-policy:Create", resources),
+      with_etag(
+        post_json_with_permission(
+          "/admin/v1/dynamic-policies",
+          body,
+          PermissionHint::with_resources("dynamic-policy:Create", resources),
+        )?,
+        etag,
       )
     }
     DynamicPolicySubcommand::Apply(args) => {
       let body = read_json_file(&args.json)?;
       let resources = resource_hint::dynamic_policy_target(&body);
-      post_json_with_permission(
+      let mut plan = post_json_with_permission(
         "/admin/v1/dynamic-policies/apply",
         body,
         PermissionHint::with_resources("dynamic-policy:Apply", resources),
+      )?;
+      plan.if_match = args.etag.clone();
+      Ok(plan)
+    }
+    DynamicPolicySubcommand::Patch(args) => {
+      let etag = dynamic_policy_etag_or_current(client, &args.etag).await?;
+      with_etag(
+        patch_json(
+          &format!("/admin/v1/dynamic-policies/{}", args.id),
+          read_json_file(&args.json)?,
+          "dynamic-policy:Update",
+          "*",
+        )?,
+        etag,
       )
     }
-    DynamicPolicySubcommand::Patch(args) => patch_json(
-      &format!("/admin/v1/dynamic-policies/{}", args.id),
-      read_json_file(&args.json)?,
-      "dynamic-policy:Update",
-      "*",
-    ),
-    DynamicPolicySubcommand::Delete(args) => delete(
-      &format!("/admin/v1/dynamic-policies/{}", args.id),
-      "dynamic-policy:Delete",
-      "*",
-    ),
+    DynamicPolicySubcommand::Delete(args) => {
+      let etag = dynamic_policy_etag_or_current(client, &args.etag).await?;
+      with_etag(
+        delete(
+          &format!("/admin/v1/dynamic-policies/{}", args.id),
+          "dynamic-policy:Delete",
+          "*",
+        )?,
+        etag,
+      )
+    }
     DynamicPolicySubcommand::Audit(args) => {
       get(&audit_endpoint(args), "dynamic-policy:ReadAudit", "*")
     }
@@ -54,12 +83,16 @@ pub(crate) fn plan_dynamic_policy(command: &DynamicPolicyCommand) -> anyhow::Res
       "*",
     ),
     DynamicPolicySubcommand::Import(args) => {
+      let etag = dynamic_policy_etag_or_current(client, &args.etag).await?;
       let body = read_json_file(&args.json)?;
       let resources = resource_hint::dynamic_policy_import_target(&body);
-      post_json_with_permission(
-        "/admin/v1/dynamic-policies/import",
-        body,
-        PermissionHint::with_resources("dynamic-policy:Import", resources),
+      with_etag(
+        post_json_with_permission(
+          "/admin/v1/dynamic-policies/import",
+          body,
+          PermissionHint::with_resources("dynamic-policy:Import", resources),
+        )?,
+        etag,
       )
     }
   }
@@ -100,11 +133,13 @@ pub(crate) fn plan_mitigation(action: &str, args: &MitigationArgs) -> anyhow::Re
     "mode": policy_mode(values.dry_run),
   });
   let resources = resource_hint::dynamic_policy_target(&body);
-  post_json_with_permission(
+  let mut plan = post_json_with_permission(
     "/admin/v1/dynamic-policies/apply",
     body,
     PermissionHint::with_resources("dynamic-policy:Apply", resources),
-  )
+  )?;
+  plan.if_match = values.etag.clone();
+  Ok(plan)
 }
 
 pub(crate) fn plan_challenge(args: &ChallengeArgs) -> anyhow::Result<RequestPlan> {
@@ -159,11 +194,13 @@ pub(crate) fn plan_rate_limit(args: &RateLimitArgs) -> anyhow::Result<RequestPla
     "mode": policy_mode(values.dry_run),
   });
   let resources = resource_hint::dynamic_policy_target(&body);
-  post_json_with_permission(
+  let mut plan = post_json_with_permission(
     "/admin/v1/dynamic-policies/apply",
     body,
     PermissionHint::with_resources("dynamic-policy:Apply", resources),
-  )
+  )?;
+  plan.if_match = values.etag.clone();
+  Ok(plan)
 }
 
 pub(crate) fn plan_mitigate(
@@ -217,11 +254,42 @@ pub(crate) fn plan_mitigate(
     "mode": mode,
   });
   let resources = resource_hint::dynamic_policy_target(&body);
-  post_json_with_permission(
+  let mut plan = post_json_with_permission(
     "/admin/v1/dynamic-policies/apply",
     body,
     PermissionHint::with_resources("dynamic-policy:Apply", resources),
-  )
+  )?;
+  plan.if_match = args.etag.clone();
+  Ok(plan)
+}
+
+async fn dynamic_policy_etag_or_current(
+  client: &AdminClient,
+  etag: &Option<String>,
+) -> anyhow::Result<String> {
+  match etag {
+    Some(etag) => Ok(etag.clone()),
+    None => current_dynamic_policy_etag(client).await,
+  }
+}
+
+async fn current_dynamic_policy_etag(client: &AdminClient) -> anyhow::Result<String> {
+  let response = client
+    .request_json(Method::GET, "/admin/v1/dynamic-policies/status", None, None)
+    .await?;
+  if !response.status.is_success() {
+    bail!(
+      "failed to fetch current dynamic policy ETag: {}",
+      response.status
+    );
+  }
+  let value = serde_json::from_slice::<Value>(&response.body)
+    .context("dynamic policy status was not JSON")?;
+  value
+    .get("etag")
+    .and_then(Value::as_str)
+    .map(str::to_string)
+    .context("dynamic policy status response did not include etag")
 }
 
 fn audit_endpoint(args: &DynamicPolicyAuditArgs) -> String {

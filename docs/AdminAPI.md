@@ -27,7 +27,8 @@ Admin listener responses include `X-OxiBelt-Request-Id` and
 "request_id": "..." }`. `details` is omitted when there is no safe
 operation hint to expose. Permission denials may include the checked IPM
 `action` and resolved `resource`; ETag failures may include the `If-Match`
-header name and expected ETag.
+header name and expected ETag. Generation ETags are concurrency diagnostics,
+not bearer secrets.
 When `[admin.audit]` is enabled, `/admin/v1/audit` returns unified Admin
 request audit records as `{ "audit": [...] }`; otherwise it returns `409`.
 Records include actor, peer, method, path, authorization action/resource,
@@ -46,8 +47,9 @@ resource grant before any state change or warm/probe-like work starts.
 Resource-specific Admin/IPM resources include:
 
 - cache: `policy/<policy>` and `host/<normalized-host>`
-- dynamic policy: `source/<source>/name/<name>` and `route/<route>`
-- upstream pool: `<pool>` and `<pool>/server/<server_id>`
+- dynamic policy: `status/current`, `source/<source>/name/<name>`, and
+  `route/<route>`
+- upstream pool: `status/current`, `<pool>`, and `<pool>/server/<server_id>`
 - IPM: `status/current`, `principal/<id>`, `credential/<id>`,
   `policy/<name>`, `binding/<id>`, `group/<group>`, `audit/current`, and
   `simulation/current`
@@ -70,6 +72,13 @@ in `docs/Configuration.md`; they are intentionally outside the first
 static/store object counts, and the last refresh result. Mutating IPM
 endpoints require `If-Match` with this ETag; missing ETags return `428`, stale
 ETags return `412`.
+
+`GET /admin/v1/dynamic-policies/status` returns the dynamic-policy PostgreSQL
+generation and ETag. Create, import, patch, and delete require matching
+`If-Match`; `apply` keeps its panic-button behavior and enforces `If-Match`
+only when the caller supplies it. `GET /admin/v1/upstream-pools/status`
+returns the upstream-pool runtime generation and ETag required by server
+mutations.
 
 When `[ipm].backend` resolves to a PostgreSQL shared-state backend, OxiBelt
 loads a strict hybrid IPM snapshot from TOML plus `oxibelt_ipm_*` tables. TOML

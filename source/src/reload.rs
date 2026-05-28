@@ -109,6 +109,11 @@ impl ReloadManager {
     let ipm = crate::ipm::IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
+    let upstream_pool_generation = if config.upstream_pools == active.config.upstream_pools {
+      active.upstream_pool_generation
+    } else {
+      active.upstream_pool_generation.saturating_add(1)
+    };
     let snapshot = AppSnapshot {
       route_table,
       sni_forward: active.sni_forward.clone(),
@@ -118,6 +123,7 @@ impl ReloadManager {
       clients: active.clients.clone(),
       control_http: active.control_http.clone(),
       h3_clients: active.h3_clients.clone(),
+      upstream_pool_generation,
       limits: active.limits.clone(),
       pools: active.pools.clone(),
       turn_pools: active.turn_pools.clone(),
@@ -212,6 +218,11 @@ impl ReloadManager {
     let ipm = crate::ipm::IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
+    let upstream_pool_generation = if config.upstream_pools == active.config.upstream_pools {
+      active.upstream_pool_generation
+    } else {
+      active.upstream_pool_generation.saturating_add(1)
+    };
     let snapshot = AppSnapshot {
       route_table: active.route_table.clone(),
       sni_forward: active.sni_forward.clone(),
@@ -221,6 +232,7 @@ impl ReloadManager {
       clients: active.clients.clone(),
       control_http: active.control_http.clone(),
       h3_clients: active.h3_clients.clone(),
+      upstream_pool_generation,
       limits: active.limits.clone(),
       pools: active.pools.clone(),
       turn_pools: active.turn_pools.clone(),

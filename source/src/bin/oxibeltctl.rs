@@ -18,6 +18,8 @@ mod ipm_plan;
 mod output;
 #[path = "oxibeltctl/plan.rs"]
 mod plan;
+#[path = "oxibeltctl/pool_plan.rs"]
+mod pool_plan;
 #[path = "oxibeltctl/profile_catalog.rs"]
 mod profile_catalog;
 #[path = "oxibeltctl/resource_hint.rs"]

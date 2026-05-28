@@ -14,8 +14,16 @@ pub(super) fn dynamic_policy_route(route: &str) -> String {
   format!("route/{}", component(route))
 }
 
+pub(super) fn dynamic_policy_status() -> &'static str {
+  "status/current"
+}
+
 pub(super) fn upstream_pool_server(pool: &str, server_id: &str) -> String {
   format!("{}/server/{}", component(pool), component(server_id))
+}
+
+pub(super) fn upstream_pool_status() -> &'static str {
+  "status/current"
 }
 
 pub(super) fn ipm_status() -> &'static str {

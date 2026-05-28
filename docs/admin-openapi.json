@@ -1914,6 +1914,11 @@
         ],
         "operationId": "createDynamicPolicy",
         "summary": "Create a dynamic policy row.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/DynamicPolicyWrite"
         },
@@ -1930,8 +1935,37 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/dynamic-policies/status": {
+      "get": {
+        "tags": [
+          "dynamic-policy"
+        ],
+        "operationId": "getDynamicPolicyStatus",
+        "summary": "Fetch the dynamic-policy write generation and ETag.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           }
         }
       }
@@ -1943,6 +1977,11 @@
         ],
         "operationId": "applyDynamicPolicy",
         "summary": "Create or replace a dynamic policy selected by namespace, source, and name.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatchOptional"
+          }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/DynamicPolicyWrite"
         },
@@ -1958,6 +1997,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -2039,6 +2081,11 @@
         ],
         "operationId": "importDynamicPolicies",
         "summary": "Import dynamic policies by namespace, source, and name.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/DynamicPolicyImport"
         },
@@ -2054,6 +2101,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -2097,6 +2150,11 @@
         ],
         "operationId": "patchDynamicPolicy",
         "summary": "Patch one dynamic policy.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/JsonObject"
         },
@@ -2116,6 +2174,12 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
           }
@@ -2127,6 +2191,11 @@
         ],
         "operationId": "deleteDynamicPolicy",
         "summary": "Disable one dynamic policy.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
@@ -2142,6 +2211,12 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
           }
         }
       }
@@ -2153,6 +2228,26 @@
         ],
         "operationId": "listUpstreamPools",
         "summary": "List runtime upstream-pool snapshots.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/upstream-pools/status": {
+      "get": {
+        "tags": [
+          "upstream-pools"
+        ],
+        "operationId": "getUpstreamPoolStatus",
+        "summary": "Fetch the upstream-pool runtime generation and ETag.",
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
@@ -2206,6 +2301,11 @@
         ],
         "operationId": "addUpstreamPoolServer",
         "summary": "Add a runtime-managed upstream-pool server.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/UpstreamPoolServerCreate"
         },
@@ -2224,6 +2324,12 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -2246,6 +2352,11 @@
         ],
         "operationId": "updateUpstreamPoolServer",
         "summary": "Update runtime state for an upstream-pool server.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/UpstreamPoolServerPatch"
         },
@@ -2265,6 +2376,12 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
           }
@@ -2276,6 +2393,11 @@
         ],
         "operationId": "removeUpstreamPoolServer",
         "summary": "Remove a runtime-managed upstream-pool server.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
@@ -2291,6 +2413,12 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
           }
         }
       }
@@ -2327,7 +2455,16 @@
         "schema": {
           "type": "string"
         },
-        "description": "Active config or IPM ETag from the corresponding status endpoint."
+        "description": "Active config, IPM, dynamic-policy, or upstream-pool ETag from the corresponding status endpoint."
+      },
+      "IfMatchOptional": {
+        "name": "If-Match",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional ETag from the corresponding status endpoint. When supplied, it is enforced as a precondition."
       },
       "Redact": {
         "name": "redact",

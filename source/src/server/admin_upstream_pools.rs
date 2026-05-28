@@ -15,7 +15,7 @@ use crate::upstream_control;
 use super::admin::json_response;
 use super::admin_auth::{AdminActor, AdminAuthorization};
 use super::admin_body::collect_admin_json;
-use super::{AdminAuditOutcome, admin_audit, admin_resource};
+use super::{AdminAuditOutcome, admin_audit, admin_error, admin_resource};
 
 pub(super) async fn admin_upstream_pools_response(
   request: hyper::Request<Incoming>,
@@ -37,6 +37,25 @@ pub(super) async fn admin_upstream_pools_response(
       ));
     }
     return Some(json_response(StatusCode::OK, &snapshot.pools.snapshots()));
+  }
+
+  if path == "/admin/v1/upstream-pools/status" {
+    if !authorization.is_allowed(
+      "upstream-pool:GetStatus",
+      admin_resource::upstream_pool_status(),
+    ) {
+      return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+    }
+    if *method != ::http::Method::GET {
+      return Some(text_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method not allowed",
+      ));
+    }
+    return Some(json_response(
+      StatusCode::OK,
+      &upstream_control::upstream_pool_status(snapshot),
+    ));
   }
 
   let rest = path.strip_prefix("/admin/v1/upstream-pools/")?;
@@ -64,6 +83,7 @@ pub(super) async fn admin_upstream_pools_response(
         "method not allowed",
       ));
     }
+    let if_match = request_if_match(&request);
     let body = match collect_admin_json::<AdminAddPoolServerRequest>(request).await {
       Ok(body) => body,
       Err(response) => {
@@ -90,6 +110,7 @@ pub(super) async fn admin_upstream_pools_response(
         peer_addr,
         authorization.actor,
         segments[0].to_string(),
+        if_match.as_deref(),
       )
       .await,
     );
@@ -110,18 +131,33 @@ pub(super) async fn admin_upstream_pools_response(
     if !authorization.is_allowed(action, &resource) {
       return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
     }
-    return Some(
-      admin_mutate_pool_server(
-        request,
-        &state,
-        peer_addr,
-        authorization.actor,
-        method,
-        segments[0].to_string(),
-        segments[2].to_string(),
-      )
-      .await,
-    );
+    let if_match = request_if_match(&request);
+    return Some(match *method {
+      ::http::Method::PATCH => {
+        admin_patch_pool_server(
+          request,
+          &state,
+          peer_addr,
+          authorization.actor,
+          segments[0].to_string(),
+          segments[2].to_string(),
+          if_match.as_deref(),
+        )
+        .await
+      }
+      ::http::Method::DELETE => {
+        admin_delete_pool_server(
+          &state,
+          peer_addr,
+          authorization.actor,
+          segments[0].to_string(),
+          segments[2].to_string(),
+          if_match.as_deref(),
+        )
+        .await
+      }
+      _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
+    });
   }
 
   Some(text_response(StatusCode::NOT_FOUND, "not found"))
@@ -163,14 +199,15 @@ async fn admin_add_pool_server(
   peer_addr: SocketAddr,
   actor: &AdminActor,
   pool_name: String,
+  if_match: Option<&str>,
 ) -> Response<ProxyBody> {
   let server_id = body.id.clone();
-  let result = upstream_control::apply_runtime_pool_update(state, |config| {
+  let result = upstream_control::apply_runtime_pool_update_checked(state, if_match, |config| {
     let pool = upstream_control::find_pool_mut(config, &pool_name)?;
     upstream_control::ensure_unique_server_id(pool, &server_id)?;
     let mut server = UpstreamPoolServerConfig {
       id: Some(server_id.clone()),
-      origin: body.origin,
+      origin: body.origin.clone(),
       weight: body.weight,
       max_conns: body.max_conns,
       backup: body.backup,
@@ -209,27 +246,9 @@ async fn admin_add_pool_server(
         AdminAuditOutcome::Rejected,
         Some(&message),
       );
-      text_response(StatusCode::BAD_REQUEST, &message)
+      upstream_pool_error_response(error)
     }
   }
-}
-
-async fn admin_mutate_pool_server(
-  request: hyper::Request<Incoming>,
-  state: &AppHandle,
-  peer_addr: SocketAddr,
-  actor: &AdminActor,
-  method: &::http::Method,
-  pool_name: String,
-  server_id: String,
-) -> Response<ProxyBody> {
-  if *method == ::http::Method::PATCH {
-    return admin_patch_pool_server(request, state, peer_addr, actor, pool_name, server_id).await;
-  }
-  if *method == ::http::Method::DELETE {
-    return admin_delete_pool_server(state, peer_addr, actor, pool_name, server_id).await;
-  }
-  text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
 }
 
 async fn admin_patch_pool_server(
@@ -239,6 +258,7 @@ async fn admin_patch_pool_server(
   actor: &AdminActor,
   pool_name: String,
   server_id: String,
+  if_match: Option<&str>,
 ) -> Response<ProxyBody> {
   let body = match collect_admin_json::<AdminPatchPoolServerRequest>(request).await {
     Ok(body) => body,
@@ -255,7 +275,7 @@ async fn admin_patch_pool_server(
       return response;
     }
   };
-  let result = upstream_control::apply_runtime_pool_update(state, |config| {
+  let result = upstream_control::apply_runtime_pool_update_checked(state, if_match, |config| {
     let pool = upstream_control::find_pool_mut(config, &pool_name)?;
     let (_, server) = upstream_control::find_server_mut(pool, &server_id)?;
     if let Some(state) = body.state {
@@ -300,9 +320,36 @@ async fn admin_patch_pool_server(
         AdminAuditOutcome::Rejected,
         Some(&message),
       );
-      text_response(StatusCode::BAD_REQUEST, &message)
+      upstream_pool_error_response(error)
     }
   }
+}
+
+fn request_if_match(request: &hyper::Request<Incoming>) -> Option<String> {
+  request
+    .headers()
+    .get(::http::header::IF_MATCH)
+    .and_then(|value| value.to_str().ok())
+    .map(str::to_string)
+}
+
+fn upstream_pool_error_response(error: anyhow::Error) -> Response<ProxyBody> {
+  if let Some(precondition) =
+    error.downcast_ref::<upstream_control::UpstreamPoolPreconditionError>()
+  {
+    let status = match precondition.kind() {
+      upstream_control::UpstreamPoolPreconditionErrorKind::Missing => {
+        StatusCode::PRECONDITION_REQUIRED
+      }
+      upstream_control::UpstreamPoolPreconditionErrorKind::Stale => StatusCode::PRECONDITION_FAILED,
+    };
+    return admin_error::error_response_with_details(
+      status,
+      &error.to_string(),
+      Some(json!({ "header": "If-Match", "expected": precondition.expected() })),
+    );
+  }
+  text_response(StatusCode::BAD_REQUEST, &error.to_string())
 }
 
 async fn admin_delete_pool_server(
@@ -311,14 +358,17 @@ async fn admin_delete_pool_server(
   actor: &AdminActor,
   pool_name: String,
   server_id: String,
+  if_match: Option<&str>,
 ) -> Response<ProxyBody> {
-  let result = upstream_control::apply_runtime_pool_update(state, |config| {
+  let result = upstream_control::apply_runtime_pool_update_checked(state, if_match, |config| {
     let pool = upstream_control::find_pool_mut(config, &pool_name)?;
     let index = pool
       .servers
       .iter()
       .enumerate()
-      .find(|(index, server)| crate::config::upstream_pool_server_id(*index, server) == server_id)
+      .find(|(index, server)| {
+        crate::config::upstream_pool_server_id(*index, server) == server_id.as_str()
+      })
       .map(|(index, _)| index)
       .with_context(|| format!("unknown upstream pool server {server_id}"))?;
     if pool.servers[index].source != UpstreamPoolServerSource::Admin {
@@ -352,7 +402,7 @@ async fn admin_delete_pool_server(
         AdminAuditOutcome::Rejected,
         Some(&message),
       );
-      text_response(StatusCode::BAD_REQUEST, &message)
+      upstream_pool_error_response(error)
     }
   }
 }

@@ -98,6 +98,91 @@ async fn upstream_pool_server_mutation_requires_server_resource() {
 }
 
 #[tokio::test]
+async fn dynamic_policy_status_requires_status_resource() {
+  let Some(denied) = try_scoped_admin_response(
+    "resource-dynamic-status-deny",
+    dynamic_policy_scope_config,
+    "GET",
+    "/admin/v1/dynamic-policies/status",
+    "",
+  )
+  .await
+  else {
+    return;
+  };
+
+  assert!(
+    denied.starts_with("HTTP/1.1 403 Forbidden")
+      && denied.contains(r#""action":"dynamic-policy:GetStatus""#)
+      && denied.contains(r#""resource":"oxibelt:oxibelt:dynamic-policy:status/current""#),
+    "dynamic policy status should require status/current: {}",
+    log_safe_text(&denied)
+  );
+
+  let Some(allowed) = try_scoped_admin_response(
+    "resource-dynamic-status-allow",
+    dynamic_policy_status_scope_config,
+    "GET",
+    "/admin/v1/dynamic-policies/status",
+    "",
+  )
+  .await
+  else {
+    return;
+  };
+
+  assert!(
+    allowed.starts_with("HTTP/1.1 400 Bad Request")
+      && allowed.contains("dynamic policy is disabled"),
+    "dynamic policy status permission should reach the handler: {}",
+    log_safe_text(&allowed)
+  );
+}
+
+#[tokio::test]
+async fn upstream_pool_status_requires_status_resource() {
+  let Some(denied) = try_scoped_admin_response(
+    "resource-upstream-status-deny",
+    upstream_pool_scope_config,
+    "GET",
+    "/admin/v1/upstream-pools/status",
+    "",
+  )
+  .await
+  else {
+    return;
+  };
+
+  assert!(
+    denied.starts_with("HTTP/1.1 403 Forbidden")
+      && denied.contains(r#""action":"upstream-pool:GetStatus""#)
+      && denied.contains(r#""resource":"oxibelt:oxibelt:upstream-pool:status/current""#),
+    "upstream pool status should require status/current: {}",
+    log_safe_text(&denied)
+  );
+
+  let Some(allowed) = try_scoped_admin_response(
+    "resource-upstream-status-allow",
+    upstream_pool_status_scope_config,
+    "GET",
+    "/admin/v1/upstream-pools/status",
+    "",
+  )
+  .await
+  else {
+    return;
+  };
+
+  assert!(
+    allowed.starts_with("HTTP/1.1 200 OK")
+      && allowed.contains(r#""generation":0"#)
+      && allowed.contains(r#""etag":"\"oxibelt-upstream-pools-0\"""#),
+    "upstream pool status permission should return the status ETag: {}",
+    log_safe_text(&allowed)
+  );
+}
+
+#[tokio::test]
 async fn ipm_credential_create_requires_target_principal_resource() {
   let response = scoped_admin_response(
     "resource-ipm-principal-deny",
@@ -124,11 +209,25 @@ async fn scoped_admin_response(
   path: &str,
   body: &str,
 ) -> String {
+  try_scoped_admin_response(name, config, method, path, body)
+    .await
+    .expect("admin listener should bind")
+}
+
+async fn try_scoped_admin_response(
+  name: &str,
+  config: fn(&Path, &Path, SocketAddr) -> Config,
+  method: &str,
+  path: &str,
+  body: &str,
+) -> Option<String> {
   let temp_dir = common::TempDir::new(name);
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
-  let listener = TcpListener::bind("127.0.0.1:0")
-    .await
-    .expect("admin listener should bind");
+  let listener = match TcpListener::bind("127.0.0.1:0").await {
+    Ok(listener) => listener,
+    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return None,
+    Err(error) => panic!("admin listener should bind: {error}"),
+  };
   let addr = listener
     .local_addr()
     .expect("admin listener address should be available");
@@ -149,7 +248,7 @@ async fn scoped_admin_response(
   let response = admin_json_response(addr, method, path, body).await;
   let _ = shutdown.send(true);
   task.abort();
-  response
+  Some(response)
 }
 
 async fn admin_json_response(addr: SocketAddr, method: &str, path: &str, body: &str) -> String {
@@ -242,6 +341,24 @@ resources = ["oxibelt:oxibelt:dynamic-policy:source/vault/name/block"]
   )
 }
 
+fn dynamic_policy_status_scope_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
+  parse_scoped_config(
+    cert_path,
+    key_path,
+    admin_bind,
+    r#"
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["dynamic-policy:GetStatus"]
+resources = ["oxibelt:oxibelt:dynamic-policy:status/current"]
+"#,
+  )
+}
+
 fn upstream_pool_scope_config(cert_path: &Path, key_path: &Path, admin_bind: SocketAddr) -> Config {
   parse_scoped_config(
     cert_path,
@@ -259,6 +376,24 @@ origin = "https://primary.internal.example"
 effect = "allow"
 actions = ["upstream-pool:UpdateServer"]
 resources = ["oxibelt:oxibelt:upstream-pool:app-pool"]
+"#,
+  )
+}
+
+fn upstream_pool_status_scope_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
+  parse_scoped_config(
+    cert_path,
+    key_path,
+    admin_bind,
+    r#"
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["upstream-pool:GetStatus"]
+resources = ["oxibelt:oxibelt:upstream-pool:status/current"]
 "#,
   )
 }

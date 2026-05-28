@@ -36,7 +36,7 @@ async fn apply_discovered_servers(
     return Ok(());
   }
   upstream_control::apply_runtime_pool_update(state, |config| {
-    upstream_control::replace_discovered_servers(config, pool_name, source, servers)
+    upstream_control::replace_discovered_servers(config, pool_name, source, servers.clone())
   })
   .await
 }

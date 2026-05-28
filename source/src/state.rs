@@ -174,6 +174,29 @@ impl AppHandle {
     };
     let _ = previous.data_plane_drain.send(true);
   }
+
+  pub(crate) fn replace_if_current(
+    &self,
+    expected: &Arc<AppSnapshot>,
+    snapshot: AppSnapshot,
+  ) -> bool {
+    let (data_plane_drain, _) = watch::channel(false);
+    let previous = {
+      let mut current = self.current.write().expect("app snapshot lock poisoned");
+      if !Arc::ptr_eq(&current.snapshot, expected) {
+        return false;
+      }
+      std::mem::replace(
+        &mut *current,
+        AppGeneration {
+          snapshot: Arc::new(snapshot),
+          data_plane_drain,
+        },
+      )
+    };
+    let _ = previous.data_plane_drain.send(true);
+    true
+  }
 }
 
 #[derive(Clone)]
@@ -186,6 +209,7 @@ pub struct AppSnapshot {
   pub clients: UpstreamClientPools,
   pub(crate) control_http: ControlHttpClient,
   pub(crate) h3_clients: UpstreamH3Pools,
+  pub upstream_pool_generation: u64,
   pub limits: Arc<LimitState>,
   pub pools: Arc<PoolState>,
   pub turn_pools: Arc<TurnPoolState>,
@@ -347,6 +371,7 @@ impl AppSnapshot {
       .context("failed to build system access log")?;
     let alt_svc_header_value = build_alt_svc_header_value(&config)
       .context("failed to build precomputed Alt-Svc header value")?;
+    let upstream_pool_generation = next_upstream_pool_generation(&config, previous);
 
     Ok(Self {
       config,
@@ -357,6 +382,7 @@ impl AppSnapshot {
       clients,
       control_http,
       h3_clients,
+      upstream_pool_generation,
       limits,
       pools,
       turn_pools,
@@ -417,6 +443,7 @@ impl AppSnapshot {
     let ipm = IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
+    let upstream_pool_generation = next_upstream_pool_generation(&config, Some(previous));
 
     Ok(Self {
       config,
@@ -427,6 +454,7 @@ impl AppSnapshot {
       clients,
       control_http: control_http.clone(),
       h3_clients,
+      upstream_pool_generation,
       limits: previous.limits.clone(),
       pools,
       turn_pools,
@@ -452,6 +480,17 @@ impl AppSnapshot {
       system_access_log: previous.system_access_log.clone(),
       alt_svc_header_value,
     })
+  }
+}
+
+fn next_upstream_pool_generation(config: &Config, previous: Option<&AppSnapshot>) -> u64 {
+  let Some(previous) = previous else {
+    return 0;
+  };
+  if config.upstream_pools == previous.config.upstream_pools {
+    previous.upstream_pool_generation
+  } else {
+    previous.upstream_pool_generation.saturating_add(1)
   }
 }
 

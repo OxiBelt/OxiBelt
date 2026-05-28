@@ -446,8 +446,9 @@ argon2id_memory_mib = 128
 #
 #[[ipm.policies.statements]]
 # effect = "allow"
-# actions = ["dynamic-policy:Create", "dynamic-policy:Apply"]
+# actions = ["dynamic-policy:GetStatus", "dynamic-policy:Create", "dynamic-policy:Apply"]
 # resources = [
+#   "oxibelt:oxibelt:dynamic-policy:status/current",
 #   "oxibelt:oxibelt:dynamic-policy:source/oxibeltctl/name/*",
 #   "oxibelt:oxibelt:dynamic-policy:route/app-root",
 # ]
@@ -459,8 +460,11 @@ argon2id_memory_mib = 128
 #
 #[[ipm.policies.statements]]
 # effect = "allow"
-# actions = ["upstream-pool:Get"]
-# resources = ["oxibelt:oxibelt:upstream-pool:app-pool"]
+# actions = ["upstream-pool:GetStatus", "upstream-pool:Get"]
+# resources = [
+#   "oxibelt:oxibelt:upstream-pool:status/current",
+#   "oxibelt:oxibelt:upstream-pool:app-pool",
+# ]
 #
 #[[ipm.policies.statements]]
 # effect = "allow"

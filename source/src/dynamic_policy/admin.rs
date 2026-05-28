@@ -6,10 +6,16 @@ use sqlx::{Postgres, Transaction};
 
 use super::{DynamicPolicyRuntime, PolicyRow, signature};
 
+mod precondition;
 mod quota;
 mod store;
 mod validation;
 mod write;
+pub use precondition::{
+  DynamicPolicyAdminStatus, DynamicPolicyPreconditionError, DynamicPolicyPreconditionErrorKind,
+  dynamic_policy_etag,
+};
+use precondition::{DynamicPolicyPreconditionMode, check_if_match_tx};
 use quota::enforce_policy_quotas;
 use store::*;
 use validation::*;
@@ -143,6 +149,16 @@ pub struct DynamicPolicyAdminRecord {
 }
 
 impl DynamicPolicyRuntime {
+  pub async fn admin_status(&self) -> anyhow::Result<DynamicPolicyAdminStatus> {
+    let inner = self.admin_inner()?;
+    let generation = select_generation(&inner.pool, &inner.namespace).await?;
+    Ok(DynamicPolicyAdminStatus {
+      namespace: inner.namespace.to_string(),
+      generation,
+      etag: dynamic_policy_etag(generation),
+    })
+  }
+
   pub async fn admin_list(&self) -> anyhow::Result<Vec<DynamicPolicyAdminRecord>> {
     let inner = self.admin_inner()?;
     select_admin_records(&inner.pool, &inner.namespace).await
@@ -157,9 +173,19 @@ impl DynamicPolicyRuntime {
     &self,
     actor: &str,
     input: DynamicPolicyAdminCreate,
+    if_match: Option<&str>,
   ) -> anyhow::Result<DynamicPolicyAdminRecord> {
     let inner = self.admin_inner()?;
+    let mut tx = begin_admin_write(&inner).await?;
+    check_if_match_tx(
+      &mut tx,
+      &inner.namespace,
+      if_match,
+      DynamicPolicyPreconditionMode::Required,
+    )
+    .await?;
     if let Err(error) = validate_create(&inner, &input) {
+      let _ = tx.rollback().await;
       audit_rejected(
         &inner,
         None,
@@ -172,7 +198,6 @@ impl DynamicPolicyRuntime {
       .await;
       return Err(error);
     }
-    let mut tx = begin_admin_write(&inner).await?;
     if let Err(error) = enforce_policy_quotas(
       &mut tx,
       &inner,
@@ -220,9 +245,19 @@ impl DynamicPolicyRuntime {
     &self,
     actor: &str,
     input: DynamicPolicyAdminCreate,
+    if_match: Option<&str>,
   ) -> anyhow::Result<DynamicPolicyAdminRecord> {
     let inner = self.admin_inner()?;
+    let mut tx = begin_admin_write(&inner).await?;
+    check_if_match_tx(
+      &mut tx,
+      &inner.namespace,
+      if_match,
+      DynamicPolicyPreconditionMode::Optional,
+    )
+    .await?;
     if let Err(error) = validate_create(&inner, &input) {
+      let _ = tx.rollback().await;
       audit_rejected(
         &inner,
         None,
@@ -235,7 +270,6 @@ impl DynamicPolicyRuntime {
       .await;
       return Err(error);
     }
-    let mut tx = begin_admin_write(&inner).await?;
     let existing =
       policy_ids_by_source_name_tx(&mut tx, &inner.namespace, &input.source, &input.name).await?;
     let id = if let Some((&id, duplicates)) = existing.split_first() {
@@ -321,9 +355,17 @@ impl DynamicPolicyRuntime {
     actor: &str,
     id: i64,
     input: DynamicPolicyAdminPatch,
+    if_match: Option<&str>,
   ) -> anyhow::Result<Option<DynamicPolicyAdminRecord>> {
     let inner = self.admin_inner()?;
     let mut tx = begin_admin_write(&inner).await?;
+    check_if_match_tx(
+      &mut tx,
+      &inner.namespace,
+      if_match,
+      DynamicPolicyPreconditionMode::Required,
+    )
+    .await?;
     let Some(existing) = select_admin_record_tx(&mut tx, &inner.namespace, id).await? else {
       return Ok(None);
     };
@@ -378,8 +420,24 @@ impl DynamicPolicyRuntime {
     select_admin_record(&inner.pool, &inner.namespace, id).await
   }
 
-  pub async fn admin_delete(&self, actor: &str, id: i64) -> anyhow::Result<bool> {
+  pub async fn admin_delete(
+    &self,
+    actor: &str,
+    id: i64,
+    if_match: Option<&str>,
+  ) -> anyhow::Result<bool> {
     let inner = self.admin_inner()?;
+    let mut tx = begin_admin_write(&inner).await?;
+    check_if_match_tx(
+      &mut tx,
+      &inner.namespace,
+      if_match,
+      DynamicPolicyPreconditionMode::Required,
+    )
+    .await?;
+    let Some(existing) = select_admin_record_tx(&mut tx, &inner.namespace, id).await? else {
+      return Ok(false);
+    };
     let result = sqlx::query(
       "UPDATE oxibelt_dynamic_policies
           SET enabled = false, writer_identity = $3, signature_version = NULL,
@@ -389,24 +447,25 @@ impl DynamicPolicyRuntime {
     .bind(inner.namespace.as_ref())
     .bind(id)
     .bind(actor)
-    .execute(&inner.pool)
+    .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
       return Ok(false);
     }
-    bump_generation(&inner.pool, &inner.namespace).await?;
-    audit(
-      &inner.pool,
+    bump_generation_tx(&mut tx, &inner.namespace).await?;
+    audit_tx(
+      &mut tx,
       &inner.namespace,
       Some(id),
       actor,
       "delete",
-      "",
-      "",
+      &existing.source,
+      &existing.name,
       "applied",
       None,
     )
     .await?;
+    tx.commit().await?;
     Ok(true)
   }
 
@@ -418,9 +477,17 @@ impl DynamicPolicyRuntime {
     &self,
     actor: &str,
     input: DynamicPolicyAdminImport,
+    if_match: Option<&str>,
   ) -> anyhow::Result<Vec<DynamicPolicyAdminRecord>> {
     let inner = self.admin_inner()?;
     let mut tx = begin_admin_write(&inner).await?;
+    check_if_match_tx(
+      &mut tx,
+      &inner.namespace,
+      if_match,
+      DynamicPolicyPreconditionMode::Required,
+    )
+    .await?;
     let mut ids = Vec::with_capacity(input.policies.len());
     for policy in input.policies {
       if let Err(error) = validate_create(&inner, &policy) {
