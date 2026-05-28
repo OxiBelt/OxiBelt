@@ -140,9 +140,15 @@ impl PlainProxyFastPath {
     {
       return text_response(StatusCode::BAD_GATEWAY, "unsupported fast-path upstream");
     }
-    if let Some(pool_name) = selected.pool_name() {
+    let pool_retry_context = if let Some(pool_name) = selected.pool_name() {
       access_log.set_upstream_pool(pool_name.to_string());
-    }
+      Some((
+        request.uri().clone(),
+        request.headers().get(http::header::COOKIE).cloned(),
+      ))
+    } else {
+      None
+    };
     let mut sticky_cookie = selected.sticky_cookie();
     let mut pool_selection = selected.into_pool_selection();
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
@@ -156,8 +162,6 @@ impl PlainProxyFastPath {
     let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
     let request_context =
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
-    let original_uri = request.uri().clone();
-    let pool_retry_cookie = request.headers().get(http::header::COOKIE).cloned();
     let request_body_definitely_empty =
       fast_path_request_body_is_definitely_empty(request.version(), request.headers());
     let (mut parts, body) = request.into_parts();
@@ -220,17 +224,18 @@ impl PlainProxyFastPath {
       return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
     };
     let upstream_started_at = Instant::now();
-    let mut pool_failures_reported = false;
-    let mut report_pool_success = true;
+    let mut report_pool_success = false;
     let upstream_response = match if let Some(selection) = pool_selection.take() {
-      pool_failures_reported = true;
+      let (original_uri, pool_retry_cookie) = pool_retry_context
+        .as_ref()
+        .expect("pool retry context should exist for pool selections");
       send_pool_with_retry(
         state.as_ref(),
         outbound,
         upstream_index,
         selection,
         resolved.route,
-        &original_uri,
+        original_uri,
         client_addr,
         host,
         pool_retry_cookie.as_ref(),
@@ -255,9 +260,6 @@ impl PlainProxyFastPath {
       Err(error) => {
         if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
           return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
-        }
-        if !pool_failures_reported {
-          state.pools.report_failure(&upstream.name);
         }
         warn!(error = %error, upstream = %upstream.name, "upstream fast-path request failed");
         let message = error.to_string();
