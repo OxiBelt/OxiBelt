@@ -352,7 +352,7 @@ enum GateMetric {
     P99,
 }
 
-struct ThroughputRatioDelta {
+struct MetricRatioDelta {
     before_ratio: f64,
     after_ratio: f64,
     ratio_delta_percent: f64,
@@ -2707,40 +2707,68 @@ fn classify_throughput_ratio_threshold_miss(
         Ok(value) => value,
         Err(error) => return baseline_unavailable_blocking(error),
     };
-    let ratio_delta = match baseline_throughput_ratio_delta_percent(
+    let comparator_p99_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        comparator,
+        comparator.as_str(),
+        comparator_scenario,
+        GateMetric::P99,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let throughput_ratio_delta = match baseline_metric_ratio_delta_percent(
         aggregates,
         baseline,
         oxibelt_scenario,
         comparator,
         comparator_scenario,
+        GateMetric::Rps,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let p99_ratio_delta = match baseline_metric_ratio_delta_percent(
+        aggregates,
+        baseline,
+        oxibelt_scenario,
+        comparator,
+        comparator_scenario,
+        GateMetric::P99,
     ) {
         Ok(value) => value,
         Err(error) => return baseline_unavailable_blocking(error),
     };
 
-    if ratio_delta.before_ratio < threshold
-        && oxibelt_rps_delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
-        && oxibelt_p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
-        && ratio_delta.ratio_delta_percent >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
+    if throughput_ratio_delta.before_ratio < threshold
+        && throughput_ratio_delta.ratio_delta_percent >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
+        && p99_ratio_delta.ratio_delta_percent <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
     {
         GateDisposition::Advisory {
             reason: format!(
-                "baseline-stable ratio gap from `{}`: baseline ratio {:.4} < threshold {:.4}, current ratio {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%",
+                "baseline-stable ratio gap from `{}`: baseline RPS ratio {:.4} < threshold {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
                 baseline_report_label(baseline),
-                ratio_delta.before_ratio,
+                throughput_ratio_delta.before_ratio,
                 threshold,
-                ratio_delta.after_ratio,
-                ratio_delta.ratio_delta_percent,
+                throughput_ratio_delta.after_ratio,
+                throughput_ratio_delta.ratio_delta_percent,
+                p99_ratio_delta.before_ratio,
+                p99_ratio_delta.after_ratio,
+                p99_ratio_delta.ratio_delta_percent,
             ),
         }
     } else {
         GateDisposition::Blocking {
             reason: format!(
-                "baseline evidence from `{}` did not qualify for advisory pass: baseline ratio {:.4}, current ratio {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%",
+                "baseline evidence from `{}` did not qualify for advisory pass: baseline RPS ratio {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
                 baseline_report_label(baseline),
-                ratio_delta.before_ratio,
-                ratio_delta.after_ratio,
-                ratio_delta.ratio_delta_percent,
+                throughput_ratio_delta.before_ratio,
+                throughput_ratio_delta.after_ratio,
+                throughput_ratio_delta.ratio_delta_percent,
+                p99_ratio_delta.before_ratio,
+                p99_ratio_delta.after_ratio,
+                p99_ratio_delta.ratio_delta_percent,
             ),
         }
     }
@@ -2888,35 +2916,27 @@ fn baseline_metric_delta_percent(
     Ok(((after - before) / before) * 100.0)
 }
 
-fn baseline_throughput_ratio_delta_percent(
+fn baseline_metric_ratio_delta_percent(
     aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
     oxibelt_scenario: &str,
     comparator: Comparator,
     comparator_scenario: &str,
-) -> std::result::Result<ThroughputRatioDelta, String> {
+    metric: GateMetric,
+) -> std::result::Result<MetricRatioDelta, String> {
     let baseline =
         baseline.ok_or_else(|| "no baseline performance report was provided".to_owned())?;
-    let before_oxibelt =
-        baseline_gate_metric(baseline, "oxibelt", oxibelt_scenario, GateMetric::Rps)?;
-    let before_comparator = baseline_gate_metric(
-        baseline,
-        comparator.as_str(),
-        comparator_scenario,
-        GateMetric::Rps,
-    )?;
-    let after_oxibelt = current_gate_metric(
-        aggregates,
-        Comparator::Oxibelt,
-        oxibelt_scenario,
-        GateMetric::Rps,
-    )?;
+    let before_oxibelt = baseline_gate_metric(baseline, "oxibelt", oxibelt_scenario, metric)?;
+    let before_comparator =
+        baseline_gate_metric(baseline, comparator.as_str(), comparator_scenario, metric)?;
+    let after_oxibelt =
+        current_gate_metric(aggregates, Comparator::Oxibelt, oxibelt_scenario, metric)?;
     let after_comparator =
-        current_gate_metric(aggregates, comparator, comparator_scenario, GateMetric::Rps)?;
+        current_gate_metric(aggregates, comparator, comparator_scenario, metric)?;
 
     let before_ratio = before_oxibelt / before_comparator;
     let after_ratio = after_oxibelt / after_comparator;
-    Ok(ThroughputRatioDelta {
+    Ok(MetricRatioDelta {
         before_ratio,
         after_ratio,
         ratio_delta_percent: ((after_ratio - before_ratio) / before_ratio) * 100.0,

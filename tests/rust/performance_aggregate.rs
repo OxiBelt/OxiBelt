@@ -222,11 +222,21 @@ fn write_baseline_report(path: &Path, aggregates: Vec<Value>) {
 }
 
 fn write_reverse_proxy_h2(input_dir: &Path, oxibelt_rps: f64, nginx_rps: f64, oxibelt_p99: f64) {
+    write_reverse_proxy_h2_with_p99(input_dir, oxibelt_rps, nginx_rps, oxibelt_p99, 10.0);
+}
+
+fn write_reverse_proxy_h2_with_p99(
+    input_dir: &Path,
+    oxibelt_rps: f64,
+    nginx_rps: f64,
+    oxibelt_p99: f64,
+    nginx_p99: f64,
+) {
     write_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
         vec![
             load_row("oxibelt-h2", "h2", oxibelt_rps, 1.0, oxibelt_p99),
-            load_row("nginx-h2", "h2", nginx_rps, 1.0, 10.0),
+            load_row("nginx-h2", "h2", nginx_rps, 1.0, nginx_p99),
         ],
     );
 }
@@ -958,6 +968,57 @@ fn h2_ratio_gate_becomes_advisory_when_baseline_gap_is_stable() {
 }
 
 #[test]
+fn h2_ratio_gate_allows_current_ci_shape_when_relative_ratios_hold() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h2_with_p99(&input_dir, 12617.6875, 18083.0625, 2.531, 2.039);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "h2", "reverse-proxy", 13463.5625, 2.361),
+            aggregate_row("nginx", "h2", "reverse-proxy", 19575.9375, 1.982),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    assert_eq!(
+        report["regression_gates"]["violations"]
+            .as_array()
+            .expect("violations should be an array")
+            .len(),
+        0
+    );
+    let advisory = find_regression_advisory(&report, "h2_min_nginx_ratio", "h2");
+    assert_close(
+        advisory["observed"]
+            .as_f64()
+            .expect("advisory ratio should exist"),
+        12617.6875 / 18083.0625,
+    );
+    let message = advisory["message"]
+        .as_str()
+        .expect("message should be present");
+    assert!(message.contains("baseline-stable ratio gap"));
+    assert!(message.contains("p99 ratio"));
+    assert!(message.contains("OxiBelt p99 +7.2%"));
+}
+
+#[test]
 fn h2_ratio_gate_blocks_when_baseline_passes_and_current_misses() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
@@ -997,13 +1058,13 @@ fn h2_ratio_gate_blocks_when_baseline_passes_and_current_misses() {
 }
 
 #[test]
-fn h2_ratio_gate_blocks_when_oxibelt_rps_regresses_against_low_baseline() {
+fn h2_ratio_gate_blocks_when_ratio_regresses_against_low_baseline() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
     let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
 
-    write_reverse_proxy_h2(&input_dir, 95.0, 145.0, 10.0);
+    write_reverse_proxy_h2(&input_dir, 90.0, 150.0, 10.0);
     write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
     write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
     write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
@@ -1031,12 +1092,12 @@ fn h2_ratio_gate_blocks_when_oxibelt_rps_regresses_against_low_baseline() {
         violation["message"]
             .as_str()
             .expect("message should be present")
-            .contains("OxiBelt RPS -5.0%")
+            .contains("current RPS ratio 0.6000 (-10.0%)")
     );
 }
 
 #[test]
-fn h2_ratio_gate_blocks_when_oxibelt_p99_regresses_against_low_baseline() {
+fn h2_ratio_gate_blocks_when_relative_p99_regresses_against_low_baseline() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -1070,7 +1131,7 @@ fn h2_ratio_gate_blocks_when_oxibelt_p99_regresses_against_low_baseline() {
         violation["message"]
             .as_str()
             .expect("message should be present")
-            .contains("OxiBelt p99 +10.0%")
+            .contains("p99 ratio 1.0000 -> 1.1000 (+10.0%)")
     );
 }
 
