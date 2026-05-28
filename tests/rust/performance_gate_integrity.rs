@@ -186,6 +186,72 @@ fn accept_multiplier_profile_harness(probe_result: &str) -> HarnessRun {
     HarnessRun { output, events }
 }
 
+fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun {
+    let script = performance_script_text();
+    let functions = format!(
+        "{}\n\n{}",
+        extract_bash_function(&script, "should_profile_load"),
+        extract_bash_function(&script, "run_load")
+    );
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-profile-load-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    write_run_load_profile_harness(&harness_path, &functions);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("PROFILE_LABEL", profile_label)
+        .env("LOAD_LABEL", load_label)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
+fn profile_pid_harness(
+    active_container: &str,
+    docker_pid: &str,
+    docker_running: &str,
+) -> HarnessRun {
+    let function = extract_bash_function(&performance_script_text(), "active_oxibelt_host_pid");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "oxibelt-performance-profile-pid-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    write_profile_pid_harness(&harness_path, &function);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("ACTIVE_PROXY_CONTAINER", active_container)
+        .env("DOCKER_PID", docker_pid)
+        .env("DOCKER_RUNNING", docker_running)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    HarnessRun { output, events }
+}
+
 fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) -> HarnessRun {
     let functions = format!(
         "{}\n\n{}",
@@ -484,6 +550,83 @@ h3_probe_succeeds() {{
 {functions}
 
 run_accept_multiplier_profile accept-0_5 baseline waf-enforcing crs-enforcing
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_run_load_profile_harness(path: &Path, functions: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+profile_label="${{PROFILE_LABEL:-}}"
+duration_seconds=1
+warmup_seconds=0
+concurrency=1
+events="${{EVENTS_FILE:?}}"
+
+run_probe_json() {{
+  printf 'PROBE %s\n' "$*" >>"${{events}}"
+  printf '{{"type":"load","label":"%s","requests":1,"rps":1,"p99_ms":1,"errors":0}}\n' "${{LOAD_LABEL:?}}"
+}}
+
+run_profiled_probe_json() {{
+  printf 'PROFILE %s %s\n' "$1" "$2" >>"${{events}}"
+  shift 2
+  run_probe_json "$@"
+}}
+
+append_result() {{
+  printf 'APPEND %s\n' "$1" >>"${{events}}"
+}}
+
+assert_result() {{
+  printf 'ASSERT %s\n' "$1" >>"${{events}}"
+}}
+
+sample_stats() {{
+  printf 'STATS %s\n' "$1" >>"${{events}}"
+}}
+
+{functions}
+
+run_load "${{LOAD_LABEL:?}}" h2 oxibelt "/perf/h2?body=ok" 1 1
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_profile_pid_harness(path: &Path, active_oxibelt_host_pid: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+active_proxy_container="${{ACTIVE_PROXY_CONTAINER:-}}"
+
+docker() {{
+  if [[ "$1" == "inspect" && "$2" == "-f" && "$3" == "{{{{.State.Pid}}}}" ]]; then
+    printf '%s\n' "${{DOCKER_PID:-}}"
+    return 0
+  fi
+  if [[ "$1" == "inspect" && "$2" == "-f" && "$3" == "{{{{.State.Running}}}}" ]]; then
+    printf '%s\n' "${{DOCKER_RUNNING:-false}}"
+    return 0
+  fi
+  return 1
+}}
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{active_oxibelt_host_pid}
+
+pid="$(active_oxibelt_host_pid oxibelt-h2)"
+printf 'PID %s\n' "${{pid}}" >>"${{events}}"
 "#
     );
     fs::write(path, harness).expect("Bash harness should be writable");
@@ -1585,6 +1728,72 @@ fn handshake_errors_are_not_covered_by_load_error_budget() {
         run.events
             .contains("FAIL performance probe reported request errors: oxibelt-tls-handshake-h2")
     );
+}
+
+#[test]
+fn diagnostic_perf_profile_is_noop_without_matching_label() {
+    let no_label = run_load_profile_harness("", "oxibelt-h2");
+    assert!(
+        no_label.output.status.success(),
+        "profile-disabled harness should still run the load"
+    );
+    assert!(
+        no_label.events.contains("PROBE load --label oxibelt-h2"),
+        "normal load probe should run without diagnostic profiling"
+    );
+    assert!(
+        !no_label.events.contains("PROFILE "),
+        "profiling should stay disabled when OXIBELT_PERF_PROFILE_LABEL is unset"
+    );
+
+    let near_miss = run_load_profile_harness("oxibelt-h2", "oxibelt-h2-upstream-h2");
+    assert!(
+        near_miss.output.status.success(),
+        "near-miss label harness should still run the load"
+    );
+    assert!(
+        !near_miss.events.contains("PROFILE "),
+        "profiling should require an exact label match"
+    );
+}
+
+#[test]
+fn diagnostic_perf_profile_runs_only_for_exact_label() {
+    let run = run_load_profile_harness("oxibelt-h2", "oxibelt-h2");
+
+    assert!(
+        run.output.status.success(),
+        "exact label harness should run successfully"
+    );
+    assert!(
+        run.events.contains("PROFILE oxibelt-h2 1"),
+        "run_load should route the exact matching label through diagnostic profiling"
+    );
+    assert!(
+        run.events.contains("PROBE load --label oxibelt-h2"),
+        "profiled loads should still execute the normal probe arguments"
+    );
+}
+
+#[test]
+fn diagnostic_perf_profile_fails_when_oxibelt_pid_is_missing() {
+    let no_container = profile_pid_harness("", "1234", "true");
+    assert!(
+        !no_container.output.status.success(),
+        "profiling should fail when no OxiBelt container is active"
+    );
+    assert!(no_container.events.contains(
+        "FAIL profiling requested for oxibelt-h2, but no active OxiBelt container is running"
+    ));
+
+    let missing_pid = profile_pid_harness("oxibelt-perf-baseline-test", "0", "true");
+    assert!(
+        !missing_pid.output.status.success(),
+        "profiling should fail closed when docker inspect does not return a usable host PID"
+    );
+    assert!(missing_pid.events.contains(
+        "FAIL profiling requested for oxibelt-h2, but OxiBelt host PID was not available"
+    ));
 }
 
 #[test]

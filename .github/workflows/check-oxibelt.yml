@@ -23,6 +23,11 @@ on:
         required: false
         default: "5"
         type: string
+      performance_h2_profile:
+        description: Record host perf evidence for the x86-64-v3 oxibelt-h2 smoke row
+        required: false
+        default: false
+        type: boolean
       aggressive_long_run:
         description: Run the scheduled aggressive long-run job after Docker performance
         required: false
@@ -633,6 +638,7 @@ jobs:
     env:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
       PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
+      PERFORMANCE_H2_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_h2_profile || false }}
       PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}
       OXIBELT_PERF_REGRESSION_GATE_MODE: warn
 
@@ -705,6 +711,22 @@ jobs:
           docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/nginx/oxibelt-performance-nginx-x86-64-v3.tar"
           docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/caddy/oxibelt-performance-caddy-x86-64-v3.tar"
 
+      - name: Install Linux perf for H2 profiling
+        if: github.event_name == 'workflow_dispatch' && inputs.performance_h2_profile && inputs.performance_profile == 'smoke' && matrix.serving_type == 'reverse-proxy' && matrix.shard == 1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic
+          if ! perf --version >/dev/null 2>&1; then
+            perf_path="$(find /usr/lib/linux-tools* -type f -name perf | sort -V | tail -n 1)"
+            if [[ -z "${perf_path}" ]]; then
+              echo "perf binary was not installed by linux-tools packages" >&2
+              exit 1
+            fi
+            sudo install -m 0755 "${perf_path}" /usr/local/bin/perf
+          fi
+          sudo sysctl kernel.perf_event_paranoid=-1
+          sudo sysctl kernel.kptr_restrict=0
+
       - name: Run Docker performance profile
         env:
           AMD64_V2_SUPPORTED: ${{ steps.select-amd64-v2.outputs.supported }}
@@ -767,6 +789,20 @@ jobs:
             for iteration in $(seq 1 "${PERFORMANCE_ITERATIONS}"); do
               echo "Running Docker performance profile ${PERFORMANCE_PROFILE} serving type ${PERFORMANCE_SERVING_TYPE} shard ${PERFORMANCE_SHARD}, target ${target_cpu}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
               status=0
+              profile_env=()
+              if [[ "${PERFORMANCE_H2_PROFILE}" == "true" \
+                    && "${PERFORMANCE_PROFILE}" == "smoke" \
+                    && "${PERFORMANCE_SERVING_TYPE}" == "reverse-proxy" \
+                    && "${PERFORMANCE_SHARD}" == "1" \
+                    && "${target_cpu}" == "x86-64-v3" \
+                    && "${iteration}" == "1" ]]; then
+                profile_env=(
+                  OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2
+                  OXIBELT_PERF_PROFILE_FREQUENCY=99
+                  OXIBELT_PERF_PROFILE_CALL_GRAPH=dwarf,8192
+                )
+              fi
+              env "${profile_env[@]}" \
               OXIBELT_DOCKER_IMAGE="${image_tag}" \
               OXIBELT_NGINX_IMAGE="${nginx_image_tag}" \
               OXIBELT_CADDY_IMAGE="${caddy_image_tag}" \

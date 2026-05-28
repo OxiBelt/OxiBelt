@@ -56,6 +56,9 @@ OXIBELT_PERF_CRS_ENFORCING_MIN_RPS=8000
 OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO=1.30
 OXIBELT_PERF_REGRESSION_GATE_MODE=fail
 OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO=baseline-accept-1
+OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2
+OXIBELT_PERF_PROFILE_FREQUENCY=99
+OXIBELT_PERF_PROFILE_CALL_GRAPH=dwarf,8192
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
 
@@ -82,6 +85,8 @@ OxiRule payload inspection is bounded by `waf.limits.max_body_inspection_bytes`,
 The baseline performance fixture also includes `/static/1k.bin`, `/static/16k.bin`, and `/static/1m.bin` static file scenarios. OxiBelt enables `proxy.static_files.sendfile = "auto"` and the opt-in static hot-object cache for that fixture: plaintext HTTP/1.1 static rows are labeled `h1c` and can exercise the guarded Linux sendfile path or hot small-object path, while TLS H1/H2/H3 static rows measure the optimized streaming fallback. nginx is configured with `sendfile on`, and Caddy uses `file_server`, so benchmark profile static rows compare the same static file sizes across all comparators.
 
 In GitHub Actions, `workflow_dispatch` also accepts `performance_iterations`, which defaults to `5`. Reduce it for long manual `benchmark` or `soak` runs when the default repeated sampling would exceed the job budget. The workflow also has a scheduled/manual `Docker aggressive long-run` job that starts after the `Docker performance` matrix succeeds. Scheduled runs use a five-hour steady soak by default. Manual runs must set `aggressive_long_run` and can override `aggressive_long_run_seconds` and `aggressive_long_run_concurrency`. The aggressive long-run uses the `baseline-aggressive-long-run` OxiBelt fixture, which keeps the steady-state baseline tuning but raises the upstream idle pool cap to the scheduled concurrency and enables `connect_error` retry for idempotent requests so transient H1 upstream reconnect churn does not surface as probe `502` noise. That fixture also extends upstream request and first-byte timeouts beyond the default slow POST stress duration, so the slow-client phase remains a resource-stability stressor instead of a 30-second upstream timeout check.
+
+For H2 hot-path investigations, set `OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2` on a local run with host `perf` installed. The harness samples only the load row whose label exactly matches the value, copies the active container's `/usr/local/bin/oxibelt` binary, and writes `perf.data`, `perf report --stdio`, `perf script`, stderr, and metadata under `profiles/` in the artifact directory. Use this as diagnostic evidence only: the profiler changes the measured run and its RPS should not be used as regression-gate or acceptance evidence. Manual `workflow_dispatch` runs can set `performance_h2_profile = true`; the workflow then enables profiling only for the `smoke` `reverse-proxy` shard `1`, target `x86-64-v3`, iteration `1` `oxibelt-h2` row.
 
 To reproduce the scheduled long-run locally with a shorter duration:
 

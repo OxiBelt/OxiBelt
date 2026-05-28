@@ -480,8 +480,27 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "workflow_dispatch should expose the Docker performance iteration count"
     );
     assert!(
+        workflow.contains("performance_h2_profile:"),
+        "workflow_dispatch should expose the opt-in H2 profiling toggle"
+    );
+    assert!(
         workflow.contains("PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}"),
         "docker-performance should default to five iterations outside manual dispatch"
+    );
+    assert!(
+        workflow.contains("PERFORMANCE_H2_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_h2_profile || false }}"),
+        "docker-performance should keep H2 profiling disabled outside explicit manual dispatch"
+    );
+    assert!(
+        workflow.contains("name: Install Linux perf for H2 profiling")
+            && workflow.contains("sudo sysctl kernel.perf_event_paranoid=-1"),
+        "manual H2 profiling should prepare host perf only for the opt-in diagnostic path"
+    );
+    assert!(
+        performance_job.contains("OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2")
+            && performance_job.contains(r#"&& "${target_cpu}" == "x86-64-v3""#)
+            && performance_job.contains(r#"&& "${iteration}" == "1""#),
+        "H2 profiling env should be scoped to the first x86-64-v3 oxibelt-h2 smoke sample"
     );
     assert!(
         workflow.contains("timeout-minutes: 360"),

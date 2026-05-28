@@ -47,6 +47,9 @@ Environment:
                                       test-only OxiBelt aggressive long-run fixture override
   OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO
                                       test-only OxiBelt TLS handshake fixture override
+  OXIBELT_PERF_PROFILE_LABEL         exact load label to record with host perf, for diagnostics only
+  OXIBELT_PERF_PROFILE_FREQUENCY     perf sampling frequency for diagnostic profiling (default: 99)
+  OXIBELT_PERF_PROFILE_CALL_GRAPH    perf call graph mode for diagnostic profiling (default: dwarf,8192)
   OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, probe logs, configs, and stats here
   KEEP_TEST_ARTIFACTS=1            keep tests/.tmp performance work directory
 EOF
@@ -104,6 +107,7 @@ run_id="$(date +%s)-$$-${RANDOM}"
 work_dir="${repo_root}/tests/.tmp/performance-${run_id}"
 logs_dir="${work_dir}/logs"
 probe_logs_dir="${work_dir}/probe-logs"
+profiles_dir="${work_dir}/profiles"
 configs_dir="${work_dir}/configs"
 tls_dir="${work_dir}/proxy-tls"
 static_dir="${work_dir}/static"
@@ -169,6 +173,9 @@ resource_max_memory_delta_bytes="${OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES:
 resource_max_fd_delta="${OXIBELT_PERF_RESOURCE_MAX_FD_DELTA:-256}"
 resource_max_task_delta="${OXIBELT_PERF_RESOURCE_MAX_TASK_DELTA:-64}"
 resource_settle_seconds="${OXIBELT_PERF_RESOURCE_SETTLE_SECONDS:-30}"
+profile_label="${OXIBELT_PERF_PROFILE_LABEL:-}"
+profile_frequency="${OXIBELT_PERF_PROFILE_FREQUENCY:-99}"
+profile_call_graph="${OXIBELT_PERF_PROFILE_CALL_GRAPH:-dwarf,8192}"
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
@@ -235,7 +242,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${logs_dir}" "${probe_logs_dir}" "${configs_dir}" "${tls_dir}" "${static_dir}"
+mkdir -p "${logs_dir}" "${probe_logs_dir}" "${profiles_dir}" "${configs_dir}" "${tls_dir}" "${static_dir}"
 : >"${results_jsonl}"
 : >"${stats_jsonl}"
 : >"${resource_snapshots_jsonl}"
@@ -250,6 +257,17 @@ require_tool() {
 require_tool docker
 require_tool jq
 require_tool openssl
+if [[ -n "${profile_label}" ]]; then
+  require_tool perf
+  if [[ ! "${profile_frequency}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "OXIBELT_PERF_PROFILE_FREQUENCY must be a positive integer; got '${profile_frequency}'" >&2
+    exit 2
+  fi
+  if [[ -z "${profile_call_graph}" ]]; then
+    echo "OXIBELT_PERF_PROFILE_CALL_GRAPH must not be empty when OXIBELT_PERF_PROFILE_LABEL is set" >&2
+    exit 2
+  fi
+fi
 
 IFS=',' read -r -a comparator_list <<<"${comparators}"
 
@@ -434,6 +452,147 @@ assert_resource_drift() {
   if (( max_taskish_delta > resource_max_task_delta )); then
     fail_with_diagnostics "OxiBelt aggressive long-run task/thread drift exceeded gate (${max_taskish_delta} > ${resource_max_task_delta})"
   fi
+}
+
+profile_artifact_name() {
+  local name="$1"
+  name="${name//[^A-Za-z0-9_.-]/_}"
+  if [[ -z "${name}" ]]; then
+    echo profile
+  else
+    echo "${name}"
+  fi
+}
+
+should_profile_load() {
+  local label="$1"
+  [[ -n "${profile_label}" && "${label}" == "${profile_label}" ]]
+}
+
+active_oxibelt_host_pid() {
+  local label="$1"
+  if [[ -z "${active_proxy_container}" ]]; then
+    fail_with_diagnostics "profiling requested for ${label}, but no active OxiBelt container is running"
+  fi
+
+  local pid
+  pid="$(docker inspect -f '{{.State.Pid}}' "${active_proxy_container}" 2>/dev/null || true)"
+  if [[ ! "${pid}" =~ ^[1-9][0-9]*$ ]]; then
+    fail_with_diagnostics "profiling requested for ${label}, but OxiBelt host PID was not available"
+  fi
+
+  if [[ "$(docker inspect -f '{{.State.Running}}' "${active_proxy_container}" 2>/dev/null || echo false)" != "true" ]]; then
+    fail_with_diagnostics "profiling requested for ${label}, but OxiBelt container is not running"
+  fi
+
+  echo "${pid}"
+}
+
+profile_duration_seconds() {
+  local duration="$1"
+  jq -n -r --arg duration "${duration}" --arg warmup "${warmup_seconds}" \
+    '($duration | tonumber) + ($warmup | tonumber) + 2'
+}
+
+run_profiled_probe_json() {
+  local label="$1"
+  local duration="$2"
+  shift 2
+
+  local profile_name pid profile_seconds profile_binary buildid_dir
+  local perf_data perf_report perf_script perf_stderr metadata_json
+  local started_at finished_at json probe_status perf_pid perf_status
+  profile_name="$(profile_artifact_name "${label}")"
+  pid="$(active_oxibelt_host_pid "${label}")"
+  profile_seconds="$(profile_duration_seconds "${duration}")"
+  profile_binary="${profiles_dir}/${profile_name}.oxibelt"
+  buildid_dir="${profiles_dir}/.build-id"
+  perf_data="${profiles_dir}/${profile_name}.perf.data"
+  perf_report="${profiles_dir}/${profile_name}.perf.report.txt"
+  perf_script="${profiles_dir}/${profile_name}.perf.script.txt"
+  perf_stderr="${profiles_dir}/${profile_name}.perf.stderr.log"
+  metadata_json="${profiles_dir}/${profile_name}.metadata.json"
+  mkdir -p "${profiles_dir}" "${buildid_dir}"
+
+  if ! docker cp "${active_proxy_container}:/usr/local/bin/oxibelt" "${profile_binary}" >>"${perf_stderr}" 2>&1; then
+    fail_with_diagnostics "failed to copy OxiBelt binary for profiling label ${label}"
+  fi
+  chmod 0644 "${profile_binary}" || true
+  PERF_BUILDID_DIR="${buildid_dir}" perf buildid-cache --add "${profile_binary}" >>"${perf_stderr}" 2>&1 || true
+
+  started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  perf record \
+    --freq "${profile_frequency}" \
+    --call-graph "${profile_call_graph}" \
+    --pid "${pid}" \
+    --output "${perf_data}" \
+    -- sleep "${profile_seconds}" >>"${perf_stderr}" 2>&1 &
+  perf_pid=$!
+  sleep 0.2
+
+  probe_status=0
+  json="$(run_probe_json "$@")" || probe_status=$?
+
+  perf_status=0
+  if kill -0 "${perf_pid}" >/dev/null 2>&1; then
+    kill -INT "${perf_pid}" >/dev/null 2>&1 || true
+  fi
+  wait "${perf_pid}" || perf_status=$?
+  finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  if [[ "${probe_status}" != "0" ]]; then
+    printf '%s\n' "${json}"
+    return "${probe_status}"
+  fi
+  if [[ "${perf_status}" != "0" && "${perf_status}" != "130" && "${perf_status}" != "143" ]]; then
+    fail_with_diagnostics "perf record failed for profiling label ${label}; see profiles/${profile_name}.perf.stderr.log"
+  fi
+  if [[ ! -s "${perf_data}" ]]; then
+    fail_with_diagnostics "perf record produced no data for profiling label ${label}"
+  fi
+
+  PERF_BUILDID_DIR="${buildid_dir}" perf report --stdio --input "${perf_data}" >"${perf_report}" 2>>"${perf_stderr}" \
+    || fail_with_diagnostics "perf report failed for profiling label ${label}; see profiles/${profile_name}.perf.stderr.log"
+  PERF_BUILDID_DIR="${buildid_dir}" perf script --input "${perf_data}" >"${perf_script}" 2>>"${perf_stderr}" \
+    || fail_with_diagnostics "perf script failed for profiling label ${label}; see profiles/${profile_name}.perf.stderr.log"
+  jq -n \
+    --arg label "${label}" \
+    --arg container "${active_proxy_container}" \
+    --argjson host_pid "${pid}" \
+    --arg frequency "${profile_frequency}" \
+    --arg call_graph "${profile_call_graph}" \
+    --arg duration_seconds "${duration}" \
+    --arg warmup_seconds "${warmup_seconds}" \
+    --arg profile_seconds "${profile_seconds}" \
+    --arg started_at "${started_at}" \
+    --arg finished_at "${finished_at}" \
+    --arg perf_data "profiles/${profile_name}.perf.data" \
+    --arg perf_report "profiles/${profile_name}.perf.report.txt" \
+    --arg perf_script "profiles/${profile_name}.perf.script.txt" \
+    --arg perf_stderr "profiles/${profile_name}.perf.stderr.log" \
+    --arg oxibelt_binary "profiles/${profile_name}.oxibelt" \
+    '{
+      schema_version: 1,
+      label: $label,
+      container: $container,
+      host_pid: $host_pid,
+      frequency: ($frequency | tonumber),
+      call_graph: $call_graph,
+      load_duration_seconds: ($duration_seconds | tonumber),
+      warmup_seconds: ($warmup_seconds | tonumber),
+      profile_seconds: ($profile_seconds | tonumber),
+      started_at: $started_at,
+      finished_at: $finished_at,
+      artifacts: {
+        perf_data: $perf_data,
+        perf_report: $perf_report,
+        perf_script: $perf_script,
+        perf_stderr: $perf_stderr,
+        oxibelt_binary: $oxibelt_binary
+      }
+    }' >"${metadata_json}"
+
+  printf '%s\n' "${json}"
 }
 
 run_probe_json() {
@@ -722,7 +881,8 @@ run_load() {
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
   fi
-  json="$(run_probe_json load \
+  local -a probe_args=(
+    load
     --label "${label}" \
     --protocol "${protocol}" \
     --host "${host}" \
@@ -735,7 +895,13 @@ run_load() {
     --warmup-seconds "${warmup_seconds}" \
     --concurrency "${conc}" \
     --expect-status 200 \
-    "${extra_args[@]}")"
+    "${extra_args[@]}"
+  )
+  if should_profile_load "${label}"; then
+    json="$(run_profiled_probe_json "${label}" "${duration}" "${probe_args[@]}")"
+  else
+    json="$(run_probe_json "${probe_args[@]}")"
+  fi
   append_result "${json}"
   assert_result "${json}"
   sample_stats "${label}"
@@ -1616,6 +1782,7 @@ cat >"${summary_md}" <<EOF
 - Duration: \`${duration_seconds}s\`
 - Warmup: \`${warmup_seconds}s\`
 - Concurrency: \`${concurrency}\`
+- Profile label: \`${profile_label:-none}\`
 
 | Scenario | Type | Protocol | Result | Notes |
 | --- | --- | --- | --- | --- |
