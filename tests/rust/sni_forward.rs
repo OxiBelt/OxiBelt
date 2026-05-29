@@ -77,6 +77,89 @@ idle_timeout_ms = 5000
 }
 
 #[tokio::test]
+async fn tcp_sni_forward_rejects_ambiguous_client_hello() {
+    let temp_dir = common::TempDir::new("sni-forward-ambiguous-tcp");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "sni-forward-ambiguous-tcp");
+    let https_port = unused_loopback_port().await;
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{https_port}")
+        .parse()
+        .expect("proxy address should parse");
+
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("raw upstream should bind");
+    let upstream_addr = upstream_listener
+        .local_addr()
+        .expect("raw upstream address should be available");
+    let upstream_accepts = Arc::new(AtomicUsize::new(0));
+    let upstream_notify = Arc::new(Notify::new());
+    let upstream_task = hold_upstream_connections(
+        upstream_listener,
+        upstream_accepts.clone(),
+        upstream_notify.clone(),
+    );
+
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "https_bind = \"127.0.0.1:8443\"",
+        &format!("https_bind = \"127.0.0.1:{https_port}\""),
+    ) + &format!(
+        r#"
+
+[[routes]]
+name = "secret-local"
+hosts = ["secret.example.com"]
+path_prefix = "/"
+upstream = "app"
+
+[sni_forward]
+enabled = true
+client_hello_max_bytes = 4096
+idle_timeout_ms = 5000
+
+[[sni_forward.rules]]
+name = "raw-upstream"
+server_names = ["forward.example.com"]
+target = "{upstream_addr}"
+protocols = ["tcp_tls"]
+connect_timeout_ms = 1000
+idle_timeout_ms = 5000
+"#
+    );
+
+    let config = parse_config(&raw);
+    let snapshot = AppSnapshot::new(config)
+        .await
+        .expect("application snapshot should initialize");
+    let state = AppHandle::new(snapshot);
+    let server_task = tokio::spawn(server::serve(state, None, RuntimeOverrides::default()));
+
+    let mut client = connect_with_retry(proxy_addr, &server_task).await;
+    let client_hello =
+        tls_client_hello_record_with_duplicate_sni("forward.example.com", "secret.example.com");
+    client
+        .write_all(&client_hello)
+        .await
+        .expect("ambiguous ClientHello should write");
+
+    let mut read_buffer = [0u8; 1];
+    match tokio::time::timeout(Duration::from_secs(2), client.read(&mut read_buffer)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        Ok(Ok(read)) => panic!("ambiguous SNI should close, read {read} bytes instead"),
+        Err(_) => panic!("ambiguous SNI connection stayed open"),
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        upstream_accepts.load(Ordering::SeqCst),
+        0,
+        "ambiguous forwarded SNI session must not reach upstream"
+    );
+    server_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn tcp_sni_forward_honors_real_ip_connection_limits() {
     let temp_dir = common::TempDir::new("sni-forward-tcp-limits");
     let (cert_path, key_path) =
@@ -246,15 +329,29 @@ async fn wait_for_accept_count(accepts: &AtomicUsize, notify: &Notify, expected:
 }
 
 fn tls_client_hello_record(host: &str) -> Vec<u8> {
-    let mut extensions = Vec::new();
-    let sni_list_len = 1 + 2 + host.len();
-    push_u16(&mut extensions, 0x0000);
-    push_u16(&mut extensions, (2 + sni_list_len) as u16);
-    push_u16(&mut extensions, sni_list_len as u16);
-    extensions.push(0x00);
-    push_u16(&mut extensions, host.len() as u16);
-    extensions.extend_from_slice(host.as_bytes());
+    tls_client_hello_record_with_extensions(&server_name_extension(host))
+}
 
+fn tls_client_hello_record_with_duplicate_sni(first: &str, second: &str) -> Vec<u8> {
+    let mut extensions = Vec::new();
+    extensions.extend_from_slice(&server_name_extension(first));
+    extensions.extend_from_slice(&server_name_extension(second));
+    tls_client_hello_record_with_extensions(&extensions)
+}
+
+fn server_name_extension(host: &str) -> Vec<u8> {
+    let mut extension = Vec::new();
+    let sni_list_len = 1 + 2 + host.len();
+    push_u16(&mut extension, 0x0000);
+    push_u16(&mut extension, (2 + sni_list_len) as u16);
+    push_u16(&mut extension, sni_list_len as u16);
+    extension.push(0x00);
+    push_u16(&mut extension, host.len() as u16);
+    extension.extend_from_slice(host.as_bytes());
+    extension
+}
+
+fn tls_client_hello_record_with_extensions(extensions: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     push_u16(&mut body, 0x0303);
     body.extend_from_slice(&[0x11; 32]);
@@ -264,7 +361,7 @@ fn tls_client_hello_record(host: &str) -> Vec<u8> {
     body.push(1);
     body.push(0);
     push_u16(&mut body, extensions.len() as u16);
-    body.extend_from_slice(&extensions);
+    body.extend_from_slice(extensions);
 
     let mut handshake = Vec::new();
     handshake.push(0x01);

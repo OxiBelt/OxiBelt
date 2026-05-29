@@ -66,37 +66,52 @@ fn parse_client_hello_body_sni(body: &[u8]) -> anyhow::Result<Option<String>> {
 
   let extensions_len = usize::from(cursor.read_u16()?);
   let extensions = cursor.take(extensions_len)?;
+  ensure!(
+    cursor.remaining() == 0,
+    "unexpected trailing data after TLS ClientHello extensions"
+  );
   parse_extensions_sni(extensions)
 }
 
 fn parse_extensions_sni(extensions: &[u8]) -> anyhow::Result<Option<String>> {
   let mut cursor = ByteCursor::new(extensions);
+  let mut saw_server_name = false;
+  let mut sni = None;
   while cursor.remaining() > 0 {
     let extension_type = cursor.read_u16()?;
     let extension_len = usize::from(cursor.read_u16()?);
     let extension = cursor.take(extension_len)?;
     if extension_type == TLS_EXTENSION_SERVER_NAME {
-      return parse_server_name_extension_sni(extension);
+      ensure!(!saw_server_name, "duplicate TLS server_name extension");
+      saw_server_name = true;
+      sni = parse_server_name_extension_sni(extension)?;
     }
   }
-  Ok(None)
+  Ok(sni)
 }
 
 fn parse_server_name_extension_sni(extension: &[u8]) -> anyhow::Result<Option<String>> {
   let mut cursor = ByteCursor::new(extension);
   let list_len = usize::from(cursor.read_u16()?);
   let names = cursor.take(list_len)?;
+  ensure!(
+    cursor.remaining() == 0,
+    "unexpected trailing data after TLS server_name list"
+  );
+
+  let mut sni = None;
   let mut names_cursor = ByteCursor::new(names);
   while names_cursor.remaining() > 0 {
     let name_type = names_cursor.read_u8()?;
     let name_len = usize::from(names_cursor.read_u16()?);
     let name = names_cursor.take(name_len)?;
     if name_type == TLS_NAME_TYPE_HOST_NAME {
+      ensure!(sni.is_none(), "duplicate TLS host_name entry");
       let value = std::str::from_utf8(name).context("SNI is not valid UTF-8")?;
-      return normalize_visible_sni(value).map(Some);
+      sni = Some(normalize_visible_sni(value)?);
     }
   }
-  Ok(None)
+  Ok(sni)
 }
 
 fn tls_record_len(data: &[u8]) -> anyhow::Result<Option<usize>> {
@@ -224,6 +239,61 @@ mod tests {
     assert_eq!(sni, None);
   }
 
+  #[test]
+  fn raw_client_hello_parser_rejects_duplicate_server_name_extensions() {
+    let mut extensions = Vec::new();
+    extensions.extend_from_slice(&server_name_extension(&["first.example.test"], &[]));
+    extensions.extend_from_slice(&server_name_extension(&["second.example.test"], &[]));
+    let hello = client_hello_with_extensions(&extensions);
+
+    let error = raw_client_hello_sni(&hello).expect_err("duplicate server_name should fail");
+
+    assert!(
+      format!("{error:#}").contains("duplicate TLS server_name extension"),
+      "{error:#}"
+    );
+  }
+
+  #[test]
+  fn raw_client_hello_parser_rejects_duplicate_host_name_entries() {
+    let extensions = server_name_extension(&["first.example.test", "second.example.test"], &[]);
+    let hello = client_hello_with_extensions(&extensions);
+
+    let error = raw_client_hello_sni(&hello).expect_err("duplicate host_name should fail");
+
+    assert!(
+      format!("{error:#}").contains("duplicate TLS host_name entry"),
+      "{error:#}"
+    );
+  }
+
+  #[test]
+  fn raw_client_hello_parser_rejects_trailing_server_name_bytes() {
+    let extensions = server_name_extension(&["app.example.test"], &[0xff]);
+    let hello = client_hello_with_extensions(&extensions);
+
+    let error = raw_client_hello_sni(&hello).expect_err("trailing server_name bytes should fail");
+
+    assert!(
+      format!("{error:#}").contains("unexpected trailing data after TLS server_name list"),
+      "{error:#}"
+    );
+  }
+
+  #[test]
+  fn raw_client_hello_parser_rejects_trailing_client_hello_extension_bytes() {
+    let extensions = server_name_extension(&["app.example.test"], &[]);
+    let hello = client_hello_with_extensions_and_trailing(&extensions, &[0xff]);
+
+    let error =
+      raw_client_hello_sni(&hello).expect_err("trailing ClientHello extension bytes should fail");
+
+    assert!(
+      format!("{error:#}").contains("unexpected trailing data after TLS ClientHello extensions"),
+      "{error:#}"
+    );
+  }
+
   fn tls_record(payload: &[u8]) -> Vec<u8> {
     let mut record = Vec::with_capacity(TLS_RECORD_HEADER_LEN + payload.len());
     record.push(0x16);
@@ -238,13 +308,25 @@ mod tests {
   }
 
   fn client_hello_with_sni(sni: &str) -> Vec<u8> {
+    client_hello_with_extensions(&server_name_extension(&[sni], &[]))
+  }
+
+  fn server_name_extension(names: &[&str], trailing: &[u8]) -> Vec<u8> {
     let mut server_name = Vec::new();
-    let sni_len = u16::try_from(sni.len()).expect("sni fits u16");
-    let list_len = 1u16 + 2 + sni_len;
+    let list_len = names.iter().fold(0u16, |len, name| {
+      let name_len = u16::try_from(name.len()).expect("sni fits u16");
+      len
+        .checked_add(1 + 2 + name_len)
+        .expect("server name list fits u16")
+    });
     server_name.extend_from_slice(&list_len.to_be_bytes());
-    server_name.push(TLS_NAME_TYPE_HOST_NAME);
-    server_name.extend_from_slice(&sni_len.to_be_bytes());
-    server_name.extend_from_slice(sni.as_bytes());
+    for name in names {
+      let name_len = u16::try_from(name.len()).expect("sni fits u16");
+      server_name.push(TLS_NAME_TYPE_HOST_NAME);
+      server_name.extend_from_slice(&name_len.to_be_bytes());
+      server_name.extend_from_slice(name.as_bytes());
+    }
+    server_name.extend_from_slice(trailing);
 
     let mut extensions = Vec::new();
     extensions.extend_from_slice(&TLS_EXTENSION_SERVER_NAME.to_be_bytes());
@@ -254,8 +336,7 @@ mod tests {
         .to_be_bytes(),
     );
     extensions.extend_from_slice(&server_name);
-
-    client_hello_with_extensions(&extensions)
+    extensions
   }
 
   fn client_hello_without_extensions() -> Vec<u8> {
@@ -263,6 +344,10 @@ mod tests {
   }
 
   fn client_hello_with_extensions(extensions: &[u8]) -> Vec<u8> {
+    client_hello_with_extensions_and_trailing(extensions, &[])
+  }
+
+  fn client_hello_with_extensions_and_trailing(extensions: &[u8], trailing: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&[0x03, 0x03]);
     body.extend_from_slice(&[0u8; 32]);
@@ -279,6 +364,7 @@ mod tests {
       );
       body.extend_from_slice(extensions);
     }
+    body.extend_from_slice(trailing);
 
     let mut message = Vec::with_capacity(4 + body.len());
     message.push(TLS_HANDSHAKE_CLIENT_HELLO);
