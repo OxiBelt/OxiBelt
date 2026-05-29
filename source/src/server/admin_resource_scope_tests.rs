@@ -202,6 +202,97 @@ async fn ipm_credential_create_requires_target_principal_resource() {
   );
 }
 
+#[tokio::test]
+async fn ipm_simulate_self_requires_self_action() {
+  let Some(response) = try_scoped_admin_response(
+    "resource-ipm-simulate-self-deny",
+    ipm_simulate_principal_only_config,
+    "POST",
+    "/admin/v1/ipm/simulate",
+    r#"{"action":"config:GetStatus","resource":"oxibelt:oxibelt:config:*"}"#,
+  )
+  .await
+  else {
+    return;
+  };
+
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden")
+      && response.contains(r#""action":"ipm:SimulateSelf""#)
+      && response.contains(r#""resource":"oxibelt:oxibelt:ipm:simulation/current""#),
+    "self simulation should require ipm:SimulateSelf: {}",
+    log_safe_text(&response)
+  );
+}
+
+#[tokio::test]
+async fn ipm_simulate_principal_requires_target_principal_resource() {
+  let Some(response) = try_scoped_admin_response(
+    "resource-ipm-simulate-principal-deny",
+    ipm_simulate_principal_status_only_config,
+    "POST",
+    "/admin/v1/ipm/simulate",
+    r#"{"action":"config:GetStatus","resource":"oxibelt:oxibelt:config:*","target":{"principal":"deployer"}}"#,
+  )
+  .await
+  else {
+    return;
+  };
+
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden")
+      && response.contains(r#""action":"ipm:SimulatePrincipal""#)
+      && response.contains(r#""resource":"oxibelt:oxibelt:ipm:principal/deployer""#),
+    "principal simulation should require target principal resource: {}",
+    log_safe_text(&response)
+  );
+}
+
+#[tokio::test]
+async fn ipm_simulate_policy_requires_overlay_policy_resource() {
+  let Some(response) = try_scoped_admin_response(
+    "resource-ipm-simulate-policy-deny",
+    ipm_simulate_policy_status_only_config,
+    "POST",
+    "/admin/v1/ipm/simulate",
+    r#"{"action":"config:GetStatus","resource":"oxibelt:oxibelt:config:*","overlay":{"policies":[{"name":"deny-status","statements":[{"effect":"deny","actions":["config:GetStatus"],"resources":["*"]}]}],"bindings":[{"group":"deployers","policy":"deny-status"}]}}"#,
+  )
+  .await
+  else {
+    return;
+  };
+
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden")
+      && response.contains(r#""action":"ipm:SimulatePolicy""#)
+      && response.contains(r#""resource":"oxibelt:oxibelt:ipm:policy/deny-status""#),
+    "policy simulation should require overlay policy resource: {}",
+    log_safe_text(&response)
+  );
+}
+
+#[tokio::test]
+async fn ipm_simulate_rejects_legacy_simulate_action_input() {
+  let Some(response) = try_scoped_admin_response(
+    "resource-ipm-simulate-legacy-action",
+    ipm_simulate_self_config,
+    "POST",
+    "/admin/v1/ipm/simulate",
+    r#"{"action":"ipm:Simulate","resource":"oxibelt:oxibelt:ipm:simulation/current"}"#,
+  )
+  .await
+  else {
+    return;
+  };
+
+  assert!(
+    response.starts_with("HTTP/1.1 400 Bad Request")
+      && response.contains("unsupported action ipm:Simulate"),
+    "legacy ipm:Simulate should be rejected as an action: {}",
+    log_safe_text(&response)
+  );
+}
+
 async fn scoped_admin_response(
   name: &str,
   config: fn(&Path, &Path, SocketAddr) -> Config,
@@ -214,7 +305,7 @@ async fn scoped_admin_response(
     .expect("admin listener should bind")
 }
 
-async fn try_scoped_admin_response(
+pub(super) async fn try_scoped_admin_response(
   name: &str,
   config: fn(&Path, &Path, SocketAddr) -> Config,
   method: &str,
@@ -416,6 +507,116 @@ resources = ["oxibelt:oxibelt:ipm:credential/new-token"]
   )
 }
 
+fn ipm_simulate_self_config(cert_path: &Path, key_path: &Path, admin_bind: SocketAddr) -> Config {
+  parse_simulation_config(
+    cert_path,
+    key_path,
+    admin_bind,
+    r#"
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["ipm:SimulateSelf"]
+resources = ["oxibelt:oxibelt:ipm:simulation/current"]
+"#,
+  )
+}
+
+fn ipm_simulate_principal_only_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
+  parse_simulation_config(
+    cert_path,
+    key_path,
+    admin_bind,
+    r#"
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["ipm:SimulatePrincipal"]
+resources = ["oxibelt:oxibelt:ipm:simulation/current"]
+"#,
+  )
+}
+
+pub(super) fn ipm_simulate_principal_status_only_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
+  ipm_simulate_principal_only_config(cert_path, key_path, admin_bind)
+}
+
+pub(super) fn ipm_simulate_policy_status_only_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
+  parse_simulation_config(
+    cert_path,
+    key_path,
+    admin_bind,
+    r#"
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["ipm:SimulatePolicy"]
+resources = ["oxibelt:oxibelt:ipm:simulation/current"]
+"#,
+  )
+}
+
+pub(super) fn parse_simulation_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+  policy_body: &str,
+) -> Config {
+  let mut raw = common::minimal_config_toml(cert_path, key_path)
+    .replace("unprivileged_mode = true", "unprivileged_mode = false")
+    .replace(
+      "https_bind = \"127.0.0.1:8443\"",
+      "https_bind = \"127.0.0.1:0\"",
+    );
+  raw.push_str(&format!(
+    r#"
+
+[admin]
+enabled = true
+bind = "{admin_bind}"
+bearer_token_env = "{ADMIN_TOKEN_ENV}"
+transport = "plaintext_allowlist"
+
+[ipm]
+enabled = true
+
+[[ipm.principals]]
+id = "operator"
+subject = "operator@example.com"
+
+[[ipm.principals]]
+id = "deployer"
+subject = "deployer@example.com"
+groups = ["deployers"]
+
+[[ipm.credentials]]
+name = "operator-token"
+principal = "operator"
+bearer_token_env = "{ADMIN_TOKEN_ENV}"
+
+[[ipm.policies]]
+name = "scoped"
+{policy_body}
+
+[[ipm.bindings]]
+principal = "operator"
+policy = "scoped"
+"#
+  ));
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  config
+}
+
 fn parse_scoped_config(
   cert_path: &Path,
   key_path: &Path,
@@ -463,6 +664,6 @@ policy = "scoped"
   config
 }
 
-fn log_safe_text(input: &str) -> String {
+pub(super) fn log_safe_text(input: &str) -> String {
   input.replace('\n', "\\n").replace('\r', "\\r")
 }

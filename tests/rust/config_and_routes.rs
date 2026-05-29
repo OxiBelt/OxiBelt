@@ -3795,6 +3795,21 @@ policy = "policy"
         "unexpected error: {error}"
     );
 
+    let legacy_simulate_action = base
+        .replace("{action}", "ipm:Simulate")
+        .replace("{resource}", "oxibelt:default:ipm:simulation/current")
+        .replace("{condition}", "");
+    let config: Config = toml::from_str(&legacy_simulate_action).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("legacy IPM simulate action should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported action ipm:Simulate"),
+        "unexpected error: {error}"
+    );
+
     let unknown_resource_service = base
         .replace("{action}", "config:GetStatus")
         .replace("{resource}", "oxibelt:default:unknown:*")

@@ -61,6 +61,11 @@ policy create, apply, import, patch, and delete operations check the
 target. Upstream server mutations check `<pool>/server/<server_id>`. IPM
 credential assignment checks both the credential and target principal; binding
 create checks the binding, target principal or group, and policy.
+`POST /admin/v1/ipm/simulate` uses the same `simulation/current` resource.
+Current-actor checks require `ipm:SimulateSelf`; target principal, credential,
+subject, or group overrides require `ipm:SimulatePrincipal` plus the referenced
+target resources; inline policy or binding overlays require `ipm:SimulatePolicy`
+plus the touched policy, binding, principal, or group resources.
 
 The legacy signed query purge endpoints under `/cache/purge*` are documented
 in `docs/Configuration.md`; they are intentionally outside the first
@@ -96,6 +101,7 @@ entries use `source = "store"` and can be managed through:
 - bindings: `GET/POST /admin/v1/ipm/bindings`,
   `DELETE /admin/v1/ipm/bindings/{id}`
 - audit: `GET /admin/v1/ipm/audit`
+- simulation: `POST /admin/v1/ipm/simulate`
 
 If no PostgreSQL IPM store is configured, list/get endpoints keep serving the
 static TOML snapshot and mutation endpoints return `409`. Store refresh is
@@ -107,3 +113,16 @@ Credential create and rotate responses return a new `obt_v1_<base64url>` token
 exactly once. OxiBelt stores only a `sha256-v1` digest plus token prefix. Rotate
 keeps the previous token valid until `previous_token_overlap_until`; revoke and
 delete clear regular access subject to lockout prevention.
+
+`/admin/v1/ipm/simulate` accepts `action` and `resource` for a self check, plus
+optional `target`, `context`, and `overlay` objects. `target.principal` resolves
+an active principal; `target.credential` resolves the credential's principal and
+actor name only when the credential is active; `target.subject` and
+`target.groups` override only the simulated actor. OxiBelt authorizes named
+target and overlay resources before resolving them so scoped callers cannot use
+validation errors to enumerate IPM objects. If `context` is omitted, OxiBelt
+evaluates with the current Admin request context; if it is supplied, only the
+supplied context fields participate. Simulation responses list context
+`claim_keys` but do not echo claim values.
+`overlay.policies` and `overlay.bindings` are applied to an in-memory snapshot
+for the single request and are never persisted.

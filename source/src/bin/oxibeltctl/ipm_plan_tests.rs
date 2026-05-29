@@ -32,6 +32,132 @@ fn ipm_status_uses_status_endpoint_and_permission() {
 }
 
 #[test]
+fn ipm_simulate_target_and_context_build_extended_body() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "ipm",
+    "simulate",
+    "--action",
+    "config:Load",
+    "--resource",
+    "oxibelt:oxibelt:config:*",
+    "--principal",
+    "deployer",
+    "--group",
+    "deployers",
+    "--source-ip",
+    "10.0.0.5",
+    "--method",
+    "POST",
+    "--claim",
+    "env=prod",
+  ])
+  .expect("ipm simulate should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.method, Method::POST);
+  assert_eq!(plan.endpoint, "/admin/v1/ipm/simulate");
+  assert_eq!(plan.permission.action, "ipm:SimulatePrincipal");
+  assert_eq!(
+    plan.permission.resources,
+    vec![
+      "simulation/current",
+      "principal/deployer",
+      "group/deployers"
+    ]
+  );
+  assert_eq!(
+    plan.body,
+    Some(json!({
+      "action": "config:Load",
+      "resource": "oxibelt:oxibelt:config:*",
+      "target": {
+        "principal": "deployer",
+        "groups": ["deployers"],
+      },
+      "context": {
+        "source_ip": "10.0.0.5",
+        "method": "POST",
+        "claims": { "env": "prod" },
+      }
+    }))
+  );
+}
+
+#[test]
+fn ipm_simulate_overlay_file_hints_policy_resources() {
+  let path = std::env::temp_dir().join(format!(
+    "oxibeltctl-ipm-overlay-{}.json",
+    std::process::id()
+  ));
+  std::fs::write(
+    &path,
+    r#"{"policies":[{"name":"deny-load","statements":[{"effect":"deny","actions":["config:Load"],"resources":["*"]}]}],"bindings":[{"group":"deployers","policy":"deny-load"}]}"#,
+  )
+  .expect("overlay fixture should be writable");
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "ipm",
+    "simulate",
+    "--action",
+    "config:Load",
+    "--resource",
+    "oxibelt:oxibelt:config:*",
+    "--overlay",
+    path.to_str().expect("path should be utf-8"),
+  ])
+  .expect("ipm simulate overlay should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.permission.action, "ipm:SimulatePolicy");
+  assert_eq!(
+    plan.permission.resources,
+    vec![
+      "simulation/current",
+      "policy/deny-load",
+      "binding/group.deployers.deny-load",
+      "group/deployers"
+    ]
+  );
+  assert_eq!(
+    plan.body,
+    Some(json!({
+      "action": "config:Load",
+      "resource": "oxibelt:oxibelt:config:*",
+      "overlay": {
+        "policies": [{
+          "name": "deny-load",
+          "statements": [{
+            "effect": "deny",
+            "actions": ["config:Load"],
+            "resources": ["*"],
+          }],
+        }],
+        "bindings": [{
+          "group": "deployers",
+          "policy": "deny-load",
+        }],
+      }
+    }))
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn ipm_credential_rotate_uses_default_overlap_and_explicit_etag() {
   let parsed = Cli::try_parse_from([
     "oxibeltctl",

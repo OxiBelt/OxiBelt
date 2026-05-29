@@ -1,12 +1,11 @@
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::ipm::{
   IpmAuditQuery, IpmBindingCreate, IpmCredentialCreate, IpmCredentialPatch, IpmCredentialRevoke,
-  IpmCredentialRotate, IpmDecision, IpmPolicyCreate, IpmPolicyPatch, IpmPreconditionError,
-  IpmPrincipalCreate, IpmPrincipalPatch, IpmRequestContext,
+  IpmCredentialRotate, IpmPolicyCreate, IpmPolicyPatch, IpmPreconditionError, IpmPrincipalCreate,
+  IpmPrincipalPatch,
 };
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
@@ -17,7 +16,6 @@ use super::admin_auth::AdminAuthorization;
 use super::admin_body::collect_admin_json;
 use super::admin_error;
 use super::admin_resource;
-
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
   authorization.is_allowed(action, resource_name)
 }
@@ -252,27 +250,7 @@ pub(super) async fn ipm_response(
       });
     }
     (&::http::Method::POST, "/admin/v1/ipm/simulate") => {
-      if !allowed(
-        authorization,
-        "ipm:Simulate",
-        admin_resource::ipm_simulation(),
-      ) {
-        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
-      }
-      let body = match collect_admin_json::<IpmSimulationRequest>(request).await {
-        Ok(body) => body,
-        Err(response) => return Some(response),
-      };
-      let decision = authorization.ipm.authorize(
-        authorization.actor,
-        &body.action,
-        &body.resource,
-        &IpmRequestContext::default(),
-      );
-      return Some(json_response(
-        StatusCode::OK,
-        &json!({ "decision": if decision == IpmDecision::Allow { "allow" } else { "deny" } }),
-      ));
+      return Some(super::admin_ipm_simulation::simulation_response(request, authorization).await);
     }
     _ => {}
   }
@@ -627,7 +605,7 @@ fn request_if_match(request: &hyper::Request<Incoming>) -> Option<String> {
     .map(str::to_string)
 }
 
-fn ipm_error_response(error: anyhow::Error) -> Response<ProxyBody> {
+pub(super) fn ipm_error_response(error: anyhow::Error) -> Response<ProxyBody> {
   let message = error.to_string();
   let status = if message.contains("IPM store is not configured") {
     StatusCode::CONFLICT
@@ -659,10 +637,4 @@ fn audit_query(query: Option<&str>) -> anyhow::Result<IpmAuditQuery> {
     }
   }
   Ok(parsed)
-}
-
-#[derive(Debug, Deserialize)]
-struct IpmSimulationRequest {
-  action: String,
-  resource: String,
 }

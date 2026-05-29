@@ -479,7 +479,9 @@ argon2id_memory_mib = 128
 #   "ipm:CreateCredential",
 #   "ipm:CreateBinding",
 #   "ipm:ReadAudit",
-#   "ipm:Simulate",
+#   "ipm:SimulateSelf",
+#   "ipm:SimulatePrincipal",
+#   "ipm:SimulatePolicy",
 # ]
 # resources = [
 #   "oxibelt:oxibelt:ipm:status/current",

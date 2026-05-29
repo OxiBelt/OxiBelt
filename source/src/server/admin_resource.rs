@@ -210,7 +210,9 @@ mod tests {
       &ipm_group("platform/admins"),
     );
     assert_allowed(&runtime, &actor, "ipm:ReadAudit", ipm_audit());
-    assert_allowed(&runtime, &actor, "ipm:Simulate", ipm_simulation());
+    assert_allowed(&runtime, &actor, "ipm:SimulateSelf", ipm_simulation());
+    assert_allowed(&runtime, &actor, "ipm:SimulatePrincipal", ipm_simulation());
+    assert_allowed(&runtime, &actor, "ipm:SimulatePolicy", ipm_simulation());
   }
 
   #[test]

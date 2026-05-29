@@ -61,6 +61,10 @@ impl<'a> AdminAuthorization<'a> {
     }
     allowed
   }
+
+  pub(super) fn context(&self) -> &IpmRequestContext {
+    self.context
+  }
 }
 
 pub(super) async fn admin_actor(

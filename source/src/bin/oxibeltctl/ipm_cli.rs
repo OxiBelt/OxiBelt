@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Subcommand};
@@ -12,12 +13,44 @@ pub(crate) struct IpmCommand {
 pub(crate) enum IpmSubcommand {
   Status,
   List(IpmListArgs),
-  Simulate(super::AuthCheckArgs),
+  Simulate(Box<IpmSimulateArgs>),
   Principal(IpmPrincipalCommand),
   Credential(IpmCredentialCommand),
   Policy(IpmPolicyCommand),
   Binding(IpmBindingCommand),
   Audit(IpmAuditArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IpmSimulateArgs {
+  #[arg(long)]
+  pub(crate) action: String,
+  #[arg(long)]
+  pub(crate) resource: String,
+  #[arg(long)]
+  pub(crate) principal: Option<String>,
+  #[arg(long)]
+  pub(crate) credential: Option<String>,
+  #[arg(long)]
+  pub(crate) subject: Option<String>,
+  #[arg(long = "group")]
+  pub(crate) groups: Vec<String>,
+  #[arg(long = "source-ip")]
+  pub(crate) source_ip: Option<IpAddr>,
+  #[arg(long)]
+  pub(crate) method: Option<String>,
+  #[arg(long)]
+  pub(crate) host: Option<String>,
+  #[arg(long)]
+  pub(crate) path: Option<String>,
+  #[arg(long)]
+  pub(crate) route: Option<String>,
+  #[arg(long)]
+  pub(crate) protocol: Option<String>,
+  #[arg(long = "claim", value_name = "KEY=VALUE")]
+  pub(crate) claims: Vec<String>,
+  #[arg(long, value_name = "FILE")]
+  pub(crate) overlay: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

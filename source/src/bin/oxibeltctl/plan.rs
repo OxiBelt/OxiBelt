@@ -80,12 +80,7 @@ pub(crate) async fn plan_command(
     Command::Cache(command) => plan_cache(command),
     Command::Ipm(command) => crate::ipm_plan::plan_ipm(client, command).await,
     Command::Auth(command) => match &command.command {
-      AuthSubcommand::Check(args) => post_json(
-        "/admin/v1/ipm/simulate",
-        json!({ "action": args.action, "resource": args.resource }),
-        "ipm:Simulate",
-        resource_hint::ipm_simulation(),
-      ),
+      AuthSubcommand::Check(args) => crate::ipm_plan::plan_auth_check(args),
     },
     Command::Files(command) => match &command.command {
       FilesSubcommand::Sync(args) => post_json(

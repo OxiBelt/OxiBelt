@@ -5,10 +5,13 @@ use oxibelt::admin_client::{BREAK_GLASS_TOKEN_ENV, DEFAULT_ADMIN_TOKEN_ENV, DEFA
 use oxibelt::diagnostics::{DoctorFailOn, DoctorOutputFormat, ExternalProbeKind};
 use url::Url;
 
+#[path = "auth_cli.rs"]
+mod auth_cli;
 #[path = "ipm_cli.rs"]
 mod ipm_cli;
 #[path = "rulepack_cli.rs"]
 mod rulepack_cli;
+pub(crate) use auth_cli::*;
 pub(crate) use ipm_cli::*;
 pub(crate) use rulepack_cli::*;
 
@@ -622,25 +625,6 @@ pub(crate) struct CacheTagArgs {
   pub(crate) tag: String,
   #[arg(long)]
   pub(crate) partition: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct AuthCommand {
-  #[command(subcommand)]
-  pub(crate) command: AuthSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum AuthSubcommand {
-  Check(AuthCheckArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct AuthCheckArgs {
-  #[arg(long)]
-  pub(crate) action: String,
-  #[arg(long)]
-  pub(crate) resource: String,
 }
 
 #[derive(Debug, Args)]

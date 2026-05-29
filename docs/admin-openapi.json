@@ -1863,13 +1863,28 @@
           "ipm"
         ],
         "operationId": "simulateIpm",
-        "summary": "Simulate IPM authorization for an action and resource.",
+        "summary": "Simulate IPM authorization for self, target identities, context, and inline policy overlays.",
         "requestBody": {
           "$ref": "#/components/requestBodies/IpmSimulationRequest"
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "IPM simulation decision.",
+            "headers": {
+              "X-OxiBelt-Request-Id": {
+                "$ref": "#/components/headers/AdminRequestId"
+              },
+              "X-OxiBelt-API-Version": {
+                "$ref": "#/components/headers/AdminApiVersion"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IpmSimulationResponse"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2961,6 +2976,76 @@
                 },
                 "resource": {
                   "type": "string"
+                },
+                "target": {
+                  "type": "object",
+                  "properties": {
+                    "principal": {
+                      "type": "string"
+                    },
+                    "credential": {
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    },
+                    "groups": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "context": {
+                  "type": "object",
+                  "properties": {
+                    "source_ip": {
+                      "type": "string",
+                      "format": "ip"
+                    },
+                    "method": {
+                      "type": "string"
+                    },
+                    "host": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "route": {
+                      "type": "string"
+                    },
+                    "protocol": {
+                      "type": "string"
+                    },
+                    "claims": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "overlay": {
+                  "type": "object",
+                  "properties": {
+                    "policies": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/IpmPolicyWrite"
+                      }
+                    },
+                    "bindings": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/IpmBindingCreate"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
               "additionalProperties": false
@@ -3573,6 +3658,97 @@
           "details": {
             "type": "object",
             "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "IpmSimulationResponse": {
+        "type": "object",
+        "required": [
+          "decision",
+          "target",
+          "context",
+          "overlay"
+        ],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          },
+          "target": {
+            "type": "object",
+            "required": [
+              "principal",
+              "subject",
+              "groups"
+            ],
+            "properties": {
+              "principal": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "context": {
+            "type": "object",
+            "properties": {
+              "source_ip": {
+                "type": "string",
+                "format": "ip"
+              },
+              "method": {
+                "type": "string"
+              },
+              "host": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "route": {
+                "type": "string"
+              },
+              "protocol": {
+                "type": "string"
+              },
+              "claim_keys": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "overlay": {
+            "type": "object",
+            "required": [
+              "policies",
+              "bindings"
+            ],
+            "properties": {
+              "policies": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bindings": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false

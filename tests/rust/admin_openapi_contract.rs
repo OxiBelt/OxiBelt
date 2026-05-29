@@ -141,6 +141,27 @@ fn dynamic_policy_and_upstream_mutations_declare_etag_preconditions() {
     );
 }
 
+#[test]
+fn ipm_simulation_documents_non_secret_claim_key_response() {
+    let spec = openapi();
+    let response_ref = &spec["paths"]["/admin/v1/ipm/simulate"]["post"]["responses"]["200"]["content"]
+        ["application/json"]["schema"]["$ref"];
+    assert_eq!(
+        response_ref, "#/components/schemas/IpmSimulationResponse",
+        "IPM simulation should document its concrete response shape"
+    );
+
+    let context = &spec["components"]["schemas"]["IpmSimulationResponse"]["properties"]["context"];
+    assert!(
+        context["properties"].get("claim_keys").is_some(),
+        "simulation response context should expose non-secret claim keys"
+    );
+    assert!(
+        context["properties"].get("claims").is_none(),
+        "simulation response context must not document echoed claim values"
+    );
+}
+
 fn documented_operations(spec: &Value) -> BTreeSet<(String, String)> {
     let paths = spec["paths"]
         .as_object()

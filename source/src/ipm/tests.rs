@@ -1,6 +1,7 @@
 use super::*;
 
 mod admin_authority;
+mod simulation;
 
 fn runtime_with_policy(policy: IpmPolicyConfig) -> IpmRuntime {
   IpmRuntime::test_with_actor_policy(

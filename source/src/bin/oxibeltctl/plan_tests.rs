@@ -15,6 +15,13 @@ fn auth_check_uses_ipm_simulate_shape() {
     command: AuthSubcommand::Check(AuthCheckArgs {
       action: "config:GetStatus".to_string(),
       resource: "*".to_string(),
+      source_ip: None,
+      method: None,
+      host: None,
+      path: None,
+      route: None,
+      protocol: None,
+      claims: Vec::new(),
     }),
   });
   let runtime = tokio::runtime::Builder::new_current_thread()
@@ -30,6 +37,49 @@ fn auth_check_uses_ipm_simulate_shape() {
   assert_eq!(
     plan.body,
     Some(json!({ "action": "config:GetStatus", "resource": "*" }))
+  );
+  assert_eq!(plan.permission.action, "ipm:SimulateSelf");
+  assert_eq!(plan.permission.resources, vec!["simulation/current"]);
+}
+
+#[test]
+fn auth_check_accepts_context_flags() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "auth",
+    "check",
+    "--action",
+    "config:Load",
+    "--resource",
+    "oxibelt:oxibelt:config:*",
+    "--source-ip",
+    "10.0.0.5",
+    "--method",
+    "POST",
+    "--claim",
+    "env=prod",
+  ])
+  .expect("auth check should parse context flags");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(
+    plan.body,
+    Some(json!({
+      "action": "config:Load",
+      "resource": "oxibelt:oxibelt:config:*",
+      "context": {
+        "source_ip": "10.0.0.5",
+        "method": "POST",
+        "claims": { "env": "prod" },
+      },
+    }))
   );
 }
 

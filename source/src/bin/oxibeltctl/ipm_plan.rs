@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use http::Method;
 use oxibelt::admin_client::AdminClient;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::cli::*;
 use crate::plan::{
@@ -21,12 +21,7 @@ pub(crate) async fn plan_ipm(
       resource_hint::ipm_status(),
     ),
     IpmSubcommand::List(args) => plan_legacy_list(args),
-    IpmSubcommand::Simulate(args) => post_json(
-      "/admin/v1/ipm/simulate",
-      json!({ "action": args.action, "resource": args.resource }),
-      "ipm:Simulate",
-      resource_hint::ipm_simulation(),
-    ),
+    IpmSubcommand::Simulate(args) => plan_ipm_simulate(args),
     IpmSubcommand::Principal(command) => plan_principal(client, command).await,
     IpmSubcommand::Credential(command) => plan_credential(client, command).await,
     IpmSubcommand::Policy(command) => plan_policy(client, command).await,
@@ -37,6 +32,22 @@ pub(crate) async fn plan_ipm(
       resource_hint::ipm_audit(),
     ),
   }
+}
+
+pub(crate) fn plan_auth_check(args: &AuthCheckArgs) -> anyhow::Result<RequestPlan> {
+  post_json(
+    "/admin/v1/ipm/simulate",
+    auth_check_body(args)?,
+    "ipm:SimulateSelf",
+    resource_hint::ipm_simulation(),
+  )
+}
+
+fn plan_ipm_simulate(args: &IpmSimulateArgs) -> anyhow::Result<RequestPlan> {
+  let overlay = args.overlay.as_deref().map(read_json_file).transpose()?;
+  let body = ipm_simulate_body(args, overlay.clone())?;
+  let permission = ipm_simulate_permission(args, overlay.as_ref());
+  post_json_with_permission("/admin/v1/ipm/simulate", body, permission)
 }
 
 fn plan_legacy_list(args: &IpmListArgs) -> anyhow::Result<RequestPlan> {
@@ -358,6 +369,172 @@ fn credential_patch_resources(id: &str, principal: Option<&str>) -> Vec<String> 
     resources.push(resource_hint::ipm_principal(principal));
   }
   resources
+}
+
+fn auth_check_body(args: &AuthCheckArgs) -> anyhow::Result<Value> {
+  let mut body = Map::new();
+  body.insert("action".to_string(), json!(args.action));
+  body.insert("resource".to_string(), json!(args.resource));
+  if let Some(context) = simulation_context_body(
+    args.source_ip.as_ref().map(ToString::to_string),
+    args.method.as_ref(),
+    args.host.as_ref(),
+    args.path.as_ref(),
+    args.route.as_ref(),
+    args.protocol.as_ref(),
+    &args.claims,
+  )? {
+    body.insert("context".to_string(), context);
+  }
+  Ok(Value::Object(body))
+}
+
+fn ipm_simulate_body(args: &IpmSimulateArgs, overlay: Option<Value>) -> anyhow::Result<Value> {
+  let mut body = Map::new();
+  body.insert("action".to_string(), json!(args.action));
+  body.insert("resource".to_string(), json!(args.resource));
+  if let Some(target) = simulation_target_body(args) {
+    body.insert("target".to_string(), target);
+  }
+  if let Some(context) = simulation_context_body(
+    args.source_ip.as_ref().map(ToString::to_string),
+    args.method.as_ref(),
+    args.host.as_ref(),
+    args.path.as_ref(),
+    args.route.as_ref(),
+    args.protocol.as_ref(),
+    &args.claims,
+  )? {
+    body.insert("context".to_string(), context);
+  }
+  if let Some(overlay) = overlay {
+    body.insert("overlay".to_string(), overlay);
+  }
+  Ok(Value::Object(body))
+}
+
+fn simulation_target_body(args: &IpmSimulateArgs) -> Option<Value> {
+  let mut target = Map::new();
+  if let Some(principal) = &args.principal {
+    target.insert("principal".to_string(), json!(principal));
+  }
+  if let Some(credential) = &args.credential {
+    target.insert("credential".to_string(), json!(credential));
+  }
+  if let Some(subject) = &args.subject {
+    target.insert("subject".to_string(), json!(subject));
+  }
+  if !args.groups.is_empty() {
+    target.insert("groups".to_string(), json!(args.groups));
+  }
+  (!target.is_empty()).then_some(Value::Object(target))
+}
+
+fn simulation_context_body(
+  source_ip: Option<String>,
+  method: Option<&String>,
+  host: Option<&String>,
+  path: Option<&String>,
+  route: Option<&String>,
+  protocol: Option<&String>,
+  claims: &[String],
+) -> anyhow::Result<Option<Value>> {
+  let mut context = Map::new();
+  if let Some(source_ip) = source_ip {
+    context.insert("source_ip".to_string(), json!(source_ip));
+  }
+  if let Some(method) = method {
+    context.insert("method".to_string(), json!(method));
+  }
+  if let Some(host) = host {
+    context.insert("host".to_string(), json!(host));
+  }
+  if let Some(path) = path {
+    context.insert("path".to_string(), json!(path));
+  }
+  if let Some(route) = route {
+    context.insert("route".to_string(), json!(route));
+  }
+  if let Some(protocol) = protocol {
+    context.insert("protocol".to_string(), json!(protocol));
+  }
+  let claims = claim_map(claims)?;
+  if !claims.is_empty() {
+    context.insert("claims".to_string(), Value::Object(claims));
+  }
+  Ok((!context.is_empty()).then_some(Value::Object(context)))
+}
+
+fn claim_map(claims: &[String]) -> anyhow::Result<Map<String, Value>> {
+  let mut parsed = Map::new();
+  for claim in claims {
+    let Some((key, value)) = claim.split_once('=') else {
+      bail!("--claim must use KEY=VALUE syntax");
+    };
+    if key.trim().is_empty() {
+      bail!("--claim key must not be empty");
+    }
+    parsed.insert(key.to_string(), Value::String(value.to_string()));
+  }
+  Ok(parsed)
+}
+
+fn ipm_simulate_permission(args: &IpmSimulateArgs, overlay: Option<&Value>) -> PermissionHint {
+  let mut resources = vec![resource_hint::ipm_simulation().to_string()];
+  if let Some(principal) = &args.principal {
+    resources.push(resource_hint::ipm_principal(principal));
+  }
+  if let Some(credential) = &args.credential {
+    resources.push(resource_hint::ipm_credential(credential));
+  }
+  for group in &args.groups {
+    resources.push(resource_hint::ipm_group(group));
+  }
+  let mut action = if args.principal.is_some()
+    || args.credential.is_some()
+    || args.subject.is_some()
+    || !args.groups.is_empty()
+  {
+    "ipm:SimulatePrincipal"
+  } else {
+    "ipm:SimulateSelf"
+  };
+  if let Some(overlay) = overlay {
+    action = "ipm:SimulatePolicy";
+    resources.extend(overlay_permission_resources(overlay));
+  }
+  PermissionHint::with_resources(action, resources)
+}
+
+fn overlay_permission_resources(overlay: &Value) -> Vec<String> {
+  let mut resources = Vec::new();
+  if let Some(policies) = overlay.get("policies").and_then(Value::as_array) {
+    for policy in policies {
+      resources.push(
+        string_field(policy, "name")
+          .map(resource_hint::ipm_policy)
+          .unwrap_or_else(|| "policy/*".to_string()),
+      );
+    }
+  }
+  if let Some(bindings) = overlay.get("bindings").and_then(Value::as_array) {
+    for binding in bindings {
+      let principal = string_field(binding, "principal");
+      let group = string_field(binding, "group");
+      let policy = string_field(binding, "policy").unwrap_or("*");
+      resources.extend(resource_hint::ipm_binding_create_target(
+        string_field(binding, "id"),
+        principal,
+        group,
+        policy,
+      ));
+    }
+  }
+  resources
+}
+
+fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+  value.get(field).and_then(Value::as_str)
 }
 
 fn audit_endpoint(args: &IpmAuditArgs) -> String {

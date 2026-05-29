@@ -19,10 +19,15 @@ mod admin_references;
 mod admin_support;
 mod admin_types;
 mod refresh;
+mod simulation;
 mod snapshot;
 mod store;
 mod token;
 pub use admin_types::*;
+pub use simulation::{
+  IpmPreparedSimulation, IpmSimulationAuthorizationRequirements, IpmSimulationRequest,
+  IpmSimulationResponse,
+};
 pub(crate) use snapshot::{
   IpmBindingRuntime, IpmCredentialRuntime, IpmPolicyRuntime, IpmPrincipalRuntime, IpmSnapshot,
   merge_store_snapshot, static_snapshot,
@@ -264,26 +269,39 @@ impl IpmRuntime {
     resource: &str,
     context: &IpmRequestContext,
   ) -> IpmDecision {
-    let policies = self.policies_for_actor(actor);
-    let mut saw_allow = false;
-    for policy in policies {
-      for statement in &policy.statements {
-        if !statement_matches(actor, action, resource, context, statement) {
-          continue;
-        }
-        match statement.effect {
-          IpmPolicyEffect::Deny => return IpmDecision::Deny,
-          IpmPolicyEffect::Allow => saw_allow = true,
-        }
+    let snapshot = self.snapshot();
+    authorize_snapshot(&snapshot, actor, action, resource, context)
+  }
+}
+
+pub(super) fn authorize_snapshot(
+  snapshot: &IpmSnapshot,
+  actor: &IpmActor,
+  action: &str,
+  resource: &str,
+  context: &IpmRequestContext,
+) -> IpmDecision {
+  let policies = policies_for_actor_in_snapshot(snapshot, actor);
+  let mut saw_allow = false;
+  for policy in policies {
+    for statement in &policy.statements {
+      if !statement_matches(actor, action, resource, context, statement) {
+        continue;
+      }
+      match statement.effect {
+        IpmPolicyEffect::Deny => return IpmDecision::Deny,
+        IpmPolicyEffect::Allow => saw_allow = true,
       }
     }
-    if saw_allow {
-      IpmDecision::Allow
-    } else {
-      IpmDecision::Deny
-    }
   }
+  if saw_allow {
+    IpmDecision::Allow
+  } else {
+    IpmDecision::Deny
+  }
+}
 
+impl IpmRuntime {
   pub fn list_principals(&self) -> Vec<IpmActor> {
     let snapshot = self.snapshot();
     let mut principals = snapshot
@@ -422,30 +440,32 @@ impl IpmRuntime {
       }),
     }
   }
+}
 
-  fn policies_for_actor(&self, actor: &IpmActor) -> Vec<IpmPolicyConfig> {
-    let snapshot = self.snapshot();
-    let mut names = Vec::new();
-    if let Some(policies) = snapshot.principal_bindings.get(&actor.principal) {
+fn policies_for_actor_in_snapshot(
+  snapshot: &IpmSnapshot,
+  actor: &IpmActor,
+) -> Vec<IpmPolicyConfig> {
+  let mut names = Vec::new();
+  if let Some(policies) = snapshot.principal_bindings.get(&actor.principal) {
+    names.extend(policies.iter().cloned());
+  }
+  for group in &actor.groups {
+    if group == "ipm-admin" {
+      return vec![bootstrap_admin_policy().clone()];
+    }
+    if let Some(policies) = snapshot.group_bindings.get(group) {
       names.extend(policies.iter().cloned());
     }
-    for group in &actor.groups {
-      if group == "ipm-admin" {
-        return vec![bootstrap_admin_policy().clone()];
-      }
-      if let Some(policies) = snapshot.group_bindings.get(group) {
-        names.extend(policies.iter().cloned());
-      }
-    }
-    let mut seen = HashSet::new();
-    names
-      .into_iter()
-      .filter(|name| seen.insert(name.clone()))
-      .filter_map(|name| snapshot.policies.get(&name))
-      .filter(|policy| policy.enabled)
-      .map(|policy| policy.policy.clone())
-      .collect()
   }
+  let mut seen = HashSet::new();
+  names
+    .into_iter()
+    .filter(|name| seen.insert(name.clone()))
+    .filter_map(|name| snapshot.policies.get(&name))
+    .filter(|policy| policy.enabled)
+    .map(|policy| policy.policy.clone())
+    .collect()
 }
 
 pub fn resource(namespace: &str, service: &str, name: &str) -> String {

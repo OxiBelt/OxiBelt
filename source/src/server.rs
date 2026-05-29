@@ -47,6 +47,9 @@ mod admin_control;
 mod admin_diagnostics;
 mod admin_error;
 mod admin_ipm;
+mod admin_ipm_simulation;
+#[cfg(test)]
+mod admin_ipm_simulation_security_tests;
 mod admin_metadata;
 mod admin_ops;
 mod admin_resource;
