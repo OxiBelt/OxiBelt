@@ -59,6 +59,27 @@ principal = "admin"
 policy = "admin-full-access"
 
 [[ipm.principals]]
+id = "viewer"
+subject = "viewer@example.test"
+
+[[ipm.credentials]]
+name = "viewer"
+principal = "viewer"
+bearer_token_env = "OXIBELT_VIEWER_TOKEN"
+
+[[ipm.policies]]
+name = "dynamic-policy-viewer"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["dynamic-policy:List"]
+resources = ["*"]
+
+[[ipm.bindings]]
+principal = "viewer"
+policy = "dynamic-policy-viewer"
+
+[[ipm.principals]]
 id = "security-operator"
 subject = "security-operator@example.test"
 
