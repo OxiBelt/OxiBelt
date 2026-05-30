@@ -45,12 +45,20 @@ pub(crate) fn validate_downstream_path(path: &str) -> anyhow::Result<()> {
     }
   }
 
-  let lower = path.to_ascii_lowercase();
-  if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+  if contains_encoded_dot_or_separator(path.as_bytes()) {
     anyhow::bail!("request path contains encoded dot or slash separators");
   }
 
   Ok(())
+}
+
+fn contains_encoded_dot_or_separator(path: &[u8]) -> bool {
+  path.windows(3).any(|window| {
+    window[0] == b'%'
+      && ((window[1] == b'2'
+        && (window[2].eq_ignore_ascii_case(&b'e') || window[2].eq_ignore_ascii_case(&b'f')))
+        || (window[1] == b'5' && window[2].eq_ignore_ascii_case(&b'c')))
+  })
 }
 
 pub(crate) fn rewrite_uri(

@@ -256,7 +256,7 @@ pub(crate) async fn prepare_webtransport(
         version: http::Version::HTTP_3,
         headers: request_headers.clone(),
         peer_addr,
-        downstream_host: host.clone(),
+        downstream_host: host.to_string(),
         downstream_scheme: "https",
         route_name: resolved.route.name.clone(),
         tcp_max_hop: None,

@@ -40,6 +40,8 @@ use crate::tls;
 use crate::turn::TurnPoolState;
 use crate::waf::WafEngine;
 
+mod http1_upgrade;
+
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type UpstreamBody = BoxBody<Bytes, BoxError>;
 type HyperClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, UpstreamBody>;
@@ -234,6 +236,7 @@ pub struct AppSnapshot {
   pub access_logs: AccessLogSinks,
   pub system_access_log: SystemAccessLog,
   pub(crate) alt_svc_header_value: Option<HeaderValue>,
+  pub(crate) http1_upgrades_possible: bool,
 }
 
 impl AppSnapshot {
@@ -371,6 +374,7 @@ impl AppSnapshot {
       .context("failed to build system access log")?;
     let alt_svc_header_value = build_alt_svc_header_value(&config)
       .context("failed to build precomputed Alt-Svc header value")?;
+    let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
     let upstream_pool_generation = next_upstream_pool_generation(&config, previous);
 
     Ok(Self {
@@ -407,6 +411,7 @@ impl AppSnapshot {
       access_logs,
       system_access_log,
       alt_svc_header_value,
+      http1_upgrades_possible,
     })
   }
 
@@ -444,6 +449,7 @@ impl AppSnapshot {
       .await
       .context("failed to build IPM runtime")?;
     let upstream_pool_generation = next_upstream_pool_generation(&config, Some(previous));
+    let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
 
     Ok(Self {
       config,
@@ -479,6 +485,7 @@ impl AppSnapshot {
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
       alt_svc_header_value,
+      http1_upgrades_possible,
     })
   }
 }

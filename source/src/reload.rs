@@ -148,6 +148,7 @@ impl ReloadManager {
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
       alt_svc_header_value: active.alt_svc_header_value.clone(),
+      http1_upgrades_possible: active.http1_upgrades_possible,
     };
     state.replace(snapshot);
     self.last_fingerprints = fingerprints;
@@ -257,6 +258,7 @@ impl ReloadManager {
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
       alt_svc_header_value: active.alt_svc_header_value.clone(),
+      http1_upgrades_possible: active.http1_upgrades_possible,
     };
     let pending = listeners.prepare(&snapshot).await?;
     state.replace(snapshot);

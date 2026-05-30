@@ -161,18 +161,31 @@ pub(super) async fn handle_connection(
     .max_headers(snapshot.config.limits.max_headers)
     .max_buf_size(snapshot.config.limits.max_total_header_bytes.max(8192))
     .keep_alive(true);
-  let connection = builder
-    .serve_connection(TokioIo::new(io), service)
-    .with_upgrades();
-  tokio::pin!(connection);
-  if *shutdown.borrow() || *data_plane_drain.borrow() {
-    connection.as_mut().graceful_shutdown();
-  }
-  let result = tokio::select! {
-    result = &mut connection => result,
-    _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+  let connection = builder.serve_connection(TokioIo::new(io), service);
+  let result = if snapshot.http1_upgrades_possible {
+    let connection = connection.with_upgrades();
+    tokio::pin!(connection);
+    if *shutdown.borrow() || *data_plane_drain.borrow() {
       connection.as_mut().graceful_shutdown();
-      (&mut connection).await
+    }
+    tokio::select! {
+      result = &mut connection => result,
+      _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+        connection.as_mut().graceful_shutdown();
+        (&mut connection).await
+      }
+    }
+  } else {
+    tokio::pin!(connection);
+    if *shutdown.borrow() || *data_plane_drain.borrow() {
+      connection.as_mut().graceful_shutdown();
+    }
+    tokio::select! {
+      result = &mut connection => result,
+      _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+        connection.as_mut().graceful_shutdown();
+        (&mut connection).await
+      }
     }
   };
   result.map_err(|error| anyhow::anyhow!(error))?;

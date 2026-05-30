@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::config::{Config, RouteConfig, UpstreamConfig};
@@ -293,11 +294,15 @@ impl RouteMatch {
 }
 
 pub fn normalize_host(raw: &str) -> String {
+  normalize_host_cow(raw).into_owned()
+}
+
+pub fn normalize_host_cow(raw: &str) -> Cow<'_, str> {
   let trimmed = raw.trim().trim_end_matches('.');
   if trimmed.starts_with('[')
     && let Some(end) = trimmed.find(']')
   {
-    return trimmed[1..end].to_ascii_lowercase();
+    return ascii_lower_cow(&trimmed[1..end]);
   }
 
   if let Some((host, port)) = trimmed.rsplit_once(':')
@@ -305,10 +310,18 @@ pub fn normalize_host(raw: &str) -> String {
     && !port.is_empty()
     && port.chars().all(|ch| ch.is_ascii_digit())
   {
-    return host.to_ascii_lowercase();
+    return ascii_lower_cow(host);
   }
 
-  trimmed.to_ascii_lowercase()
+  ascii_lower_cow(trimmed)
+}
+
+fn ascii_lower_cow(value: &str) -> Cow<'_, str> {
+  if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+    Cow::Owned(value.to_ascii_lowercase())
+  } else {
+    Cow::Borrowed(value)
+  }
 }
 
 pub fn path_prefix_matches(prefix: &str, path: &str) -> bool {
@@ -513,6 +526,23 @@ mod tests {
   fn normalize_host_removes_port() {
     assert_eq!(normalize_host("Example.com:8443"), "example.com");
     assert_eq!(normalize_host("[2001:db8::1]:8443"), "2001:db8::1");
+  }
+
+  #[test]
+  fn normalize_host_cow_borrows_common_normalized_hosts() {
+    assert!(matches!(
+      normalize_host_cow("example.com"),
+      std::borrow::Cow::Borrowed("example.com")
+    ));
+    assert!(matches!(
+      normalize_host_cow("example.com:8443"),
+      std::borrow::Cow::Borrowed("example.com")
+    ));
+    assert!(matches!(
+      normalize_host_cow("Example.com"),
+      std::borrow::Cow::Owned(value) if value == "example.com"
+    ));
+    assert_eq!(normalize_host("Example.com."), "example.com");
   }
 
   #[test]

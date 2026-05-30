@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::str::FromStr;
 
@@ -9,18 +10,18 @@ use http::header::{
 use http::uri::Authority;
 
 use crate::config::ForwardedHeaderMode;
-use crate::routes::normalize_host;
+use crate::routes::{normalize_host, normalize_host_cow};
 
-pub(crate) fn extract_host<B>(request: &Request<B>) -> Option<String> {
+pub(crate) fn extract_host<B>(request: &Request<B>) -> Option<Cow<'_, str>> {
   if let Some(authority) = request.uri().authority() {
-    return Some(normalize_host(authority.host()));
+    return Some(normalize_host_cow(authority.host()));
   }
 
   request
     .headers()
     .get(HOST)
     .and_then(|value| value.to_str().ok())
-    .map(normalize_host)
+    .map(normalize_host_cow)
 }
 
 pub(crate) fn extract_downstream_port<B>(request: &Request<B>, scheme: &str) -> u16 {
@@ -132,9 +133,26 @@ fn effective_authority(
 }
 
 fn explicit_authority_port(raw: &str) -> Option<u16> {
-  Authority::from_str(raw.trim())
+  let raw = raw.trim();
+  if !authority_may_have_explicit_port(raw) {
+    return None;
+  }
+  Authority::from_str(raw)
     .ok()
     .and_then(|authority| authority.port_u16())
+}
+
+fn authority_may_have_explicit_port(raw: &str) -> bool {
+  if raw.starts_with('[') {
+    return raw
+      .find(']')
+      .and_then(|end| raw.as_bytes().get(end + 1))
+      .is_some_and(|byte| *byte == b':');
+  }
+
+  raw.rsplit_once(':').is_some_and(|(host, port)| {
+    !host.contains(':') && !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+  })
 }
 
 fn default_port_for_scheme(scheme: &str) -> u16 {
@@ -441,6 +459,46 @@ mod tests {
     assert_eq!(extract_downstream_port(&authority, "http"), 8080);
     assert_eq!(extract_downstream_port(&host, "https"), 9443);
     assert_eq!(extract_downstream_port(&default, "https"), 443);
+  }
+
+  #[test]
+  fn host_extraction_borrows_common_normalized_host() {
+    let request = Request::builder()
+      .uri("/path")
+      .header(HOST, "example.test")
+      .body(())
+      .expect("request should build");
+    assert!(matches!(
+      extract_host(&request),
+      Some(std::borrow::Cow::Borrowed("example.test"))
+    ));
+
+    let upper = Request::builder()
+      .uri("/path")
+      .header(HOST, "Example.Test:8443")
+      .body(())
+      .expect("request should build");
+    assert!(matches!(
+      extract_host(&upper),
+      Some(std::borrow::Cow::Owned(value)) if value == "example.test"
+    ));
+  }
+
+  #[test]
+  fn downstream_port_handles_ipv6_and_non_port_hosts() {
+    let bracketed = Request::builder()
+      .uri("/path")
+      .header(HOST, "[2001:db8::1]:9443")
+      .body(())
+      .expect("request should build");
+    let bare_ipv6 = Request::builder()
+      .uri("/path")
+      .header(HOST, "2001:db8::1")
+      .body(())
+      .expect("request should build");
+
+    assert_eq!(extract_downstream_port(&bracketed, "https"), 9443);
+    assert_eq!(extract_downstream_port(&bare_ipv6, "https"), 443);
   }
 
   #[test]

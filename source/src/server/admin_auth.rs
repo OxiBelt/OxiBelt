@@ -86,7 +86,7 @@ pub(super) fn admin_request_context<B>(
   IpmRequestContext {
     source_ip: Some(peer_addr.ip()),
     method: Some(request.method().as_str().to_string()),
-    host: extract_host(request),
+    host: extract_host(request).map(|host| host.into_owned()),
     path: Some(request.uri().path().to_string()),
     protocol: Some(format!("{:?}", request.version())),
     ..IpmRequestContext::default()

@@ -524,7 +524,7 @@ where
     let context = IpmRequestContext {
       source_ip: Some(client_addr.ip()),
       method: Some(request.method().as_str().to_string()),
-      host: Some(host.clone()),
+      host: Some(host.to_string()),
       path: Some(path.to_string()),
       route: Some(resolved.route.name.clone()),
       protocol: Some(format!("{:?}", request_version)),
@@ -535,6 +535,7 @@ where
     }
   }
 
+  let host = host.into_owned();
   let request = if !content_length_zero_guard_required(request.headers(), request_version) {
     match fast_path::try_handle_plain_proxy(
       request,
@@ -873,7 +874,7 @@ where
           version: request_version,
           headers: request.headers().clone(),
           peer_addr: client_addr,
-          downstream_host: host.clone(),
+          downstream_host: host.to_string(),
           downstream_scheme,
           route_name: resolved.route.name.clone(),
           tcp_max_hop,
