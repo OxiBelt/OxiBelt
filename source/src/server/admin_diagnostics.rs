@@ -190,7 +190,6 @@ pub(super) async fn admin_diagnostics_response(
               move |context| async move {
                 context.ensure_not_cancelled()?;
                 context.progress("collecting", None, None).await;
-                let active = state.snapshot();
                 let status = admin_control.status().await;
                 let effective = admin_control
                   .effective_config()
@@ -402,7 +401,6 @@ async fn enqueue_support_bundle_operation(
       move |context| async move {
         context.ensure_not_cancelled()?;
         context.progress("collecting", None, None).await;
-        let active = state.snapshot();
         let status = admin_control.status().await;
         let effective = admin_control
           .effective_config()

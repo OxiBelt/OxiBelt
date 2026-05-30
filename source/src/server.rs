@@ -2352,6 +2352,9 @@ mod admin_audit_tests;
 mod admin_diagnostics_tests;
 
 #[cfg(test)]
+mod admin_diagnostics_async_tests;
+
+#[cfg(test)]
 mod admin_diagnostics_probe_tests;
 
 #[cfg(test)]
