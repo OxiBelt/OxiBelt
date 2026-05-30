@@ -76,6 +76,108 @@ fn non_admin_cannot_grant_group_bound_admin_policy() {
 }
 
 #[test]
+fn non_admin_cannot_grant_group_bound_scoped_admin_config_policy() {
+  let mut snapshot = empty_snapshot();
+  snapshot
+    .principals
+    .insert("operator".to_string(), principal("operator", &["ops"]).1);
+  let admin_config_resource = resource("oxibelt", "admin", "config");
+  snapshot.policies.insert(
+    "scoped-admin-policy".to_string(),
+    scoped_policy(
+      "scoped-admin-policy",
+      "admin:UpdateConfig",
+      &admin_config_resource,
+    )
+    .1,
+  );
+  snapshot.group_bindings.insert(
+    "ops-admin".to_string(),
+    vec!["scoped-admin-policy".to_string()],
+  );
+  let runtime = runtime_from_snapshot(
+    snapshot,
+    "OXIBELT_ADMIN_TOKEN",
+    false,
+    break_glass_verifier(),
+  );
+  let actor = runtime.snapshot().principals["operator"].actor.clone();
+  let groups = vec!["ops-admin".to_string()];
+  let candidate = IpmActor {
+    name: "new-admin".to_string(),
+    principal: "new-admin".to_string(),
+    subject: "new-admin@example.com".to_string(),
+    groups: groups.clone(),
+  };
+
+  assert_eq!(
+    runtime.authorize(
+      &candidate,
+      "admin:UpdateConfig",
+      &admin_config_resource,
+      &IpmRequestContext::default(),
+    ),
+    IpmDecision::Allow
+  );
+  assert!(runtime.actor_has_admin_authority(&candidate));
+  let error = runtime
+    .ensure_actor_may_create_principal(&actor, "new-admin", "new-admin@example.com", &groups)
+    .expect_err("non-admin actor must not join a group with a scoped admin policy");
+
+  assert!(error.to_string().contains("requires an admin-capable"));
+}
+
+#[test]
+fn non_admin_cannot_assign_credential_to_scoped_admin_principal() {
+  let mut snapshot = empty_snapshot();
+  snapshot
+    .principals
+    .insert("operator".to_string(), principal("operator", &["ops"]).1);
+  snapshot.principals.insert(
+    "new-admin".to_string(),
+    principal("new-admin", &["ops-admin"]).1,
+  );
+  let admin_config_resource = resource("oxibelt", "admin", "config");
+  snapshot.policies.insert(
+    "scoped-admin-policy".to_string(),
+    scoped_policy(
+      "scoped-admin-policy",
+      "admin:UpdateConfig",
+      &admin_config_resource,
+    )
+    .1,
+  );
+  snapshot.group_bindings.insert(
+    "ops-admin".to_string(),
+    vec!["scoped-admin-policy".to_string()],
+  );
+  let runtime = runtime_from_snapshot(
+    snapshot,
+    "OXIBELT_ADMIN_TOKEN",
+    false,
+    break_glass_verifier(),
+  );
+  let actor = runtime.snapshot().principals["operator"].actor.clone();
+  let target = runtime.snapshot().principals["new-admin"].actor.clone();
+
+  assert_eq!(
+    runtime.authorize(
+      &target,
+      "admin:UpdateConfig",
+      &admin_config_resource,
+      &IpmRequestContext::default(),
+    ),
+    IpmDecision::Allow
+  );
+  assert!(runtime.actor_has_admin_authority(&target));
+  let error = runtime
+    .ensure_actor_may_assign_credential_principal(&actor, None, "new-admin")
+    .expect_err("non-admin actor must not mint credentials for a scoped admin principal");
+
+  assert!(error.to_string().contains("requires an admin-capable"));
+}
+
+#[test]
 fn non_admin_cannot_patch_subject_into_admin_policy_condition() {
   let mut snapshot = empty_snapshot();
   snapshot
@@ -214,4 +316,24 @@ fn admin_actor_can_grant_admin_authority() {
   runtime
     .ensure_actor_may_create_binding(&actor, &binding)
     .expect("admin actor should be able to bind admin-capable policies");
+}
+
+fn scoped_policy(name: &str, action: &str, resource: &str) -> (String, IpmPolicyRuntime) {
+  (
+    name.to_string(),
+    IpmPolicyRuntime {
+      policy: IpmPolicyConfig {
+        name: name.to_string(),
+        version: "2026-05-23".to_string(),
+        statements: vec![IpmPolicyStatementConfig {
+          effect: IpmPolicyEffect::Allow,
+          actions: vec![action.to_string()],
+          resources: vec![resource.to_string()],
+          conditions: Vec::new(),
+        }],
+      },
+      enabled: true,
+      source: IpmEntrySource::Config,
+    },
+  )
 }

@@ -9,7 +9,7 @@ use crate::config::{
 use super::admin_types::{IpmAuditQuery, IpmAuditRecord, IpmBindingCreate, IpmPolicyCreate};
 use super::{
   IpmActor, IpmCredentialRuntime, IpmDecision, IpmEntrySource, IpmRequestContext, IpmRuntime,
-  RedactedIpmPolicy, now_unix,
+  RedactedIpmPolicy, now_unix, resource,
 };
 
 const ADMIN_GROUP: &str = "ipm-admin";
@@ -31,6 +31,13 @@ const ADMIN_GRANT_ACTIONS: &[&str] = &[
   "ipm:CreateBinding",
   "ipm:DeleteBinding",
 ];
+
+fn admin_authority_resource(namespace: &str, action: &str) -> String {
+  match action {
+    "admin:UpdateConfig" => resource(namespace, "admin", "config"),
+    _ => resource(namespace, "ipm", "config"),
+  }
+}
 
 impl IpmRuntime {
   pub(crate) fn admin_store(&self) -> anyhow::Result<super::store::IpmStore> {
@@ -127,12 +134,7 @@ impl IpmRuntime {
           .is_some_and(|principal| {
             let mut actor = principal.actor.clone();
             actor.name = credential.name.clone();
-            self.authorize(
-              &actor,
-              "ipm:CreateCredential",
-              "*",
-              &IpmRequestContext::default(),
-            ) == IpmDecision::Allow
+            self.actor_has_admin_authority(&actor)
           })
       })
       .collect()
@@ -324,12 +326,22 @@ impl IpmRuntime {
       return true;
     }
     if ADMIN_MARKER_ACTIONS.iter().any(|action| {
-      self.authorize(actor, action, "*", &IpmRequestContext::default()) == IpmDecision::Allow
+      self.authorize(
+        actor,
+        action,
+        &admin_authority_resource(self.namespace(), action),
+        &IpmRequestContext::default(),
+      ) == IpmDecision::Allow
     }) {
       return true;
     }
     ADMIN_GRANT_ACTIONS.iter().all(|action| {
-      self.authorize(actor, action, "*", &IpmRequestContext::default()) == IpmDecision::Allow
+      self.authorize(
+        actor,
+        action,
+        &admin_authority_resource(self.namespace(), action),
+        &IpmRequestContext::default(),
+      ) == IpmDecision::Allow
     })
   }
 
