@@ -13,6 +13,7 @@ use crate::lifecycle::ConnectionDrain;
 use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 
 mod body_shortcuts;
+mod direct_selection;
 
 mod common {
   include!(concat!(

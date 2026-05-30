@@ -11,6 +11,7 @@ use crate::waf::{
 
 use super::body::ProxyBody;
 static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
+static DEFAULT_METHOD: LazyLock<Method> = LazyLock::new(|| Method::GET);
 
 struct SystemAccessLogRequest {
   method: Method,
@@ -25,7 +26,7 @@ pub(crate) struct SystemAccessLogContext<'a> {
   transaction_id: Option<String>,
   request: Option<SystemAccessLogRequest>,
   metadata_enabled: bool,
-  method: Method,
+  method: Option<Method>,
   version: Version,
   pub(super) request_received_at_unix_ms: u64,
   pub(super) response_received_at_unix_ms: u64,
@@ -76,7 +77,7 @@ impl<'a> SystemAccessLogContext<'a> {
       transaction_id: None,
       request: request_snapshot,
       metadata_enabled,
-      method: request.method().clone(),
+      method: metadata_enabled.then(|| request.method().clone()),
       version: request.version(),
       request_received_at_unix_ms: 0,
       response_received_at_unix_ms: 0,
@@ -160,6 +161,10 @@ impl<'a> SystemAccessLogContext<'a> {
       return;
     }
     self.upstream_pool = Some(upstream_pool);
+  }
+
+  pub(super) fn set_upstream_first_byte_time_ms(&mut self, elapsed_ms: u64) {
+    self.upstream_first_byte_time_ms = Some(elapsed_ms);
   }
 
   pub(super) fn request_id(&self) -> &str {
@@ -246,7 +251,7 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn method(&self) -> &Method {
-    &self.method
+    self.method.as_ref().unwrap_or(&DEFAULT_METHOD)
   }
 
   pub(super) fn protocol_label(&self) -> &'static str {
@@ -431,6 +436,7 @@ mod tests {
     context.set_upstream_pool("pool".to_string());
     context.record_upstream_error("connect_error", "upstream request failed");
 
+    assert!(context.method.is_none());
     assert_eq!(context.route_name_for_metrics(), "unmatched");
     assert_eq!(context.upstream_name_for_metrics(), "none");
     assert_eq!(context.upstream_protocol_for_metrics(), "none");
@@ -452,6 +458,7 @@ mod tests {
     context.set_route_name("app");
     context.set_upstream("backend", "http");
 
+    assert_eq!(context.method().as_str(), "GET");
     assert_eq!(context.route_name_for_metrics(), "app");
     assert_eq!(context.upstream_name_for_metrics(), "backend");
     assert_eq!(context.upstream_protocol_for_metrics(), "http");

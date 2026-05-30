@@ -144,11 +144,10 @@ fn exact_known_small_content_length(headers: &HeaderMap, body: &ProxyBody) -> Op
   if !body::is_known_small_response_body_len(length) {
     return None;
   }
-  body
-    .size_hint()
-    .upper()
-    .is_some_and(|upper| upper == length as u64)
-    .then_some(length)
+  match body.size_hint().upper() {
+    Some(upper) if upper != length as u64 => None,
+    _ => Some(length),
+  }
 }
 
 fn inline_body(bytes: Bytes, trailers: Option<HeaderMap>, trailer_mode: TrailerMode) -> ProxyBody {
@@ -213,6 +212,7 @@ mod tests {
   struct FramesBody {
     frames: VecDeque<Frame<Bytes>>,
     length: u64,
+    exact_size_hint: bool,
   }
 
   struct EndAfterDataBody {
@@ -250,7 +250,9 @@ mod tests {
 
     fn size_hint(&self) -> SizeHint {
       let mut hint = SizeHint::new();
-      hint.set_exact(self.length);
+      if self.exact_size_hint {
+        hint.set_exact(self.length);
+      }
       hint
     }
   }
@@ -298,6 +300,16 @@ mod tests {
     FramesBody {
       frames: frames.into(),
       length,
+      exact_size_hint: true,
+    }
+    .boxed()
+  }
+
+  fn frames_body_without_size_hint(frames: Vec<Frame<Bytes>>, length: u64) -> ProxyBody {
+    FramesBody {
+      frames: frames.into(),
+      length,
+      exact_size_hint: false,
     }
     .boxed()
   }
@@ -448,10 +460,31 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn unknown_size_hint_keeps_streaming_without_polling() {
+  async fn unknown_size_hint_still_collects_bounded_small_body() {
     let disposition = try_inline_response_body(
       &headers(&["2"]),
-      panic_body_with_upper(None),
+      frames_body_without_size_hint(vec![Frame::data(Bytes::from_static(b"ok"))], 2),
+      Duration::from_secs(1),
+      TrailerMode::Drop,
+    )
+    .await;
+
+    let SmallResponseDisposition::Inlined(body) = disposition else {
+      panic!("expected inline body");
+    };
+    let bytes = body
+      .collect()
+      .await
+      .expect("inline body should collect")
+      .to_bytes();
+    assert_eq!(bytes.as_ref(), b"ok");
+  }
+
+  #[tokio::test]
+  async fn conflicting_size_hint_keeps_streaming_without_polling() {
+    let disposition = try_inline_response_body(
+      &headers(&["2"]),
+      panic_body_with_upper(Some(3)),
       Duration::from_secs(1),
       TrailerMode::Drop,
     )
