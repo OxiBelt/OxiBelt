@@ -2630,7 +2630,7 @@ fn validate_request_limits<B>(
   request: &Request<B>,
   limits: &crate::config::LimitsConfig,
 ) -> Result<(), (StatusCode, &'static str)> {
-  if request.uri().to_string().len() > limits.max_uri_bytes {
+  if uri_wire_len(request.uri()) > limits.max_uri_bytes {
     return Err((StatusCode::URI_TOO_LONG, "request URI is too large"));
   }
   if request.headers().len() > limits.max_headers {
@@ -2687,6 +2687,24 @@ fn validate_request_limits<B>(
     return Err((StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"));
   }
   Ok(())
+}
+
+fn uri_wire_len(uri: &http::Uri) -> usize {
+  let mut len = 0usize;
+  let has_scheme = uri.scheme_str().is_some();
+  if let Some(scheme) = uri.scheme_str() {
+    len += scheme.len() + 1;
+  }
+  if let Some(authority) = uri.authority() {
+    if has_scheme {
+      len += 2;
+    }
+    len += authority.as_str().len();
+  }
+  if let Some(path_and_query) = uri.path_and_query() {
+    len += path_and_query.as_str().len();
+  }
+  len
 }
 
 async fn reject_content_length_zero_data<B>(

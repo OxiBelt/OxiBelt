@@ -14,6 +14,7 @@ use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTran
 
 mod body_shortcuts;
 mod direct_selection;
+mod h3;
 
 mod common {
   include!(concat!(
@@ -665,8 +666,19 @@ async fn unsupported_upstream_modes_force_general_proxy_path_at_runtime() {
     .expect("snapshot should initialize");
   let h3_resolved = resolved_route(&h3_state);
   assert!(h3_resolved.execution_plan.fast_path.plain_proxy_h1);
+  assert!(h3_resolved.execution_plan.fast_path.plain_proxy_h3);
   assert!(!PlainProxyFastPath::eligible(
     &request(),
+    &h3_state,
+    &h3_resolved
+  ));
+  let h3_downstream_request = Request::builder()
+    .version(http::Version::HTTP_3)
+    .uri("https://example.com/perf/h3?body=ok")
+    .body(PanicBody)
+    .expect("request should build");
+  assert!(!PlainProxyFastPath::eligible(
+    &h3_downstream_request,
     &h3_state,
     &h3_resolved
   ));
@@ -683,8 +695,24 @@ async fn unsupported_upstream_modes_force_general_proxy_path_at_runtime() {
       .fast_path
       .plain_proxy_h1
   );
+  assert!(
+    proxy_protocol_resolved
+      .execution_plan
+      .fast_path
+      .plain_proxy_h3
+  );
   assert!(!PlainProxyFastPath::eligible(
     &request(),
+    &proxy_protocol_state,
+    &proxy_protocol_resolved
+  ));
+  let h3_downstream_request = Request::builder()
+    .version(http::Version::HTTP_3)
+    .uri("https://example.com/perf/h3?body=ok")
+    .body(PanicBody)
+    .expect("request should build");
+  assert!(!PlainProxyFastPath::eligible(
+    &h3_downstream_request,
     &proxy_protocol_state,
     &proxy_protocol_resolved
   ));

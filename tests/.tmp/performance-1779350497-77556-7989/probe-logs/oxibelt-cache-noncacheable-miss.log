@@ -1,3 +1,0 @@
-Command: perf-probe load --label oxibelt-cache-noncacheable-miss --protocol h2 --host oxibelt --port 8443 --server-name proxy --authority example.test --path /perf/cache-noncacheable-miss\?body_repeat=4096\&cache_control=no-store --ca-cert /tls/proxy-ca.pem --duration-seconds 30 --warmup-seconds 5 --concurrency 64 --expect-status 200
-
-{"concurrency":64,"duration_seconds":30,"error_samples":[],"errors":0,"label":"oxibelt-cache-noncacheable-miss","p50_ms":3.885,"p95_ms":5.795,"p99_ms":6.775,"protocol":"h2","requests":483924,"rps":16130.8,"statuses":{"200":483924},"type":"load","unique_query_param":null,"warmup_seconds":5}

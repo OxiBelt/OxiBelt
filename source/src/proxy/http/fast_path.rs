@@ -555,6 +555,7 @@ fn plain_proxy_fast_path_enabled_for_version<B>(
       resolved.execution_plan.fast_path.plain_proxy_h1
     }
     http::Version::HTTP_2 => resolved.execution_plan.fast_path.plain_proxy_h2,
+    http::Version::HTTP_3 => resolved.execution_plan.fast_path.plain_proxy_h3,
     _ => false,
   }
 }

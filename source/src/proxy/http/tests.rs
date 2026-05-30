@@ -17,6 +17,24 @@ fn parse_config(raw: &str) -> Config {
 }
 
 #[test]
+fn uri_wire_len_matches_display_length_without_allocating_in_hot_path() {
+  let mut authority_parts = http::uri::Parts::default();
+  authority_parts.authority = Some(http::uri::Authority::from_static("example.com:443"));
+  let authority_form = http::Uri::from_parts(authority_parts).expect("authority URI should build");
+  let uris = [
+    http::Uri::from_static("/"),
+    http::Uri::from_static("/perf/h3?body=ok"),
+    http::Uri::from_static("https://example.com/perf/h3?body=ok"),
+    http::Uri::from_static("http://example.com"),
+    authority_form,
+  ];
+
+  for uri in uris {
+    assert_eq!(uri_wire_len(&uri), uri.to_string().len(), "{uri}");
+  }
+}
+
+#[test]
 fn forwarded_client_addr_source_selects_resolved_or_direct_peer() {
   let peer_addr = "10.0.0.10:443".parse().unwrap();
   let resolved_addr = "203.0.113.7:443".parse().unwrap();

@@ -1,3 +1,0 @@
-Command: perf-probe load --label oxibelt-waf-enforcing --protocol h2 --host oxibelt --port 8443 --server-name proxy --authority example.test --path /perf/waf\?body=ok --ca-cert /tls/proxy-ca.pem --duration-seconds 30 --warmup-seconds 5 --concurrency 64 --expect-status 200
-
-{"concurrency":64,"duration_seconds":30,"error_samples":[],"errors":0,"label":"oxibelt-waf-enforcing","p50_ms":1.416,"p95_ms":2.557,"p99_ms":3.147,"protocol":"h2","requests":1272868,"rps":42428.933333333334,"statuses":{"200":1272868},"type":"load","unique_query_param":null,"warmup_seconds":5}

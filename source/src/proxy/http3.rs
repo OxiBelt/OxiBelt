@@ -28,6 +28,8 @@ use crate::tls;
 
 type H3BidiStream = crate::quic::h3::BidiStream<Bytes>;
 type H3RequestStream = h3::server::RequestStream<H3BidiStream, Bytes>;
+type H3RequestRecvStream =
+  h3::server::RequestStream<<H3BidiStream as h3::quic::BidiStream<Bytes>>::RecvStream, Bytes>;
 type H3ServerConnection = h3::server::Connection<crate::quic::h3::Connection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
@@ -573,7 +575,8 @@ async fn handle_h3_request(
   stream: H3RequestStream,
   context: H3DownstreamRequestContext,
 ) -> anyhow::Result<StatusCode> {
-  let (request, stream_completion) = request_body::prepare_h3_request_body(request, stream).await;
+  let (send_stream, recv_stream) = stream.split();
+  let request = request_body::prepare_h3_request_body(request, recv_stream).await;
   let response = http_proxy::handle_http3(
     request,
     context.peer_addr,
@@ -585,15 +588,17 @@ async fn handle_h3_request(
   )
   .await;
   let status = response.status();
-  let stream = stream_completion.into_stream().await?;
-  respond_to_h3_request(stream, response).await?;
+  respond_to_h3_request(send_stream, response).await?;
   Ok(status)
 }
 
-async fn respond_to_h3_request(
-  mut stream: H3RequestStream,
+async fn respond_to_h3_request<S>(
+  mut stream: h3::server::RequestStream<S, Bytes>,
   response: Response<ProxyBody>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+  S: h3::quic::SendStream<Bytes>,
+{
   let response_send_timeout = http_proxy::downstream_response_send_timeout(&response);
   let (parts, mut body) = response.into_parts();
   let mut parts = parts;

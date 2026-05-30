@@ -6,27 +6,16 @@ use ::http::Request;
 use bytes::{Buf, Bytes};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Frame;
-use tokio::sync::oneshot;
 
 use crate::proxy::http::body::{BoxError, ProxyBody, boxed_error, channel_body};
 
-use super::{H3_BODY_CHANNEL_CAPACITY, H3RequestStream};
-
-pub(super) struct H3RequestStreamCompletion(RequestStreamCompletion<H3RequestStream>);
-
-impl H3RequestStreamCompletion {
-  pub(super) async fn into_stream(self) -> anyhow::Result<H3RequestStream> {
-    self.0.into_stream().await
-  }
-}
+use super::{H3_BODY_CHANNEL_CAPACITY, H3RequestRecvStream};
 
 pub(super) async fn prepare_h3_request_body(
   request: Request<()>,
-  stream: H3RequestStream,
-) -> (Request<ProxyBody>, H3RequestStreamCompletion) {
-  let (request, completion) =
-    prepare_h3_request_body_with_spawner(request, stream, &TokioBodyTaskSpawner).await;
-  (request, H3RequestStreamCompletion(completion))
+  stream: H3RequestRecvStream,
+) -> Request<ProxyBody> {
+  prepare_h3_request_body_with_spawner(request, stream, &TokioBodyTaskSpawner).await
 }
 
 trait H3RequestBodyStream: Send + 'static {
@@ -42,7 +31,7 @@ trait H3RequestBodyStream: Send + 'static {
   ) -> impl Future<Output = Result<Option<Bytes>, Self::Error>> + Send + '_;
 }
 
-impl H3RequestBodyStream for H3RequestStream {
+impl H3RequestBodyStream for H3RequestRecvStream {
   type Error = h3::error::StreamError;
 
   fn poll_recv_data_bytes(
@@ -86,51 +75,11 @@ impl BodyTaskSpawner for TokioBodyTaskSpawner {
   }
 }
 
-struct RequestStreamCompletion<S> {
-  ready: Option<S>,
-  receiver: Option<oneshot::Receiver<S>>,
-}
-
-impl<S> RequestStreamCompletion<S> {
-  fn ready(stream: S) -> Self {
-    Self {
-      ready: Some(stream),
-      receiver: None,
-    }
-  }
-
-  fn receiver(receiver: oneshot::Receiver<S>) -> Self {
-    Self {
-      ready: None,
-      receiver: Some(receiver),
-    }
-  }
-
-  async fn into_stream(self) -> anyhow::Result<S> {
-    if let Some(stream) = self.ready {
-      return Ok(stream);
-    }
-    let Some(receiver) = self.receiver else {
-      return Err(anyhow::anyhow!(
-        "downstream HTTP/3 request body stream completion is missing"
-      ));
-    };
-    receiver
-      .await
-      .map_err(|_| anyhow::anyhow!("downstream HTTP/3 request body task did not return stream"))
-  }
-
-  #[cfg(test)]
-  fn is_ready(&self) -> bool {
-    self.ready.is_some()
-  }
-}
-
 async fn prepare_h3_request_body_with_spawner<S, Spawner>(
   request: Request<()>,
   mut stream: S,
   spawner: &Spawner,
-) -> (Request<ProxyBody>, RequestStreamCompletion<S>)
+) -> Request<ProxyBody>
 where
   S: H3RequestBodyStream,
   Spawner: BodyTaskSpawner,
@@ -144,10 +93,8 @@ where
   match first {
     Some(Ok(None)) => {
       let (parts, _) = request.into_parts();
-      (
-        Request::from_parts(parts, empty_body()),
-        RequestStreamCompletion::ready(stream),
-      )
+      drop(stream);
+      Request::from_parts(parts, empty_body())
     }
     Some(Ok(Some(chunk))) => {
       stream_h3_request_body_with_initial(request, stream, Some(Ok(Frame::data(chunk))), spawner)
@@ -166,7 +113,7 @@ fn stream_h3_request_body<S, Spawner>(
   request: Request<()>,
   stream: S,
   spawner: &Spawner,
-) -> (Request<ProxyBody>, RequestStreamCompletion<S>)
+) -> Request<ProxyBody>
 where
   S: H3RequestBodyStream,
   Spawner: BodyTaskSpawner,
@@ -179,25 +126,22 @@ fn stream_h3_request_body_with_initial<S, Spawner>(
   stream: S,
   initial_frame: Option<Result<Frame<Bytes>, BoxError>>,
   spawner: &Spawner,
-) -> (Request<ProxyBody>, RequestStreamCompletion<S>)
+) -> Request<ProxyBody>
 where
   S: H3RequestBodyStream,
   Spawner: BodyTaskSpawner,
 {
   let (parts, _) = request.into_parts();
   let (body_sender, body) = channel_body(H3_BODY_CHANNEL_CAPACITY);
-  let (stream_sender, stream_receiver) = oneshot::channel();
   let mut stream = stream;
   let initial_is_error = initial_frame.as_ref().is_some_and(Result::is_err);
   spawner.spawn_request_body_task(async move {
     if let Some(frame) = initial_frame
       && body_sender.send(frame).await.is_err()
     {
-      let _ = stream_sender.send(stream);
       return;
     }
     if initial_is_error {
-      let _ = stream_sender.send(stream);
       return;
     }
     loop {
@@ -216,12 +160,8 @@ where
         }
       }
     }
-    let _ = stream_sender.send(stream);
   });
-  (
-    Request::from_parts(parts, body),
-    RequestStreamCompletion::receiver(stream_receiver),
-  )
+  Request::from_parts(parts, body)
 }
 
 fn downstream_h3_request_body_error(error: impl fmt::Display) -> BoxError {
@@ -244,6 +184,7 @@ mod tests {
   use std::sync::Arc;
   use std::sync::atomic::{AtomicUsize, Ordering};
   use std::task::{Context, Poll};
+  use std::time::Duration;
 
   use ::http::header::CONTENT_LENGTH;
   use ::http::{HeaderValue, Method, Request};
@@ -271,11 +212,9 @@ mod tests {
     ]);
     let spawner = CountingSpawner::default();
 
-    let (request, completion) =
-      prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
 
     assert_eq!(spawner.spawned(), 1);
-    assert!(!completion.is_ready());
     let body = request
       .into_body()
       .collect()
@@ -283,10 +222,6 @@ mod tests {
       .expect("POST body should collect")
       .to_bytes();
     assert_eq!(body, Bytes::from_static(b"abc"));
-    let _stream = completion
-      .into_stream()
-      .await
-      .expect("streaming task should return the stream");
   }
 
   #[tokio::test]
@@ -296,12 +231,10 @@ mod tests {
     let poll_count = stream.poll_count();
     let spawner = CountingSpawner::default();
 
-    let (request, completion) =
-      prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
 
     assert_eq!(spawner.spawned(), 0);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    assert!(completion.is_ready());
     let body = request
       .into_body()
       .collect()
@@ -318,12 +251,10 @@ mod tests {
     let poll_count = stream.poll_count();
     let spawner = CountingSpawner::default();
 
-    let (_request, completion) =
-      prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let _request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
 
     assert_eq!(spawner.spawned(), 1);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    assert!(!completion.is_ready());
   }
 
   #[tokio::test]
@@ -332,11 +263,9 @@ mod tests {
     let stream = FakeRequestStream::pending();
     let spawner = CountingSpawner::default();
 
-    let (_request, completion) =
-      prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let _request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
 
     assert_eq!(spawner.spawned(), 1);
-    assert!(!completion.is_ready());
   }
 
   #[tokio::test]
@@ -345,8 +274,7 @@ mod tests {
     let stream = FakeRequestStream::new([FakeStreamEvent::Error("stream reset")]);
     let spawner = CountingSpawner::default();
 
-    let (request, completion) =
-      prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
 
     assert_eq!(spawner.spawned(), 1);
     let error = request
@@ -359,10 +287,33 @@ mod tests {
         .to_string()
         .contains("failed to receive downstream HTTP/3 request data: stream reset")
     );
-    let _stream = completion
-      .into_stream()
-      .await
-      .expect("streaming task should return the stream after an error");
+  }
+
+  #[tokio::test]
+  async fn dropping_proxy_body_stops_background_recv_task() {
+    let request = request(Method::POST);
+    let stream = FakeRequestStream::new([
+      FakeStreamEvent::Data(Bytes::from_static(b"first")),
+      FakeStreamEvent::Data(Bytes::from_static(b"second")),
+      FakeStreamEvent::End,
+    ]);
+    let drop_count = stream.drop_count();
+    let spawner = CountingSpawner::default();
+
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    assert_eq!(spawner.spawned(), 1);
+
+    drop(request);
+    tokio::time::timeout(Duration::from_secs(1), async {
+      loop {
+        if drop_count.load(Ordering::SeqCst) > 0 {
+          break;
+        }
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("recv task should stop after downstream body is dropped");
   }
 
   async fn assert_content_length_zero_data_is_streamed(method: Method) {
@@ -374,12 +325,10 @@ mod tests {
     let poll_count = stream.poll_count();
     let spawner = CountingSpawner::default();
 
-    let (request, completion) =
-      prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
 
     assert_eq!(spawner.spawned(), 1);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    assert!(!completion.is_ready());
     let body = request
       .into_body()
       .collect()
@@ -387,10 +336,6 @@ mod tests {
       .expect("Content-Length: 0 DATA should collect through ProxyBody")
       .to_bytes();
     assert_eq!(body, Bytes::from_static(b"malicious-body"));
-    let _stream = completion
-      .into_stream()
-      .await
-      .expect("streaming task should return the stream");
   }
 
   fn request(method: Method) -> Request<()> {
@@ -442,6 +387,7 @@ mod tests {
     events: VecDeque<FakeStreamEvent>,
     pending: bool,
     poll_count: Arc<AtomicUsize>,
+    drop_count: Arc<AtomicUsize>,
   }
 
   impl FakeRequestStream {
@@ -450,6 +396,7 @@ mod tests {
         events: events.into_iter().collect(),
         pending: false,
         poll_count: Arc::new(AtomicUsize::new(0)),
+        drop_count: Arc::new(AtomicUsize::new(0)),
       }
     }
 
@@ -458,11 +405,22 @@ mod tests {
         events: VecDeque::new(),
         pending: true,
         poll_count: Arc::new(AtomicUsize::new(0)),
+        drop_count: Arc::new(AtomicUsize::new(0)),
       }
     }
 
     fn poll_count(&self) -> Arc<AtomicUsize> {
       Arc::clone(&self.poll_count)
+    }
+
+    fn drop_count(&self) -> Arc<AtomicUsize> {
+      Arc::clone(&self.drop_count)
+    }
+  }
+
+  impl Drop for FakeRequestStream {
+    fn drop(&mut self) {
+      self.drop_count.fetch_add(1, Ordering::SeqCst);
     }
   }
 

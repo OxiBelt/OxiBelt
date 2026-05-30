@@ -13,6 +13,7 @@ pub struct RouteExecutionPlan {
 pub struct FastPathPlan {
   pub plain_proxy_h1: bool,
   pub plain_proxy_h2: bool,
+  pub plain_proxy_h3: bool,
   pub static_small_object: bool,
   pub static_sendfile_like: bool,
   pub cache_hit: bool,
@@ -83,6 +84,7 @@ pub(super) fn route_execution_plan(
     fast_path: FastPathPlan {
       plain_proxy_h1: can_plain_proxy,
       plain_proxy_h2: can_plain_proxy,
+      plain_proxy_h3: can_plain_proxy,
       static_small_object: can_static_small_object,
       static_sendfile_like: can_static_sendfile,
       cache_hit: route.cache.is_some(),
@@ -201,11 +203,12 @@ sendfile = "auto"
   }
 
   #[test]
-  fn no_waf_plain_proxy_has_h1_and_h2_fast_path_plan() {
+  fn no_waf_plain_proxy_has_h1_h2_and_h3_fast_path_plan() {
     let plan = execution_plan(&minimal_proxy_config(""));
 
     assert!(plan.fast_path.plain_proxy_h1);
     assert!(plan.fast_path.plain_proxy_h2);
+    assert!(plan.fast_path.plain_proxy_h3);
     assert_eq!(plan.waf.request, WafExecutionPlan::None);
     assert_eq!(plan.waf.response, WafExecutionPlan::None);
   }
@@ -233,6 +236,7 @@ status = 403
     assert_eq!(proxy.waf.request, WafExecutionPlan::HeaderOnly);
     assert!(proxy.fast_path.plain_proxy_h1);
     assert!(proxy.fast_path.plain_proxy_h2);
+    assert!(proxy.fast_path.plain_proxy_h3);
     assert_eq!(static_plan.waf.request, WafExecutionPlan::HeaderOnly);
     assert!(static_plan.fast_path.static_sendfile_like);
   }
@@ -259,6 +263,8 @@ status = 413
 
     assert_eq!(proxy.waf.request, WafExecutionPlan::SizeOnly);
     assert!(!proxy.fast_path.plain_proxy_h1);
+    assert!(!proxy.fast_path.plain_proxy_h2);
+    assert!(!proxy.fast_path.plain_proxy_h3);
     assert_eq!(static_plan.waf.request, WafExecutionPlan::SizeOnly);
     assert!(static_plan.fast_path.static_sendfile_like);
   }
@@ -281,8 +287,11 @@ type = "reject"
 status = 403
 "#;
     let prefix = execution_plan(&minimal_static_config(prefix_waf));
+    let prefix_proxy = execution_plan(&minimal_proxy_config(prefix_waf));
     assert_eq!(prefix.waf.request, WafExecutionPlan::PrefixBody);
     assert!(!prefix.fast_path.static_sendfile_like);
+    assert_eq!(prefix_proxy.waf.request, WafExecutionPlan::PrefixBody);
+    assert!(!prefix_proxy.fast_path.plain_proxy_h3);
 
     let stream_waf = r#"
 
@@ -301,6 +310,7 @@ type = "close_stream"
     let stream = execution_plan(&minimal_proxy_config(stream_waf));
     assert!(stream.waf.stream_enabled);
     assert!(!stream.fast_path.plain_proxy_h1);
+    assert!(!stream.fast_path.plain_proxy_h3);
   }
 
   #[test]
@@ -324,5 +334,6 @@ upstream = "app"
 
     assert_eq!(plan.waf.request, WafExecutionPlan::HeaderOnly);
     assert!(!plan.fast_path.plain_proxy_h1);
+    assert!(!plan.fast_path.plain_proxy_h3);
   }
 }
