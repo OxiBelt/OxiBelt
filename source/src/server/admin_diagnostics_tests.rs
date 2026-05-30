@@ -37,6 +37,7 @@ async fn diagnostics_preflight_get_allows_read_only_actor() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -75,6 +76,7 @@ async fn diagnostics_candidate_requires_probe_permission_and_reports_invalid_con
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -138,6 +140,7 @@ async fn diagnostics_candidate_upstream_probe_requires_target_permission() {
     admin_addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
   let body = candidate_upstream_probe_body(&cert_path, &key_path, probe_addr);
@@ -203,6 +206,7 @@ async fn diagnostics_candidate_upstream_probe_allows_authorized_target() {
     admin_addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
   let probe_task = spawn_health_probe_responder(probe_listener);
@@ -255,6 +259,7 @@ async fn support_bundle_requires_redact_and_permission() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -295,6 +300,7 @@ async fn support_bundle_requires_redact_and_permission() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -350,6 +356,7 @@ async fn support_bundle_external_probe_requires_target_permission() {
     admin_addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -406,6 +413,7 @@ async fn runtime_snapshot_requires_redact_and_permission() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -444,6 +452,7 @@ async fn runtime_snapshot_requires_redact_and_permission() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 

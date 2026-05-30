@@ -43,6 +43,7 @@ async fn diagnostics_preflight_get_external_probe_uses_query_options() {
     admin_addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
   let probe_task = spawn_health_probe_responder(probe_listener);

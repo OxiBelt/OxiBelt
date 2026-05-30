@@ -305,7 +305,7 @@ impl AdminAuditHandle {
   pub fn finish_with_error(&self, status: StatusCode, error: &str) -> AdminAuditEvent {
     let mut event = self.inner.lock().expect("admin audit lock poisoned");
     event.status = status.as_u16();
-    if status.is_success() || status.is_redirection() {
+    if status == StatusCode::SWITCHING_PROTOCOLS || status.is_success() || status.is_redirection() {
       event.outcome = "applied".to_string();
       event.error = None;
     } else {
@@ -451,5 +451,30 @@ mod tests {
       .expect("committed event should be queued");
     assert_eq!(event.status, StatusCode::OK.as_u16());
     assert_eq!(event.outcome, "applied");
+  }
+
+  #[test]
+  fn audit_treats_only_switching_protocols_as_applied_informational() {
+    let switching = AdminAuditHandle::new(
+      "127.0.0.1:12345".parse().expect("peer address"),
+      "http",
+      &Method::GET,
+      "/admin/v1/operations/op_550e8400-e29b-41d4-a716-446655440000/events/ws",
+      None,
+    )
+    .finish(StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(switching.outcome, "applied");
+    assert!(switching.error.is_none());
+
+    let other_informational = AdminAuditHandle::new(
+      "127.0.0.1:12345".parse().expect("peer address"),
+      "http",
+      &Method::GET,
+      "/admin/v1/config/status",
+      None,
+    )
+    .finish(StatusCode::CONTINUE);
+    assert_eq!(other_informational.outcome, "rejected");
+    assert!(other_informational.error.is_some());
   }
 }

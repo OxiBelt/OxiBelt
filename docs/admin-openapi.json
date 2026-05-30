@@ -26,6 +26,10 @@
       "description": "Unified Admin request audit log."
     },
     {
+      "name": "operations",
+      "description": "Process-local long-running Admin operation queue, polling, and event streams."
+    },
+    {
       "name": "config",
       "description": "Runtime configuration validation, diff, load, rollback, and TLS reload."
     },
@@ -263,6 +267,210 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/operations": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "operationId": "listAdminOperations",
+        "summary": "List process-local long-running Admin operations.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "operationId": "createAdminOperation",
+        "summary": "Create an explicit long-running Admin operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatchOptional"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminOperationCreateRequest"
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/AdminOperationAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/admin/v1/operations/{id}": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "operationId": "getAdminOperation",
+        "summary": "Poll one long-running Admin operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminOperationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminOperation"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "operations"
+        ],
+        "operationId": "cancelAdminOperation",
+        "summary": "Request cancellation of one long-running Admin operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminOperationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminOperation"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/operations/{id}/events": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "operationId": "watchAdminOperationEvents",
+        "summary": "Stream operation events as SSE or NDJSON.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminOperationId"
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "sse",
+                "ndjson"
+              ],
+              "default": "sse"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation event stream. Default is text/event-stream; format=ndjson returns application/x-ndjson.",
+            "headers": {
+              "X-OxiBelt-Request-Id": {
+                "$ref": "#/components/headers/AdminRequestId"
+              },
+              "X-OxiBelt-API-Version": {
+                "$ref": "#/components/headers/AdminApiVersion"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/operations/{id}/events/ws": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "operationId": "watchAdminOperationEventsWebSocket",
+        "summary": "Subscribe to operation events with WebSocket JSON text frames.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminOperationId"
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade accepted."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           }
         }
       }
@@ -2481,6 +2689,15 @@
         },
         "description": "Optional ETag from the corresponding status endpoint. When supplied, it is enforced as a precondition."
       },
+      "AdminOperationId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/AdminOperationId"
+        },
+        "description": "Canonical operation ID with op_ prefix and UUIDv4 payload."
+      },
       "Redact": {
         "name": "redact",
         "in": "query",
@@ -2561,6 +2778,16 @@
             "schema": {
               "type": "object",
               "additionalProperties": true
+            }
+          }
+        }
+      },
+      "AdminOperationCreateRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminOperationCreateRequest"
             }
           }
         }
@@ -3413,6 +3640,58 @@
           }
         }
       },
+      "AdminOperation": {
+        "description": "Long-running Admin operation snapshot.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminOperation"
+            }
+          }
+        }
+      },
+      "AdminOperationAccepted": {
+        "description": "Long-running Admin operation accepted.",
+        "headers": {
+          "Location": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "Operation-Location": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "Preference-Applied": {
+            "schema": {
+              "type": "string",
+              "const": "respond-async"
+            }
+          },
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminOperation"
+            }
+          }
+        }
+      },
       "BadRequest": {
         "description": "Bad request.",
         "headers": {
@@ -3613,6 +3892,142 @@
       }
     },
     "schemas": {
+      "AdminOperationId": {
+        "type": "string",
+        "pattern": "^op_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "AdminOperationKind": {
+        "type": "string",
+        "enum": [
+          "cache_warm",
+          "oxirule_replay",
+          "diagnostics_preflight",
+          "support_bundle",
+          "dynamic_policy_import"
+        ]
+      },
+      "AdminOperationState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "expired"
+        ]
+      },
+      "AdminOperationProgress": {
+        "type": "object",
+        "properties": {
+          "phase": {
+            "type": "string"
+          },
+          "processed": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminOperation": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "state",
+          "created_at_unix_ms",
+          "actor",
+          "principal",
+          "request_id",
+          "cancel_requested"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/AdminOperationId"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AdminOperationKind"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AdminOperationState"
+          },
+          "created_at_unix_ms": {
+            "type": "integer"
+          },
+          "started_at_unix_ms": {
+            "type": "integer"
+          },
+          "finished_at_unix_ms": {
+            "type": "integer"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "principal": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/AdminOperationProgress"
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminOperationEvent": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "event",
+          "created_at_unix_ms",
+          "operation"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer"
+          },
+          "event": {
+            "type": "string"
+          },
+          "created_at_unix_ms": {
+            "type": "integer"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/AdminOperation"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminOperationCreateRequest": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/AdminOperationKind"
+          },
+          "request": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
       "AdminErrorEnvelope": {
         "type": "object",
         "required": [
@@ -3779,7 +4194,9 @@
               "waf_devtools",
               "runtime_introspection",
               "cache_admin",
-              "upstream_pool_runtime_control"
+              "upstream_pool_runtime_control",
+              "admin_operations",
+              "admin_audit"
             ],
             "properties": {
               "config_load": {
@@ -3804,6 +4221,12 @@
                 "type": "boolean"
               },
               "upstream_pool_runtime_control": {
+                "type": "boolean"
+              },
+              "admin_operations": {
+                "type": "boolean"
+              },
+              "admin_audit": {
                 "type": "boolean"
               }
             },

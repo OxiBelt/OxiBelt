@@ -4,6 +4,7 @@ use hyper::body::Incoming;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::admin_audit::AdminAuditHandle;
 use crate::dynamic_policy::{
   DynamicPolicyAdminCreate, DynamicPolicyAdminImport, DynamicPolicyAdminPatch,
   DynamicPolicyAdminRecord, DynamicPolicyPreconditionError, DynamicPolicyPreconditionErrorKind,
@@ -12,13 +13,13 @@ use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::state::AppHandle;
 
-use super::{AdminAuthorization, admin_error, admin_resource};
+use super::{AdminAuthorization, admin_error, admin_operations, admin_resource};
 
 mod cache;
 mod dynamic_policy_query;
 pub(super) use cache::{
   cache_key_explain_response, cache_purge_json_response, cache_purge_response, cache_warm_response,
-  signed_cache_purge_actor,
+  enqueue_cache_warm_operation, signed_cache_purge_actor,
 };
 
 pub(super) const ADMIN_JSON_BODY_LIMIT: usize = 64 * 1024;
@@ -80,6 +81,7 @@ fn authorize_dynamic_policy_transition(
 pub(super) async fn dynamic_policy_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
+  operations: admin_operations::AdminOperationRuntime,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
@@ -201,6 +203,10 @@ pub(super) async fn dynamic_policy_response(
       });
     }
     (&::http::Method::POST, "/admin/v1/dynamic-policies/import") => {
+      let respond_async = admin_operations::prefer_respond_async(&request);
+      let request_id = AdminAuditHandle::from_request(&request)
+        .map(|audit| audit.request_id())
+        .unwrap_or_else(|| "unknown".to_string());
       let if_match = request_if_match(&request);
       let body = match collect_admin_json::<DynamicPolicyAdminImport>(request).await {
         Ok(body) => body,
@@ -216,6 +222,43 @@ pub(super) async fn dynamic_policy_response(
         ) {
           return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
         }
+      }
+      if respond_async {
+        let actor_name = authorization.actor.name.clone();
+        return Some(
+          match operations
+            .enqueue(
+              admin_operations::AdminOperationKind::DynamicPolicyImport,
+              authorization.actor,
+              request_id,
+              move |context| async move {
+                context.ensure_not_cancelled()?;
+                context
+                  .progress("importing", Some(0), Some(body.policies.len() as u64))
+                  .await;
+                let policies = state
+                  .snapshot()
+                  .dynamic_policy
+                  .admin_import(&actor_name, body, if_match.as_deref())
+                  .await
+                  .map_err(|error| error.to_string())?;
+                context.ensure_not_cancelled()?;
+                context
+                  .progress(
+                    "importing",
+                    Some(policies.len() as u64),
+                    Some(policies.len() as u64),
+                  )
+                  .await;
+                admin_operations::value_result(json!({ "policies": policies }))
+              },
+            )
+            .await
+          {
+            Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
+            Err(error) => admin_operations::enqueue_error_response(error),
+          },
+        );
       }
       return Some(
         match state
@@ -311,6 +354,69 @@ pub(super) async fn dynamic_policy_response(
     }
     _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
   })
+}
+
+pub(in crate::server) async fn enqueue_dynamic_policy_import_operation(
+  request: serde_json::Value,
+  state: AppHandle,
+  operations: admin_operations::AdminOperationRuntime,
+  authorization: &AdminAuthorization<'_>,
+  request_id: String,
+  if_match: Option<String>,
+) -> Response<ProxyBody> {
+  let body = match serde_json::from_value::<DynamicPolicyAdminImport>(request) {
+    Ok(body) => body,
+    Err(_) => {
+      return text_response(
+        StatusCode::BAD_REQUEST,
+        "invalid dynamic_policy_import request",
+      );
+    }
+  };
+  for policy in &body.policies {
+    if !authorize_dynamic_policy_record(
+      authorization,
+      "dynamic-policy:Import",
+      &policy.source,
+      &policy.name,
+      policy.route_name.as_deref(),
+    ) {
+      return text_response(StatusCode::FORBIDDEN, "forbidden");
+    }
+  }
+  let actor_name = authorization.actor.name.clone();
+  match operations
+    .enqueue(
+      admin_operations::AdminOperationKind::DynamicPolicyImport,
+      authorization.actor,
+      request_id,
+      move |context| async move {
+        context.ensure_not_cancelled()?;
+        context
+          .progress("importing", Some(0), Some(body.policies.len() as u64))
+          .await;
+        let policies = state
+          .snapshot()
+          .dynamic_policy
+          .admin_import(&actor_name, body, if_match.as_deref())
+          .await
+          .map_err(|error| error.to_string())?;
+        context.ensure_not_cancelled()?;
+        context
+          .progress(
+            "importing",
+            Some(policies.len() as u64),
+            Some(policies.len() as u64),
+          )
+          .await;
+        admin_operations::value_result(json!({ "policies": policies }))
+      },
+    )
+    .await
+  {
+    Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
+    Err(error) => admin_operations::enqueue_error_response(error),
+  }
 }
 
 fn request_if_match(request: &hyper::Request<Incoming>) -> Option<String> {

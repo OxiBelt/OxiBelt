@@ -51,6 +51,9 @@ mod admin_ipm_simulation;
 #[cfg(test)]
 mod admin_ipm_simulation_security_tests;
 mod admin_metadata;
+mod admin_operations;
+#[cfg(test)]
+mod admin_operations_tests;
 mod admin_ops;
 mod admin_resource;
 #[cfg(test)]
@@ -64,6 +67,7 @@ mod plain_http;
 mod reload_tests;
 use admin_auth::{AdminActor, AdminAuthorization, admin_actor, admin_request_context};
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
+use admin_operations::AdminOperationRuntime;
 use admin_upstream_pools::admin_upstream_pools_response;
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
 const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
@@ -78,8 +82,15 @@ pub async fn serve(
     .and_then(|path| Config::load_effective_toml_redacted(path).ok())
     .and_then(|value| toml::to_string_pretty(&value).ok());
   let (admin_control, mut admin_control_rx) = AdminControlHandle::new(effective_config);
-  let mut listeners =
-    ListenerSupervisor::start(state.clone(), error_tx.clone(), admin_control.clone()).await?;
+  let admin_operations =
+    AdminOperationRuntime::new(state.snapshot().config.admin.operations.clone());
+  let mut listeners = ListenerSupervisor::start(
+    state.clone(),
+    error_tx.clone(),
+    admin_control.clone(),
+    admin_operations.clone(),
+  )
+  .await?;
   let _ops = OpsTasks::start(state.clone(), error_tx.clone()).await?;
   let reload = if state.snapshot().config.runtime.hot_reload.mode.enabled() {
     match config_path {
@@ -284,6 +295,7 @@ async fn serve_admin_listener(
   configured_bind: SocketAddr,
   state: AppHandle,
   admin_control: AdminControlHandle,
+  admin_operations: AdminOperationRuntime,
   mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
   let bind = listener
@@ -310,9 +322,18 @@ async fn serve_admin_listener(
         crate::tcp_socket::enable_tcp_nodelay(&stream, peer_addr, "admin listener");
         let state = state.clone();
         let admin_control = admin_control.clone();
+        let admin_operations = admin_operations.clone();
         tokio::spawn(async move {
           if let Err(error) =
-            handle_admin_connection(stream, peer_addr, configured_bind, state, admin_control).await
+            handle_admin_connection(
+              stream,
+              peer_addr,
+              configured_bind,
+              state,
+              admin_control,
+              admin_operations,
+            )
+            .await
           {
             warn!(peer = %peer_addr, error = %error, "admin connection failed");
           }
@@ -328,6 +349,7 @@ async fn handle_admin_connection(
   listener_bind: SocketAddr,
   state: AppHandle,
   admin_control: AdminControlHandle,
+  admin_operations: AdminOperationRuntime,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
   if !admin_listener_current(&snapshot, listener_bind) {
@@ -338,25 +360,62 @@ async fn handle_admin_connection(
   drop(snapshot);
   match transport {
     AdminTransportMode::Tls => {
-      handle_admin_tls_connection(stream, peer_addr, listener_bind, state, admin_control).await
+      handle_admin_tls_connection(
+        stream,
+        peer_addr,
+        listener_bind,
+        state,
+        admin_control,
+        admin_operations,
+      )
+      .await
     }
     AdminTransportMode::Plaintext => {
-      handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state, admin_control)
-        .await
+      handle_admin_plaintext_connection(
+        stream,
+        peer_addr,
+        listener_bind,
+        state,
+        admin_control,
+        admin_operations,
+      )
+      .await
     }
     AdminTransportMode::PlaintextAllowlist if plaintext_allowed => {
-      handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state, admin_control)
-        .await
+      handle_admin_plaintext_connection(
+        stream,
+        peer_addr,
+        listener_bind,
+        state,
+        admin_control,
+        admin_operations,
+      )
+      .await
     }
     AdminTransportMode::PlaintextAllowlist => {
       bail!("admin plaintext connection from {peer_addr} is not allowlisted");
     }
     AdminTransportMode::Auto => {
       if plaintext_allowed && !tcp_stream_starts_with_tls(&stream).await {
-        handle_admin_plaintext_connection(stream, peer_addr, listener_bind, state, admin_control)
-          .await
+        handle_admin_plaintext_connection(
+          stream,
+          peer_addr,
+          listener_bind,
+          state,
+          admin_control,
+          admin_operations,
+        )
+        .await
       } else {
-        handle_admin_tls_connection(stream, peer_addr, listener_bind, state, admin_control).await
+        handle_admin_tls_connection(
+          stream,
+          peer_addr,
+          listener_bind,
+          state,
+          admin_control,
+          admin_operations,
+        )
+        .await
       }
     }
   }
@@ -387,6 +446,7 @@ async fn handle_admin_tls_connection(
   listener_bind: SocketAddr,
   state: AppHandle,
   admin_control: AdminControlHandle,
+  admin_operations: AdminOperationRuntime,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
   let config = snapshot
@@ -408,6 +468,7 @@ async fn handle_admin_tls_connection(
     listener_bind,
     state,
     admin_control,
+    admin_operations,
     "https",
   )
   .await
@@ -419,6 +480,7 @@ async fn handle_admin_plaintext_connection(
   listener_bind: SocketAddr,
   state: AppHandle,
   admin_control: AdminControlHandle,
+  admin_operations: AdminOperationRuntime,
 ) -> anyhow::Result<()> {
   serve_admin_http1(
     TokioIo::new(stream),
@@ -426,6 +488,7 @@ async fn handle_admin_plaintext_connection(
     listener_bind,
     state,
     admin_control,
+    admin_operations,
     "http",
   )
   .await
@@ -437,10 +500,11 @@ async fn serve_admin_http1<I>(
   listener_bind: SocketAddr,
   state: AppHandle,
   admin_control: AdminControlHandle,
+  admin_operations: AdminOperationRuntime,
   scheme: &'static str,
 ) -> anyhow::Result<()>
 where
-  I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+  I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
   let snapshot = state.snapshot();
   let header_timeout_ms = snapshot.config.limits.client_header_timeout_ms;
@@ -451,12 +515,14 @@ where
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = state.clone();
     let admin_control = admin_control.clone();
+    let admin_operations = admin_operations.clone();
     async move {
       Ok::<_, Infallible>(
         admin_response(
           request,
           state,
           admin_control,
+          admin_operations,
           peer_addr,
           listener_bind,
           scheme,
@@ -474,6 +540,7 @@ where
     .keep_alive(true);
   builder
     .serve_connection(io, service)
+    .with_upgrades()
     .await
     .map_err(|error| anyhow::anyhow!(error))
 }
@@ -482,6 +549,7 @@ async fn admin_response(
   mut request: hyper::Request<Incoming>,
   state: AppHandle,
   admin_control: AdminControlHandle,
+  admin_operations: AdminOperationRuntime,
   peer_addr: SocketAddr,
   listener_bind: SocketAddr,
   scheme: &'static str,
@@ -496,6 +564,7 @@ async fn admin_response(
       request,
       state.clone(),
       admin_control,
+      admin_operations,
       peer_addr,
       listener_bind,
       scheme,
@@ -513,6 +582,7 @@ async fn admin_response_inner(
   request: hyper::Request<Incoming>,
   state: AppHandle,
   admin_control: AdminControlHandle,
+  admin_operations: AdminOperationRuntime,
   peer_addr: SocketAddr,
   listener_bind: SocketAddr,
   scheme: &'static str,
@@ -592,6 +662,23 @@ async fn admin_response_inner(
     return response;
   }
 
+  if path == "/admin/v1/operations" || path.starts_with("/admin/v1/operations/") {
+    return admin_operations::admin_operations_response(
+      request,
+      admin_operations::AdminOperationRouteContext {
+        state: state.clone(),
+        admin_control: admin_control.clone(),
+        operations: admin_operations.clone(),
+        peer_addr,
+      },
+      &authorization,
+      &method,
+      &path,
+    )
+    .await
+    .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
+  }
+
   if path == "/admin/v1/config/status"
     || path == "/admin/v1/config/effective"
     || path == "/admin/v1/config/validate"
@@ -638,8 +725,15 @@ async fn admin_response_inner(
       .await;
   }
   if path == "/admin/v1/cache/warm" {
-    return admin::cache_warm_response(request, state.clone(), &authorization, &method, peer_addr)
-      .await;
+    return admin::cache_warm_response(
+      request,
+      state.clone(),
+      admin_operations.clone(),
+      &authorization,
+      &method,
+      peer_addr,
+    )
+    .await;
   }
   if path == "/admin/v1/cache/purge" {
     return admin::cache_purge_json_response(
@@ -657,6 +751,7 @@ async fn admin_response_inner(
     return admin_ops::admin_waf_devtools_response(
       request,
       snapshot.as_ref(),
+      admin_operations.clone(),
       &authorization,
       &method,
       &path,
@@ -684,6 +779,7 @@ async fn admin_response_inner(
       request,
       state.clone(),
       admin_control.clone(),
+      admin_operations.clone(),
       &authorization,
       &method,
       &path,
@@ -700,7 +796,15 @@ async fn admin_response_inner(
     let response = if ipm_path {
       admin_ipm::ipm_response(request, state.clone(), &authorization, &method, &path).await
     } else {
-      admin::dynamic_policy_response(request, state.clone(), &authorization, &method, &path).await
+      admin::dynamic_policy_response(
+        request,
+        state.clone(),
+        admin_operations.clone(),
+        &authorization,
+        &method,
+        &path,
+      )
+      .await
     };
     return response.unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
@@ -879,6 +983,7 @@ pub(crate) struct ListenerSupervisor {
   turns: Vec<TurnListenerTask>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
   admin_control: AdminControlHandle,
+  admin_operations: AdminOperationRuntime,
 }
 
 struct TcpListenerTask {
@@ -967,6 +1072,7 @@ impl ListenerSupervisor {
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
     admin_control: AdminControlHandle,
+    admin_operations: AdminOperationRuntime,
   ) -> anyhow::Result<Self> {
     let snapshot = state.snapshot();
     let mut supervisor = Self {
@@ -978,6 +1084,7 @@ impl ListenerSupervisor {
       turns: Vec::new(),
       error_tx,
       admin_control,
+      admin_operations,
     };
     let pending = supervisor.prepare(&snapshot).await?;
     supervisor.commit(pending, &snapshot, state);
@@ -1216,6 +1323,7 @@ impl ListenerSupervisor {
           state.clone(),
           self.error_tx.clone(),
           self.admin_control.clone(),
+          self.admin_operations.clone(),
           drain_timeouts,
         );
         if let Some(old) = self.admin.replace(admin) {
@@ -1511,13 +1619,21 @@ impl BoundAdminListener {
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
     admin_control: AdminControlHandle,
+    admin_operations: AdminOperationRuntime,
     drain_timeouts: DrainTimeouts,
   ) -> AdminListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
     let task = tokio::spawn(async move {
-      if let Err(error) =
-        serve_admin_listener(self.listener, bind, state, admin_control, shutdown_rx).await
+      if let Err(error) = serve_admin_listener(
+        self.listener,
+        bind,
+        state,
+        admin_control,
+        admin_operations,
+        shutdown_rx,
+      )
+      .await
       {
         let _ = error_tx.send(error.context("admin listener failed"));
       }
@@ -1558,6 +1674,11 @@ async fn bind_admin_listener(bind: SocketAddr) -> anyhow::Result<BoundAdminListe
 #[cfg(test)]
 fn test_admin_control() -> AdminControlHandle {
   AdminControlHandle::new(None).0
+}
+
+#[cfg(test)]
+fn test_admin_operations() -> AdminOperationRuntime {
+  AdminOperationRuntime::new(crate::config::AdminOperationsConfig::default())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2281,6 +2402,7 @@ mod tests {
       addr,
       state,
       test_admin_control(),
+      test_admin_operations(),
       shutdown_rx,
     ));
 
@@ -2319,9 +2441,14 @@ mod tests {
         .expect("initial snapshot should initialize"),
     );
     let (error_tx, _error_rx) = mpsc::unbounded_channel();
-    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx, test_admin_control())
-      .await
-      .expect("listener supervisor should start");
+    let mut supervisor = ListenerSupervisor::start(
+      state.clone(),
+      error_tx,
+      test_admin_control(),
+      test_admin_operations(),
+    )
+    .await
+    .expect("listener supervisor should start");
 
     let response = admin_purge_response_with_retry(old_admin).await;
     assert!(
@@ -2380,9 +2507,14 @@ mod tests {
         .expect("initial snapshot should initialize"),
     );
     let (error_tx, _error_rx) = mpsc::unbounded_channel();
-    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx, test_admin_control())
-      .await
-      .expect("listener supervisor should start");
+    let mut supervisor = ListenerSupervisor::start(
+      state.clone(),
+      error_tx,
+      test_admin_control(),
+      test_admin_operations(),
+    )
+    .await
+    .expect("listener supervisor should start");
 
     let response = admin_purge_response_with_retry(admin_addr).await;
     assert!(
@@ -2424,9 +2556,14 @@ mod tests {
         .expect("initial snapshot should initialize"),
     );
     let (error_tx, _error_rx) = mpsc::unbounded_channel();
-    let mut supervisor = ListenerSupervisor::start(state.clone(), error_tx, test_admin_control())
-      .await
-      .expect("listener supervisor should start");
+    let mut supervisor = ListenerSupervisor::start(
+      state.clone(),
+      error_tx,
+      test_admin_control(),
+      test_admin_operations(),
+    )
+    .await
+    .expect("listener supervisor should start");
 
     let held_request = tokio::spawn(raw_http_response(old_http, "/slow"));
     tokio::time::timeout(Duration::from_secs(2), first_upstream_request)

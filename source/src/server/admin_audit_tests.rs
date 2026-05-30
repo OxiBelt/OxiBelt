@@ -44,6 +44,7 @@ async fn audit_queue_full_rejects_config_load_before_handler() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 

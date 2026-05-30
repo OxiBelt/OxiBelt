@@ -1704,6 +1704,27 @@ impl Config {
         bail!("admin.audit.backend {backend_name} must use kind = \"postgres\"");
       }
     }
+    if self.admin.operations.max_running == 0 {
+      bail!("admin.operations.max_running must be greater than 0");
+    }
+    if self.admin.operations.max_queued == 0 {
+      bail!("admin.operations.max_queued must be greater than 0");
+    }
+    if self.admin.operations.max_stored == 0 {
+      bail!("admin.operations.max_stored must be greater than 0");
+    }
+    if self.admin.operations.max_stored < self.admin.operations.max_running {
+      bail!("admin.operations.max_stored must be at least admin.operations.max_running");
+    }
+    if self.admin.operations.retention_seconds == 0 {
+      bail!("admin.operations.retention_seconds must be greater than 0");
+    }
+    if self.admin.operations.event_buffer == 0 {
+      bail!("admin.operations.event_buffer must be greater than 0");
+    }
+    if self.admin.operations.result_max_bytes == 0 {
+      bail!("admin.operations.result_max_bytes must be greater than 0");
+    }
     if !self.ipm.enabled {
       if self.admin.bearer_token_env.trim().is_empty() {
         bail!("admin.bearer_token_env must not be empty when admin is enabled");
@@ -2593,6 +2614,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "bind",
       "cache_purge_signing",
       "enabled",
+      "operations",
       "plaintext_allowed_source_cidrs",
       "rbac",
       "tls",
@@ -2600,6 +2622,16 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "transport",
     ][..],
     "admin.audit" => &["backend", "enabled", "queue_capacity"][..],
+    "admin.operations" => &[
+      "enabled",
+      "event_buffer",
+      "max_queued",
+      "max_running",
+      "max_stored",
+      "result_max_bytes",
+      "retention_seconds",
+      "websocket",
+    ][..],
     "admin.cache_purge_signing" => &[
       "enabled",
       "key_env",
@@ -4421,6 +4453,8 @@ pub struct AdminConfig {
   #[serde(default)]
   pub audit: AdminAuditConfig,
   #[serde(default)]
+  pub operations: AdminOperationsConfig,
+  #[serde(default)]
   pub tls: AdminTlsConfig,
   #[serde(default, rename = "rbac")]
   legacy_rbac: Option<LegacyAdminRbacConfig>,
@@ -4439,6 +4473,7 @@ impl Default for AdminConfig {
       plaintext_allowed_source_cidrs: default_admin_plaintext_allowed_source_cidrs(),
       cache_purge_signing: AdminCachePurgeSigningConfig::default(),
       audit: AdminAuditConfig::default(),
+      operations: AdminOperationsConfig::default(),
       tls: AdminTlsConfig::default(),
       legacy_rbac: None,
       legacy_token_store: None,
@@ -4462,6 +4497,41 @@ impl Default for AdminAuditConfig {
       enabled: false,
       backend: None,
       queue_capacity: default_admin_audit_queue_capacity(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AdminOperationsConfig {
+  #[serde(default = "default_true")]
+  pub enabled: bool,
+  #[serde(default = "default_admin_operations_max_running")]
+  pub max_running: usize,
+  #[serde(default = "default_admin_operations_max_queued")]
+  pub max_queued: usize,
+  #[serde(default = "default_admin_operations_max_stored")]
+  pub max_stored: usize,
+  #[serde(default = "default_admin_operations_retention_seconds")]
+  pub retention_seconds: u64,
+  #[serde(default = "default_admin_operations_event_buffer")]
+  pub event_buffer: usize,
+  #[serde(default = "default_admin_operations_result_max_bytes")]
+  pub result_max_bytes: usize,
+  #[serde(default = "default_true")]
+  pub websocket: bool,
+}
+
+impl Default for AdminOperationsConfig {
+  fn default() -> Self {
+    Self {
+      enabled: true,
+      max_running: default_admin_operations_max_running(),
+      max_queued: default_admin_operations_max_queued(),
+      max_stored: default_admin_operations_max_stored(),
+      retention_seconds: default_admin_operations_retention_seconds(),
+      event_buffer: default_admin_operations_event_buffer(),
+      result_max_bytes: default_admin_operations_result_max_bytes(),
+      websocket: true,
     }
   }
 }
@@ -5640,6 +5710,30 @@ fn default_database_access_log_queue_capacity() -> usize {
 
 fn default_admin_audit_queue_capacity() -> usize {
   1024
+}
+
+fn default_admin_operations_max_running() -> usize {
+  4
+}
+
+fn default_admin_operations_max_queued() -> usize {
+  64
+}
+
+fn default_admin_operations_max_stored() -> usize {
+  256
+}
+
+fn default_admin_operations_retention_seconds() -> u64 {
+  3_600
+}
+
+fn default_admin_operations_event_buffer() -> usize {
+  256
+}
+
+fn default_admin_operations_result_max_bytes() -> usize {
+  16 * 1024 * 1024
 }
 
 fn default_shared_state_namespace() -> String {

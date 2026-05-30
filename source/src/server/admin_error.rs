@@ -30,7 +30,7 @@ pub(super) async fn finalize_response(
   audit: &AdminAuditHandle,
 ) -> Response<ProxyBody> {
   let request_id = audit.request_id();
-  if response.status().is_success() {
+  if response.status().is_success() || response.status() == StatusCode::SWITCHING_PROTOCOLS {
     return with_admin_headers(response, &request_id);
   }
 
@@ -297,5 +297,30 @@ mod tests {
     assert_eq!(body["error"]["code"], "precondition_required");
     assert_eq!(body["error"]["details"]["header"], "If-Match");
     assert_eq!(body["error"]["details"]["expected"], "\"oxibelt-config-1\"");
+  }
+
+  #[tokio::test]
+  async fn finalize_preserves_only_switching_protocols_informational() {
+    let audit = AdminAuditHandle::new(
+      "127.0.0.1:12345".parse().expect("peer address"),
+      "http",
+      &Method::GET,
+      "/admin/v1/config/status",
+      None,
+    );
+    let response = error_response(StatusCode::CONTINUE, "continue");
+    let response = finalize_response(response, &audit).await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["message"], "continue");
+    assert_eq!(body["request_id"], audit.request_id());
+
+    let switching = error_response(StatusCode::SWITCHING_PROTOCOLS, "switching protocols");
+    let switching = finalize_response(switching, &audit).await;
+    assert_eq!(switching.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(switching.headers()[REQUEST_ID_HEADER], audit.request_id());
+    let body = switching.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert!(body.get("request_id").is_none());
   }
 }

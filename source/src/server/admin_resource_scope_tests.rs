@@ -333,6 +333,7 @@ pub(super) async fn try_scoped_admin_response(
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 

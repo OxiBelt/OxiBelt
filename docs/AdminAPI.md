@@ -36,6 +36,38 @@ outcome, status, and a redacted request summary. Request bodies are summarized
 with byte count, top-level JSON keys, and selected safe scalar fields, not
 stored as raw payloads.
 
+## Long-Running Operations
+
+Admin operations can run control-plane work asynchronously without changing
+existing endpoint behavior by default. The v1 runtime is process-local,
+in-memory, and lost on restart. Supplying `Prefer: respond-async` to supported
+source endpoints returns `202 Accepted` with the operation snapshot plus
+`Location`, `Operation-Location`, and `Preference-Applied: respond-async`.
+Operation IDs are canonical UUIDv4 values prefixed with `op_`, for example
+`op_550e8400-e29b-41d4-a716-446655440000`.
+
+Supported async kinds are `cache_warm`, `oxirule_replay`,
+`diagnostics_preflight`, `support_bundle`, and `dynamic_policy_import`.
+Explicit creation uses `POST /admin/v1/operations` with `{ "kind": "...",
+"request": { ... } }`; the request payload is the same shape as the matching
+source endpoint. `dynamic_policy_import` still enforces `If-Match` at execution
+time, so a stale ETag fails the operation without applying changes.
+
+Operations can be listed, polled, cancelled, and watched:
+
+- `GET /admin/v1/operations`
+- `POST /admin/v1/operations`
+- `GET /admin/v1/operations/{id}`
+- `DELETE /admin/v1/operations/{id}`
+- `GET /admin/v1/operations/{id}/events`
+- `GET /admin/v1/operations/{id}/events/ws`
+
+`GET /events` streams `text/event-stream` by default, or newline-delimited JSON
+with `?format=ndjson`. The stream envelope is intentionally compatible with
+MCP Streamable HTTP-style event consumption, but OxiBelt does not expose a full
+MCP JSON-RPC server. `GET /events/ws` upgrades to WebSocket and sends the same
+event envelope as JSON text frames.
+
 ## Resource Scoping
 
 Admin authorization uses `oxibelt:<namespace>:<service>:<resource>` resource
@@ -47,6 +79,7 @@ resource grant before any state change or warm/probe-like work starts.
 Resource-specific Admin/IPM resources include:
 
 - cache: `policy/<policy>` and `host/<normalized-host>`
+- operations: `operation/*` or `operation/<kind>/<id>`
 - dynamic policy: `status/current`, `source/<source>/name/<name>`, and
   `route/<route>`
 - upstream pool: `status/current`, `<pool>`, and `<pool>/server/<server_id>`

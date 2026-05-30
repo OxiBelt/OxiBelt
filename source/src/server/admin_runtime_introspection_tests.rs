@@ -43,6 +43,7 @@ async fn runtime_introspection_requires_redact_and_dedicated_permission() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -89,6 +90,7 @@ async fn runtime_introspection_requires_redact_and_dedicated_permission() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 

@@ -377,6 +377,16 @@ enabled = false
 # backend = "cluster" # PostgreSQL shared_state backend for oxibelt_admin_audit
 queue_capacity = 1024
 
+[admin.operations]
+enabled = true
+max_running = 4
+max_queued = 64
+max_stored = 256
+retention_seconds = 3600
+event_buffer = 256
+result_max_bytes = 16777216
+websocket = true
+
 [admin.cache_purge_signing]
 enabled = false
 key_env = "OXIBELT_CACHE_PURGE_HMAC_KEY"

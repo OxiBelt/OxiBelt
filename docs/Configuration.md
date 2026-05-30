@@ -1034,6 +1034,29 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 
 `[admin]` exposes operations APIs such as cache purge and upstream-pool runtime control. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>`, even when mTLS is enabled.
 
+`[admin.operations]` controls the process-local long-running operation runtime:
+
+```toml
+[admin.operations]
+enabled = true
+max_running = 4
+max_queued = 64
+max_stored = 256
+retention_seconds = 3600
+event_buffer = 256
+result_max_bytes = 16777216
+websocket = true
+```
+
+The operation store is in-memory and lost on restart. Existing Admin endpoints
+remain synchronous unless `Prefer: respond-async` is supplied. Accepted async
+requests return `202` with `Location`, `Operation-Location`, and
+`Preference-Applied: respond-async`. IDs are `op_<uuid-v4>` with canonical
+lowercase UUIDs. `GET /admin/v1/operations/{id}/events` streams SSE by default
+or NDJSON with `?format=ndjson`; this follows MCP Streamable HTTP-style event
+streaming semantics, but OxiBelt is not a full MCP server. WebSocket event
+subscriptions are limited to `/admin/v1/operations/{id}/events/ws`.
+
 `[admin.audit]` is an optional PostgreSQL-backed unified Admin audit log. It requires `enabled = true`, `backend = "<shared_state-postgres-backend>"`, and `[shared_state].enabled = true`; the backend must be a PostgreSQL `[[shared_state.backends]]` entry. OxiBelt creates `oxibelt_admin_audit` and writes every Admin request, including reads and rejected requests, through a bounded asynchronous queue. If the queue is full or the database writer cannot keep up, OxiBelt rejects new Admin requests with `503` before running the handler; writer failures are retried with bounded backoff. OxiBelt also emits the structured `oxibelt.admin.audit` tracing event. `GET /admin/v1/audit` requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin` and supports `limit`, `outcome`, `actor`, `principal`, `service`, `operation`, `request_id`, `path_prefix`, and `before_id` filters. Request payloads are not stored raw; the audit summary records body byte count, top-level JSON keys, and a small allowlist of safe scalar fields.
 
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
@@ -1055,6 +1078,11 @@ are `status/current`, `principal/<id>`, `credential/<id>`, `policy/<name>`,
 Dynamic resource components are percent-encoded when they contain reserved
 characters such as `/`, `:`, or spaces; wildcards such as `*` and
 `policy/*` continue to match through normal IPM wildcard evaluation.
+Operation enqueue checks the same permission as the synchronous source action.
+The creator can read, watch, and cancel their own operation. Other callers need
+`admin:ListOperations` on `operation/*`, `admin:ReadOperation` on
+`operation/<kind>/<id>` or `operation/*`, and `admin:CancelOperation` on the
+same operation resource.
 
 OxiRule development API requests that set `include_active_rules = true` evaluate active WAF policy as well as the submitted candidate, so they require the same devtools action on `oxirule/*`; replay uses `replay/*`.
 
@@ -1262,6 +1290,12 @@ Admin config and downstream TLS endpoints:
 - `GET /admin/v1/diagnostics/support-bundle`
 - `GET /admin/v1/runtime/snapshot`
 - `GET /admin/v1/runtime/introspection`
+- `GET /admin/v1/operations`
+- `POST /admin/v1/operations`
+- `GET /admin/v1/operations/{id}`
+- `DELETE /admin/v1/operations/{id}`
+- `GET /admin/v1/operations/{id}/events`
+- `GET /admin/v1/operations/{id}/events/ws`
 
 Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, and downstream TLS operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Load and rollback require `admin:UpdateConfig` for `[admin]` changes and `ipm:UpdateConfig` for `[ipm]` changes. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
 

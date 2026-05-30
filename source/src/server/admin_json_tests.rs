@@ -46,6 +46,7 @@ async fn admin_v1_json_purge_removes_exact_prefix_and_tag_entries() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -114,6 +115,7 @@ async fn query_cache_purge_authorizes_specific_type_and_policy() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -168,6 +170,7 @@ async fn admin_ipm_request_context_applies_source_ip_deny() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -204,6 +207,7 @@ async fn admin_metadata_endpoints_require_auth_and_ipm_permission() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 
@@ -252,6 +256,7 @@ async fn admin_metadata_endpoints_return_openapi_capabilities_and_version() {
     addr,
     state,
     test_admin_control(),
+    test_admin_operations(),
     shutdown_rx,
   ));
 

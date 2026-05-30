@@ -8,15 +8,17 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 
-use crate::proxy::http;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
-use crate::state::{AppHandle, AppSnapshot};
+use crate::state::AppSnapshot;
 
 use super::super::{
   AdminActor, AdminAuditOutcome, AdminAuthorization, admin_audit, admin_resource,
 };
 use super::{collect_admin_json, json_response};
+
+mod warm;
+pub(in crate::server) use warm::{cache_warm_response, enqueue_cache_warm_operation};
 
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
   authorization.is_allowed(action, resource_name)
@@ -65,38 +67,6 @@ struct AdminCacheKeyExplainRequest {
   headers: std::collections::HashMap<String, String>,
   #[serde(default)]
   response_headers: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdminCacheWarmRequest {
-  items: Vec<AdminCacheWarmItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdminCacheWarmItem {
-  #[serde(default)]
-  policy: Option<String>,
-  #[serde(default)]
-  method: Option<String>,
-  scheme: String,
-  host: String,
-  uri: String,
-  #[serde(default)]
-  headers: std::collections::HashMap<String, String>,
-}
-
-struct PreparedCacheWarmItem {
-  policy: Option<String>,
-  scheme: String,
-  host: String,
-  uri: String,
-  method: Method,
-  headers: HeaderMap,
-}
-
-enum CacheWarmPlanItem {
-  Ready(PreparedCacheWarmItem),
-  ValidationError(serde_json::Value),
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,112 +176,6 @@ pub(in crate::server) async fn cache_key_explain_response(
     (!response_headers.is_empty()).then_some(&response_headers),
   );
   json_response(StatusCode::OK, &explain)
-}
-
-pub(in crate::server) async fn cache_warm_response(
-  request: hyper::Request<Incoming>,
-  state: AppHandle,
-  authorization: &AdminAuthorization<'_>,
-  method: &::http::Method,
-  peer_addr: SocketAddr,
-) -> Response<ProxyBody> {
-  if *method != ::http::Method::POST {
-    return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
-  }
-  let body = match collect_admin_json::<AdminCacheWarmRequest>(request).await {
-    Ok(body) => body,
-    Err(response) => return response,
-  };
-  if body.items.is_empty() || body.items.len() > 128 {
-    return text_response(
-      StatusCode::BAD_REQUEST,
-      "items must contain 1 to 128 entries",
-    );
-  }
-  let snapshot = state.snapshot();
-  let mut plan = Vec::new();
-  for item in body.items {
-    let method = item.method.unwrap_or_else(|| "GET".to_string());
-    if method != "GET" && method != "HEAD" {
-      plan.push(CacheWarmPlanItem::ValidationError(
-        json!({ "uri": item.uri, "result": "validation_error" }),
-      ));
-      continue;
-    }
-    let request_method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
-    let uri = match item.uri.parse::<Uri>() {
-      Ok(uri) if !uri.path().is_empty() && uri.path().starts_with('/') => uri,
-      _ => {
-        plan.push(CacheWarmPlanItem::ValidationError(
-          json!({ "uri": item.uri, "result": "validation_error" }),
-        ));
-        continue;
-      }
-    };
-    let headers = match header_map_from_strings(item.headers) {
-      Ok(headers) => headers,
-      Err(_) => {
-        plan.push(CacheWarmPlanItem::ValidationError(
-          json!({ "uri": item.uri, "result": "validation_error" }),
-        ));
-        continue;
-      }
-    };
-    let effective_policy =
-      effective_warm_policy(&snapshot, &item.host, item.policy.as_deref(), &uri);
-    if !authorize_cache_target(
-      authorization,
-      "cache:Warm",
-      &effective_policy,
-      Some(&item.host),
-    ) {
-      return text_response(StatusCode::FORBIDDEN, "forbidden");
-    }
-    plan.push(CacheWarmPlanItem::Ready(PreparedCacheWarmItem {
-      policy: item.policy,
-      scheme: item.scheme,
-      host: item.host,
-      uri: item.uri,
-      method: request_method,
-      headers,
-    }));
-  }
-
-  let mut results = Vec::new();
-  for item in plan {
-    let item = match item {
-      CacheWarmPlanItem::Ready(item) => item,
-      CacheWarmPlanItem::ValidationError(result) => {
-        results.push(result);
-        continue;
-      }
-    };
-    match http::warm_cache_request(
-      state.clone(),
-      peer_addr,
-      &item.scheme,
-      &item.host,
-      &item.uri,
-      item.method,
-      item.headers,
-    )
-    .await
-    {
-      Ok(result) => results.push(json!({
-        "policy": item.policy,
-        "uri": item.uri,
-        "status": result.status,
-        "result": result.result,
-      })),
-      Err(error) => results.push(json!({
-        "policy": item.policy,
-        "uri": item.uri,
-        "result": "validation_error",
-        "error": error.to_string(),
-      })),
-    }
-  }
-  json_response(StatusCode::OK, &json!({ "items": results }))
 }
 
 pub(in crate::server) async fn cache_purge_json_response(

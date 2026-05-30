@@ -2,6 +2,7 @@ use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde::Deserialize;
 
+use crate::admin_audit::AdminAuditHandle;
 use crate::diagnostics::{DoctorOptions, ExternalProbeKind};
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
@@ -11,8 +12,9 @@ use super::admin::json_response;
 use super::admin_auth::AdminAuthorization;
 use super::admin_body::collect_admin_json;
 use super::admin_control::AdminControlHandle;
+use super::admin_operations;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct AdminPreflightRequest {
   #[serde(default = "default_config_format")]
   format: String,
@@ -21,10 +23,19 @@ struct AdminPreflightRequest {
   external_probes: Vec<ExternalProbeKind>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct AdminSupportBundleRequest {
+  #[serde(default)]
+  redact: bool,
+  #[serde(default)]
+  external_probes: Vec<ExternalProbeKind>,
+}
+
 pub(super) async fn admin_diagnostics_response(
   request: hyper::Request<Incoming>,
   state: AppHandle,
   admin_control: AdminControlHandle,
+  operations: admin_operations::AdminOperationRuntime,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
@@ -41,6 +52,10 @@ pub(super) async fn admin_diagnostics_response(
 
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/diagnostics/preflight") => {
+      let respond_async = admin_operations::prefer_respond_async(&request);
+      let request_id = AdminAuditHandle::from_request(&request)
+        .map(|audit| audit.request_id())
+        .unwrap_or_else(|| "unknown".to_string());
       if !authorization.is_allowed("diagnostics:ReadPreflight", "preflight/current") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
@@ -56,10 +71,36 @@ pub(super) async fn admin_diagnostics_response(
       if let Some(response) = ensure_probe_target_permissions(authorization, &config, &options) {
         return Some(response);
       }
+      if respond_async {
+        return Some(
+          match operations
+            .enqueue(
+              admin_operations::AdminOperationKind::DiagnosticsPreflight,
+              authorization.actor,
+              request_id,
+              move |context| async move {
+                context.ensure_not_cancelled()?;
+                context.progress("diagnosing", None, None).await;
+                let report = crate::diagnostics::diagnose_config(config, &options).await;
+                context.ensure_not_cancelled()?;
+                admin_operations::value_result(report)
+              },
+            )
+            .await
+          {
+            Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
+            Err(error) => admin_operations::enqueue_error_response(error),
+          },
+        );
+      }
       let report = crate::diagnostics::diagnose_config(config, &options).await;
       Some(json_response(StatusCode::OK, &report))
     }
     (&::http::Method::POST, "/admin/v1/diagnostics/preflight") => {
+      let respond_async = admin_operations::prefer_respond_async(&request);
+      let request_id = AdminAuditHandle::from_request(&request)
+        .map(|audit| audit.request_id())
+        .unwrap_or_else(|| "unknown".to_string());
       if !authorization.is_allowed("diagnostics:RunPreflight", "preflight/candidate") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
@@ -92,10 +133,36 @@ pub(super) async fn admin_diagnostics_response(
       if let Some(response) = ensure_probe_target_permissions(authorization, &config, &options) {
         return Some(response);
       }
+      if respond_async {
+        return Some(
+          match operations
+            .enqueue(
+              admin_operations::AdminOperationKind::DiagnosticsPreflight,
+              authorization.actor,
+              request_id,
+              move |context| async move {
+                context.ensure_not_cancelled()?;
+                context.progress("diagnosing", None, None).await;
+                let report = crate::diagnostics::diagnose_config(config, &options).await;
+                context.ensure_not_cancelled()?;
+                admin_operations::value_result(report)
+              },
+            )
+            .await
+          {
+            Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
+            Err(error) => admin_operations::enqueue_error_response(error),
+          },
+        );
+      }
       let report = crate::diagnostics::diagnose_config(config, &options).await;
       Some(json_response(StatusCode::OK, &report))
     }
     (&::http::Method::GET, "/admin/v1/diagnostics/support-bundle") => {
+      let respond_async = admin_operations::prefer_respond_async(&request);
+      let request_id = AdminAuditHandle::from_request(&request)
+        .map(|audit| audit.request_id())
+        .unwrap_or_else(|| "unknown".to_string());
       if !authorization.is_allowed("diagnostics:ReadSupportBundle", "support-bundle/current") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
@@ -112,6 +179,40 @@ pub(super) async fn admin_diagnostics_response(
         ensure_probe_target_permissions(authorization, &active.config, &options)
       {
         return Some(response);
+      }
+      if respond_async {
+        return Some(
+          match operations
+            .enqueue(
+              admin_operations::AdminOperationKind::SupportBundle,
+              authorization.actor,
+              request_id,
+              move |context| async move {
+                context.ensure_not_cancelled()?;
+                context.progress("collecting", None, None).await;
+                let active = state.snapshot();
+                let status = admin_control.status().await;
+                let effective = admin_control
+                  .effective_config()
+                  .await
+                  .map(|(_, _, config)| config);
+                let bundle = crate::diagnostics::build_support_bundle(
+                  active.as_ref(),
+                  status,
+                  effective,
+                  &options,
+                )
+                .await;
+                context.ensure_not_cancelled()?;
+                admin_operations::value_result(bundle)
+              },
+            )
+            .await
+          {
+            Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
+            Err(error) => admin_operations::enqueue_error_response(error),
+          },
+        );
       }
       let status = admin_control.status().await;
       let effective = admin_control
@@ -150,6 +251,195 @@ pub(super) async fn admin_diagnostics_response(
       StatusCode::METHOD_NOT_ALLOWED,
       "method not allowed",
     )),
+  }
+}
+
+pub(in crate::server) async fn enqueue_diagnostics_operation(
+  kind: admin_operations::AdminOperationKind,
+  request: serde_json::Value,
+  state: AppHandle,
+  admin_control: AdminControlHandle,
+  operations: admin_operations::AdminOperationRuntime,
+  authorization: &AdminAuthorization<'_>,
+  request_id: String,
+) -> Response<ProxyBody> {
+  match kind {
+    admin_operations::AdminOperationKind::DiagnosticsPreflight => {
+      enqueue_preflight_operation(request, state, operations, authorization, request_id).await
+    }
+    admin_operations::AdminOperationKind::SupportBundle => {
+      enqueue_support_bundle_operation(
+        request,
+        state,
+        admin_control,
+        operations,
+        authorization,
+        request_id,
+      )
+      .await
+    }
+    _ => text_response(
+      StatusCode::BAD_REQUEST,
+      "unsupported diagnostics operation kind",
+    ),
+  }
+}
+
+async fn enqueue_preflight_operation(
+  request: serde_json::Value,
+  state: AppHandle,
+  operations: admin_operations::AdminOperationRuntime,
+  authorization: &AdminAuthorization<'_>,
+  request_id: String,
+) -> Response<ProxyBody> {
+  let body = match serde_json::from_value::<AdminPreflightRequest>(request) {
+    Ok(body) => body,
+    Err(_) => {
+      return text_response(
+        StatusCode::BAD_REQUEST,
+        "invalid diagnostics_preflight request",
+      );
+    }
+  };
+  if !authorization.is_allowed("diagnostics:RunPreflight", "preflight/candidate") {
+    return text_response(StatusCode::FORBIDDEN, "forbidden");
+  }
+  if body.format != "toml" {
+    return text_response(StatusCode::BAD_REQUEST, "unsupported config format");
+  }
+  let options = DoctorOptions {
+    external_probes: body.external_probes,
+    allow_secret_env_probes: false,
+  };
+  if let Some(response) = ensure_probe_permissions(authorization, &options) {
+    return response;
+  }
+  let active = state.snapshot();
+  let config = match crate::diagnostics::load_admin_inline_config(&body.config, &active.config) {
+    Ok(config) => config,
+    Err(report) => {
+      return enqueue_completed_report(
+        operations,
+        admin_operations::AdminOperationKind::DiagnosticsPreflight,
+        authorization,
+        request_id,
+        report,
+      )
+      .await;
+    }
+  };
+  if let Err(report) = crate::diagnostics::validate_config_for_diagnostics(&config) {
+    return enqueue_completed_report(
+      operations,
+      admin_operations::AdminOperationKind::DiagnosticsPreflight,
+      authorization,
+      request_id,
+      report,
+    )
+    .await;
+  }
+  if let Some(response) = ensure_probe_target_permissions(authorization, &config, &options) {
+    return response;
+  }
+  match operations
+    .enqueue(
+      admin_operations::AdminOperationKind::DiagnosticsPreflight,
+      authorization.actor,
+      request_id,
+      move |context| async move {
+        context.ensure_not_cancelled()?;
+        context.progress("diagnosing", None, None).await;
+        let report = crate::diagnostics::diagnose_config(config, &options).await;
+        context.ensure_not_cancelled()?;
+        admin_operations::value_result(report)
+      },
+    )
+    .await
+  {
+    Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
+    Err(error) => admin_operations::enqueue_error_response(error),
+  }
+}
+
+async fn enqueue_support_bundle_operation(
+  request: serde_json::Value,
+  state: AppHandle,
+  admin_control: AdminControlHandle,
+  operations: admin_operations::AdminOperationRuntime,
+  authorization: &AdminAuthorization<'_>,
+  request_id: String,
+) -> Response<ProxyBody> {
+  let body = if request.is_null() {
+    AdminSupportBundleRequest::default()
+  } else {
+    match serde_json::from_value::<AdminSupportBundleRequest>(request) {
+      Ok(body) => body,
+      Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid support_bundle request"),
+    }
+  };
+  if !body.redact {
+    return text_response(StatusCode::BAD_REQUEST, "redact=true is required");
+  }
+  if !authorization.is_allowed("diagnostics:ReadSupportBundle", "support-bundle/current") {
+    return text_response(StatusCode::FORBIDDEN, "forbidden");
+  }
+  let options = DoctorOptions {
+    external_probes: body.external_probes,
+    allow_secret_env_probes: true,
+  };
+  if let Some(response) = ensure_probe_permissions(authorization, &options) {
+    return response;
+  }
+  let active = state.snapshot();
+  if let Some(response) = ensure_probe_target_permissions(authorization, &active.config, &options) {
+    return response;
+  }
+  match operations
+    .enqueue(
+      admin_operations::AdminOperationKind::SupportBundle,
+      authorization.actor,
+      request_id,
+      move |context| async move {
+        context.ensure_not_cancelled()?;
+        context.progress("collecting", None, None).await;
+        let active = state.snapshot();
+        let status = admin_control.status().await;
+        let effective = admin_control
+          .effective_config()
+          .await
+          .map(|(_, _, config)| config);
+        let bundle =
+          crate::diagnostics::build_support_bundle(active.as_ref(), status, effective, &options)
+            .await;
+        context.ensure_not_cancelled()?;
+        admin_operations::value_result(bundle)
+      },
+    )
+    .await
+  {
+    Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
+    Err(error) => admin_operations::enqueue_error_response(error),
+  }
+}
+
+async fn enqueue_completed_report<T>(
+  operations: admin_operations::AdminOperationRuntime,
+  kind: admin_operations::AdminOperationKind,
+  authorization: &AdminAuthorization<'_>,
+  request_id: String,
+  report: T,
+) -> Response<ProxyBody>
+where
+  T: serde::Serialize + Send + 'static,
+{
+  match operations
+    .enqueue(kind, authorization.actor, request_id, move |_| async move {
+      admin_operations::value_result(report)
+    })
+    .await
+  {
+    Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
+    Err(error) => admin_operations::enqueue_error_response(error),
   }
 }
 
