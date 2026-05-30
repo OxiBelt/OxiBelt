@@ -1,6 +1,6 @@
 use http::Method;
 
-use super::super::{EffectiveRetryPolicy, select_direct_fast_path_upstream};
+use super::super::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 use super::{common, parse_config, resolved_route};
 use crate::state::AppSnapshot;
 use crate::waf::RequestWafDecision;
@@ -19,11 +19,10 @@ async fn direct_upstream_fast_path_selects_pre_resolved_upstream_when_retry_is_o
     .expect("snapshot should initialize");
   let resolved = resolved_route(&state);
   let request_waf = RequestWafDecision::default();
-  let retry_policy =
-    EffectiveRetryPolicy::for_direct_http_request(&state.config, resolved.route, &Method::GET);
+  let retry_enabled = direct_http_retry_enabled(&state, resolved.route, &Method::GET);
 
-  assert!(!retry_policy.enabled);
-  let selected = select_direct_fast_path_upstream(&state, &resolved, &request_waf, &retry_policy)
+  assert!(!retry_enabled);
+  let selected = select_direct_fast_path_upstream(&state, &resolved, &request_waf, retry_enabled)
     .expect("direct upstream should use pre-resolved selection");
 
   assert_eq!(selected.upstream.name, "app");
@@ -44,18 +43,27 @@ async fn direct_upstream_fast_path_falls_back_for_waf_pool_and_retry_selection()
     .await
     .expect("snapshot should initialize");
   let direct_resolved = resolved_route(&direct_state);
-  let retry_off = EffectiveRetryPolicy::for_direct_http_request(
-    &direct_state.config,
-    direct_resolved.route,
-    &Method::GET,
-  );
+  let retry_off = direct_http_retry_enabled(&direct_state, direct_resolved.route, &Method::GET);
   let waf_override = RequestWafDecision {
     upstream_override: Some("app".to_string()),
     ..RequestWafDecision::default()
   };
   assert!(
-    select_direct_fast_path_upstream(&direct_state, &direct_resolved, &waf_override, &retry_off)
+    select_direct_fast_path_upstream(&direct_state, &direct_resolved, &waf_override, retry_off)
       .is_none()
+  );
+  let waf_pool_override = RequestWafDecision {
+    upstream_pool_override: Some("app-pool".to_string()),
+    ..RequestWafDecision::default()
+  };
+  assert!(
+    select_direct_fast_path_upstream(
+      &direct_state,
+      &direct_resolved,
+      &waf_pool_override,
+      retry_off,
+    )
+    .is_none()
   );
 
   let pool_raw = format!(
@@ -75,17 +83,13 @@ origin = "https://app.internal.example"
     .await
     .expect("snapshot should initialize");
   let pool_resolved = resolved_route(&pool_state);
-  let retry_off = EffectiveRetryPolicy::for_direct_http_request(
-    &pool_state.config,
-    pool_resolved.route,
-    &Method::GET,
-  );
+  let retry_off = direct_http_retry_enabled(&pool_state, pool_resolved.route, &Method::GET);
   assert!(
     select_direct_fast_path_upstream(
       &pool_state,
       &pool_resolved,
       &RequestWafDecision::default(),
-      &retry_off,
+      retry_off,
     )
     .is_none()
   );
@@ -102,19 +106,15 @@ enabled = true
     .await
     .expect("snapshot should initialize");
   let retry_resolved = resolved_route(&retry_state);
-  let retry_on = EffectiveRetryPolicy::for_direct_http_request(
-    &retry_state.config,
-    retry_resolved.route,
-    &Method::GET,
-  );
+  let retry_on = direct_http_retry_enabled(&retry_state, retry_resolved.route, &Method::GET);
 
-  assert!(retry_on.enabled);
+  assert!(retry_on);
   assert!(
     select_direct_fast_path_upstream(
       &retry_state,
       &retry_resolved,
       &RequestWafDecision::default(),
-      &retry_on,
+      retry_on,
     )
     .is_none()
   );

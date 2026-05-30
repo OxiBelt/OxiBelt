@@ -9,9 +9,7 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Body;
 use tracing::warn;
 
-use crate::config::{
-  HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode, UpstreamConfig,
-};
+use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{
   self, BodyTimeoutKind, ProxyBody, boxed_error, error_indicates_body_timeout,
@@ -38,10 +36,12 @@ use super::{
   send_pool_with_retry, send_with_retry, with_downstream_response_timeout,
 };
 
+mod direct;
 mod small_response;
 mod waf;
+use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 use self::small_response::{SmallResponseDisposition, try_inline_response_body};
-pub(crate) use self::waf::prepare_plain_fast_path_waf;
+use self::waf::{PlainFastPathWaf, plain_fast_path_waf_required, prepare_plain_fast_path_waf};
 
 static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
 
@@ -50,11 +50,6 @@ fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> 
 }
 
 pub(crate) struct PlainProxyFastPath;
-
-struct DirectFastPathSelection<'a> {
-  upstream: &'a UpstreamConfig,
-  upstream_index: usize,
-}
 
 impl PlainProxyFastPath {
   pub(crate) fn eligible<B>(
@@ -121,16 +116,13 @@ impl PlainProxyFastPath {
     B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
     B::Error: Into<body::BoxError> + Send + Sync + 'static,
   {
-    let direct_retry_policy = EffectiveRetryPolicy::for_direct_http_request(
-      &state.config,
-      resolved.route,
-      request.method(),
-    );
+    let direct_retry_enabled =
+      direct_http_retry_enabled(state.as_ref(), resolved.route, request.method());
     let direct_selection = select_direct_fast_path_upstream(
       state.as_ref(),
       resolved,
       &request_waf,
-      &direct_retry_policy,
+      direct_retry_enabled,
     );
     let (
       mut upstream,
@@ -143,7 +135,7 @@ impl PlainProxyFastPath {
       (
         selected.upstream,
         selected.upstream_index,
-        direct_retry_policy,
+        EffectiveRetryPolicy::disabled_direct(),
         None,
         None,
         None,
@@ -180,8 +172,14 @@ impl PlainProxyFastPath {
       let pool_selection = selected.into_pool_selection();
       let retry_policy = if pool_selection.is_some() {
         EffectiveRetryPolicy::for_http_request(&state.config, resolved.route, request.method())
+      } else if direct_retry_enabled {
+        EffectiveRetryPolicy::for_direct_http_request(
+          &state.config,
+          resolved.route,
+          request.method(),
+        )
       } else {
-        direct_retry_policy
+        EffectiveRetryPolicy::disabled_direct()
       };
       (
         upstream,
@@ -503,22 +501,26 @@ where
   if !PlainProxyFastPath::eligible(&request, &state, resolved) {
     return Err(request);
   }
-  let fast_path_waf = match prepare_plain_fast_path_waf(
-    &request,
-    state.as_ref(),
-    resolved,
-    client_addr,
-    host,
-    tcp_max_hop,
-    tls,
-    protocol,
-    transport_network,
-    transport_metadata,
-    downstream_scheme,
-    access_log,
-  ) {
-    Ok(waf) => waf,
-    Err(response) => return Ok(*response),
+  let fast_path_waf = if plain_fast_path_waf_required(resolved) {
+    match prepare_plain_fast_path_waf(
+      &request,
+      state.as_ref(),
+      resolved,
+      client_addr,
+      host,
+      tcp_max_hop,
+      tls,
+      protocol,
+      transport_network,
+      transport_metadata,
+      downstream_scheme,
+      access_log,
+    ) {
+      Ok(waf) => waf,
+      Err(response) => return Ok(*response),
+    }
+  } else {
+    PlainFastPathWaf::disabled()
   };
   Ok(
     PlainProxyFastPath::handle(
@@ -558,49 +560,6 @@ fn plain_proxy_fast_path_enabled_for_version<B>(
     http::Version::HTTP_3 => resolved.execution_plan.fast_path.plain_proxy_h3,
     _ => false,
   }
-}
-
-fn select_direct_fast_path_upstream<'a>(
-  state: &'a AppSnapshot,
-  resolved: &ResolvedRoute<'a>,
-  request_waf: &RequestWafDecision,
-  retry_policy: &EffectiveRetryPolicy,
-) -> Option<DirectFastPathSelection<'a>> {
-  if retry_policy.enabled
-    || request_waf.upstream_override.is_some()
-    || request_waf.upstream_pool_override.is_some()
-    || resolved.route.upstream_pool.is_some()
-  {
-    return None;
-  }
-
-  let upstream = resolved.upstream?;
-  let upstream_index = resolved.upstream_index?;
-  if state
-    .upstreams
-    .get(upstream_index)
-    .is_none_or(|candidate| candidate.name != upstream.name)
-  {
-    return None;
-  }
-
-  let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
-    select_upstream_http_version(
-      state.config.proxy.auto_upgrade.enabled,
-      state.config.proxy.auto_upgrade.max_http_version,
-      upstream.max_http_version,
-    )
-  });
-  if upstream_version == HttpVersion::H3
-    || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
-  {
-    return None;
-  }
-
-  Some(DirectFastPathSelection {
-    upstream,
-    upstream_index,
-  })
 }
 
 fn apply_fast_path_priority_policy(headers: &mut HeaderMap, mode: PriorityMode) {

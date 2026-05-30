@@ -26,6 +26,20 @@ pub(crate) struct PlainFastPathWaf {
   pub(crate) tags: Option<HashMap<String, String>>,
 }
 
+impl PlainFastPathWaf {
+  pub(crate) fn disabled() -> Self {
+    Self {
+      request: RequestWafDecision::default(),
+      request_headers: None,
+      tags: None,
+    }
+  }
+}
+
+pub(crate) fn plain_fast_path_waf_required(resolved: &ResolvedRoute<'_>) -> bool {
+  resolved.execution_plan.waf.request.enabled() || resolved.execution_plan.waf.response.enabled()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_plain_fast_path_waf<B>(
   request: &Request<B>,
@@ -118,6 +132,82 @@ mod tests {
     let config: Config = toml::from_str(raw).expect("config should parse");
     config.validate().expect("config should validate");
     config
+  }
+
+  #[tokio::test]
+  async fn response_waf_requires_plain_fast_path_waf_prepare() {
+    let temp_dir = common::TempDir::new("plain-fast-path-response-waf-required");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-response-waf-required");
+    let raw = format!(
+      "{}{}",
+      common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      ),
+      r#"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "response-mark"
+phase = "response"
+priority = 10
+when = "Response.Http.Status == 200"
+
+[[waf.rules.actions]]
+type = "set_response_header"
+name = "x-fast-path-response-waf"
+value = "yes"
+"#
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
+    let resolved = state
+      .route_table
+      .resolve("example.com", "/", &state.upstreams)
+      .expect("route should resolve");
+
+    assert!(plain_fast_path_waf_required(&resolved));
+
+    let request = Request::builder()
+      .uri("https://example.com/")
+      .body(())
+      .expect("request should build");
+    let mut access_log = SystemAccessLogContext::new(
+      &request,
+      "127.0.0.1:12345".parse().unwrap(),
+      None,
+      Some(Arc::new(WafTlsMetadata::default())),
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      false,
+      true,
+    );
+    let prepared = prepare_plain_fast_path_waf(
+      &request,
+      &state,
+      &resolved,
+      "127.0.0.1:12345".parse().unwrap(),
+      "example.com",
+      None,
+      &WafTlsMetadata::default(),
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      &mut access_log,
+    )
+    .expect("response WAF should prepare without evaluating request WAF");
+
+    assert!(
+      prepared.request_headers.is_some(),
+      "response WAF needs original request headers for response evaluation"
+    );
   }
 
   #[tokio::test]

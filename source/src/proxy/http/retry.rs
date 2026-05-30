@@ -132,7 +132,7 @@ impl EffectiveRetryPolicy {
     policy
   }
 
-  fn http_retry_enabled(config: &Config, route: &RouteConfig, method: &Method) -> bool {
+  pub(super) fn http_retry_enabled(config: &Config, route: &RouteConfig, method: &Method) -> bool {
     let retry = &config.proxy.retry;
     let route_retry = route.retry.as_ref();
     let enabled = route_retry
