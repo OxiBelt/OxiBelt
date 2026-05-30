@@ -145,18 +145,23 @@ where
       return;
     }
     loop {
-      match stream.recv_data_bytes().await {
-        Ok(Some(chunk)) => {
-          if body_sender.send(Ok(Frame::data(chunk))).await.is_err() {
-            break;
+      tokio::select! {
+        () = body_sender.closed() => break,
+        result = stream.recv_data_bytes() => {
+          match result {
+            Ok(Some(chunk)) => {
+              if body_sender.send(Ok(Frame::data(chunk))).await.is_err() {
+                break;
+              }
+            }
+            Ok(None) => break,
+            Err(error) => {
+              let _ = body_sender
+                .send(Err(downstream_h3_request_body_error(error)))
+                .await;
+              break;
+            }
           }
-        }
-        Ok(None) => break,
-        Err(error) => {
-          let _ = body_sender
-            .send(Err(downstream_h3_request_body_error(error)))
-            .await;
-          break;
         }
       }
     }
@@ -314,6 +319,29 @@ mod tests {
     })
     .await
     .expect("recv task should stop after downstream body is dropped");
+  }
+
+  #[tokio::test]
+  async fn dropping_pending_proxy_body_stops_background_recv_task() {
+    let request = request(Method::POST);
+    let stream = FakeRequestStream::pending();
+    let drop_count = stream.drop_count();
+    let spawner = CountingSpawner::default();
+
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    assert_eq!(spawner.spawned(), 1);
+
+    drop(request);
+    tokio::time::timeout(Duration::from_secs(1), async {
+      loop {
+        if drop_count.load(Ordering::SeqCst) > 0 {
+          break;
+        }
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("pending recv task should stop after downstream body is dropped");
   }
 
   async fn assert_content_length_zero_data_is_streamed(method: Method) {
