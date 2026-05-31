@@ -2,7 +2,8 @@ use std::fmt;
 use std::future::{Future, poll_fn};
 use std::task::{Context, Poll};
 
-use ::http::Request;
+use ::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use ::http::{Method, Request};
 use bytes::{Buf, Bytes};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Frame;
@@ -84,11 +85,13 @@ where
   S: H3RequestBodyStream,
   Spawner: BodyTaskSpawner,
 {
-  let first = poll_fn(|cx| match stream.poll_recv_data_bytes(cx) {
-    Poll::Ready(result) => Poll::Ready(Some(result)),
-    Poll::Pending => Poll::Ready(None),
-  })
-  .await;
+  let first = match poll_h3_request_body_once(&mut stream).await {
+    None if h3_request_body_empty_probe_allowed(request.method(), request.headers()) => {
+      tokio::task::yield_now().await;
+      poll_h3_request_body_once(&mut stream).await
+    }
+    first => first,
+  };
 
   match first {
     Some(Ok(None)) => {
@@ -107,6 +110,23 @@ where
     ),
     None => stream_h3_request_body(request, stream, spawner),
   }
+}
+
+async fn poll_h3_request_body_once<S>(stream: &mut S) -> Option<Result<Option<Bytes>, S::Error>>
+where
+  S: H3RequestBodyStream,
+{
+  poll_fn(|cx| match stream.poll_recv_data_bytes(cx) {
+    Poll::Ready(result) => Poll::Ready(Some(result)),
+    Poll::Pending => Poll::Ready(None),
+  })
+  .await
+}
+
+fn h3_request_body_empty_probe_allowed(method: &Method, headers: &::http::HeaderMap) -> bool {
+  matches!(method, &Method::GET | &Method::HEAD)
+    && !headers.contains_key(CONTENT_LENGTH)
+    && !headers.contains_key(TRANSFER_ENCODING)
 }
 
 fn stream_h3_request_body<S, Spawner>(
@@ -274,6 +294,109 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn get_and_head_without_framing_headers_shortcut_pending_then_end() {
+    for method in [Method::GET, Method::HEAD] {
+      let request = request(method);
+      let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
+      let poll_count = stream.poll_count();
+      let spawner = CountingSpawner::default();
+
+      let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+
+      assert_eq!(spawner.spawned(), 0);
+      assert_eq!(poll_count.load(Ordering::SeqCst), 2);
+      let body = request
+        .into_body()
+        .collect()
+        .await
+        .expect("pending then EOF request body should collect")
+        .to_bytes();
+      assert!(body.is_empty());
+    }
+  }
+
+  #[tokio::test]
+  async fn post_without_framing_headers_does_not_use_empty_probe() {
+    let request = request(Method::POST);
+    let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
+    let spawner = CountingSpawner::default();
+
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+
+    assert_eq!(spawner.spawned(), 1);
+    let body = request
+      .into_body()
+      .collect()
+      .await
+      .expect("POST body should still use the streaming path")
+      .to_bytes();
+    assert!(body.is_empty());
+  }
+
+  #[tokio::test]
+  async fn get_content_length_positive_does_not_use_empty_probe() {
+    let request = request_with_content_length(Method::GET, &["5"]);
+    let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
+    let poll_count = stream.poll_count();
+    let spawner = CountingSpawner::default();
+
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+
+    assert_eq!(spawner.spawned(), 1);
+    assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    let body = request
+      .into_body()
+      .collect()
+      .await
+      .expect("framed GET body should still use the streaming path")
+      .to_bytes();
+    assert!(body.is_empty());
+  }
+
+  #[tokio::test]
+  async fn get_without_framing_headers_preserves_late_data_and_errors() {
+    let request = request(Method::GET);
+    let stream = FakeRequestStream::new([
+      FakeStreamEvent::Pending,
+      FakeStreamEvent::Data(Bytes::from_static(b"body")),
+      FakeStreamEvent::End,
+    ]);
+    let spawner = CountingSpawner::default();
+
+    let prepared = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+
+    assert_eq!(spawner.spawned(), 1);
+    let body = prepared
+      .into_body()
+      .collect()
+      .await
+      .expect("late DATA should collect through the streaming path")
+      .to_bytes();
+    assert_eq!(body, Bytes::from_static(b"body"));
+
+    let request = self::request(Method::GET);
+    let stream = FakeRequestStream::new([
+      FakeStreamEvent::Pending,
+      FakeStreamEvent::Error("stream reset"),
+    ]);
+    let spawner = CountingSpawner::default();
+
+    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+
+    assert_eq!(spawner.spawned(), 1);
+    let error = request
+      .into_body()
+      .collect()
+      .await
+      .expect_err("late stream error should be exposed as a body error");
+    assert!(
+      error
+        .to_string()
+        .contains("failed to receive downstream HTTP/3 request data: stream reset")
+    );
+  }
+
+  #[tokio::test]
   async fn h3_stream_error_propagates_through_streaming_body() {
     let request = request(Method::POST);
     let stream = FakeRequestStream::new([FakeStreamEvent::Error("stream reset")]);
@@ -406,6 +529,7 @@ mod tests {
   }
 
   enum FakeStreamEvent {
+    Pending,
     Data(Bytes),
     End,
     Error(&'static str),
@@ -457,7 +581,7 @@ mod tests {
 
     fn poll_recv_data_bytes(
       &mut self,
-      _cx: &mut Context<'_>,
+      cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, Self::Error>> {
       self.poll_count.fetch_add(1, Ordering::SeqCst);
       if self.pending {
@@ -465,6 +589,10 @@ mod tests {
       }
 
       match self.events.pop_front().unwrap_or(FakeStreamEvent::End) {
+        FakeStreamEvent::Pending => {
+          cx.waker().wake_by_ref();
+          Poll::Pending
+        }
         FakeStreamEvent::Data(bytes) => Poll::Ready(Ok(Some(bytes))),
         FakeStreamEvent::End => Poll::Ready(Ok(None)),
         FakeStreamEvent::Error(message) => Poll::Ready(Err(FakeStreamError(message))),

@@ -445,10 +445,6 @@ jobs:
             platform: linux/arm64
             runner: ubuntu-24.04-arm
             qemu_platforms: ""
-          - arch: riscv64
-            platform: linux/riscv64
-            runner: ubuntu-latest
-            qemu_platforms: riscv64
 
     steps:
       - name: Checkout
@@ -475,6 +471,43 @@ jobs:
         with:
           name: oxibelt-alpine-musl-${{ matrix.arch }}-image
           path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.arch }}.tar
+          retention-days: 0
+
+  docker-alpine-musl-image-riscv64:
+    name: Docker image (Alpine musl, riscv64)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs:
+      - test
+      - test-riscv64-qemu
+      - fuzz-smoke
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a
+        with:
+          platforms: riscv64
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # 4.0.0
+
+      - name: Build Docker image artifact
+        run: |
+          tests/scripts/build-docker-image-artifact.sh \
+            "linux/riscv64" \
+            "riscv64" \
+            "${RUNNER_TEMP}/oxibelt-image"
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-alpine-musl-riscv64-image
+          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-riscv64.tar
           retention-days: 0
 
   docker-integration-config-runtime:

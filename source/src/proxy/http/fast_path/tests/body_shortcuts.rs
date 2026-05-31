@@ -90,6 +90,24 @@ struct PendingThenDataBody {
   yielded: bool,
 }
 
+struct PendingThenEndBody {
+  pending: bool,
+}
+
+struct PendingTwiceThenDataBody {
+  pending_count: usize,
+  yielded: bool,
+}
+
+struct PendingThenTrailerBody {
+  pending: bool,
+  yielded: bool,
+}
+
+struct PendingThenErrorBody {
+  pending: bool,
+}
+
 impl Body for PendingThenDataBody {
   type Data = Bytes;
   type Error = body::BoxError;
@@ -115,6 +133,100 @@ impl Body for PendingThenDataBody {
   }
 }
 
+impl Body for PendingThenEndBody {
+  type Data = Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    if self.pending {
+      self.pending = false;
+      cx.waker().wake_by_ref();
+      return Poll::Pending;
+    }
+    Poll::Ready(None)
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::new()
+  }
+}
+
+impl Body for PendingTwiceThenDataBody {
+  type Data = Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    if self.pending_count > 0 {
+      self.pending_count -= 1;
+      cx.waker().wake_by_ref();
+      return Poll::Pending;
+    }
+    if self.yielded {
+      return Poll::Ready(None);
+    }
+    self.yielded = true;
+    Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"late-data")))))
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::new()
+  }
+}
+
+impl Body for PendingThenTrailerBody {
+  type Data = Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    if self.pending {
+      self.pending = false;
+      cx.waker().wake_by_ref();
+      return Poll::Pending;
+    }
+    if self.yielded {
+      return Poll::Ready(None);
+    }
+    self.yielded = true;
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("x-trailer", "late".parse().unwrap());
+    Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::new()
+  }
+}
+
+impl Body for PendingThenErrorBody {
+  type Data = Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    if self.pending {
+      self.pending = false;
+      cx.waker().wake_by_ref();
+      return Poll::Pending;
+    }
+    Poll::Ready(Some(Err(std::io::Error::other("late body error").into())))
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::new()
+  }
+}
+
 #[tokio::test]
 async fn actual_end_stream_request_body_shortcut_does_not_poll_body() {
   let body = fast_path_request_body(
@@ -124,6 +236,7 @@ async fn actual_end_stream_request_body_shortcut_does_not_poll_body() {
     false,
     false,
   )
+  .await
   .collect()
   .await
   .expect("end-stream fast-path body should collect");
@@ -144,6 +257,7 @@ async fn h2_h3_actual_end_stream_request_body_shortcut_does_not_poll_body() {
       false,
       false,
     )
+    .await
     .collect()
     .await
     .expect("end-stream h2/h3 fast-path body should collect");
@@ -256,6 +370,7 @@ async fn h2_h3_empty_probe_preserves_data_and_trailers() {
     false,
     true,
   )
+  .await
   .collect()
   .await
   .expect("zero-size-hint data body should collect");
@@ -268,6 +383,7 @@ async fn h2_h3_empty_probe_preserves_data_and_trailers() {
     false,
     true,
   )
+  .await
   .collect()
   .await
   .expect("zero-size-hint trailer-only body should collect");
@@ -286,9 +402,75 @@ async fn h2_h3_empty_probe_keeps_pending_body_on_limited_timeout_path() {
     false,
     true,
   )
+  .await
   .collect()
   .await
   .expect("pending body should stay readable after empty probe");
 
   assert_eq!(data.to_bytes(), Bytes::from_static(b"data"));
+}
+
+#[tokio::test]
+async fn h2_h3_empty_probe_shortcuts_pending_then_eof() {
+  let body = fast_path_request_body(
+    PendingThenEndBody { pending: true },
+    1024,
+    Duration::from_millis(100),
+    false,
+    true,
+  )
+  .await
+  .collect()
+  .await
+  .expect("pending then EOF body should collect");
+
+  assert!(body.to_bytes().is_empty());
+}
+
+#[tokio::test]
+async fn h2_h3_empty_probe_preserves_late_data_trailers_and_errors() {
+  let data = fast_path_request_body(
+    PendingTwiceThenDataBody {
+      pending_count: 2,
+      yielded: false,
+    },
+    1024,
+    Duration::from_millis(100),
+    false,
+    true,
+  )
+  .await
+  .collect()
+  .await
+  .expect("body that stays pending through the probe should remain readable");
+  assert_eq!(data.to_bytes(), Bytes::from_static(b"late-data"));
+
+  let trailers = fast_path_request_body(
+    PendingThenTrailerBody {
+      pending: true,
+      yielded: false,
+    },
+    1024,
+    Duration::from_millis(100),
+    false,
+    true,
+  )
+  .await
+  .collect()
+  .await
+  .expect("late trailer body should collect");
+  assert_eq!(trailers.trailers().unwrap()["x-trailer"], "late");
+
+  let error = fast_path_request_body(
+    PendingThenErrorBody { pending: true },
+    1024,
+    Duration::from_millis(100),
+    false,
+    true,
+  )
+  .await
+  .collect()
+  .await
+  .expect_err("late body error should be preserved");
+  assert!(error.to_string().contains("late body error"));
 }

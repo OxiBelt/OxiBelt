@@ -305,6 +305,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "docker-alpine-musl-image-amd64",
         "docker-alpine-comparator-musl-image-amd64",
         "docker-alpine-musl-image-other",
+        "docker-alpine-musl-image-riscv64",
         "remote-signer-dos-docker",
         "browser-webdriver",
         "docker-performance",
@@ -387,6 +388,60 @@ fn docker_integration_jobs_are_split_by_logical_group() {
             "{job_id} should consume {output_name}"
         );
     }
+}
+
+#[test]
+fn riscv64_docker_image_artifact_is_scheduled_or_manual_only() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let qemu_job = jobs
+        .get("test-riscv64-qemu")
+        .expect("workflow should keep the RISC-V compile-check job");
+    let riscv64_image_job = jobs
+        .get("docker-alpine-musl-image-riscv64")
+        .expect("workflow should define the scheduled/manual RISC-V Docker image job");
+    let other_start = workflow
+        .find("  docker-alpine-musl-image-other:")
+        .expect("workflow should define the non-AMD64 image job");
+    let riscv_start = workflow
+        .find("  docker-alpine-musl-image-riscv64:")
+        .expect("workflow should define the RISC-V image job");
+    let other_job = &workflow[other_start..riscv_start];
+
+    assert!(
+        workflow.contains("riscv64gc-unknown-linux-gnu")
+            && workflow.contains("riscv64gc-unknown-linux-musl"),
+        "RISC-V cargo check coverage should keep both GNU and musl targets"
+    );
+    assert!(
+        qemu_job.needs.is_empty(),
+        "RISC-V cargo check should stay independent of Docker image jobs"
+    );
+    assert_eq!(
+        riscv64_image_job.needs,
+        vec![
+            "test".to_owned(),
+            "test-riscv64-qemu".to_owned(),
+            "fuzz-smoke".to_owned()
+        ],
+        "RISC-V Docker image builds should still wait for normal test gates"
+    );
+    assert!(
+        workflow.contains(
+            "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+        ),
+        "RISC-V Docker image artifact should run only on scheduled/manual workflows"
+    );
+    assert!(
+        !other_job.contains("arch: riscv64"),
+        "push/PR non-AMD64 Docker image matrix should not include the long RISC-V build"
+    );
+    assert!(
+        workflow.contains("\"linux/riscv64\"")
+            && workflow.contains("\"riscv64\"")
+            && workflow.contains("name: oxibelt-alpine-musl-riscv64-image"),
+        "scheduled/manual RISC-V Docker image job should build and upload the riscv64 artifact"
+    );
 }
 
 #[test]
