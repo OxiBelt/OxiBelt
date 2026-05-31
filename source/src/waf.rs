@@ -44,6 +44,7 @@ mod person_proof_dynamic;
 mod person_proof_policy;
 mod person_proof_v2;
 mod plan;
+mod request_header_mutation;
 mod rule_groups;
 mod rulepacks;
 mod runtime_helpers;
@@ -1088,12 +1089,17 @@ fn validate_actions(
       }
       WafActionConfig::SetRequestHeader { name, value, .. } => {
         require_phase(rule, WafPhase::Request, "set_request_header")?;
-        validate_header(name, value)?;
+        request_header_mutation::validate(
+          rule.name.as_str(),
+          "set_request_header",
+          name,
+          Some(value),
+        )?;
         mutations += 1;
       }
       WafActionConfig::RemoveRequestHeader { name, .. } => {
         require_phase(rule, WafPhase::Request, "remove_request_header")?;
-        validate_header_name(name)?;
+        request_header_mutation::validate(rule.name.as_str(), "remove_request_header", name, None)?;
         mutations += 1;
       }
       WafActionConfig::SetResponseHeader { name, value, .. } => {
@@ -2352,6 +2358,19 @@ fn compile_actions(
       WafActionConfig::EmitMitigation { .. } => Ok(CompiledAction::EmitMitigation(
         compile_mitigation_action(rule, action)?,
       )),
+      WafActionConfig::SetRequestHeader { name, value, .. } if rule.phase == WafPhase::Request => {
+        request_header_mutation::validate(
+          rule.name.as_str(),
+          "set_request_header",
+          name,
+          Some(value),
+        )?;
+        Ok(CompiledAction::Config(action.clone()))
+      }
+      WafActionConfig::RemoveRequestHeader { name, .. } if rule.phase == WafPhase::Request => {
+        request_header_mutation::validate(rule.name.as_str(), "remove_request_header", name, None)?;
+        Ok(CompiledAction::Config(action.clone()))
+      }
       action => Ok(CompiledAction::Config(action.clone())),
     })
     .collect()
@@ -2887,17 +2906,19 @@ fn apply_request_actions(
         return Ok(person_proof_policy);
       }
       CompiledAction::Config(WafActionConfig::SetRequestHeader { name, value, .. }) => {
+        let name = HeaderName::from_bytes(name.as_bytes())?;
+        request_header_mutation::ensure_allowed(&rule.name, "set_request_header", &name)?;
         decision.request_header_mutations.push(HeaderMutation::Set {
-          name: HeaderName::from_bytes(name.as_bytes())?,
+          name,
           value: HeaderValue::from_str(value)?,
         });
       }
       CompiledAction::Config(WafActionConfig::RemoveRequestHeader { name, .. }) => {
+        let name = HeaderName::from_bytes(name.as_bytes())?;
+        request_header_mutation::ensure_allowed(&rule.name, "remove_request_header", &name)?;
         decision
           .request_header_mutations
-          .push(HeaderMutation::Remove {
-            name: HeaderName::from_bytes(name.as_bytes())?,
-          });
+          .push(HeaderMutation::Remove { name });
       }
       CompiledAction::Config(WafActionConfig::SetTag { key, value, .. }) => {
         decision.tags.push((key.clone(), value.clone()));

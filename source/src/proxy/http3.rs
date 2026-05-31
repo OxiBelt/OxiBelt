@@ -343,7 +343,11 @@ pub(crate) async fn handle_downstream_connection(
         continue;
       }
       accepted = h3_connection.accept() => {
-        accepted.context("failed to accept downstream HTTP/3 request")?
+        match accepted {
+          Ok(resolver) => resolver,
+          Err(error) if downstream_h3_accept_closed_normally(&error) => return Ok(()),
+          Err(error) => return Err(error).context("failed to accept downstream HTTP/3 request"),
+        }
       }
     };
     let Some(resolver) = resolver else {
@@ -849,6 +853,23 @@ pub(crate) fn rejects_unsafe_early_data(
     && !matches!(request.method(), &Method::GET | &Method::HEAD)
 }
 
+fn downstream_h3_accept_closed_normally(error: &h3::error::ConnectionError) -> bool {
+  error.is_h3_no_error() || downstream_h3_accept_message_is_normal_close(&error.to_string())
+}
+
+fn downstream_h3_accept_message_is_normal_close(message: &str) -> bool {
+  let message = message.to_ascii_lowercase();
+  [
+    "closed before request headers completed",
+    "closed by peer",
+    "connection closed",
+    "graceful shutdown",
+    "h3_no_error",
+  ]
+  .iter()
+  .any(|needle| message.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -944,6 +965,29 @@ mod tests {
       crate::config::QuicZeroRttMode::Off,
       true
     ));
+  }
+
+  #[test]
+  fn h3_accept_normal_close_messages_are_not_warnable() {
+    for message in [
+      "Remote error: ApplicationClose: H3_NO_ERROR",
+      "connection closed before request headers completed",
+      "connection closed",
+      "graceful shutdown",
+    ] {
+      assert!(downstream_h3_accept_message_is_normal_close(message));
+    }
+  }
+
+  #[test]
+  fn h3_accept_protocol_errors_remain_warnable() {
+    for message in [
+      "Local error: Application { code: H3_MESSAGE_ERROR, reason: \"bad frame\" }",
+      "Remote error: ApplicationClose: H3_FRAME_UNEXPECTED",
+      "Timeout",
+    ] {
+      assert!(!downstream_h3_accept_message_is_normal_close(message));
+    }
   }
 
   #[test]

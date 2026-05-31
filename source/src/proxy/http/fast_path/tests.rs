@@ -190,7 +190,13 @@ async fn h1_definitely_empty_request_body_shortcut_does_not_poll_body() {
       request.version(),
       request.headers()
     ));
-    let body = fast_path_request_body(request.into_body(), 1024, Duration::from_millis(100), true);
+    let body = fast_path_request_body(
+      request.into_body(),
+      1024,
+      Duration::from_millis(100),
+      true,
+      false,
+    );
     let bytes = body
       .collect()
       .await

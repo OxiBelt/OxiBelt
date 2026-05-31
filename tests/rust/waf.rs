@@ -7018,6 +7018,151 @@ value = "valid"
 }
 
 #[test]
+fn waf_request_header_mutations_allow_end_to_end_headers() {
+    let temp_dir = common::TempDir::new("waf-safe-request-header-mutations");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-safe-request-header-mutations");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "safe-request-header-mutations"
+phase = "request"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "set_request_header"
+name = "X-OxiBelt-Checked"
+value = "true"
+
+[[waf.rules.actions]]
+type = "remove_request_header"
+name = "X-Debug-Mode"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+
+    assert!(decision.terminal.is_none());
+    assert!(decision.request_header_mutations.iter().any(|mutation| {
+        matches!(
+            mutation,
+            HeaderMutation::Set { name, value }
+                if name.as_str() == "x-oxibelt-checked" && value.as_bytes() == b"true"
+        )
+    }));
+    assert!(decision.request_header_mutations.iter().any(|mutation| {
+        matches!(
+            mutation,
+            HeaderMutation::Remove { name } if name.as_str() == "x-debug-mode"
+        )
+    }));
+}
+
+#[test]
+fn waf_request_header_mutations_reject_framing_and_hop_by_hop_headers() {
+    let temp_dir = common::TempDir::new("waf-unsafe-request-header-mutations");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-unsafe-request-header-mutations");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for header in [
+        "Content-Length",
+        "Transfer-Encoding",
+        "Connection",
+        "Keep-Alive",
+        "TE",
+        "Trailer",
+        "Upgrade",
+        "Proxy-Authenticate",
+        "Proxy-Authorization",
+    ] {
+        for action in ["set_request_header", "remove_request_header"] {
+            let action_config = if action == "set_request_header" {
+                format!(
+                    r#"
+[[waf.rules.actions]]
+type = "set_request_header"
+name = "{header}"
+value = "unsafe"
+"#
+                )
+            } else {
+                format!(
+                    r#"
+[[waf.rules.actions]]
+type = "remove_request_header"
+name = "{header}"
+"#
+                )
+            };
+            let rule_name = format!(
+                "unsafe-{}-{}",
+                action,
+                header.to_ascii_lowercase().replace('-', "_")
+            );
+            let raw = format!(
+                r#"{base}
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "{rule_name}"
+phase = "request"
+priority = 10
+when = "true"
+{action_config}
+"#
+            );
+
+            let config: Config = toml::from_str(&raw).expect("config should parse");
+            let validation_error = config.validate().expect_err("validation should fail");
+            let validation_chain = format!("{validation_error:#}");
+            assert!(
+                validation_chain.contains("cannot mutate request header")
+                    && validation_chain.contains(&header.to_ascii_lowercase()),
+                "unexpected validation error for {action} {header}: {validation_chain}"
+            );
+
+            let compile_error = match WafEngine::new(&config) {
+                Ok(_) => panic!("WAF compile should fail for {action} {header}"),
+                Err(error) => error,
+            };
+            let compile_chain = format!("{compile_error:#}");
+            assert!(
+                compile_chain.contains("cannot mutate request header")
+                    && compile_chain.contains(&header.to_ascii_lowercase()),
+                "unexpected compile error for {action} {header}: {compile_chain}"
+            );
+        }
+    }
+}
+
+#[test]
 fn person_proof_success_tag_uses_verified_policy() {
     let temp_dir = common::TempDir::new("waf-person-proof-tag-policy");
     let (cert_path, key_path) =

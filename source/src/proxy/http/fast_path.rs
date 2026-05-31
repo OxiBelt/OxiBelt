@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use http::header::{CONTENT_LENGTH, COOKIE, TRANSFER_ENCODING};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Limited};
-use hyper::body::Body;
+use hyper::body::{Body, Frame, SizeHint};
 use tracing::warn;
 
 use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
@@ -250,11 +252,14 @@ impl PlainProxyFastPath {
     state
       .telemetry
       .inject_trace_context(&mut parts.headers, trace_context);
+    let request_body_empty_probe_allowed =
+      fast_path_request_body_empty_probe_allowed(&parts.method, request_version, &parts.headers);
     let body = fast_path_request_body(
       body,
       state.config.limits.max_request_body_bytes as usize,
       client_body_timeout,
       request_body_definitely_empty,
+      request_body_empty_probe_allowed,
     );
     let outbound = Request::from_parts(parts, body).map(|body| {
       fast_path_outbound_request_body(
@@ -601,6 +606,7 @@ fn fast_path_request_body<B>(
   max_body_bytes: usize,
   timeout: std::time::Duration,
   definitely_empty: bool,
+  empty_probe_allowed: bool,
 ) -> ProxyBody
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
@@ -610,11 +616,94 @@ where
     return empty_body();
   }
 
+  if empty_probe_allowed {
+    return fast_path_request_body_with_empty_probe(body, max_body_bytes, timeout);
+  }
+
   body::with_read_timeout(
     Limited::new(body, max_body_bytes),
     timeout,
     BodyTimeoutKind::DownstreamRequestRead,
   )
+}
+
+fn fast_path_request_body_with_empty_probe<B>(
+  body: B,
+  max_body_bytes: usize,
+  timeout: std::time::Duration,
+) -> ProxyBody
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+{
+  let size_hint = body.size_hint();
+  let mut body = Box::pin(body);
+  let first = match fast_path_poll_request_body_once(body.as_mut()) {
+    Poll::Ready(None) => return empty_body(),
+    Poll::Ready(Some(frame)) => Some(frame),
+    Poll::Pending => None,
+  };
+
+  body::with_read_timeout(
+    Limited::new(
+      PeekedRequestBody {
+        first,
+        body,
+        size_hint,
+      },
+      max_body_bytes,
+    ),
+    timeout,
+    BodyTimeoutKind::DownstreamRequestRead,
+  )
+}
+
+fn fast_path_poll_request_body_once<B>(
+  body: Pin<&mut B>,
+) -> Poll<Option<Result<Frame<bytes::Bytes>, B::Error>>>
+where
+  B: Body<Data = bytes::Bytes>,
+{
+  let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+  body.poll_frame(&mut context)
+}
+
+struct PeekedRequestBody<B>
+where
+  B: Body<Data = bytes::Bytes>,
+{
+  first: Option<Result<Frame<bytes::Bytes>, B::Error>>,
+  body: Pin<Box<B>>,
+  size_hint: SizeHint,
+}
+
+impl<B> Unpin for PeekedRequestBody<B> where B: Body<Data = bytes::Bytes> {}
+
+impl<B> Body for PeekedRequestBody<B>
+where
+  B: Body<Data = bytes::Bytes>,
+{
+  type Data = bytes::Bytes;
+  type Error = B::Error;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    if let Some(frame) = self.first.take() {
+      return Poll::Ready(Some(frame));
+    }
+
+    self.body.as_mut().poll_frame(cx)
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.first.is_none() && self.body.is_end_stream()
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    self.size_hint.clone()
+  }
 }
 
 fn fast_path_request_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
@@ -633,6 +722,17 @@ fn fast_path_request_body_is_definitely_empty(version: http::Version, headers: &
       .to_str()
       .ok()
       .is_some_and(|value| value.trim() == "0")
+}
+
+fn fast_path_request_body_empty_probe_allowed(
+  method: &Method,
+  version: http::Version,
+  headers: &HeaderMap,
+) -> bool {
+  matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3)
+    && matches!(method, &Method::GET | &Method::HEAD)
+    && !headers.contains_key(CONTENT_LENGTH)
+    && !headers.contains_key(TRANSFER_ENCODING)
 }
 
 fn empty_body() -> ProxyBody {
