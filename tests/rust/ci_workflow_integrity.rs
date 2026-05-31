@@ -14,6 +14,17 @@ enum Outcome {
     Skipped,
 }
 
+const DOCKER_INTEGRATION_JOBS: &[&str] = &[
+    "docker-integration-config-runtime",
+    "docker-integration-proxy",
+    "docker-integration-protocol",
+    "docker-integration-waf",
+    "docker-integration-cache",
+    "docker-integration-state-data",
+    "docker-integration-ops",
+    "docker-integration-security",
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -286,7 +297,7 @@ fn source_structure_job_stays_independent() {
 #[test]
 fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     let jobs = parse_jobs(&workflow_text());
-    let security_relevant_jobs = [
+    let mut security_relevant_jobs = vec![
         "test",
         "test-riscv64-qemu",
         "generate-test-matrices",
@@ -294,13 +305,13 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "docker-alpine-musl-image-amd64",
         "docker-alpine-comparator-musl-image-amd64",
         "docker-alpine-musl-image-other",
-        "docker-integration-matrix",
         "remote-signer-dos-docker",
         "browser-webdriver",
         "docker-performance",
         "docker-performance-summary",
         "docker-aggressive-long-run",
     ];
+    security_relevant_jobs.extend(DOCKER_INTEGRATION_JOBS.iter().copied());
 
     assert_eq!(
         simulate_source_structure_failure(&jobs, "source-structure"),
@@ -316,6 +327,64 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
             simulate_source_structure_failure(&jobs, job_id),
             Outcome::Success,
             "{job_id} would be skipped if source-structure failed"
+        );
+    }
+}
+
+#[test]
+fn docker_integration_jobs_are_split_by_logical_group() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let groups = [
+        (
+            "docker-integration-config-runtime",
+            "docker_config_runtime",
+            "config-runtime",
+        ),
+        ("docker-integration-proxy", "docker_proxy", "proxy"),
+        ("docker-integration-protocol", "docker_protocol", "protocol"),
+        ("docker-integration-waf", "docker_waf", "waf"),
+        ("docker-integration-cache", "docker_cache", "cache"),
+        (
+            "docker-integration-state-data",
+            "docker_state_data",
+            "state-data",
+        ),
+        ("docker-integration-ops", "docker_ops", "ops"),
+        ("docker-integration-security", "docker_security", "security"),
+    ];
+
+    assert!(
+        !jobs.contains_key("docker-integration-matrix"),
+        "workflow should not keep the monolithic Docker integration matrix job"
+    );
+
+    for (job_id, output_name, group) in groups {
+        let job = jobs
+            .get(job_id)
+            .unwrap_or_else(|| panic!("workflow should define {job_id}"));
+        assert!(
+            job.needs.contains(&"generate-test-matrices".to_owned())
+                && job
+                    .needs
+                    .contains(&"docker-alpine-musl-image-amd64".to_owned()),
+            "{job_id} should wait for generated matrices and the AMD64 image"
+        );
+        assert!(
+            workflow.contains(&format!(
+                "{output_name}: ${{{{ steps.matrices.outputs.{output_name} }}}}"
+            )),
+            "generate-test-matrices should expose {output_name}"
+        );
+        assert!(
+            workflow.contains(&format!("write_docker_matrix {output_name} {group}")),
+            "generate-test-matrices should generate the {group} Docker matrix"
+        );
+        assert!(
+            workflow.contains(&format!(
+                "matrix: ${{{{ fromJson(needs.generate-test-matrices.outputs.{output_name}) }}}}"
+            )),
+            "{job_id} should consume {output_name}"
         );
     }
 }
@@ -550,6 +619,18 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
             .contains(&"docker-alpine-comparator-musl-image-amd64".to_owned()),
         "docker-performance should wait for target-specific comparator images"
     );
+    let performance_needs = &jobs
+        .get("docker-performance")
+        .expect("workflow should define docker-performance")
+        .needs;
+    for job_id in DOCKER_INTEGRATION_JOBS {
+        assert!(
+            performance_needs
+                .iter()
+                .any(|need| need.as_str() == *job_id),
+            "docker-performance should wait for {job_id}"
+        );
+    }
     for target_cpu in ["x86-64-v2", "x86-64-v3"] {
         assert!(
             performance_job.contains(&format!(

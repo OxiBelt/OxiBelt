@@ -20,6 +20,82 @@ struct BrowserScenario {
     description: &'static str,
 }
 
+struct DockerIntegrationGroup {
+    name: &'static str,
+    categories: &'static [&'static str],
+}
+
+const DOCKER_INTEGRATION_GROUPS: &[DockerIntegrationGroup] = &[
+    DockerIntegrationGroup {
+        name: "config-runtime",
+        categories: &[
+            "config-valid",
+            "config-invalid",
+            "listener-http",
+            "limits",
+            "timeouts",
+            "buffering",
+            "hot-reload",
+            "lifecycle",
+        ],
+    },
+    DockerIntegrationGroup {
+        name: "proxy",
+        categories: &[
+            "http-semantics",
+            "proxy-compression",
+            "proxy-headers",
+            "proxy-identity",
+            "proxy-protocol",
+            "proxy-routing",
+            "proxy-upstream-tls",
+            "upstream-discovery",
+            "upstream-pools",
+        ],
+    },
+    DockerIntegrationGroup {
+        name: "protocol",
+        categories: &[
+            "protocol-startup",
+            "protocol-proxying",
+            "protocol-operations",
+            "sni-forwarding",
+        ],
+    },
+    DockerIntegrationGroup {
+        name: "waf",
+        categories: &[
+            "waf-request",
+            "waf-response",
+            "waf-validation",
+            "waf-helpers",
+            "waf-crs",
+            "waf-person-proof",
+        ],
+    },
+    DockerIntegrationGroup {
+        name: "cache",
+        categories: &["cache"],
+    },
+    DockerIntegrationGroup {
+        name: "state-data",
+        categories: &[
+            "database-access-log",
+            "database-mitigation",
+            "dynamic-policy",
+            "shared-state",
+        ],
+    },
+    DockerIntegrationGroup {
+        name: "ops",
+        categories: &["ops"],
+    },
+    DockerIntegrationGroup {
+        name: "security",
+        categories: &["security"],
+    },
+];
+
 #[derive(Clone, Copy)]
 enum ExpectStart {
     Success,
@@ -71,13 +147,19 @@ fn main() -> Result<()> {
 fn list_command(args: &[String]) -> Result<()> {
     let suite = arg_value(args, "--suite")?;
     let format = arg_value(args, "--format")?;
+    let group = optional_arg_value(args, "--group");
     if format != "github-matrix" {
         return Err(format!("unsupported list format: {format}").into());
     }
 
     match suite.as_str() {
-        "docker" => print_docker_matrix(),
-        "browser" => print_browser_matrix(),
+        "docker" => print_docker_matrix(group.as_deref()),
+        "browser" => {
+            if group.is_some() {
+                return Err("--group is only supported for the docker suite".into());
+            }
+            print_browser_matrix()
+        }
         _ => Err(format!("unsupported suite: {suite}").into()),
     }
 }
@@ -109,7 +191,7 @@ fn materialize_command(args: &[String]) -> Result<()> {
 
 fn usage() {
     eprintln!(
-        "usage:\n  oxibelt-docker-integration-matrix list --suite <docker|browser> --format github-matrix\n  oxibelt-docker-integration-matrix materialize --suite <docker|browser> --category <name> --case <name> --output <dir>"
+        "usage:\n  oxibelt-docker-integration-matrix list --suite <docker|browser> --format github-matrix [--group <docker-group>]\n  oxibelt-docker-integration-matrix materialize --suite <docker|browser> --category <name> --case <name> --output <dir>"
     );
 }
 
@@ -120,10 +202,46 @@ fn arg_value(args: &[String], name: &str) -> Result<String> {
         .ok_or_else(|| format!("missing argument {name}").into())
 }
 
-fn print_docker_matrix() -> Result<()> {
+fn optional_arg_value(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|items| items[0] == name)
+        .map(|items| items[1].clone())
+}
+
+fn docker_integration_group(name: &str) -> Result<&'static DockerIntegrationGroup> {
+    if let Some(group) = DOCKER_INTEGRATION_GROUPS
+        .iter()
+        .find(|group| group.name == name)
+    {
+        return Ok(group);
+    }
+
+    let supported = DOCKER_INTEGRATION_GROUPS
+        .iter()
+        .map(|group| group.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!("unsupported docker matrix group: {name}; supported groups: {supported}").into())
+}
+
+fn print_docker_matrix(group: Option<&str>) -> Result<()> {
     let cases = docker_cases();
+    let selected_cases = if let Some(group) = group {
+        let group = docker_integration_group(group)?;
+        cases
+            .iter()
+            .filter(|case| group.categories.contains(&case.category))
+            .collect::<Vec<_>>()
+    } else {
+        cases.iter().collect::<Vec<_>>()
+    };
+
+    if selected_cases.is_empty() {
+        return Err("selected docker matrix group has no cases".into());
+    }
+
     print!("{{\"include\":[");
-    for (index, case) in cases.iter().enumerate() {
+    for (index, case) in selected_cases.iter().enumerate() {
         if index > 0 {
             print!(",");
         }
@@ -6733,6 +6851,43 @@ mod tests {
                 case.category,
                 case.name,
                 path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn every_docker_case_belongs_to_exactly_one_group() {
+        for case in docker_cases() {
+            let groups = DOCKER_INTEGRATION_GROUPS
+                .iter()
+                .filter(|group| group.categories.contains(&case.category))
+                .map(|group| group.name)
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                groups.len(),
+                1,
+                "docker case {}/{} should belong to exactly one group; found {:?}",
+                case.category,
+                case.name,
+                groups
+            );
+        }
+    }
+
+    #[test]
+    fn every_docker_group_has_cases() {
+        let cases = docker_cases();
+        for group in DOCKER_INTEGRATION_GROUPS {
+            let case_count = cases
+                .iter()
+                .filter(|case| group.categories.contains(&case.category))
+                .count();
+
+            assert!(
+                case_count > 0,
+                "docker matrix group {} should contain at least one case",
+                group.name
             );
         }
     }
