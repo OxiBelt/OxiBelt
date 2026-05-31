@@ -29,6 +29,15 @@ operation hint to expose. Permission denials may include the checked IPM
 `action` and resolved `resource`; ETag failures may include the `If-Match`
 header name and expected ETag. Generation ETags are concurrency diagnostics,
 not bearer secrets.
+
+Operationally large list endpoints opt in to pagination when `limit`, `cursor`,
+`sort`, `order`, or `filter[...]` is present. The first implementation covers
+`/admin/v1/dynamic-policies` and the IPM principal, credential, policy, and
+binding lists. Existing calls without these query parameters keep returning the
+full legacy array. Paginated responses preserve the existing array field and add
+`pagination` with `limit`, `has_more`, optional opaque `next_cursor`, `sort`,
+and `order`; cursors are bound to the endpoint and normalized query.
+
 When `[admin.audit]` is enabled, `/admin/v1/audit` returns unified Admin
 request audit records as `{ "audit": [...] }`; otherwise it returns `409`.
 Records include actor, peer, method, path, authorization action/resource,

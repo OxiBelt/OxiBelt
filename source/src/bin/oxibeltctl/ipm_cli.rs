@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Subcommand};
 
+use super::ListQueryArgs;
+
 #[derive(Debug, Args)]
 pub(crate) struct IpmCommand {
   #[command(subcommand)]
@@ -61,10 +63,10 @@ pub(crate) struct IpmListArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum IpmListTarget {
-  Principals,
-  Credentials,
-  Policies,
-  Bindings,
+  Principals(ListQueryArgs),
+  Credentials(ListQueryArgs),
+  Policies(ListQueryArgs),
+  Bindings(ListQueryArgs),
 }
 
 #[derive(Debug, Args)]
@@ -75,7 +77,7 @@ pub(crate) struct IpmPrincipalCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum IpmPrincipalSubcommand {
-  List,
+  List(ListQueryArgs),
   Get(IpmIdArg),
   Create(IpmPrincipalCreateArgs),
   Patch(IpmPrincipalPatchArgs),
@@ -119,7 +121,7 @@ pub(crate) struct IpmCredentialCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum IpmCredentialSubcommand {
-  List,
+  List(ListQueryArgs),
   Get(IpmIdArg),
   Create(IpmCredentialCreateArgs),
   Patch(IpmCredentialPatchArgs),
@@ -189,7 +191,7 @@ pub(crate) struct IpmPolicyCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum IpmPolicySubcommand {
-  List,
+  List(ListQueryArgs),
   Get(IpmIdArg),
   Create(IpmJsonMutationArg),
   Patch(IpmPolicyPatchArgs),
@@ -213,7 +215,7 @@ pub(crate) struct IpmBindingCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum IpmBindingSubcommand {
-  List,
+  List(ListQueryArgs),
   Create(IpmBindingCreateArgs),
   Delete(IpmMutatingIdArg),
 }

@@ -32,6 +32,36 @@ fn ipm_status_uses_status_endpoint_and_permission() {
 }
 
 #[test]
+fn ipm_principal_list_builds_pagination_query_endpoint() {
+  let command = Command::Ipm(IpmCommand {
+    command: IpmSubcommand::Principal(IpmPrincipalCommand {
+      command: IpmPrincipalSubcommand::List(ListQueryArgs {
+        limit: Some(25),
+        cursor: None,
+        sort: Some("subject".to_string()),
+        order: Some("desc".to_string()),
+        filters: vec!["group=deployers".to_string(), "enabled=true".to_string()],
+      }),
+    }),
+  });
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &command))
+    .expect("plan");
+
+  assert_eq!(plan.method, Method::GET);
+  assert_eq!(
+    plan.endpoint,
+    "/admin/v1/ipm/principals?limit=25&sort=subject&order=desc&filter%5Bgroup%5D=deployers&filter%5Benabled%5D=true"
+  );
+  assert_eq!(plan.permission.action, "ipm:ListPrincipals");
+}
+
+#[test]
 fn ipm_simulate_target_and_context_build_extended_body() {
   let parsed = Cli::try_parse_from([
     "oxibeltctl",

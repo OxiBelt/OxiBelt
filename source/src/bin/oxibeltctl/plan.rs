@@ -123,6 +123,37 @@ fn admin_audit_endpoint(args: &AdminAuditArgs) -> String {
   format!("/admin/v1/audit?{}", serializer.finish())
 }
 
+pub(crate) fn list_endpoint(base: &str, args: &ListQueryArgs) -> anyhow::Result<String> {
+  let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+  if let Some(limit) = args.limit {
+    serializer.append_pair("limit", &limit.to_string());
+  }
+  if let Some(cursor) = &args.cursor {
+    serializer.append_pair("cursor", cursor);
+  }
+  if let Some(sort) = &args.sort {
+    serializer.append_pair("sort", sort);
+  }
+  if let Some(order) = &args.order {
+    serializer.append_pair("order", order);
+  }
+  for filter in &args.filters {
+    let (key, value) = filter
+      .split_once('=')
+      .ok_or_else(|| anyhow::anyhow!("--filter must use KEY=VALUE"))?;
+    if key.is_empty() {
+      bail!("--filter key must not be empty");
+    }
+    serializer.append_pair(&format!("filter[{key}]"), value);
+  }
+  let query = serializer.finish();
+  if query.is_empty() {
+    Ok(base.to_string())
+  } else {
+    Ok(format!("{base}?{query}"))
+  }
+}
+
 fn plan_support_bundle(args: &SupportBundleArgs) -> anyhow::Result<RequestPlan> {
   if !args.redact {
     bail!("support-bundle requires --redact");

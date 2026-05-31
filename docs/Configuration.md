@@ -1297,6 +1297,12 @@ Admin config and downstream TLS endpoints:
 - `GET /admin/v1/operations/{id}/events`
 - `GET /admin/v1/operations/{id}/events/ws`
 
+The IPM principal, credential, policy, and binding list endpoints support
+opt-in `limit`, `cursor`, `sort`, `order`, and exact-match `filter[...]` query
+parameters. Calls without these list query parameters keep returning the full
+legacy array; paginated responses add a `pagination` object with an opaque
+`next_cursor` when more rows are available.
+
 Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, and downstream TLS operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Load and rollback require `admin:UpdateConfig` for `[admin]` changes and `ipm:UpdateConfig` for `[ipm]` changes. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk and preserves the active TLS state if validation fails.
 
 Admin diagnostics endpoints return the same production preflight report shape as
@@ -1453,6 +1459,8 @@ Dynamic policy automation endpoints:
 - `POST /admin/v1/dynamic-policies/import`
 
 `GET /admin/v1/dynamic-policies/status` returns `{ "namespace": "...", "generation": n, "etag": "\"oxibelt-dynamic-policy-n\"" }` and checks `dynamic-policy:GetStatus` on `status/current`. Create/import/apply JSON accepts `source`, `name`, `action`, `subject_type`, `subject`, optional `route_name`, `path_prefix`, `method`, `rate`, `burst`, `status`, `body`, `reason`, `code`, `mode`, and either `expires_at` or `ttl_seconds` when TTL is required. Create, import, and apply check `source/<source>/name/<name>` plus `route/<route_name>` when present before writing. Get, patch, and delete by ID first resolve the existing row, return `404` if absent, and then authorize the stored source/name/route; patch also authorizes the proposed source/name/route when those fields change. Create, import, apply, and patch reject changes that would exceed either the global active policy cap or the matching source quota bucket. Raw `POST /admin/v1/dynamic-policies` preserves create semantics and requires `If-Match` with the current dynamic-policy status ETag, as do import, patch, and delete; missing ETags return `428`, stale ETags return `412`. `POST /admin/v1/dynamic-policies/apply` is the operator UX upsert endpoint: it creates or replaces the row selected by `namespace + source + name`, disables duplicate rows beyond the lowest `id`, and is intended for repeat panic-button clicks that should not consume extra quota. `apply` accepts optional `If-Match`; omitted ETags are allowed, while stale supplied ETags return `412`. Import payloads use `{ "policies": [...] }` and upsert by `namespace + source + name`; duplicate rows beyond the lowest `id` are disabled. `DELETE` disables the row instead of physically removing it.
+
+`GET /admin/v1/dynamic-policies` supports opt-in `limit`, `cursor`, `sort`, `order`, and exact-match `filter[source]`, `filter[name]`, and `filter[enabled]` query parameters. Unpaginated calls keep the legacy full response ordered by `source`, `name`, and `id`; paginated calls use keyset pagination and return the existing `policies` field plus `pagination`.
 
 `GET /admin/v1/dynamic-policies/audit` returns recent audit rows as `{ "audit": [...] }`. `limit` defaults to `100` and is capped at `1000`; `policy_id` restricts results to one policy. Dynamic policy create, apply, import, patch, and delete successes are audited, and validation or quota rejects are written as best-effort audit rows with `outcome = "rejected"`. The audit actor is derived from Admin authentication and authorization, not from JSON supplied by a CLI or automation client.
 

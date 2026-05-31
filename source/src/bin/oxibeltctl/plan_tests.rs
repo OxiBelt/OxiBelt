@@ -633,6 +633,34 @@ fn dynamic_policy_audit_builds_query_endpoint() {
 }
 
 #[test]
+fn dynamic_policy_list_builds_pagination_query_endpoint() {
+  let command = Command::DynamicPolicy(DynamicPolicyCommand {
+    command: DynamicPolicySubcommand::List(ListQueryArgs {
+      limit: Some(50),
+      cursor: Some("cursor-token".to_string()),
+      sort: Some("created_at".to_string()),
+      order: Some("desc".to_string()),
+      filters: vec!["source=oxibeltctl".to_string(), "enabled=true".to_string()],
+    }),
+  });
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &command))
+    .expect("plan");
+
+  assert_eq!(plan.method, Method::GET);
+  assert_eq!(
+    plan.endpoint,
+    "/admin/v1/dynamic-policies?limit=50&cursor=cursor-token&sort=created_at&order=desc&filter%5Bsource%5D=oxibeltctl&filter%5Benabled%5D=true"
+  );
+  assert_eq!(plan.permission.action, "dynamic-policy:List");
+}
+
+#[test]
 fn admin_audit_builds_query_endpoint() {
   let command = Command::Audit(AdminAuditArgs {
     outcome: Some("rejected".to_string()),

@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::admin_audit::AdminAuditHandle;
+use crate::admin_list::{AdminListQuery, AdminListSpec};
 use crate::dynamic_policy::{
   DynamicPolicyAdminCreate, DynamicPolicyAdminImport, DynamicPolicyAdminPatch,
   DynamicPolicyAdminRecord, DynamicPolicyPreconditionError, DynamicPolicyPreconditionErrorKind,
@@ -23,6 +24,21 @@ pub(super) use cache::{
 };
 
 pub(super) const ADMIN_JSON_BODY_LIMIT: usize = 64 * 1024;
+
+const DYNAMIC_POLICY_LIST: AdminListSpec = AdminListSpec {
+  endpoint: "/admin/v1/dynamic-policies",
+  default_sort: "source",
+  allowed_sorts: &[
+    "source",
+    "name",
+    "enabled",
+    "priority",
+    "created_at",
+    "updated_at",
+    "id",
+  ],
+  allowed_filters: &["source", "name", "enabled"],
+};
 
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
   authorization.is_allowed(action, resource_name)
@@ -113,6 +129,26 @@ pub(super) async fn dynamic_policy_response(
     (&::http::Method::GET, "/admin/v1/dynamic-policies") => {
       if !allowed(authorization, "dynamic-policy:List", "*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      let list_query = match AdminListQuery::parse(query.as_deref(), &DYNAMIC_POLICY_LIST) {
+        Ok(query) => query,
+        Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
+      };
+      if let Some(list_query) = list_query {
+        return Some(
+          match state
+            .snapshot()
+            .dynamic_policy
+            .admin_list_page(&list_query)
+            .await
+          {
+            Ok(page) => json_response(
+              StatusCode::OK,
+              &json!({ "policies": page.items, "pagination": page.pagination }),
+            ),
+            Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          },
+        );
       }
       return Some(match state.snapshot().dynamic_policy.admin_list().await {
         Ok(policies) => json_response(StatusCode::OK, &json!({ "policies": policies })),

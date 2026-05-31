@@ -162,6 +162,34 @@ fn ipm_simulation_documents_non_secret_claim_key_response() {
     );
 }
 
+#[test]
+fn operational_lists_document_pagination_filter_and_sort_parameters() {
+    let spec = openapi();
+    for path in [
+        "/admin/v1/dynamic-policies",
+        "/admin/v1/ipm/principals",
+        "/admin/v1/ipm/credentials",
+        "/admin/v1/ipm/policies",
+        "/admin/v1/ipm/bindings",
+    ] {
+        let names = operation_parameter_names(&spec, path, "get");
+        for required in ["limit", "cursor", "sort", "order"] {
+            assert!(
+                names.contains(required),
+                "{path} must document {required} list parameter"
+            );
+        }
+        assert!(
+            names.iter().any(|name| name.starts_with("filter[")),
+            "{path} must document at least one filter[...] parameter"
+        );
+        assert!(
+            spec["paths"][path]["get"]["responses"].get("400").is_some(),
+            "{path} must document invalid list query responses"
+        );
+    }
+}
+
 fn documented_operations(spec: &Value) -> BTreeSet<(String, String)> {
     let paths = spec["paths"]
         .as_object()
@@ -179,6 +207,29 @@ fn documented_operations(spec: &Value) -> BTreeSet<(String, String)> {
         }
     }
     documented
+}
+
+fn operation_parameter_names(spec: &Value, path: &str, method: &str) -> BTreeSet<String> {
+    spec["paths"][path][method]["parameters"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{method} {path} must document parameters"))
+        .iter()
+        .map(|parameter| {
+            if let Some(name) = parameter["name"].as_str() {
+                return name.to_string();
+            }
+            let reference = parameter["$ref"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{method} {path} parameter must have name or $ref"));
+            let component = reference
+                .strip_prefix("#/components/parameters/")
+                .unwrap_or_else(|| panic!("{method} {path} parameter ref must target components"));
+            spec["components"]["parameters"][component]["name"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{reference} must resolve to a named parameter"))
+                .to_string()
+        })
+        .collect()
 }
 
 fn expected_operations() -> BTreeSet<(String, String)> {

@@ -998,7 +998,7 @@ import_upserts_existing_policy() {
 }
 
 apply_upserts_policy_without_duplicate_active_rows() {
-  local response request old_request active_count second_policy_id
+  local response request old_request active_count second_policy_id list cursor next bad_cursor
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/apply" 412 "POST" '{"source":"oxibeltctl","name":"panic-login","action":"reject","subject_type":"client_ip_path","subject":"203.0.113.63|/app/identity","path_prefix":"/app/identity","status":429,"body":"apply block stale","reason":"operator panic button","code":"panic.login","ttl_seconds":3600}' "Authorization: Bearer matrix-security-token" "If-Match: \"oxibelt-dynamic-policy-stale\"")"
   assert_response_jq "${response}" '.body | fromjson | .error.message | contains("If-Match does not match")'
 
@@ -1021,6 +1021,17 @@ apply_upserts_policy_without_duplicate_active_rows() {
   assert_body_jq "${old_request}" '.path == "/origin/app/identity/login"'
   request="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 203.0.113.64")"
   assert_response_jq "${request}" '.body == "apply block v2"'
+
+  list="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies?limit=1&sort=created_at&order=desc&filter%5Benabled%5D=true" 200 "GET" "" "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${list}" '.body | fromjson | .policies | length == 1'
+  assert_response_jq "${list}" '.body | fromjson | .pagination.has_more == true and (.pagination.next_cursor | type) == "string" and .pagination.sort == "created_at" and .pagination.order == "desc"'
+  cursor="$(policy_json_field "${list}" '.pagination.next_cursor')"
+  next="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies?limit=1&sort=created_at&order=desc&filter%5Benabled%5D=true&cursor=${cursor}" 200 "GET" "" "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${next}" '.body | fromjson | .policies | length == 1'
+  list="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies?limit=10&filter%5Bsource%5D=oxibeltctl" 200 "GET" "" "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${list}" '.body | fromjson | .policies | all(.source == "oxibeltctl")'
+  bad_cursor="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies?limit=1&cursor=not-a-valid-cursor" 400 "GET" "" "Authorization: Bearer matrix-security-token")"
+  assert_response_jq "${bad_cursor}" '.body | contains("cursor is invalid")'
 
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/dynamic-policies/${apply_policy_id}" 200 "DELETE" "" "Authorization: Bearer matrix-security-token" "If-Match: $(dynamic_policy_etag)")"
   assert_response_jq "${response}" '.body | fromjson | .ok == true'

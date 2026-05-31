@@ -13,6 +13,7 @@ compile_error!("oxibelt-proxy supports only x86_64, aarch64, and riscv64.");
 pub mod access_log;
 pub mod admin_audit;
 pub mod admin_client;
+pub(crate) mod admin_list;
 pub mod cache;
 pub mod config;
 pub mod control_http;

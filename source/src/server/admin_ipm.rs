@@ -2,6 +2,7 @@ use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde_json::json;
 
+use crate::admin_list::AdminListQuery;
 use crate::ipm::{
   IpmAuditQuery, IpmBindingCreate, IpmCredentialCreate, IpmCredentialPatch, IpmCredentialRevoke,
   IpmCredentialRotate, IpmPolicyCreate, IpmPolicyPatch, IpmPreconditionError, IpmPrincipalCreate,
@@ -15,6 +16,10 @@ use super::admin::json_response;
 use super::admin_auth::AdminAuthorization;
 use super::admin_body::collect_admin_json;
 use super::admin_error;
+use super::admin_ipm_list::{
+  IPM_BINDINGS_LIST, IPM_CREDENTIALS_LIST, IPM_POLICIES_LIST, IPM_PRINCIPALS_LIST,
+  ipm_binding_page, ipm_credential_page, ipm_policy_page, ipm_principal_page,
+};
 use super::admin_resource;
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
   authorization.is_allowed(action, resource_name)
@@ -101,6 +106,21 @@ pub(super) async fn ipm_response(
       if !allowed(authorization, "ipm:ListPrincipals", "principal/*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
+      let query = match AdminListQuery::parse(request.uri().query(), &IPM_PRINCIPALS_LIST) {
+        Ok(query) => query,
+        Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
+      };
+      if let Some(query) = query {
+        return Some(
+          match ipm_principal_page(state.snapshot().ipm.admin_list_principals(), &query) {
+            Ok(page) => json_response(
+              StatusCode::OK,
+              &json!({ "principals": page.items, "pagination": page.pagination }),
+            ),
+            Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          },
+        );
+      }
       return Some(json_response(
         StatusCode::OK,
         &json!({ "principals": state.snapshot().ipm.admin_list_principals() }),
@@ -134,6 +154,21 @@ pub(super) async fn ipm_response(
     (&::http::Method::GET, "/admin/v1/ipm/credentials") => {
       if !allowed(authorization, "ipm:ListCredentials", "credential/*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      let query = match AdminListQuery::parse(request.uri().query(), &IPM_CREDENTIALS_LIST) {
+        Ok(query) => query,
+        Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
+      };
+      if let Some(query) = query {
+        return Some(
+          match ipm_credential_page(state.snapshot().ipm.list_credentials(), &query) {
+            Ok(page) => json_response(
+              StatusCode::OK,
+              &json!({ "credentials": page.items, "pagination": page.pagination }),
+            ),
+            Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          },
+        );
       }
       return Some(json_response(
         StatusCode::OK,
@@ -173,6 +208,21 @@ pub(super) async fn ipm_response(
       if !allowed(authorization, "ipm:ListPolicies", "policy/*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
+      let query = match AdminListQuery::parse(request.uri().query(), &IPM_POLICIES_LIST) {
+        Ok(query) => query,
+        Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
+      };
+      if let Some(query) = query {
+        return Some(
+          match ipm_policy_page(state.snapshot().ipm.list_policies(), &query) {
+            Ok(page) => json_response(
+              StatusCode::OK,
+              &json!({ "policies": page.items, "pagination": page.pagination }),
+            ),
+            Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          },
+        );
+      }
       return Some(json_response(
         StatusCode::OK,
         &json!({ "policies": state.snapshot().ipm.list_policies() }),
@@ -206,6 +256,21 @@ pub(super) async fn ipm_response(
     (&::http::Method::GET, "/admin/v1/ipm/bindings") => {
       if !allowed(authorization, "ipm:ListBindings", "binding/*") {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      let query = match AdminListQuery::parse(request.uri().query(), &IPM_BINDINGS_LIST) {
+        Ok(query) => query,
+        Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
+      };
+      if let Some(query) = query {
+        return Some(
+          match ipm_binding_page(state.snapshot().ipm.list_bindings(), &query) {
+            Ok(page) => json_response(
+              StatusCode::OK,
+              &json!({ "bindings": page.items, "pagination": page.pagination }),
+            ),
+            Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          },
+        );
       }
       return Some(json_response(
         StatusCode::OK,

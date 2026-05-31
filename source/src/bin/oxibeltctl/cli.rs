@@ -347,6 +347,20 @@ pub(crate) struct OxiRuleTemplateArgs {
   pub(crate) vars: Vec<String>,
 }
 
+#[derive(Debug, Args, Default)]
+pub(crate) struct ListQueryArgs {
+  #[arg(long)]
+  pub(crate) limit: Option<usize>,
+  #[arg(long)]
+  pub(crate) cursor: Option<String>,
+  #[arg(long)]
+  pub(crate) sort: Option<String>,
+  #[arg(long)]
+  pub(crate) order: Option<String>,
+  #[arg(long = "filter", value_name = "KEY=VALUE")]
+  pub(crate) filters: Vec<String>,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct DynamicPolicyCommand {
   #[command(subcommand)]
@@ -356,7 +370,7 @@ pub(crate) struct DynamicPolicyCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum DynamicPolicySubcommand {
   Status,
-  List,
+  List(ListQueryArgs),
   Get(IdArg),
   Create(DynamicPolicyJsonArg),
   Apply(DynamicPolicyJsonArg),

@@ -282,6 +282,9 @@
           "200": {
             "$ref": "#/components/responses/JsonObject"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
@@ -1352,9 +1355,66 @@
         ],
         "operationId": "listIpmPrincipals",
         "summary": "List IPM principals.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminListLimit"
+          },
+          {
+            "$ref": "#/components/parameters/AdminListCursor"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "id",
+                "subject",
+                "enabled",
+                "source"
+              ],
+              "default": "id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/AdminListOrder"
+          },
+          {
+            "name": "filter[source]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "config",
+                "store"
+              ]
+            }
+          },
+          {
+            "name": "filter[enabled]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "filter[group]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1517,9 +1577,76 @@
         ],
         "operationId": "listIpmCredentials",
         "summary": "List redacted IPM credentials.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminListLimit"
+          },
+          {
+            "$ref": "#/components/parameters/AdminListCursor"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "name",
+                "principal",
+                "enabled",
+                "revoked",
+                "source",
+                "expires_at"
+              ],
+              "default": "name"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/AdminListOrder"
+          },
+          {
+            "name": "filter[source]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "config",
+                "store"
+              ]
+            }
+          },
+          {
+            "name": "filter[principal]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter[enabled]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "filter[revoked]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1778,9 +1905,58 @@
         ],
         "operationId": "listIpmPolicies",
         "summary": "List IPM policies.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminListLimit"
+          },
+          {
+            "$ref": "#/components/parameters/AdminListCursor"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "name",
+                "version",
+                "enabled",
+                "source"
+              ],
+              "default": "name"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/AdminListOrder"
+          },
+          {
+            "name": "filter[source]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "config",
+                "store"
+              ]
+            }
+          },
+          {
+            "name": "filter[enabled]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1943,9 +2119,84 @@
         ],
         "operationId": "listIpmBindings",
         "summary": "List IPM bindings.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminListLimit"
+          },
+          {
+            "$ref": "#/components/parameters/AdminListCursor"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "id",
+                "principal",
+                "group",
+                "policy",
+                "enabled",
+                "source"
+              ],
+              "default": "id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/AdminListOrder"
+          },
+          {
+            "name": "filter[source]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "config",
+                "store"
+              ]
+            }
+          },
+          {
+            "name": "filter[principal]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter[group]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter[policy]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter[enabled]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -2116,6 +2367,59 @@
         ],
         "operationId": "listDynamicPolicies",
         "summary": "List active dynamic policies.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminListLimit"
+          },
+          {
+            "$ref": "#/components/parameters/AdminListCursor"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "source",
+                "name",
+                "enabled",
+                "priority",
+                "created_at",
+                "updated_at",
+                "id"
+              ],
+              "default": "source"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/AdminListOrder"
+          },
+          {
+            "name": "filter[source]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter[name]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter[enabled]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
@@ -2688,6 +2992,39 @@
           "type": "string"
         },
         "description": "Optional ETag from the corresponding status endpoint. When supplied, it is enforced as a precondition."
+      },
+      "AdminListLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "description": "Enables opt-in pagination and limits the number of returned list items."
+      },
+      "AdminListCursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Opaque cursor returned in pagination.next_cursor. The cursor is bound to the endpoint, sort, order, and filters."
+      },
+      "AdminListOrder": {
+        "name": "order",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "asc"
+        }
       },
       "AdminOperationId": {
         "name": "id",

@@ -4,6 +4,8 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 
+use crate::admin_list::{AdminListPage, AdminListQuery};
+
 use super::{DynamicPolicyRuntime, PolicyRow, signature};
 
 mod precondition;
@@ -162,6 +164,14 @@ impl DynamicPolicyRuntime {
   pub async fn admin_list(&self) -> anyhow::Result<Vec<DynamicPolicyAdminRecord>> {
     let inner = self.admin_inner()?;
     select_admin_records(&inner.pool, &inner.namespace).await
+  }
+
+  pub async fn admin_list_page(
+    &self,
+    query: &AdminListQuery,
+  ) -> anyhow::Result<AdminListPage<DynamicPolicyAdminRecord>> {
+    let inner = self.admin_inner()?;
+    select_admin_records_page(&inner.pool, &inner.namespace, query).await
   }
 
   pub async fn admin_get(&self, id: i64) -> anyhow::Result<Option<DynamicPolicyAdminRecord>> {

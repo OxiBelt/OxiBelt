@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 
 use crate::cli::*;
 use crate::plan::{
-  PermissionHint, RequestPlan, delete, delete_with_permission, get, patch_json,
+  PermissionHint, RequestPlan, delete, delete_with_permission, get, list_endpoint, patch_json,
   patch_json_with_permission, post_json, post_json_with_permission, read_json_file,
 };
 use crate::resource_hint;
@@ -52,18 +52,26 @@ fn plan_ipm_simulate(args: &IpmSimulateArgs) -> anyhow::Result<RequestPlan> {
 
 fn plan_legacy_list(args: &IpmListArgs) -> anyhow::Result<RequestPlan> {
   match &args.target {
-    IpmListTarget::Principals => get(
-      "/admin/v1/ipm/principals",
+    IpmListTarget::Principals(list) => get(
+      &list_endpoint("/admin/v1/ipm/principals", list)?,
       "ipm:ListPrincipals",
       "principal/*",
     ),
-    IpmListTarget::Credentials => get(
-      "/admin/v1/ipm/credentials",
+    IpmListTarget::Credentials(list) => get(
+      &list_endpoint("/admin/v1/ipm/credentials", list)?,
       "ipm:ListCredentials",
       "credential/*",
     ),
-    IpmListTarget::Policies => get("/admin/v1/ipm/policies", "ipm:ListPolicies", "policy/*"),
-    IpmListTarget::Bindings => get("/admin/v1/ipm/bindings", "ipm:ListBindings", "binding/*"),
+    IpmListTarget::Policies(list) => get(
+      &list_endpoint("/admin/v1/ipm/policies", list)?,
+      "ipm:ListPolicies",
+      "policy/*",
+    ),
+    IpmListTarget::Bindings(list) => get(
+      &list_endpoint("/admin/v1/ipm/bindings", list)?,
+      "ipm:ListBindings",
+      "binding/*",
+    ),
   }
 }
 
@@ -72,8 +80,8 @@ async fn plan_principal(
   command: &IpmPrincipalCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmPrincipalSubcommand::List => get(
-      "/admin/v1/ipm/principals",
+    IpmPrincipalSubcommand::List(args) => get(
+      &list_endpoint("/admin/v1/ipm/principals", args)?,
       "ipm:ListPrincipals",
       "principal/*",
     ),
@@ -139,8 +147,8 @@ async fn plan_credential(
   command: &IpmCredentialCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmCredentialSubcommand::List => get(
-      "/admin/v1/ipm/credentials",
+    IpmCredentialSubcommand::List(args) => get(
+      &list_endpoint("/admin/v1/ipm/credentials", args)?,
       "ipm:ListCredentials",
       "credential/*",
     ),
@@ -236,7 +244,11 @@ async fn plan_policy(
   command: &IpmPolicyCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmPolicySubcommand::List => get("/admin/v1/ipm/policies", "ipm:ListPolicies", "policy/*"),
+    IpmPolicySubcommand::List(args) => get(
+      &list_endpoint("/admin/v1/ipm/policies", args)?,
+      "ipm:ListPolicies",
+      "policy/*",
+    ),
     IpmPolicySubcommand::Get(args) => get(
       &format!("/admin/v1/ipm/policies/{}", path_id(&args.id)?),
       "ipm:GetPolicy",
@@ -286,7 +298,11 @@ async fn plan_binding(
   command: &IpmBindingCommand,
 ) -> anyhow::Result<RequestPlan> {
   match &command.command {
-    IpmBindingSubcommand::List => get("/admin/v1/ipm/bindings", "ipm:ListBindings", "binding/*"),
+    IpmBindingSubcommand::List(args) => get(
+      &list_endpoint("/admin/v1/ipm/bindings", args)?,
+      "ipm:ListBindings",
+      "binding/*",
+    ),
     IpmBindingSubcommand::Create(args) => {
       let etag = ipm_etag_or_current(client, &args.etag).await?;
       with_etag(

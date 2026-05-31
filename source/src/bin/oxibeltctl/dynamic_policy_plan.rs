@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 
 use crate::cli::*;
 use crate::plan::{
-  PermissionHint, RequestPlan, delete, get, patch_json, post_json_with_permission, read_json_file,
-  with_etag,
+  PermissionHint, RequestPlan, delete, get, list_endpoint, patch_json, post_json_with_permission,
+  read_json_file, with_etag,
 };
 use crate::profile_catalog::MitigationProfileCatalog;
 use crate::resource_hint;
@@ -21,7 +21,11 @@ pub(crate) async fn plan_dynamic_policy(
       "dynamic-policy:GetStatus",
       resource_hint::dynamic_policy_status(),
     ),
-    DynamicPolicySubcommand::List => get("/admin/v1/dynamic-policies", "dynamic-policy:List", "*"),
+    DynamicPolicySubcommand::List(args) => get(
+      &list_endpoint("/admin/v1/dynamic-policies", args)?,
+      "dynamic-policy:List",
+      "*",
+    ),
     DynamicPolicySubcommand::Get(args) => get(
       &format!("/admin/v1/dynamic-policies/{}", args.id),
       "dynamic-policy:Get",
