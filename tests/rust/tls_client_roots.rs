@@ -1,6 +1,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +26,7 @@ use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 static NEXT_REMOTE_SIGNER_ID: AtomicU64 = AtomicU64::new(0);
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 
 #[test]
 fn upstream_tls_client_accepts_extra_root_certificates() {
@@ -608,8 +610,45 @@ fn default_tls_key_exchange_groups() -> Vec<TlsKeyExchangeGroup> {
 }
 
 struct RemoteSignerTestServer {
+    _socket_dir: RemoteSignerSocketDir,
     socket_path: PathBuf,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+struct RemoteSignerSocketDir {
+    path: PathBuf,
+}
+
+impl RemoteSignerSocketDir {
+    fn new(id: u64) -> Self {
+        let path = std::env::temp_dir().join(format!("ob-rs-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir(&path).unwrap_or_else(|error| {
+            panic!(
+                "failed to create remote signer socket directory {}: {error}",
+                path.display()
+            )
+        });
+        Self { path }
+    }
+
+    fn socket_path(&self, id: u64) -> PathBuf {
+        let path = self.path.join(format!("s{id}"));
+        let len = path.as_os_str().as_bytes().len();
+        assert!(
+            len <= MAX_UNIX_SOCKET_PATH_BYTES,
+            "remote signer socket path must fit Unix socket limits: {} bytes at {}",
+            len,
+            path.display()
+        );
+        path
+    }
+}
+
+impl Drop for RemoteSignerSocketDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 impl RemoteSignerTestServer {
@@ -667,7 +706,7 @@ async fn start_remote_signer(
 }
 
 async fn start_remote_signer_with_limits(
-    temp_dir: &common::TempDir,
+    _temp_dir: &common::TempDir,
     key_id: &str,
     key_path: &Path,
     token_env: &str,
@@ -679,7 +718,8 @@ async fn start_remote_signer_with_limits(
         std::env::set_var(token_env, remote_signer_token());
     }
     let id = NEXT_REMOTE_SIGNER_ID.fetch_add(1, Ordering::Relaxed);
-    let socket_path = temp_dir.path().join(format!("s{id}"));
+    let socket_dir = RemoteSignerSocketDir::new(id);
+    let socket_path = socket_dir.socket_path(id);
     let config = SignerServerConfig {
         socket_path: socket_path.clone(),
         socket_mode: 0o600,
@@ -706,6 +746,7 @@ async fn start_remote_signer_with_limits(
     for _ in 0..100 {
         if socket_path.exists() {
             return RemoteSignerTestServer {
+                _socket_dir: socket_dir,
                 socket_path,
                 thread: Some(thread),
             };
