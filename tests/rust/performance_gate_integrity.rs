@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,6 +24,24 @@ fn perf_probe_source_text() -> String {
 
 fn oxibelt_performance_fixture_root() -> PathBuf {
     repo_root().join("tests/fixtures/oxibelt-docker-performance/oxibelt")
+}
+
+struct HarnessTempDir {
+    dir: tempfile::TempDir,
+}
+
+impl HarnessTempDir {
+    fn new(prefix: &str) -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("temporary harness directory should be creatable");
+        Self { dir }
+    }
+
+    fn join(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.dir.path().join(path)
+    }
 }
 
 fn extract_bash_function(script: &str, function_name: &str) -> String {
@@ -55,15 +72,7 @@ struct HarnessRun {
 
 fn run_common_loads_harness(h3_mode: &str, probe_result: &str) -> HarnessRun {
     let function = extract_bash_function(&performance_script_text(), "run_common_loads");
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-gate-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-gate-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     write_harness(&harness_path, &function);
@@ -76,7 +85,6 @@ fn run_common_loads_harness(h3_mode: &str, probe_result: &str) -> HarnessRun {
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
@@ -96,15 +104,7 @@ fn run_static_loads_harness_for(
         extract_bash_function(&performance_script_text(), "run_static_h3_load"),
         extract_bash_function(&performance_script_text(), "run_static_loads")
     );
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-static-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-static-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     write_static_loads_harness(&harness_path, &functions);
@@ -119,22 +119,13 @@ fn run_static_loads_harness_for(
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
 
 fn nginx_h3_mode_harness(mode: &str, supported: &str) -> HarnessRun {
     let function = extract_bash_function(&performance_script_text(), "resolve_nginx_h3_mode");
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-nginx-h3-mode-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-nginx-h3-mode-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     write_nginx_h3_mode_harness(&harness_path, &function);
@@ -147,7 +138,6 @@ fn nginx_h3_mode_harness(mode: &str, supported: &str) -> HarnessRun {
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
@@ -161,15 +151,7 @@ fn accept_multiplier_profile_harness(probe_result: &str) -> HarnessRun {
         ),
         extract_bash_function(&performance_script_text(), "run_accept_multiplier_profile")
     );
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-accept-multipliers-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-accept-multipliers-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     write_accept_multiplier_harness(&harness_path, &functions);
@@ -181,7 +163,6 @@ fn accept_multiplier_profile_harness(probe_result: &str) -> HarnessRun {
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
@@ -193,15 +174,7 @@ fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun
         extract_bash_function(&script, "should_profile_load"),
         extract_bash_function(&script, "run_load")
     );
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-profile-load-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-profile-load-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     write_run_load_profile_harness(&harness_path, &functions);
@@ -214,7 +187,6 @@ fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
@@ -225,15 +197,7 @@ fn profile_pid_harness(
     docker_running: &str,
 ) -> HarnessRun {
     let function = extract_bash_function(&performance_script_text(), "active_oxibelt_host_pid");
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-profile-pid-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-profile-pid-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     write_profile_pid_harness(&harness_path, &function);
@@ -247,7 +211,6 @@ fn profile_pid_harness(
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
@@ -258,15 +221,7 @@ fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) ->
         extract_bash_function(&performance_script_text(), "load_errors_within_budget"),
         extract_bash_function(&performance_script_text(), "assert_result")
     );
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-assert-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-assert-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     write_assert_result_harness(&harness_path, &functions);
@@ -279,7 +234,6 @@ fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) ->
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
@@ -292,15 +246,7 @@ fn resource_drift_harness(
     max_task_delta: &str,
 ) -> HarnessRun {
     let functions = extract_bash_function(&performance_script_text(), "assert_resource_drift");
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-resource-drift-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-resource-drift-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     let snapshots_path = temp_dir.join("resource-snapshots.jsonl");
@@ -320,7 +266,6 @@ fn resource_drift_harness(
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
@@ -337,15 +282,7 @@ fn static_16k_ratio_harness(rows: &[&str], min_ratio: &str) -> HarnessRun {
             "assert_static_16k_h1c_caddy_ratio",
         )
     );
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-static-ratio-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-static-ratio-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     let results_path = temp_dir.join("results.jsonl");
@@ -361,7 +298,6 @@ fn static_16k_ratio_harness(rows: &[&str], min_ratio: &str) -> HarnessRun {
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }
@@ -383,15 +319,7 @@ fn waf_crs_gate_harness(
             "assert_waf_crs_regression_gates",
         )
     );
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "oxibelt-performance-waf-crs-gate-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("temporary harness directory should be creatable");
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-waf-crs-gate-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
     let results_path = temp_dir.join("results.jsonl");
@@ -409,7 +337,6 @@ fn waf_crs_gate_harness(
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
-    fs::remove_dir_all(&temp_dir).ok();
 
     HarnessRun { output, events }
 }

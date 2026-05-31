@@ -85,13 +85,13 @@ fn installed_rulepack_path_rejects_path_separators() {
 #[test]
 fn rulepack_source_resolves_regular_file_inside_source_dir() {
   let source = TempTree::new().expect("source temp");
-  let rules_dir = source.path.join("rules");
+  let rules_dir = source.path().join("rules");
   std::fs::create_dir(&rules_dir).expect("rules dir");
   let rule_path = rules_dir.join("ok.oxirule.toml");
   std::fs::write(&rule_path, "when = \"true\"\n").expect("rule file");
 
   let resolved =
-    resolve_existing_local_source_file(&source.path, Path::new("rules/ok.oxirule.toml"))
+    resolve_existing_local_source_file(source.path(), Path::new("rules/ok.oxirule.toml"))
       .expect("in-tree regular file should resolve");
 
   assert!(resolved.is_absolute());
@@ -106,14 +106,14 @@ fn rulepack_source_resolves_regular_file_inside_source_dir() {
 fn rulepack_source_rejects_symlink_escape() {
   let source = TempTree::new().expect("source temp");
   let outside = TempTree::new().expect("outside temp");
-  let rules_dir = source.path.join("rules");
+  let rules_dir = source.path().join("rules");
   std::fs::create_dir(&rules_dir).expect("rules dir");
-  let outside_file = outside.path.join("leak.oxirule.toml");
+  let outside_file = outside.path().join("leak.oxirule.toml");
   std::fs::write(&outside_file, "when = \"true\"\n").expect("outside rule file");
   std::os::unix::fs::symlink(&outside_file, rules_dir.join("leak.oxirule.toml")).expect("symlink");
 
   let error =
-    resolve_existing_local_source_file(&source.path, Path::new("rules/leak.oxirule.toml"))
+    resolve_existing_local_source_file(source.path(), Path::new("rules/leak.oxirule.toml"))
       .expect_err("symlink escape should fail");
 
   assert!(error.to_string().contains("must stay within"));

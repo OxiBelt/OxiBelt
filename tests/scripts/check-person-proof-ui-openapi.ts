@@ -2,7 +2,6 @@
 import { webcrypto } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { TextEncoder } from 'node:util'
-import vm from 'node:vm'
 
 type ChallengeKind = 'pow_sha256_v1' | 'third_party_provider'
 
@@ -24,7 +23,9 @@ type ChallengeResult = {
 }
 
 const ChallengeAssetUrl = new URL('../../source/assets/person-proof-challenge.html', import.meta.url)
+const BuiltScriptUrl = new URL('../../ui/person-proof/dist/challenge.js', import.meta.url)
 const Html = readFileSync(ChallengeAssetUrl, 'utf8')
+const BuiltChallengeScript = readFileSync(BuiltScriptUrl, 'utf8')
 const ScriptMatch = Html.match(
   /<script type="module" nonce="__CSP_NONCE__">\n([\s\S]*?)\n<\/script>/u,
 )
@@ -33,7 +34,14 @@ if (!ScriptMatch) {
   throw new Error('failed to locate person proof challenge module script')
 }
 
-const ChallengeScript = ScriptMatch[1].replace(/export \{\};\s*$/u, '')
+const EscapeClosingScript = (ScriptText: string): string => ScriptText.replaceAll('</script', '<\\/script')
+const EmbeddedChallengeScript = ScriptMatch[1]
+
+if (EmbeddedChallengeScript !== EscapeClosingScript(BuiltChallengeScript)) {
+  throw new Error('person proof challenge HTML does not match the built challenge module')
+}
+
+let ChallengeRunIndex = 0
 
 const WaitFor = async (Predicate: () => boolean): Promise<void> => {
   for (let Attempt = 0; Attempt < 100; Attempt += 1) {
@@ -45,25 +53,38 @@ const WaitFor = async (Predicate: () => boolean): Promise<void> => {
   throw new Error('timed out waiting for challenge script')
 }
 
+const SetGlobal = (Name: string, Value: unknown): (() => void) => {
+  const Previous = Object.getOwnPropertyDescriptor(globalThis, Name)
+  Object.defineProperty(globalThis, Name, {
+    configurable: true,
+    value: Value,
+    writable: true,
+  })
+
+  return () => {
+    if (Previous) {
+      Object.defineProperty(globalThis, Name, Previous)
+    } else {
+      Reflect.deleteProperty(globalThis, Name)
+    }
+  }
+}
+
 const RunChallenge = async ({ mode, kind }: ChallengeOptions): Promise<ChallengeResult> => {
   const Calls: FetchCall[] = []
   const Redirects: string[] = []
   const Status = { textContent: '' }
   const Storage = new Map<string, string>()
 
-  const Context = {
-    Blob: undefined,
-    Worker: undefined,
-    URL,
-    Uint8Array,
-    TextEncoder,
-    clearTimeout,
-    console,
-    crypto: webcrypto,
-    document: {
+  const RestoreGlobals = [
+    SetGlobal('Blob', undefined),
+    SetGlobal('Worker', undefined),
+    SetGlobal('TextEncoder', TextEncoder),
+    SetGlobal('crypto', webcrypto),
+    SetGlobal('document', {
       querySelector: (Selector: string) => (Selector === '[data-status]' ? Status : null),
-    },
-    fetch: async (Url: URL | string, Init: { method?: string; body?: unknown } = {}) => {
+    }),
+    SetGlobal('fetch', async (Url: URL | string, Init: { method?: string; body?: unknown } = {}) => {
       const Method = Init.method || 'GET'
       Calls.push({ method: Method, url: String(Url), body: Init.body })
 
@@ -89,23 +110,28 @@ const RunChallenge = async ({ mode, kind }: ChallengeOptions): Promise<Challenge
           },
         }),
       }
-    },
-    localStorage: {
+    }),
+    SetGlobal('localStorage', {
       setItem: (Key: string, Value: string) => Storage.set(Key, Value),
-    },
-    navigator: { hardwareConcurrency: 0 },
-    setTimeout,
-    window: {
+    }),
+    SetGlobal('navigator', { hardwareConcurrency: 0 }),
+    SetGlobal('window', {
       location: {
         origin: 'https://example.test',
         assign: (Path: string) => Redirects.push(Path),
       },
-    },
-  }
+    }),
+  ]
 
-  vm.createContext(Context)
-  vm.runInContext(ChallengeScript, Context)
-  await WaitFor(() => Status.textContent.startsWith('Challenge failed:') || Redirects.length > 0)
+  try {
+    ChallengeRunIndex += 1
+    await import(`${BuiltScriptUrl.href}?run=${ChallengeRunIndex}`)
+    await WaitFor(() => Status.textContent.startsWith('Challenge failed:') || Redirects.length > 0)
+  } finally {
+    for (const Restore of RestoreGlobals.reverse()) {
+      Restore()
+    }
+  }
 
   return { calls: Calls, redirects: Redirects, status: Status.textContent }
 }

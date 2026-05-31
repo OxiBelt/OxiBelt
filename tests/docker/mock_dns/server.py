@@ -86,7 +86,7 @@ def build_response(packet):
 
 
 def main():
-  host = os.environ.get("LISTEN_HOST", "0.0.0.0")
+  host = os.environ.get("LISTEN_HOST", "127.0.0.1")
   port = int(os.environ.get("LISTEN_PORT", "53"))
   sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
   sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

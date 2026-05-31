@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use http::{HeaderValue, Method, Request, StatusCode};
@@ -358,7 +358,7 @@ fn load_git_source(
   }
   let clone_url = validate_git_url(git)?;
   let temp = clone_git_source(&clone_url, git_ref)?;
-  let dir = temp.path.clone();
+  let dir = temp.path().to_path_buf();
   load_dir_source(&dir, &args.manifest, Some(temp))
 }
 
@@ -401,12 +401,12 @@ fn clone_git_source(clone_url: &str, git_ref: Option<&str>) -> anyhow::Result<Te
   if let Some(git_ref) = git_ref {
     clone.arg("--branch").arg(git_ref);
   }
-  clone.arg(clone_url).arg(&temp.path);
+  clone.arg(clone_url).arg(temp.path());
   run_git_command(&mut clone, "git clone")?;
   let mut rev_parse = ProcessCommand::new("git");
   rev_parse
     .arg("-C")
-    .arg(&temp.path)
+    .arg(temp.path())
     .arg("rev-parse")
     .arg("HEAD");
   let output = rev_parse
@@ -663,27 +663,21 @@ fn permission(action: &str, resource: &str) -> PermissionHint {
 
 #[derive(Debug)]
 struct TempTree {
-  path: PathBuf,
+  dir: tempfile::TempDir,
   commit: Option<String>,
 }
 
 impl TempTree {
   fn new() -> anyhow::Result<Self> {
-    let stamp = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .unwrap_or_default()
-      .as_nanos();
-    let path =
-      std::env::temp_dir().join(format!("oxibelt-rulepack-{}-{stamp}", std::process::id()));
-    std::fs::create_dir(&path)
-      .with_context(|| format!("failed to create temporary directory {}", path.display()))?;
-    Ok(Self { path, commit: None })
+    let dir = tempfile::Builder::new()
+      .prefix("oxibelt-rulepack-")
+      .tempdir()
+      .context("failed to create temporary rulepack directory")?;
+    Ok(Self { dir, commit: None })
   }
-}
 
-impl Drop for TempTree {
-  fn drop(&mut self) {
-    let _ = std::fs::remove_dir_all(&self.path);
+  fn path(&self) -> &Path {
+    self.dir.path()
   }
 }
 

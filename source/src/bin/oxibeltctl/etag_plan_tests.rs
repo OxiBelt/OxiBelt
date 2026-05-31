@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use clap::Parser;
 use oxibelt::admin_client::{AdminClient, AdminClientOptions};
@@ -57,7 +57,6 @@ fn dynamic_policy_create_fetches_current_etag_when_omitted() {
   let Some((client, request_thread)) = status_client(
     r#"{"namespace":"oxibelt","generation":3,"etag":"\"oxibelt-dynamic-policy-3\""}"#,
   ) else {
-    let _ = std::fs::remove_file(&json_file);
     return;
   };
   let parsed = Cli::try_parse_from([
@@ -65,7 +64,10 @@ fn dynamic_policy_create_fetches_current_etag_when_omitted() {
     "dynamic-policy",
     "create",
     "--json",
-    json_file.to_str().expect("json path should be UTF-8"),
+    json_file
+      .path()
+      .to_str()
+      .expect("json path should be UTF-8"),
   ])
   .expect("dynamic-policy create should parse");
   let runtime = tokio::runtime::Builder::new_current_thread()
@@ -76,7 +78,6 @@ fn dynamic_policy_create_fetches_current_etag_when_omitted() {
     .block_on(plan_command(&client, &parsed.command))
     .expect("plan");
   let request = request_thread.join().expect("status server should finish");
-  let _ = std::fs::remove_file(&json_file);
 
   assert_eq!(
     plan.if_match.as_deref(),
@@ -85,17 +86,14 @@ fn dynamic_policy_create_fetches_current_etag_when_omitted() {
   assert!(request.starts_with("GET /admin/v1/dynamic-policies/status "));
 }
 
-fn write_temp_file(label: &str, content: &str) -> std::path::PathBuf {
-  let nanos = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .expect("clock should be after Unix epoch")
-    .as_nanos();
-  let path = std::env::temp_dir().join(format!(
-    "oxibeltctl-{label}-{}-{nanos}.json",
-    std::process::id()
-  ));
-  std::fs::write(&path, content).expect("temp policy should be written");
-  path
+fn write_temp_file(label: &str, content: &str) -> tempfile::NamedTempFile {
+  let file = tempfile::Builder::new()
+    .prefix(&format!("oxibeltctl-{label}-"))
+    .suffix(".json")
+    .tempfile()
+    .expect("temp policy file should be created");
+  std::fs::write(file.path(), content).expect("temp policy should be written");
+  file
 }
 
 fn status_client(body: &'static str) -> Option<(AdminClient, thread::JoinHandle<String>)> {

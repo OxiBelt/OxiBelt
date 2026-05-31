@@ -71,8 +71,32 @@ class EchoHandler(BaseHTTPRequestHandler):
       status = int(status)
     except (TypeError, ValueError):
       status = 500
-    etag = query.get("etag", [""])[0]
-    last_modified = query.get("last_modified", [""])[0]
+    cache_control = {
+      "private": "private",
+      "no-store": "no-store",
+      "private-no-store": "private, no-store",
+      "public": "public, max-age=60",
+      "public-max-age-1": "public, max-age=1",
+      "public-stale-revalidate": "public, max-age=1, stale-while-revalidate=30",
+      "public-stale-error": "public, max-age=1, stale-if-error=30",
+    }.get(query.get("cache_control", [""])[0])
+    try:
+      etag = _query_header(query, "etag")
+      last_modified = _query_header(query, "last_modified")
+      early_link = _query_header(query, "early_link", "</style.css>; rel=preload; as=style")
+      content_type = _query_header(query, "content_type", "application/json")
+      cache_control = _safe_header_value(
+        "cache_control_value",
+        query.get("cache_control_value", [cache_control])[0],
+      )
+      surrogate_control = _query_header(query, "surrogate_control")
+      surrogate_key = _query_header(query, "surrogate_key")
+      cache_tag = _query_header(query, "cache_tag")
+      expires = _query_header(query, "expires")
+      vary = _query_header(query, "vary")
+    except ValueError as error:
+      self.send_error(400, str(error))
+      return
     if etag and self.headers.get("if-none-match") == etag:
       self.send_response(304)
       self.send_header("etag", etag)
@@ -100,41 +124,29 @@ class EchoHandler(BaseHTTPRequestHandler):
       time.sleep(header_delay_ms / 1000.0)
     if query.get("early_hints"):
       self.send_response_only(103, "Early Hints")
-      self.send_header("link", query.get("early_link", ["</style.css>; rel=preload; as=style"])[0])
+      self.send_header("link", early_link)
       self.end_headers()
     self.send_response(status)
-    self.send_header("content-type", query.get("content_type", ["application/json"])[0])
+    self.send_header("content-type", content_type)
     self.send_header("x-upstream-marker", UPSTREAM_MARKER)
     if any(key in query for key in ("sequence_key", "body_sequence", "status_sequence")):
       self.send_header("x-sequence-index", str(sequence_index))
     if query.get("set_cookie"):
       self.send_header("set-cookie", "upstream_session=present; Path=/")
-    cache_control = {
-      "private": "private",
-      "no-store": "no-store",
-      "private-no-store": "private, no-store",
-      "public": "public, max-age=60",
-      "public-max-age-1": "public, max-age=1",
-      "public-stale-revalidate": "public, max-age=1, stale-while-revalidate=30",
-      "public-stale-error": "public, max-age=1, stale-if-error=30",
-    }.get(query.get("cache_control", [""])[0])
-    cache_control = query.get("cache_control_value", [cache_control])[0]
     if cache_control:
       self.send_header("cache-control", cache_control)
-    if query.get("surrogate_control"):
-      self.send_header("surrogate-control", query.get("surrogate_control", [""])[0])
-    if query.get("surrogate_key"):
-      self.send_header("surrogate-key", query.get("surrogate_key", [""])[0])
-    if query.get("cache_tag"):
-      self.send_header("cache-tag", query.get("cache_tag", [""])[0])
+    if surrogate_control:
+      self.send_header("surrogate-control", surrogate_control)
+    if surrogate_key:
+      self.send_header("surrogate-key", surrogate_key)
+    if cache_tag:
+      self.send_header("cache-tag", cache_tag)
     if etag:
       self.send_header("etag", etag)
     if last_modified:
       self.send_header("last-modified", last_modified)
-    expires = query.get("expires", [""])[0]
     if expires:
       self.send_header("expires", expires)
-    vary = query.get("vary", [""])[0]
     if vary:
       self.send_header("vary", vary)
     if chunked_response:
@@ -211,6 +223,18 @@ def _sequence_value(query, key, index, default):
     return default
   values = raw.split("|")
   return values[min(index, len(values) - 1)]
+
+
+def _query_header(query, key, default=""):
+  return _safe_header_value(key, query.get(key, [default])[0])
+
+
+def _safe_header_value(key, value):
+  if value is None:
+    return None
+  if "\r" in value or "\n" in value:
+    raise ValueError(f"invalid {key} header value")
+  return value
 
 
 def main():

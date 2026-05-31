@@ -3,7 +3,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -21,7 +20,7 @@ fn limits_template_and_installer_scope_nofile_to_oxibelt_user() -> TestResult {
         &[
             OsStr::new("--apply"),
             OsStr::new("--root"),
-            staged_root.path.as_os_str(),
+            staged_root.path().as_os_str(),
             OsStr::new("--kernel-release"),
             OsStr::new("7.0.3"),
         ],
@@ -31,14 +30,14 @@ fn limits_template_and_installer_scope_nofile_to_oxibelt_user() -> TestResult {
         &repo_root.join("kernel-extension/verify.sh"),
         &[
             OsStr::new("--root"),
-            staged_root.path.as_os_str(),
+            staged_root.path().as_os_str(),
             OsStr::new("--kernel-release"),
             OsStr::new("7.0.3"),
         ],
     )?;
 
     let installed_path = staged_root
-        .path
+        .path()
         .join("etc/security/limits.d/90-oxibelt-edge.conf");
     let installed = fs::read_to_string(&installed_path)?;
     assert_oxibelt_scoped_nofile_limits(&installed, &installed_path)?;
@@ -120,20 +119,18 @@ fn run_script(repo_root: &Path, script: &Path, args: &[&OsStr]) -> TestResult {
 }
 
 struct TempRoot {
-    path: PathBuf,
+    path: tempfile::TempDir,
 }
 
 impl TempRoot {
     fn new(prefix: &str) -> TestResult<Self> {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&path)?;
+        let path = tempfile::Builder::new()
+            .prefix(&format!("{prefix}-"))
+            .tempdir()?;
         Ok(Self { path })
     }
-}
 
-impl Drop for TempRoot {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+    fn path(&self) -> &Path {
+        self.path.path()
     }
 }

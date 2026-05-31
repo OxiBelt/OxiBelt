@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use clap::Parser;
 use http::Method;
@@ -112,13 +112,19 @@ fn current_doctor_includes_external_probe_query() {
 
 #[test]
 fn candidate_doctor_posts_toml() {
-  let temp_dir = std::env::temp_dir();
-  let path = temp_dir.join(format!("oxibeltctl-doctor-{}.toml", std::process::id()));
-  std::fs::write(&path, "[listeners]\nhttps_bind = \"127.0.0.1:8443\"\n")
-    .expect("candidate should be written");
+  let candidate = tempfile::Builder::new()
+    .prefix("oxibeltctl-doctor-")
+    .suffix(".toml")
+    .tempfile()
+    .expect("candidate config file should be created");
+  std::fs::write(
+    candidate.path(),
+    "[listeners]\nhttps_bind = \"127.0.0.1:8443\"\n",
+  )
+  .expect("candidate should be written");
   let command = Command::Doctor(DoctorArgs {
     config: None,
-    candidate: Some(path.clone()),
+    candidate: Some(candidate.path().to_path_buf()),
     format: DoctorOutputFormat::Json,
     fail_on: DoctorFailOn::Warning,
     external_probes: vec![ExternalProbeKind::RemoteSigner],
@@ -131,7 +137,6 @@ fn candidate_doctor_posts_toml() {
   let plan = runtime
     .block_on(plan_command(&client, &command))
     .expect("plan");
-  let _ = std::fs::remove_file(&path);
 
   assert_eq!(plan.method, Method::POST);
   assert_eq!(plan.endpoint, "/admin/v1/diagnostics/preflight");
@@ -410,7 +415,10 @@ fn mitigate_profile_file_renders_apply_policy() {
     "mitigate",
     "login-bruteforce",
     "--profile-file",
-    profile_file.to_str().expect("profile path should be UTF-8"),
+    profile_file
+      .path()
+      .to_str()
+      .expect("profile path should be UTF-8"),
     "--source",
     "203.0.113.13",
   ])
@@ -423,7 +431,6 @@ fn mitigate_profile_file_renders_apply_policy() {
   let plan = runtime
     .block_on(plan_command(&client, &parsed.command))
     .expect("plan");
-  let _ = std::fs::remove_file(&profile_file);
 
   assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
   assert_eq!(
@@ -476,7 +483,10 @@ fn mitigate_profile_cli_options_override_profile_shape() {
     "mitigate",
     "login-bruteforce",
     "--profile-file",
-    profile_file.to_str().expect("profile path should be UTF-8"),
+    profile_file
+      .path()
+      .to_str()
+      .expect("profile path should be UTF-8"),
     "--source",
     "203.0.113.14",
     "--path-prefix",
@@ -504,7 +514,6 @@ fn mitigate_profile_cli_options_override_profile_shape() {
   let plan = runtime
     .block_on(plan_command(&client, &parsed.command))
     .expect("plan");
-  let _ = std::fs::remove_file(&profile_file);
 
   assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
   assert_eq!(
@@ -543,7 +552,10 @@ fn mitigate_unknown_profile_fails() {
     "mitigate",
     "missing",
     "--profile-file",
-    profile_file.to_str().expect("profile path should be UTF-8"),
+    profile_file
+      .path()
+      .to_str()
+      .expect("profile path should be UTF-8"),
     "--source",
     "203.0.113.15",
   ])
@@ -557,7 +569,6 @@ fn mitigate_unknown_profile_fails() {
     Ok(_) => panic!("unknown profile should fail"),
     Err(error) => error,
   };
-  let _ = std::fs::remove_file(&profile_file);
 
   assert!(error.to_string().contains("mitigation profile missing"));
 }
@@ -691,17 +702,14 @@ fn admin_audit_builds_query_endpoint() {
   assert_eq!(plan.permission.resources, vec!["audit/admin"]);
 }
 
-fn write_temp_file(label: &str, content: &str) -> std::path::PathBuf {
-  let nanos = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .expect("clock should be after Unix epoch")
-    .as_nanos();
-  let path = std::env::temp_dir().join(format!(
-    "oxibeltctl-{label}-{}-{nanos}.json",
-    std::process::id()
-  ));
-  std::fs::write(&path, content).expect("temp profile should be written");
-  path
+fn write_temp_file(label: &str, content: &str) -> tempfile::NamedTempFile {
+  let file = tempfile::Builder::new()
+    .prefix(&format!("oxibeltctl-{label}-"))
+    .suffix(".json")
+    .tempfile()
+    .expect("temp profile file should be created");
+  std::fs::write(file.path(), content).expect("temp profile should be written");
+  file
 }
 
 fn dummy_client() -> AdminClient {

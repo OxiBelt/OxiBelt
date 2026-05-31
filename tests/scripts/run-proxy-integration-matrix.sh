@@ -2073,6 +2073,7 @@ if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
     -e VALID_A_IP="${http_container_ip}" \
     -e SPOOF_A_NAME=spoofed.discovery.test \
     -e SPOOF_A_IP=203.0.113.66 \
+    -e LISTEN_HOST=0.0.0.0 \
     "${mock_dns_image}" >/dev/null
   dns_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${dns_container}")"
   if [[ -z "${dns_container_ip}" ]]; then

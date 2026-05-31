@@ -1,37 +1,24 @@
 use std::fs;
 use std::path::Path;
-use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 struct TempDir {
-    path: PathBuf,
+    dir: tempfile::TempDir,
 }
 
 impl TempDir {
     fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "oxibelt-performance-aggregate-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("temp directory should be created");
-        Self { path }
+        let dir = tempfile::Builder::new()
+            .prefix("oxibelt-performance-aggregate-")
+            .tempdir()
+            .expect("temp directory should be created");
+        Self { dir }
     }
 
     fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        self.dir.path()
     }
 }
 

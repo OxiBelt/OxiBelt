@@ -667,7 +667,7 @@ async fn start_remote_signer(
 }
 
 async fn start_remote_signer_with_limits(
-    _temp_dir: &common::TempDir,
+    temp_dir: &common::TempDir,
     key_id: &str,
     key_path: &Path,
     token_env: &str,
@@ -679,7 +679,7 @@ async fn start_remote_signer_with_limits(
         std::env::set_var(token_env, remote_signer_token());
     }
     let id = NEXT_REMOTE_SIGNER_ID.fetch_add(1, Ordering::Relaxed);
-    let socket_path = std::env::temp_dir().join(format!("obks-{}-{id}.sock", std::process::id()));
+    let socket_path = temp_dir.path().join(format!("s{id}"));
     let config = SignerServerConfig {
         socket_path: socket_path.clone(),
         socket_mode: 0o600,

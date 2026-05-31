@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use clap::Parser;
 use oxibelt::admin_client::{AdminClient, AdminClientOptions, DEFAULT_ADMIN_URL};
@@ -81,7 +81,10 @@ fn cache_key_explain_hints_policy_and_host_from_json() {
     "cache",
     "key-explain",
     "--json",
-    json_file.to_str().expect("json path should be UTF-8"),
+    json_file
+      .path()
+      .to_str()
+      .expect("json path should be UTF-8"),
   ])
   .expect("cache key-explain should parse");
   let runtime = tokio::runtime::Builder::new_current_thread()
@@ -92,7 +95,6 @@ fn cache_key_explain_hints_policy_and_host_from_json() {
   let plan = runtime
     .block_on(plan_command(&client, &parsed.command))
     .expect("plan");
-  let _ = std::fs::remove_file(&json_file);
 
   assert_eq!(plan.permission.action, "cache:ExplainKey");
   assert_eq!(
@@ -119,7 +121,10 @@ fn dynamic_policy_apply_hints_source_name_and_route_from_json() {
     "dynamic-policy",
     "apply",
     "--json",
-    json_file.to_str().expect("json path should be UTF-8"),
+    json_file
+      .path()
+      .to_str()
+      .expect("json path should be UTF-8"),
   ])
   .expect("dynamic-policy apply should parse");
   let runtime = tokio::runtime::Builder::new_current_thread()
@@ -130,7 +135,6 @@ fn dynamic_policy_apply_hints_source_name_and_route_from_json() {
   let plan = runtime
     .block_on(plan_command(&client, &parsed.command))
     .expect("plan");
-  let _ = std::fs::remove_file(&json_file);
 
   assert_eq!(plan.permission.action, "dynamic-policy:Apply");
   assert_eq!(
@@ -160,17 +164,14 @@ fn dynamic_policy_by_id_uses_collection_fallback_hint() {
   assert_eq!(plan.permission.resources, vec!["*"]);
 }
 
-fn write_temp_file(label: &str, content: &str) -> std::path::PathBuf {
-  let nanos = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .expect("clock should be after Unix epoch")
-    .as_nanos();
-  let path = std::env::temp_dir().join(format!(
-    "oxibeltctl-{label}-{}-{nanos}.json",
-    std::process::id()
-  ));
-  std::fs::write(&path, content).expect("temp profile should be written");
-  path
+fn write_temp_file(label: &str, content: &str) -> tempfile::NamedTempFile {
+  let file = tempfile::Builder::new()
+    .prefix(&format!("oxibeltctl-{label}-"))
+    .suffix(".json")
+    .tempfile()
+    .expect("temp profile file should be created");
+  std::fs::write(file.path(), content).expect("temp profile should be written");
+  file
 }
 
 fn dummy_client() -> AdminClient {

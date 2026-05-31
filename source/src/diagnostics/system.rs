@@ -370,17 +370,12 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn write_probe_does_not_follow_existing_symlink() {
-    let nonce = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .expect("system time should be after unix epoch")
-      .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-      "oxibelt-doctor-symlink-test-{}-{nonce}",
-      std::process::id(),
-    ));
-    std::fs::create_dir_all(&dir).expect("temp dir should be created");
-    let victim = dir.join("victim");
-    let probe = dir.join("probe");
+    let dir = tempfile::Builder::new()
+      .prefix("oxibelt-doctor-symlink-test-")
+      .tempdir()
+      .expect("temp dir should be created");
+    let victim = dir.path().join("victim");
+    let probe = dir.path().join("probe");
     std::fs::write(&victim, b"secret").expect("victim should be written");
     std::os::unix::fs::symlink(&victim, &probe).expect("probe symlink should be created");
 
@@ -392,6 +387,5 @@ mod tests {
 
     let _ = std::fs::remove_file(probe);
     let _ = std::fs::remove_file(victim);
-    let _ = std::fs::remove_dir(dir);
   }
 }

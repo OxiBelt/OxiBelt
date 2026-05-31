@@ -45,6 +45,7 @@ serde_json = "1"
 socket2 = "0.6"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
 subtle = "2.6"
+tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
 tokio-util = { version = "0.7", features = ["io"] }

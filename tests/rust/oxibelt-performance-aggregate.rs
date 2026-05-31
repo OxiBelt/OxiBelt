@@ -4000,20 +4000,12 @@ fn display_path(input_dir: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after epoch")
-            .as_nanos();
-        let path = env::temp_dir().join(format!(
-            "oxibelt-performance-aggregate-{name}-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("temporary aggregate directory should be creatable");
-        path
+    fn temp_dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("oxibelt-performance-aggregate-{name}-"))
+            .tempdir()
+            .expect("temporary aggregate directory should be creatable")
     }
 
     fn aggregate_stat(
@@ -4080,7 +4072,7 @@ mod tests {
     fn comparison_report_schema_and_target_thresholds_are_current() {
         let input_dir = temp_dir("schema-thresholds");
         let report = aggregate(
-            &input_dir,
+            input_dir.path(),
             Some("smoke".to_owned()),
             None,
             None,
@@ -4092,8 +4084,6 @@ mod tests {
         assert_eq!(report.schema_version, 8);
         assert_eq!(report.regression_gates.thresholds.h2_min_nginx_ratio, 0.80);
         assert_eq!(report.regression_gates.thresholds.h3_min_nginx_ratio, 0.80);
-
-        fs::remove_dir_all(input_dir).ok();
     }
 
     #[test]
@@ -4143,7 +4133,9 @@ mod tests {
     #[test]
     fn unsupported_cpu_markers_are_excluded_from_expected_results() {
         let input_dir = temp_dir("unsupported");
-        let artifact_dir = input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1");
+        let artifact_dir = input_dir
+            .path()
+            .join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1");
         fs::create_dir_all(&artifact_dir).expect("unsupported artifact dir should be creatable");
         fs::write(
             artifact_dir.join("unsupported-cpu.json"),
@@ -4158,7 +4150,7 @@ mod tests {
         .expect("ignored unsupported result should be writable");
 
         let report = aggregate(
-            &input_dir,
+            input_dir.path(),
             Some("smoke".to_owned()),
             Some(5),
             Some(2),
@@ -4193,15 +4185,14 @@ mod tests {
                 .any(|warning| warning.contains("only unsupported CPU marker artifacts")),
             "all-unsupported aggregate should explain why no results were found"
         );
-
-        fs::remove_dir_all(input_dir).ok();
     }
 
     #[test]
     fn target_cpu_unsupported_markers_are_excluded_from_expected_results() {
         let input_dir = temp_dir("target-unsupported");
-        let artifact_dir =
-            input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/x86-64-v4");
+        let artifact_dir = input_dir
+            .path()
+            .join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/x86-64-v4");
         fs::create_dir_all(&artifact_dir).expect("unsupported target dir should be creatable");
         fs::write(
             artifact_dir.join("unsupported-cpu.json"),
@@ -4210,7 +4201,7 @@ mod tests {
         .expect("unsupported marker should be writable");
 
         let report = aggregate(
-            &input_dir,
+            input_dir.path(),
             Some("smoke".to_owned()),
             Some(1),
             Some(1),
@@ -4241,15 +4232,14 @@ mod tests {
                     == "oxibelt-docker-performance-smoke-reverse-proxy-shard-1/x86-64-v4/run-1/results.json"),
             "unsupported target should not be reported as a missing expected result"
         );
-
-        fs::remove_dir_all(input_dir).ok();
     }
 
     #[test]
     fn unsupported_cpu_markers_are_rendered_in_markdown() {
         let input_dir = temp_dir("markdown");
-        let artifact_dir =
-            input_dir.join("oxibelt-docker-performance-benchmark-static-files-shard-20");
+        let artifact_dir = input_dir
+            .path()
+            .join("oxibelt-docker-performance-benchmark-static-files-shard-20");
         fs::create_dir_all(&artifact_dir).expect("unsupported artifact dir should be creatable");
         fs::write(
             artifact_dir.join("unsupported-cpu.json"),
@@ -4258,7 +4248,7 @@ mod tests {
         .expect("unsupported marker should be writable");
 
         let report = aggregate(
-            &input_dir,
+            input_dir.path(),
             Some("benchmark".to_owned()),
             Some(5),
             Some(20),
@@ -4272,7 +4262,5 @@ mod tests {
         assert!(
             markdown.contains("Unsupported AMD64 target shards excluded: `static-files/shard-20`")
         );
-
-        fs::remove_dir_all(input_dir).ok();
     }
 }

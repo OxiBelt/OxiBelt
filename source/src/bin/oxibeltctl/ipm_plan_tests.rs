@@ -123,12 +123,13 @@ fn ipm_simulate_target_and_context_build_extended_body() {
 
 #[test]
 fn ipm_simulate_overlay_file_hints_policy_resources() {
-  let path = std::env::temp_dir().join(format!(
-    "oxibeltctl-ipm-overlay-{}.json",
-    std::process::id()
-  ));
+  let overlay = tempfile::Builder::new()
+    .prefix("oxibeltctl-ipm-overlay-")
+    .suffix(".json")
+    .tempfile()
+    .expect("overlay fixture file should be created");
   std::fs::write(
-    &path,
+    overlay.path(),
     r#"{"policies":[{"name":"deny-load","statements":[{"effect":"deny","actions":["config:Load"],"resources":["*"]}]}],"bindings":[{"group":"deployers","policy":"deny-load"}]}"#,
   )
   .expect("overlay fixture should be writable");
@@ -141,7 +142,7 @@ fn ipm_simulate_overlay_file_hints_policy_resources() {
     "--resource",
     "oxibelt:oxibelt:config:*",
     "--overlay",
-    path.to_str().expect("path should be utf-8"),
+    overlay.path().to_str().expect("path should be utf-8"),
   ])
   .expect("ipm simulate overlay should parse");
   let runtime = tokio::runtime::Builder::new_current_thread()
@@ -184,7 +185,6 @@ fn ipm_simulate_overlay_file_hints_policy_resources() {
       }
     }))
   );
-  let _ = std::fs::remove_file(path);
 }
 
 #[test]
