@@ -1525,6 +1525,47 @@ protocol_probe_webtransport_multiplex() {
   fail_with_diagnostics "WebTransport multiplex probe did not reach expected statuses ${expect_statuses}"
 }
 
+protocol_probe_admin_operation_wt_events() {
+  local path="$1"
+  local expect_event="$2"
+  local expect_terminal_state="$3"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-admin-wt-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      admin-operation-wt-events \
+      --host proxy \
+      --port 9092 \
+      --path "${path}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --header "Authorization: Bearer matrix-admin-token" \
+      --expect-event "${expect_event}" \
+      --expect-terminal-state "${expect_terminal_state}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "Admin WebTransport operation event probe failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "Admin WebTransport operation event probe did not reach expected terminal state ${expect_terminal_state}"
+}
+
 postgres_query() {
   local sql="$1"
   docker exec \

@@ -257,6 +257,26 @@ async fn create_operation(
       )
       .await
     }
+    AdminOperationKind::WebTransportSnapshot => {
+      super::enqueue_webtransport_snapshot_operation(
+        body.request,
+        context.state,
+        context.operations,
+        authorization,
+        request_id,
+      )
+      .await
+    }
+    AdminOperationKind::WebTransportDrain => {
+      super::enqueue_webtransport_drain_operation(
+        body.request,
+        context.state,
+        context.operations,
+        authorization,
+        request_id,
+      )
+      .await
+    }
   }
 }
 
@@ -272,7 +292,7 @@ fn event_format(query: Option<&str>) -> AdminOperationEventFormat {
   AdminOperationEventFormat::Sse
 }
 
-fn can_access_operation(
+pub(in crate::server) fn can_access_operation(
   authorization: &AdminAuthorization<'_>,
   snapshot: &AdminOperationSnapshot,
   action: &str,

@@ -136,12 +136,14 @@ impl ReloadManager {
       dynamic_policy: active.dynamic_policy.clone(),
       external_auth: active.external_auth.clone(),
       runtime_introspection: active.runtime_introspection.clone(),
+      webtransport_admin: active.webtransport_admin.clone(),
       lifecycle: active.lifecycle.clone(),
       admin_audit: active.admin_audit.clone(),
       shared_state: active.shared_state.clone(),
       tls_server_config: active.tls_server_config.clone(),
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config: active.quic_server_config.clone(),
+      admin_quic_server_config: active.admin_quic_server_config.clone(),
       tls_resumption: active.tls_resumption.clone(),
       waf,
       mitigation: active.mitigation.clone(),
@@ -216,6 +218,7 @@ impl ReloadManager {
     } else {
       None
     };
+    let admin_quic_server_config = active.admin_quic_server_config.clone();
     let ipm = crate::ipm::IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
@@ -246,12 +249,14 @@ impl ReloadManager {
       dynamic_policy: active.dynamic_policy.clone(),
       external_auth: active.external_auth.clone(),
       runtime_introspection: active.runtime_introspection.clone(),
+      webtransport_admin: active.webtransport_admin.clone(),
       lifecycle: active.lifecycle.clone(),
       admin_audit: active.admin_audit.clone(),
       shared_state: active.shared_state.clone(),
       tls_server_config,
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config,
+      admin_quic_server_config,
       tls_resumption: active.tls_resumption.clone(),
       waf: active.waf.clone(),
       mitigation: active.mitigation.clone(),

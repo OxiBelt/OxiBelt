@@ -146,6 +146,17 @@ struct WebTransportReloadGatedArgs {
     expect_drained_status: u16,
 }
 
+struct AdminOperationWtEventsArgs {
+    host: String,
+    port: u16,
+    path: String,
+    headers: HeaderMap,
+    ca_cert: String,
+    expect_events: Vec<String>,
+    expect_terminal_state: Option<String>,
+    timeout_ms: u64,
+}
+
 struct WebSocketEchoArgs {
     listen: SocketAddr,
 }
@@ -282,6 +293,9 @@ async fn main() -> anyhow::Result<()> {
         "webtransport-reload-gated" => {
             run_webtransport_reload_gated_client(parse_webtransport_reload_gated_args(args)?).await
         }
+        "admin-operation-wt-events" => {
+            run_admin_operation_wt_events_client(parse_admin_operation_wt_events_args(args)?).await
+        }
         _ => {
             usage();
             bail!("unknown command: {command}");
@@ -291,7 +305,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -672,6 +686,52 @@ fn parse_webtransport_reload_gated_args(
             .ok_or_else(|| anyhow!("--expect-initial-status is required"))?,
         expect_drained_status: expect_drained_status
             .ok_or_else(|| anyhow!("--expect-drained-status is required"))?,
+    })
+}
+
+fn parse_admin_operation_wt_events_args(
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<AdminOperationWtEventsArgs> {
+    let mut host = None;
+    let mut port = None;
+    let mut path = None;
+    let mut headers = HeaderMap::new();
+    let mut ca_cert = None;
+    let mut expect_events = Vec::new();
+    let mut expect_terminal_state = None;
+    let mut timeout_ms = 10_000;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--host" => host = Some(value),
+            "--port" => port = Some(value.parse().context("invalid --port value")?),
+            "--path" => path = Some(validate_origin_form_path(&value)?),
+            "--header" => insert_header(&mut headers, &value)?,
+            "--ca-cert" => ca_cert = Some(value),
+            "--expect-event" => expect_events.push(value),
+            "--expect-terminal-state" => expect_terminal_state = Some(value),
+            "--timeout-ms" => {
+                timeout_ms = value.parse().context("invalid --timeout-ms value")?;
+                if timeout_ms == 0 {
+                    bail!("--timeout-ms must be greater than zero");
+                }
+            }
+            _ => bail!("unknown admin-operation-wt-events flag: {flag}"),
+        }
+    }
+
+    Ok(AdminOperationWtEventsArgs {
+        host: host.ok_or_else(|| anyhow!("--host is required"))?,
+        port: port.ok_or_else(|| anyhow!("--port is required"))?,
+        path: path.ok_or_else(|| anyhow!("--path is required"))?,
+        headers,
+        ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+        expect_events,
+        expect_terminal_state,
+        timeout_ms,
     })
 }
 
@@ -2002,6 +2062,125 @@ async fn run_webtransport_reload_gated_client(
         })
     );
     Ok(())
+}
+
+async fn run_admin_operation_wt_events_client(
+    args: AdminOperationWtEventsArgs,
+) -> anyhow::Result<()> {
+    let timeout = Duration::from_millis(args.timeout_ms);
+    let certs = load_certs(Path::new(&args.ca_cert))?;
+    let client = web_transport_quinn::ClientBuilder::new()
+        .with_server_certificates(certs)
+        .context("failed to build Admin WebTransport client")?;
+    let url = url::Url::parse(&format!("https://{}:{}{}", args.host, args.port, args.path))
+        .context("failed to build Admin WebTransport URL")?;
+    let request = web_transport_quinn::proto::ConnectRequest::new(url).with_headers(args.headers);
+    let session = tokio::time::timeout(timeout, client.connect(request))
+        .await
+        .context("timed out connecting to Admin WebTransport operation events")?
+        .context("failed to connect to Admin WebTransport operation events")?;
+    let mut stream = tokio::time::timeout(timeout, session.accept_uni())
+        .await
+        .context("timed out waiting for Admin WebTransport event stream")?
+        .context("failed to accept Admin WebTransport event stream")?;
+    let bytes = read_admin_webtransport_event_stream(&mut stream, timeout)
+        .await
+        .context("failed to read Admin WebTransport event stream")?;
+    let body = String::from_utf8(bytes).context("Admin WebTransport event stream was not UTF-8")?;
+
+    let mut events = Vec::new();
+    let mut terminal_state = None;
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line)
+            .with_context(|| format!("Admin WebTransport event line was not JSON: {line}"))?;
+        if let Some(event) = value.get("event").and_then(|value| value.as_str()) {
+            events.push(event.to_string());
+        }
+        if let Some(state) = value
+            .pointer("/operation/state")
+            .and_then(|value| value.as_str())
+        {
+            if matches!(state, "succeeded" | "failed" | "cancelled" | "expired") {
+                terminal_state = Some(state.to_string());
+            }
+        }
+    }
+
+    for expected in &args.expect_events {
+        if !events.iter().any(|event| event == expected) {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                  "events": events,
+                  "expected_event": expected,
+                  "body": body,
+                })
+            );
+            bail!("Admin WebTransport event stream missed expected event");
+        }
+    }
+    if let Some(expected) = &args.expect_terminal_state {
+        if terminal_state.as_deref() != Some(expected.as_str()) {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                  "events": events,
+                  "terminal_state": terminal_state,
+                  "expected_terminal_state": expected,
+                  "body": body,
+                })
+            );
+            bail!("Admin WebTransport event stream terminal state did not match");
+        }
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+          "events": events,
+          "terminal_state": terminal_state,
+          "body_bytes": body.len(),
+        })
+    );
+    Ok(())
+}
+
+async fn read_admin_webtransport_event_stream<R>(
+    stream: &mut R,
+    timeout: Duration,
+) -> anyhow::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
+            .await
+            .context("timed out reading Admin WebTransport event stream")?;
+        match read {
+            Ok(0) => return Ok(bytes),
+            Ok(len) => {
+                bytes.extend_from_slice(&chunk[..len]);
+                if bytes.len() > 1024 * 1024 {
+                    bail!("Admin WebTransport event stream exceeded 1 MiB");
+                }
+            }
+            Err(error)
+                if !bytes.is_empty() && is_admin_webtransport_terminal_read_error(&error) =>
+            {
+                return Ok(bytes);
+            }
+            Err(error) => {
+                return Err(error).context("failed to read Admin WebTransport event stream")
+            }
+        }
+    }
+}
+
+fn is_admin_webtransport_terminal_read_error(error: &io::Error) -> bool {
+    let message = error.to_string();
+    message.contains("connection error: closed") || message.contains("session error")
 }
 
 async fn tls_resumption_http1_request(

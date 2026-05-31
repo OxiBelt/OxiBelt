@@ -24,100 +24,30 @@ use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContex
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::waf::{WafStreamClose, WafStreamDirection, WafWebTransportStreamKind};
+use crate::webtransport_admin::WebTransportSessionRegistration;
 
+#[path = "session/admin_commands.rs"]
+mod admin_commands;
 #[path = "session/connection_limits.rs"]
 mod connection_limits;
+#[path = "session/index.rs"]
+mod index;
 #[path = "session/metrics.rs"]
 mod metrics;
 #[path = "session/state.rs"]
 mod state;
+#[path = "session/task_reporting.rs"]
+mod task_reporting;
 
+use admin_commands::spawn_admin_session_command_forwarder;
 use connection_limits::acquire_webtransport_session_permits;
+pub(super) use index::WebTransportSessionIndex;
+use index::session_id_for_stream_id;
 use metrics::record_session_end_metrics;
 pub(super) use state::ActiveWebTransportSession;
+use task_reporting::{report_activity, report_session_task_result, report_stream_task_result};
 const WEBTRANSPORT_DRAFT_HEADER: &str = "sec-webtransport-http3-draft";
 const WEBTRANSPORT_DRAFT_VALUE: &str = "draft02";
-#[derive(Default)]
-pub(super) struct WebTransportSessionIndex {
-  connect_stream_ids: HashMap<SessionId, StreamId>,
-}
-
-impl WebTransportSessionIndex {
-  fn insert(&mut self, connect_stream_id: StreamId) -> SessionId {
-    let session_id = session_id_for_stream_id(connect_stream_id);
-    self
-      .connect_stream_ids
-      .insert(session_id, connect_stream_id);
-    session_id
-  }
-
-  pub(super) fn remove(&mut self, session_id: SessionId) {
-    self.connect_stream_ids.remove(&session_id);
-  }
-
-  fn contains(&self, session_id: SessionId) -> bool {
-    self.connect_stream_ids.contains_key(&session_id)
-  }
-
-  #[cfg(test)]
-  fn connect_stream_id(&self, session_id: SessionId) -> Option<StreamId> {
-    self.connect_stream_ids.get(&session_id).copied()
-  }
-
-  pub(super) fn session_for_datagram_stream_id(&self, stream_id: StreamId) -> Option<SessionId> {
-    let session_id = session_id_for_stream_id(stream_id);
-    self.contains(session_id).then_some(session_id)
-  }
-}
-
-fn session_id_for_stream_id(stream_id: StreamId) -> SessionId {
-  SessionId::from(stream_id)
-}
-fn report_activity(events: &mpsc::Sender<DispatcherEvent>, session_id: SessionId) {
-  let _ = events.try_send(DispatcherEvent::Activity(session_id));
-}
-
-async fn report_stream_task_result<F>(
-  session_id: SessionId,
-  future: F,
-  events: mpsc::Sender<DispatcherEvent>,
-) where
-  F: std::future::Future<Output = anyhow::Result<()>>,
-{
-  let result = future.await;
-  if let Err(error) = result
-    && let Some(close) = stream_waf_bridge::blocked_close(&error)
-  {
-    let _ = events
-      .send(DispatcherEvent::Blocked(session_id, close.clone()))
-      .await;
-  }
-}
-
-async fn report_session_task_result<F>(
-  session_id: SessionId,
-  future: F,
-  events: mpsc::Sender<DispatcherEvent>,
-) where
-  F: std::future::Future<Output = anyhow::Result<()>>,
-{
-  let result = future.await;
-  match result {
-    Ok(()) => {
-      let _ = events.send(DispatcherEvent::SessionEnded(session_id)).await;
-    }
-    Err(error) => {
-      if let Some(close) = stream_waf_bridge::blocked_close(&error) {
-        let _ = events
-          .send(DispatcherEvent::Blocked(session_id, close.clone()))
-          .await;
-      } else {
-        warn!(?session_id, error = %error, "WebTransport session task ended");
-        let _ = events.send(DispatcherEvent::SessionEnded(session_id)).await;
-      }
-    }
-  }
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn accept_webtransport_session(
@@ -153,6 +83,24 @@ pub(super) async fn accept_webtransport_session(
       return Ok(());
     }
   };
+
+  let registration = WebTransportSessionRegistration {
+    route: prepared.route_name.clone(),
+    upstream: prepared.upstream.name.clone(),
+    peer_ip: peer_addr.ip(),
+    client_ip: prepared.client_addr.ip(),
+  };
+  if snapshot.webtransport_admin.is_draining(&registration) {
+    respond_to_h3_request(
+      stream,
+      text_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "WebTransport session is draining",
+      ),
+    )
+    .await?;
+    return Ok(());
+  }
 
   if sessions.len()
     >= snapshot
@@ -226,6 +174,11 @@ pub(super) async fn accept_webtransport_session(
   let inserted_session = session_index.insert(connect_stream_id);
   debug_assert_eq!(inserted_session, session_id);
   let upstream = Arc::new(upstream);
+  let (admin_command_tx, admin_command_rx) = tokio::sync::mpsc::unbounded_channel();
+  let admin_guard = snapshot
+    .webtransport_admin
+    .register(registration, admin_command_tx)
+    .context("failed to register WebTransport admin session")?;
   let stream_waf = prepared.stream_waf.take();
   let stream_waf_state = stream_waf.as_ref().map(|_| snapshot.clone());
   let introspection_guard = snapshot
@@ -241,15 +194,22 @@ pub(super) async fn accept_webtransport_session(
     connect_stream_id,
     downstream,
     upstream.clone(),
-    events,
+    events.clone(),
     stream_waf_state.clone(),
     stream_waf.clone(),
   );
+  let mut tasks = tasks;
+  tasks.push(spawn_admin_session_command_forwarder(
+    session_id,
+    admin_command_rx,
+    events,
+  ));
   sessions.insert(
     session_id,
     ActiveWebTransportSession {
       upstream,
       connect_stream: stream,
+      admin_guard,
       _connection_permits: connection_permits,
       _introspection_guard: introspection_guard,
       stream_waf_state,
@@ -327,8 +287,7 @@ pub(super) fn handle_downstream_bidi_stream(
     reset_unknown_bidi_stream(stream);
     return;
   };
-  session.last_activity = Instant::now();
-  session.reap_finished_tasks();
+  session.record_activity();
   session
     .tasks
     .push(tokio::spawn(bridge_downstream_bidi_stream(
@@ -384,8 +343,7 @@ pub(super) fn handle_downstream_uni_stream(
     stop_unknown_uni_stream(stream);
     return;
   };
-  session.last_activity = Instant::now();
-  session.reap_finished_tasks();
+  session.record_activity();
   session
     .tasks
     .push(tokio::spawn(bridge_downstream_uni_stream(
@@ -447,8 +405,7 @@ pub(super) fn handle_downstream_datagram(
     let Some(session) = sessions.get_mut(&session_id) else {
       return;
     };
-    session.last_activity = Instant::now();
-    session.reap_finished_tasks();
+    session.record_activity();
 
     if let (Some(state), Some(context)) = (
       session.stream_waf_state.as_ref(),
@@ -627,20 +584,54 @@ pub(super) fn close_session(
   close: Option<&WafStreamClose>,
   fallback_reason: &'static [u8],
 ) {
+  let (close_code, reason) = match close {
+    Some(close) => (close.webtransport_code, close.reason.as_bytes()),
+    None => (0, fallback_reason),
+  };
+  close_session_inner(
+    sessions,
+    session_index,
+    session_id,
+    close,
+    close_code,
+    reason,
+  );
+}
+
+pub(super) fn close_session_with_code(
+  sessions: &mut HashMap<SessionId, ActiveWebTransportSession>,
+  session_index: &mut WebTransportSessionIndex,
+  session_id: SessionId,
+  close_code: u32,
+  reason: &[u8],
+) {
+  close_session_inner(
+    sessions,
+    session_index,
+    session_id,
+    None,
+    close_code,
+    reason,
+  );
+}
+
+fn close_session_inner(
+  sessions: &mut HashMap<SessionId, ActiveWebTransportSession>,
+  session_index: &mut WebTransportSessionIndex,
+  session_id: SessionId,
+  metrics_close: Option<&WafStreamClose>,
+  close_code: u32,
+  reason: &[u8],
+) {
   let Some(mut session) = sessions.remove(&session_id) else {
     return;
   };
-  record_session_end_metrics(&session, close);
+  record_session_end_metrics(&session, metrics_close);
   session_index.remove(session_id);
   for task in session.tasks {
     task.abort();
   }
-  match close {
-    Some(close) => session
-      .upstream
-      .close(close.webtransport_code, close.reason.as_bytes()),
-    None => session.upstream.close(0, fallback_reason),
-  }
+  session.upstream.close(close_code, reason);
   session.connect_stream.stop_stream(Code::H3_NO_ERROR);
   session.connect_stream.stop_sending(Code::H3_NO_ERROR);
 }

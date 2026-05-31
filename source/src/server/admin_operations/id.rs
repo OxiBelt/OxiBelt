@@ -31,7 +31,7 @@ pub(super) fn new_operation_id() -> String {
   )
 }
 
-pub(super) fn parse_operation_id(raw: &str) -> anyhow::Result<&str> {
+pub(in crate::server) fn parse_operation_id(raw: &str) -> anyhow::Result<&str> {
   let Some(uuid) = raw.strip_prefix(OPERATION_ID_PREFIX) else {
     bail!("operation id must start with op_");
   };

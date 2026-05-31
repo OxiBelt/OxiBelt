@@ -46,6 +46,7 @@ mod admin_config_diff;
 mod admin_control;
 mod admin_diagnostics;
 mod admin_error;
+mod admin_h3;
 mod admin_ipm;
 mod admin_ipm_list;
 mod admin_ipm_simulation;
@@ -980,6 +981,7 @@ pub(crate) struct ListenerSupervisor {
   http: Option<TcpListenerTask>,
   http3: Option<Http3ListenerTask>,
   admin: Option<AdminListenerTask>,
+  admin_h3: Option<admin_h3::AdminHttp3ListenerTask>,
   streams: Vec<StreamListenerTask>,
   turns: Vec<TurnListenerTask>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
@@ -1046,9 +1048,11 @@ pub(crate) struct PendingListenerUpdate {
   http: Option<Option<BoundTcpListener>>,
   http3: Option<Option<BoundHttp3Listener>>,
   admin: Option<Option<BoundAdminListener>>,
+  admin_h3: Option<Option<admin_h3::BoundAdminHttp3Listener>>,
   streams: Option<Vec<BoundStreamListener>>,
   turns: Option<Vec<BoundTurnListener>>,
   refresh_http3_config: bool,
+  refresh_admin_h3_config: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1081,6 +1085,7 @@ impl ListenerSupervisor {
       http: None,
       http3: None,
       admin: None,
+      admin_h3: None,
       streams: Vec::new(),
       turns: Vec::new(),
       error_tx,
@@ -1175,6 +1180,31 @@ impl ListenerSupervisor {
       None
     };
 
+    let (admin_h3, refresh_admin_h3_config) =
+      if snapshot.config.admin.enabled && snapshot.config.admin.http3.enabled {
+        let bind = admin_h3::configured_bind(snapshot);
+        if self.admin_h3.as_ref().is_some_and(|task| {
+          task.matches(
+            bind,
+            &snapshot.config.quic.socket,
+            &snapshot.config.quic.downstream.transport,
+          )
+        }) {
+          (None, true)
+        } else {
+          (
+            Some(Some(admin_h3::BoundAdminHttp3Listener::bind(
+              bind, snapshot,
+            )?)),
+            false,
+          )
+        }
+      } else if self.admin_h3.is_some() {
+        (Some(None), false)
+      } else {
+        (None, false)
+      };
+
     let desired_streams = snapshot
       .config
       .stream_listeners
@@ -1255,9 +1285,11 @@ impl ListenerSupervisor {
       http,
       http3,
       admin,
+      admin_h3,
       streams,
       turns,
       refresh_http3_config,
+      refresh_admin_h3_config,
     })
   }
 
@@ -1338,6 +1370,30 @@ impl ListenerSupervisor {
       }
       None => {}
     }
+    match pending.admin_h3 {
+      Some(Some(admin_h3)) => {
+        let admin_h3 = admin_h3.start(
+          state.clone(),
+          self.error_tx.clone(),
+          self.admin_operations.clone(),
+          drain_timeouts.graceful,
+        );
+        if let Some(old) = self.admin_h3.replace(admin_h3) {
+          old.drain_background();
+        }
+      }
+      Some(None) => {
+        if let Some(old) = self.admin_h3.take() {
+          old.drain_background();
+        }
+      }
+      None if pending.refresh_admin_h3_config => {
+        if let (Some(task), Some(config)) = (&self.admin_h3, &snapshot.admin_quic_server_config) {
+          task.refresh_server_config(config.clone());
+        }
+      }
+      None => {}
+    }
     if let Some(streams) = pending.streams {
       let old = std::mem::take(&mut self.streams);
       for task in old {
@@ -1375,6 +1431,9 @@ impl ListenerSupervisor {
     if let Some(task) = self.admin.take() {
       tasks.push(task.drain());
     }
+    if let Some(task) = self.admin_h3.take() {
+      tasks.push(task.drain());
+    }
     for task in std::mem::take(&mut self.streams) {
       tasks.push(task.drain());
     }
@@ -1401,6 +1460,9 @@ impl Drop for ListenerSupervisor {
       task.drain_background();
     }
     if let Some(task) = self.admin.take() {
+      task.drain_background();
+    }
+    if let Some(task) = self.admin_h3.take() {
       task.drain_background();
     }
     for task in std::mem::take(&mut self.streams) {

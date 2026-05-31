@@ -4,15 +4,22 @@ mod runtime;
 mod stream;
 mod types;
 mod websocket;
+mod webtransport;
 
 pub(super) use endpoint::{
   AdminOperationRouteContext, accepted_operation_response, admin_operations_response,
+  can_access_operation,
 };
+pub(super) use id::parse_operation_id;
 pub(super) use runtime::{
   AdminOperationContext, AdminOperationError, AdminOperationRuntime, AdminOperationWorkResult,
   value_result,
 };
-pub(super) use types::AdminOperationKind;
+pub(super) use stream::encode_ndjson_event;
+pub(super) use types::{AdminOperationEvent, AdminOperationKind};
+pub(super) use webtransport::{
+  enqueue_webtransport_drain_operation, enqueue_webtransport_snapshot_operation,
+};
 
 use ::http::{Response, StatusCode};
 

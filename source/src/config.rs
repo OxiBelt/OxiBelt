@@ -1683,6 +1683,9 @@ impl Config {
       if self.admin.audit.enabled {
         bail!("admin.audit.enabled requires admin.enabled = true");
       }
+      if self.admin.http3.enabled {
+        bail!("admin.http3.enabled requires admin.enabled = true");
+      }
       return Ok(());
     }
     if self.admin.audit.enabled {
@@ -1724,6 +1727,9 @@ impl Config {
     }
     if self.admin.operations.result_max_bytes == 0 {
       bail!("admin.operations.result_max_bytes must be greater than 0");
+    }
+    if self.admin.operations.webtransport_max_sessions == 0 {
+      bail!("admin.operations.webtransport_max_sessions must be greater than 0");
     }
     if !self.ipm.enabled {
       if self.admin.bearer_token_env.trim().is_empty() {
@@ -1768,6 +1774,14 @@ impl Config {
       bail!(
         "admin.tls.enabled must be true for non-loopback admin.bind when admin.transport requires TLS"
       );
+    }
+    if self.admin.http3.enabled {
+      if !self.admin.tls.enabled {
+        bail!("admin.http3.enabled requires admin.tls.enabled = true");
+      }
+      if self.admin.tls.max_version != TlsVersion::Tls13 {
+        bail!("admin.http3.enabled requires admin.tls.max_version to allow tls1.3");
+      }
     }
     self.admin.tls.validate()
   }
@@ -2614,6 +2628,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "bind",
       "cache_purge_signing",
       "enabled",
+      "http3",
       "operations",
       "plaintext_allowed_source_cidrs",
       "rbac",
@@ -2630,8 +2645,11 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_stored",
       "result_max_bytes",
       "retention_seconds",
+      "webtransport",
+      "webtransport_max_sessions",
       "websocket",
     ][..],
+    "admin.http3" => &["bind", "enabled"][..],
     "admin.cache_purge_signing" => &[
       "enabled",
       "key_env",
@@ -4455,6 +4473,8 @@ pub struct AdminConfig {
   #[serde(default)]
   pub operations: AdminOperationsConfig,
   #[serde(default)]
+  pub http3: AdminHttp3Config,
+  #[serde(default)]
   pub tls: AdminTlsConfig,
   #[serde(default, rename = "rbac")]
   legacy_rbac: Option<LegacyAdminRbacConfig>,
@@ -4474,6 +4494,7 @@ impl Default for AdminConfig {
       cache_purge_signing: AdminCachePurgeSigningConfig::default(),
       audit: AdminAuditConfig::default(),
       operations: AdminOperationsConfig::default(),
+      http3: AdminHttp3Config::default(),
       tls: AdminTlsConfig::default(),
       legacy_rbac: None,
       legacy_token_store: None,
@@ -4519,6 +4540,10 @@ pub struct AdminOperationsConfig {
   pub result_max_bytes: usize,
   #[serde(default = "default_true")]
   pub websocket: bool,
+  #[serde(default = "default_true")]
+  pub webtransport: bool,
+  #[serde(default = "default_admin_operations_webtransport_max_sessions")]
+  pub webtransport_max_sessions: usize,
 }
 
 impl Default for AdminOperationsConfig {
@@ -4532,8 +4557,18 @@ impl Default for AdminOperationsConfig {
       event_buffer: default_admin_operations_event_buffer(),
       result_max_bytes: default_admin_operations_result_max_bytes(),
       websocket: true,
+      webtransport: true,
+      webtransport_max_sessions: default_admin_operations_webtransport_max_sessions(),
     }
   }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct AdminHttp3Config {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub bind: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -5734,6 +5769,10 @@ fn default_admin_operations_event_buffer() -> usize {
 
 fn default_admin_operations_result_max_bytes() -> usize {
   16 * 1024 * 1024
+}
+
+fn default_admin_operations_webtransport_max_sessions() -> usize {
+  64
 }
 
 fn default_shared_state_namespace() -> String {

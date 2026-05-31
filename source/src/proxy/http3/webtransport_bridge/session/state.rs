@@ -10,10 +10,12 @@ use crate::proxy::stream_waf::StreamWafRequestContext;
 use crate::runtime_introspection::RuntimeCounterGuard;
 use crate::state::AppSnapshot;
 use crate::telemetry::{TelemetryStart, TraceContext};
+use crate::webtransport_admin::WebTransportSessionGuard;
 
 pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSession {
   pub(super) upstream: Arc<web_transport_quinn::Session>,
   pub(super) connect_stream: H3RequestStream,
+  pub(super) admin_guard: WebTransportSessionGuard,
   pub(super) _connection_permits: WebTransportSessionPermits,
   pub(super) _introspection_guard: RuntimeCounterGuard,
   pub(super) stream_waf_state: Option<Arc<AppSnapshot>>,
@@ -33,6 +35,15 @@ impl ActiveWebTransportSession {
     &self,
   ) -> std::time::Duration {
     self.timeouts.webtransport_idle
+  }
+
+  pub(in crate::proxy::http3::webtransport_bridge) fn record_activity(&mut self) {
+    self.last_activity = Instant::now();
+    self
+      .metrics_state
+      .webtransport_admin
+      .record_activity(self.admin_guard.id());
+    self.reap_finished_tasks();
   }
 
   pub(in crate::proxy::http3::webtransport_bridge) fn reap_finished_tasks(&mut self) {

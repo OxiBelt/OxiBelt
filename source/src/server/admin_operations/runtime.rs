@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tokio::sync::{Mutex, Semaphore, broadcast};
+use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tracing::{info, warn};
 
 use crate::config::AdminOperationsConfig;
@@ -27,6 +28,7 @@ pub(in crate::server) struct AdminOperationRuntime {
 struct AdminOperationRuntimeInner {
   config: AdminOperationsConfig,
   running: Arc<Semaphore>,
+  webtransport_sessions: Arc<Semaphore>,
   store: Mutex<AdminOperationStore>,
 }
 
@@ -64,6 +66,7 @@ impl AdminOperationRuntime {
     Self {
       inner: Arc::new(AdminOperationRuntimeInner {
         running: Arc::new(Semaphore::new(config.max_running)),
+        webtransport_sessions: Arc::new(Semaphore::new(config.webtransport_max_sessions)),
         config,
         store: Mutex::new(AdminOperationStore {
           operations: HashMap::new(),
@@ -75,6 +78,23 @@ impl AdminOperationRuntime {
 
   pub(in crate::server) fn config(&self) -> &AdminOperationsConfig {
     &self.inner.config
+  }
+
+  pub(in crate::server) fn try_acquire_webtransport_session(
+    &self,
+  ) -> Result<OwnedSemaphorePermit, AdminOperationError> {
+    if !self.inner.config.webtransport {
+      return Err(AdminOperationError::Disabled);
+    }
+    self
+      .inner
+      .webtransport_sessions
+      .clone()
+      .try_acquire_owned()
+      .map_err(|error| match error {
+        TryAcquireError::NoPermits => AdminOperationError::QueueFull,
+        TryAcquireError::Closed => AdminOperationError::Disabled,
+      })
   }
 
   pub(in crate::server) async fn enqueue<F, Fut>(
@@ -361,6 +381,10 @@ impl AdminOperationRuntime {
 }
 
 impl AdminOperationContext {
+  pub(in crate::server) fn id(&self) -> &str {
+    &self.id
+  }
+
   pub(in crate::server) fn is_cancelled(&self) -> bool {
     self.cancel.load(Ordering::SeqCst)
   }

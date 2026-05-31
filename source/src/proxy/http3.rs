@@ -594,7 +594,7 @@ async fn handle_h3_request(
   Ok(status)
 }
 
-async fn respond_to_h3_request<S>(
+pub(crate) async fn respond_to_h3_request<S>(
   mut stream: h3::server::RequestStream<S, Bytes>,
   response: Response<ProxyBody>,
 ) -> anyhow::Result<()>

@@ -5,10 +5,15 @@ use serde_json::Value;
 #[serde(rename_all = "snake_case")]
 pub(in crate::server) enum AdminOperationKind {
   CacheWarm,
+  #[serde(rename = "oxirule_replay")]
   OxiRuleReplay,
   DiagnosticsPreflight,
   SupportBundle,
   DynamicPolicyImport,
+  #[serde(rename = "webtransport_snapshot")]
+  WebTransportSnapshot,
+  #[serde(rename = "webtransport_drain")]
+  WebTransportDrain,
 }
 
 impl AdminOperationKind {
@@ -19,6 +24,8 @@ impl AdminOperationKind {
       Self::DiagnosticsPreflight => "diagnostics_preflight",
       Self::SupportBundle => "support_bundle",
       Self::DynamicPolicyImport => "dynamic_policy_import",
+      Self::WebTransportSnapshot => "webtransport_snapshot",
+      Self::WebTransportDrain => "webtransport_drain",
     }
   }
 }
@@ -81,4 +88,42 @@ pub(in crate::server) struct AdminOperationEvent {
   pub event: String,
   pub created_at_unix_ms: u64,
   pub operation: AdminOperationSnapshot,
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+
+  use super::*;
+
+  #[test]
+  fn operation_kind_wire_names_match_contract() {
+    let cases = [
+      (AdminOperationKind::CacheWarm, "cache_warm"),
+      (AdminOperationKind::OxiRuleReplay, "oxirule_replay"),
+      (
+        AdminOperationKind::DiagnosticsPreflight,
+        "diagnostics_preflight",
+      ),
+      (AdminOperationKind::SupportBundle, "support_bundle"),
+      (
+        AdminOperationKind::DynamicPolicyImport,
+        "dynamic_policy_import",
+      ),
+      (
+        AdminOperationKind::WebTransportSnapshot,
+        "webtransport_snapshot",
+      ),
+      (AdminOperationKind::WebTransportDrain, "webtransport_drain"),
+    ];
+
+    for (kind, wire_name) in cases {
+      assert_eq!(kind.as_str(), wire_name);
+      assert_eq!(serde_json::to_value(kind).unwrap(), json!(wire_name));
+      assert_eq!(
+        serde_json::from_value::<AdminOperationKind>(json!(wire_name)).unwrap(),
+        kind
+      );
+    }
+  }
 }

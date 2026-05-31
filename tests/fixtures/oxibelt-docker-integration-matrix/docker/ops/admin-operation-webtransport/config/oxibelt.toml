@@ -1,0 +1,104 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[runtime.drain]
+graceful_timeout_ms = 5000
+long_connection_close_delay_ms = 5000
+shutdown_delay_ms = 0
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = false
+http2 = false
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = ["upstream-ca.pem"]
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h3"
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "auto"
+
+[admin.operations]
+webtransport = true
+webtransport_max_sessions = 8
+
+[admin.http3]
+enabled = true
+
+[admin.tls]
+enabled = true
+require_sni = true
+reject_unknown_sni = true
+
+[[admin.tls.certificates]]
+server_names = ["proxy"]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+default = true
+
+[limits]
+max_connections = 64
+max_connections_per_ip = 64
+max_webtransport_sessions = 64
+max_webtransport_sessions_per_ip = 64
+max_webtransport_sessions_per_connection = 4
+connection_limit_identity = "proxy_protocol"
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "webtransport-upstream"
+origin = "https://mock-webtransport:18446/wt-origin"
+max_http_version = "h3"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+idle_timeout_ms = 75000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "webtransport-route"
+hosts = ["example.test"]
+path_prefix = "/wt"
+upstream = "webtransport-upstream"
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = "auto"
+reuse_port = true

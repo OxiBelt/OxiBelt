@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use h3::quic::{Connection as H3QuicConnection, StreamId};
@@ -30,8 +30,8 @@ mod session;
 use connection::{DownstreamWebTransportConnection, spawn_downstream_reader_tasks};
 use session::{
   ActiveWebTransportSession, WebTransportSessionIndex, accept_webtransport_session,
-  close_all_sessions, close_expired_sessions, close_session, handle_downstream_bidi_stream,
-  handle_downstream_datagram, handle_downstream_uni_stream,
+  close_all_sessions, close_expired_sessions, close_session, close_session_with_code,
+  handle_downstream_bidi_stream, handle_downstream_datagram, handle_downstream_uni_stream,
 };
 
 type H3OpenStreams = <crate::quic::h3::Connection as H3QuicConnection<Bytes>>::OpenStreams;
@@ -52,6 +52,7 @@ enum DispatcherEvent {
   DownstreamDatagram(StreamId, Bytes),
   DownstreamRequest(Request<()>, Box<H3RequestStream>),
   Activity(SessionId),
+  AdminClose(SessionId, u32, String),
   Blocked(SessionId, WafStreamClose),
   SessionEnded(SessionId),
   ConnectionClosed,
@@ -179,9 +180,17 @@ pub(super) async fn serve_webtransport_connection(
           }
           Some(DispatcherEvent::Activity(session_id)) => {
             if let Some(session) = sessions.get_mut(&session_id) {
-              session.last_activity = Instant::now();
-              session.reap_finished_tasks();
+              session.record_activity();
             }
+          }
+          Some(DispatcherEvent::AdminClose(session_id, close_code, reason)) => {
+            close_session_with_code(
+              &mut sessions,
+              &mut session_index,
+              session_id,
+              close_code,
+              reason.as_bytes(),
+            );
           }
           Some(DispatcherEvent::Blocked(session_id, close)) => {
             close_session(

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -11,7 +11,6 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use std::time::Duration;
-use tokio::sync::watch;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
@@ -39,8 +38,12 @@ use crate::telemetry::TelemetryRuntime;
 use crate::tls;
 use crate::turn::TurnPoolState;
 use crate::waf::WafEngine;
+use crate::webtransport_admin::WebTransportAdminRegistry;
 
+pub(crate) mod handle;
 mod http1_upgrade;
+
+pub use handle::AppHandle;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type UpstreamBody = BoxBody<Bytes, BoxError>;
@@ -120,88 +123,6 @@ impl UpstreamClientPools {
 }
 
 #[derive(Clone)]
-pub struct AppHandle {
-  current: Arc<RwLock<AppGeneration>>,
-}
-
-struct AppGeneration {
-  snapshot: Arc<AppSnapshot>,
-  data_plane_drain: watch::Sender<bool>,
-}
-
-pub(crate) struct AppConnectionSnapshot {
-  pub(crate) snapshot: Arc<AppSnapshot>,
-  pub(crate) data_plane_drain: watch::Receiver<bool>,
-}
-
-impl AppHandle {
-  pub fn new(snapshot: AppSnapshot) -> Self {
-    let (data_plane_drain, _) = watch::channel(false);
-    Self {
-      current: Arc::new(RwLock::new(AppGeneration {
-        snapshot: Arc::new(snapshot),
-        data_plane_drain,
-      })),
-    }
-  }
-
-  pub fn snapshot(&self) -> Arc<AppSnapshot> {
-    self
-      .current
-      .read()
-      .expect("app snapshot lock poisoned")
-      .snapshot
-      .clone()
-  }
-
-  pub(crate) fn connection_snapshot(&self) -> AppConnectionSnapshot {
-    let current = self.current.read().expect("app snapshot lock poisoned");
-    AppConnectionSnapshot {
-      snapshot: current.snapshot.clone(),
-      data_plane_drain: current.data_plane_drain.subscribe(),
-    }
-  }
-
-  pub fn replace(&self, snapshot: AppSnapshot) {
-    let (data_plane_drain, _) = watch::channel(false);
-    let previous = {
-      let mut current = self.current.write().expect("app snapshot lock poisoned");
-      std::mem::replace(
-        &mut *current,
-        AppGeneration {
-          snapshot: Arc::new(snapshot),
-          data_plane_drain,
-        },
-      )
-    };
-    let _ = previous.data_plane_drain.send(true);
-  }
-
-  pub(crate) fn replace_if_current(
-    &self,
-    expected: &Arc<AppSnapshot>,
-    snapshot: AppSnapshot,
-  ) -> bool {
-    let (data_plane_drain, _) = watch::channel(false);
-    let previous = {
-      let mut current = self.current.write().expect("app snapshot lock poisoned");
-      if !Arc::ptr_eq(&current.snapshot, expected) {
-        return false;
-      }
-      std::mem::replace(
-        &mut *current,
-        AppGeneration {
-          snapshot: Arc::new(snapshot),
-          data_plane_drain,
-        },
-      )
-    };
-    let _ = previous.data_plane_drain.send(true);
-    true
-  }
-}
-
-#[derive(Clone)]
 pub struct AppSnapshot {
   pub config: Config,
   pub route_table: RouteTable,
@@ -224,12 +145,14 @@ pub struct AppSnapshot {
   pub dynamic_policy: DynamicPolicyRuntime,
   pub external_auth: ExternalAuthRuntime,
   pub runtime_introspection: Arc<RuntimeIntrospectionState>,
+  pub webtransport_admin: Arc<WebTransportAdminRegistry>,
   pub lifecycle: Arc<LifecycleState>,
   pub admin_audit: AdminAuditRuntime,
   pub shared_state: Option<Arc<SharedState>>,
   pub tls_server_config: Arc<rustls::ServerConfig>,
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
+  pub admin_quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub(crate) tls_resumption: tls::TlsResumptionState,
   pub waf: WafEngine,
   pub mitigation: MitigationSink,
@@ -319,6 +242,9 @@ impl AppSnapshot {
     let runtime_introspection = previous
       .map(|snapshot| snapshot.runtime_introspection.clone())
       .unwrap_or_default();
+    let webtransport_admin = previous
+      .map(|snapshot| snapshot.webtransport_admin.clone())
+      .unwrap_or_default();
     let mitigation = MitigationSink::new(&config, metrics.clone())
       .await
       .context("failed to build mitigation sink")?;
@@ -351,6 +277,19 @@ impl AppSnapshot {
           Some(&tls_resumption),
         )
         .context("failed to build QUIC TLS config")?,
+      )
+    } else {
+      None
+    };
+    let admin_quic_server_config = if config.admin.enabled && config.admin.http3.enabled {
+      Some(
+        tls::build_admin_quic_server_config_with_resumption(
+          &config.admin.tls,
+          &config.quic,
+          config.source_paths.cert_dir.as_deref(),
+          Some(&tls_resumption),
+        )
+        .context("failed to build admin QUIC TLS config")?,
       )
     } else {
       None
@@ -399,12 +338,14 @@ impl AppSnapshot {
       dynamic_policy,
       external_auth,
       runtime_introspection,
+      webtransport_admin,
       lifecycle,
       admin_audit,
       shared_state,
       tls_server_config,
       admin_tls_server_config,
       quic_server_config,
+      admin_quic_server_config,
       tls_resumption,
       waf,
       mitigation,
@@ -473,12 +414,14 @@ impl AppSnapshot {
       dynamic_policy: previous.dynamic_policy.clone(),
       external_auth,
       runtime_introspection: previous.runtime_introspection.clone(),
+      webtransport_admin: previous.webtransport_admin.clone(),
       lifecycle: previous.lifecycle.clone(),
       admin_audit: previous.admin_audit.clone(),
       shared_state: previous.shared_state.clone(),
       tls_server_config: previous.tls_server_config.clone(),
       admin_tls_server_config: previous.admin_tls_server_config.clone(),
       quic_server_config: previous.quic_server_config.clone(),
+      admin_quic_server_config: previous.admin_quic_server_config.clone(),
       tls_resumption: previous.tls_resumption.clone(),
       waf: previous.waf.clone(),
       mitigation: previous.mitigation.clone(),

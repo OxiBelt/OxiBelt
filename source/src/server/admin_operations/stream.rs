@@ -97,13 +97,15 @@ pub(super) fn event_stream_response(
 fn encode_event(event: &AdminOperationEvent, format: AdminOperationEventFormat) -> Bytes {
   match format {
     AdminOperationEventFormat::Sse => encode_sse_event(event),
-    AdminOperationEventFormat::Ndjson => {
-      let mut bytes =
-        serde_json::to_vec(event).unwrap_or_else(|_| br#"{"event":"operation.error"}"#.to_vec());
-      bytes.push(b'\n');
-      Bytes::from(bytes)
-    }
+    AdminOperationEventFormat::Ndjson => encode_ndjson_event(event),
   }
+}
+
+pub(in crate::server) fn encode_ndjson_event(event: &AdminOperationEvent) -> Bytes {
+  let mut bytes =
+    serde_json::to_vec(event).unwrap_or_else(|_| br#"{"event":"operation.error"}"#.to_vec());
+  bytes.push(b'\n');
+  Bytes::from(bytes)
 }
 
 fn encode_sse_event(event: &AdminOperationEvent) -> Bytes {

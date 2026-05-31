@@ -478,6 +478,31 @@
         }
       }
     },
+    "/admin/v1/operations/{id}/events/wt": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AdminOperationId"
+        }
+      ],
+      "x-oxibelt-webtransport": {
+        "method": "CONNECT",
+        "transport": "http3",
+        "summary": "Subscribe to operation events with WebTransport over the opt-in Admin HTTP/3 listener.",
+        "requires": [
+          "admin.http3.enabled",
+          "admin.operations.webtransport"
+        ],
+        "authorization": "Own operation or admin:ReadOperation on operation/<kind>/<id> or operation/*.",
+        "server_initiated_unidirectional_stream": {
+          "content_type": "application/x-ndjson",
+          "history_replay": true,
+          "heartbeat": true,
+          "terminal_event_closes_stream": true
+        },
+        "datagrams": false,
+        "client_streams": false
+      }
+    },
     "/admin/v1/config/status": {
       "get": {
         "tags": [
@@ -4240,7 +4265,9 @@
           "oxirule_replay",
           "diagnostics_preflight",
           "support_bundle",
-          "dynamic_policy_import"
+          "dynamic_policy_import",
+          "webtransport_snapshot",
+          "webtransport_drain"
         ]
       },
       "AdminOperationState": {
@@ -4361,6 +4388,114 @@
           "request": {
             "type": "object",
             "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebTransportSessionScope": {
+        "type": "object",
+        "properties": {
+          "session_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^wts_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "default": []
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "ip"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebTransportSnapshotRequest": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/WebTransportSessionScope"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebTransportDrainRequest": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/WebTransportSessionScope"
+          },
+          "grace_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "close_code": {
+            "type": "integer",
+            "default": 0
+          },
+          "reason": {
+            "type": "string",
+            "default": "admin webtransport drain"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebTransportSessionSnapshot": {
+        "type": "object",
+        "required": [
+          "id",
+          "route",
+          "upstream",
+          "peer_ip",
+          "client_ip",
+          "started_at_unix_ms",
+          "last_activity_unix_ms",
+          "draining"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^wts_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "route": {
+            "type": "string"
+          },
+          "upstream": {
+            "type": "string"
+          },
+          "peer_ip": {
+            "type": "string",
+            "format": "ip"
+          },
+          "client_ip": {
+            "type": "string",
+            "format": "ip"
+          },
+          "started_at_unix_ms": {
+            "type": "integer"
+          },
+          "last_activity_unix_ms": {
+            "type": "integer"
+          },
+          "draining": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -4533,6 +4668,8 @@
               "cache_admin",
               "upstream_pool_runtime_control",
               "admin_operations",
+              "admin_http3",
+              "admin_operation_webtransport",
               "admin_audit"
             ],
             "properties": {
@@ -4561,6 +4698,12 @@
                 "type": "boolean"
               },
               "admin_operations": {
+                "type": "boolean"
+              },
+              "admin_http3": {
+                "type": "boolean"
+              },
+              "admin_operation_webtransport": {
                 "type": "boolean"
               },
               "admin_audit": {

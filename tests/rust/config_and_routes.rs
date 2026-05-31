@@ -3371,6 +3371,144 @@ default = true
 }
 
 #[test]
+fn admin_http3_and_operation_webtransport_config_validates() {
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+    }
+    let temp_dir = common::TempDir::new("admin-http3");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-http3");
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+transport = "tls"
+
+[admin.http3]
+enabled = true
+bind = "127.0.0.1:9443"
+
+[admin.operations]
+webtransport = false
+webtransport_max_sessions = 12
+
+[admin.tls]
+enabled = true
+min_version = "tls1.3"
+max_version = "tls1.3"
+
+[[admin.tls.certificates]]
+server_names = ["admin.example.com"]
+cert_chain = "{}"
+private_key = "{}"
+default = true
+"#,
+        common::minimal_config_toml(&cert_path, &key_path),
+        cert_path.display(),
+        key_path.display()
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert!(config.admin.http3.enabled);
+    assert_eq!(
+        config.admin.http3.bind,
+        Some("127.0.0.1:9443".parse().expect("bind should parse"))
+    );
+    assert!(!config.admin.operations.webtransport);
+    assert_eq!(config.admin.operations.webtransport_max_sessions, 12);
+}
+
+#[test]
+fn admin_http3_requires_admin_and_tls13() {
+    let temp_dir = common::TempDir::new("admin-http3-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "admin-http3-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[admin.http3]
+enabled = true
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("admin HTTP/3 should require admin.enabled");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.http3.enabled requires admin.enabled = true"),
+        "unexpected error: {error}"
+    );
+
+    unsafe {
+        std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+    }
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+transport = "auto"
+
+[admin.http3]
+enabled = true
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("admin HTTP/3 should require admin TLS");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.http3.enabled requires admin.tls.enabled = true"),
+        "unexpected error: {error}"
+    );
+
+    let raw = format!(
+        r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+transport = "auto"
+
+[admin.http3]
+enabled = true
+
+[admin.tls]
+enabled = true
+min_version = "tls1.2"
+max_version = "tls1.2"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("admin HTTP/3 should require TLS 1.3 support");
+    assert!(
+        error
+            .to_string()
+            .contains("admin.http3.enabled requires admin.tls.max_version to allow tls1.3"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn ipm_config_parses_principals_credentials_policies_and_bindings() {
     unsafe {
         std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");

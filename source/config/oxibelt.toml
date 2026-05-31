@@ -386,6 +386,12 @@ retention_seconds = 3600
 event_buffer = 256
 result_max_bytes = 16777216
 websocket = true
+webtransport = true
+webtransport_max_sessions = 64
+
+[admin.http3]
+enabled = false
+# bind = "127.0.0.1:9092" # UDP; defaults to admin.bind when omitted
 
 [admin.cache_purge_signing]
 enabled = false

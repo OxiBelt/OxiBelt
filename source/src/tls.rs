@@ -15,9 +15,11 @@ use crate::config::{
   UpstreamEchConfig, UpstreamEchMode, UpstreamTlsResumptionConfig, canonicalize_existing_file,
 };
 
+mod admin_quic;
 mod client_auth;
 mod resumption;
 
+pub use admin_quic::build_admin_quic_server_config_with_resumption;
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
 use resumption::{
   TlsServerResumptionKey, certificate_identity, client_auth_identity, configure_server_resumption,

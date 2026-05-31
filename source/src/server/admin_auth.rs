@@ -1,7 +1,5 @@
 use std::net::SocketAddr;
 
-use hyper::body::Incoming;
-
 use crate::admin_audit::AdminAuditHandle;
 use crate::config::Config;
 use crate::ipm::{IpmActor, IpmDecision, IpmRequestContext, IpmRuntime, resource};
@@ -67,8 +65,8 @@ impl<'a> AdminAuthorization<'a> {
   }
 }
 
-pub(super) async fn admin_actor(
-  request: &hyper::Request<Incoming>,
+pub(super) async fn admin_actor<B>(
+  request: &::http::Request<B>,
   config: &Config,
   ipm: &IpmRuntime,
 ) -> Option<AdminActor> {

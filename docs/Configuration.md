@@ -1034,6 +1034,14 @@ Cache poisoning defenses should be explicit in production configs. Keep `Authori
 
 `[admin]` exposes operations APIs such as cache purge and upstream-pool runtime control. `transport = "auto"` accepts plaintext only from `plaintext_allowed_source_cidrs`; other clients must use TLS. Use `plaintext_allowlist` for Docker bridge or same-host management networks that intentionally use plaintext, and add those CIDRs explicitly. `transport = "plaintext"` is rejected unless `allow_insecure_plaintext = true`. When admin TLS is enabled, `server_names` are matched case-insensitively and may use a leftmost wildcard such as `*.ops.example.com`; missing or unknown SNI is rejected by default. Admin requests always require `Authorization: Bearer <token>`, even when mTLS is enabled.
 
+`[admin.http3]` enables an opt-in UDP HTTP/3 Admin listener for Admin WebTransport operation event subscriptions. It requires `admin.enabled = true`, `admin.tls.enabled = true`, and Admin TLS settings that allow TLS 1.3. When `bind` is omitted, OxiBelt listens on the same IP and port as `admin.bind` over UDP; the existing HTTP/1 Admin listener remains unchanged.
+
+```toml
+[admin.http3]
+enabled = false
+# bind = "127.0.0.1:9092"
+```
+
 `[admin.operations]` controls the process-local long-running operation runtime:
 
 ```toml
@@ -1046,6 +1054,8 @@ retention_seconds = 3600
 event_buffer = 256
 result_max_bytes = 16777216
 websocket = true
+webtransport = true
+webtransport_max_sessions = 64
 ```
 
 The operation store is in-memory and lost on restart. Existing Admin endpoints
@@ -1056,12 +1066,39 @@ lowercase UUIDs. `GET /admin/v1/operations/{id}/events` streams SSE by default
 or NDJSON with `?format=ndjson`; this follows MCP Streamable HTTP-style event
 streaming semantics, but OxiBelt is not a full MCP server. WebSocket event
 subscriptions are limited to `/admin/v1/operations/{id}/events/ws`.
+When both `[admin.http3]` and `admin.operations.webtransport` are enabled,
+HTTP/3 clients may use WebTransport `CONNECT
+/admin/v1/operations/{id}/events/wt`; OxiBelt accepts the session and writes
+newline-delimited JSON operation events on one server-initiated unidirectional
+stream. The server replays history, emits heartbeats, and closes the stream
+after a terminal operation event.
+
+The `webtransport_snapshot` and `webtransport_drain` operation kinds inspect
+and control active data-plane WebTransport sessions tracked in the local
+process. Sessions are exposed with opaque `wts_<uuid>` IDs and metadata for
+route, upstream, peer IP, client IP, start time, and last activity. Drain
+requests accept:
+
+```json
+{
+  "scope": { "session_ids": [], "route": null, "upstream": null, "client_ip": null },
+  "grace_ms": null,
+  "close_code": 0,
+  "reason": "admin webtransport drain"
+}
+```
+
+If `grace_ms` is omitted, OxiBelt uses
+`runtime.drain.long_connection_close_delay_ms`. A drain rule rejects new
+matching sessions with `503`, then closes remaining matching sessions after
+the grace period. Cancelling the drain operation removes the rule but cannot
+restore sessions that have already closed.
 
 `[admin.audit]` is an optional PostgreSQL-backed unified Admin audit log. It requires `enabled = true`, `backend = "<shared_state-postgres-backend>"`, and `[shared_state].enabled = true`; the backend must be a PostgreSQL `[[shared_state.backends]]` entry. OxiBelt creates `oxibelt_admin_audit` and writes every Admin request, including reads and rejected requests, through a bounded asynchronous queue. If the queue is full or the database writer cannot keep up, OxiBelt rejects new Admin requests with `503` before running the handler; writer failures are retried with bounded backoff. OxiBelt also emits the structured `oxibelt.admin.audit` tracing event. `GET /admin/v1/audit` requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin` and supports `limit`, `outcome`, `actor`, `principal`, `service`, `operation`, `request_id`, `path_prefix`, and `before_id` filters. Request payloads are not stored raw; the audit summary records body byte count, top-level JSON keys, and a small allowlist of safe scalar fields.
 
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
-Actions use `service:Action` syntax. Initial services are `admin`, `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. Admin API metadata reads require `admin:ReadMetadata` on resources such as `oxibelt:<namespace>:admin:metadata/openapi`, and the unified Admin audit log requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin`. Protected control-plane configuration changes require `admin:UpdateConfig` on `oxibelt:<namespace>:admin:config` for `[admin]` changes and `ipm:UpdateConfig` on `oxibelt:<namespace>:ipm:config` for `[ipm]` changes, in addition to the base config operation permission. IPM administration uses `ipm:GetStatus`, `ipm:ListPrincipals`, `ipm:GetPrincipal`, `ipm:CreatePrincipal`, `ipm:UpdatePrincipal`, `ipm:DeletePrincipal`, `ipm:ListCredentials`, `ipm:GetCredential`, `ipm:CreateCredential`, `ipm:UpdateCredential`, `ipm:RotateCredential`, `ipm:RevokeCredential`, `ipm:DeleteCredential`, `ipm:ListPolicies`, `ipm:GetPolicy`, `ipm:CreatePolicy`, `ipm:UpdatePolicy`, `ipm:DeletePolicy`, `ipm:ListBindings`, `ipm:CreateBinding`, `ipm:DeleteBinding`, `ipm:ReadAudit`, `ipm:SimulateSelf`, `ipm:SimulatePrincipal`, and `ipm:SimulatePolicy`. Dynamic policy automation uses `dynamic-policy:GetStatus`, `dynamic-policy:List`, `dynamic-policy:Get`, `dynamic-policy:Create`, `dynamic-policy:Apply`, `dynamic-policy:Update`, `dynamic-policy:Delete`, `dynamic-policy:Export`, `dynamic-policy:Import`, and `dynamic-policy:ReadAudit`. Upstream-pool automation uses `upstream-pool:GetStatus`, `upstream-pool:List`, `upstream-pool:Get`, `upstream-pool:AddServer`, `upstream-pool:UpdateServer`, and `upstream-pool:RemoveServer`. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:PutOxiRulePack`, `waf:DeleteOxiRulePack`, `waf:ListOxiRulePacks`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:admin:config`, `oxibelt:oxibelt:admin:metadata/openapi`, `oxibelt:oxibelt:admin:audit/admin`, `oxibelt:oxibelt:ipm:config`, `oxibelt:oxibelt:dynamic-policy:status/current`, `oxibelt:oxibelt:upstream-pool:status/current`, `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:oxirule-rulepack/rulepacks/admin.oxirule-rulepack.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
+Actions use `service:Action` syntax. Initial services are `admin`, `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. Admin API metadata reads require `admin:ReadMetadata` on resources such as `oxibelt:<namespace>:admin:metadata/openapi`, and the unified Admin audit log requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin`. Protected control-plane configuration changes require `admin:UpdateConfig` on `oxibelt:<namespace>:admin:config` for `[admin]` changes and `ipm:UpdateConfig` on `oxibelt:<namespace>:ipm:config` for `[ipm]` changes, in addition to the base config operation permission. IPM administration uses `ipm:GetStatus`, `ipm:ListPrincipals`, `ipm:GetPrincipal`, `ipm:CreatePrincipal`, `ipm:UpdatePrincipal`, `ipm:DeletePrincipal`, `ipm:ListCredentials`, `ipm:GetCredential`, `ipm:CreateCredential`, `ipm:UpdateCredential`, `ipm:RotateCredential`, `ipm:RevokeCredential`, `ipm:DeleteCredential`, `ipm:ListPolicies`, `ipm:GetPolicy`, `ipm:CreatePolicy`, `ipm:UpdatePolicy`, `ipm:DeletePolicy`, `ipm:ListBindings`, `ipm:CreateBinding`, `ipm:DeleteBinding`, `ipm:ReadAudit`, `ipm:SimulateSelf`, `ipm:SimulatePrincipal`, and `ipm:SimulatePolicy`. Dynamic policy automation uses `dynamic-policy:GetStatus`, `dynamic-policy:List`, `dynamic-policy:Get`, `dynamic-policy:Create`, `dynamic-policy:Apply`, `dynamic-policy:Update`, `dynamic-policy:Delete`, `dynamic-policy:Export`, `dynamic-policy:Import`, and `dynamic-policy:ReadAudit`. Upstream-pool automation uses `upstream-pool:GetStatus`, `upstream-pool:List`, `upstream-pool:Get`, `upstream-pool:AddServer`, `upstream-pool:UpdateServer`, and `upstream-pool:RemoveServer`. Runtime WebTransport operations use `runtime:GetWebTransportSessions` and `runtime:DrainWebTransportSessions`. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:PutOxiRulePack`, `waf:DeleteOxiRulePack`, `waf:ListOxiRulePacks`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:admin:config`, `oxibelt:oxibelt:admin:metadata/openapi`, `oxibelt:oxibelt:admin:audit/admin`, `oxibelt:oxibelt:ipm:config`, `oxibelt:oxibelt:dynamic-policy:status/current`, `oxibelt:oxibelt:upstream-pool:status/current`, `oxibelt:oxibelt:runtime:webtransport/session/*`, `oxibelt:oxibelt:runtime:webtransport/session/<id>`, `oxibelt:oxibelt:runtime:webtransport/route/<route>`, `oxibelt:oxibelt:runtime:webtransport/upstream/<upstream>`, `oxibelt:oxibelt:runtime:webtransport/client-ip/<ip>`, `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:oxirule-rulepack/rulepacks/admin.oxirule-rulepack.toml`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
 
 Resource-specific Admin endpoints use typed resource names and may require
 multiple resources for one request. Cache operations use

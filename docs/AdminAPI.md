@@ -30,6 +30,10 @@ operation hint to expose. Permission denials may include the checked IPM
 header name and expected ETag. Generation ETags are concurrency diagnostics,
 not bearer secrets.
 
+An opt-in `[admin.http3]` UDP listener is available for Admin WebTransport
+operation event subscriptions. It requires Admin TLS with TLS 1.3 support and
+does not replace the existing HTTP/1 Admin API contract.
+
 Operationally large list endpoints opt in to pagination when `limit`, `cursor`,
 `sort`, `order`, or `filter[...]` is present. The first implementation covers
 `/admin/v1/dynamic-policies` and the IPM principal, credential, policy, and
@@ -56,7 +60,8 @@ Operation IDs are canonical UUIDv4 values prefixed with `op_`, for example
 `op_550e8400-e29b-41d4-a716-446655440000`.
 
 Supported async kinds are `cache_warm`, `oxirule_replay`,
-`diagnostics_preflight`, `support_bundle`, and `dynamic_policy_import`.
+`diagnostics_preflight`, `support_bundle`, `dynamic_policy_import`,
+`webtransport_snapshot`, and `webtransport_drain`.
 Explicit creation uses `POST /admin/v1/operations` with `{ "kind": "...",
 "request": { ... } }`; the request payload is the same shape as the matching
 source endpoint. `dynamic_policy_import` still enforces `If-Match` at execution
@@ -70,12 +75,31 @@ Operations can be listed, polled, cancelled, and watched:
 - `DELETE /admin/v1/operations/{id}`
 - `GET /admin/v1/operations/{id}/events`
 - `GET /admin/v1/operations/{id}/events/ws`
+- `CONNECT /admin/v1/operations/{id}/events/wt` over Admin HTTP/3 WebTransport
 
 `GET /events` streams `text/event-stream` by default, or newline-delimited JSON
 with `?format=ndjson`. The stream envelope is intentionally compatible with
 MCP Streamable HTTP-style event consumption, but OxiBelt does not expose a full
 MCP JSON-RPC server. `GET /events/ws` upgrades to WebSocket and sends the same
 event envelope as JSON text frames.
+
+`CONNECT /events/wt` accepts an HTTP/3 WebTransport session when
+`[admin.http3]` and `admin.operations.webtransport` are enabled. OxiBelt
+opens one server-initiated unidirectional stream, writes NDJSON operation
+events, replays stored history, emits heartbeat records, and closes the stream
+after a terminal operation event. Datagrams and client-created WebTransport
+streams are ignored in v1.
+
+The creator may read their own operation over any event transport. Other
+callers need `admin:ReadOperation` on `operation/<kind>/<id>` or
+`operation/*`.
+
+`webtransport_snapshot` returns active data-plane WebTransport sessions from
+the process-local registry. `webtransport_drain` installs a drain rule for a
+scope, rejects new matching sessions with `503`, waits for `grace_ms` or
+`runtime.drain.long_connection_close_delay_ms`, and closes remaining matching
+sessions. Cancelling the drain removes the rule but does not restore sessions
+already closed.
 
 ## Resource Scoping
 
@@ -89,6 +113,9 @@ Resource-specific Admin/IPM resources include:
 
 - cache: `policy/<policy>` and `host/<normalized-host>`
 - operations: `operation/*` or `operation/<kind>/<id>`
+- runtime WebTransport: `webtransport/session/*`,
+  `webtransport/session/<id>`, `webtransport/route/<route>`,
+  `webtransport/upstream/<upstream>`, or `webtransport/client-ip/<ip>`
 - dynamic policy: `status/current`, `source/<source>/name/<name>`, and
   `route/<route>`
 - upstream pool: `status/current`, `<pool>`, and `<pool>/server/<server_id>`
