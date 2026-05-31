@@ -52,6 +52,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         .arg(output_dir);
     for name in [
         "OXIBELT_PERF_H2_MIN_NGINX_RATIO",
+        "OXIBELT_PERF_H3_MIN_NGINX_RATIO",
         "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO",
         "OXIBELT_PERF_STATIC_16K_H1C_MIN_NGINX_RATIO",
         "OXIBELT_PERF_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO",
@@ -237,6 +238,8 @@ fn write_reverse_proxy_h2_with_p99(
         vec![
             load_row("oxibelt-h2", "h2", oxibelt_rps, 1.0, oxibelt_p99),
             load_row("nginx-h2", "h2", nginx_rps, 1.0, nginx_p99),
+            load_row("oxibelt-h3", "h3", 100.0, 1.0, 4.0),
+            load_row("nginx-h3", "h3", 100.0, 1.0, 4.0),
         ],
     );
 }
@@ -553,7 +556,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 7);
+    assert_eq!(report["schema_version"], 8);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -746,6 +749,8 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
         vec![
             load_row("oxibelt-h2", "h2", 83.0, 1.0, 4.0),
             load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
+            load_row("oxibelt-h3", "h3", 83.0, 1.0, 4.0),
+            load_row("nginx-h3", "h3", 100.0, 1.0, 4.0),
         ],
     );
     write_results_array(
@@ -787,7 +792,13 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
         report["regression_gates"]["thresholds"]["h2_min_nginx_ratio"]
             .as_f64()
             .expect("H2 threshold should be emitted"),
-        0.75,
+        0.80,
+    );
+    assert_close(
+        report["regression_gates"]["thresholds"]["h3_min_nginx_ratio"]
+            .as_f64()
+            .expect("H3 threshold should be emitted"),
+        0.80,
     );
     assert_close(
         report["regression_gates"]["thresholds"]["static_16k_h1c_min_nginx_ratio"]
@@ -834,6 +845,8 @@ fn separates_amd64_target_cpus_and_reports_isa_deltas() {
             vec![
                 with_target_cpu(load_row("oxibelt-h2", "h2", oxibelt_rps, 1.0, 4.0), target),
                 with_target_cpu(load_row("nginx-h2", "h2", 100.0, 1.0, 4.0), target),
+                with_target_cpu(load_row("oxibelt-h3", "h3", 90.0, 1.0, 4.0), target),
+                with_target_cpu(load_row("nginx-h3", "h3", 100.0, 1.0, 4.0), target),
             ],
         );
     }
@@ -911,7 +924,7 @@ fn separates_amd64_target_cpus_and_reports_isa_deltas() {
 }
 
 #[test]
-fn h2_ratio_gate_becomes_advisory_when_baseline_gap_is_stable() {
+fn h2_ratio_gate_blocks_when_baseline_gap_is_stable() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -938,37 +951,30 @@ fn h2_ratio_gate_becomes_advisory_when_baseline_gap_is_stable() {
         ],
     );
 
-    assert_eq!(report["regression_gates"]["status"], "pass");
-    assert_eq!(
-        report["regression_gates"]["violations"]
-            .as_array()
-            .expect("violations should be an array")
-            .len(),
-        0
-    );
-    let advisory = find_regression_advisory(&report, "h2_min_nginx_ratio", "h2");
-    assert_eq!(advisory["disposition"], "advisory");
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(violation["disposition"], "blocking");
     assert_close(
-        advisory["observed"]
+        violation["observed"]
             .as_f64()
-            .expect("advisory ratio should exist"),
+            .expect("violation ratio should exist"),
         135.0 / 205.0,
     );
     assert!(
-        advisory["message"]
+        violation["message"]
             .as_str()
             .expect("message should be present")
-            .contains("baseline-stable ratio gap")
+            .contains("target ratio gate requires meeting the configured threshold")
     );
 
     let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
         .expect("markdown report should be readable");
-    assert!(markdown.contains("### Advisories"));
+    assert!(markdown.contains("### Blocking violations"));
     assert!(markdown.contains("`h2_min_nginx_ratio`"));
 }
 
 #[test]
-fn h2_ratio_gate_allows_current_ci_shape_when_relative_ratios_hold() {
+fn h2_ratio_gate_blocks_current_ci_shape_until_target_ratio_recovers() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -995,27 +1001,18 @@ fn h2_ratio_gate_allows_current_ci_shape_when_relative_ratios_hold() {
         ],
     );
 
-    assert_eq!(report["regression_gates"]["status"], "pass");
-    assert_eq!(
-        report["regression_gates"]["violations"]
-            .as_array()
-            .expect("violations should be an array")
-            .len(),
-        0
-    );
-    let advisory = find_regression_advisory(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
     assert_close(
-        advisory["observed"]
+        violation["observed"]
             .as_f64()
-            .expect("advisory ratio should exist"),
+            .expect("violation ratio should exist"),
         12617.6875 / 18083.0625,
     );
-    let message = advisory["message"]
+    let message = violation["message"]
         .as_str()
         .expect("message should be present");
-    assert!(message.contains("baseline-stable ratio gap"));
-    assert!(message.contains("p99 ratio"));
-    assert!(message.contains("OxiBelt p99 +7.2%"));
+    assert!(message.contains("target ratio gate requires meeting the configured threshold"));
 }
 
 #[test]
@@ -1053,7 +1050,7 @@ fn h2_ratio_gate_blocks_when_baseline_passes_and_current_misses() {
         violation["message"]
             .as_str()
             .expect("message should be present")
-            .contains("did not qualify for advisory pass")
+            .contains("target ratio gate requires meeting the configured threshold")
     );
 }
 
@@ -1092,7 +1089,7 @@ fn h2_ratio_gate_blocks_when_ratio_regresses_against_low_baseline() {
         violation["message"]
             .as_str()
             .expect("message should be present")
-            .contains("current RPS ratio 0.6000 (-10.0%)")
+            .contains("target ratio gate requires meeting the configured threshold")
     );
 }
 
@@ -1131,7 +1128,7 @@ fn h2_ratio_gate_blocks_when_relative_p99_regresses_against_low_baseline() {
         violation["message"]
             .as_str()
             .expect("message should be present")
-            .contains("p99 ratio 1.0000 -> 1.1000 (+10.0%)")
+            .contains("target ratio gate requires meeting the configured threshold")
     );
 }
 
@@ -1253,7 +1250,7 @@ fn threshold_misses_remain_blocking_when_baseline_report_is_unreadable() {
         violation["message"]
             .as_str()
             .expect("message should be present")
-            .contains("baseline-aware advisory unavailable")
+            .contains("target ratio gate requires meeting the configured threshold")
     );
     let warnings = report["warnings"]
         .as_array()

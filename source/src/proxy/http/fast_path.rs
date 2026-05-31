@@ -127,6 +127,7 @@ impl PlainProxyFastPath {
     let (
       mut upstream,
       mut upstream_index,
+      upstream_version,
       retry_policy,
       pool_retry_context,
       mut sticky_cookie,
@@ -135,6 +136,7 @@ impl PlainProxyFastPath {
       (
         selected.upstream,
         selected.upstream_index,
+        selected.upstream_version,
         EffectiveRetryPolicy::disabled_direct(),
         None,
         None,
@@ -162,6 +164,13 @@ impl PlainProxyFastPath {
       };
       let upstream = selected.upstream;
       let upstream_index = selected.upstream_index;
+      let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
+        select_upstream_http_version(
+          state.config.proxy.auto_upgrade.enabled,
+          state.config.proxy.auto_upgrade.max_http_version,
+          upstream.max_http_version,
+        )
+      });
       let pool_retry_context = if let Some(pool_name) = selected.pool_name() {
         access_log.set_upstream_pool(pool_name.to_string());
         Some((request.uri().clone(), pool_cookie_header.cloned()))
@@ -184,19 +193,13 @@ impl PlainProxyFastPath {
       (
         upstream,
         upstream_index,
+        upstream_version,
         retry_policy,
         pool_retry_context,
         sticky_cookie,
         pool_selection,
       )
     };
-    let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
-      select_upstream_http_version(
-        state.config.proxy.auto_upgrade.enabled,
-        state.config.proxy.auto_upgrade.max_http_version,
-        upstream.max_http_version,
-      )
-    });
     if upstream_version == HttpVersion::H3
       || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
     {

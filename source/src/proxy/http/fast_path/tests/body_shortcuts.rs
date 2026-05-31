@@ -92,6 +92,22 @@ async fn actual_end_stream_request_body_shortcut_does_not_poll_body() {
 }
 
 #[tokio::test]
+async fn h2_h3_actual_end_stream_request_body_shortcut_does_not_poll_body() {
+  for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
+    let request = http::Request::builder()
+      .version(version)
+      .body(EndStreamPanicBody)
+      .expect("request should build");
+    let body = fast_path_request_body(request.into_body(), 1024, Duration::from_millis(100), false)
+      .collect()
+      .await
+      .expect("end-stream h2/h3 fast-path body should collect");
+
+    assert!(body.to_bytes().is_empty());
+  }
+}
+
+#[tokio::test]
 async fn h2_zero_size_hint_is_not_treated_as_empty_body() {
   let h2_content_length_zero = http::Request::builder()
     .version(http::Version::HTTP_2)

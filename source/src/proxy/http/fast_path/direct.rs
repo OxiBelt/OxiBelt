@@ -10,6 +10,7 @@ use crate::waf::RequestWafDecision;
 pub(super) struct DirectFastPathSelection<'a> {
   pub(super) upstream: &'a UpstreamConfig,
   pub(super) upstream_index: usize,
+  pub(super) upstream_version: HttpVersion,
 }
 
 pub(super) fn direct_http_retry_enabled(
@@ -60,5 +61,6 @@ pub(super) fn select_direct_fast_path_upstream<'a>(
   Some(DirectFastPathSelection {
     upstream,
     upstream_index,
+    upstream_version,
   })
 }

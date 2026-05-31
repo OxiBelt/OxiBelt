@@ -10,7 +10,8 @@ use serde_json::Value;
 
 const MAX_RESULTS_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_WARNINGS: usize = 200;
-const DEFAULT_H2_MIN_NGINX_RATIO: f64 = 0.75;
+const DEFAULT_H2_MIN_NGINX_RATIO: f64 = 0.80;
+const DEFAULT_H3_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO: f64 = 0.80;
 const DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO: f64 = 0.90;
 const DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO: f64 = 0.90;
@@ -301,6 +302,7 @@ struct ReportSummary {
 #[derive(Clone, Copy, Serialize)]
 struct RegressionGateThresholds {
     h2_min_nginx_ratio: f64,
+    h3_min_nginx_ratio: f64,
     static_16k_h1c_min_caddy_ratio: f64,
     static_16k_h1c_min_nginx_ratio: f64,
     remote_signer_handshake_min_local_ratio: f64,
@@ -373,6 +375,7 @@ struct ComparatorRatioGate<'a> {
     scenario: &'a str,
     comparator: Comparator,
     threshold: f64,
+    allow_baseline_advisory: bool,
 }
 
 struct P99RatioGate<'a> {
@@ -734,7 +737,7 @@ fn aggregate(
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 7,
+        schema_version: 8,
         profile,
         primary_target_cpu,
         expected_target_cpus,
@@ -1929,6 +1932,12 @@ fn regression_gate_thresholds(warnings: &mut WarningBag) -> RegressionGateThresh
             ThresholdKind::NonNegative,
             warnings,
         ),
+        h3_min_nginx_ratio: env_threshold(
+            "OXIBELT_PERF_H3_MIN_NGINX_RATIO",
+            DEFAULT_H3_MIN_NGINX_RATIO,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
         static_16k_h1c_min_caddy_ratio: env_threshold(
             "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO",
             DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
@@ -2020,6 +2029,21 @@ fn build_regression_gate_report(
             scenario: "h2",
             comparator: Comparator::Nginx,
             threshold: thresholds.h2_min_nginx_ratio,
+            allow_baseline_advisory: false,
+        },
+        &mut findings,
+    );
+    collect_comparator_ratio_regression_gate(
+        aggregates,
+        baseline,
+        primary_target_cpu,
+        ComparatorRatioGate {
+            gate: "h3_min_nginx_ratio",
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h3",
+            comparator: Comparator::Nginx,
+            threshold: thresholds.h3_min_nginx_ratio,
+            allow_baseline_advisory: false,
         },
         &mut findings,
     );
@@ -2040,6 +2064,7 @@ fn build_regression_gate_report(
             scenario: "static-16k-h1c",
             comparator: Comparator::Nginx,
             threshold: thresholds.static_16k_h1c_min_nginx_ratio,
+            allow_baseline_advisory: true,
         },
         &mut findings,
     );
@@ -2278,14 +2303,20 @@ fn collect_comparator_ratio_regression_gate(
 
     let ratio = oxibelt_rps / comparator_rps;
     if ratio < gate.threshold {
-        let decision = classify_throughput_ratio_threshold_miss(
-            aggregates,
-            baseline,
-            gate.scenario,
-            gate.comparator,
-            gate.scenario,
-            gate.threshold,
-        );
+        let decision = if gate.allow_baseline_advisory {
+            classify_throughput_ratio_threshold_miss(
+                aggregates,
+                baseline,
+                gate.scenario,
+                gate.comparator,
+                gate.scenario,
+                gate.threshold,
+            )
+        } else {
+            GateDisposition::Blocking {
+                reason: "target ratio gate requires meeting the configured threshold; baseline-stable advisory pass is disabled for this gate".to_owned(),
+            }
+        };
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
@@ -3983,6 +4014,130 @@ mod tests {
         ));
         fs::create_dir_all(&path).expect("temporary aggregate directory should be creatable");
         path
+    }
+
+    fn aggregate_stat(
+        comparator: Comparator,
+        scenario: &str,
+        group: ScenarioGroup,
+        median_rps: f64,
+        median_p99_ms: f64,
+    ) -> AggregateStats {
+        AggregateStats {
+            amd64_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+            label: format!("{}-{scenario}", comparator.as_str()),
+            comparator: comparator.as_str().to_owned(),
+            scenario: scenario.to_owned(),
+            group: group.as_str().to_owned(),
+            result_type: Some("load".to_owned()),
+            protocol_or_mode: Some(scenario.to_owned()),
+            sample_count: 1,
+            median_rps: Some(median_rps),
+            min_rps: Some(median_rps),
+            max_rps: Some(median_rps),
+            p25_rps: Some(median_rps),
+            p75_rps: Some(median_rps),
+            median_p50_ms: Some(median_p99_ms / 2.0),
+            median_p90_ms: Some(median_p99_ms * 0.9),
+            median_p95_ms: Some(median_p99_ms * 0.95),
+            median_p99_ms: Some(median_p99_ms),
+            total_errors: 0,
+            skipped_count: 0,
+            skip_reasons: Vec::new(),
+            source_files: vec!["synthetic/results.json".to_owned()],
+        }
+    }
+
+    fn insert_primary_aggregate(
+        aggregates: &mut PrimaryAggregateMap,
+        comparator: Comparator,
+        scenario: &str,
+        rps: f64,
+        p99: f64,
+    ) {
+        aggregates.insert(
+            (comparator, scenario.to_owned()),
+            aggregate_stat(comparator, scenario, ScenarioGroup::ReverseProxy, rps, p99),
+        );
+    }
+
+    fn baseline_context_for(aggregates: &PrimaryAggregateMap) -> BaselineGateContext {
+        BaselineGateContext {
+            report: "synthetic-baseline.json".to_owned(),
+            aggregates: aggregates
+                .iter()
+                .map(|((comparator, scenario), aggregate)| {
+                    (
+                        (comparator.as_str().to_owned(), scenario.clone()),
+                        aggregate.clone(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn comparison_report_schema_and_target_thresholds_are_current() {
+        let input_dir = temp_dir("schema-thresholds");
+        let report = aggregate(
+            &input_dir,
+            Some("smoke".to_owned()),
+            None,
+            None,
+            Vec::new(),
+            DEFAULT_AMD64_TARGET_CPU.to_owned(),
+            None,
+        );
+
+        assert_eq!(report.schema_version, 8);
+        assert_eq!(report.regression_gates.thresholds.h2_min_nginx_ratio, 0.80);
+        assert_eq!(report.regression_gates.thresholds.h3_min_nginx_ratio, 0.80);
+
+        fs::remove_dir_all(input_dir).ok();
+    }
+
+    #[test]
+    fn h2_and_h3_target_ratio_misses_are_blocking_even_with_stable_baseline() {
+        let mut aggregates = PrimaryAggregateMap::new();
+        insert_primary_aggregate(&mut aggregates, Comparator::Oxibelt, "h2", 79.0, 1.0);
+        insert_primary_aggregate(&mut aggregates, Comparator::Nginx, "h2", 100.0, 1.0);
+        insert_primary_aggregate(&mut aggregates, Comparator::Oxibelt, "h3", 79.0, 1.0);
+        insert_primary_aggregate(&mut aggregates, Comparator::Nginx, "h3", 100.0, 1.0);
+        let baseline = baseline_context_for(&aggregates);
+
+        let gates = build_regression_gate_report(
+            &aggregates,
+            RegressionGateThresholds {
+                h2_min_nginx_ratio: 0.80,
+                h3_min_nginx_ratio: 0.80,
+                static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
+                static_16k_h1c_min_nginx_ratio: DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO,
+                remote_signer_handshake_min_local_ratio:
+                    DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
+                waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
+                crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+                waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
+            },
+            Some(&baseline),
+            DEFAULT_AMD64_TARGET_CPU,
+        );
+
+        for gate in ["h2_min_nginx_ratio", "h3_min_nginx_ratio"] {
+            assert!(
+                gates
+                    .violations
+                    .iter()
+                    .any(|violation| violation.gate == gate && violation.disposition == "blocking"),
+                "{gate} should be a blocking violation"
+            );
+            assert!(
+                !gates
+                    .advisories
+                    .iter()
+                    .any(|advisory| advisory.gate == gate),
+                "{gate} should not be downgraded to an advisory"
+            );
+        }
     }
 
     #[test]
