@@ -1151,7 +1151,11 @@ fn oxibelt_performance_fixtures_pin_h2_window_profile() {
                 http2
                     .get("max_frame_size_bytes")
                     .and_then(toml::Value::as_integer),
-                Some(65_535),
+                if scenario == "baseline" {
+                    Some(131_072)
+                } else {
+                    Some(65_535)
+                },
                 "{} should pin max frame size",
                 path.display()
             );

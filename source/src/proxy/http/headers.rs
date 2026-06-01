@@ -12,6 +12,13 @@ use http::uri::Authority;
 use crate::config::ForwardedHeaderMode;
 use crate::routes::{normalize_host, normalize_host_cow};
 
+const CLOSE_HEADER: HeaderName = HeaderName::from_static("close");
+const KEEP_ALIVE_HEADER: HeaderName = HeaderName::from_static("keep-alive");
+const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
+const X_FORWARDED_PORT: HeaderName = HeaderName::from_static("x-forwarded-port");
+const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+
 pub(crate) fn extract_host<B>(request: &Request<B>) -> Option<Cow<'_, str>> {
   if let Some(authority) = request.uri().authority() {
     return Some(normalize_host_cow(authority.host()));
@@ -83,34 +90,30 @@ pub(crate) fn add_forwarded_headers(
   port: u16,
   mode: ForwardedHeaderMode,
 ) {
-  remove_inbound_forwarded_headers(headers, mode);
+  remove_inbound_forwarded_headers(headers);
   let forwarded_ip = forwarded_client_addr.ip();
   match mode {
     ForwardedHeaderMode::Overwrite => {
-      headers.insert(
-        HeaderName::from_static("x-forwarded-for"),
-        ip_header_value(forwarded_ip),
-      );
+      headers.insert(X_FORWARDED_FOR, ip_header_value(forwarded_ip));
     }
     ForwardedHeaderMode::Append => {
       let forwarded_for = forwarded_ip.to_string();
-      append_csv_header(headers, "x-forwarded-for", &forwarded_for);
+      append_csv_header(headers, X_FORWARDED_FOR, &forwarded_for);
     }
   }
 
-  headers.insert(
-    HeaderName::from_static("x-forwarded-proto"),
-    forwarded_proto_header_value(scheme),
-  );
+  headers.insert(X_FORWARDED_PROTO, forwarded_proto_header_value(scheme));
 
-  if let Ok(value) = HeaderValue::from_str(host) {
-    headers.insert(HeaderName::from_static("x-forwarded-host"), value);
+  match HeaderValue::from_str(host) {
+    Ok(value) => {
+      headers.insert(X_FORWARDED_HOST, value);
+    }
+    Err(_) => {
+      headers.remove(X_FORWARDED_HOST);
+    }
   }
 
-  headers.insert(
-    HeaderName::from_static("x-forwarded-port"),
-    port_header_value(port),
-  );
+  headers.insert(X_FORWARDED_PORT, port_header_value(port));
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -167,26 +170,8 @@ fn default_port_for_optional_scheme(scheme: &str) -> Option<u16> {
   }
 }
 
-fn remove_inbound_forwarded_headers(headers: &mut HeaderMap, mode: ForwardedHeaderMode) {
-  if !has_inbound_forwarded_headers(headers, mode) {
-    return;
-  }
-
+fn remove_inbound_forwarded_headers(headers: &mut HeaderMap) {
   headers.remove(FORWARDED);
-  if mode == ForwardedHeaderMode::Overwrite {
-    headers.remove(HeaderName::from_static("x-forwarded-for"));
-  }
-  headers.remove(HeaderName::from_static("x-forwarded-host"));
-  headers.remove(HeaderName::from_static("x-forwarded-proto"));
-  headers.remove(HeaderName::from_static("x-forwarded-port"));
-}
-
-fn has_inbound_forwarded_headers(headers: &HeaderMap, mode: ForwardedHeaderMode) -> bool {
-  headers.contains_key(FORWARDED)
-    || (mode == ForwardedHeaderMode::Overwrite && headers.contains_key("x-forwarded-for"))
-    || headers.contains_key("x-forwarded-host")
-    || headers.contains_key("x-forwarded-proto")
-    || headers.contains_key("x-forwarded-port")
 }
 
 fn forwarded_proto_header_value(scheme: &str) -> HeaderValue {
@@ -234,8 +219,7 @@ fn write_u8_decimal(value: u8, output: &mut [u8]) -> usize {
   }
 }
 
-fn append_csv_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
-  let header_name = HeaderName::from_static(name);
+fn append_csv_header(headers: &mut HeaderMap, header_name: HeaderName, value: &str) {
   let next_value = match headers
     .get(&header_name)
     .and_then(|item| item.to_str().ok())
@@ -295,7 +279,7 @@ pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
       }
     }
     if remove_close_header {
-      headers.remove(HeaderName::from_static("close"));
+      headers.remove(CLOSE_HEADER);
     }
     if remove_te_header {
       headers.remove(TE);
@@ -303,7 +287,7 @@ pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
   }
 
   headers.remove(CONNECTION);
-  headers.remove(HeaderName::from_static("keep-alive"));
+  headers.remove(KEEP_ALIVE_HEADER);
   headers.remove(PROXY_AUTHENTICATE);
   headers.remove(PROXY_AUTHORIZATION);
   headers.remove(TRAILER);
@@ -322,7 +306,7 @@ pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
 
 fn has_hop_by_hop_headers(headers: &HeaderMap) -> bool {
   headers.contains_key(CONNECTION)
-    || headers.contains_key("keep-alive")
+    || headers.contains_key(KEEP_ALIVE_HEADER)
     || headers.contains_key(PROXY_AUTHENTICATE)
     || headers.contains_key(PROXY_AUTHORIZATION)
     || headers.contains_key(TRAILER)
@@ -555,6 +539,26 @@ mod tests {
     assert_eq!(headers["x-forwarded-host"], "example.test");
     assert_eq!(headers["x-forwarded-proto"], "https");
     assert_eq!(headers["x-forwarded-port"], "8443");
+  }
+
+  #[test]
+  fn forwarded_headers_drop_inbound_host_when_effective_host_is_invalid() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-forwarded-host", HeaderValue::from_static("evil.test"));
+
+    add_forwarded_headers(
+      &mut headers,
+      "203.0.113.10:5443".parse().unwrap(),
+      "bad\nhost",
+      "https",
+      443,
+      ForwardedHeaderMode::Overwrite,
+    );
+
+    assert!(!headers.contains_key("x-forwarded-host"));
+    assert_eq!(headers["x-forwarded-for"], "203.0.113.10");
+    assert_eq!(headers["x-forwarded-proto"], "https");
+    assert_eq!(headers["x-forwarded-port"], "443");
   }
 
   #[test]
