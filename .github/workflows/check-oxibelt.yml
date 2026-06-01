@@ -28,6 +28,15 @@ on:
         required: false
         default: false
         type: boolean
+      performance_profile_label:
+        description: Record host perf evidence for one exact reverse-proxy load label
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - oxibelt-h2
+          - oxibelt-h3
       aggressive_long_run:
         description: Run the scheduled aggressive long-run job after Docker performance
         required: false
@@ -426,6 +435,37 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-comparator-image/${{ matrix.image_tar }}
+          retention-days: 0
+
+  docker-performance-probe-image:
+    name: Docker performance probe image
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - test-riscv64-qemu
+      - fuzz-smoke
+    permissions:
+      contents: read
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
+
+      - name: Build performance probe Docker image artifact
+        run: |
+          tests/scripts/build-performance-probe-image-artifact.sh \
+            "linux/amd64" \
+            "${RUNNER_TEMP}/oxibelt-performance-probe-image"
+
+      - name: Upload performance probe Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-performance-probe-image
+          path: ${{ runner.temp }}/oxibelt-performance-probe-image/oxibelt-performance-probe.tar
           retention-days: 0
 
   docker-alpine-musl-image-other:
@@ -1031,6 +1071,7 @@ jobs:
       - remote-signer-dos-docker
       - browser-webdriver
       - docker-alpine-comparator-musl-image-amd64
+      - docker-performance-probe-image
     permissions:
       actions: read
       contents: read
@@ -1072,6 +1113,7 @@ jobs:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
       PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
       PERFORMANCE_H2_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_h2_profile || false }}
+      PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile_label || 'none' }}
       PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}
       OXIBELT_PERF_REGRESSION_GATE_MODE: warn
 
@@ -1125,6 +1167,12 @@ jobs:
           name: oxibelt-performance-caddy-x86-64-v3-image
           path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/caddy
 
+      - name: Download performance probe image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-performance-probe-image
+          path: ${{ runner.temp }}/oxibelt-performance-probe-image
+
       - name: Load AMD64 v2 OxiBelt Docker image
         if: steps.select-amd64-v2.outputs.supported == 'true'
         env:
@@ -1144,8 +1192,11 @@ jobs:
           docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/nginx/oxibelt-performance-nginx-x86-64-v3.tar"
           docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/caddy/oxibelt-performance-caddy-x86-64-v3.tar"
 
-      - name: Install Linux perf for H2 profiling
-        if: github.event_name == 'workflow_dispatch' && inputs.performance_h2_profile && inputs.performance_profile == 'smoke' && matrix.serving_type == 'reverse-proxy' && matrix.shard == 1
+      - name: Load performance probe Docker image
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-performance-probe-image/oxibelt-performance-probe.tar"
+
+      - name: Install Linux perf for performance profiling
+        if: github.event_name == 'workflow_dispatch' && inputs.performance_profile == 'smoke' && matrix.serving_type == 'reverse-proxy' && matrix.shard == 1 && (inputs.performance_h2_profile || inputs.performance_profile_label != 'none')
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic
@@ -1178,6 +1229,21 @@ jobs:
             echo "performance_iterations must be a positive integer; got '${PERFORMANCE_ITERATIONS}'" >&2
             exit 2
           fi
+          selected_profile_label="${PERFORMANCE_PROFILE_LABEL}"
+          if [[ -z "${selected_profile_label}" || "${selected_profile_label}" == "none" ]]; then
+            if [[ "${PERFORMANCE_H2_PROFILE}" == "true" ]]; then
+              selected_profile_label="oxibelt-h2"
+            else
+              selected_profile_label="none"
+            fi
+          fi
+          case "${selected_profile_label}" in
+            none|oxibelt-h2|oxibelt-h3) ;;
+            *)
+              echo "performance_profile_label must be none, oxibelt-h2, or oxibelt-h3; got '${selected_profile_label}'" >&2
+              exit 2
+              ;;
+          esac
 
           failed_iterations=()
           for target_cpu in x86-64-v2 x86-64-v3; do
@@ -1223,14 +1289,14 @@ jobs:
               echo "Running Docker performance profile ${PERFORMANCE_PROFILE} serving type ${PERFORMANCE_SERVING_TYPE} shard ${PERFORMANCE_SHARD}, target ${target_cpu}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
               status=0
               profile_env=()
-              if [[ "${PERFORMANCE_H2_PROFILE}" == "true" \
+              if [[ "${selected_profile_label}" != "none" \
                     && "${PERFORMANCE_PROFILE}" == "smoke" \
                     && "${PERFORMANCE_SERVING_TYPE}" == "reverse-proxy" \
                     && "${PERFORMANCE_SHARD}" == "1" \
                     && "${target_cpu}" == "x86-64-v3" \
                     && "${iteration}" == "1" ]]; then
                 profile_env=(
-                  OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2
+                  OXIBELT_PERF_PROFILE_LABEL="${selected_profile_label}"
                   OXIBELT_PERF_PROFILE_FREQUENCY=99
                   OXIBELT_PERF_PROFILE_CALL_GRAPH=dwarf,8192
                 )
@@ -1239,6 +1305,7 @@ jobs:
               OXIBELT_DOCKER_IMAGE="${image_tag}" \
               OXIBELT_NGINX_IMAGE="${nginx_image_tag}" \
               OXIBELT_CADDY_IMAGE="${caddy_image_tag}" \
+              OXIBELT_PERF_PROBE_IMAGE=oxibelt/perf-probe:ci \
               OXIBELT_NGINX_H3_MODE=required \
               OXIBELT_AMD64_TARGET_CPU="${target_cpu}" \
               OXIBELT_TEST_ARTIFACT_DIR="${target_artifact_dir}/run-${iteration}" \
@@ -1410,15 +1477,27 @@ jobs:
             exit 1
           fi
 
+          failed=0
+          missing_expected_count="$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          if (( missing_expected_count > 0 )); then
+            jq -r '.artifact_discovery.missing_expected_paths[]? | "::error title=Docker performance missing expected result::" + .' \
+              "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
+            echo "Docker performance is missing ${missing_expected_count} expected result path(s)" >&2
+            failed=1
+          fi
+
           gate_status="$(jq -r '.regression_gates.status // "unknown"' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
-          if [[ "${gate_status}" == "pass" ]]; then
+          if [[ "${gate_status}" == "pass" && "${failed}" == "0" ]]; then
             echo "Docker performance regression gates passed"
             exit 0
           fi
 
-          jq -r '.regression_gates.violations[]? | "::error title=Docker performance regression gate::" + .message' \
-            "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
-          echo "Docker performance regression gates failed with status '${gate_status}'" >&2
+          if [[ "${gate_status}" != "pass" ]]; then
+            jq -r '.regression_gates.violations[]? | "::error title=Docker performance regression gate::" + .message' \
+              "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
+            echo "Docker performance regression gates failed with status '${gate_status}'" >&2
+            failed=1
+          fi
           exit 1
 
   docker-aggressive-long-run:

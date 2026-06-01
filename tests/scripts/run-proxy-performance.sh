@@ -11,6 +11,7 @@ Environment:
   OXIBELT_NGINX_IMAGE              nginx comparator image (default: nginx:mainline-alpine)
   OXIBELT_NGINX_H3_MODE            auto, required, optional, or disabled (default: auto)
   OXIBELT_CADDY_IMAGE              Caddy comparator image (default: caddy:2-alpine)
+  OXIBELT_PERF_PROBE_IMAGE         prebuilt perf-probe image to reuse; built locally when unset
   OXIBELT_PERF_DURATION_SECONDS    load duration override
   OXIBELT_PERF_WARMUP_SECONDS      warmup duration override
   OXIBELT_PERF_CONCURRENCY         load concurrency override
@@ -119,11 +120,12 @@ resource_snapshots_jsonl="${work_dir}/resource-snapshots.jsonl"
 resource_drift_json="${work_dir}/resource-drift.json"
 network_name="oxibelt-perf-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
-perf_probe_image="oxibelt/perf-probe:${run_id}"
+perf_probe_image="${OXIBELT_PERF_PROBE_IMAGE:-oxibelt/perf-probe:${run_id}}"
 oxibelt_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/perf-proxy:${run_id}}"
 nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
 nginx_h3_mode_override="${OXIBELT_NGINX_H3_MODE:-auto}"
+remove_perf_probe_image=0
 remove_oxibelt_image=0
 active_proxy_container=""
 active_remote_signer_container=""
@@ -232,7 +234,9 @@ cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
   docker volume ls -q --filter "label=${test_label}" | xargs -r docker volume rm >/dev/null 2>&1 || true
-  docker rmi -f "${perf_probe_image}" >/dev/null 2>&1 || true
+  if [[ "${remove_perf_probe_image}" == "1" ]]; then
+    docker rmi -f "${perf_probe_image}" >/dev/null 2>&1 || true
+  fi
   if [[ "${remove_oxibelt_image}" == "1" ]]; then
     docker rmi -f "${oxibelt_image}" >/dev/null 2>&1 || true
   fi
@@ -327,6 +331,44 @@ copy_artifacts() {
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
     cp -R "${work_dir}/." "${OXIBELT_TEST_ARTIFACT_DIR}/" 2>/dev/null || true
   fi
+}
+
+retry_command() {
+  local attempts="$1"
+  shift
+  local delay=5
+  local attempt status
+
+  for attempt in $(seq 1 "${attempts}"); do
+    if "$@"; then
+      return 0
+    fi
+    status=$?
+    if [[ "${attempt}" == "${attempts}" ]]; then
+      return "${status}"
+    fi
+    printf 'Command failed with status %s; retrying in %ss (%s/%s): %s\n' \
+      "${status}" "${delay}" "${attempt}" "${attempts}" "$*" >&2
+    sleep "${delay}"
+    delay=$((delay * 2))
+  done
+}
+
+build_perf_probe_image() {
+  if [[ -n "${OXIBELT_PERF_PROBE_IMAGE:-}" ]]; then
+    return 0
+  fi
+
+  remove_perf_probe_image=1
+  for base_image in rust:1.95.0-trixie debian:trixie-slim; do
+    retry_command 3 docker pull "${base_image}" \
+      || fail_with_diagnostics "failed to pull performance probe base image ${base_image}"
+  done
+  retry_command 3 docker build \
+    -t "${perf_probe_image}" \
+    -f "${repo_root}/tests/docker/perf_probe/Dockerfile" \
+    "${repo_root}/tests/docker/perf_probe" >/dev/null \
+    || fail_with_diagnostics "failed to build performance probe image ${perf_probe_image}"
 }
 
 fail_with_diagnostics() {
@@ -1779,6 +1821,7 @@ cat >"${summary_md}" <<EOF
 - OxiBelt aggressive fixture: \`${oxibelt_aggressive_scenario}\`
 - OxiBelt handshake fixture: \`${oxibelt_handshake_scenario}\`
 - OxiBelt AMD64 target CPU: \`${amd64_target_cpu}\`
+- Perf probe image: \`${perf_probe_image}\`
 - Duration: \`${duration_seconds}s\`
 - Warmup: \`${warmup_seconds}s\`
 - Concurrency: \`${concurrency}\`
@@ -1790,10 +1833,7 @@ EOF
 
 docker network create "${network_name}" >/dev/null
 
-docker build \
-  -t "${perf_probe_image}" \
-  -f "${repo_root}/tests/docker/perf_probe/Dockerfile" \
-  "${repo_root}/tests/docker/perf_probe" >/dev/null
+build_perf_probe_image
 
 if has_comparator oxibelt && [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   remove_oxibelt_image=1

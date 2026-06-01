@@ -1658,6 +1658,51 @@ fn handshake_errors_are_not_covered_by_load_error_budget() {
 }
 
 #[test]
+fn performance_probe_image_override_skips_local_probe_build() {
+    let script = performance_script_text();
+
+    assert!(
+        script.contains("OXIBELT_PERF_PROBE_IMAGE         prebuilt perf-probe image to reuse; built locally when unset"),
+        "usage should document the reusable perf-probe image override"
+    );
+    assert!(
+        script.contains(
+            "perf_probe_image=\"${OXIBELT_PERF_PROBE_IMAGE:-oxibelt/perf-probe:${run_id}}\""
+        ),
+        "performance harness should prefer the prebuilt probe image when provided"
+    );
+    assert!(
+        script.contains("if [[ -n \"${OXIBELT_PERF_PROBE_IMAGE:-}\" ]]; then\n    return 0\n  fi"),
+        "performance harness should skip local probe builds when the override is set"
+    );
+    assert!(
+        script.contains("if [[ \"${remove_perf_probe_image}\" == \"1\" ]]; then")
+            && script.contains("docker rmi -f \"${perf_probe_image}\""),
+        "performance harness should not delete externally provided probe images"
+    );
+}
+
+#[test]
+fn local_performance_probe_build_retries_base_pulls_and_build() {
+    let script = performance_script_text();
+
+    assert!(
+        script.contains("for base_image in rust:1.95.0-trixie debian:trixie-slim; do")
+            && script.contains("retry_command 3 docker pull \"${base_image}\"")
+            && script.contains("retry_command 3 docker build"),
+        "local probe image builds should retry Docker Hub base-image pulls and the Docker build"
+    );
+    assert!(
+        script.contains(
+            "fail_with_diagnostics \"failed to pull performance probe base image ${base_image}\""
+        ) && script.contains(
+            "fail_with_diagnostics \"failed to build performance probe image ${perf_probe_image}\""
+        ),
+        "probe image build failures should copy normal performance diagnostics"
+    );
+}
+
+#[test]
 fn diagnostic_perf_profile_is_noop_without_matching_label() {
     let no_label = run_load_profile_harness("", "oxibelt-h2");
     assert!(

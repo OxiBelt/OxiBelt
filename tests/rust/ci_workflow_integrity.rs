@@ -56,6 +56,11 @@ fn comparator_build_script_text() -> String {
     .expect("performance comparator build script should be readable")
 }
 
+fn performance_probe_build_script_text() -> String {
+    fs::read_to_string(repo_root().join("tests/scripts/build-performance-probe-image-artifact.sh"))
+        .expect("performance probe build script should be readable")
+}
+
 fn workspace_members() -> Vec<String> {
     let manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
         .expect("root Cargo.toml should be readable");
@@ -304,6 +309,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "linux-target-builds",
         "docker-alpine-musl-image-amd64",
         "docker-alpine-comparator-musl-image-amd64",
+        "docker-performance-probe-image",
         "docker-alpine-musl-image-other",
         "docker-alpine-musl-image-riscv64",
         "remote-signer-dos-docker",
@@ -590,6 +596,46 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
 }
 
 #[test]
+fn docker_performance_probe_image_job_builds_reusable_artifact() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let probe_job = jobs
+        .get("docker-performance-probe-image")
+        .expect("workflow should define the performance probe image job");
+    let script = performance_probe_build_script_text();
+
+    assert_eq!(
+        probe_job.needs,
+        vec![
+            "test".to_owned(),
+            "test-riscv64-qemu".to_owned(),
+            "fuzz-smoke".to_owned()
+        ],
+        "performance probe image builds should follow the normal test gates"
+    );
+    assert!(
+        workflow.contains("name: Docker performance probe image"),
+        "probe image job should have a clear display name"
+    );
+    assert!(
+        workflow.contains("tests/scripts/build-performance-probe-image-artifact.sh")
+            && workflow.contains("name: oxibelt-performance-probe-image")
+            && workflow.contains("oxibelt-performance-probe.tar"),
+        "probe image job should build and upload a reusable tar artifact"
+    );
+    assert!(
+        script.contains("image_tag=\"oxibelt/perf-probe:ci\"")
+            && script.contains("image_tar=\"${output_dir%/}/oxibelt-performance-probe.tar\""),
+        "probe build script should produce a deterministic tag and tar name"
+    );
+    assert!(
+        script.contains("retry_command 3 docker pull --platform \"${platform}\"")
+            && script.contains("retry_command 3 docker buildx build"),
+        "probe build script should retry Docker Hub pulls and the BuildKit image build"
+    );
+}
+
+#[test]
 fn docker_performance_job_uses_sharded_repeated_sampling() {
     let workflow = workflow_text();
     let jobs = parse_jobs(&workflow);
@@ -608,6 +654,12 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "workflow_dispatch should expose the opt-in H2 profiling toggle"
     );
     assert!(
+        workflow.contains("performance_profile_label:")
+            && workflow.contains("- oxibelt-h2")
+            && workflow.contains("- oxibelt-h3"),
+        "workflow_dispatch should expose exact H2/H3 profiling labels"
+    );
+    assert!(
         workflow.contains("PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}"),
         "docker-performance should default to five iterations outside manual dispatch"
     );
@@ -616,15 +668,23 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should keep H2 profiling disabled outside explicit manual dispatch"
     );
     assert!(
-        workflow.contains("name: Install Linux perf for H2 profiling")
-            && workflow.contains("sudo sysctl kernel.perf_event_paranoid=-1"),
-        "manual H2 profiling should prepare host perf only for the opt-in diagnostic path"
+        workflow.contains("PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile_label || 'none' }}"),
+        "docker-performance should keep exact profiling labels disabled outside manual dispatch"
     );
     assert!(
-        performance_job.contains("OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2")
+        workflow.contains("name: Install Linux perf for performance profiling")
+            && workflow.contains("inputs.performance_profile_label != 'none'")
+            && workflow.contains("sudo sysctl kernel.perf_event_paranoid=-1"),
+        "manual profiling should prepare host perf only for the opt-in diagnostic path"
+    );
+    assert!(
+        performance_job.contains("selected_profile_label=\"${PERFORMANCE_PROFILE_LABEL}\"")
+            && performance_job.contains("selected_profile_label=\"oxibelt-h2\"")
+            && performance_job.contains("none|oxibelt-h2|oxibelt-h3")
+            && performance_job.contains("OXIBELT_PERF_PROFILE_LABEL=\"${selected_profile_label}\"")
             && performance_job.contains(r#"&& "${target_cpu}" == "x86-64-v3""#)
             && performance_job.contains(r#"&& "${iteration}" == "1""#),
-        "H2 profiling env should be scoped to the first x86-64-v3 oxibelt-h2 smoke sample"
+        "profiling env should be scoped to one exact first x86-64-v3 smoke sample"
     );
     assert!(
         workflow.contains("timeout-minutes: 360"),
@@ -673,6 +733,13 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
             .needs
             .contains(&"docker-alpine-comparator-musl-image-amd64".to_owned()),
         "docker-performance should wait for target-specific comparator images"
+    );
+    assert!(
+        jobs.get("docker-performance")
+            .expect("workflow should define docker-performance")
+            .needs
+            .contains(&"docker-performance-probe-image".to_owned()),
+        "docker-performance should wait for the reusable probe image"
     );
     let performance_needs = &jobs
         .get("docker-performance")
@@ -740,8 +807,14 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     assert!(
         performance_job.contains("OXIBELT_NGINX_IMAGE=\"${nginx_image_tag}\"")
             && performance_job.contains("OXIBELT_CADDY_IMAGE=\"${caddy_image_tag}\"")
+            && performance_job.contains("OXIBELT_PERF_PROBE_IMAGE=oxibelt/perf-probe:ci")
             && performance_job.contains("OXIBELT_NGINX_H3_MODE=required"),
-        "docker-performance should compare against target-specific comparator images and require nginx HTTP/3 in CI"
+        "docker-performance should compare against target-specific comparator images, reuse the probe image, and require nginx HTTP/3 in CI"
+    );
+    assert!(
+        performance_job.contains("name: Download performance probe image artifact")
+            && performance_job.contains("docker load --input \"${RUNNER_TEMP}/oxibelt-performance-probe-image/oxibelt-performance-probe.tar\""),
+        "docker-performance should download and load the prebuilt probe image before iterations"
     );
     assert!(
         workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),
@@ -862,6 +935,12 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         workflow.contains("gate_status=\"$(jq -r '.regression_gates.status // \"unknown\"'"),
         "summary job should read the regression gate status from the comparison JSON"
+    );
+    assert!(
+        workflow.contains("missing_expected_count=\"$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length'")
+            && workflow.contains("::error title=Docker performance missing expected result::")
+            && workflow.contains("Docker performance is missing ${missing_expected_count} expected result path(s)"),
+        "summary job should fail closed and emit errors for missing expected result paths"
     );
     assert!(
         workflow.contains(".artifact_discovery.unsupported_cpu.count // 0"),

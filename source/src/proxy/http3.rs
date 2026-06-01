@@ -707,7 +707,8 @@ struct H3KnownSmallBody {
 }
 
 async fn collect_h3_known_small_body(mut body: ProxyBody) -> anyhow::Result<H3KnownSmallBody> {
-  let mut chunks = Vec::new();
+  let mut first_chunk = None;
+  let mut buffered = BytesMut::new();
   let mut total = 0usize;
   let mut trailers = None;
 
@@ -729,7 +730,15 @@ async fn collect_h3_known_small_body(mut body: ProxyBody) -> anyhow::Result<H3Kn
             KNOWN_SMALL_BODY_MAX_BYTES
           );
         }
-        chunks.push(data);
+        if first_chunk.is_none() && buffered.is_empty() {
+          first_chunk = Some(data);
+        } else {
+          if let Some(first) = first_chunk.take() {
+            buffered.reserve(total);
+            buffered.extend_from_slice(&first);
+          }
+          buffered.extend_from_slice(&data);
+        }
       }
       Err(frame) => {
         if let Ok(frame_trailers) = frame.into_trailers() {
@@ -740,16 +749,12 @@ async fn collect_h3_known_small_body(mut body: ProxyBody) -> anyhow::Result<H3Kn
     }
   }
 
-  let data = match chunks.len() {
-    0 => Bytes::new(),
-    1 => chunks.pop().unwrap_or_default(),
-    _ => {
-      let mut bytes = BytesMut::with_capacity(total);
-      for chunk in chunks {
-        bytes.extend_from_slice(&chunk);
-      }
-      bytes.freeze()
-    }
+  let data = if let Some(chunk) = first_chunk {
+    chunk
+  } else if buffered.is_empty() {
+    Bytes::new()
+  } else {
+    buffered.freeze()
   };
 
   Ok(H3KnownSmallBody { data, trailers })
