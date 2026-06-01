@@ -10,6 +10,7 @@ use serde_json::Value;
 
 const MAX_RESULTS_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_WARNINGS: usize = 200;
+const DEFAULT_H1_KEEPALIVE_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_H2_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_H3_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO: f64 = 0.80;
@@ -301,6 +302,7 @@ struct ReportSummary {
 
 #[derive(Clone, Copy, Serialize)]
 struct RegressionGateThresholds {
+    h1_keepalive_min_nginx_ratio: f64,
     h2_min_nginx_ratio: f64,
     h3_min_nginx_ratio: f64,
     static_16k_h1c_min_caddy_ratio: f64,
@@ -737,7 +739,7 @@ fn aggregate(
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 8,
+        schema_version: 9,
         profile,
         primary_target_cpu,
         expected_target_cpus,
@@ -1926,6 +1928,12 @@ fn ratio_status(status: &str, ratio: Option<f64>, reason: impl Into<String>) -> 
 
 fn regression_gate_thresholds(warnings: &mut WarningBag) -> RegressionGateThresholds {
     RegressionGateThresholds {
+        h1_keepalive_min_nginx_ratio: env_threshold(
+            "OXIBELT_PERF_H1_KEEPALIVE_MIN_NGINX_RATIO",
+            DEFAULT_H1_KEEPALIVE_MIN_NGINX_RATIO,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
         h2_min_nginx_ratio: env_threshold(
             "OXIBELT_PERF_H2_MIN_NGINX_RATIO",
             DEFAULT_H2_MIN_NGINX_RATIO,
@@ -2019,6 +2027,20 @@ fn build_regression_gate_report(
         advisories: Vec::new(),
     };
 
+    collect_comparator_ratio_regression_gate(
+        aggregates,
+        baseline,
+        primary_target_cpu,
+        ComparatorRatioGate {
+            gate: "h1_keepalive_min_nginx_ratio",
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h1-keepalive",
+            comparator: Comparator::Nginx,
+            threshold: thresholds.h1_keepalive_min_nginx_ratio,
+            allow_baseline_advisory: false,
+        },
+        &mut findings,
+    );
     collect_comparator_ratio_regression_gate(
         aggregates,
         baseline,
@@ -4081,14 +4103,35 @@ mod tests {
             None,
         );
 
-        assert_eq!(report.schema_version, 8);
+        assert_eq!(report.schema_version, 9);
+        assert_eq!(
+            report
+                .regression_gates
+                .thresholds
+                .h1_keepalive_min_nginx_ratio,
+            0.80
+        );
         assert_eq!(report.regression_gates.thresholds.h2_min_nginx_ratio, 0.80);
         assert_eq!(report.regression_gates.thresholds.h3_min_nginx_ratio, 0.80);
     }
 
     #[test]
-    fn h2_and_h3_target_ratio_misses_are_blocking_even_with_stable_baseline() {
+    fn h1_h2_and_h3_target_ratio_misses_are_blocking_even_with_stable_baseline() {
         let mut aggregates = PrimaryAggregateMap::new();
+        insert_primary_aggregate(
+            &mut aggregates,
+            Comparator::Oxibelt,
+            "h1-keepalive",
+            79.0,
+            1.0,
+        );
+        insert_primary_aggregate(
+            &mut aggregates,
+            Comparator::Nginx,
+            "h1-keepalive",
+            100.0,
+            1.0,
+        );
         insert_primary_aggregate(&mut aggregates, Comparator::Oxibelt, "h2", 79.0, 1.0);
         insert_primary_aggregate(&mut aggregates, Comparator::Nginx, "h2", 100.0, 1.0);
         insert_primary_aggregate(&mut aggregates, Comparator::Oxibelt, "h3", 79.0, 1.0);
@@ -4098,6 +4141,7 @@ mod tests {
         let gates = build_regression_gate_report(
             &aggregates,
             RegressionGateThresholds {
+                h1_keepalive_min_nginx_ratio: 0.80,
                 h2_min_nginx_ratio: 0.80,
                 h3_min_nginx_ratio: 0.80,
                 static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
@@ -4112,7 +4156,11 @@ mod tests {
             DEFAULT_AMD64_TARGET_CPU,
         );
 
-        for gate in ["h2_min_nginx_ratio", "h3_min_nginx_ratio"] {
+        for gate in [
+            "h1_keepalive_min_nginx_ratio",
+            "h2_min_nginx_ratio",
+            "h3_min_nginx_ratio",
+        ] {
             assert!(
                 gates
                     .violations

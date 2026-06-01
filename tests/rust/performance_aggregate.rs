@@ -38,6 +38,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         .arg("--output-dir")
         .arg(output_dir);
     for name in [
+        "OXIBELT_PERF_H1_KEEPALIVE_MIN_NGINX_RATIO",
         "OXIBELT_PERF_H2_MIN_NGINX_RATIO",
         "OXIBELT_PERF_H3_MIN_NGINX_RATIO",
         "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO",
@@ -223,6 +224,8 @@ fn write_reverse_proxy_h2_with_p99(
     write_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
         vec![
+            load_row("oxibelt-h1-keepalive", "h1", 100.0, 1.0, 4.0),
+            load_row("nginx-h1-keepalive", "h1", 100.0, 1.0, 4.0),
             load_row("oxibelt-h2", "h2", oxibelt_rps, 1.0, oxibelt_p99),
             load_row("nginx-h2", "h2", nginx_rps, 1.0, nginx_p99),
             load_row("oxibelt-h3", "h3", 100.0, 1.0, 4.0),
@@ -543,7 +546,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 8);
+    assert_eq!(report["schema_version"], 9);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -734,6 +737,8 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
     write_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
         vec![
+            load_row("oxibelt-h1-keepalive", "h1", 83.0, 1.0, 4.0),
+            load_row("nginx-h1-keepalive", "h1", 100.0, 1.0, 4.0),
             load_row("oxibelt-h2", "h2", 83.0, 1.0, 4.0),
             load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
             load_row("oxibelt-h3", "h3", 83.0, 1.0, 4.0),
@@ -775,6 +780,12 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
 
     let report = run_aggregate(&input_dir, &output_dir);
     assert_eq!(report["regression_gates"]["status"], "pass");
+    assert_close(
+        report["regression_gates"]["thresholds"]["h1_keepalive_min_nginx_ratio"]
+            .as_f64()
+            .expect("H1 keep-alive threshold should be emitted"),
+        0.80,
+    );
     assert_close(
         report["regression_gates"]["thresholds"]["h2_min_nginx_ratio"]
             .as_f64()
@@ -830,6 +841,14 @@ fn separates_amd64_target_cpus_and_reports_isa_deltas() {
                 "oxibelt-docker-performance-smoke-reverse-proxy-shard-1/{target}/run-1"
             )),
             vec![
+                with_target_cpu(
+                    load_row("oxibelt-h1-keepalive", "h1", 90.0, 1.0, 4.0),
+                    target,
+                ),
+                with_target_cpu(
+                    load_row("nginx-h1-keepalive", "h1", 100.0, 1.0, 4.0),
+                    target,
+                ),
                 with_target_cpu(load_row("oxibelt-h2", "h2", oxibelt_rps, 1.0, 4.0), target),
                 with_target_cpu(load_row("nginx-h2", "h2", 100.0, 1.0, 4.0), target),
                 with_target_cpu(load_row("oxibelt-h3", "h3", 90.0, 1.0, 4.0), target),
@@ -958,6 +977,42 @@ fn h2_ratio_gate_blocks_when_baseline_gap_is_stable() {
         .expect("markdown report should be readable");
     assert!(markdown.contains("### Blocking violations"));
     assert!(markdown.contains("`h2_min_nginx_ratio`"));
+}
+
+#[test]
+fn h1_keepalive_ratio_gate_blocks_when_target_misses() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-h1-keepalive", "h1", 79.0, 1.0, 4.0),
+            load_row("nginx-h1-keepalive", "h1", 100.0, 1.0, 4.0),
+            load_row("oxibelt-h2", "h2", 100.0, 1.0, 4.0),
+            load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
+            load_row("oxibelt-h3", "h3", 100.0, 1.0, 4.0),
+            load_row("nginx-h3", "h3", 100.0, 1.0, 4.0),
+        ],
+    );
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+
+    let report = run_aggregate(&input_dir, &output_dir);
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation =
+        find_regression_violation(&report, "h1_keepalive_min_nginx_ratio", "h1-keepalive");
+    assert_eq!(violation["disposition"], "blocking");
+    assert_eq!(violation["comparator"], "nginx");
+    assert_close(
+        violation["observed"]
+            .as_f64()
+            .expect("H1 keep-alive ratio should exist"),
+        0.79,
+    );
 }
 
 #[test]
@@ -1337,7 +1392,7 @@ fn regression_gates_fail_closed_when_no_samples_are_available() {
             .as_array()
             .expect("violations should be an array")
             .len()
-            >= 8,
+            >= 9,
         "every required regression gate should fail closed when no samples exist"
     );
 
@@ -1410,6 +1465,8 @@ fn regression_gates_report_static_crs_and_p99_violations() {
     write_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
         vec![
+            load_row("oxibelt-h1-keepalive", "h1", 100.0, 1.0, 4.0),
+            load_row("nginx-h1-keepalive", "h1", 100.0, 1.0, 4.0),
             load_row("oxibelt-h2", "h2", 74.0, 1.0, 4.0),
             load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
         ],
