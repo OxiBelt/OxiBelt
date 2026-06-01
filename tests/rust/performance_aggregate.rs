@@ -254,6 +254,54 @@ fn write_reverse_proxy_h3_with_p99(
     );
 }
 
+fn write_reverse_proxy_h1_with_p99(
+    input_dir: &Path,
+    oxibelt_rps: f64,
+    nginx_rps: f64,
+    oxibelt_p99: f64,
+    nginx_p99: f64,
+) {
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-h1-keepalive", "h1", oxibelt_rps, 1.0, oxibelt_p99),
+            load_row("nginx-h1-keepalive", "h1", nginx_rps, 1.0, nginx_p99),
+            load_row("oxibelt-h2", "h2", 100.0, 1.0, 4.0),
+            load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
+            load_row("oxibelt-h3", "h3", 100.0, 1.0, 4.0),
+            load_row("nginx-h3", "h3", 100.0, 1.0, 4.0),
+        ],
+    );
+}
+
+fn write_h1_baseline_report(
+    path: &Path,
+    oxibelt_rps: f64,
+    nginx_rps: f64,
+    oxibelt_p99: f64,
+    nginx_p99: f64,
+) {
+    write_baseline_report(
+        path,
+        vec![
+            aggregate_row(
+                "oxibelt",
+                "h1-keepalive",
+                "reverse-proxy",
+                oxibelt_rps,
+                oxibelt_p99,
+            ),
+            aggregate_row(
+                "nginx",
+                "h1-keepalive",
+                "reverse-proxy",
+                nginx_rps,
+                nginx_p99,
+            ),
+        ],
+    );
+}
+
 fn write_static_gate_rows(input_dir: &Path, oxibelt_rps: f64, nginx_rps: f64, caddy_rps: f64) {
     write_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
@@ -1032,6 +1080,176 @@ fn h1_keepalive_ratio_gate_blocks_when_target_misses() {
             .as_f64()
             .expect("H1 keep-alive ratio should exist"),
         0.79,
+    );
+}
+
+#[test]
+fn h1_keepalive_ratio_gate_advises_when_near_target_baseline_remains_stable() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h1_with_p99(&input_dir, 22579.750, 28253.3125, 1.6795, 1.437);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_h1_baseline_report(&baseline_path, 23115.9375, 28388.5, 1.5535, 1.3895);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    let advisory =
+        find_regression_advisory(&report, "h1_keepalive_min_nginx_ratio", "h1-keepalive");
+    assert_eq!(advisory["disposition"], "advisory");
+    assert_close(
+        advisory["observed"]
+            .as_f64()
+            .expect("advisory ratio should exist"),
+        22579.750 / 28253.3125,
+    );
+    let message = advisory["message"]
+        .as_str()
+        .expect("message should be present");
+    assert!(message.contains("near-target ratio miss"));
+    assert!(message.contains("baseline RPS ratio"));
+
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains("### Advisories"));
+    assert!(markdown.contains("`h1_keepalive_min_nginx_ratio`"));
+}
+
+#[test]
+fn h1_keepalive_near_target_miss_blocks_without_baseline_report() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_reverse_proxy_h1_with_p99(&input_dir, 79.91894755703424, 100.0, 10.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+
+    let report = run_aggregate(&input_dir, &output_dir);
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation =
+        find_regression_violation(&report, "h1_keepalive_min_nginx_ratio", "h1-keepalive");
+    assert_eq!(violation["disposition"], "blocking");
+    let message = violation["message"]
+        .as_str()
+        .expect("message should be present");
+    assert!(message.contains("baseline-aware advisory unavailable"));
+    assert!(message.contains("no baseline performance report was provided"));
+}
+
+#[test]
+fn h1_keepalive_near_target_miss_blocks_when_baseline_also_misses() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h1_with_p99(&input_dir, 79.91894755703424, 100.0, 10.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_h1_baseline_report(&baseline_path, 79.0, 100.0, 10.0, 10.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation =
+        find_regression_violation(&report, "h1_keepalive_min_nginx_ratio", "h1-keepalive");
+    assert_eq!(violation["disposition"], "blocking");
+    assert!(
+        violation["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("did not qualify for near-target advisory pass")
+    );
+}
+
+#[test]
+fn h1_keepalive_near_target_miss_blocks_when_ratio_regresses() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h1_with_p99(&input_dir, 79.91894755703424, 100.0, 10.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_h1_baseline_report(&baseline_path, 83.0, 100.0, 10.0, 10.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation =
+        find_regression_violation(&report, "h1_keepalive_min_nginx_ratio", "h1-keepalive");
+    assert_eq!(violation["disposition"], "blocking");
+    assert!(
+        violation["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("did not qualify for near-target advisory pass")
+    );
+}
+
+#[test]
+fn h1_keepalive_near_target_miss_blocks_when_relative_p99_regresses() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h1_with_p99(&input_dir, 79.91894755703424, 100.0, 10.6, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_h1_baseline_report(&baseline_path, 81.0, 100.0, 10.0, 10.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation =
+        find_regression_violation(&report, "h1_keepalive_min_nginx_ratio", "h1-keepalive");
+    assert_eq!(violation["disposition"], "blocking");
+    assert!(
+        violation["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("did not qualify for near-target advisory pass")
     );
 }
 

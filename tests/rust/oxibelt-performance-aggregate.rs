@@ -13,6 +13,7 @@ const MAX_WARNINGS: usize = 200;
 const DEFAULT_H1_KEEPALIVE_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_H2_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_H3_MIN_NGINX_RATIO: f64 = 0.80;
+const DEFAULT_RATIO_TARGET_NEAR_MISS_TOLERANCE: f64 = 0.005;
 const DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO: f64 = 0.80;
 const DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO: f64 = 0.90;
 const DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO: f64 = 0.90;
@@ -378,6 +379,16 @@ struct ComparatorRatioGate<'a> {
     comparator: Comparator,
     threshold: f64,
     allow_baseline_advisory: bool,
+    near_target_advisory_tolerance: Option<f64>,
+}
+
+struct NearTargetRatioMiss<'a> {
+    oxibelt_scenario: &'a str,
+    comparator: Comparator,
+    comparator_scenario: &'a str,
+    threshold: f64,
+    tolerance: f64,
+    current_ratio: f64,
 }
 
 struct P99RatioGate<'a> {
@@ -2038,6 +2049,7 @@ fn build_regression_gate_report(
             comparator: Comparator::Nginx,
             threshold: thresholds.h1_keepalive_min_nginx_ratio,
             allow_baseline_advisory: false,
+            near_target_advisory_tolerance: Some(DEFAULT_RATIO_TARGET_NEAR_MISS_TOLERANCE),
         },
         &mut findings,
     );
@@ -2052,6 +2064,7 @@ fn build_regression_gate_report(
             comparator: Comparator::Nginx,
             threshold: thresholds.h2_min_nginx_ratio,
             allow_baseline_advisory: true,
+            near_target_advisory_tolerance: None,
         },
         &mut findings,
     );
@@ -2066,6 +2079,7 @@ fn build_regression_gate_report(
             comparator: Comparator::Nginx,
             threshold: thresholds.h3_min_nginx_ratio,
             allow_baseline_advisory: true,
+            near_target_advisory_tolerance: None,
         },
         &mut findings,
     );
@@ -2087,6 +2101,7 @@ fn build_regression_gate_report(
             comparator: Comparator::Nginx,
             threshold: thresholds.static_16k_h1c_min_nginx_ratio,
             allow_baseline_advisory: true,
+            near_target_advisory_tolerance: None,
         },
         &mut findings,
     );
@@ -2333,6 +2348,19 @@ fn collect_comparator_ratio_regression_gate(
                 gate.comparator,
                 gate.scenario,
                 gate.threshold,
+            )
+        } else if let Some(tolerance) = gate.near_target_advisory_tolerance {
+            classify_near_target_ratio_threshold_miss(
+                aggregates,
+                baseline,
+                NearTargetRatioMiss {
+                    oxibelt_scenario: gate.scenario,
+                    comparator: gate.comparator,
+                    comparator_scenario: gate.scenario,
+                    threshold: gate.threshold,
+                    tolerance,
+                    current_ratio: ratio,
+                },
             )
         } else {
             GateDisposition::Blocking {
@@ -2819,6 +2847,124 @@ fn classify_throughput_ratio_threshold_miss(
                 throughput_ratio_delta.before_ratio,
                 throughput_ratio_delta.after_ratio,
                 throughput_ratio_delta.ratio_delta_percent,
+                p99_ratio_delta.before_ratio,
+                p99_ratio_delta.after_ratio,
+                p99_ratio_delta.ratio_delta_percent,
+            ),
+        }
+    }
+}
+
+fn classify_near_target_ratio_threshold_miss(
+    aggregates: &PrimaryAggregateMap,
+    baseline: Option<&BaselineGateContext>,
+    miss: NearTargetRatioMiss<'_>,
+) -> GateDisposition {
+    let advisory_floor = miss.threshold - miss.tolerance;
+    if miss.current_ratio < advisory_floor {
+        return GateDisposition::Blocking {
+            reason: format!(
+                "near-target advisory unavailable: current RPS ratio {:.4} is below advisory floor {:.4}",
+                miss.current_ratio, advisory_floor
+            ),
+        };
+    }
+
+    let oxibelt_rps_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        Comparator::Oxibelt,
+        "oxibelt",
+        miss.oxibelt_scenario,
+        GateMetric::Rps,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let oxibelt_p99_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        Comparator::Oxibelt,
+        "oxibelt",
+        miss.oxibelt_scenario,
+        GateMetric::P99,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let comparator_rps_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        miss.comparator,
+        miss.comparator.as_str(),
+        miss.comparator_scenario,
+        GateMetric::Rps,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let comparator_p99_delta = match baseline_metric_delta_percent(
+        aggregates,
+        baseline,
+        miss.comparator,
+        miss.comparator.as_str(),
+        miss.comparator_scenario,
+        GateMetric::P99,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let throughput_ratio_delta = match baseline_metric_ratio_delta_percent(
+        aggregates,
+        baseline,
+        miss.oxibelt_scenario,
+        miss.comparator,
+        miss.comparator_scenario,
+        GateMetric::Rps,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+    let p99_ratio_delta = match baseline_metric_ratio_delta_percent(
+        aggregates,
+        baseline,
+        miss.oxibelt_scenario,
+        miss.comparator,
+        miss.comparator_scenario,
+        GateMetric::P99,
+    ) {
+        Ok(value) => value,
+        Err(error) => return baseline_unavailable_blocking(error),
+    };
+
+    if throughput_ratio_delta.before_ratio >= miss.threshold
+        && throughput_ratio_delta.ratio_delta_percent >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
+        && p99_ratio_delta.ratio_delta_percent <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
+    {
+        GateDisposition::Advisory {
+            reason: format!(
+                "near-target ratio miss from `{}`: current RPS ratio {:.4} is within {:.4} of threshold {:.4}, baseline RPS ratio {:.4} >= threshold, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
+                baseline_report_label(baseline),
+                miss.current_ratio,
+                miss.tolerance,
+                miss.threshold,
+                throughput_ratio_delta.before_ratio,
+                throughput_ratio_delta.after_ratio,
+                throughput_ratio_delta.ratio_delta_percent,
+                p99_ratio_delta.before_ratio,
+                p99_ratio_delta.after_ratio,
+                p99_ratio_delta.ratio_delta_percent,
+            ),
+        }
+    } else {
+        GateDisposition::Blocking {
+            reason: format!(
+                "baseline evidence from `{}` did not qualify for near-target advisory pass: baseline RPS ratio {:.4}, current RPS ratio {:.4} ({:+.1}%), advisory floor {:.4}, p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
+                baseline_report_label(baseline),
+                throughput_ratio_delta.before_ratio,
+                throughput_ratio_delta.after_ratio,
+                throughput_ratio_delta.ratio_delta_percent,
+                advisory_floor,
                 p99_ratio_delta.before_ratio,
                 p99_ratio_delta.after_ratio,
                 p99_ratio_delta.ratio_delta_percent,
@@ -4116,7 +4262,80 @@ mod tests {
     }
 
     #[test]
-    fn h1_target_ratio_miss_blocks_while_h2_and_h3_stable_gaps_are_advisory() {
+    fn h1_near_target_ratio_miss_is_advisory_with_passing_stable_baseline() {
+        let mut aggregates = PrimaryAggregateMap::new();
+        insert_primary_aggregate(
+            &mut aggregates,
+            Comparator::Oxibelt,
+            "h1-keepalive",
+            79.91894755703424,
+            10.2,
+        );
+        insert_primary_aggregate(
+            &mut aggregates,
+            Comparator::Nginx,
+            "h1-keepalive",
+            100.0,
+            10.0,
+        );
+        insert_primary_aggregate(&mut aggregates, Comparator::Oxibelt, "h2", 100.0, 1.0);
+        insert_primary_aggregate(&mut aggregates, Comparator::Nginx, "h2", 100.0, 1.0);
+        insert_primary_aggregate(&mut aggregates, Comparator::Oxibelt, "h3", 100.0, 1.0);
+        insert_primary_aggregate(&mut aggregates, Comparator::Nginx, "h3", 100.0, 1.0);
+
+        let mut baseline_aggregates = PrimaryAggregateMap::new();
+        insert_primary_aggregate(
+            &mut baseline_aggregates,
+            Comparator::Oxibelt,
+            "h1-keepalive",
+            81.0,
+            10.0,
+        );
+        insert_primary_aggregate(
+            &mut baseline_aggregates,
+            Comparator::Nginx,
+            "h1-keepalive",
+            100.0,
+            10.0,
+        );
+        let baseline = baseline_context_for(&baseline_aggregates);
+
+        let gates = build_regression_gate_report(
+            &aggregates,
+            RegressionGateThresholds {
+                h1_keepalive_min_nginx_ratio: 0.80,
+                h2_min_nginx_ratio: 0.80,
+                h3_min_nginx_ratio: 0.80,
+                static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
+                static_16k_h1c_min_nginx_ratio: DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO,
+                remote_signer_handshake_min_local_ratio:
+                    DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
+                waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
+                crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+                waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
+            },
+            Some(&baseline),
+            DEFAULT_AMD64_TARGET_CPU,
+        );
+
+        assert!(
+            gates.advisories.iter().any(|advisory| {
+                advisory.gate == "h1_keepalive_min_nginx_ratio"
+                    && advisory.disposition == "advisory"
+            }),
+            "H1 keep-alive should become an advisory for a baseline-stable near miss"
+        );
+        assert!(
+            !gates
+                .violations
+                .iter()
+                .any(|violation| violation.gate == "h1_keepalive_min_nginx_ratio"),
+            "H1 keep-alive near miss should not block when baseline evidence is stable"
+        );
+    }
+
+    #[test]
+    fn h1_material_ratio_miss_blocks_while_h2_and_h3_stable_gaps_are_advisory() {
         let mut aggregates = PrimaryAggregateMap::new();
         insert_primary_aggregate(
             &mut aggregates,
