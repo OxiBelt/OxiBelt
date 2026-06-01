@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use http::Request;
+use http::{HeaderMap, Request};
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
 use hyper::body::{Body, Frame, SizeHint};
@@ -22,6 +22,22 @@ type TerminalBodyError = Arc<Mutex<Option<BoxError>>>;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KnownSmallResponseBody;
+
+#[derive(Debug, Clone)]
+pub(crate) struct InlinedKnownSmallResponseBody {
+  pub(crate) data: Bytes,
+  pub(crate) trailers: Option<HeaderMap>,
+}
+
+impl InlinedKnownSmallResponseBody {
+  pub(crate) fn new(data: Bytes, trailers: Option<HeaderMap>) -> Self {
+    Self { data, trailers }
+  }
+
+  pub(crate) fn into_parts(self) -> (Bytes, Option<HeaderMap>) {
+    (self.data, self.trailers)
+  }
+}
 
 pub(crate) fn is_known_small_response_body_len(len: usize) -> bool {
   len <= KNOWN_SMALL_BODY_MAX_BYTES

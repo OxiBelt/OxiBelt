@@ -54,7 +54,13 @@ where
       Poll::Ready(None) => return empty_body(),
       Poll::Ready(Some(frame)) => Some(frame),
       Poll::Pending => {
+        if body.is_end_stream() {
+          return empty_body();
+        }
         tokio::task::yield_now().await;
+        if body.is_end_stream() {
+          return empty_body();
+        }
         match fast_path_poll_request_body_once(body.as_mut()) {
           Poll::Ready(None) => return empty_body(),
           Poll::Ready(Some(frame)) => Some(frame),

@@ -363,7 +363,7 @@ impl PlainProxyFastPath {
     let (mut parts, response_body) = upstream_response
       .map(|body| body.map_err(boxed_error).boxed())
       .into_parts();
-    let (response_body, known_small_response_body, trailers_handled) =
+    let (response_body, inlined_known_small_body, trailers_handled) =
       match try_inline_response_body(
         &parts.headers,
         response_body,
@@ -372,14 +372,14 @@ impl PlainProxyFastPath {
       )
       .await
       {
-        SmallResponseDisposition::Inlined(body) => (body, true, true),
+        SmallResponseDisposition::Inlined { body, inlined } => (body, Some(inlined), true),
         SmallResponseDisposition::Streaming(body) => (
           body::with_read_timeout(
             body,
             timeouts.upstream_read,
             BodyTimeoutKind::UpstreamResponseRead,
           ),
-          false,
+          None,
           false,
         ),
         SmallResponseDisposition::Error(response) => {
@@ -473,10 +473,11 @@ impl PlainProxyFastPath {
       fast_path_filter_trailers(response_body, state.config.proxy.http.trailers)
     };
     let mut response = Response::from_parts(parts, response_body);
-    if known_small_response_body {
+    if let Some(inlined) = inlined_known_small_body {
       response
         .extensions_mut()
         .insert(body::KnownSmallResponseBody);
+      response.extensions_mut().insert(inlined);
     }
     let mut response =
       with_downstream_response_timeout(response, timeouts.response_send, transport_network);

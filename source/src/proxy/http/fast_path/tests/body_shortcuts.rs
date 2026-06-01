@@ -1,4 +1,6 @@
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -94,6 +96,11 @@ struct PendingThenEndBody {
   pending: bool,
 }
 
+struct PendingMarksEndBody {
+  pending: bool,
+  poll_count: Arc<AtomicUsize>,
+}
+
 struct PendingTwiceThenDataBody {
   pending_count: usize,
   yielded: bool,
@@ -147,6 +154,32 @@ impl Body for PendingThenEndBody {
       return Poll::Pending;
     }
     Poll::Ready(None)
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::new()
+  }
+}
+
+impl Body for PendingMarksEndBody {
+  type Data = Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    self.poll_count.fetch_add(1, Ordering::SeqCst);
+    if self.pending {
+      self.pending = false;
+      cx.waker().wake_by_ref();
+      return Poll::Pending;
+    }
+    Poll::Ready(None)
+  }
+
+  fn is_end_stream(&self) -> bool {
+    !self.pending
   }
 
   fn size_hint(&self) -> SizeHint {
@@ -424,6 +457,28 @@ async fn h2_h3_empty_probe_shortcuts_pending_then_eof() {
   .await
   .expect("pending then EOF body should collect");
 
+  assert!(body.to_bytes().is_empty());
+}
+
+#[tokio::test]
+async fn h2_h3_empty_probe_skips_repoll_when_pending_marks_end_stream() {
+  let poll_count = Arc::new(AtomicUsize::new(0));
+  let body = fast_path_request_body(
+    PendingMarksEndBody {
+      pending: true,
+      poll_count: Arc::clone(&poll_count),
+    },
+    1024,
+    Duration::from_millis(100),
+    false,
+    true,
+  )
+  .await
+  .collect()
+  .await
+  .expect("pending body that marks end-stream should collect");
+
+  assert_eq!(poll_count.load(Ordering::SeqCst), 1);
   assert!(body.to_bytes().is_empty());
 }
 

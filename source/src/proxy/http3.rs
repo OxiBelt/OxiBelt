@@ -20,7 +20,8 @@ use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{
-  KNOWN_SMALL_BODY_MAX_BYTES, KnownSmallResponseBody, ProxyBody, boxed_error, channel_body,
+  InlinedKnownSmallResponseBody, KNOWN_SMALL_BODY_MAX_BYTES, KnownSmallResponseBody, ProxyBody,
+  boxed_error, channel_body,
 };
 use crate::proxy::http::response::text_response;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
@@ -625,15 +626,21 @@ where
         .context("failed to send downstream HTTP/3 interim response")?;
     }
   }
-  let use_known_small_response_body = use_h3_known_small_body_path(
-    parts.extensions.get::<KnownSmallResponseBody>().is_some(),
-    &body,
-  );
+  let inlined_known_small_body = parts.extensions.remove::<InlinedKnownSmallResponseBody>();
+  let use_known_small_response_body = inlined_known_small_body.is_none()
+    && use_h3_known_small_body_path(
+      parts.extensions.get::<KnownSmallResponseBody>().is_some(),
+      &body,
+    );
   let head = Response::from_parts(parts, ());
   stream
     .send_response(head)
     .await
     .context("failed to send downstream HTTP/3 response headers")?;
+
+  if let Some(inlined) = inlined_known_small_body {
+    return respond_to_h3_inlined_known_small_body(stream, inlined, response_send_timeout).await;
+  }
 
   if use_known_small_response_body {
     return respond_to_h3_known_small_body(stream, body, response_send_timeout).await;
@@ -684,6 +691,37 @@ where
   let collected = collect_h3_known_small_body(body).await?;
   let trailers = collected.trailers;
   let data = collected.data;
+  if !data.is_empty() {
+    maybe_timeout(response_send_timeout, stream.send_data(data))
+      .await
+      .context("failed to send downstream HTTP/3 response data")?;
+  }
+  if let Some(trailers) = trailers {
+    maybe_timeout(response_send_timeout, stream.send_trailers(trailers))
+      .await
+      .context("failed to send downstream HTTP/3 response trailers")?;
+  }
+  maybe_timeout(response_send_timeout, stream.finish())
+    .await
+    .context("failed to finish downstream HTTP/3 response")?;
+  Ok(())
+}
+
+async fn respond_to_h3_inlined_known_small_body<S>(
+  mut stream: h3::server::RequestStream<S, Bytes>,
+  inlined: InlinedKnownSmallResponseBody,
+  response_send_timeout: Option<Duration>,
+) -> anyhow::Result<()>
+where
+  S: h3::quic::SendStream<Bytes>,
+{
+  let (data, trailers) = inlined.into_parts();
+  if data.len() > KNOWN_SMALL_BODY_MAX_BYTES {
+    anyhow::bail!(
+      "downstream HTTP/3 inlined known-small response body exceeded {} bytes",
+      KNOWN_SMALL_BODY_MAX_BYTES
+    );
+  }
   if !data.is_empty() {
     maybe_timeout(response_send_timeout, stream.send_data(data))
       .await

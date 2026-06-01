@@ -19,7 +19,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::config::{CompressionConfig, CompressionPolicyConfig};
 
-use super::body::{KnownSmallResponseBody, ProxyBody, boxed_error};
+use super::body::{InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody, boxed_error};
 
 const ENCODING_PREFERENCE: [CompressionEncoding; 4] = [
   CompressionEncoding::Br,
@@ -156,6 +156,7 @@ pub(crate) fn maybe_compress_response(
     return Response::from_parts(parts, body);
   }
   parts.extensions.remove::<KnownSmallResponseBody>();
+  parts.extensions.remove::<InlinedKnownSmallResponseBody>();
 
   parts.headers.insert(
     CONTENT_ENCODING,
@@ -699,6 +700,9 @@ mod tests {
     response
       .headers_mut()
       .insert(ETAG, HeaderValue::from_static("\"strong\""));
+    response.extensions_mut().insert(KnownSmallResponseBody);
+    let stale = InlinedKnownSmallResponseBody::new(Bytes::from_static(b"stale"), None);
+    response.extensions_mut().insert(stale);
 
     let mut request_headers = HeaderMap::new();
     request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
@@ -717,6 +721,9 @@ mod tests {
     assert_eq!(response.headers().get(CONTENT_ENCODING).unwrap(), "gzip");
     assert!(!response.headers().contains_key(CONTENT_LENGTH));
     assert_eq!(response.headers().get(ETAG).unwrap(), "W/\"strong\"");
+    let extensions = response.extensions();
+    assert!(extensions.get::<KnownSmallResponseBody>().is_none());
+    assert!(extensions.get::<InlinedKnownSmallResponseBody>().is_none());
 
     let compressed = response
       .into_body()

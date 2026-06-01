@@ -20,7 +20,10 @@ use tokio_util::io::ReaderStream;
 use tracing::warn;
 
 use super::{CachedStaticObject, StaticBodyPlan, StaticFileBodyPlan, StaticResponsePlan};
-use crate::proxy::http::body::{BoxError, KnownSmallResponseBody, ProxyBody, boxed_error};
+use crate::proxy::http::body::{
+  BoxError, InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody, boxed_error,
+  is_known_small_response_body_len,
+};
 use crate::proxy::http::response::text_response;
 
 const STATIC_BODY_CHANNEL_CHUNK_BYTES: usize = 64 * 1024;
@@ -48,6 +51,11 @@ pub(crate) async fn response_from_plan(
       let mut response = Response::new(full_body(bytes.clone()));
       if bytes.len() <= inline_max_bytes {
         response.extensions_mut().insert(KnownSmallResponseBody);
+        if is_known_small_response_body_len(bytes.len()) {
+          response
+            .extensions_mut()
+            .insert(InlinedKnownSmallResponseBody::new(bytes, None));
+        }
       }
       response
     }

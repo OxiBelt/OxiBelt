@@ -22,6 +22,10 @@ pub(super) async fn prepare_h3_request_body(
 trait H3RequestBodyStream: Send + 'static {
   type Error: fmt::Display + Send + Sync + 'static;
 
+  fn is_end_stream(&self) -> bool {
+    false
+  }
+
   fn poll_recv_data_bytes(
     &mut self,
     cx: &mut Context<'_>,
@@ -87,8 +91,16 @@ where
 {
   let first = match poll_h3_request_body_once(&mut stream).await {
     None if h3_request_body_empty_probe_allowed(request.method(), request.headers()) => {
-      tokio::task::yield_now().await;
-      poll_h3_request_body_once(&mut stream).await
+      if stream.is_end_stream() {
+        Some(Ok(None))
+      } else {
+        tokio::task::yield_now().await;
+        if stream.is_end_stream() {
+          Some(Ok(None))
+        } else {
+          poll_h3_request_body_once(&mut stream).await
+        }
+      }
     }
     first => first,
   };
@@ -294,7 +306,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn get_and_head_without_framing_headers_shortcut_pending_then_end() {
+  async fn get_and_head_without_framing_headers_shortcut_pending_marked_end() {
     for method in [Method::GET, Method::HEAD] {
       let request = request(method);
       let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
@@ -304,7 +316,7 @@ mod tests {
       let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
 
       assert_eq!(spawner.spawned(), 0);
-      assert_eq!(poll_count.load(Ordering::SeqCst), 2);
+      assert_eq!(poll_count.load(Ordering::SeqCst), 1);
       let body = request
         .into_body()
         .collect()
@@ -578,6 +590,11 @@ mod tests {
 
   impl H3RequestBodyStream for FakeRequestStream {
     type Error = FakeStreamError;
+
+    fn is_end_stream(&self) -> bool {
+      !self.pending
+        && (self.events.is_empty() || matches!(self.events.front(), Some(FakeStreamEvent::End)))
+    }
 
     fn poll_recv_data_bytes(
       &mut self,
