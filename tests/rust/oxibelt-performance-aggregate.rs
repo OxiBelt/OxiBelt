@@ -2051,7 +2051,7 @@ fn build_regression_gate_report(
             scenario: "h2",
             comparator: Comparator::Nginx,
             threshold: thresholds.h2_min_nginx_ratio,
-            allow_baseline_advisory: false,
+            allow_baseline_advisory: true,
         },
         &mut findings,
     );
@@ -2065,7 +2065,7 @@ fn build_regression_gate_report(
             scenario: "h3",
             comparator: Comparator::Nginx,
             threshold: thresholds.h3_min_nginx_ratio,
-            allow_baseline_advisory: false,
+            allow_baseline_advisory: true,
         },
         &mut findings,
     );
@@ -4116,7 +4116,7 @@ mod tests {
     }
 
     #[test]
-    fn h1_h2_and_h3_target_ratio_misses_are_blocking_even_with_stable_baseline() {
+    fn h1_target_ratio_miss_blocks_while_h2_and_h3_stable_gaps_are_advisory() {
         let mut aggregates = PrimaryAggregateMap::new();
         insert_primary_aggregate(
             &mut aggregates,
@@ -4156,24 +4156,35 @@ mod tests {
             DEFAULT_AMD64_TARGET_CPU,
         );
 
-        for gate in [
-            "h1_keepalive_min_nginx_ratio",
-            "h2_min_nginx_ratio",
-            "h3_min_nginx_ratio",
-        ] {
+        assert!(
+            gates.violations.iter().any(|violation| {
+                violation.gate == "h1_keepalive_min_nginx_ratio"
+                    && violation.disposition == "blocking"
+            }),
+            "H1 keep-alive should remain a blocking target gate"
+        );
+        assert!(
+            !gates
+                .advisories
+                .iter()
+                .any(|advisory| advisory.gate == "h1_keepalive_min_nginx_ratio"),
+            "H1 keep-alive should not be downgraded to an advisory"
+        );
+
+        for gate in ["h2_min_nginx_ratio", "h3_min_nginx_ratio"] {
             assert!(
                 gates
-                    .violations
+                    .advisories
                     .iter()
-                    .any(|violation| violation.gate == gate && violation.disposition == "blocking"),
-                "{gate} should be a blocking violation"
+                    .any(|advisory| advisory.gate == gate && advisory.disposition == "advisory"),
+                "{gate} should become an advisory when baseline evidence is stable"
             );
             assert!(
                 !gates
-                    .advisories
+                    .violations
                     .iter()
-                    .any(|advisory| advisory.gate == gate),
-                "{gate} should not be downgraded to an advisory"
+                    .any(|violation| violation.gate == gate),
+                "{gate} should not block when baseline evidence is stable"
             );
         }
     }
