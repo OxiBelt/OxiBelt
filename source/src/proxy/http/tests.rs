@@ -35,6 +35,71 @@ fn uri_wire_len_matches_display_length_without_allocating_in_hot_path() {
 }
 
 #[test]
+fn request_limits_reject_ambiguous_body_framing() {
+  let limits = crate::config::LimitsConfig::default();
+  let mut duplicate_content_length = Request::builder()
+    .uri("/")
+    .body(())
+    .expect("request should build");
+  duplicate_content_length
+    .headers_mut()
+    .append(http::header::CONTENT_LENGTH, "0".parse().unwrap());
+  duplicate_content_length
+    .headers_mut()
+    .append(http::header::CONTENT_LENGTH, "0".parse().unwrap());
+
+  assert_eq!(
+    validate_request_limits(&duplicate_content_length, &limits),
+    Err((StatusCode::BAD_REQUEST, "ambiguous request body framing"))
+  );
+
+  let te_and_cl = Request::builder()
+    .uri("/")
+    .header(http::header::TRANSFER_ENCODING, "chunked")
+    .header(http::header::CONTENT_LENGTH, "7")
+    .body(())
+    .expect("request should build");
+
+  assert_eq!(
+    validate_request_limits(&te_and_cl, &limits),
+    Err((StatusCode::BAD_REQUEST, "ambiguous request body framing"))
+  );
+}
+
+#[test]
+fn request_limits_reject_invalid_content_length() {
+  let limits = crate::config::LimitsConfig::default();
+  let invalid = Request::builder()
+    .uri("/")
+    .header(http::header::CONTENT_LENGTH, "abc")
+    .body(())
+    .expect("request should build");
+
+  assert_eq!(
+    validate_request_limits(&invalid, &limits),
+    Err((StatusCode::BAD_REQUEST, "invalid request body framing"))
+  );
+}
+
+#[test]
+fn request_limits_apply_body_size_to_single_positive_content_length() {
+  let limits = crate::config::LimitsConfig {
+    max_request_body_bytes: 6,
+    ..crate::config::LimitsConfig::default()
+  };
+  let too_large = Request::builder()
+    .uri("/")
+    .header(http::header::CONTENT_LENGTH, "7")
+    .body(())
+    .expect("request should build");
+
+  assert_eq!(
+    validate_request_limits(&too_large, &limits),
+    Err((StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"))
+  );
+}
+
+#[test]
 fn forwarded_client_addr_source_selects_resolved_or_direct_peer() {
   let peer_addr = "10.0.0.10:443".parse().unwrap();
   let resolved_addr = "203.0.113.7:443".parse().unwrap();

@@ -2,13 +2,13 @@ use std::fmt;
 use std::future::{Future, poll_fn};
 use std::task::{Context, Poll};
 
-use ::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
-use ::http::{Method, Request};
+use ::http::Request;
 use bytes::{Buf, Bytes};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Frame;
 
 use crate::proxy::http::body::{BoxError, ProxyBody, boxed_error, channel_body};
+use crate::proxy::http::request_framing::h2_or_h3_safe_method_empty_probe_allowed;
 
 use super::{H3_BODY_CHANNEL_CAPACITY, H3RequestRecvStream};
 
@@ -90,7 +90,13 @@ where
   Spawner: BodyTaskSpawner,
 {
   let first = match poll_h3_request_body_once(&mut stream).await {
-    None if h3_request_body_empty_probe_allowed(request.method(), request.headers()) => {
+    None
+      if h2_or_h3_safe_method_empty_probe_allowed(
+        request.method(),
+        http::Version::HTTP_3,
+        request.headers(),
+      ) =>
+    {
       if stream.is_end_stream() {
         Some(Ok(None))
       } else {
@@ -133,12 +139,6 @@ where
     Poll::Pending => Poll::Ready(None),
   })
   .await
-}
-
-fn h3_request_body_empty_probe_allowed(method: &Method, headers: &::http::HeaderMap) -> bool {
-  matches!(method, &Method::GET | &Method::HEAD)
-    && !headers.contains_key(CONTENT_LENGTH)
-    && !headers.contains_key(TRANSFER_ENCODING)
 }
 
 fn stream_h3_request_body<S, Spawner>(

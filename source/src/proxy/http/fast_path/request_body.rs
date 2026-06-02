@@ -1,12 +1,14 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use http::{HeaderMap, Method};
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::{Body, Frame, SizeHint};
 
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
+use crate::proxy::http::request_framing::{
+  h2_or_h3_safe_method_empty_probe_allowed, http1_request_body_is_definitely_empty,
+};
 
 #[allow(clippy::manual_async_fn)]
 pub(super) fn fast_path_request_body<B>(
@@ -136,21 +138,7 @@ pub(super) fn fast_path_request_body_is_definitely_empty(
   version: http::Version,
   headers: &HeaderMap,
 ) -> bool {
-  if !matches!(version, http::Version::HTTP_10 | http::Version::HTTP_11)
-    || headers.contains_key(TRANSFER_ENCODING)
-  {
-    return false;
-  }
-
-  let mut content_lengths = headers.get_all(CONTENT_LENGTH).iter();
-  let Some(content_length) = content_lengths.next() else {
-    return true;
-  };
-  content_lengths.next().is_none()
-    && content_length
-      .to_str()
-      .ok()
-      .is_some_and(|value| value.trim() == "0")
+  http1_request_body_is_definitely_empty(version, headers)
 }
 
 pub(super) fn fast_path_request_body_empty_probe_allowed(
@@ -158,10 +146,7 @@ pub(super) fn fast_path_request_body_empty_probe_allowed(
   version: http::Version,
   headers: &HeaderMap,
 ) -> bool {
-  matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3)
-    && matches!(method, &Method::GET | &Method::HEAD)
-    && !headers.contains_key(CONTENT_LENGTH)
-    && !headers.contains_key(TRANSFER_ENCODING)
+  h2_or_h3_safe_method_empty_probe_allowed(method, version, headers)
 }
 
 fn empty_body() -> ProxyBody {

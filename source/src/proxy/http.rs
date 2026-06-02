@@ -42,6 +42,7 @@ pub(crate) mod headers;
 pub(crate) mod observability;
 pub(crate) mod person_proof;
 pub(crate) mod request;
+pub(crate) mod request_framing;
 pub(crate) mod response;
 mod retry;
 pub(crate) mod semantics;
@@ -69,6 +70,11 @@ use self::observability::{
 };
 use self::person_proof::handle_person_proof_api;
 use self::request::{RebuildRequestOptions, rebuild_request};
+use self::request_framing::{
+  RequestBodyFraming, h2_or_h3_content_length_zero_guard_required,
+  http1_content_length_zero_body_is_definitely_empty, http1_response_body_is_definitely_empty,
+  positive_content_length, request_body_framing,
+};
 use self::response::{
   apply_security_headers, apply_sticky_cookie, draining_response, text_response,
   upstream_error_response, waf_terminal_response,
@@ -538,7 +544,8 @@ where
   }
 
   let host = host.into_owned();
-  let request = if !content_length_zero_guard_required(request.headers(), request_version) {
+  let request = if !h2_or_h3_content_length_zero_guard_required(request_version, request.headers())
+  {
     match fast_path::try_handle_plain_proxy(
       request,
       state.clone(),
@@ -2670,28 +2677,17 @@ fn validate_request_limits<B>(
       "headers are too large",
     ));
   }
-  if request.headers().contains_key(http::header::CONTENT_LENGTH)
-    && request
-      .headers()
-      .contains_key(http::header::TRANSFER_ENCODING)
-  {
-    return Err((StatusCode::BAD_REQUEST, "ambiguous request body framing"));
+  match request_body_framing(request.headers()) {
+    RequestBodyFraming::Ambiguous => {
+      return Err((StatusCode::BAD_REQUEST, "ambiguous request body framing"));
+    }
+    RequestBodyFraming::InvalidContentLength => {
+      return Err((StatusCode::BAD_REQUEST, "invalid request body framing"));
+    }
+    _ => {}
   }
-  if request
-    .headers()
-    .get_all(http::header::CONTENT_LENGTH)
-    .iter()
-    .count()
-    > 1
-  {
-    return Err((StatusCode::BAD_REQUEST, "ambiguous request body framing"));
-  }
-  if let Some(length) = request
-    .headers()
-    .get(http::header::CONTENT_LENGTH)
-    .and_then(|value| value.to_str().ok())
-    .and_then(|value| value.parse::<u64>().ok())
-    && length > limits.max_request_body_bytes
+  if positive_content_length(request.headers())
+    .is_some_and(|length| length > limits.max_request_body_bytes)
   {
     return Err((StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"));
   }
@@ -2725,7 +2721,7 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
-  if !content_length_zero_guard_required(request.headers(), version) {
+  if !h2_or_h3_content_length_zero_guard_required(version, request.headers()) {
     let (parts, body) = request.into_parts();
     return Ok(Request::from_parts(parts, Either::Left(body)));
   }
@@ -3463,43 +3459,11 @@ fn body_capture_decision(
 }
 
 fn request_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
-  http1_body_is_definitely_empty(version, headers)
+  http1_content_length_zero_body_is_definitely_empty(version, headers)
 }
 
 fn response_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
-  http1_body_is_definitely_empty(version, headers)
-}
-
-fn http1_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
-  matches!(version, http::Version::HTTP_10 | http::Version::HTTP_11)
-    && content_length_is_exact_zero(headers)
-    && !headers.contains_key(http::header::TRANSFER_ENCODING)
-}
-
-fn content_length_zero_guard_required(headers: &HeaderMap, version: http::Version) -> bool {
-  matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3)
-    && content_length_is_exact_zero(headers)
-}
-
-fn content_length_is_exact_zero(headers: &HeaderMap) -> bool {
-  let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
-  let Some(value) = values.next() else {
-    return false;
-  };
-  values.next().is_none() && value.to_str().ok().is_some_and(|value| value.trim() == "0")
-}
-
-fn positive_content_length(headers: &HeaderMap) -> Option<u64> {
-  if headers.contains_key(http::header::TRANSFER_ENCODING) {
-    return None;
-  }
-  let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
-  let value = values.next()?;
-  if values.next().is_some() {
-    return None;
-  }
-  let length = value.to_str().ok()?.trim().parse::<u64>().ok()?;
-  (length > 0).then_some(length)
+  http1_response_body_is_definitely_empty(version, headers)
 }
 
 #[cfg(test)]

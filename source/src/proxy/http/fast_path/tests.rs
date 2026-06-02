@@ -163,10 +163,12 @@ async fn h2_request_without_content_length_zero_is_fast_path_eligible_before_gua
     .body(PanicBody)
     .expect("request should build");
 
-  assert!(!super::super::content_length_zero_guard_required(
-    request.headers(),
-    request.version()
-  ));
+  assert!(
+    !crate::proxy::http::request_framing::h2_or_h3_content_length_zero_guard_required(
+      request.version(),
+      request.headers()
+    )
+  );
   assert!(resolved.execution_plan.fast_path.plain_proxy_h2);
   assert!(PlainProxyFastPath::eligible(&request, &state, &resolved));
 }
