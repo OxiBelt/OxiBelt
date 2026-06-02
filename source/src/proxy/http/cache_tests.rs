@@ -6,7 +6,7 @@ mod common {
 }
 
 use http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use http::{HeaderMap, HeaderValue, Method, Response};
+use http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 use pretty_assertions::assert_eq;
@@ -16,6 +16,19 @@ use std::task::{Context, Poll};
 use super::{full_body, maybe_cache_response, maybe_cache_response_with_store_permission};
 use crate::config::Config;
 use crate::state::AppSnapshot;
+
+fn assert_cache_status<B>(response: &Response<B>, outcome: &str, reason: &str) {
+  assert_eq!(response.headers().get("x-oxibelt-cache").unwrap(), outcome);
+  assert_eq!(
+    response.headers().get("x-oxibelt-cache-reason").unwrap(),
+    reason
+  );
+}
+
+fn assert_no_cache_status_headers(headers: &HeaderMap) {
+  assert!(!headers.contains_key("x-oxibelt-cache"));
+  assert!(!headers.contains_key("x-oxibelt-cache-reason"));
+}
 
 fn parse_config(raw: &str) -> Config {
   let config: Config = toml::from_str(raw).expect("config should parse");
@@ -45,6 +58,32 @@ impl Body for PanicBody {
 
 fn panic_body() -> super::body::ProxyBody {
   PanicBody.boxed()
+}
+
+struct ErrorBody;
+
+impl Body for ErrorBody {
+  type Data = bytes::Bytes;
+  type Error = super::body::BoxError;
+
+  fn poll_frame(
+    self: Pin<&mut Self>,
+    _cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    Poll::Ready(Some(Err(Box::new(std::io::Error::other(
+      "cache body error",
+    )))))
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    let mut hint = SizeHint::new();
+    hint.set_exact(4);
+    hint
+  }
+}
+
+fn error_body() -> super::body::ProxyBody {
+  ErrorBody.boxed()
 }
 
 #[tokio::test]
@@ -87,6 +126,57 @@ cache_methods = ["GET"]
   .await;
 
   assert_eq!(response.status(), http::StatusCode::OK);
+  assert_cache_status(&response, "miss", "store_not_allowed");
+  assert_eq!(state.cache.stats().memory_entries, 0);
+}
+
+#[tokio::test]
+async fn cache_fill_body_error_reports_store_failed_reason() {
+  let temp_dir = common::TempDir::new("cache-fill-body-error");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "cache-body-error");
+  let raw = format!(
+    r#"
+{}
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1024
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  let method = Method::GET;
+  let uri: http::Uri = "/body-error".parse().expect("URI should parse");
+  let request_headers = HeaderMap::new();
+  let mut response = Response::new(error_body());
+  response.headers_mut().insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+  response
+    .headers_mut()
+    .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+
+  let response = maybe_cache_response(
+    response,
+    &state,
+    Some("default"),
+    "https",
+    "example.com",
+    &method,
+    &uri,
+    &request_headers,
+    None,
+  )
+  .await;
+
+  assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+  assert_cache_status(&response, "miss", "store_failed");
   assert_eq!(state.cache.stats().memory_entries, 0);
 }
 
@@ -205,6 +295,7 @@ cache_methods = ["GET"]
   .await;
 
   assert_eq!(response.status(), http::StatusCode::OK);
+  assert_cache_status(&response, "miss", "not_cacheable");
   assert_eq!(state.cache.stats().memory_entries, 0);
 }
 
@@ -254,6 +345,7 @@ content_types = ["text/css"]
   .await;
 
   assert_eq!(response.status(), http::StatusCode::OK);
+  assert_cache_status(&response, "miss", "admission_rejected");
   assert_eq!(state.cache.stats().memory_entries, 0);
 }
 
@@ -309,6 +401,12 @@ stream_large_objects = true
   )
   .await;
 
+  let delivered = response.headers().clone();
+  assert_eq!(delivered.get("x-oxibelt-cache").unwrap(), "miss");
+  assert_eq!(
+    delivered.get("x-oxibelt-cache-reason").unwrap(),
+    "too_large"
+  );
   let delivered = response
     .into_body()
     .collect()
@@ -363,6 +461,12 @@ stream_large_objects = true
   let request_headers = HeaderMap::new();
   let body = bytes::Bytes::from_static(b"cacheable body");
   let mut response = Response::new(full_body(body.clone()));
+  response
+    .headers_mut()
+    .insert("x-oxibelt-cache", HeaderValue::from_static("hit"));
+  response
+    .headers_mut()
+    .insert("x-oxibelt-cache-reason", HeaderValue::from_static("forged"));
   response.headers_mut().insert(
     CACHE_CONTROL,
     HeaderValue::from_static("public, max-age=60"),
@@ -384,6 +488,7 @@ stream_large_objects = true
   )
   .await;
 
+  assert_cache_status(&response, "miss", "stored");
   let delivered = response
     .into_body()
     .collect()
@@ -400,8 +505,52 @@ stream_large_objects = true
     uri: &uri,
     request_headers: &request_headers,
   }) {
-    Some(crate::cache::CacheLookup::Fresh(entry)) => assert_eq!(entry.body, body),
+    Some(crate::cache::CacheLookup::Fresh(entry)) => {
+      assert_eq!(entry.body, body);
+      assert_no_cache_status_headers(&entry.headers);
+    }
     other => panic!("expected fresh cache hit, got {other:?}"),
+  }
+}
+
+#[test]
+fn cached_status_response_marks_hit_stale_and_revalidated() {
+  let request_headers = HeaderMap::new();
+  for (outcome, reason, expected_outcome, expected_reason) in [
+    (
+      super::cache_status::CacheHeaderOutcome::Hit,
+      super::cache_status::CacheHeaderReason::Fresh,
+      "hit",
+      "fresh",
+    ),
+    (
+      super::cache_status::CacheHeaderOutcome::Stale,
+      super::cache_status::CacheHeaderReason::BackgroundRefresh,
+      "stale",
+      "background_refresh",
+    ),
+    (
+      super::cache_status::CacheHeaderOutcome::Revalidated,
+      super::cache_status::CacheHeaderReason::NotModified,
+      "revalidated",
+      "not_modified",
+    ),
+  ] {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-oxibelt-cache", HeaderValue::from_static("miss"));
+    headers.insert("x-oxibelt-cache-reason", HeaderValue::from_static("forged"));
+    let response = super::cache_status::cached_status_response(
+      crate::cache::CacheEntry {
+        status: StatusCode::OK,
+        headers,
+        body: bytes::Bytes::from_static(b"cached"),
+      },
+      &Method::GET,
+      &request_headers,
+      outcome,
+      reason,
+    );
+    assert_cache_status(&response, expected_outcome, expected_reason);
   }
 }
 

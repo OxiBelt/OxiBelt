@@ -4059,11 +4059,13 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/cache?item=1" 200)"
   assert_body_jq "${response}" '.upstream == "http-upstream"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
 
   docker rm -f "${http_container}" >/dev/null
 
   response="$(client_request "example.test" "/app/cache?item=1" 200)"
   assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/cache?item=1"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
 }
 "#,
             None,
@@ -4082,9 +4084,11 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/revalidate?etag=matrix-v1&cache_control=public" 200)"
   assert_body_jq "${response}" '.upstream == "http-upstream"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
 
   response="$(client_request_with_headers "example.test" "/app/revalidate?etag=matrix-v1&cache_control=public" 200 "GET" "" "Cache-Control: no-cache")"
   assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/revalidate?etag=matrix-v1&cache_control=public"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "revalidated" and .headers["x-oxibelt-cache-reason"] == "not_modified"'
 }
 "#,
             None,
@@ -4146,9 +4150,11 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/hybrid?body=abcdefghijklmnopqrstuvwxyz&cache_control=public&content_type=text/plain" 200)"
   assert_response_jq "${response}" '.body == "abcdefghijklmnopqrstuvwxyz"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
   docker rm -f "${http_container}" >/dev/null
   response="$(client_request "example.test" "/app/hybrid?body=abcdefghijklmnopqrstuvwxyz&cache_control=public&content_type=text/plain" 200)"
   assert_response_jq "${response}" '.body == "abcdefghijklmnopqrstuvwxyz"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
 }
 "#,
             None,
@@ -4167,9 +4173,11 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/assets/app.css?body=body-css&cache_control=public&content_type=text/css" 200)"
   assert_response_jq "${response}" '.body == "body-css"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
   docker rm -f "${http_container}" >/dev/null
   response="$(client_request "example.test" "/assets/app.css?body=body-css&cache_control=public&content_type=text/css" 200)"
   assert_response_jq "${response}" '.body == "body-css"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
 }
 "#,
             None,
@@ -4188,6 +4196,10 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/admin-purge?cache_control=public" 200)"
   assert_body_jq "${response}" '.upstream == "http-upstream"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
+  response="$(client_request "example.test" "/app/admin-purge?cache_control=public" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
   response="$(client_request_with_headers_on_port 9092 "proxy" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/admin-purge?cache_control=public" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
   assert_response_jq "${response}" '.body == "purged=1\n"'
   docker rm -f "${http_container}" >/dev/null
@@ -4442,9 +4454,11 @@ run_case_checks() {
   local first stale second_stale refreshed
   first="$(client_request "example.test" "/app/bg?sequence_key=bg-refresh&body_sequence=old%7Cold%7Cnew&cache_control=public-stale-revalidate&content_type=text/plain" 200)"
   assert_response_jq "${first}" '.body == "old"'
+  assert_response_jq "${first}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
   sleep 2
   stale="$(client_request "example.test" "/app/bg?sequence_key=bg-refresh&body_sequence=old%7Cold%7Cnew&cache_control=public-stale-revalidate&content_type=text/plain" 200)"
   assert_response_jq "${stale}" '.body == "old"'
+  assert_response_jq "${stale}" '(.headers["x-oxibelt-cache"] == "stale" and .headers["x-oxibelt-cache-reason"] == "background_refresh") or (.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored")'
   sleep 2
   second_stale="$(client_request "example.test" "/app/bg?sequence_key=bg-refresh&body_sequence=old%7Cold%7Cnew&cache_control=public-stale-revalidate&content_type=text/plain" 200)"
   assert_response_jq "${second_stale}" '.body == "old" or .body == "new"'
@@ -4498,9 +4512,12 @@ run_case_checks() {
   second="$(client_request "example.test" "/app/admit?sequence_key=admit&body_sequence=admitted%7Cadmitted%7Cshould-not-serve&status_sequence=200%7C200%7C500&cache_control=public-stale-error&content_type=text/plain" 200)"
   assert_response_jq "${first}" '.body == "admitted"'
   assert_response_jq "${second}" '.body == "admitted"'
+  assert_response_jq "${first}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "admission_warming"'
+  assert_response_jq "${second}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
   sleep 2
   stale="$(client_request "example.test" "/app/admit?sequence_key=admit&body_sequence=admitted%7Cadmitted%7Cshould-not-serve&status_sequence=200%7C200%7C500&cache_control=public-stale-error&content_type=text/plain" 200)"
   assert_response_jq "${stale}" '.body == "admitted"'
+  assert_response_jq "${stale}" '.headers["x-oxibelt-cache"] == "stale" and .headers["x-oxibelt-cache-reason"] == "stale_if_error"'
 
   rejected="$(client_request "example.test" "/app/reject-content-type?body=json&cache_control=public&content_type=application/json" 200)"
   assert_response_jq "${rejected}" '.body == "json"'

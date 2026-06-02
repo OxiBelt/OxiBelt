@@ -34,6 +34,7 @@ use crate::waf::{
 pub(crate) mod access_log;
 pub(crate) mod body;
 pub(crate) mod buffering;
+mod cache_status;
 pub(crate) mod compression;
 pub(crate) mod fast_path;
 pub(crate) mod grpc_web;
@@ -58,6 +59,7 @@ use self::body::{
   BodyTimeoutKind, CapturedBody, ProxyBody, boxed_error, capture_body_prefix, capture_prefix,
   error_indicates_body_timeout, error_is_body_length_limit, error_is_timeout,
 };
+use self::cache_status::{CacheHeaderOutcome as CacheOutcome, CacheHeaderReason as CacheReason};
 use self::headers::{
   add_forwarded_headers, extract_downstream_port, extract_host, is_upgrade_request,
   set_effective_host_header, strip_hop_by_hop_headers, validate_authority_host_consistency,
@@ -1277,7 +1279,7 @@ where
             .stale_if_error_allows_read_timeout(resolved.route.cache.as_deref())
         {
           state.metrics.record_cache_stale();
-          return cached_entry_response(entry, &request_method, &request_headers);
+          return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
         }
         return upstream_error_response(
           &state,
@@ -1324,7 +1326,7 @@ where
             .stale_if_error_allows_connect(resolved.route.cache.as_deref())
         {
           state.metrics.record_cache_stale();
-          return cached_entry_response(entry, &request_method, &request_headers);
+          return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
         }
         return upstream_error_response(
           &state,
@@ -1479,7 +1481,7 @@ where
           }
         {
           state.metrics.record_cache_stale();
-          return cached_entry_response(entry, &request_method, &request_headers);
+          return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
         }
         return upstream_error_response(
           &state,
@@ -1532,7 +1534,7 @@ where
       .stale_if_error_allows_status(resolved.route.cache.as_deref(), parts.status)
   {
     state.metrics.record_cache_stale();
-    return cached_entry_response(entry, &request_method, &request_headers);
+    return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
   }
   if parts.status == StatusCode::NOT_MODIFIED
     && let Some(entry) = revalidation_entry.clone()
@@ -1554,7 +1556,7 @@ where
     let mut headers = entry.headers.clone();
     merge_not_modified_headers(&mut headers, &parts.headers);
     state.metrics.record_cache_hit();
-    let response = cached_entry_response(
+    let mut response = cache_status::cached_entry_response(
       crate::cache::CacheEntry {
         status: entry.status,
         headers,
@@ -1562,6 +1564,11 @@ where
       },
       &request_method,
       &request_headers,
+    );
+    cache_status::apply(
+      &mut response,
+      CacheOutcome::Revalidated,
+      CacheReason::NotModified,
     );
     let response = compression::maybe_compress_response(
       response,
@@ -1666,6 +1673,7 @@ where
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
+  cache_status::strip_headers(&mut parts.headers);
   apply_alt_svc_header(
     &mut parts.headers,
     parts.status,
@@ -2756,46 +2764,6 @@ where
   ))
 }
 
-fn cached_entry_response(
-  entry: crate::cache::CacheEntry,
-  method: &Method,
-  request_headers: &HeaderMap,
-) -> Response<ProxyBody> {
-  let entry = crate::cache::range_entry(entry, method, request_headers);
-  let body_len = entry.body.len();
-  let mut response = Response::new(full_body(entry.body));
-  *response.status_mut() = entry.status;
-  *response.headers_mut() = entry.headers;
-  if body::is_known_small_response_body_len(body_len) {
-    response
-      .extensions_mut()
-      .insert(body::KnownSmallResponseBody);
-  }
-  response
-}
-
-#[allow(clippy::too_many_arguments)]
-fn cached_downstream_response(
-  state: &AppSnapshot,
-  route: &RouteConfig,
-  entry: crate::cache::CacheEntry,
-  request_method: &Method,
-  request_headers: &HeaderMap,
-  timeouts: EffectiveTimeouts,
-  transport_network: WafTransportNetwork,
-) -> Response<ProxyBody> {
-  let response = cached_entry_response(entry, request_method, request_headers);
-  let response = compression::maybe_compress_response(
-    response,
-    request_method,
-    request_headers,
-    route.compression.as_deref(),
-    &state.config.compression,
-    &state.compression,
-  );
-  with_downstream_response_timeout(response, timeouts.response_send, transport_network)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn handle_cache_lookup_result(
   state: &Arc<AppSnapshot>,
@@ -2822,7 +2790,7 @@ fn handle_cache_lookup_result(
       if record_events {
         record_route_cache_event(state, resolved.route, "hit", "fresh");
       }
-      Some(cached_downstream_response(
+      Some(cache_status::cached_downstream_response(
         state,
         resolved.route,
         entry,
@@ -2830,6 +2798,8 @@ fn handle_cache_lookup_result(
         request_headers,
         timeouts,
         transport_network,
+        CacheOutcome::Hit,
+        CacheReason::Fresh,
       ))
     }
     crate::cache::CacheLookup::Stale(stale) => {
@@ -2855,7 +2825,7 @@ fn handle_cache_lookup_result(
         if record_events {
           record_route_cache_event(state, resolved.route, "stale", "background_refresh");
         }
-        return Some(cached_downstream_response(
+        return Some(cache_status::cached_downstream_response(
           state,
           resolved.route,
           stale.entry,
@@ -2863,6 +2833,8 @@ fn handle_cache_lookup_result(
           request_headers,
           timeouts,
           transport_network,
+          CacheOutcome::Stale,
+          CacheReason::BackgroundRefresh,
         ));
       }
       if !stale.request_headers.is_empty() {
@@ -2883,7 +2855,7 @@ fn handle_cache_lookup_result(
         if record_events {
           record_route_cache_event(state, resolved.route, "hit", "stale_without_validators");
         }
-        Some(cached_downstream_response(
+        Some(cache_status::cached_downstream_response(
           state,
           resolved.route,
           stale.entry,
@@ -2891,6 +2863,8 @@ fn handle_cache_lookup_result(
           request_headers,
           timeouts,
           transport_network,
+          CacheOutcome::Stale,
+          CacheReason::StaleWithoutValidators,
         ))
       }
     }
@@ -3160,14 +3134,23 @@ async fn maybe_cache_response_with_store_permission(
   allow_store: bool,
 ) -> Response<ProxyBody> {
   if !state.cache.policy_enabled(route_cache, method) {
+    let mut response = response;
+    cache_status::strip_headers(response.headers_mut());
     return response;
   }
   let (mut parts, body) = response.into_parts();
+  cache_status::strip_headers(&mut parts.headers);
   if !allow_store {
     if state.cache.strip_surrogate_control(route_cache) {
       parts.headers.remove("surrogate-control");
     }
-    return Response::from_parts(parts, body);
+    let mut response = Response::from_parts(parts, body);
+    cache_status::apply(
+      &mut response,
+      CacheOutcome::Miss,
+      CacheReason::StoreNotAllowed,
+    );
+    return response;
   }
   let content_length = exact_response_content_length(&parts.headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
@@ -3202,7 +3185,13 @@ async fn maybe_cache_response_with_store_permission(
         if state.cache.strip_surrogate_control(route_cache) {
           parts.headers.remove("surrogate-control");
         }
-        return Response::from_parts(parts, body);
+        let mut response = Response::from_parts(parts, body);
+        cache_status::apply(
+          &mut response,
+          CacheOutcome::Miss,
+          CacheReason::from_rejection(reason),
+        );
+        return response;
       }
       crate::cache::CachePreparedInsertDecision::NotCacheable(reason) => {
         record_fill_stage("head_decision", reason.as_str(), head_started);
@@ -3212,7 +3201,13 @@ async fn maybe_cache_response_with_store_permission(
         if state.cache.strip_surrogate_control(route_cache) {
           parts.headers.remove("surrogate-control");
         }
-        return Response::from_parts(parts, body);
+        let mut response = Response::from_parts(parts, body);
+        cache_status::apply(
+          &mut response,
+          CacheOutcome::Miss,
+          CacheReason::from_rejection(reason),
+        );
+        return response;
       }
     };
   let collect_limit = cache_response_collect_limit(&state.config);
@@ -3229,7 +3224,9 @@ async fn maybe_cache_response_with_store_permission(
     if state.cache.strip_surrogate_control(route_cache) {
       parts.headers.remove("surrogate-control");
     }
-    return Response::from_parts(parts, body);
+    let mut response = Response::from_parts(parts, body);
+    cache_status::apply(&mut response, CacheOutcome::Miss, CacheReason::TooLarge);
+    return response;
   }
   let collect_started = Instant::now();
   match collect_cache_response_body(body, collect_limit).await {
@@ -3239,7 +3236,7 @@ async fn maybe_cache_response_with_store_permission(
         parts.headers.remove("surrogate-control");
       }
       let store_started = Instant::now();
-      match state.cache.insert_prepared(
+      let reason = match state.cache.insert_prepared(
         *prepared,
         crate::cache::CacheEntry {
           status: parts.status,
@@ -3254,10 +3251,12 @@ async fn maybe_cache_response_with_store_permission(
             insert_ctx(),
             crate::cache::CacheFillSuppressionReason::AdmissionRejected,
           );
+          CacheReason::AdmissionRejected
         }
         crate::cache::CacheInsertOutcome::AdmissionWarming => {
           record_fill_stage("local_store", "admission_warming", store_started);
           state.metrics.record_cache_admission_rejection();
+          CacheReason::AdmissionWarming
         }
         crate::cache::CacheInsertOutcome::StoreFailed => {
           record_fill_stage("local_store", "store_failed", store_started);
@@ -3266,20 +3265,24 @@ async fn maybe_cache_response_with_store_permission(
             insert_ctx(),
             crate::cache::CacheFillSuppressionReason::StoreFailed,
           );
+          CacheReason::StoreFailed
         }
         crate::cache::CacheInsertOutcome::NotCacheable => {
           record_fill_stage("local_store", "not_cacheable", store_started);
           state.cache.note_fill_not_stored(insert_ctx());
+          CacheReason::NotCacheable
         }
         crate::cache::CacheInsertOutcome::Stored => {
           record_fill_stage("local_store", "stored", store_started);
           if state.cache.shared_cache_enabled() {
             record_fill_stage("shared_store", "submitted", Instant::now());
           }
+          CacheReason::Stored
         }
-      }
+      };
       let body_len = bytes.len();
       let mut response = Response::from_parts(parts, full_body(bytes));
+      cache_status::apply(&mut response, CacheOutcome::Miss, reason);
       if body::is_known_small_response_body_len(body_len) {
         response
           .extensions_mut()
@@ -3290,18 +3293,18 @@ async fn maybe_cache_response_with_store_permission(
     Err(error) if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) => {
       record_fill_stage("body_collect", "timeout", collect_started);
       state.metrics.record_cache_fill_error();
-      text_response(
+      cache_status::store_failed_response(text_response(
         StatusCode::GATEWAY_TIMEOUT,
         "upstream response body timed out",
-      )
+      ))
     }
     Err(error) => {
       record_fill_stage("body_collect", "error", collect_started);
       state.metrics.record_cache_fill_error();
-      text_response(
+      cache_status::store_failed_response(text_response(
         StatusCode::BAD_GATEWAY,
         &format!("failed to read upstream response body: {error}"),
-      )
+      ))
     }
   }
 }
