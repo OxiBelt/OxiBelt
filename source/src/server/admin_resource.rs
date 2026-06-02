@@ -34,6 +34,10 @@ pub(super) fn ipm_principal(id: &str) -> String {
   format!("principal/{}", component(id))
 }
 
+pub(super) fn ipm_principal_wildcard() -> &'static str {
+  "principal/*"
+}
+
 pub(super) fn ipm_credential(id: &str) -> String {
   format!("credential/{}", component(id))
 }

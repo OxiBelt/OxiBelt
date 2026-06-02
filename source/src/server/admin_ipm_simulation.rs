@@ -15,6 +15,14 @@ fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: 
   authorization.is_allowed(action, resource_name)
 }
 
+fn allowed_silently(
+  authorization: &AdminAuthorization<'_>,
+  action: &str,
+  resource_name: &str,
+) -> bool {
+  authorization.is_allowed_silently(action, resource_name)
+}
+
 pub(super) async fn simulation_response(
   request: hyper::Request<Incoming>,
   authorization: &AdminAuthorization<'_>,
@@ -62,6 +70,25 @@ pub(super) async fn simulation_response(
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
 
+  if requires_principal {
+    let credential_preflight = body.credential_owner_preflight(authorization.ipm);
+    if !authorize_sensitive_simulation_target_requirements(
+      authorization,
+      &credential_preflight.requirements,
+    ) {
+      return text_response(StatusCode::FORBIDDEN, "forbidden");
+    }
+    if !credential_preflight.unresolved_credentials.is_empty()
+      && !allowed_silently(
+        authorization,
+        "ipm:SimulatePrincipal",
+        admin_resource::ipm_principal_wildcard(),
+      )
+    {
+      return text_response(StatusCode::FORBIDDEN, "forbidden");
+    }
+  }
+
   let prepared = match authorization.ipm.admin_prepare_simulation(
     authorization.actor,
     authorization.context(),
@@ -102,6 +129,31 @@ fn authorize_simulation_target_requirements(
   for group in &requirements.target_groups {
     let resource = admin_resource::ipm_group(group);
     if !allowed(authorization, "ipm:SimulatePrincipal", &resource) {
+      return false;
+    }
+  }
+  true
+}
+
+fn authorize_sensitive_simulation_target_requirements(
+  authorization: &AdminAuthorization<'_>,
+  requirements: &IpmSimulationAuthorizationRequirements,
+) -> bool {
+  for principal in &requirements.target_principals {
+    let resource = admin_resource::ipm_principal(principal);
+    if !allowed_silently(authorization, "ipm:SimulatePrincipal", &resource) {
+      return false;
+    }
+  }
+  for credential in &requirements.target_credentials {
+    let resource = admin_resource::ipm_credential(credential);
+    if !allowed_silently(authorization, "ipm:SimulatePrincipal", &resource) {
+      return false;
+    }
+  }
+  for group in &requirements.target_groups {
+    let resource = admin_resource::ipm_group(group);
+    if !allowed_silently(authorization, "ipm:SimulatePrincipal", &resource) {
       return false;
     }
   }

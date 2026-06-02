@@ -177,6 +177,59 @@ fn resolves_target_credential() {
 }
 
 #[test]
+fn credential_owner_preflight_collects_known_owner_before_activity_validation() {
+  let mut snapshot = empty_snapshot();
+  snapshot
+    .principals
+    .insert("deployer".to_string(), principal("deployer", &[]).1);
+  let mut credential = bearer_env_credential("deploy-token", "deployer", "PATH");
+  credential.enabled = false;
+  snapshot.credentials.push(credential);
+  let runtime = runtime_from_snapshot(
+    snapshot,
+    "OXIBELT_ADMIN_TOKEN",
+    false,
+    break_glass_verifier(),
+  );
+  let request = simulation_request(serde_json::json!({
+    "action": "dynamic-policy:Apply",
+    "resource": "oxibelt:oxibelt:dynamic-policy:source/oxibeltctl/name/block",
+    "target": { "credential": "deploy-token" }
+  }));
+
+  let preflight = request.credential_owner_preflight(&runtime);
+
+  assert_eq!(
+    preflight.requirements.target_principals,
+    vec!["deployer".to_string()]
+  );
+  assert!(preflight.unresolved_credentials.is_empty());
+}
+
+#[test]
+fn credential_owner_preflight_marks_unknown_credentials() {
+  let runtime = runtime_from_snapshot(
+    empty_snapshot(),
+    "OXIBELT_ADMIN_TOKEN",
+    false,
+    break_glass_verifier(),
+  );
+  let request = simulation_request(serde_json::json!({
+    "action": "dynamic-policy:Apply",
+    "resource": "oxibelt:oxibelt:dynamic-policy:source/oxibeltctl/name/block",
+    "target": { "credential": "missing-token" }
+  }));
+
+  let preflight = request.credential_owner_preflight(&runtime);
+
+  assert!(preflight.requirements.target_principals.is_empty());
+  assert_eq!(
+    preflight.unresolved_credentials,
+    vec!["missing-token".to_string()]
+  );
+}
+
+#[test]
 fn rejects_inactive_target_credentials() {
   let base = bearer_env_credential("deploy-token", "deployer", "PATH");
   let mut disabled = base.clone();

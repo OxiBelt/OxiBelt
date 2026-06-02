@@ -56,6 +56,33 @@ impl IpmSimulationRequest {
     }
     requirements
   }
+
+  pub(crate) fn credential_owner_preflight(
+    &self,
+    runtime: &IpmRuntime,
+  ) -> IpmSimulationCredentialPreflight {
+    let mut preflight = IpmSimulationCredentialPreflight::default();
+    let Some(target) = self.target.as_ref().filter(|target| target.has_overrides()) else {
+      return preflight;
+    };
+    let Some(credential_id) = &target.credential else {
+      return preflight;
+    };
+
+    let snapshot = runtime.snapshot();
+    match snapshot
+      .credentials
+      .iter()
+      .find(|credential| credential.name == *credential_id)
+    {
+      Some(credential) => push_unique(
+        &mut preflight.requirements.target_principals,
+        credential.principal.clone(),
+      ),
+      None => push_unique(&mut preflight.unresolved_credentials, credential_id.clone()),
+    }
+    preflight
+  }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -137,6 +164,12 @@ pub struct IpmSimulationAuthorizationRequirements {
   pub overlay_groups: Vec<String>,
   pub overlay_policies: Vec<String>,
   pub overlay_bindings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct IpmSimulationCredentialPreflight {
+  pub(crate) requirements: IpmSimulationAuthorizationRequirements,
+  pub(crate) unresolved_credentials: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -43,6 +43,14 @@ impl<'a> AdminAuthorization<'a> {
   }
 
   pub(super) fn is_allowed(&self, action: &str, resource_name: &str) -> bool {
+    self.is_allowed_with_audit(action, resource_name, true)
+  }
+
+  pub(super) fn is_allowed_silently(&self, action: &str, resource_name: &str) -> bool {
+    self.is_allowed_with_audit(action, resource_name, false)
+  }
+
+  fn is_allowed_with_audit(&self, action: &str, resource_name: &str, audit_check: bool) -> bool {
     let resource = resource(
       self.ipm.namespace(),
       service_for_action(action),
@@ -54,7 +62,7 @@ impl<'a> AdminAuthorization<'a> {
         .authorize(self.actor, action, &resource, self.context),
       IpmDecision::Allow
     );
-    if let Some(audit) = &self.audit {
+    if audit_check && let Some(audit) = &self.audit {
       audit.record_authorization(action, &resource, allowed);
     }
     allowed
