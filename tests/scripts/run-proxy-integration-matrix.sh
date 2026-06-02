@@ -23,15 +23,40 @@ upstream_tls_dir="${work_dir}/upstream-tls"
 postgres_tls_dir="${work_dir}/postgres-tls"
 logs_dir="${work_dir}/logs"
 network_name="oxibelt-matrix-${run_id}"
-mock_image="oxibelt/mock-upstream:${run_id}"
-mock_dns_image="oxibelt/mock-dns:${run_id}"
-mock_kubernetes_image="oxibelt/mock-kubernetes:${run_id}"
-pq_probe_image="oxibelt/pq-probe:${run_id}"
-protocol_probe_image="oxibelt/protocol-probe:${run_id}"
-postgres_image="oxibelt/postgres:${run_id}"
+mock_image="${OXIBELT_MOCK_UPSTREAM_IMAGE:-oxibelt/mock-upstream:${run_id}}"
+mock_dns_image="${OXIBELT_MOCK_DNS_IMAGE:-oxibelt/mock-dns:${run_id}}"
+mock_kubernetes_image="${OXIBELT_MOCK_KUBERNETES_IMAGE:-oxibelt/mock-kubernetes:${run_id}}"
+pq_probe_image="${OXIBELT_PQ_PROBE_IMAGE:-oxibelt/pq-probe:${run_id}}"
+protocol_probe_image="${OXIBELT_PROTOCOL_PROBE_IMAGE:-oxibelt/protocol-probe:${run_id}}"
+postgres_image="${OXIBELT_POSTGRES_IMAGE:-oxibelt/postgres:${run_id}}"
 redis_image="${OXIBELT_REDIS_IMAGE:-valkey/valkey:8-alpine}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy-matrix:${run_id}}"
+require_preloaded_helper_images="${OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES:-0}"
+remove_mock_image=0
+remove_mock_dns_image=0
+remove_mock_kubernetes_image=0
+remove_pq_probe_image=0
+remove_protocol_probe_image=0
+remove_postgres_image=0
 remove_proxy_image=0
+if [[ -z "${OXIBELT_MOCK_UPSTREAM_IMAGE:-}" ]]; then
+  remove_mock_image=1
+fi
+if [[ -z "${OXIBELT_MOCK_DNS_IMAGE:-}" ]]; then
+  remove_mock_dns_image=1
+fi
+if [[ -z "${OXIBELT_MOCK_KUBERNETES_IMAGE:-}" ]]; then
+  remove_mock_kubernetes_image=1
+fi
+if [[ -z "${OXIBELT_PQ_PROBE_IMAGE:-}" ]]; then
+  remove_pq_probe_image=1
+fi
+if [[ -z "${OXIBELT_PROTOCOL_PROBE_IMAGE:-}" ]]; then
+  remove_protocol_probe_image=1
+fi
+if [[ -z "${OXIBELT_POSTGRES_IMAGE:-}" ]]; then
+  remove_postgres_image=1
+fi
 proxy_container="oxibelt-proxy-${run_id}"
 proxy_b_container="oxibelt-proxy-b-${run_id}"
 http_container="oxibelt-http-${run_id}"
@@ -58,7 +83,24 @@ cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
   docker volume rm "${remote_signer_socket_volume}" >/dev/null 2>&1 || true
-  docker rmi -f "${mock_image}" "${mock_dns_image}" "${mock_kubernetes_image}" "${pq_probe_image}" "${protocol_probe_image}" "${postgres_image}" >/dev/null 2>&1 || true
+  if [[ "${remove_mock_image}" == "1" ]]; then
+    docker rmi -f "${mock_image}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${remove_mock_dns_image}" == "1" ]]; then
+    docker rmi -f "${mock_dns_image}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${remove_mock_kubernetes_image}" == "1" ]]; then
+    docker rmi -f "${mock_kubernetes_image}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${remove_pq_probe_image}" == "1" ]]; then
+    docker rmi -f "${pq_probe_image}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${remove_protocol_probe_image}" == "1" ]]; then
+    docker rmi -f "${protocol_probe_image}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${remove_postgres_image}" == "1" ]]; then
+    docker rmi -f "${postgres_image}" >/dev/null 2>&1 || true
+  fi
   if [[ "${remove_proxy_image}" == "1" ]]; then
     docker rmi -f "${proxy_image}" >/dev/null 2>&1 || true
   fi
@@ -120,6 +162,35 @@ docker_build_with_retry() {
     sleep 5
     attempt=$((attempt + 1))
   done
+}
+
+require_preloaded_helper_image() {
+  local image="$1"
+  if [[ "${require_preloaded_helper_images}" != "1" ]]; then
+    return 0
+  fi
+  if ! docker image inspect "${image}" >/dev/null 2>&1; then
+    echo "required preloaded Docker integration helper image is missing: ${image}" >&2
+    echo "load the oxibelt-docker-integration-helper-images artifact or unset OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES" >&2
+    exit 1
+  fi
+}
+
+ensure_helper_image() {
+  local image="$1"
+  local remove_flag_name="$2"
+  local dockerfile="$3"
+  local context="$4"
+
+  require_preloaded_helper_image "${image}"
+  if [[ "${require_preloaded_helper_images}" == "1" || "${!remove_flag_name}" != "1" ]]; then
+    return 0
+  fi
+
+  docker_build_with_retry \
+    -t "${image}" \
+    -f "${dockerfile}" \
+    "${context}" >/dev/null
 }
 
 cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
@@ -1789,48 +1860,55 @@ fi
 docker network create "${network_name}" >/dev/null
 
 if [[ "${CASE_EXPECT_START}" == "success" || "${CASE_NEED_HTTP_UPSTREAM}" == "1" || "${CASE_NEED_HTTPS_UPSTREAM}" == "1" || "${CASE_NEED_ALT_UPSTREAM}" == "1" ]]; then
-  docker_build_with_retry \
-    -t "${mock_image}" \
-    -f "${repo_root}/tests/docker/mock_upstream/Dockerfile" \
-    "${repo_root}/tests/docker/mock_upstream" >/dev/null
+  ensure_helper_image \
+    "${mock_image}" \
+    remove_mock_image \
+    "${repo_root}/tests/docker/mock_upstream/Dockerfile" \
+    "${repo_root}/tests/docker/mock_upstream"
 fi
 
 if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
-  docker_build_with_retry \
-    -t "${mock_dns_image}" \
-    -f "${repo_root}/tests/docker/mock_dns/Dockerfile" \
-    "${repo_root}/tests/docker/mock_dns" >/dev/null
+  ensure_helper_image \
+    "${mock_dns_image}" \
+    remove_mock_dns_image \
+    "${repo_root}/tests/docker/mock_dns/Dockerfile" \
+    "${repo_root}/tests/docker/mock_dns"
 fi
 
 if [[ "${CASE_NEED_KUBERNETES_SERVER}" == "1" ]]; then
-  docker_build_with_retry \
-    -t "${mock_kubernetes_image}" \
-    -f "${repo_root}/tests/docker/mock_kubernetes/Dockerfile" \
-    "${repo_root}/tests/docker/mock_kubernetes" >/dev/null
+  ensure_helper_image \
+    "${mock_kubernetes_image}" \
+    remove_mock_kubernetes_image \
+    "${repo_root}/tests/docker/mock_kubernetes/Dockerfile" \
+    "${repo_root}/tests/docker/mock_kubernetes"
 fi
 
 if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
-  docker_build_with_retry \
-    -t "${pq_probe_image}" \
-    -f "${repo_root}/tests/docker/pq_probe/Dockerfile" \
-    "${repo_root}/tests/docker/pq_probe" >/dev/null
+  ensure_helper_image \
+    "${pq_probe_image}" \
+    remove_pq_probe_image \
+    "${repo_root}/tests/docker/pq_probe/Dockerfile" \
+    "${repo_root}/tests/docker/pq_probe"
 fi
 
 if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" || "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" || "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" || "${CASE_NEED_TURN_UDP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TCP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TLS_UPSTREAM}" == "1" ]]; then
-  docker_build_with_retry \
-    -t "${protocol_probe_image}" \
-    -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
-    "${repo_root}/tests/docker/protocol_probe" >/dev/null
+  ensure_helper_image \
+    "${protocol_probe_image}" \
+    remove_protocol_probe_image \
+    "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
+    "${repo_root}/tests/docker/protocol_probe"
 fi
 
 if [[ "${CASE_NEED_POSTGRES}" == "1" ]]; then
-  docker_build_with_retry \
-    -t "${postgres_image}" \
-    -f "${repo_root}/tests/docker/postgres/Dockerfile" \
-    "${repo_root}/tests/docker/postgres" >/dev/null
+  ensure_helper_image \
+    "${postgres_image}" \
+    remove_postgres_image \
+    "${repo_root}/tests/docker/postgres/Dockerfile" \
+    "${repo_root}/tests/docker/postgres"
 fi
 
 if [[ "${CASE_NEED_REDIS}" == "1" ]]; then
+  require_preloaded_helper_image "${redis_image}"
   docker run -d \
     --name "${redis_container}" \
     --label "${test_label}" \

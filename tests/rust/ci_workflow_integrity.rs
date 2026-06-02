@@ -61,6 +61,13 @@ fn performance_probe_build_script_text() -> String {
         .expect("performance probe build script should be readable")
 }
 
+fn docker_integration_helper_build_script_text() -> String {
+    fs::read_to_string(
+        repo_root().join("tests/scripts/build-docker-integration-helper-images-artifact.sh"),
+    )
+    .expect("Docker integration helper image build script should be readable")
+}
+
 fn workspace_members() -> Vec<String> {
     let manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
         .expect("root Cargo.toml should be readable");
@@ -310,6 +317,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "docker-alpine-musl-image-amd64",
         "docker-alpine-comparator-musl-image-amd64",
         "docker-performance-probe-image",
+        "docker-integration-helper-images",
         "docker-alpine-musl-image-other",
         "docker-alpine-musl-image-riscv64",
         "remote-signer-dos-docker",
@@ -374,8 +382,11 @@ fn docker_integration_jobs_are_split_by_logical_group() {
             job.needs.contains(&"generate-test-matrices".to_owned())
                 && job
                     .needs
-                    .contains(&"docker-alpine-musl-image-amd64".to_owned()),
-            "{job_id} should wait for generated matrices and the AMD64 image"
+                    .contains(&"docker-alpine-musl-image-amd64".to_owned())
+                && job
+                    .needs
+                    .contains(&"docker-integration-helper-images".to_owned()),
+            "{job_id} should wait for generated matrices, the AMD64 image, and helper images"
         );
         assert!(
             workflow.contains(&format!(
@@ -392,6 +403,90 @@ fn docker_integration_jobs_are_split_by_logical_group() {
                 "matrix: ${{{{ fromJson(needs.generate-test-matrices.outputs.{output_name}) }}}}"
             )),
             "{job_id} should consume {output_name}"
+        );
+    }
+}
+
+#[test]
+fn docker_integration_helper_image_job_builds_reusable_artifact() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let helper_job = jobs
+        .get("docker-integration-helper-images")
+        .expect("workflow should define the Docker integration helper image job");
+    let script = docker_integration_helper_build_script_text();
+
+    assert_eq!(
+        helper_job.needs,
+        vec![
+            "test".to_owned(),
+            "test-riscv64-qemu".to_owned(),
+            "fuzz-smoke".to_owned()
+        ],
+        "Docker integration helper image builds should follow the normal test gates"
+    );
+    assert!(
+        workflow.contains("name: Docker integration helper images")
+            && workflow
+                .contains("tests/scripts/build-docker-integration-helper-images-artifact.sh")
+            && workflow.contains("name: oxibelt-docker-integration-helper-images")
+            && workflow.contains("oxibelt-docker-integration-helper-images.tar"),
+        "workflow should build and upload a reusable Docker integration helper image artifact"
+    );
+    for image in [
+        "oxibelt/mock-upstream:ci",
+        "oxibelt/mock-dns:ci",
+        "oxibelt/mock-kubernetes:ci",
+        "oxibelt/pq-probe:ci",
+        "oxibelt/protocol-probe:ci",
+        "oxibelt/postgres:ci",
+        "valkey/valkey:8-alpine",
+    ] {
+        assert!(
+            script.contains(image),
+            "helper image build script should include deterministic tag {image}"
+        );
+    }
+    assert!(
+        script.contains("retry_command 3 docker pull --platform \"${platform}\"")
+            && script.contains("retry_command 3 docker buildx build")
+            && script.contains("retry_command 3 docker save"),
+        "helper image build script should retry Docker Hub pulls, builds, and image save"
+    );
+}
+
+#[test]
+fn docker_integration_jobs_use_prebuilt_helper_images() {
+    let workflow = workflow_text();
+
+    assert_eq!(
+        workflow
+            .matches("name: Download Docker integration helper image artifact")
+            .count(),
+        DOCKER_INTEGRATION_JOBS.len(),
+        "each Docker integration job should download the helper image artifact"
+    );
+    assert_eq!(
+        workflow
+            .matches("name: Load Docker integration helper images")
+            .count(),
+        DOCKER_INTEGRATION_JOBS.len(),
+        "each Docker integration job should load the helper image tar"
+    );
+    for value in [
+        "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
+        "OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci",
+        "OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci",
+        "OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci",
+        "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
+        "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",
+        "OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine",
+        "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
+    ] {
+        assert_eq!(
+            workflow.matches(value).count(),
+            DOCKER_INTEGRATION_JOBS.len(),
+            "each Docker integration job should pass {value}"
         );
     }
 }

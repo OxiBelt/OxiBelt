@@ -4,6 +4,7 @@
 - `docker/`: mock upstream image assets for end-to-end proxy verification
 - `scripts/build-targets.sh`: adds the current Linux `gnu` and `musl` targets, then builds both
 - `scripts/build-docker-image-artifact.sh`: builds an Alpine musl Docker image for a requested Docker platform (`linux/amd64`, `linux/arm64`, or `linux/riscv64`) and writes it as a loadable image tar artifact. AMD64 builds accept `amd64v2`, `amd64`, and `amd64v4`; the default `amd64` artifact name remains `oxibelt-alpine-musl-amd64-image` and targets `x86-64-v3`.
+- `scripts/build-docker-integration-helper-images-artifact.sh`: builds the Docker integration helper images once for CI and writes a loadable tar artifact containing the mock upstream, DNS, Kubernetes, PQ probe, protocol probe, PostgreSQL, and Valkey images.
 - `scripts/select-amd64-docker-image-artifact.sh`: selects the best loadable AMD64 Docker artifact for the current Linux runner from `/proc/cpuinfo`, or validates a required target such as `x86-64-v3` for benchmark jobs.
 - `riscv64gc-unknown-linux-musl` builds need `clang/libclang`, and either a native `riscv64gc-unknown-linux-musl` toolchain or `riscv64-linux-musl-gcc`
 - RISC-V Docker image artifacts use `rust:1.95.0-trixie` as the builder because the official `rust:1.95.0-alpine3.23` image is not published for `riscv64`; the runtime image is still Alpine/musl.
@@ -25,6 +26,8 @@
 - `docker/postgres/`: test-only PostgreSQL image used by database access-log and mitigation matrix cases.
 
 The Docker integration flow avoids host bind mounts on purpose. It uses `docker build` and `docker cp`, which behaves more reliably when Docker is exposed through `docker-outside-of-docker`.
+
+CI prebuilds Docker integration helper images once as the `oxibelt-docker-integration-helper-images` artifact and loads that tar in each Docker integration matrix job. Local `run-proxy-integration-matrix.sh` runs still build helper images on demand unless `OXIBELT_MOCK_UPSTREAM_IMAGE`, `OXIBELT_MOCK_DNS_IMAGE`, `OXIBELT_MOCK_KUBERNETES_IMAGE`, `OXIBELT_PQ_PROBE_IMAGE`, `OXIBELT_PROTOCOL_PROBE_IMAGE`, `OXIBELT_POSTGRES_IMAGE`, or `OXIBELT_REDIS_IMAGE` is set. Set `OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES=1` only after loading those images so missing helpers fail before Docker tries to pull from a registry.
 
 The Docker performance flow follows the same constraint. It copies generated TLS material and configs into containers instead of relying on bind mounts, and removes test containers, networks, and test-only images by label during cleanup.
 

@@ -550,12 +550,44 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-riscv64.tar
           retention-days: 0
 
+  docker-integration-helper-images:
+    name: Docker integration helper images
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - test-riscv64-qemu
+      - fuzz-smoke
+    permissions:
+      contents: read
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
+
+      - name: Build Docker integration helper image artifact
+        run: |
+          tests/scripts/build-docker-integration-helper-images-artifact.sh \
+            "linux/amd64" \
+            "${RUNNER_TEMP}/oxibelt-integration-helper-images"
+
+      - name: Upload Docker integration helper image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar
+          retention-days: 0
+
   docker-integration-config-runtime:
     name: Docker integration config-runtime (${{ matrix.name }})
     runs-on: ubuntu-latest
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
     permissions:
       actions: read
       contents: read
@@ -588,9 +620,26 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
       - name: Run Docker integration matrix case
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
+          OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
+          OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
@@ -609,6 +658,7 @@ jobs:
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
     permissions:
       actions: read
       contents: read
@@ -641,9 +691,26 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
       - name: Run Docker integration matrix case
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
+          OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
+          OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
@@ -662,6 +729,7 @@ jobs:
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
     permissions:
       actions: read
       contents: read
@@ -694,9 +762,26 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
       - name: Run Docker integration matrix case
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
+          OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
+          OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
@@ -715,6 +800,7 @@ jobs:
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
     permissions:
       actions: read
       contents: read
@@ -747,9 +833,26 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
       - name: Run Docker integration matrix case
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
+          OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
+          OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
@@ -768,6 +871,7 @@ jobs:
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
     permissions:
       actions: read
       contents: read
@@ -800,9 +904,26 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
       - name: Run Docker integration matrix case
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
+          OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
+          OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
@@ -821,6 +942,7 @@ jobs:
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
     permissions:
       actions: read
       contents: read
@@ -853,9 +975,26 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
       - name: Run Docker integration matrix case
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
+          OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
+          OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
@@ -874,6 +1013,7 @@ jobs:
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
     permissions:
       actions: read
       contents: read
@@ -906,9 +1046,26 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
       - name: Run Docker integration matrix case
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
+          OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
+          OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
@@ -927,6 +1084,7 @@ jobs:
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
     permissions:
       actions: read
       contents: read
@@ -959,9 +1117,26 @@ jobs:
           OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
       - name: Run Docker integration matrix case
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
+          OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
+          OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
