@@ -7177,6 +7177,116 @@ fn route_replacement_rejects_query_fragments() {
 }
 
 #[test]
+fn route_path_values_reject_encoded_dot_and_slash_separators() {
+    let temp_dir = common::TempDir::new("route-encoded-separators");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-encoded-separators");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for raw in [
+        base.replace("path_prefix = \"/\"", "path_prefix = \"/%2e/admin\""),
+        base.replace(
+            "path_prefix = \"/\"",
+            "path_prefix = \"/\"\nreplace_prefix_with = \"/edge%2fadmin\"",
+        ),
+        base.replace(
+            "path_prefix = \"/\"",
+            "path_prefix = \"/\"\nreplace_prefix_with = \"/edge%5Cadmin\"",
+        ),
+    ] {
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("encoded separators should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("must not contain encoded dot or slash separators"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn routes_reject_empty_host_lists_and_duplicate_names() {
+    let temp_dir = common::TempDir::new("route-identity-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-identity-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let empty_hosts = base.replace("hosts = [\"example.com\"]", "hosts = []");
+    let config: Config = toml::from_str(&empty_hosts).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("route with no hosts should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("route app-root must have at least one host match"),
+        "unexpected error: {error}"
+    );
+
+    let duplicate_name = base
+        + r#"
+
+[[routes]]
+name = "app-root"
+hosts = ["duplicate.example.com"]
+path_prefix = "/duplicate"
+upstream = "app"
+"#;
+    let config: Config = toml::from_str(&duplicate_name).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("duplicate route names should be rejected");
+    assert!(
+        error.to_string().contains("duplicate route name: app-root"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn routes_reject_unknown_option_references() {
+    let temp_dir = common::TempDir::new("route-unknown-references");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-unknown-references");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (raw, expected) in [
+        (
+            base.replace(
+                "upstream = \"app\"",
+                "upstream = \"app\"\ncache = \"missing\"",
+            ),
+            "route app-root references unknown cache missing",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                "upstream = \"app\"\ncompression = \"missing\"",
+            ),
+            "route app-root references unknown compression policy missing",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                "upstream = \"app\"\nexternal_auth = \"missing\"",
+            ),
+            "route app-root references unknown external_auth missing",
+        ),
+    ] {
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("unknown route reference should be rejected");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn route_can_reference_pool_without_direct_upstreams() {
     let temp_dir = common::TempDir::new("pool-only-route");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "pool-only-route");
@@ -7325,6 +7435,121 @@ fn static_route_rejects_missing_root() {
 
     assert!(
         error.to_string().contains("static_root is invalid"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn static_routes_reject_upstream_only_options() {
+    let temp_dir = common::TempDir::new("static-route-upstream-options");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "static-upstream-options");
+    let static_root = temp_dir.path().join("public");
+    std::fs::create_dir_all(&static_root).expect("static root should be created");
+    let base = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        &format!("static_root = \"{}\"", static_root.display()),
+    );
+
+    for (raw, expected) in [
+        (
+            base.replace(
+                &format!("static_root = \"{}\"", static_root.display()),
+                &format!(
+                    "static_root = \"{}\"\nreplace_prefix_with = \"/edge\"",
+                    static_root.display()
+                ),
+            ),
+            "cannot set replace_prefix_with when static_root is configured",
+        ),
+        (
+            base.replace(
+                &format!("static_root = \"{}\"", static_root.display()),
+                &format!(
+                    "static_root = \"{}\"\ncache = \"default\"",
+                    static_root.display()
+                ),
+            ),
+            "cannot set cache when static_root is configured",
+        ),
+        (
+            base.replace(
+                &format!("static_root = \"{}\"", static_root.display()),
+                &format!(
+                    "static_root = \"{}\"\nupstream_http_version = \"h2\"",
+                    static_root.display()
+                ),
+            ),
+            "cannot set upstream_http_version when static_root is configured",
+        ),
+        (
+            base.replace(
+                &format!("static_root = \"{}\"", static_root.display()),
+                &format!(
+                    "static_root = \"{}\"\ngeneric_http_upgrade = true",
+                    static_root.display()
+                ),
+            ),
+            "cannot enable upstream-only route features when static_root is configured",
+        ),
+        (
+            base.replace(
+                &format!("static_root = \"{}\"", static_root.display()),
+                &format!(
+                    "static_root = \"{}\"\nconnect_tunneling = true",
+                    static_root.display()
+                ),
+            ),
+            "cannot enable upstream-only route features when static_root is configured",
+        ),
+        (
+            base.replace(
+                &format!("static_root = \"{}\"", static_root.display()),
+                &format!(
+                    "static_root = \"{}\"\ngrpc_web = true",
+                    static_root.display()
+                ),
+            ),
+            "cannot enable upstream-only route features when static_root is configured",
+        ),
+    ] {
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("static route upstream-only option should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn upstream_pool_routes_reject_http3_route_override() {
+    let temp_dir = common::TempDir::new("pool-route-h3-override");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "pool-route-h3-override");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        r#"upstream_pool = "app-pool"
+upstream_http_version = "h3"
+
+[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+origin = "https://app.internal.example"
+"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("HTTP/3 route override should fail for pool routes");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot set upstream_http_version = \"h3\" for upstream_pool routes"),
         "unexpected error: {error}"
     );
 }

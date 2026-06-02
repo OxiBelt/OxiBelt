@@ -1315,6 +1315,21 @@ run_case_checks() {
             None,
         ),
         docker_case(
+            "config-valid",
+            "static-only-route-startup",
+            "static-only route starts without direct upstream configuration",
+            ExpectStart::Success,
+            Needs::default(),
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "static.example.test" "/assets/ok.txt" 200)"
+  assert_response_jq "${response}" '.body == "static ok\n"'
+}
+"#,
+            None,
+        ),
+        docker_case(
             "proxy-compression",
             "downstream-gzip-response",
             "downstream response compression negotiates and serves gzip",
@@ -1389,6 +1404,28 @@ run_case_checks() {
   assert_response_jq "${private_response}" '.headers["content-encoding"] == null
     and .headers["cache-control"] == "private, no-store"'
   assert_body_jq "${private_response}" '.path == "/origin/app/private?cache_control=private-no-store"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-compression",
+            "route-compression-off-overrides-default",
+            "route compression off skips global downstream compression",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local compressed uncompressed
+  compressed="$(client_request_with_headers "example.test" "/on/compress?body_repeat=2048&body_repeat_char=x&content_type=text/plain" 200 "GET" "" "Accept-Encoding: gzip")"
+  assert_response_jq "${compressed}" '.headers["content-encoding"] == "gzip"'
+
+  uncompressed="$(client_request_with_headers "example.test" "/off/compress?body_repeat=2048&body_repeat_char=x&content_type=text/plain" 200 "GET" "" "Accept-Encoding: gzip")"
+  assert_response_jq "${uncompressed}" '.headers["content-encoding"] == null'
+  assert_response_jq "${uncompressed}" '.body | length == 2048'
 }
 "#,
             None,
@@ -4187,6 +4224,37 @@ run_case_checks() {
         ),
         docker_case(
             "cache",
+            "route-named-cache-policy-isolated",
+            "route named cache policy hits independently from default cache",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local named_seed named_hit default_seed default_hit
+  named_seed="$(client_request "example.test" "/named/object?body=named-a&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${named_seed}" '.body == "named-a"'
+  assert_response_jq "${named_seed}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
+
+  named_hit="$(client_request "example.test" "/named/object?body=named-a&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${named_hit}" '.body == "named-a"'
+  assert_response_jq "${named_hit}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
+
+  default_seed="$(client_request "example.test" "/default/object?body=default-a&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${default_seed}" '.body == "default-a"'
+  assert_response_jq "${default_seed}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
+
+  default_hit="$(client_request "example.test" "/default/object?body=default-a&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${default_hit}" '.body == "default-a"'
+  assert_response_jq "${default_hit}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
             "http-semantics-revalidate",
             "cache revalidates stale entries with ETag validators",
             ExpectStart::Success,
@@ -5433,6 +5501,24 @@ run_case_checks() {
             Some("round_robin"),
         ),
         docker_case(
+            "config-invalid",
+            "route-multiple-targets",
+            "routes must configure exactly one target kind",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some("must set exactly one of upstream, upstream_pool, or static_root"),
+        ),
+        docker_case(
+            "config-invalid",
+            "route-unknown-references",
+            "routes reject unknown target references",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some("references unknown upstream missing-upstream"),
+        ),
+        docker_case(
             "proxy-routing",
             "exact-host-beats-wildcard",
             "exact host routes beat wildcard routes",
@@ -5506,6 +5592,183 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/v1/items?x=1" 200)"
   assert_body_jq "${response}" '.path == "/origin/edge/v1/items?x=1"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "host-port-and-case-normalization",
+            "host matching normalizes case and strips ordinary ports",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "API.EXAMPLE.TEST:443" "/case/host-port" 200)"
+  assert_body_jq "${response}" '.upstream == "alt-upstream" and .path == "/alt/case/host-port"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "wildcard-suffix-specificity",
+            "more specific wildcard host suffixes win over broader wildcards",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local broad narrow
+  broad="$(client_request "www.example.test" "/suffix/broad" 200)"
+  assert_body_jq "${broad}" '.upstream == "http-upstream" and .path == "/origin/suffix/broad"'
+
+  narrow="$(client_request "v1.api.example.test" "/suffix/narrow" 200)"
+  assert_body_jq "${narrow}" '.upstream == "alt-upstream" and .path == "/alt/suffix/narrow"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "prefix-boundary-no-partial-match",
+            "route prefixes match only full path segment boundaries",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local matched partial
+  matched="$(client_request "example.test" "/app/ok" 200)"
+  assert_body_jq "${matched}" '.upstream == "http-upstream" and .path == "/origin/app/ok"'
+
+  partial="$(client_request "example.test" "/application" 404)"
+  assert_response_jq "${partial}" '.body == "no matching route"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "equal-specificity-keeps-route-order",
+            "equal host and path specificity keeps the first configured route",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "tie.example.test" "/same/path" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/same/path"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "host-header-not-tls-sni-selects-route",
+            "HTTPS routing uses the Host header rather than TLS SNI",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                alt_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request_with_sni "proxy" "api.example.test" "/sni/host-route" 200)"
+  assert_body_jq "${response}" '.upstream == "alt-upstream" and .path == "/alt/sni/host-route"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "replace-prefix-exact-root-and-query",
+            "prefix replacement preserves query strings on exact prefix matches",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app?x=1&y=two" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/edge?x=1&y=two"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "no-matching-route-fails-closed",
+            "unmatched hosts and paths return no matching route",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local host_miss path_miss
+  host_miss="$(client_request "other.example.test" "/app/known" 404)"
+  assert_response_jq "${host_miss}" '.body == "no matching route"'
+
+  path_miss="$(client_request "example.test" "/other" 404)"
+  assert_response_jq "${path_miss}" '.body == "no matching route"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "pool-only-route-forwards",
+            "routes can forward through an upstream pool without direct upstream entries",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/pool/only" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/pool/only"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "route-upstream-http-version-h2-override",
+            "route-level upstream HTTP version override can force HTTP/2",
+            ExpectStart::Success,
+            Needs {
+                h2_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/h2/override" 200)"
+  assert_body_jq "${response}" '.upstream == "h2-upstream"
+    and .request_version == "HTTP/2.0"
+    and .path == "/h2-origin/h2/override"'
 }
 "#,
             None,
