@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{self, Poll, ready};
 
 use bytes::{Buf, Bytes};
-use futures_util::stream::{self, Stream, StreamExt};
 use h3::error::Code;
 use h3::quic::{self, ConnectionErrorIncoming, StreamErrorIncoming, StreamId, WriteBuf};
 use h3_datagram::datagram::EncodedDatagram;
@@ -15,40 +15,79 @@ use h3_datagram::quic_traits::{
 use h3_quinn::quinn::{self, ReadDatagram, ReadError, SendDatagramError, VarInt};
 use tokio_util::sync::ReusableBoxFuture;
 
-type BoxStreamSync<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
+type AcceptBiFuture = ReusableBoxFuture<
+  'static,
+  (
+    quinn::Connection,
+    <quinn::AcceptBi<'static> as Future>::Output,
+  ),
+>;
+type AcceptUniFuture = ReusableBoxFuture<
+  'static,
+  (
+    quinn::Connection,
+    <quinn::AcceptUni<'static> as Future>::Output,
+  ),
+>;
+type OpenBiFuture = ReusableBoxFuture<'static, <quinn::OpenBi<'static> as Future>::Output>;
+type OpenUniFuture = ReusableBoxFuture<'static, <quinn::OpenUni<'static> as Future>::Output>;
+type ReadDatagramFuture =
+  ReusableBoxFuture<'static, (quinn::Connection, <ReadDatagram<'static> as Future>::Output)>;
 
 #[derive(Clone, Default)]
 pub(crate) struct EarlyDataTracker {
-  stream_ids: Arc<Mutex<HashSet<StreamId>>>,
+  inner: Arc<EarlyDataTrackerInner>,
+}
+
+#[derive(Default)]
+struct EarlyDataTrackerInner {
+  has_early_streams: AtomicBool,
+  stream_ids: Mutex<HashSet<StreamId>>,
 }
 
 impl EarlyDataTracker {
   fn note(&self, stream_id: StreamId, is_0rtt: bool) {
     if is_0rtt {
       self
+        .inner
         .stream_ids
         .lock()
         .expect("HTTP/3 early-data tracker lock poisoned")
         .insert(stream_id);
+      self.inner.has_early_streams.store(true, Ordering::Release);
     }
   }
 
   pub(crate) fn take(&self, stream_id: StreamId) -> bool {
-    self
+    if !self.inner.has_early_streams.load(Ordering::Acquire) {
+      return false;
+    }
+
+    let mut stream_ids = self
+      .inner
       .stream_ids
       .lock()
-      .expect("HTTP/3 early-data tracker lock poisoned")
-      .remove(&stream_id)
+      .expect("HTTP/3 early-data tracker lock poisoned");
+    let removed = stream_ids.remove(&stream_id);
+    if stream_ids.is_empty() {
+      self.inner.has_early_streams.store(false, Ordering::Release);
+    }
+    removed
+  }
+
+  #[cfg(test)]
+  fn has_early_streams(&self) -> bool {
+    self.inner.has_early_streams.load(Ordering::Acquire)
   }
 }
 
 pub(crate) struct Connection {
   conn: quinn::Connection,
   early_data: EarlyDataTracker,
-  incoming_bi: BoxStreamSync<'static, <quinn::AcceptBi<'static> as Future>::Output>,
-  opening_bi: Option<BoxStreamSync<'static, <quinn::OpenBi<'static> as Future>::Output>>,
-  incoming_uni: BoxStreamSync<'static, <quinn::AcceptUni<'static> as Future>::Output>,
-  opening_uni: Option<BoxStreamSync<'static, <quinn::OpenUni<'static> as Future>::Output>>,
+  incoming_bi: AcceptBiFuture,
+  opening_bi: Option<OpenBiFuture>,
+  incoming_uni: AcceptUniFuture,
+  opening_uni: Option<OpenUniFuture>,
 }
 
 impl Connection {
@@ -56,13 +95,9 @@ impl Connection {
     Self {
       conn: conn.clone(),
       early_data,
-      incoming_bi: Box::pin(stream::unfold(conn.clone(), |conn| async {
-        Some((conn.accept_bi().await, conn))
-      })),
+      incoming_bi: ReusableBoxFuture::new(accept_bi(conn.clone())),
       opening_bi: None,
-      incoming_uni: Box::pin(stream::unfold(conn.clone(), |conn| async {
-        Some((conn.accept_uni().await, conn))
-      })),
+      incoming_uni: ReusableBoxFuture::new(accept_uni(conn.clone())),
       opening_uni: None,
     }
   }
@@ -79,9 +114,9 @@ where
     &mut self,
     cx: &mut task::Context<'_>,
   ) -> Poll<Result<Self::BidiStream, ConnectionErrorIncoming>> {
-    let (send, recv) = ready!(self.incoming_bi.poll_next_unpin(cx))
-      .expect("incoming bidirectional stream source never ends")
-      .map_err(convert_connection_error)?;
+    let (conn, accepted) = ready!(self.incoming_bi.poll(cx));
+    self.incoming_bi.set(accept_bi(conn));
+    let (send, recv) = accepted.map_err(convert_connection_error)?;
     self
       .early_data
       .note(h3_stream_id(recv.id()), recv.is_0rtt());
@@ -95,9 +130,9 @@ where
     &mut self,
     cx: &mut task::Context<'_>,
   ) -> Poll<Result<Self::RecvStream, ConnectionErrorIncoming>> {
-    let recv = ready!(self.incoming_uni.poll_next_unpin(cx))
-      .expect("incoming unidirectional stream source never ends")
-      .map_err(convert_connection_error)?;
+    let (conn, accepted) = ready!(self.incoming_uni.poll(cx));
+    self.incoming_uni.set(accept_uni(conn));
+    let recv = accepted.map_err(convert_connection_error)?;
     Poll::Ready(Ok(RecvStream::new(recv)))
   }
 
@@ -121,14 +156,16 @@ where
     &mut self,
     cx: &mut task::Context<'_>,
   ) -> Poll<Result<Self::BidiStream, StreamErrorIncoming>> {
-    let bi = self.opening_bi.get_or_insert_with(|| {
-      Box::pin(stream::unfold(self.conn.clone(), |conn| async {
-        Some((conn.open_bi().await, conn))
-      }))
-    });
-    let (send, recv) = ready!(bi.poll_next_unpin(cx))
-      .expect("open bidi source never ends")
-      .map_err(connection_error_as_stream_error)?;
+    let conn = self.conn.clone();
+    let result = {
+      let bi = self
+        .opening_bi
+        .get_or_insert_with(|| ReusableBoxFuture::new(open_bi(conn.clone())));
+      let result = ready!(bi.poll(cx));
+      bi.set(open_bi(conn));
+      result
+    };
+    let (send, recv) = result.map_err(connection_error_as_stream_error)?;
     Poll::Ready(Ok(BidiStream {
       send: SendStream::new(send),
       recv: RecvStream::new(recv),
@@ -139,14 +176,16 @@ where
     &mut self,
     cx: &mut task::Context<'_>,
   ) -> Poll<Result<Self::SendStream, StreamErrorIncoming>> {
-    let uni = self.opening_uni.get_or_insert_with(|| {
-      Box::pin(stream::unfold(self.conn.clone(), |conn| async {
-        Some((conn.open_uni().await, conn))
-      }))
-    });
-    let send = ready!(uni.poll_next_unpin(cx))
-      .expect("open uni source never ends")
-      .map_err(connection_error_as_stream_error)?;
+    let conn = self.conn.clone();
+    let result = {
+      let uni = self
+        .opening_uni
+        .get_or_insert_with(|| ReusableBoxFuture::new(open_uni(conn.clone())));
+      let result = ready!(uni.poll(cx));
+      uni.set(open_uni(conn));
+      result
+    };
+    let send = result.map_err(connection_error_as_stream_error)?;
     Poll::Ready(Ok(SendStream::new(send)))
   }
 
@@ -160,8 +199,8 @@ where
 
 pub(crate) struct OpenStreams {
   conn: quinn::Connection,
-  opening_bi: Option<BoxStreamSync<'static, <quinn::OpenBi<'static> as Future>::Output>>,
-  opening_uni: Option<BoxStreamSync<'static, <quinn::OpenUni<'static> as Future>::Output>>,
+  opening_bi: Option<OpenBiFuture>,
+  opening_uni: Option<OpenUniFuture>,
 }
 
 impl<B> quic::OpenStreams<B> for OpenStreams
@@ -175,14 +214,16 @@ where
     &mut self,
     cx: &mut task::Context<'_>,
   ) -> Poll<Result<Self::BidiStream, StreamErrorIncoming>> {
-    let bi = self.opening_bi.get_or_insert_with(|| {
-      Box::pin(stream::unfold(self.conn.clone(), |conn| async {
-        Some((conn.open_bi().await, conn))
-      }))
-    });
-    let (send, recv) = ready!(bi.poll_next_unpin(cx))
-      .expect("open bidi source never ends")
-      .map_err(connection_error_as_stream_error)?;
+    let conn = self.conn.clone();
+    let result = {
+      let bi = self
+        .opening_bi
+        .get_or_insert_with(|| ReusableBoxFuture::new(open_bi(conn.clone())));
+      let result = ready!(bi.poll(cx));
+      bi.set(open_bi(conn));
+      result
+    };
+    let (send, recv) = result.map_err(connection_error_as_stream_error)?;
     Poll::Ready(Ok(BidiStream {
       send: SendStream::new(send),
       recv: RecvStream::new(recv),
@@ -193,14 +234,16 @@ where
     &mut self,
     cx: &mut task::Context<'_>,
   ) -> Poll<Result<Self::SendStream, StreamErrorIncoming>> {
-    let uni = self.opening_uni.get_or_insert_with(|| {
-      Box::pin(stream::unfold(self.conn.clone(), |conn| async {
-        Some((conn.open_uni().await, conn))
-      }))
-    });
-    let send = ready!(uni.poll_next_unpin(cx))
-      .expect("open uni source never ends")
-      .map_err(connection_error_as_stream_error)?;
+    let conn = self.conn.clone();
+    let result = {
+      let uni = self
+        .opening_uni
+        .get_or_insert_with(|| ReusableBoxFuture::new(open_uni(conn.clone())));
+      let result = ready!(uni.poll(cx));
+      uni.set(open_uni(conn));
+      result
+    };
+    let send = result.map_err(connection_error_as_stream_error)?;
     Poll::Ready(Ok(SendStream::new(send)))
   }
 
@@ -465,7 +508,7 @@ impl<B: Buf> SendDatagram<B> for SendDatagramHandler {
 }
 
 pub(crate) struct RecvDatagramHandler {
-  datagrams: BoxStreamSync<'static, <ReadDatagram<'static> as Future>::Output>,
+  datagrams: ReadDatagramFuture,
 }
 
 impl RecvDatagram for RecvDatagramHandler {
@@ -475,11 +518,9 @@ impl RecvDatagram for RecvDatagramHandler {
     &mut self,
     cx: &mut task::Context<'_>,
   ) -> Poll<Result<Self::Buffer, h3_datagram::ConnectionErrorIncoming>> {
-    Poll::Ready(
-      ready!(self.datagrams.poll_next_unpin(cx))
-        .expect("incoming datagram source never ends")
-        .map_err(convert_connection_error_to_datagram_error),
-    )
+    let (conn, datagram) = ready!(self.datagrams.poll(cx));
+    self.datagrams.set(read_datagram(conn));
+    Poll::Ready(datagram.map_err(convert_connection_error_to_datagram_error))
   }
 }
 
@@ -495,11 +536,44 @@ impl<B: Buf> DatagramConnectionExt<B> for Connection {
 
   fn recv_datagram_handler(&self) -> Self::RecvDatagramHandler {
     RecvDatagramHandler {
-      datagrams: Box::pin(stream::unfold(self.conn.clone(), |conn| async {
-        Some((conn.read_datagram().await, conn))
-      })),
+      datagrams: ReusableBoxFuture::new(read_datagram(self.conn.clone())),
     }
   }
+}
+
+async fn accept_bi(
+  conn: quinn::Connection,
+) -> (
+  quinn::Connection,
+  <quinn::AcceptBi<'static> as Future>::Output,
+) {
+  let accepted = conn.accept_bi().await;
+  (conn, accepted)
+}
+
+async fn accept_uni(
+  conn: quinn::Connection,
+) -> (
+  quinn::Connection,
+  <quinn::AcceptUni<'static> as Future>::Output,
+) {
+  let accepted = conn.accept_uni().await;
+  (conn, accepted)
+}
+
+async fn open_bi(conn: quinn::Connection) -> <quinn::OpenBi<'static> as Future>::Output {
+  conn.open_bi().await
+}
+
+async fn open_uni(conn: quinn::Connection) -> <quinn::OpenUni<'static> as Future>::Output {
+  conn.open_uni().await
+}
+
+async fn read_datagram(
+  conn: quinn::Connection,
+) -> (quinn::Connection, <ReadDatagram<'static> as Future>::Output) {
+  let datagram = conn.read_datagram().await;
+  (conn, datagram)
 }
 
 fn h3_stream_id(id: quinn::StreamId) -> StreamId {
@@ -595,10 +669,13 @@ mod tests {
     let stream_id = StreamId::try_from(0).unwrap();
 
     tracker.note(stream_id, false);
+    assert!(!tracker.has_early_streams());
     assert!(!tracker.take(stream_id));
 
     tracker.note(stream_id, true);
+    assert!(tracker.has_early_streams());
     assert!(tracker.take(stream_id));
+    assert!(!tracker.has_early_streams());
     assert!(!tracker.take(stream_id));
   }
 }
