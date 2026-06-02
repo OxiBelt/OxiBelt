@@ -131,6 +131,7 @@ async fn run_polling_discovery_worker(
   discovery: UpstreamPoolDiscoveryConfig,
   mut shutdown: watch::Receiver<bool>,
 ) {
+  let mut nomad_index: Option<String> = None;
   loop {
     if *shutdown.borrow() {
       break;
@@ -138,7 +139,23 @@ async fn run_polling_discovery_worker(
 
     let snapshot = state.snapshot();
     let fallback_delay = Duration::from_millis(discovery.refresh_interval_ms);
-    let result = super::discover_servers(&snapshot.control_http, &discovery).await;
+    let result = if discovery.provider == UpstreamDiscoveryProvider::Nomad && discovery.watch {
+      match super::nomad::discover_nomad_servers(
+        &snapshot.control_http,
+        &discovery,
+        nomad_index.as_deref(),
+      )
+      .await
+      {
+        Ok(result) => {
+          nomad_index = result.index;
+          Ok((result.servers, result.delay))
+        }
+        Err(error) => Err(error),
+      }
+    } else {
+      super::discover_servers(&snapshot.control_http, &discovery).await
+    };
     let delay = match result {
       Ok((servers, delay)) => {
         if let Err(error) =

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use anyhow::bail;
 use serde::Deserialize;
@@ -23,6 +24,92 @@ pub(super) fn default_kubernetes_watch_timeout_seconds() -> u64 {
 
 pub(super) fn default_discovery_update_debounce_ms() -> u64 {
   250
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamPoolDiscoveryConfig {
+  pub provider: UpstreamDiscoveryProvider,
+  #[serde(default)]
+  pub name: Option<String>,
+  #[serde(default)]
+  pub endpoint: Option<Url>,
+  #[serde(default)]
+  pub namespace: Option<String>,
+  #[serde(default)]
+  pub service: Option<String>,
+  #[serde(default)]
+  pub port_name: Option<String>,
+  #[serde(default)]
+  pub key_prefix: Option<String>,
+  #[serde(default)]
+  pub token_env: Option<String>,
+  #[serde(default)]
+  pub filter: Option<String>,
+  #[serde(default)]
+  pub datacenter: Option<String>,
+  #[serde(default)]
+  pub file: Option<PathBuf>,
+  #[serde(default)]
+  pub record_type: DnsDiscoveryRecordType,
+  #[serde(default)]
+  pub scheme: super::DiscoveryUpstreamScheme,
+  #[serde(default)]
+  pub port: Option<u16>,
+  #[serde(default)]
+  pub kubernetes_resource: KubernetesDiscoveryResource,
+  #[serde(default)]
+  pub watch: bool,
+  #[serde(default = "default_kubernetes_watch_timeout_seconds")]
+  pub watch_timeout_seconds: u64,
+  #[serde(default = "default_discovery_update_debounce_ms")]
+  pub update_debounce_ms: u64,
+  #[serde(default = "super::default_discovery_refresh_interval_ms")]
+  pub refresh_interval_ms: u64,
+  #[serde(default = "super::default_discovery_min_ttl_ms")]
+  pub min_ttl_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamPoolSlowStartConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_pool_slow_start_duration_ms")]
+  pub duration_ms: u64,
+  #[serde(default = "default_pool_slow_start_min_weight_percent")]
+  pub min_weight_percent: u32,
+}
+
+impl Default for UpstreamPoolSlowStartConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      duration_ms: default_pool_slow_start_duration_ms(),
+      min_weight_percent: default_pool_slow_start_min_weight_percent(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamPoolOutlierEjectionConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_pool_outlier_ejection_consecutive_failures")]
+  pub consecutive_failures: u32,
+  #[serde(default = "default_pool_outlier_ejection_base_ms")]
+  pub base_ejection_ms: u64,
+  #[serde(default = "default_pool_outlier_ejection_max_ms")]
+  pub max_ejection_ms: u64,
+}
+
+impl Default for UpstreamPoolOutlierEjectionConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      consecutive_failures: default_pool_outlier_ejection_consecutive_failures(),
+      base_ejection_ms: default_pool_outlier_ejection_base_ms(),
+      max_ejection_ms: default_pool_outlier_ejection_max_ms(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -102,6 +189,37 @@ impl StickyCookieSameSite {
       Self::None => "None",
     }
   }
+}
+
+pub(super) fn validate_pool_policy(pool: &UpstreamPoolConfig) -> anyhow::Result<()> {
+  if pool.slow_start.duration_ms == 0 || pool.slow_start.min_weight_percent == 0 {
+    bail!(
+      "upstream pool {} slow_start duration_ms and min_weight_percent must be greater than 0",
+      pool.name
+    );
+  }
+  if pool.slow_start.min_weight_percent > 100 {
+    bail!(
+      "upstream pool {} slow_start.min_weight_percent must be at most 100",
+      pool.name
+    );
+  }
+  if pool.outlier_ejection.consecutive_failures == 0
+    || pool.outlier_ejection.base_ejection_ms == 0
+    || pool.outlier_ejection.max_ejection_ms == 0
+  {
+    bail!(
+      "upstream pool {} outlier_ejection values must be greater than 0",
+      pool.name
+    );
+  }
+  if pool.outlier_ejection.max_ejection_ms < pool.outlier_ejection.base_ejection_ms {
+    bail!(
+      "upstream pool {} outlier_ejection.max_ejection_ms must be greater than or equal to base_ejection_ms",
+      pool.name
+    );
+  }
+  Ok(())
 }
 
 pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Result<()> {
@@ -242,14 +360,68 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
           );
         }
       }
+      UpstreamDiscoveryProvider::Nomad => {
+        validate_nomad_discovery_fields(pool, discovery)?;
+        validate_http_endpoint(
+          &format!("upstream pool {} nomad discovery endpoint", pool.name),
+          discovery.endpoint.as_ref(),
+        )?;
+        validate_optional_non_empty(
+          "upstream_pools.discovery.service",
+          discovery.service.as_deref(),
+        )?;
+        validate_optional_non_empty(
+          "upstream_pools.discovery.namespace",
+          discovery.namespace.as_deref(),
+        )?;
+        validate_optional_non_empty(
+          "upstream_pools.discovery.filter",
+          discovery.filter.as_deref(),
+        )?;
+        validate_optional_non_empty(
+          "upstream_pools.discovery.token_env",
+          discovery.token_env.as_deref(),
+        )?;
+        if discovery.service.is_none() {
+          bail!(
+            "upstream pool {} nomad discovery requires service",
+            pool.name
+          );
+        }
+      }
     }
+  }
+  Ok(())
+}
+
+fn validate_nomad_discovery_fields(
+  pool: &UpstreamPoolConfig,
+  discovery: &UpstreamPoolDiscoveryConfig,
+) -> anyhow::Result<()> {
+  if discovery.kubernetes_resource != KubernetesDiscoveryResource::Endpoints {
+    bail!(
+      "upstream pool {} discovery kubernetes_resource is only supported for kubernetes providers",
+      pool.name
+    );
+  }
+  if discovery.name.is_some()
+    || discovery.port_name.is_some()
+    || discovery.key_prefix.is_some()
+    || discovery.datacenter.is_some()
+    || discovery.file.is_some()
+    || discovery.port.is_some()
+  {
+    bail!(
+      "upstream pool {} nomad discovery only supports endpoint, service, namespace, filter, token_env, scheme, refresh_interval_ms, watch, and watch_timeout_seconds",
+      pool.name
+    );
   }
   Ok(())
 }
 
 fn validate_non_kubernetes_discovery_fields(
   pool: &UpstreamPoolConfig,
-  discovery: &super::UpstreamPoolDiscoveryConfig,
+  discovery: &UpstreamPoolDiscoveryConfig,
 ) -> anyhow::Result<()> {
   if discovery.kubernetes_resource != KubernetesDiscoveryResource::Endpoints {
     bail!(
@@ -325,6 +497,26 @@ fn validate_http_endpoint(field_name: &str, endpoint: Option<&Url>) -> anyhow::R
     bail!("{field_name} must use http:// or https://");
   }
   Ok(())
+}
+
+fn default_pool_slow_start_duration_ms() -> u64 {
+  30_000
+}
+
+fn default_pool_slow_start_min_weight_percent() -> u32 {
+  10
+}
+
+fn default_pool_outlier_ejection_consecutive_failures() -> u32 {
+  5
+}
+
+fn default_pool_outlier_ejection_base_ms() -> u64 {
+  30_000
+}
+
+fn default_pool_outlier_ejection_max_ms() -> u64 {
+  300_000
 }
 
 fn default_sticky_cookie_name() -> String {

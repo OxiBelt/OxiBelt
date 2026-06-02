@@ -153,6 +153,11 @@ generation and ETag. Create, import, patch, and delete require matching
 only when the caller supplies it. `GET /admin/v1/upstream-pools/status`
 returns the upstream-pool runtime generation and ETag required by server
 mutations.
+`GET /admin/v1/upstream-pools` and `GET /admin/v1/upstream-pools/{pool}`
+remain protected by the existing upstream-pool IPM actions and include runtime
+server details such as `health_reason`, `last_health_check_ms`,
+`ejected_until_ms`, `ejection_count`, `slow_start_remaining_ms`, and
+`effective_weight_percent`.
 
 When `[ipm].backend` resolves to a PostgreSQL shared-state backend, OxiBelt
 loads a strict hybrid IPM snapshot from TOML plus `oxibelt_ipm_*` tables. TOML

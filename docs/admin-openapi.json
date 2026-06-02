@@ -67,7 +67,7 @@
     },
     {
       "name": "upstream-pools",
-      "description": "Runtime upstream-pool inspection and server control. Server mutations check <pool>/server/<server_id> resources."
+      "description": "Runtime upstream-pool inspection and server control. Server snapshots include health reason, health-check time, outlier ejection, slow-start, and effective-weight fields. Server mutations check <pool>/server/<server_id> resources."
     }
   ],
   "paths": {

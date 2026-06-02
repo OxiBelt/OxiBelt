@@ -1,0 +1,79 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "plaintext_allowlist"
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+[metrics]
+enabled = true
+bind = "0.0.0.0:9090"
+
+[[upstream_pools]]
+name = "nomad-pool"
+algorithm = "rendezvous_hash"
+
+[upstream_pools.slow_start]
+enabled = true
+duration_ms = 30000
+min_weight_percent = 10
+
+[upstream_pools.outlier_ejection]
+enabled = true
+consecutive_failures = 1
+base_ejection_ms = 1000
+max_ejection_ms = 1000
+
+[[upstream_pools.discovery]]
+provider = "nomad"
+endpoint = "http://mock-nomad:18091"
+namespace = "default"
+service = "app"
+filter = "Tags contains \"blue\""
+token_env = "NOMAD_TOKEN"
+scheme = "http"
+watch = true
+watch_timeout_seconds = 5
+refresh_interval_ms = 500
+
+[[routes]]
+name = "nomad-route"
+hosts = ["nomad.example.test"]
+path_prefix = "/"
+upstream_pool = "nomad-pool"

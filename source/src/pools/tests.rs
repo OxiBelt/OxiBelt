@@ -1,10 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use super::*;
 use crate::config::{
-  UpstreamPoolHealthCheckConfig, UpstreamPoolKeepaliveConfig, UpstreamPoolServerConfig,
-  UpstreamPoolServerState,
+  UpstreamPoolHealthCheckConfig, UpstreamPoolKeepaliveConfig, UpstreamPoolOutlierEjectionConfig,
+  UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
+  UpstreamPoolSlowStartConfig,
 };
 
 fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig {
@@ -14,6 +16,8 @@ fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig {
     hash_key: None,
     sticky_cookie: Default::default(),
     keepalive: UpstreamPoolKeepaliveConfig::default(),
+    slow_start: UpstreamPoolSlowStartConfig::default(),
+    outlier_ejection: UpstreamPoolOutlierEjectionConfig::default(),
     servers: vec![
       UpstreamPoolServerConfig {
         id: None,
@@ -282,6 +286,127 @@ fn weighted_least_conn_normalizes_active_count_by_weight() {
     normalized_active_score(runtime, 0, &runtime.servers[0])
       < normalized_active_score(runtime, 1, &runtime.servers[1])
   );
+}
+
+#[test]
+fn slow_start_scales_weight_for_new_servers_after_rebuild() {
+  let mut pool = test_pool(LoadBalancingAlgorithm::PowerOfTwoChoices);
+  pool.servers[0].id = Some("app-a".to_string());
+  pool.servers[1].id = Some("app-b".to_string());
+  pool.slow_start.enabled = true;
+  pool.slow_start.duration_ms = 60_000;
+  pool.slow_start.min_weight_percent = 10;
+  let initial = PoolState::new(&[pool.clone()], None);
+
+  pool.servers.push(UpstreamPoolServerConfig {
+    id: Some("canary".to_string()),
+    origin: "http://canary.example".parse().unwrap(),
+    weight: 10,
+    max_conns: 0,
+    backup: false,
+    state: Default::default(),
+    source: UpstreamPoolServerSource::Admin,
+  });
+  let rebuilt = PoolState::new_with_previous(&[pool], None, Some(initial.as_ref()));
+  let snapshot = rebuilt.snapshot("app-pool").unwrap();
+  let canary = snapshot_server(&snapshot, "pool:app-pool:canary");
+
+  assert!(canary.effective_weight_percent >= 10);
+  assert!(canary.effective_weight_percent < 100);
+  assert!(canary.slow_start_remaining_ms.is_some());
+}
+
+#[test]
+fn synthetic_upstream_names_hash_discovery_style_server_ids() {
+  assert_eq!(
+    synthetic_upstream_name_for_id("app-pool", "primary"),
+    "pool:app-pool:primary"
+  );
+  let name =
+    synthetic_upstream_name_for_id("app-pool", "nomad-default-app-service-192.0.2.10-18080");
+  assert!(name.starts_with("pool:app-pool:server-"));
+  assert!(!name.contains("192.0.2.10"));
+  assert!(!name.contains("18080"));
+}
+
+#[test]
+fn outlier_ejection_excludes_all_servers_and_fails_closed() {
+  let mut pool = test_pool(LoadBalancingAlgorithm::PowerOfTwoChoices);
+  pool.outlier_ejection.enabled = true;
+  pool.outlier_ejection.consecutive_failures = 1;
+  pool.outlier_ejection.base_ejection_ms = 30_000;
+  pool.outlier_ejection.max_ejection_ms = 30_000;
+  let state = PoolState::new(&[pool], None);
+  let first = synthetic_upstream_name("app-pool", 0);
+  let second = synthetic_upstream_name("app-pool", 1);
+
+  state.report_failure(&first);
+  state.report_failure(&second);
+
+  let snapshot = state.snapshot("app-pool").unwrap();
+  for upstream in [&first, &second] {
+    let server = snapshot_server(&snapshot, upstream);
+    assert!(!server.healthy);
+    assert_eq!(server.health_reason, "outlier_ejected");
+    assert_eq!(server.ejection_count, 1);
+    assert!(server.ejected_until_ms.is_some());
+  }
+  let error = match state.select("app-pool", "203.0.113.10".parse().unwrap(), "/", None) {
+    Ok(selection) => panic!(
+      "all ejected servers should fail closed, got {}",
+      selection.upstream_name
+    ),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("no available servers"));
+}
+
+#[test]
+fn outlier_ejection_expiry_restores_eligibility() {
+  let mut pool = test_pool(LoadBalancingAlgorithm::PowerOfTwoChoices);
+  pool.servers[1].state = UpstreamPoolServerState::Maintenance;
+  pool.outlier_ejection.enabled = true;
+  pool.outlier_ejection.consecutive_failures = 1;
+  pool.outlier_ejection.base_ejection_ms = 1;
+  pool.outlier_ejection.max_ejection_ms = 1;
+  let state = PoolState::new(&[pool], None);
+  let first = synthetic_upstream_name("app-pool", 0);
+
+  state.report_failure(&first);
+  assert!(
+    state
+      .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+      .is_err()
+  );
+
+  std::thread::sleep(Duration::from_millis(5));
+  let selection = state
+    .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+    .unwrap();
+  assert_eq!(selection.upstream_name, first);
+}
+
+#[test]
+fn runtime_state_is_preserved_across_pool_rebuilds() {
+  let mut pool = test_pool(LoadBalancingAlgorithm::Ewma);
+  pool.outlier_ejection.enabled = true;
+  pool.outlier_ejection.consecutive_failures = 1;
+  pool.outlier_ejection.base_ejection_ms = 30_000;
+  pool.outlier_ejection.max_ejection_ms = 30_000;
+  let state = PoolState::new(&[pool.clone()], None);
+  let first = synthetic_upstream_name("app-pool", 0);
+
+  state.report_success_latency(&first, 17);
+  state.report_failure(&first);
+
+  let rebuilt = PoolState::new_with_previous(&[pool], None, Some(state.as_ref()));
+  let runtime = app_pool_runtime(&rebuilt);
+  assert!(runtime.servers[0].ewma_latency_ms.load(Ordering::Relaxed) > 0);
+  assert_eq!(runtime.servers[0].ejection_count.load(Ordering::Relaxed), 1);
+  let snapshot = rebuilt.snapshot("app-pool").unwrap();
+  let preserved = snapshot_server(&snapshot, &first);
+  assert_eq!(preserved.health_reason, "outlier_ejected");
+  assert!(preserved.ejected_until_ms.is_some());
 }
 
 #[test]

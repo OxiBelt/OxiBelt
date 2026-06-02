@@ -163,6 +163,12 @@ pub struct PoolServerSnapshot {
   pub backup: bool,
   pub active: usize,
   pub healthy: bool,
+  pub health_reason: String,
+  pub last_health_check_ms: Option<u64>,
+  pub ejected_until_ms: Option<u64>,
+  pub ejection_count: u32,
+  pub slow_start_remaining_ms: Option<u64>,
+  pub effective_weight_percent: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -529,6 +535,12 @@ fn redact_pool_snapshot(pool: PoolRuntimeSnapshot) -> PoolSnapshot {
         backup: server.backup,
         active: server.active,
         healthy: server.healthy,
+        health_reason: server.health_reason,
+        last_health_check_ms: server.last_health_check_ms,
+        ejected_until_ms: server.ejected_until_ms,
+        ejection_count: server.ejection_count,
+        slow_start_remaining_ms: server.slow_start_remaining_ms,
+        effective_weight_percent: server.effective_weight_percent,
       })
       .collect(),
   }

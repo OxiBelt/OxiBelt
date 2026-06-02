@@ -27,7 +27,7 @@
 
 The Docker integration flow avoids host bind mounts on purpose. It uses `docker build` and `docker cp`, which behaves more reliably when Docker is exposed through `docker-outside-of-docker`.
 
-CI prebuilds Docker integration helper images once as the `oxibelt-docker-integration-helper-images` artifact and loads that tar in each Docker integration matrix job. Local `run-proxy-integration-matrix.sh` runs still build helper images on demand unless `OXIBELT_MOCK_UPSTREAM_IMAGE`, `OXIBELT_MOCK_DNS_IMAGE`, `OXIBELT_MOCK_KUBERNETES_IMAGE`, `OXIBELT_PQ_PROBE_IMAGE`, `OXIBELT_PROTOCOL_PROBE_IMAGE`, `OXIBELT_POSTGRES_IMAGE`, or `OXIBELT_REDIS_IMAGE` is set. Set `OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES=1` only after loading those images so missing helpers fail before Docker tries to pull from a registry.
+CI prebuilds Docker integration helper images once as the `oxibelt-docker-integration-helper-images` artifact and loads that tar in each Docker integration matrix job. Local `run-proxy-integration-matrix.sh` runs still build helper images on demand unless `OXIBELT_MOCK_UPSTREAM_IMAGE`, `OXIBELT_MOCK_DNS_IMAGE`, `OXIBELT_MOCK_KUBERNETES_IMAGE`, `OXIBELT_MOCK_NOMAD_IMAGE`, `OXIBELT_PQ_PROBE_IMAGE`, `OXIBELT_PROTOCOL_PROBE_IMAGE`, `OXIBELT_POSTGRES_IMAGE`, or `OXIBELT_REDIS_IMAGE` is set. Set `OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES=1` only after loading those images so missing helpers fail before Docker tries to pull from a registry.
 
 The Docker performance flow follows the same constraint. It copies generated TLS material and configs into containers instead of relying on bind mounts, and removes test containers, networks, and test-only images by label during cleanup.
 

@@ -27,6 +27,7 @@ image_tar="${output_dir%/}/oxibelt-docker-integration-helper-images.tar"
 mock_upstream_image="oxibelt/mock-upstream:ci"
 mock_dns_image="oxibelt/mock-dns:ci"
 mock_kubernetes_image="oxibelt/mock-kubernetes:ci"
+mock_nomad_image="oxibelt/mock-nomad:ci"
 pq_probe_image="oxibelt/pq-probe:ci"
 protocol_probe_image="oxibelt/protocol-probe:ci"
 postgres_image="oxibelt/postgres:ci"
@@ -94,6 +95,11 @@ build_helper_image \
   "${repo_root}/tests/docker/mock_kubernetes"
 
 build_helper_image \
+  "${mock_nomad_image}" \
+  "${repo_root}/tests/docker/mock_nomad/Dockerfile" \
+  "${repo_root}/tests/docker/mock_nomad"
+
+build_helper_image \
   "${pq_probe_image}" \
   "${repo_root}/tests/docker/pq_probe/Dockerfile" \
   "${repo_root}/tests/docker/pq_probe"
@@ -113,6 +119,7 @@ retry_command 3 docker save \
   "${mock_upstream_image}" \
   "${mock_dns_image}" \
   "${mock_kubernetes_image}" \
+  "${mock_nomad_image}" \
   "${pq_probe_image}" \
   "${protocol_probe_image}" \
   "${postgres_image}" \
@@ -124,6 +131,7 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "mock_upstream_image=${mock_upstream_image}"
     echo "mock_dns_image=${mock_dns_image}"
     echo "mock_kubernetes_image=${mock_kubernetes_image}"
+    echo "mock_nomad_image=${mock_nomad_image}"
     echo "pq_probe_image=${pq_probe_image}"
     echo "protocol_probe_image=${protocol_probe_image}"
     echo "postgres_image=${postgres_image}"

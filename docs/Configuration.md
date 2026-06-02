@@ -1525,7 +1525,7 @@ POST /admin/v1/cache/warm
 
 `key-explain` requires `cache:ExplainKey` on both `policy/<policy>` and `host/<normalized-host>` and accepts `{ "policy": "default", "method": "GET", "scheme": "https", "host": "example.test", "uri": "/asset.css", "headers": {}, "response_headers": {} }`. It returns the selected policy, partition, base key, optional variant key, Vary fields, and cacheability reasons. `warm` requires `cache:Warm` on each item's effective cache policy and normalized host, and accepts `{ "items": [{ "scheme": "https", "host": "example.test", "uri": "/asset.css", "method": "GET", "headers": {} }] }`; methods are limited to `GET` and `HEAD`, and each item returns `stored`, `not_cacheable`, `upstream_error`, or `validation_error`. If any warm item is not authorized, the request returns one `403` and no warm request is issued.
 
-Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics include aggregate TLS server session storage diagnostic counters for stateful resumption cache calls and approximate lock/put timing. With `metrics.detail = "detailed"`, Prometheus also includes bounded-label HTTP, upstream, cache, TLS handshake, QUIC Retry, WebSocket, WebTransport, and TURN counters/histograms using route/upstream/protocol/status/cache-reason style labels. Cache miss reasons include lookup misses, fill lock timeouts, shared fill lock conflicts, and fills that completed without storing an entry. Detailed mode also emits `oxibelt_cache_fill_stage_duration_ms` with `route`, `policy`, `stage`, and `outcome` labels for `lock_wait`, `head_decision`, `body_collect`, `local_store`, and `shared_store`. `metrics.detail = "basic"` keeps only aggregate counters and gauges. `metrics.histogram_buckets_ms` must be a non-empty strictly increasing list of positive millisecond buckets. The public metrics listener omits detailed WAF rule names, IDs, modes, routes, and per-rule hit/cost counters because it is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoints for rule-level data. The operator-facing bundle and secure starter configuration are documented in [Observability.md](Observability.md).
+Health paths must start with `/`. Readiness returns `503 draining` while lifecycle drain is active; liveness remains `200 live` so process supervisors can distinguish intentional drain from process failure. Prometheus metrics include aggregate TLS server session storage diagnostic counters for stateful resumption cache calls and approximate lock/put timing. Upstream-pool metrics expose public-safe server counts, health-report counters, and outlier-ejection counters with pool/source/state/outcome/reason labels; they never include discovery endpoint URLs, upstream origins, credentials, raw discovery errors, or response bodies. With `metrics.detail = "detailed"`, Prometheus also includes bounded-label HTTP, upstream, cache, TLS handshake, QUIC Retry, WebSocket, WebTransport, and TURN counters/histograms using route/upstream/protocol/status/cache-reason style labels. Cache miss reasons include lookup misses, fill lock timeouts, shared fill lock conflicts, and fills that completed without storing an entry. Detailed mode also emits `oxibelt_cache_fill_stage_duration_ms` with `route`, `policy`, `stage`, and `outcome` labels for `lock_wait`, `head_decision`, `body_collect`, `local_store`, and `shared_store`. `metrics.detail = "basic"` keeps only aggregate counters and gauges. `metrics.histogram_buckets_ms` must be a non-empty strictly increasing list of positive millisecond buckets. The public metrics listener omits detailed WAF rule names, IDs, modes, routes, and per-rule hit/cost counters because it is intended for unauthenticated operational scraping. Use the authenticated admin WAF telemetry endpoints and upstream-pool Admin snapshots for per-rule or per-server operational detail. The operator-facing bundle and secure starter configuration are documented in [Observability.md](Observability.md).
 
 `[telemetry.tracing]` enables W3C `traceparent` extraction/injection and OTLP HTTP/protobuf trace export. `enabled = false` is the default. The v1 exporter supports `http://` OTLP collector endpoints, uses `service_name` as the OpenTelemetry resource service name, samples new root traces with `sample_ratio`, and bounds blocking exporter I/O with `export_timeout_ms`. Export failures after startup or reload are logged and dropped; they do not block data-plane requests. `propagate_trace_context = true` forwards trace context to upstream HTTP/1.1, HTTP/2, HTTP/3, and WebTransport CONNECT requests. Full reload and admin config load apply telemetry changes to the replacement snapshot.
 
@@ -1821,6 +1821,17 @@ max_idle = 32
 idle_timeout_ms = 75000
 max_lifetime_ms = 300000
 
+[upstream_pools.slow_start]
+enabled = false
+duration_ms = 30000
+min_weight_percent = 10
+
+[upstream_pools.outlier_ejection]
+enabled = false
+consecutive_failures = 5
+base_ejection_ms = 30000
+max_ejection_ms = 300000
+
 [[upstream_pools.servers]]
 id = "app-1"
 origin = "https://app-1.internal.example"
@@ -1873,6 +1884,18 @@ key_prefix = "/oxibelt/upstreams/app/"
 # token_env = "ETCD_TOKEN"
 refresh_interval_ms = 30000
 
+[[upstream_pools.discovery]]
+provider = "nomad"
+endpoint = "https://nomad.internal.example:4646"
+namespace = "default"
+service = "app"
+filter = "Tags contains \"blue\""
+token_env = "NOMAD_TOKEN"
+scheme = "https"
+watch = true
+watch_timeout_seconds = 45
+refresh_interval_ms = 30000
+
 [upstream_pools.health_check]
 enabled = true
 mode = "passive" # passive | active
@@ -1889,9 +1912,9 @@ grpc_expected_statuses = ["SERVING"]
 
 Pool names and upstream names are separate namespaces. `algorithm` defaults to `power_of_two_choices`. HTTP pools support `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, `rendezvous_ip_hash`, `ewma`, `least_time`, and `sticky_cookie`. `algorithm = "sticky_cookie"` selects an upstream by a signed affinity cookie when present, otherwise it uses `sticky_cookie.fallback_algorithm` and emits `Set-Cookie`; the fallback must be one of the non-sticky modern algorithms. Legacy names such as `round_robin`, `least_conn`, `random`, `hash`, and `ip_hash` are rejected during parsing or validation and must be migrated explicitly. The cookie HMAC secret comes from `sticky_cookie.secret_env` when set, from `[shared_state].sticky_sessions_backend` when configured, or from a process-local generated secret. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
 
-Pool server `state` controls new request selection. `ready` accepts traffic. `drain`, `down`, and `maintenance` stop new selection while already selected in-flight requests finish naturally.
+Pool server `state` controls new request selection. `ready` accepts traffic. `drain`, `down`, and `maintenance` stop new selection while already selected in-flight requests finish naturally. `slow_start` and `outlier_ejection` are opt-in and disabled by default. When slow start is enabled, newly added, discovered, or recovered servers ramp from `min_weight_percent` to full effective weight over `duration_ms` across all pool algorithms, including sticky fallback, rendezvous, EWMA, and least-time scoring. When outlier ejection is enabled, passive retry/health failures can temporarily exclude a server after `consecutive_failures`; the ejection duration starts at `base_ejection_ms`, backs off per ejection count, and is capped by `max_ejection_ms`. If no ready, healthy, non-ejected server remains, OxiBelt preserves the existing fail-closed upstream-pool response.
 
-Dynamic discovery applies to `upstream_pools` only. `provider = "file"` reads a JSON document from a path under the config directory, for example `source/config/discovery/app-pool.json` when running from the repository layout. The document shape is:
+Dynamic discovery applies to `upstream_pools` only. `provider = "file"` reads a JSON document from a path under the config directory, for example `source/config/discovery/app-pool.json` when running from the repository layout. `provider = "nomad"` polls `GET /v1/service/:service_name`; when `watch = true`, OxiBelt uses Nomad blocking-query `index` and `wait` parameters derived from successful `X-Nomad-Index` responses and `watch_timeout_seconds`. Nomad `token_env` is read from the environment and sent only as `X-Nomad-Token`; bearer-style configuration is intentionally not exposed in OxiBelt TOML. Nomad responses are treated as untrusted input: entries need non-empty service IDs, matching service names, valid addresses and ports, and generated `http`/`https` origins. Invalid discovery responses or rejected runtime updates keep the previous active pool state. The file discovery document shape is:
 
 ```json
 {

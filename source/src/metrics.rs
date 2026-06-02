@@ -8,6 +8,7 @@ use crate::config::{MetricsConfig, MetricsDetail};
 use crate::tls::TlsServerSessionStorageStats;
 
 mod detail;
+mod pool;
 mod sni_forward;
 
 #[derive(Debug, Default)]
@@ -45,6 +46,7 @@ pub struct Metrics {
   mitigation_queue_depth: AtomicU64,
   mitigation_writer_healthy: AtomicU64,
   sni_forward: sni_forward::SniForwardMetrics,
+  pool: pool::PoolMetrics,
   detailed: Mutex<detail::DetailedMetrics>,
 }
 
@@ -285,6 +287,29 @@ impl Metrics {
       .store(u64::from(healthy), Ordering::Relaxed);
   }
 
+  pub fn set_upstream_pool_server_counts(
+    &self,
+    counts: Vec<(String, String, String, String, u64)>,
+  ) {
+    self.pool.set_server_counts(counts);
+  }
+
+  pub fn record_upstream_pool_health_report(
+    &self,
+    pool_name: &str,
+    source: &str,
+    outcome: &str,
+    reason: &str,
+  ) {
+    self
+      .pool
+      .record_health_report(pool_name, source, outcome, reason);
+  }
+
+  pub fn record_upstream_pool_outlier_ejection(&self, pool_name: &str, source: &str, reason: &str) {
+    self.pool.record_outlier_ejection(pool_name, source, reason);
+  }
+
   pub fn prometheus(
     &self,
     config: &MetricsConfig,
@@ -499,6 +524,7 @@ impl Metrics {
       self.mitigation_writer_healthy.load(Ordering::Relaxed),
     );
     self.append_sni_forward_prometheus(&mut output);
+    self.append_upstream_pool_prometheus(&mut output);
     append_metric(
       &mut output,
       "oxibelt_cache_disk_recovered_entries_total",
@@ -588,6 +614,10 @@ impl Metrics {
     }
     output
   }
+
+  fn append_upstream_pool_prometheus(&self, output: &mut String) {
+    self.pool.append_prometheus(output);
+  }
 }
 
 fn append_metric(output: &mut String, name: &str, kind: &str, value: impl std::fmt::Display) {
@@ -647,6 +677,36 @@ mod tests {
     assert!(body.contains("oxibelt_tls_server_session_storage_take_total 17"));
     assert!(body.contains("oxibelt_tls_server_session_storage_lock_wait_ns_total 19"));
     assert!(body.contains("oxibelt_tls_server_session_storage_put_duration_ns_total 23"));
+  }
+
+  #[test]
+  fn prometheus_output_includes_upstream_pool_health_metrics() {
+    let metrics = Metrics::new();
+    let config = MetricsConfig::default();
+    metrics.set_upstream_pool_server_counts(vec![(
+      "app-pool".to_string(),
+      "nomad".to_string(),
+      "ready".to_string(),
+      "outlier_ejected".to_string(),
+      2,
+    )]);
+    metrics.record_upstream_pool_health_report("app-pool", "nomad", "failure", "passive_failure");
+    metrics.record_upstream_pool_outlier_ejection("app-pool", "nomad", "outlier_ejected");
+
+    let body = metrics.prometheus(
+      &config,
+      CacheStats::default(),
+      TlsServerSessionStorageStats::default(),
+    );
+
+    assert!(body.contains("oxibelt_upstream_pool_servers"));
+    assert!(body.contains("source=\"nomad\""));
+    assert!(body.contains("reason=\"outlier_ejected\""));
+    assert!(body.contains("oxibelt_upstream_pool_health_reports_total"));
+    assert!(body.contains("outcome=\"failure\""));
+    assert!(body.contains("oxibelt_upstream_pool_outlier_ejections_total"));
+    assert!(!body.contains("http://"));
+    assert!(!body.contains("secret"));
   }
 
   #[test]

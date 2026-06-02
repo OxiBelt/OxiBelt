@@ -477,6 +477,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
         "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
         "OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci",
         "OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci",
+        "OXIBELT_MOCK_NOMAD_IMAGE: oxibelt/mock-nomad:ci",
         "OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci",
         "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
         "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",

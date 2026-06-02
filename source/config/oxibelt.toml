@@ -894,6 +894,17 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # same_site = "lax" # lax | strict | none
 # path = "/"
 #
+#[upstream_pools.slow_start]
+# enabled = false
+# duration_ms = 30000
+# min_weight_percent = 10
+#
+#[upstream_pools.outlier_ejection]
+# enabled = false
+# consecutive_failures = 5
+# base_ejection_ms = 30000
+# max_ejection_ms = 300000
+#
 #[[upstream_pools.servers]]
 # id = "app-1"
 # origin = "https://app-1.internal.example"
@@ -942,6 +953,18 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # endpoint = "https://etcd.internal.example:2379"
 # key_prefix = "/oxibelt/upstreams/app/"
 # token_env = "ETCD_TOKEN"
+# refresh_interval_ms = 30000
+#
+#[[upstream_pools.discovery]]
+# provider = "nomad"
+# endpoint = "https://nomad.internal.example:4646"
+# namespace = "default"
+# service = "app"
+# filter = "Tags contains \"blue\""
+# token_env = "NOMAD_TOKEN"
+# scheme = "https"
+# watch = true
+# watch_timeout_seconds = 45
 # refresh_interval_ms = 30000
 
 #[[turn_upstream_pools]]

@@ -103,6 +103,61 @@ origin = "http://app-a.example"
 }
 
 #[test]
+fn upstream_pool_slow_start_outlier_and_nomad_discovery_parse() {
+    let temp_dir = common::TempDir::new("pool-lb-polish");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "pool-lb-polish");
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "nomad-pool"
+
+[upstream_pools.slow_start]
+enabled = true
+duration_ms = 45000
+min_weight_percent = 25
+
+[upstream_pools.outlier_ejection]
+enabled = true
+consecutive_failures = 3
+base_ejection_ms = 10000
+max_ejection_ms = 60000
+
+[[upstream_pools.discovery]]
+provider = "nomad"
+endpoint = "https://nomad.example:4646"
+namespace = "payments"
+service = "api"
+filter = "Tags contains \"blue\""
+token_env = "NOMAD_TOKEN"
+scheme = "https"
+watch = true
+watch_timeout_seconds = 45
+refresh_interval_ms = 1000
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let pool = &config.upstream_pools[0];
+    assert!(pool.slow_start.enabled);
+    assert_eq!(pool.slow_start.duration_ms, 45_000);
+    assert_eq!(pool.slow_start.min_weight_percent, 25);
+    assert!(pool.outlier_ejection.enabled);
+    assert_eq!(pool.outlier_ejection.consecutive_failures, 3);
+    assert_eq!(pool.outlier_ejection.max_ejection_ms, 60_000);
+    let discovery = &pool.discovery[0];
+    assert_eq!(discovery.provider, UpstreamDiscoveryProvider::Nomad);
+    assert_eq!(discovery.namespace.as_deref(), Some("payments"));
+    assert_eq!(discovery.service.as_deref(), Some("api"));
+    assert_eq!(discovery.token_env.as_deref(), Some("NOMAD_TOKEN"));
+    assert!(discovery.watch);
+    assert_eq!(discovery.watch_timeout_seconds, 45);
+}
+
+#[test]
 fn legacy_upstream_pool_algorithms_are_rejected_without_aliases() {
     let temp_dir = common::TempDir::new("legacy-pool-algorithm");
     let (cert_path, key_path) =
@@ -4291,6 +4346,91 @@ update_debounce_ms = 0
         .expect_err("zero discovery debounce should be rejected");
     assert!(
         error.to_string().contains("update_debounce_ms"),
+        "unexpected error: {error}"
+    );
+
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "slow-start-pool"
+
+[upstream_pools.slow_start]
+enabled = true
+duration_ms = 0
+
+[[upstream_pools.servers]]
+id = "app"
+origin = "http://app.example"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("zero slow_start duration should be rejected");
+    assert!(
+        error.to_string().contains("slow_start"),
+        "unexpected error: {error}"
+    );
+
+    let raw = raw.replace(
+        r#"[upstream_pools.slow_start]
+enabled = true
+duration_ms = 0"#,
+        r#"[upstream_pools.outlier_ejection]
+enabled = true
+base_ejection_ms = 60000
+max_ejection_ms = 10000"#,
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("outlier max below base should be rejected");
+    assert!(
+        error.to_string().contains("max_ejection_ms"),
+        "unexpected error: {error}"
+    );
+
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "nomad-pool"
+
+[[upstream_pools.discovery]]
+provider = "nomad"
+service = "api"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("Nomad endpoint should be required");
+    assert!(
+        error.to_string().contains("nomad discovery endpoint"),
+        "unexpected error: {error}"
+    );
+
+    let raw = raw
+        .replace(
+            "service = \"api\"",
+            "endpoint = \"http://nomad.example:4646\"",
+        )
+        .replace(
+            "provider = \"nomad\"",
+            "provider = \"nomad\"\ndatacenter = \"dc1\"",
+        );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("Nomad service and unsupported fields should be rejected");
+    assert!(
+        error.to_string().contains("nomad discovery service")
+            || error.to_string().contains("only supports"),
         "unexpected error: {error}"
     );
 }

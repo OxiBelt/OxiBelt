@@ -202,6 +202,7 @@ pub(crate) fn replace_discovered_servers(
       | UpstreamPoolServerSource::Kubernetes
       | UpstreamPoolServerSource::Consul
       | UpstreamPoolServerSource::Etcd
+      | UpstreamPoolServerSource::Nomad
   ) {
     bail!("discovery updates require a supported discovery source");
   }

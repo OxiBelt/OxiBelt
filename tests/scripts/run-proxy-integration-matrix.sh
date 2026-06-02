@@ -26,6 +26,7 @@ network_name="oxibelt-matrix-${run_id}"
 mock_image="${OXIBELT_MOCK_UPSTREAM_IMAGE:-oxibelt/mock-upstream:${run_id}}"
 mock_dns_image="${OXIBELT_MOCK_DNS_IMAGE:-oxibelt/mock-dns:${run_id}}"
 mock_kubernetes_image="${OXIBELT_MOCK_KUBERNETES_IMAGE:-oxibelt/mock-kubernetes:${run_id}}"
+mock_nomad_image="${OXIBELT_MOCK_NOMAD_IMAGE:-oxibelt/mock-nomad:${run_id}}"
 pq_probe_image="${OXIBELT_PQ_PROBE_IMAGE:-oxibelt/pq-probe:${run_id}}"
 protocol_probe_image="${OXIBELT_PROTOCOL_PROBE_IMAGE:-oxibelt/protocol-probe:${run_id}}"
 postgres_image="${OXIBELT_POSTGRES_IMAGE:-oxibelt/postgres:${run_id}}"
@@ -35,6 +36,7 @@ require_preloaded_helper_images="${OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES:-0}"
 remove_mock_image=0
 remove_mock_dns_image=0
 remove_mock_kubernetes_image=0
+remove_mock_nomad_image=0
 remove_pq_probe_image=0
 remove_protocol_probe_image=0
 remove_postgres_image=0
@@ -47,6 +49,9 @@ if [[ -z "${OXIBELT_MOCK_DNS_IMAGE:-}" ]]; then
 fi
 if [[ -z "${OXIBELT_MOCK_KUBERNETES_IMAGE:-}" ]]; then
   remove_mock_kubernetes_image=1
+fi
+if [[ -z "${OXIBELT_MOCK_NOMAD_IMAGE:-}" ]]; then
+  remove_mock_nomad_image=1
 fi
 if [[ -z "${OXIBELT_PQ_PROBE_IMAGE:-}" ]]; then
   remove_pq_probe_image=1
@@ -73,6 +78,7 @@ turn_tcp_container="oxibelt-turn-tcp-${run_id}"
 turn_tls_container="oxibelt-turn-tls-${run_id}"
 dns_container="oxibelt-dns-${run_id}"
 kubernetes_container="oxibelt-kubernetes-${run_id}"
+nomad_container="oxibelt-nomad-${run_id}"
 postgres_container="oxibelt-postgres-${run_id}"
 redis_container="oxibelt-redis-${run_id}"
 remote_signer_container="oxibelt-keysigner-${run_id}"
@@ -91,6 +97,9 @@ cleanup() {
   fi
   if [[ "${remove_mock_kubernetes_image}" == "1" ]]; then
     docker rmi -f "${mock_kubernetes_image}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${remove_mock_nomad_image}" == "1" ]]; then
+    docker rmi -f "${mock_nomad_image}" >/dev/null 2>&1 || true
   fi
   if [[ "${remove_pq_probe_image}" == "1" ]]; then
     docker rmi -f "${pq_probe_image}" >/dev/null 2>&1 || true
@@ -221,6 +230,7 @@ collect_diagnostics() {
   docker logs "${turn_tls_container}" >"${logs_dir}/mock-turn-tls.log" 2>&1 || true
   docker logs "${dns_container}" >"${logs_dir}/mock-dns.log" 2>&1 || true
   docker logs "${kubernetes_container}" >"${logs_dir}/mock-kubernetes.log" 2>&1 || true
+  docker logs "${nomad_container}" >"${logs_dir}/mock-nomad.log" 2>&1 || true
   docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
   docker logs "${redis_container}" >"${logs_dir}/redis.log" 2>&1 || true
   docker logs "${remote_signer_container}" >"${logs_dir}/remote-signer.log" 2>&1 || true
@@ -1883,6 +1893,14 @@ if [[ "${CASE_NEED_KUBERNETES_SERVER}" == "1" ]]; then
     "${repo_root}/tests/docker/mock_kubernetes"
 fi
 
+if [[ "${CASE_NEED_NOMAD_SERVER}" == "1" ]]; then
+  ensure_helper_image \
+    "${mock_nomad_image}" \
+    remove_mock_nomad_image \
+    "${repo_root}/tests/docker/mock_nomad/Dockerfile" \
+    "${repo_root}/tests/docker/mock_nomad"
+fi
+
 if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
   ensure_helper_image \
     "${pq_probe_image}" \
@@ -2028,6 +2046,28 @@ if [[ "${CASE_NEED_KUBERNETES_SERVER}" == "1" ]]; then
     -e MODIFIED_DELAY_SECONDS=5.0 \
     -e DELETED_DELAY_SECONDS=4.0 \
     "${mock_kubernetes_image}" >/dev/null
+fi
+
+if [[ "${CASE_NEED_NOMAD_SERVER}" == "1" ]]; then
+  if [[ "${CASE_NEED_HTTP_UPSTREAM}" != "1" || "${CASE_NEED_ALT_UPSTREAM}" != "1" ]]; then
+    fail_with_diagnostics "Nomad mock matrix cases require the HTTP and alternate upstreams"
+  fi
+  http_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${http_container}")"
+  alt_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${alt_container}")"
+  if [[ -z "${http_container_ip}" || -z "${alt_container_ip}" ]]; then
+    fail_with_diagnostics "failed to inspect mock upstream IPs for Nomad case"
+  fi
+  docker run -d \
+    --name "${nomad_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-nomad \
+    -e LISTEN_PORT=18091 \
+    -e EXPECTED_TOKEN=matrix-nomad-token \
+    -e INITIAL_ENDPOINT_IP="${http_container_ip}" \
+    -e UPDATED_ENDPOINT_IP="${alt_container_ip}" \
+    -e MODIFIED_DELAY_SECONDS=3.0 \
+    "${mock_nomad_image}" >/dev/null
 fi
 
 if [[ "${CASE_NEED_HTTPS_UPSTREAM}" == "1" ]]; then
@@ -2273,6 +2313,7 @@ docker create \
   -e OXIBELT_CACHE_PURGE_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
   -e OXIBELT_INSTANCE_ID=proxy-a \
   -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
+  -e NOMAD_TOKEN=matrix-nomad-token \
   "${remote_signer_docker_args[@]}" \
   "${proxy_dns_args[@]}" \
   "${proxy_image}" >/dev/null
@@ -2296,6 +2337,7 @@ if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then
     -e OXIBELT_CACHE_PURGE_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
     -e OXIBELT_INSTANCE_ID=proxy-b \
     -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
+    -e NOMAD_TOKEN=matrix-nomad-token \
     "${remote_signer_docker_args[@]}" \
     "${proxy_dns_args[@]}" \
     "${proxy_image}" >/dev/null

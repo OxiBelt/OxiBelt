@@ -787,6 +787,7 @@ impl Config {
           pool.name
         );
       }
+      upstream_pool::validate_pool_policy(pool)?;
       let mut server_ids = HashSet::new();
       for (index, server) in pool.servers.iter().enumerate() {
         let server_id = upstream_pool_server_id(index, server);
@@ -2870,7 +2871,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "health_check",
       "keepalive",
       "name",
+      "outlier_ejection",
       "servers",
+      "slow_start",
       "sticky_cookie",
     ][..],
     "upstream_pools.discovery" => &[
@@ -2906,6 +2909,13 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "ttl_seconds",
     ][..],
     "upstream_pools.keepalive" => &["idle_timeout_ms", "max_idle", "max_lifetime_ms"][..],
+    "upstream_pools.slow_start" => &["duration_ms", "enabled", "min_weight_percent"][..],
+    "upstream_pools.outlier_ejection" => &[
+      "base_ejection_ms",
+      "consecutive_failures",
+      "enabled",
+      "max_ejection_ms",
+    ][..],
     "upstream_pools.health_check" => &[
       "enabled",
       "expected_status",
@@ -4990,6 +5000,10 @@ pub struct UpstreamPoolConfig {
   #[serde(default)]
   pub keepalive: UpstreamPoolKeepaliveConfig,
   #[serde(default)]
+  pub slow_start: UpstreamPoolSlowStartConfig,
+  #[serde(default)]
+  pub outlier_ejection: UpstreamPoolOutlierEjectionConfig,
+  #[serde(default)]
   pub servers: Vec<UpstreamPoolServerConfig>,
   #[serde(default)]
   pub discovery: Vec<UpstreamPoolDiscoveryConfig>,
@@ -5018,49 +5032,6 @@ impl UpstreamPoolConfig {
   }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct UpstreamPoolDiscoveryConfig {
-  pub provider: UpstreamDiscoveryProvider,
-  #[serde(default)]
-  pub name: Option<String>,
-  #[serde(default)]
-  pub endpoint: Option<Url>,
-  #[serde(default)]
-  pub namespace: Option<String>,
-  #[serde(default)]
-  pub service: Option<String>,
-  #[serde(default)]
-  pub port_name: Option<String>,
-  #[serde(default)]
-  pub key_prefix: Option<String>,
-  #[serde(default)]
-  pub token_env: Option<String>,
-  #[serde(default)]
-  pub filter: Option<String>,
-  #[serde(default)]
-  pub datacenter: Option<String>,
-  #[serde(default)]
-  pub file: Option<PathBuf>,
-  #[serde(default)]
-  pub record_type: DnsDiscoveryRecordType,
-  #[serde(default)]
-  pub scheme: DiscoveryUpstreamScheme,
-  #[serde(default)]
-  pub port: Option<u16>,
-  #[serde(default)]
-  pub kubernetes_resource: KubernetesDiscoveryResource,
-  #[serde(default)]
-  pub watch: bool,
-  #[serde(default = "upstream_pool::default_kubernetes_watch_timeout_seconds")]
-  pub watch_timeout_seconds: u64,
-  #[serde(default = "upstream_pool::default_discovery_update_debounce_ms")]
-  pub update_debounce_ms: u64,
-  #[serde(default = "default_discovery_refresh_interval_ms")]
-  pub refresh_interval_ms: u64,
-  #[serde(default = "default_discovery_min_ttl_ms")]
-  pub min_ttl_ms: u64,
-}
-
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamDiscoveryProvider {
@@ -5069,6 +5040,7 @@ pub enum UpstreamDiscoveryProvider {
   Kubernetes,
   Consul,
   Etcd,
+  Nomad,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -5183,6 +5155,7 @@ pub enum UpstreamPoolServerSource {
   Kubernetes,
   Consul,
   Etcd,
+  Nomad,
   Admin,
 }
 
@@ -5195,6 +5168,7 @@ impl UpstreamPoolServerSource {
       Self::Kubernetes => "kubernetes",
       Self::Consul => "consul",
       Self::Etcd => "etcd",
+      Self::Nomad => "nomad",
       Self::Admin => "admin",
     }
   }

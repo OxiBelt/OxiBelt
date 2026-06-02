@@ -212,13 +212,19 @@ impl AppSnapshot {
       buffering::cleanup_stale_temp_files(temp_dir);
     }
     let limits = LimitState::new(shared_state.clone());
-    let pools = PoolState::new(&config.upstream_pools, shared_state.clone());
-    let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
-    let cache = ResponseCache::new(&config.cache, shared_state.clone())
-      .context("failed to build response cache")?;
     let metrics = previous
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
+    let pools = PoolState::new_with_previous_and_metrics(
+      &config.upstream_pools,
+      shared_state.clone(),
+      previous.map(|snapshot| snapshot.pools.as_ref()),
+      Some(metrics.clone()),
+    );
+    publish_upstream_pool_server_metrics(&pools);
+    let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
+    let cache = ResponseCache::new(&config.cache, shared_state.clone())
+      .context("failed to build response cache")?;
     let telemetry = match previous {
       Some(_) => TelemetryRuntime::new(&config.telemetry.tracing)
         .context("failed to build telemetry runtime")?,
@@ -377,15 +383,21 @@ impl AppSnapshot {
       .context("failed to build upstream HTTP/3 pools")?;
     let control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
       .context("failed to build control-plane HTTP client")?;
-    let pools = PoolState::new(&config.upstream_pools, previous.shared_state.clone());
+    let metrics = previous.metrics.clone();
+    let pools = PoolState::new_with_previous_and_metrics(
+      &config.upstream_pools,
+      previous.shared_state.clone(),
+      Some(previous.pools.as_ref()),
+      Some(metrics.clone()),
+    );
+    publish_upstream_pool_server_metrics(&pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let alt_svc_header_value = build_alt_svc_header_value(&config)
       .context("failed to build precomputed Alt-Svc header value")?;
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
-    let external_auth =
-      ExternalAuthRuntime::new(&config, control_http.clone(), previous.metrics.clone())
-        .context("failed to build external auth runtime")?;
+    let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
+      .context("failed to build external auth runtime")?;
     let ipm = IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
@@ -408,7 +420,7 @@ impl AppSnapshot {
       cache: previous.cache.clone(),
       compression: previous.compression.clone(),
       static_files: Arc::new(static_files),
-      metrics: previous.metrics.clone(),
+      metrics,
       telemetry: previous.telemetry.clone(),
       ipm,
       dynamic_policy: previous.dynamic_policy.clone(),
@@ -442,6 +454,10 @@ fn next_upstream_pool_generation(config: &Config, previous: Option<&AppSnapshot>
   } else {
     previous.upstream_pool_generation.saturating_add(1)
   }
+}
+
+fn publish_upstream_pool_server_metrics(pools: &Arc<PoolState>) {
+  pools.publish_server_count_metrics();
 }
 
 fn build_upstream_uri_parts(

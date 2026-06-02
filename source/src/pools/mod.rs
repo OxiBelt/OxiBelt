@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use anyhow::bail;
 use http::HeaderValue;
@@ -12,18 +12,32 @@ use crate::config::{
   UpstreamConfig, UpstreamPoolConfig, UpstreamPoolServerConfig, UpstreamTlsConfig,
   upstream_pool_server_id,
 };
+use crate::metrics::Metrics;
 use crate::shared_state::SharedState;
 
+mod health;
+mod selection;
 mod sticky;
 
-const SCORE_SCALE: u128 = 1_000;
 const EWMA_FAILURE_PENALTY_MS: u64 = 30_000;
-const EWMA_ACTIVE_PENALTY_MS: u64 = 5;
+
+use health::{
+  HEALTH_REASON_ACTIVE_FAILURE, HEALTH_REASON_ACTIVE_SUCCESS, HEALTH_REASON_OUTLIER_EJECTED,
+  HEALTH_REASON_PASSIVE_FAILURE, HEALTH_REASON_PASSIVE_SUCCESS, HEALTH_REASON_UNKNOWN,
+  effective_server_weight, effective_weight_percent_at, health_reason_label, mark_health_report,
+  maybe_eject_outlier, now_millis, optional_millis, server_healthy, set_server_health,
+  slow_start_remaining_ms_at, source_for_server,
+};
+use selection::build_sticky_fallback;
+#[cfg(test)]
+use selection::{normalized_active_score, weighted_available};
+use selection::{parse_policy_override, select_by_algorithm};
 
 #[derive(Debug)]
 pub struct PoolState {
   pools: HashMap<String, Arc<PoolRuntime>>,
   shared_state: Option<Arc<SharedState>>,
+  metrics: Option<Arc<Metrics>>,
 }
 
 #[derive(Debug)]
@@ -44,6 +58,79 @@ struct PoolServerRuntime {
   consecutive_successes: AtomicU32,
   consecutive_failures: AtomicU32,
   ewma_latency_ms: AtomicU64,
+  ready_since_ms: AtomicU64,
+  ejected_until_ms: AtomicU64,
+  ejection_count: AtomicU32,
+  last_health_check_ms: AtomicU64,
+  health_reason: AtomicU8,
+}
+
+impl PoolServerRuntime {
+  fn new(
+    pool_name: &str,
+    config: &UpstreamPoolServerConfig,
+    server_id: &str,
+    previous_pool_exists: bool,
+    previous: Option<&PoolServerRuntime>,
+    previous_config: Option<&UpstreamPoolServerConfig>,
+    now_ms: u64,
+  ) -> Self {
+    let recovered_to_ready = previous_config.is_some_and(|previous| {
+      !previous.state.accepts_new_requests() && config.state.accepts_new_requests()
+    });
+    let ready_since_ms = match previous {
+      Some(_) if recovered_to_ready => now_ms,
+      Some(previous) => previous.ready_since_ms.load(Ordering::Relaxed),
+      None if previous_pool_exists => now_ms,
+      None => 0,
+    };
+    Self {
+      upstream_name: synthetic_upstream_name_for_id(pool_name, server_id),
+      server_id: server_id.to_string(),
+      active: AtomicUsize::new(0),
+      healthy: AtomicBool::new(
+        previous
+          .map(|previous| previous.healthy.load(Ordering::Relaxed))
+          .unwrap_or(true),
+      ),
+      consecutive_successes: AtomicU32::new(
+        previous
+          .map(|previous| previous.consecutive_successes.load(Ordering::Relaxed))
+          .unwrap_or(0),
+      ),
+      consecutive_failures: AtomicU32::new(
+        previous
+          .map(|previous| previous.consecutive_failures.load(Ordering::Relaxed))
+          .unwrap_or(0),
+      ),
+      ewma_latency_ms: AtomicU64::new(
+        previous
+          .map(|previous| previous.ewma_latency_ms.load(Ordering::Relaxed))
+          .unwrap_or(0),
+      ),
+      ready_since_ms: AtomicU64::new(ready_since_ms),
+      ejected_until_ms: AtomicU64::new(
+        previous
+          .map(|previous| previous.ejected_until_ms.load(Ordering::Relaxed))
+          .unwrap_or(0),
+      ),
+      ejection_count: AtomicU32::new(
+        previous
+          .map(|previous| previous.ejection_count.load(Ordering::Relaxed))
+          .unwrap_or(0),
+      ),
+      last_health_check_ms: AtomicU64::new(
+        previous
+          .map(|previous| previous.last_health_check_ms.load(Ordering::Relaxed))
+          .unwrap_or(0),
+      ),
+      health_reason: AtomicU8::new(
+        previous
+          .map(|previous| previous.health_reason.load(Ordering::Relaxed))
+          .unwrap_or(HEALTH_REASON_UNKNOWN),
+      ),
+    }
+  }
 }
 
 pub struct PoolSelection {
@@ -73,6 +160,12 @@ pub struct PoolServerRuntimeSnapshot {
   pub backup: bool,
   pub active: usize,
   pub healthy: bool,
+  pub health_reason: String,
+  pub last_health_check_ms: Option<u64>,
+  pub ejected_until_ms: Option<u64>,
+  pub ejection_count: u32,
+  pub slow_start_remaining_ms: Option<u64>,
+  pub effective_weight_percent: u32,
 }
 
 impl Drop for PoolSelection {
@@ -88,24 +181,59 @@ impl Drop for PoolSelection {
 
 impl PoolState {
   pub fn new(configs: &[UpstreamPoolConfig], shared_state: Option<Arc<SharedState>>) -> Arc<Self> {
+    Self::new_with_previous_and_metrics(configs, shared_state, None, None)
+  }
+
+  pub fn new_with_previous(
+    configs: &[UpstreamPoolConfig],
+    shared_state: Option<Arc<SharedState>>,
+    previous: Option<&PoolState>,
+  ) -> Arc<Self> {
+    Self::new_with_previous_and_metrics(configs, shared_state, previous, None)
+  }
+
+  pub fn new_with_previous_and_metrics(
+    configs: &[UpstreamPoolConfig],
+    shared_state: Option<Arc<SharedState>>,
+    previous: Option<&PoolState>,
+    metrics: Option<Arc<Metrics>>,
+  ) -> Arc<Self> {
+    let now_ms = now_millis();
     let pools = configs
       .iter()
       .map(|config| {
+        let previous_pool = previous.and_then(|state| state.pools.get(&config.name));
         let servers = config
           .servers
           .iter()
           .enumerate()
-          .map(|(index, _)| {
-            let server_id = upstream_pool_server_id(index, &config.servers[index]);
-            Arc::new(PoolServerRuntime {
-              upstream_name: synthetic_upstream_name_for_id(&config.name, &server_id),
-              server_id,
-              active: AtomicUsize::new(0),
-              healthy: AtomicBool::new(true),
-              consecutive_successes: AtomicU32::new(0),
-              consecutive_failures: AtomicU32::new(0),
-              ewma_latency_ms: AtomicU64::new(0),
-            })
+          .map(|(index, server_config)| {
+            let server_id = upstream_pool_server_id(index, server_config);
+            let previous_runtime = previous_pool.and_then(|pool| {
+              pool
+                .servers
+                .iter()
+                .find(|server| server.server_id == server_id)
+            });
+            let previous_config = previous_pool.and_then(|pool| {
+              pool
+                .config
+                .servers
+                .iter()
+                .enumerate()
+                .find_map(|(index, server)| {
+                  (upstream_pool_server_id(index, server) == server_id).then_some(server)
+                })
+            });
+            Arc::new(PoolServerRuntime::new(
+              &config.name,
+              server_config,
+              &server_id,
+              previous_pool.is_some(),
+              previous_runtime.map(Arc::as_ref),
+              previous_config,
+              now_ms,
+            ))
           })
           .collect();
         (
@@ -123,6 +251,7 @@ impl PoolState {
     Arc::new(Self {
       pools,
       shared_state,
+      metrics,
     })
   }
 
@@ -242,11 +371,46 @@ impl PoolState {
     self.pools.get(pool_name).map(pool_snapshot)
   }
 
+  pub fn publish_server_count_metrics(&self) {
+    let Some(metrics) = &self.metrics else {
+      return;
+    };
+    let mut counts = HashMap::new();
+    for pool in self.snapshots() {
+      for server in pool.servers {
+        *counts
+          .entry((
+            pool.name.clone(),
+            server.source,
+            server.state,
+            server.health_reason,
+          ))
+          .or_insert(0_u64) += 1;
+      }
+    }
+    metrics.set_upstream_pool_server_counts(
+      counts
+        .into_iter()
+        .map(|((pool, source, state, reason), count)| (pool, source, state, reason, count))
+        .collect(),
+    );
+  }
+
   pub fn report_success(&self, upstream_name: &str) {
+    self.report_success_with_reason(upstream_name, HEALTH_REASON_PASSIVE_SUCCESS);
+  }
+
+  pub fn report_active_success(&self, upstream_name: &str) {
+    self.report_success_with_reason(upstream_name, HEALTH_REASON_ACTIVE_SUCCESS);
+  }
+
+  fn report_success_with_reason(&self, upstream_name: &str, reason: u8) {
     if self.pools.is_empty() {
       return;
     }
     if let Some((pool, server)) = self.find_pool_server(upstream_name) {
+      let now_ms = mark_health_report(&server, reason);
+      self.record_health_report(&pool, &server, true, reason);
       if let Some(shared) = &self.shared_state
         && let Ok(Some(healthy)) = shared.pool_report(
           upstream_name,
@@ -256,7 +420,8 @@ impl PoolState {
           pool.config.health_check.unhealthy_threshold,
         )
       {
-        server.healthy.store(healthy, Ordering::Relaxed);
+        set_server_health(&server, healthy, now_ms);
+        self.publish_server_count_metrics();
         return;
       }
       server.consecutive_failures.store(0, Ordering::Relaxed);
@@ -264,8 +429,9 @@ impl PoolState {
       if !pool.config.health_check.enabled
         || successes >= pool.config.health_check.healthy_threshold
       {
-        server.healthy.store(true, Ordering::Relaxed);
+        set_server_health(&server, true, now_ms);
       }
+      self.publish_server_count_metrics();
     }
   }
 
@@ -273,34 +439,51 @@ impl PoolState {
     if let Some((_, server)) = self.find_pool_server(upstream_name) {
       observe_ewma_latency(&server, latency_ms);
     }
-    self.report_success(upstream_name);
+    self.report_success_with_reason(upstream_name, HEALTH_REASON_PASSIVE_SUCCESS);
   }
 
   pub fn report_failure(&self, upstream_name: &str) {
+    self.report_failure_with_reason(upstream_name, HEALTH_REASON_PASSIVE_FAILURE);
+  }
+
+  pub fn report_active_failure(&self, upstream_name: &str) {
+    self.report_failure_with_reason(upstream_name, HEALTH_REASON_ACTIVE_FAILURE);
+  }
+
+  fn report_failure_with_reason(&self, upstream_name: &str, reason: u8) {
     if self.pools.is_empty() {
       return;
     }
     if let Some((pool, server)) = self.find_pool_server(upstream_name) {
+      let now_ms = mark_health_report(&server, reason);
       observe_ewma_latency(&server, EWMA_FAILURE_PENALTY_MS);
-      if let Some(shared) = &self.shared_state
+      self.record_health_report(&pool, &server, false, reason);
+      let shared_health = if let Some(shared) = &self.shared_state
         && let Ok(Some(healthy)) = shared.pool_report(
           upstream_name,
           false,
           pool.config.health_check.enabled,
           pool.config.health_check.healthy_threshold,
           pool.config.health_check.unhealthy_threshold,
-        )
-      {
-        server.healthy.store(healthy, Ordering::Relaxed);
-        return;
-      }
+        ) {
+        Some(healthy)
+      } else {
+        None
+      };
       server.consecutive_successes.store(0, Ordering::Relaxed);
       let failures = server.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+      if let Some(healthy) = shared_health {
+        set_server_health(&server, healthy, now_ms);
+      }
+      if maybe_eject_outlier(&pool, &server, failures, now_ms) {
+        self.record_outlier_ejection(&pool, &server);
+      }
       if pool.config.health_check.enabled
         && failures >= pool.config.health_check.unhealthy_threshold
       {
-        server.healthy.store(false, Ordering::Relaxed);
+        set_server_health(&server, false, now_ms);
       }
+      self.publish_server_count_metrics();
     }
   }
 
@@ -338,263 +521,45 @@ impl PoolState {
       sticky_cookie,
     }
   }
+
+  fn record_health_report(
+    &self,
+    pool: &PoolRuntime,
+    server: &PoolServerRuntime,
+    success: bool,
+    reason: u8,
+  ) {
+    let Some(metrics) = &self.metrics else {
+      return;
+    };
+    if let Some(source) = source_for_server(pool, server) {
+      metrics.record_upstream_pool_health_report(
+        &pool.config.name,
+        source.as_str(),
+        if success { "success" } else { "failure" },
+        health_reason_label(reason),
+      );
+    }
+  }
+
+  fn record_outlier_ejection(&self, pool: &PoolRuntime, server: &PoolServerRuntime) {
+    let Some(metrics) = &self.metrics else {
+      return;
+    };
+    if let Some(source) = source_for_server(pool, server) {
+      metrics.record_upstream_pool_outlier_ejection(
+        &pool.config.name,
+        source.as_str(),
+        health_reason_label(HEALTH_REASON_OUTLIER_EJECTED),
+      );
+    }
+  }
 }
 
 impl PoolSelection {
   pub fn sticky_cookie(&self) -> Option<HeaderValue> {
     self.sticky_cookie.clone()
   }
-}
-
-fn parse_policy_override(raw: &str) -> Option<LoadBalancingAlgorithm> {
-  match raw {
-    "power_of_two_choices" => Some(LoadBalancingAlgorithm::PowerOfTwoChoices),
-    "weighted_least_conn" => Some(LoadBalancingAlgorithm::WeightedLeastConn),
-    "rendezvous_hash" => Some(LoadBalancingAlgorithm::RendezvousHash),
-    "rendezvous_ip_hash" => Some(LoadBalancingAlgorithm::RendezvousIpHash),
-    "ewma" => Some(LoadBalancingAlgorithm::Ewma),
-    "least_time" => Some(LoadBalancingAlgorithm::LeastTime),
-    _ => None,
-  }
-}
-
-fn select_by_algorithm(
-  pool: &Arc<PoolRuntime>,
-  algorithm: LoadBalancingAlgorithm,
-  client_ip: IpAddr,
-  hash_key: &str,
-  excluded_upstreams: &HashSet<&str>,
-) -> Option<Arc<PoolServerRuntime>> {
-  match algorithm {
-    LoadBalancingAlgorithm::PowerOfTwoChoices => {
-      select_power_of_two_choices(pool, excluded_upstreams)
-    }
-    LoadBalancingAlgorithm::WeightedLeastConn => {
-      select_weighted_least_conn(pool, excluded_upstreams)
-    }
-    LoadBalancingAlgorithm::RendezvousHash => {
-      select_rendezvous_hash(pool, hash_key, excluded_upstreams)
-    }
-    LoadBalancingAlgorithm::RendezvousIpHash => {
-      select_rendezvous_hash(pool, &client_ip.to_string(), excluded_upstreams)
-    }
-    LoadBalancingAlgorithm::Ewma => select_ewma(pool, excluded_upstreams),
-    LoadBalancingAlgorithm::LeastTime => select_least_time(pool, excluded_upstreams),
-    LoadBalancingAlgorithm::StickyCookie => None,
-  }
-}
-
-fn build_sticky_fallback(
-  pool: &Arc<PoolRuntime>,
-  algorithm: LoadBalancingAlgorithm,
-  client_ip: IpAddr,
-  hash_key: &str,
-  excluded_upstreams: &HashSet<&str>,
-) -> Option<Arc<PoolServerRuntime>> {
-  select_by_algorithm(pool, algorithm, client_ip, hash_key, excluded_upstreams)
-}
-
-fn select_power_of_two_choices(
-  pool: &Arc<PoolRuntime>,
-  excluded_upstreams: &HashSet<&str>,
-) -> Option<Arc<PoolServerRuntime>> {
-  let weighted = weighted_available(pool, excluded_upstreams);
-  if weighted.is_empty() {
-    return None;
-  }
-  if weighted.len() == 1 {
-    return weighted.first().cloned();
-  }
-  let first_index = next_choice(pool, weighted.len());
-  let mut second_index = next_choice(pool, weighted.len());
-  if first_index == second_index {
-    second_index = (second_index + 1) % weighted.len();
-  }
-  let first = weighted[first_index].clone();
-  let second = weighted[second_index].clone();
-  Some(select_lower_active_score(pool, first, second))
-}
-
-fn select_weighted_least_conn(
-  pool: &Arc<PoolRuntime>,
-  excluded_upstreams: &HashSet<&str>,
-) -> Option<Arc<PoolServerRuntime>> {
-  available_candidates(pool, excluded_upstreams)
-    .into_iter()
-    .min_by_key(|(index, server)| {
-      (
-        normalized_active_score(pool, *index, server),
-        stable_hash64(&server.server_id),
-      )
-    })
-    .map(|(_, server)| server)
-}
-
-fn select_rendezvous_hash(
-  pool: &Arc<PoolRuntime>,
-  key: &str,
-  excluded_upstreams: &HashSet<&str>,
-) -> Option<Arc<PoolServerRuntime>> {
-  available_candidates(pool, excluded_upstreams)
-    .into_iter()
-    .max_by_key(|(index, server)| rendezvous_score(pool, *index, server, key))
-    .map(|(_, server)| server)
-}
-
-fn select_ewma(
-  pool: &Arc<PoolRuntime>,
-  excluded_upstreams: &HashSet<&str>,
-) -> Option<Arc<PoolServerRuntime>> {
-  available_candidates(pool, excluded_upstreams)
-    .into_iter()
-    .min_by_key(|(index, server)| {
-      (
-        ewma_score(pool, *index, server, true),
-        stable_hash64(&server.server_id),
-      )
-    })
-    .map(|(_, server)| server)
-}
-
-fn select_least_time(
-  pool: &Arc<PoolRuntime>,
-  excluded_upstreams: &HashSet<&str>,
-) -> Option<Arc<PoolServerRuntime>> {
-  available_candidates(pool, excluded_upstreams)
-    .into_iter()
-    .min_by_key(|(index, server)| {
-      (
-        ewma_score(pool, *index, server, false),
-        normalized_active_score(pool, *index, server),
-        stable_hash64(&server.server_id),
-      )
-    })
-    .map(|(_, server)| server)
-}
-
-fn weighted_available(
-  pool: &Arc<PoolRuntime>,
-  excluded_upstreams: &HashSet<&str>,
-) -> Vec<Arc<PoolServerRuntime>> {
-  let mut result = Vec::new();
-  for (index, server) in available_candidates(pool, excluded_upstreams) {
-    let weight = server_config(pool, index).weight;
-    for _ in 0..weight {
-      result.push(server.clone());
-    }
-  }
-  result
-}
-
-fn available_candidates(
-  pool: &Arc<PoolRuntime>,
-  excluded_upstreams: &HashSet<&str>,
-) -> Vec<(usize, Arc<PoolServerRuntime>)> {
-  let primary = pool
-    .servers
-    .iter()
-    .enumerate()
-    .filter(|(index, server)| server_available(pool, *index, server, excluded_upstreams))
-    .map(|(index, server)| (index, server.clone()))
-    .collect::<Vec<_>>();
-  if !primary.is_empty() {
-    return primary;
-  }
-  pool
-    .servers
-    .iter()
-    .enumerate()
-    .filter(|(index, server)| {
-      let config = server_config(pool, *index);
-      config.backup
-        && !excluded_upstreams.contains(server.upstream_name.as_str())
-        && config.state.accepts_new_requests()
-        && server_healthy(pool, server)
-        && server_capacity_available(pool, *index, server)
-    })
-    .map(|(index, server)| (index, server.clone()))
-    .collect()
-}
-
-fn select_lower_active_score(
-  pool: &PoolRuntime,
-  first: Arc<PoolServerRuntime>,
-  second: Arc<PoolServerRuntime>,
-) -> Arc<PoolServerRuntime> {
-  let first_index = server_index(pool, &first).unwrap_or(0);
-  let second_index = server_index(pool, &second).unwrap_or(first_index);
-  let first_score = normalized_active_score(pool, first_index, &first);
-  let second_score = normalized_active_score(pool, second_index, &second);
-  if first_score <= second_score {
-    first
-  } else {
-    second
-  }
-}
-
-fn next_choice(pool: &PoolRuntime, len: usize) -> usize {
-  let current = pool.chooser.fetch_add(1, Ordering::Relaxed) as u64;
-  (mix64(current) as usize) % len
-}
-
-fn normalized_active_score(pool: &PoolRuntime, index: usize, server: &PoolServerRuntime) -> u128 {
-  let weight = u128::from(server_config(pool, index).weight.max(1));
-  active_count(pool, server) as u128 * SCORE_SCALE / weight
-}
-
-fn rendezvous_score(
-  pool: &PoolRuntime,
-  index: usize,
-  server: &PoolServerRuntime,
-  key: &str,
-) -> u128 {
-  let hash = stable_hash64_pair(key, &server.server_id).max(1);
-  u128::from(hash) * u128::from(server_config(pool, index).weight.max(1))
-}
-
-fn ewma_score(
-  pool: &PoolRuntime,
-  index: usize,
-  server: &PoolServerRuntime,
-  include_active: bool,
-) -> u128 {
-  let weight = u128::from(server_config(pool, index).weight.max(1));
-  let latency = u128::from(latency_sample_for_score(pool, server));
-  let active = if include_active {
-    active_count(pool, server) as u128 * u128::from(EWMA_ACTIVE_PENALTY_MS)
-  } else {
-    0
-  };
-  latency.saturating_add(active) * SCORE_SCALE / weight
-}
-
-fn latency_sample_for_score(pool: &PoolRuntime, server: &PoolServerRuntime) -> u64 {
-  let current = server.ewma_latency_ms.load(Ordering::Relaxed);
-  if current > 0 {
-    return current;
-  }
-  let (sum, count) = pool
-    .servers
-    .iter()
-    .fold((0u128, 0u128), |(sum, count), server| {
-      let value = server.ewma_latency_ms.load(Ordering::Relaxed);
-      if value == 0 {
-        (sum, count)
-      } else {
-        (sum + u128::from(value), count + 1)
-      }
-    });
-  sum
-    .checked_div(count)
-    .unwrap_or(0)
-    .min(u128::from(u64::MAX)) as u64
-}
-
-fn server_index(pool: &PoolRuntime, target: &PoolServerRuntime) -> Option<usize> {
-  pool
-    .servers
-    .iter()
-    .position(|server| server.server_id == target.server_id)
 }
 
 fn observe_ewma_latency(server: &PoolServerRuntime, sample_ms: u64) {
@@ -611,52 +576,6 @@ fn observe_ewma_latency(server: &PoolServerRuntime, sample_ms: u64) {
           .saturating_div(8)
       })
     });
-}
-
-fn stable_hash64(value: &str) -> u64 {
-  let mut hash = 0xcbf2_9ce4_8422_2325u64;
-  for byte in value.as_bytes() {
-    hash ^= u64::from(*byte);
-    hash = hash.wrapping_mul(0x100_0000_01b3);
-  }
-  mix64(hash)
-}
-
-fn stable_hash64_pair(left: &str, right: &str) -> u64 {
-  let mut hash = 0xcbf2_9ce4_8422_2325u64;
-  for byte in left
-    .as_bytes()
-    .iter()
-    .copied()
-    .chain(std::iter::once(0xff))
-    .chain(right.as_bytes().iter().copied())
-  {
-    hash ^= u64::from(byte);
-    hash = hash.wrapping_mul(0x100_0000_01b3);
-  }
-  mix64(hash)
-}
-
-fn mix64(mut value: u64) -> u64 {
-  value ^= value >> 33;
-  value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
-  value ^= value >> 33;
-  value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-  value ^ (value >> 33)
-}
-
-fn server_available(
-  pool: &Arc<PoolRuntime>,
-  index: usize,
-  server: &Arc<PoolServerRuntime>,
-  excluded_upstreams: &HashSet<&str>,
-) -> bool {
-  let config = server_config(pool, index);
-  !config.backup
-    && !excluded_upstreams.contains(server.upstream_name.as_str())
-    && config.state.accepts_new_requests()
-    && server_healthy(pool, server)
-    && server_capacity_available(pool, index, server)
 }
 
 fn server_capacity_available(
@@ -681,31 +600,53 @@ fn server_config(pool: &PoolRuntime, index: usize) -> &UpstreamPoolServerConfig 
   &pool.config.servers[index]
 }
 
-fn server_healthy(pool: &PoolRuntime, server: &PoolServerRuntime) -> bool {
-  if let Some(shared) = &pool.shared_state
-    && let Ok(Some(healthy)) = shared.pool_health(&server.upstream_name)
-  {
-    return healthy;
-  }
-  server.healthy.load(Ordering::Relaxed)
-}
-
 #[allow(dead_code)]
 pub(crate) fn synthetic_upstream_name(pool: &str, index: usize) -> String {
   format!("pool:{pool}:{index}")
 }
 
 pub(crate) fn synthetic_upstream_name_for_id(pool: &str, server_id: &str) -> String {
-  format!("pool:{pool}:{server_id}")
+  if server_id_is_public_label_safe(server_id) {
+    return format!("pool:{pool}:{server_id}");
+  }
+  format!(
+    "pool:{pool}:server-{:016x}",
+    stable_server_label_hash(pool, server_id)
+  )
+}
+
+fn server_id_is_public_label_safe(server_id: &str) -> bool {
+  !server_id.is_empty()
+    && server_id.len() <= 64
+    && server_id
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn stable_server_label_hash(pool: &str, server_id: &str) -> u64 {
+  let mut hash = 0xcbf29ce484222325_u64;
+  for byte in pool
+    .as_bytes()
+    .iter()
+    .copied()
+    .chain([0xff])
+    .chain(server_id.as_bytes().iter().copied())
+  {
+    hash ^= u64::from(byte);
+    hash = hash.wrapping_mul(0x100000001b3);
+  }
+  hash
 }
 
 fn pool_snapshot(pool: &Arc<PoolRuntime>) -> PoolRuntimeSnapshot {
+  let now_ms = now_millis();
   let mut servers = pool
     .servers
     .iter()
     .enumerate()
     .map(|(index, server)| {
       let config = server_config(pool, index);
+      let ejected_until_ms = server.ejected_until_ms.load(Ordering::Relaxed);
       PoolServerRuntimeSnapshot {
         id: server.server_id.clone(),
         upstream_name: server.upstream_name.clone(),
@@ -717,6 +658,13 @@ fn pool_snapshot(pool: &Arc<PoolRuntime>) -> PoolRuntimeSnapshot {
         backup: config.backup,
         active: active_count(pool, server),
         healthy: server_healthy(pool, server),
+        health_reason: health_reason_label(server.health_reason.load(Ordering::Relaxed))
+          .to_string(),
+        last_health_check_ms: optional_millis(server.last_health_check_ms.load(Ordering::Relaxed)),
+        ejected_until_ms: optional_millis(ejected_until_ms),
+        ejection_count: server.ejection_count.load(Ordering::Relaxed),
+        slow_start_remaining_ms: slow_start_remaining_ms_at(pool, server, now_ms),
+        effective_weight_percent: effective_weight_percent_at(pool, server, now_ms),
       }
     })
     .collect::<Vec<_>>();
