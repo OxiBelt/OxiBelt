@@ -3,17 +3,31 @@ use std::collections::HashSet;
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
-use super::{Parser, WafActionConfig, WafRuleConfig, is_valid_rule_label};
+use super::{Parser, WafActionConfig, WafPhase, WafRuleConfig, is_valid_rule_label};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WafRuleGroupConfig {
   pub name: String,
   #[serde(default)]
+  pub phase: Option<WafPhase>,
+  #[serde(default)]
+  pub tags: Vec<String>,
+  #[serde(default)]
   pub when: Option<String>,
   #[serde(default)]
   pub merge_condition_as: WafConditionMerge,
   #[serde(default)]
+  pub conditions: Vec<WafRuleGroupConditionConfig>,
+  #[serde(default)]
   pub actions: Vec<WafActionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WafRuleGroupConditionConfig {
+  pub label: String,
+  pub when: String,
+  #[serde(default)]
+  pub merge_condition_as: WafConditionMerge,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -48,9 +62,9 @@ pub(super) fn validate_rule_group_scope(
     if !names.insert(group.name.as_str()) {
       bail!("{scope} contains duplicate WAF rule group {}", group.name);
     }
-    if group.when.is_none() && group.actions.is_empty() {
+    if group.when.is_none() && group.conditions.is_empty() && group.actions.is_empty() {
       bail!(
-        "{scope} rule group {} must define at least one of when or actions",
+        "{scope} rule group {} must define at least one of when, conditions, or actions",
         group.name
       );
     }
@@ -65,6 +79,36 @@ pub(super) fn validate_rule_group_scope(
         format!(
           "failed to parse {scope} rule group {} expression",
           group.name
+        )
+      })?;
+    }
+    for tag in &group.tags {
+      if tag.is_empty() || !is_valid_rule_label(tag) {
+        bail!(
+          "{scope} rule group {} tag must match [A-Za-z0-9-]{{1,32}}",
+          group.name
+        );
+      }
+    }
+    let mut condition_labels = HashSet::new();
+    for condition in &group.conditions {
+      if condition.label.trim().is_empty() || !is_valid_rule_label(&condition.label) {
+        bail!(
+          "{scope} rule group {} condition label must match [A-Za-z0-9-]{{1,32}}",
+          group.name
+        );
+      }
+      if !condition_labels.insert(condition.label.as_str()) {
+        bail!(
+          "{scope} rule group {} contains duplicate condition label {}",
+          group.name,
+          condition.label
+        );
+      }
+      Parser::new(&condition.when).parse().with_context(|| {
+        format!(
+          "failed to parse {scope} rule group {} condition {} expression",
+          group.name, condition.label
         )
       })?;
     }
@@ -99,11 +143,29 @@ pub(super) fn resolve_rule<'a>(
       );
     }
     let group = find_group(rule, group_name, &groups)?;
+    if let Some(phase) = group.phase
+      && phase != rule.phase
+    {
+      bail!(
+        "{scope} rule {} references rule group {} for phase {} from {} phase",
+        rule.name,
+        group_name,
+        phase.as_str(),
+        rule.phase.as_str()
+      );
+    }
     condition.push(
       &format!("rule group {group_name}"),
       group.when.as_deref(),
       group.merge_condition_as,
     )?;
+    for fragment in &group.conditions {
+      condition.push(
+        &format!("rule group {group_name} condition {}", fragment.label),
+        Some(fragment.when.as_str()),
+        fragment.merge_condition_as,
+      )?;
+    }
     collect_actions(&mut actions, &mut order, &group.actions);
   }
 

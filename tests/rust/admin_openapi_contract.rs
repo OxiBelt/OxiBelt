@@ -265,6 +265,8 @@ fn expected_operations() -> BTreeSet<(String, String)> {
         ("post", "/admin/v1/waf/oxirule/test"),
         ("post", "/admin/v1/waf/oxirule/explain"),
         ("post", "/admin/v1/waf/oxirule/replay"),
+        ("post", "/admin/v1/waf/oxirule/analyze"),
+        ("post", "/admin/v1/waf/oxirule/hardening-plan"),
         ("get", "/admin/v1/waf/oxirule/templates"),
         ("post", "/admin/v1/waf/oxirule/templates/render"),
         ("post", "/admin/v1/waf/oxirule/false-positive"),

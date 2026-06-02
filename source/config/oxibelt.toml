@@ -533,12 +533,16 @@ argon2id_memory_mib = 128
 #   "waf:ExplainOxiRule",
 #   "waf:EstimateOxiRuleCost",
 #   "waf:ReplayOxiRule",
+#   "waf:AnalyzeOxiRuleRisk",
+#   "waf:PlanOxiRuleHardening",
 # ]
 # resources = [
 #   "oxibelt:oxibelt:waf:oxirule/*",
 #   "oxibelt:oxibelt:waf:oxirule-group/*",
 #   "oxibelt:oxibelt:waf:oxirule-rulepack/*",
 #   "oxibelt:oxibelt:waf:replay/*",
+#   "oxibelt:oxibelt:waf:analyze/*",
+#   "oxibelt:oxibelt:waf:hardening-plan/*",
 # ]
 #
 #[[ipm.policies.statements]]

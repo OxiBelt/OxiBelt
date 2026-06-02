@@ -3756,11 +3756,15 @@ actions = [
     "waf:ExplainOxiRule",
     "waf:EstimateOxiRuleCost",
     "waf:ReplayOxiRule",
+    "waf:AnalyzeOxiRuleRisk",
+    "waf:PlanOxiRuleHardening",
 ]
 resources = [
     "oxibelt:default:waf:oxirule/*",
     "oxibelt:default:waf:oxirule-group/*",
     "oxibelt:default:waf:replay/*",
+    "oxibelt:default:waf:analyze/*",
+    "oxibelt:default:waf:hardening-plan/*",
 ]
 
 [[ipm.policies.statements]]

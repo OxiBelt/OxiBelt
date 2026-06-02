@@ -4,6 +4,7 @@ use super::binary_format::bytes_match_format;
 use super::body_cache::BodyTextSlot;
 use super::{
   CachedRegexArgs, EvalContext, RegexFlavor, Value, WafBodyInput, body_scan, expect_string_arg,
+  malicious_intelligence_score,
 };
 
 pub(super) fn eval_body_call(
@@ -80,6 +81,26 @@ pub(super) fn eval_body_call(
           .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set),
       ))
     }
+    "anomalyScore" => {
+      let profile = expect_string_arg(args, 0)?;
+      let text = body.map(|body| ctx.body_text_caches.text(text_slot, body));
+      Ok(Value::Int(
+        malicious_intelligence_score::body_anomaly_score(body, text, profile)?,
+      ))
+    }
+    "malformedScore" => {
+      let profile = expect_string_arg(args, 0)?;
+      let text = body.map(|body| ctx.body_text_caches.text(text_slot, body));
+      Ok(Value::Int(
+        malicious_intelligence_score::body_malformed_score(body, text, profile)?,
+      ))
+    }
+    "promptInjectionScore" => {
+      let text = body.map(|body| ctx.body_text_caches.text(text_slot, body));
+      Ok(Value::Int(
+        malicious_intelligence_score::body_prompt_injection_score(body, text),
+      ))
+    }
     _ => bail!("unknown BodyView method {method}"),
   }
 }
@@ -95,5 +116,8 @@ pub(super) fn body_content_method(method: &str) -> bool {
       | "containsAny"
       | "matchesAny"
       | "scan"
+      | "anomalyScore"
+      | "malformedScore"
+      | "promptInjectionScore"
   )
 }

@@ -1067,6 +1067,64 @@
         }
       }
     },
+    "/admin/v1/waf/oxirule/analyze": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "analyzeOxiRuleRisk",
+        "summary": "Analyze fixture risk with local OxiRule malicious-intelligence and malformed-payload heuristics.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/OxiRuleAnalyzeRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/oxirule/hardening-plan": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "planOxiRuleHardening",
+        "summary": "Render non-mutating OxiRule hardening suggestions for malicious-intelligence and automation abuse.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/OxiRuleHardeningPlanRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
     "/admin/v1/waf/oxirule/templates": {
       "get": {
         "tags": [
@@ -3484,6 +3542,69 @@
                 }
               },
               "additionalProperties": true
+            }
+          }
+        }
+      },
+      "OxiRuleAnalyzeRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "fixture": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "profiles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "uri",
+                      "path",
+                      "query",
+                      "header",
+                      "payload",
+                      "json",
+                      "form",
+                      "prompt",
+                      "generic"
+                    ]
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "OxiRuleHardeningPlanRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "route": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "enforcing",
+                    "monitor"
+                  ]
+                },
+                "threats": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
             }
           }
         }

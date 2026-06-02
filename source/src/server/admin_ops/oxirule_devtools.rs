@@ -137,6 +137,39 @@ pub(in crate::server) async fn admin_waf_devtools_response(
         &crate::waf::replay_oxirule(&snapshot.config, body),
       ))
     }
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/analyze") => {
+      let body = match collect_admin_json::<crate::waf::OxiRuleAnalyzeRequest>(request).await {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      if !authorization.is_allowed("waf:AnalyzeOxiRuleRisk", "analyze/inline") {
+        return Some(super::permission_denied(
+          authorization.actor,
+          "waf:AnalyzeOxiRuleRisk",
+        ));
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::analyze_oxirule(&snapshot.config, body),
+      ))
+    }
+    (&::http::Method::POST, "/admin/v1/waf/oxirule/hardening-plan") => {
+      let body = match collect_admin_json::<crate::waf::OxiRuleHardeningPlanRequest>(request).await
+      {
+        Ok(body) => body,
+        Err(response) => return Some(response),
+      };
+      if !authorization.is_allowed("waf:PlanOxiRuleHardening", "hardening-plan/inline") {
+        return Some(super::permission_denied(
+          authorization.actor,
+          "waf:PlanOxiRuleHardening",
+        ));
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &crate::waf::plan_oxirule_hardening(body),
+      ))
+    }
     (&::http::Method::GET, "/admin/v1/waf/oxirule/templates") => {
       if !authorization.is_allowed("waf:ListOxiRuleTemplates", "template/*") {
         return Some(super::permission_denied(

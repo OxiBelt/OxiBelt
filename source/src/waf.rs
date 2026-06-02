@@ -32,6 +32,7 @@ mod devtools;
 mod expression;
 mod external_files;
 mod functions;
+mod malicious_intelligence_score;
 mod metadata;
 mod mitigation_action;
 pub(crate) mod normalization;
@@ -64,6 +65,7 @@ use functions::{
   FunctionCallRef, FunctionKey, FunctionMap, compile_global_functions, compile_route_functions,
   function_body_route_functions, resolve_function, validate_function_arity,
 };
+use malicious_intelligence_score as mi_score;
 pub use metadata::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 pub use mitigation_action::MitigationIntent;
 use mitigation_action::{
@@ -3997,10 +3999,26 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     | (ObjectRef::RequestClientAgent, "Provider")
     | (ObjectRef::RequestClientAgent, "Model")
     | (ObjectRef::RequestClientAgent, "AuthMethod") => Ok(Value::Null),
-    (ObjectRef::RequestClientBot, "Disposition") => Ok(Value::String("unknown".to_string())),
-    (ObjectRef::RequestClientBot, "Malicious") => Ok(Value::Null),
-    (ObjectRef::RequestClientBot, "Score") => Ok(Value::Int(0)),
-    (ObjectRef::RequestClientBot, "Reason") => Ok(Value::Null),
+    (ObjectRef::RequestClientBot, "Disposition") => Ok(Value::String(
+      mi_score::request_bot_assessment(ctx.request)
+        .disposition
+        .to_string(),
+    )),
+    (ObjectRef::RequestClientBot, "Malicious") => Ok(
+      mi_score::request_bot_assessment(ctx.request)
+        .malicious
+        .map(Value::Bool)
+        .unwrap_or(Value::Null),
+    ),
+    (ObjectRef::RequestClientBot, "Score") => Ok(Value::Int(
+      mi_score::request_bot_assessment(ctx.request).score,
+    )),
+    (ObjectRef::RequestClientBot, "Reason") => Ok(
+      mi_score::request_bot_assessment(ctx.request)
+        .reason
+        .map(Value::String)
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::RequestTransport, "Network") => Ok(Value::String(
       ctx.request.transport_network.as_str().to_string(),
     )),
@@ -4541,6 +4559,15 @@ fn eval_string_call(
       expect_string_arg(args, 0)?,
       text,
     )?)),
+    "anomalyScore" => Ok(Value::Int(mi_score::anomaly_score(
+      text,
+      expect_string_arg(args, 0)?,
+    )?)),
+    "malformedScore" => Ok(Value::Int(mi_score::malformed_score(
+      text,
+      expect_string_arg(args, 0)?,
+    )?)),
+    "promptInjectionScore" => Ok(Value::Int(mi_score::prompt_injection_score(text))),
     _ => bail!("unknown String method {method}"),
   }
 }

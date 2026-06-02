@@ -37,6 +37,24 @@ pub struct OxiRuleDevtoolsReplayRequest {
   pub input: String,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OxiRuleAnalyzeRequest {
+  #[serde(default)]
+  pub fixture: OxiRuleFixture,
+  #[serde(default)]
+  pub profiles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OxiRuleHardeningPlanRequest {
+  #[serde(default)]
+  pub route: Option<String>,
+  #[serde(default)]
+  pub mode: Option<WafMode>,
+  #[serde(default)]
+  pub threats: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct OxiRuleCandidate {
   pub content: String,
@@ -345,6 +363,10 @@ pub struct OxiRuleDevtoolsReport {
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub replay_results: Vec<OxiRuleReplayResult>,
   #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub risk: Vec<OxiRuleRiskSummary>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub bot: Option<OxiRuleBotRiskSummary>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub templates: Vec<OxiRuleTemplateSummary>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub rendered: Option<String>,
@@ -442,6 +464,26 @@ pub struct OxiRuleReplayResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct OxiRuleRiskSummary {
+  pub target: String,
+  pub profile: String,
+  pub anomaly_score: i64,
+  pub malformed_score: i64,
+  pub prompt_injection_score: i64,
+  pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OxiRuleBotRiskSummary {
+  pub score: i64,
+  pub disposition: &'static str,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub malicious: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct OxiRuleTemplateSummary {
   pub name: &'static str,
   pub description: &'static str,
@@ -463,6 +505,8 @@ impl OxiRuleDevtoolsReport {
       cost_warnings: Vec::new(),
       explain_steps: Vec::new(),
       replay_results: Vec::new(),
+      risk: Vec::new(),
+      bot: None,
       templates: Vec::new(),
       rendered: None,
       suggestions: Vec::new(),

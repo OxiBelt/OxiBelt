@@ -552,6 +552,18 @@ fn oxirule_devtools_actions_require_matching_ipm_permission() {
       "waf:TestOxiRule",
     ),
     (
+      "waf:AnalyzeOxiRuleRisk",
+      "oxibelt:oxibelt:waf:analyze/inline",
+      "analyze/inline",
+      "waf:PlanOxiRuleHardening",
+    ),
+    (
+      "waf:PlanOxiRuleHardening",
+      "oxibelt:oxibelt:waf:hardening-plan/inline",
+      "hardening-plan/inline",
+      "waf:AnalyzeOxiRuleRisk",
+    ),
+    (
       "waf:ListOxiRuleTemplates",
       "oxibelt:oxibelt:waf:template/*",
       "template/*",

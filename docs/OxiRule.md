@@ -132,8 +132,15 @@ Rule groups bundle reusable condition fragments and actions. Define global group
 ```toml
 [[waf.rule_groups]]
 name = "bot-defense"
+phase = "request"
+tags = ["automation", "malicious-intelligence"]
 when = "Request.Headers.anyValueMatches('(?i)(sqlmap|nikto)')"
 merge_condition_as = "and"
+
+[[waf.rule_groups.conditions]]
+label = "prompt-injection-query"
+when = "Request.Http.Query.promptInjectionScore() >= 35"
+merge_condition_as = "or"
 
 [[waf.rule_groups.actions]]
 priority = 10
@@ -157,7 +164,9 @@ status = 403
 
 Group lookup order is external file-local, then route-local, then global. External groups are visible only inside the external rule file that defines them. Rule execution order is still controlled by the referencing rule's `priority`.
 
-Condition fragments are processed in `groups` array order, followed by the rule's own `when`. `merge_condition_as` accepts `and`, `or`, or `override` and defaults to `and`; each fragment's value controls how that fragment joins the previous accumulated condition. If `override` appears, it may appear only once across the referenced groups plus rule, and the effective condition is exactly that fragment's `when`.
+Condition fragments are processed in `groups` array order, followed by the rule's own `when`. A group-level `when` is shorthand for one condition fragment; `[[conditions]]` adds labeled condition fragments in declaration order. `merge_condition_as` accepts `and`, `or`, or `override` and defaults to `and`; each fragment's value controls how that fragment joins the previous accumulated condition. If `override` appears, it may appear only once across the referenced groups plus rule, and the effective condition is exactly that fragment's `when`.
+
+Group `phase` is optional. When set, only rules with the same phase may reference the group; mismatches fail closed at configuration load. Group `tags` are metadata for analysis, rulepack authorship, and documentation and must use the same label shape as rule tags.
 
 Actions from referenced groups and the rule are collected, sorted by action `priority` with lower values first, and executed in stable declaration order for equal priorities. Action `priority` defaults to `0`. Terminal actions still stop later actions after sorting.
 
@@ -217,6 +226,8 @@ oxibelt oxirule false-positive --finding finding.json
 ```
 
 The matching Admin API endpoints live under `/admin/v1/waf/oxirule/*` and are synchronous and stateless. They accept inline candidate OxiRule content plus optional inline OxiRule group content, compile it against the active configuration context, and return JSON fields such as `ok`, `diagnostics`, `matched_rules`, `actions`, `terminal`, `mutations`, `tags`, `stream_close`, `body_need`, `cost_warnings`, and `explain_steps`. Candidate-only requests with `include_active_rules = false` do not include active WAF rules or rule groups in the evaluation context. The API does not write files or install rules; use `POST /admin/v1/files/sync` for deployment.
+
+`POST /admin/v1/waf/oxirule/analyze` accepts a fixture and returns local risk summaries for URI, path, query, header, body, response body, or stream payload surfaces. `POST /admin/v1/waf/oxirule/hardening-plan` renders non-mutating TOML suggestions for malicious-intelligence, prompt-injection, malformed payload, and suspicious automation defenses. These endpoints do not call external LLMs or classifiers and do not deploy policy; write the returned TOML through file sync when it is ready to apply.
 
 Fixtures can target request, response, or stream phase. Stream fixtures evaluate the rule engine's `WafStreamInput` shape for WebSocket/WebTransport metadata and payloads; they do not create live upgraded sessions. Replay accepts uploaded NDJSON fixture lines and does not read server-side log files.
 
@@ -353,6 +364,9 @@ Value.matches('(?i)sqlmap')
 Value.lowerAscii()
 Value.upperAscii()
 Value.size()
+Value.anomalyScore('uri')
+Value.malformedScore('payload')
+Value.promptInjectionScore()
 ```
 
 IP/CIDR helper:
@@ -911,6 +925,8 @@ PersonProofTokenBindingView.directPeerIpNetworkPrefix(Ipv4PrefixBits, Ipv6Prefix
 PersonProofTokenBindingView.tcpMaxHop(ConfiguredMaxHop): String
 ```
 
+`Request.Client.Bot` is derived from local request signals such as URI shape, query/path anomalies, suspicious headers, automation User-Agent strings, and any request body prefix already captured for WAF evaluation. `Score` is `0..100`; `Disposition` becomes `malicious` for high-confidence local automation or attack signals and otherwise remains `unknown` unless a future trusted bot identity source marks traffic as normal. `Request.Client.Agent.Verified` remains `false` unless an explicitly trusted agent authentication mechanism is configured; client-supplied AI/LLM or crawler claims are not trusted.
+
 ```text
 TransportMetadata.Network: 'tcp' | 'udp'
 TransportMetadata.RemoteIp: IpAddress
@@ -1095,9 +1111,14 @@ Request.Body.matches(Pattern): Bool
 Request.Body.containsAny(PatternSetName): Bool
 Request.Body.matchesAny(PatternSetName): Bool
 Request.Body.scan(PatternSetName): BodyScanResult
+Request.Body.anomalyScore(Profile): Int
+Request.Body.malformedScore(Profile): Int
+Request.Body.promptInjectionScore(): Int
 ```
 
 The same shape is supported for `Response.Body` in response-phase rules and `Stream.Payload` in stream-phase rules. Body content helpers are bounded by `waf.limits.max_body_inspection_bytes`; bytes beyond that prefix are replayed or forwarded but not inspected.
+
+Malicious-intelligence and malformed-payload score helpers return an integer from `0` to `100`. They are deterministic local heuristics, not external LLM classifications, identity proof, Person proof, or proof of benign or malicious intent. Supported profiles are `uri`, `path`, `query`, `header`, `payload`, `json`, `form`, `prompt`, and `generic`. `anomalyScore` combines malformed encoding, suspicious delimiter density, encoded layering, high-entropy segments, known attack strings, prompt-injection phrases, and truncation signals. `malformedScore` focuses on invalid percent/unicode encoding, control/null characters, path traversal shape, malformed JSON-like input, and truncation. `promptInjectionScore` focuses on instruction override, system/developer prompt disclosure, tool/function-call abuse, and secret exfiltration language. Body score helpers require bounded prefix inspection.
 
 `Body.scan(PatternSetName)` returns:
 
