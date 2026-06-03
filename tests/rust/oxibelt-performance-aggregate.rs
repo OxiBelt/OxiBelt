@@ -24,6 +24,12 @@ const DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO: f64 = 1.30;
 const BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT: f64 = -3.0;
 const BASELINE_P99_REGRESSION_TOLERANCE_PERCENT: f64 = 5.0;
 const BASELINE_MONITOR_P99_IMPROVEMENT_PERCENT: f64 = -5.0;
+const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
+const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
+const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
+const QUORUM_SHARD_PERCENT: f64 = 0.80;
+const COMPARISON_SCHEMA_VERSION: u32 = 10;
+const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
 const SERVING_TYPES: [&str; 6] = [
@@ -58,6 +64,18 @@ struct Args {
     primary_target_cpu: String,
     #[arg(long)]
     baseline_report: Option<PathBuf>,
+    #[arg(long)]
+    baseline_context: Option<PathBuf>,
+}
+
+struct AggregateOptions<'a> {
+    profile: Option<String>,
+    expected_runs: Option<usize>,
+    expected_shards: Option<usize>,
+    expected_target_cpus: Vec<String>,
+    primary_target_cpu: String,
+    baseline_report: Option<&'a Path>,
+    baseline_context: Option<&'a Path>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -125,6 +143,7 @@ struct DiscoveredFiles {
     results: Vec<PathBuf>,
     summary_count: usize,
     docker_stats_count: usize,
+    iteration_statuses: Vec<PathBuf>,
     unsupported_cpu_markers: Vec<PathBuf>,
 }
 
@@ -133,6 +152,7 @@ struct ArtifactDiscovery {
     results_files: usize,
     summary_files: usize,
     docker_stats_files: usize,
+    iteration_status_files: usize,
     expected_results_files: Option<usize>,
     missing_expected_paths: Vec<String>,
     unsupported_cpu: UnsupportedCpuDiscovery,
@@ -179,10 +199,20 @@ struct AggregateBuilder {
     p90_values: Vec<f64>,
     p95_values: Vec<f64>,
     p99_values: Vec<f64>,
+    rps_values_by_shard: BTreeMap<String, Vec<f64>>,
+    p99_values_by_shard: BTreeMap<String, Vec<f64>>,
     total_errors: u64,
     skipped_count: u64,
     skip_reasons: BTreeSet<String>,
     source_files: BTreeSet<String>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct AggregateDistribution {
+    sample_count: usize,
+    shard_count: usize,
+    per_shard_median_rps: Vec<f64>,
+    per_shard_median_p99_ms: Vec<f64>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -209,6 +239,8 @@ struct AggregateStats {
     skipped_count: u64,
     skip_reasons: Vec<String>,
     source_files: Vec<String>,
+    #[serde(default)]
+    distribution: AggregateDistribution,
 }
 
 #[derive(Clone, Serialize)]
@@ -326,6 +358,11 @@ struct RegressionGateViolation {
     observed: Option<f64>,
     threshold: f64,
     comparator: Option<String>,
+    evaluation_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stat_band: Option<StatBandReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_source: Option<String>,
     message: String,
 }
 
@@ -344,12 +381,182 @@ struct RegressionGateFindings {
 
 struct BaselineGateContext {
     report: String,
+    schema_version: Option<u32>,
     aggregates: BTreeMap<(String, String), AggregateStats>,
 }
 
 enum GateDisposition {
-    Blocking { reason: String },
-    Advisory { reason: String },
+    Blocking {
+        reason: String,
+        evaluation_mode: String,
+        stat_band: Option<StatBandReport>,
+        baseline_source: Option<String>,
+    },
+    Advisory {
+        reason: String,
+        evaluation_mode: String,
+        stat_band: Option<StatBandReport>,
+        baseline_source: Option<String>,
+    },
+}
+
+impl GateDisposition {
+    fn blocking(reason: impl Into<String>) -> Self {
+        Self::Blocking {
+            reason: reason.into(),
+            evaluation_mode: "median_baseline".to_owned(),
+            stat_band: None,
+            baseline_source: None,
+        }
+    }
+
+    fn threshold_blocking(reason: impl Into<String>) -> Self {
+        Self::Blocking {
+            reason: reason.into(),
+            evaluation_mode: "threshold".to_owned(),
+            stat_band: None,
+            baseline_source: None,
+        }
+    }
+
+    fn advisory(reason: impl Into<String>) -> Self {
+        Self::Advisory {
+            reason: reason.into(),
+            evaluation_mode: "median_baseline".to_owned(),
+            stat_band: None,
+            baseline_source: None,
+        }
+    }
+
+    fn statistical(
+        blocking: bool,
+        reason: impl Into<String>,
+        stat_band: StatBandReport,
+        baseline_source: Option<String>,
+    ) -> Self {
+        let reason = reason.into();
+        if blocking {
+            Self::Blocking {
+                reason,
+                evaluation_mode: "statistical_band".to_owned(),
+                stat_band: Some(stat_band),
+                baseline_source,
+            }
+        } else {
+            Self::Advisory {
+                reason,
+                evaluation_mode: "statistical_band".to_owned(),
+                stat_band: Some(stat_band),
+                baseline_source,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct StatBandReport {
+    mode: String,
+    status: String,
+    baseline_schema_version: Option<u32>,
+    baseline_shards: usize,
+    current_shards: usize,
+    baseline_samples: usize,
+    current_samples: usize,
+    rps_median_delta_percent: Option<f64>,
+    rps_p10_delta_percent: Option<f64>,
+    p99_median_delta_percent: Option<f64>,
+    p99_p90_delta_percent: Option<f64>,
+    rps_median_min_delta_percent: f64,
+    rps_p10_min_delta_percent: f64,
+    p99_median_max_delta_percent: f64,
+    p99_p90_max_delta_percent: f64,
+}
+
+#[derive(Serialize)]
+struct SampleQuality {
+    iteration_status_files: usize,
+    ok_iterations: usize,
+    failed_iterations: usize,
+    failed_iteration_samples: Vec<IterationStatusSummary>,
+}
+
+#[derive(Serialize)]
+struct IterationStatusSummary {
+    source_file: String,
+    target_cpu: Option<String>,
+    serving_type: Option<String>,
+    shard: Option<u64>,
+    iteration: Option<u64>,
+    exit_code: Option<i64>,
+    status: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct IterationStatusFile {
+    target_cpu: Option<String>,
+    serving_type: Option<String>,
+    shard: Option<u64>,
+    iteration: Option<u64>,
+    exit_code: Option<i64>,
+    status: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct QuorumReport {
+    status: String,
+    policy: String,
+    primary_target_cpu: String,
+    valid_sample_min_percent: f64,
+    shard_min_percent: f64,
+    required_sample_count: Option<usize>,
+    required_shards: Option<usize>,
+    rows: Vec<QuorumRow>,
+    warnings: Vec<String>,
+    violations: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct QuorumRow {
+    group: String,
+    scenario: String,
+    comparator: String,
+    sample_count: usize,
+    shard_count: usize,
+    required_sample_count: Option<usize>,
+    required_shards: Option<usize>,
+    matching_comparator_rows: usize,
+    status: String,
+    reason: String,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct BaselineSelectionSource {
+    source: Option<String>,
+    branch: Option<String>,
+    run_id: Option<String>,
+    sha: Option<String>,
+    artifact_id: Option<String>,
+    artifact_name: Option<String>,
+    schema_version: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct BaselineSelectionFile {
+    #[serde(default)]
+    fallback_order: Vec<String>,
+    #[serde(default)]
+    selected: BaselineSelectionSource,
+}
+
+#[derive(Serialize)]
+struct BaselineContextReport {
+    status: String,
+    report: Option<String>,
+    schema_version: Option<u32>,
+    fallback_order: Vec<String>,
+    selected: Option<BaselineSelectionSource>,
 }
 
 #[derive(Clone, Copy)]
@@ -466,6 +673,9 @@ struct Report {
     expected_runs: Option<usize>,
     expected_shards: Option<usize>,
     artifact_discovery: ArtifactDiscovery,
+    baseline_context: BaselineContextReport,
+    sample_quality: SampleQuality,
+    quorum: QuorumReport,
     summary: ReportSummary,
     comparisons: ComparisonGroups,
     accept_multiplier_comparisons: Vec<AcceptMultiplierComparison>,
@@ -481,6 +691,7 @@ struct Report {
 
 #[derive(Deserialize)]
 struct BaselineReport {
+    schema_version: Option<u32>,
     aggregates: Vec<AggregateStats>,
 }
 
@@ -522,12 +733,16 @@ struct PerformanceDeltaRow {
     before_oxibelt_p99_ms: Option<f64>,
     after_oxibelt_p99_ms: Option<f64>,
     oxibelt_p99_delta_percent: Option<f64>,
+    classification_source: String,
+    stat_band: Option<StatBandReport>,
     classification: String,
     reason: String,
 }
 
 impl AggregateBuilder {
     fn push(&mut self, row: BenchmarkRow) {
+        let source_file = row.source_file.clone();
+        let shard_id = shard_id_from_source_file(&source_file);
         if self.amd64_target_cpu.is_empty() {
             self.amd64_target_cpu = row.amd64_target_cpu;
         }
@@ -541,6 +756,10 @@ impl AggregateBuilder {
         merge_text_field(&mut self.protocol_or_mode, row.protocol_or_mode);
         if let Some(rps) = row.rps {
             self.rps_values.push(rps);
+            self.rps_values_by_shard
+                .entry(shard_id.clone())
+                .or_default()
+                .push(rps);
         }
         if let Some(p50) = row.p50_ms {
             self.p50_values.push(p50);
@@ -553,6 +772,10 @@ impl AggregateBuilder {
         }
         if let Some(p99) = row.p99_ms {
             self.p99_values.push(p99);
+            self.p99_values_by_shard
+                .entry(shard_id)
+                .or_default()
+                .push(p99);
         }
         self.total_errors = self.total_errors.saturating_add(row.errors);
         if row.skipped {
@@ -561,7 +784,7 @@ impl AggregateBuilder {
                 self.skip_reasons.insert(reason);
             }
         }
-        self.source_files.insert(row.source_file);
+        self.source_files.insert(source_file);
     }
 
     fn finish(self) -> AggregateStats {
@@ -598,6 +821,12 @@ impl AggregateBuilder {
             skipped_count: self.skipped_count,
             skip_reasons: self.skip_reasons.into_iter().collect(),
             source_files: self.source_files.into_iter().collect(),
+            distribution: AggregateDistribution {
+                sample_count: rps_values.len(),
+                shard_count: self.rps_values_by_shard.len(),
+                per_shard_median_rps: per_shard_medians(self.rps_values_by_shard),
+                per_shard_median_p99_ms: per_shard_medians(self.p99_values_by_shard),
+            },
         }
     }
 }
@@ -606,12 +835,15 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let report = aggregate(
         &args.input_dir,
-        args.profile,
-        args.expected_runs,
-        args.expected_shards,
-        args.expected_target_cpus,
-        args.primary_target_cpu,
-        args.baseline_report.as_deref(),
+        AggregateOptions {
+            profile: args.profile.clone(),
+            expected_runs: args.expected_runs,
+            expected_shards: args.expected_shards,
+            expected_target_cpus: args.expected_target_cpus.clone(),
+            primary_target_cpu: args.primary_target_cpu.clone(),
+            baseline_report: args.baseline_report.as_deref(),
+            baseline_context: args.baseline_context.as_deref(),
+        },
     );
     fs::create_dir_all(&args.output_dir)?;
     fs::write(
@@ -636,22 +868,31 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn aggregate(
-    input_dir: &Path,
-    profile: Option<String>,
-    expected_runs: Option<usize>,
-    expected_shards: Option<usize>,
-    expected_target_cpus: Vec<String>,
-    primary_target_cpu: String,
-    baseline_report: Option<&Path>,
-) -> Report {
+fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
+    let AggregateOptions {
+        profile,
+        expected_runs,
+        expected_shards,
+        expected_target_cpus,
+        primary_target_cpu,
+        baseline_report,
+        baseline_context,
+    } = options;
     let mut warnings = WarningBag::default();
     let expected_target_cpus = normalize_expected_target_cpus(expected_target_cpus, &mut warnings);
     let primary_target_cpu = normalize_primary_target_cpu(primary_target_cpu, &mut warnings);
     let regression_gate_thresholds = regression_gate_thresholds(&mut warnings);
     let baseline_gate_context =
         load_baseline_gate_context(baseline_report, &primary_target_cpu, &mut warnings);
+    let baseline_context_report = load_baseline_context_report(
+        baseline_report,
+        baseline_context,
+        baseline_gate_context.as_ref(),
+        &mut warnings,
+    );
     let discovered = discover_files(input_dir, &mut warnings);
+    let sample_quality =
+        build_sample_quality(input_dir, &discovered.iteration_statuses, &mut warnings);
     let unsupported_artifact_dirs = unsupported_artifact_dirs(&discovered.unsupported_cpu_markers);
     let results = discovered
         .results
@@ -666,6 +907,7 @@ fn aggregate(
         results_files: results.len(),
         summary_files: discovered.summary_count,
         docker_stats_files: discovered.docker_stats_count,
+        iteration_status_files: discovered.iteration_statuses.len(),
         expected_results_files: None,
         missing_expected_paths: Vec::new(),
         unsupported_cpu: unsupported_cpu_discovery(
@@ -724,6 +966,12 @@ fn aggregate(
     let primary_remote_signer_comparisons =
         primary_remote_signer_comparisons(&remote_signer_comparisons, &primary_target_cpu);
     let primary_aggregates = primary_aggregate_map(&aggregate_map, &primary_target_cpu);
+    let quorum = build_quorum_report(
+        &primary_aggregates,
+        expected_runs,
+        expected_shards,
+        &primary_target_cpu,
+    );
     let regression_gates = build_regression_gate_report(
         &primary_aggregates,
         regression_gate_thresholds,
@@ -757,13 +1005,16 @@ fn aggregate(
     let (warnings, warnings_omitted) = warnings.finish();
 
     Report {
-        schema_version: 9,
+        schema_version: COMPARISON_SCHEMA_VERSION,
         profile,
         primary_target_cpu,
         expected_target_cpus,
         expected_runs,
         expected_shards,
         artifact_discovery,
+        baseline_context: baseline_context_report,
+        sample_quality,
+        quorum,
         summary,
         comparisons: ComparisonGroups {
             reverse_proxy,
@@ -908,8 +1159,59 @@ fn load_baseline_gate_context(
         .collect();
     Some(BaselineGateContext {
         report: label,
+        schema_version: baseline.schema_version,
         aggregates,
     })
+}
+
+fn load_baseline_context_report(
+    baseline_report: Option<&Path>,
+    baseline_context: Option<&Path>,
+    loaded_baseline: Option<&BaselineGateContext>,
+    warnings: &mut WarningBag,
+) -> BaselineContextReport {
+    let mut fallback_order = Vec::new();
+    let mut selected = None;
+    if let Some(path) = baseline_context {
+        match fs::read_to_string(path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| {
+                serde_json::from_str::<BaselineSelectionFile>(&raw)
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(context) => {
+                fallback_order = context.fallback_order;
+                selected = Some(context.selected);
+            }
+            Err(error) => warnings.push(format!(
+                "failed to read baseline context metadata: {error}; selected baseline source metadata is unavailable"
+            )),
+        }
+    }
+
+    match (baseline_report, loaded_baseline) {
+        (Some(path), Some(context)) => BaselineContextReport {
+            status: "loaded".to_owned(),
+            report: Some(path.display().to_string()),
+            schema_version: context.schema_version,
+            fallback_order,
+            selected,
+        },
+        (Some(path), None) => BaselineContextReport {
+            status: "unreadable".to_owned(),
+            report: Some(path.display().to_string()),
+            schema_version: None,
+            fallback_order,
+            selected,
+        },
+        (None, _) => BaselineContextReport {
+            status: "unavailable".to_owned(),
+            report: None,
+            schema_version: None,
+            fallback_order,
+            selected,
+        },
+    }
 }
 
 fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFiles {
@@ -917,6 +1219,7 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
         results: Vec::new(),
         summary_count: 0,
         docker_stats_count: 0,
+        iteration_statuses: Vec::new(),
         unsupported_cpu_markers: Vec::new(),
     };
 
@@ -968,6 +1271,7 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
                 "results.json" => discovered.results.push(entry.path()),
                 "summary.md" => discovered.summary_count += 1,
                 "docker-stats.jsonl" => discovered.docker_stats_count += 1,
+                "iteration-status.json" => discovered.iteration_statuses.push(entry.path()),
                 "unsupported-cpu.json" => discovered.unsupported_cpu_markers.push(entry.path()),
                 _ => {}
             }
@@ -975,8 +1279,86 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
     }
 
     discovered.results.sort();
+    discovered.iteration_statuses.sort();
     discovered.unsupported_cpu_markers.sort();
     discovered
+}
+
+fn build_sample_quality(
+    input_dir: &Path,
+    iteration_statuses: &[PathBuf],
+    warnings: &mut WarningBag,
+) -> SampleQuality {
+    let mut quality = SampleQuality {
+        iteration_status_files: iteration_statuses.len(),
+        ok_iterations: 0,
+        failed_iterations: 0,
+        failed_iteration_samples: Vec::new(),
+    };
+
+    for path in iteration_statuses {
+        let rel_path = display_path(input_dir, path);
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                warnings.push(format!("failed to read {rel_path}: {error}"));
+                quality.failed_iterations += 1;
+                quality
+                    .failed_iteration_samples
+                    .push(IterationStatusSummary {
+                        source_file: rel_path,
+                        target_cpu: None,
+                        serving_type: None,
+                        shard: None,
+                        iteration: None,
+                        exit_code: None,
+                        status: Some("unreadable".to_owned()),
+                        reason: Some(error.to_string()),
+                    });
+                continue;
+            }
+        };
+        let status = match serde_json::from_str::<IterationStatusFile>(&raw) {
+            Ok(status) => status,
+            Err(error) => {
+                warnings.push(format!("failed to parse {rel_path}: {error}"));
+                quality.failed_iterations += 1;
+                quality
+                    .failed_iteration_samples
+                    .push(IterationStatusSummary {
+                        source_file: rel_path,
+                        target_cpu: None,
+                        serving_type: None,
+                        shard: None,
+                        iteration: None,
+                        exit_code: None,
+                        status: Some("invalid".to_owned()),
+                        reason: Some(error.to_string()),
+                    });
+                continue;
+            }
+        };
+        let ok = status.status.as_deref() == Some("ok") && status.exit_code == Some(0);
+        if ok {
+            quality.ok_iterations += 1;
+            continue;
+        }
+        quality.failed_iterations += 1;
+        quality
+            .failed_iteration_samples
+            .push(IterationStatusSummary {
+                source_file: rel_path,
+                target_cpu: status.target_cpu,
+                serving_type: status.serving_type,
+                shard: status.shard,
+                iteration: status.iteration,
+                exit_code: status.exit_code,
+                status: status.status,
+                reason: status.reason,
+            });
+    }
+
+    quality
 }
 
 fn unsupported_cpu_discovery(
@@ -1121,6 +1503,218 @@ fn add_expected_artifact_warnings(
         }
     }
     artifact_discovery.expected_results_files = Some(expected_results_files);
+}
+
+#[derive(Clone, Copy)]
+struct RequiredQuorumRow {
+    group: ScenarioGroup,
+    scenario: &'static str,
+    comparator: Comparator,
+    matching_comparator_rows: usize,
+}
+
+fn build_quorum_report(
+    aggregates: &PrimaryAggregateMap,
+    expected_runs: Option<usize>,
+    expected_shards: Option<usize>,
+    primary_target_cpu: &str,
+) -> QuorumReport {
+    let required_sample_count = match (expected_runs, expected_shards) {
+        (Some(runs), Some(shards)) => {
+            Some(((runs * shards) as f64 * QUORUM_VALID_SAMPLE_PERCENT).ceil() as usize)
+        }
+        _ => None,
+    };
+    let required_shards =
+        expected_shards.map(|shards| ((shards as f64) * QUORUM_SHARD_PERCENT).ceil() as usize);
+    let required_rows = required_quorum_rows();
+    let mut rows = Vec::new();
+    let mut warnings = Vec::new();
+    let mut violations = Vec::new();
+
+    for row in required_rows {
+        let aggregate = aggregates.get(&(row.comparator, row.scenario.to_owned()));
+        let sample_count = aggregate.map_or(0, |aggregate| aggregate.sample_count);
+        let shard_count = aggregate.map_or(0, aggregate_shard_count);
+        let mut row_violations = Vec::new();
+        if aggregate.is_none() {
+            row_violations.push(format!(
+                "missing primary {primary_target_cpu} {} {} row",
+                row.comparator.as_str(),
+                row.scenario
+            ));
+        }
+        if let Some(required) = required_sample_count {
+            if sample_count < required {
+                row_violations.push(format!("valid samples {sample_count} < quorum {required}"));
+            }
+        } else if sample_count == 0 {
+            row_violations.push("valid samples 0 < quorum 1".to_owned());
+        }
+        if let Some(required) = required_shards {
+            if shard_count < required {
+                row_violations.push(format!("valid shards {shard_count} < quorum {required}"));
+            }
+        } else if shard_count == 0 {
+            row_violations.push("valid shards 0 < quorum 1".to_owned());
+        }
+
+        let status;
+        let reason;
+        if row_violations.is_empty() {
+            status = "pass".to_owned();
+            reason = "quorum satisfied".to_owned();
+        } else {
+            status = "insufficient_evidence".to_owned();
+            reason = row_violations.join("; ");
+            violations.push(format!(
+                "{} {} {}: {reason}",
+                row.group.as_str(),
+                row.scenario,
+                row.comparator.as_str()
+            ));
+        }
+
+        rows.push(QuorumRow {
+            group: row.group.as_str().to_owned(),
+            scenario: row.scenario.to_owned(),
+            comparator: row.comparator.as_str().to_owned(),
+            sample_count,
+            shard_count,
+            required_sample_count,
+            required_shards,
+            matching_comparator_rows: row.matching_comparator_rows,
+            status,
+            reason,
+        });
+    }
+
+    if violations.is_empty() {
+        warnings.push(
+            "missing expected artifact paths are treated as warning evidence when required primary rows satisfy quorum"
+                .to_owned(),
+        );
+    }
+
+    QuorumReport {
+        status: if violations.is_empty() {
+            "pass".to_owned()
+        } else {
+            "fail".to_owned()
+        },
+        policy: "evidence_quorum".to_owned(),
+        primary_target_cpu: primary_target_cpu.to_owned(),
+        valid_sample_min_percent: QUORUM_VALID_SAMPLE_PERCENT,
+        shard_min_percent: QUORUM_SHARD_PERCENT,
+        required_sample_count,
+        required_shards,
+        rows,
+        warnings,
+        violations,
+    }
+}
+
+fn required_quorum_rows() -> Vec<RequiredQuorumRow> {
+    vec![
+        RequiredQuorumRow {
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h1-keepalive",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h1-keepalive",
+            comparator: Comparator::Nginx,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h2",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h2",
+            comparator: Comparator::Nginx,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h3",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::ReverseProxy,
+            scenario: "h3",
+            comparator: Comparator::Nginx,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::StaticFiles,
+            scenario: "static-16k-h1c",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 2,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::StaticFiles,
+            scenario: "static-16k-h1c",
+            comparator: Comparator::Nginx,
+            matching_comparator_rows: 2,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::StaticFiles,
+            scenario: "static-16k-h1c",
+            comparator: Comparator::Caddy,
+            matching_comparator_rows: 2,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::RemoteSigner,
+            scenario: "local-key-tls-handshake-h2",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::RemoteSigner,
+            scenario: "remote-signer-tls-handshake-h2",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::OxibeltOnly,
+            scenario: "waf-monitor",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::OxibeltOnly,
+            scenario: "waf-enforcing",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::OxibeltOnly,
+            scenario: "crs-monitor",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+        RequiredQuorumRow {
+            group: ScenarioGroup::OxibeltOnly,
+            scenario: "crs-enforcing",
+            comparator: Comparator::Oxibelt,
+            matching_comparator_rows: 1,
+        },
+    ]
+}
+
+fn aggregate_shard_count(aggregate: &AggregateStats) -> usize {
+    if aggregate.distribution.shard_count > 0 {
+        aggregate.distribution.shard_count
+    } else {
+        aggregate.source_files.len()
+    }
 }
 
 fn parse_results_file(
@@ -2373,9 +2967,9 @@ fn collect_comparator_ratio_regression_gate(
                 },
             )
         } else {
-            GateDisposition::Blocking {
-                reason: "target ratio gate requires meeting the configured threshold; baseline-stable advisory pass is disabled for this gate".to_owned(),
-            }
+            GateDisposition::threshold_blocking(
+                "target ratio gate requires meeting the configured threshold; baseline-stable advisory pass is disabled for this gate",
+            )
         };
         push_threshold_regression_gate_metric(
             findings,
@@ -2688,6 +3282,9 @@ fn push_missing_regression_gate_metric(
         observed: None,
         threshold: context.threshold,
         comparator: comparator.map(str::to_owned),
+        evaluation_mode: "evidence".to_owned(),
+        stat_band: None,
+        baseline_source: None,
         message: message.into(),
     });
 }
@@ -2710,6 +3307,9 @@ fn push_invalid_regression_gate_metric(
         observed: Some(observed),
         threshold: context.threshold,
         comparator: comparator.map(str::to_owned),
+        evaluation_mode: "evidence".to_owned(),
+        stat_band: None,
+        baseline_source: None,
         message: message.into(),
     });
 }
@@ -2731,16 +3331,33 @@ fn push_threshold_regression_gate_metric(
     input: RegressionGateFindingInput<'_>,
     decision: GateDisposition,
 ) {
-    let (target, disposition, message) = match decision {
-        GateDisposition::Blocking { reason } => (
+    let (target, disposition, message, evaluation_mode, stat_band, baseline_source) = match decision
+    {
+        GateDisposition::Blocking {
+            reason,
+            evaluation_mode,
+            stat_band,
+            baseline_source,
+        } => (
             &mut findings.violations,
             "blocking",
             format!("{}; {reason}", input.message),
+            evaluation_mode,
+            stat_band,
+            baseline_source,
         ),
-        GateDisposition::Advisory { reason } => (
+        GateDisposition::Advisory {
+            reason,
+            evaluation_mode,
+            stat_band,
+            baseline_source,
+        } => (
             &mut findings.advisories,
             "advisory",
             format!("{}; advisory: {reason}", input.message),
+            evaluation_mode,
+            stat_band,
+            baseline_source,
         ),
     };
     target.push(RegressionGateViolation {
@@ -2753,6 +3370,9 @@ fn push_threshold_regression_gate_metric(
         observed: input.observed,
         threshold: input.threshold,
         comparator: input.comparator.map(str::to_owned),
+        evaluation_mode,
+        stat_band,
+        baseline_source,
         message,
     });
 }
@@ -2765,6 +3385,11 @@ fn classify_throughput_ratio_threshold_miss(
     comparator_scenario: &str,
     threshold: f64,
 ) -> GateDisposition {
+    if let Some(decision) = classify_statistical_oxibelt_row(aggregates, baseline, oxibelt_scenario)
+    {
+        return decision;
+    }
+
     let oxibelt_rps_delta = match baseline_metric_delta_percent(
         aggregates,
         baseline,
@@ -2844,50 +3469,44 @@ fn classify_throughput_ratio_threshold_miss(
         && rps_ratio_is_stable
         && (p99_ratio_is_stable || oxibelt_p99_is_stable)
     {
-        GateDisposition::Advisory {
-            reason: format!(
-                "baseline-stable ratio gap from `{}`: baseline RPS ratio {:.4} < threshold {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
-                baseline_report_label(baseline),
-                throughput_ratio_delta.before_ratio,
-                threshold,
-                throughput_ratio_delta.after_ratio,
-                throughput_ratio_delta.ratio_delta_percent,
-                p99_ratio_delta.before_ratio,
-                p99_ratio_delta.after_ratio,
-                p99_ratio_delta.ratio_delta_percent,
-            ),
-        }
+        GateDisposition::advisory(format!(
+            "baseline-stable ratio gap from `{}`: baseline RPS ratio {:.4} < threshold {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
+            baseline_report_label(baseline),
+            throughput_ratio_delta.before_ratio,
+            threshold,
+            throughput_ratio_delta.after_ratio,
+            throughput_ratio_delta.ratio_delta_percent,
+            p99_ratio_delta.before_ratio,
+            p99_ratio_delta.after_ratio,
+            p99_ratio_delta.ratio_delta_percent,
+        ))
     } else if throughput_ratio_delta.before_ratio < threshold
         && oxibelt_rps_is_stable
         && oxibelt_p99_is_stable
         && comparator_outpaced_oxibelt
     {
-        GateDisposition::Advisory {
-            reason: format!(
-                "baseline-stable comparator-shift ratio gap from `{}`: baseline RPS ratio {:.4} < threshold {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}% and p99 {oxibelt_p99_delta:+.1}% remain within tolerances, comparator RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%",
-                baseline_report_label(baseline),
-                throughput_ratio_delta.before_ratio,
-                threshold,
-                throughput_ratio_delta.after_ratio,
-                throughput_ratio_delta.ratio_delta_percent,
-                p99_ratio_delta.before_ratio,
-                p99_ratio_delta.after_ratio,
-                p99_ratio_delta.ratio_delta_percent,
-            ),
-        }
+        GateDisposition::advisory(format!(
+            "baseline-stable comparator-shift ratio gap from `{}`: baseline RPS ratio {:.4} < threshold {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}% and p99 {oxibelt_p99_delta:+.1}% remain within tolerances, comparator RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%",
+            baseline_report_label(baseline),
+            throughput_ratio_delta.before_ratio,
+            threshold,
+            throughput_ratio_delta.after_ratio,
+            throughput_ratio_delta.ratio_delta_percent,
+            p99_ratio_delta.before_ratio,
+            p99_ratio_delta.after_ratio,
+            p99_ratio_delta.ratio_delta_percent,
+        ))
     } else {
-        GateDisposition::Blocking {
-            reason: format!(
-                "baseline evidence from `{}` did not qualify for advisory pass: baseline RPS ratio {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
-                baseline_report_label(baseline),
-                throughput_ratio_delta.before_ratio,
-                throughput_ratio_delta.after_ratio,
-                throughput_ratio_delta.ratio_delta_percent,
-                p99_ratio_delta.before_ratio,
-                p99_ratio_delta.after_ratio,
-                p99_ratio_delta.ratio_delta_percent,
-            ),
-        }
+        GateDisposition::blocking(format!(
+            "baseline evidence from `{}` did not qualify for advisory pass: baseline RPS ratio {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
+            baseline_report_label(baseline),
+            throughput_ratio_delta.before_ratio,
+            throughput_ratio_delta.after_ratio,
+            throughput_ratio_delta.ratio_delta_percent,
+            p99_ratio_delta.before_ratio,
+            p99_ratio_delta.after_ratio,
+            p99_ratio_delta.ratio_delta_percent,
+        ))
     }
 }
 
@@ -2896,15 +3515,19 @@ fn classify_baseline_stable_ratio_threshold_miss(
     baseline: Option<&BaselineGateContext>,
     miss: BaselineStableRatioMiss<'_>,
 ) -> GateDisposition {
+    if let Some(decision) =
+        classify_statistical_oxibelt_row(aggregates, baseline, miss.oxibelt_scenario)
+    {
+        return decision;
+    }
+
     let near_target_floor = miss.threshold - miss.policy.near_target_tolerance;
     let comparator_shift_floor = miss.threshold - miss.policy.comparator_shift_tolerance;
     if miss.current_ratio < comparator_shift_floor {
-        return GateDisposition::Blocking {
-            reason: format!(
-                "baseline-stable advisory unavailable: current RPS ratio {:.4} is below comparator-shift advisory floor {:.4}",
-                miss.current_ratio, comparator_shift_floor
-            ),
-        };
+        return GateDisposition::blocking(format!(
+            "baseline-stable advisory unavailable: current RPS ratio {:.4} is below comparator-shift advisory floor {:.4}",
+            miss.current_ratio, comparator_shift_floor
+        ));
     }
 
     let oxibelt_rps_delta = match baseline_metric_delta_percent(
@@ -2984,52 +3607,46 @@ fn classify_baseline_stable_ratio_threshold_miss(
         && oxibelt_p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT;
 
     if near_target_advisory {
-        GateDisposition::Advisory {
-            reason: format!(
-                "near-target ratio miss from `{}`: current RPS ratio {:.4} is within {:.4} of threshold {:.4}, baseline RPS ratio {:.4} >= threshold, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
-                baseline_report_label(baseline),
-                miss.current_ratio,
-                miss.policy.near_target_tolerance,
-                miss.threshold,
-                throughput_ratio_delta.before_ratio,
-                throughput_ratio_delta.after_ratio,
-                throughput_ratio_delta.ratio_delta_percent,
-                p99_ratio_delta.before_ratio,
-                p99_ratio_delta.after_ratio,
-                p99_ratio_delta.ratio_delta_percent,
-            ),
-        }
+        GateDisposition::advisory(format!(
+            "near-target ratio miss from `{}`: current RPS ratio {:.4} is within {:.4} of threshold {:.4}, baseline RPS ratio {:.4} >= threshold, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
+            baseline_report_label(baseline),
+            miss.current_ratio,
+            miss.policy.near_target_tolerance,
+            miss.threshold,
+            throughput_ratio_delta.before_ratio,
+            throughput_ratio_delta.after_ratio,
+            throughput_ratio_delta.ratio_delta_percent,
+            p99_ratio_delta.before_ratio,
+            p99_ratio_delta.after_ratio,
+            p99_ratio_delta.ratio_delta_percent,
+        ))
     } else if comparator_shift_advisory {
-        GateDisposition::Advisory {
-            reason: format!(
-                "comparator-shift ratio miss from `{}`: current RPS ratio {:.4} is within {:.4} of threshold {:.4}, baseline RPS ratio {:.4} >= threshold, OxiBelt RPS {oxibelt_rps_delta:+.1}% and p99 {oxibelt_p99_delta:+.1}% remain within tolerances, comparator RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%)",
-                baseline_report_label(baseline),
-                miss.current_ratio,
-                miss.policy.comparator_shift_tolerance,
-                miss.threshold,
-                throughput_ratio_delta.before_ratio,
-                throughput_ratio_delta.after_ratio,
-                throughput_ratio_delta.ratio_delta_percent,
-                p99_ratio_delta.before_ratio,
-                p99_ratio_delta.after_ratio,
-                p99_ratio_delta.ratio_delta_percent,
-            ),
-        }
+        GateDisposition::advisory(format!(
+            "comparator-shift ratio miss from `{}`: current RPS ratio {:.4} is within {:.4} of threshold {:.4}, baseline RPS ratio {:.4} >= threshold, OxiBelt RPS {oxibelt_rps_delta:+.1}% and p99 {oxibelt_p99_delta:+.1}% remain within tolerances, comparator RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%)",
+            baseline_report_label(baseline),
+            miss.current_ratio,
+            miss.policy.comparator_shift_tolerance,
+            miss.threshold,
+            throughput_ratio_delta.before_ratio,
+            throughput_ratio_delta.after_ratio,
+            throughput_ratio_delta.ratio_delta_percent,
+            p99_ratio_delta.before_ratio,
+            p99_ratio_delta.after_ratio,
+            p99_ratio_delta.ratio_delta_percent,
+        ))
     } else {
-        GateDisposition::Blocking {
-            reason: format!(
-                "baseline evidence from `{}` did not qualify for baseline-stable advisory pass: baseline RPS ratio {:.4}, current RPS ratio {:.4} ({:+.1}%), near-target floor {:.4}, comparator-shift floor {:.4}, p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
-                baseline_report_label(baseline),
-                throughput_ratio_delta.before_ratio,
-                throughput_ratio_delta.after_ratio,
-                throughput_ratio_delta.ratio_delta_percent,
-                near_target_floor,
-                comparator_shift_floor,
-                p99_ratio_delta.before_ratio,
-                p99_ratio_delta.after_ratio,
-                p99_ratio_delta.ratio_delta_percent,
-            ),
-        }
+        GateDisposition::blocking(format!(
+            "baseline evidence from `{}` did not qualify for baseline-stable advisory pass: baseline RPS ratio {:.4}, current RPS ratio {:.4} ({:+.1}%), near-target floor {:.4}, comparator-shift floor {:.4}, p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
+            baseline_report_label(baseline),
+            throughput_ratio_delta.before_ratio,
+            throughput_ratio_delta.after_ratio,
+            throughput_ratio_delta.ratio_delta_percent,
+            near_target_floor,
+            comparator_shift_floor,
+            p99_ratio_delta.before_ratio,
+            p99_ratio_delta.after_ratio,
+            p99_ratio_delta.ratio_delta_percent,
+        ))
     }
 }
 
@@ -3038,6 +3655,10 @@ fn classify_absolute_rps_threshold_miss(
     baseline: Option<&BaselineGateContext>,
     scenario: &str,
 ) -> GateDisposition {
+    if let Some(decision) = classify_statistical_oxibelt_row(aggregates, baseline, scenario) {
+        return decision;
+    }
+
     let rps_delta = match baseline_metric_delta_percent(
         aggregates,
         baseline,
@@ -3064,19 +3685,15 @@ fn classify_absolute_rps_threshold_miss(
     if rps_delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
         && p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
     {
-        GateDisposition::Advisory {
-            reason: format!(
-                "baseline-stable OxiBelt row from `{}`: RPS {rps_delta:+.1}%, p99 {p99_delta:+.1}%",
-                baseline_report_label(baseline)
-            ),
-        }
+        GateDisposition::advisory(format!(
+            "baseline-stable OxiBelt row from `{}`: RPS {rps_delta:+.1}%, p99 {p99_delta:+.1}%",
+            baseline_report_label(baseline)
+        ))
     } else {
-        GateDisposition::Blocking {
-            reason: format!(
-                "baseline evidence from `{}` did not qualify for advisory pass: OxiBelt RPS {rps_delta:+.1}%, p99 {p99_delta:+.1}%",
-                baseline_report_label(baseline)
-            ),
-        }
+        GateDisposition::blocking(format!(
+            "baseline evidence from `{}` did not qualify for advisory pass: OxiBelt RPS {rps_delta:+.1}%, p99 {p99_delta:+.1}%",
+            baseline_report_label(baseline)
+        ))
     }
 }
 
@@ -3086,6 +3703,12 @@ fn classify_p99_ratio_threshold_miss(
     monitor_scenario: &str,
     enforcing_scenario: &str,
 ) -> GateDisposition {
+    if let Some(decision) =
+        classify_statistical_oxibelt_row(aggregates, baseline, enforcing_scenario)
+    {
+        return decision;
+    }
+
     let enforcing_p99_delta = match baseline_metric_delta_percent(
         aggregates,
         baseline,
@@ -3112,26 +3735,127 @@ fn classify_p99_ratio_threshold_miss(
     if enforcing_p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
         && monitor_p99_delta <= BASELINE_MONITOR_P99_IMPROVEMENT_PERCENT
     {
-        GateDisposition::Advisory {
-            reason: format!(
-                "baseline monitor p99 shift from `{}`: enforcing p99 {enforcing_p99_delta:+.1}%, monitor p99 {monitor_p99_delta:+.1}%",
-                baseline_report_label(baseline)
-            ),
-        }
+        GateDisposition::advisory(format!(
+            "baseline monitor p99 shift from `{}`: enforcing p99 {enforcing_p99_delta:+.1}%, monitor p99 {monitor_p99_delta:+.1}%",
+            baseline_report_label(baseline)
+        ))
     } else {
-        GateDisposition::Blocking {
-            reason: format!(
-                "baseline evidence from `{}` did not qualify for advisory pass: enforcing p99 {enforcing_p99_delta:+.1}%, monitor p99 {monitor_p99_delta:+.1}%",
-                baseline_report_label(baseline)
-            ),
-        }
+        GateDisposition::blocking(format!(
+            "baseline evidence from `{}` did not qualify for advisory pass: enforcing p99 {enforcing_p99_delta:+.1}%, monitor p99 {monitor_p99_delta:+.1}%",
+            baseline_report_label(baseline)
+        ))
     }
 }
 
 fn baseline_unavailable_blocking(error: String) -> GateDisposition {
-    GateDisposition::Blocking {
-        reason: format!("baseline-aware advisory unavailable: {error}"),
+    GateDisposition::blocking(format!("baseline-aware advisory unavailable: {error}"))
+}
+
+fn classify_statistical_oxibelt_row(
+    aggregates: &PrimaryAggregateMap,
+    baseline: Option<&BaselineGateContext>,
+    scenario: &str,
+) -> Option<GateDisposition> {
+    let baseline = baseline?;
+    let current = aggregates.get(&(Comparator::Oxibelt, scenario.to_owned()))?;
+    let previous = baseline
+        .aggregates
+        .get(&("oxibelt".to_owned(), scenario.to_owned()))?;
+    let stat_band = build_stat_band_report(previous, current, baseline)?;
+    let stable = stat_band.status == "stable";
+    let reason = if stable {
+        format!(
+            "statistical baseline band from `{}` keeps OxiBelt stable: RPS median {}, RPS p10 {}, p99 median {}, p99 p90 {}; comparator-driven threshold miss is advisory",
+            baseline.report,
+            format_percent(stat_band.rps_median_delta_percent),
+            format_percent(stat_band.rps_p10_delta_percent),
+            format_percent(stat_band.p99_median_delta_percent),
+            format_percent(stat_band.p99_p90_delta_percent),
+        )
+    } else {
+        format!(
+            "statistical baseline band from `{}` found material OxiBelt regression: RPS median {}, RPS p10 {}, p99 median {}, p99 p90 {}",
+            baseline.report,
+            format_percent(stat_band.rps_median_delta_percent),
+            format_percent(stat_band.rps_p10_delta_percent),
+            format_percent(stat_band.p99_median_delta_percent),
+            format_percent(stat_band.p99_p90_delta_percent),
+        )
+    };
+    Some(GateDisposition::statistical(
+        !stable,
+        reason,
+        stat_band,
+        Some(baseline.report.clone()),
+    ))
+}
+
+fn build_stat_band_report(
+    baseline: &AggregateStats,
+    current: &AggregateStats,
+    baseline_context: &BaselineGateContext,
+) -> Option<StatBandReport> {
+    build_stat_band_report_with_schema(baseline, current, baseline_context.schema_version)
+}
+
+fn build_stat_band_report_with_schema(
+    baseline: &AggregateStats,
+    current: &AggregateStats,
+    baseline_schema_version: Option<u32>,
+) -> Option<StatBandReport> {
+    if baseline.distribution.shard_count == 0 || current.distribution.shard_count == 0 {
+        return None;
     }
+
+    let baseline_rps_median =
+        distribution_percentile(&baseline.distribution.per_shard_median_rps, 50.0)?;
+    let current_rps_median =
+        distribution_percentile(&current.distribution.per_shard_median_rps, 50.0)?;
+    let baseline_rps_p10 =
+        distribution_percentile(&baseline.distribution.per_shard_median_rps, 10.0)?;
+    let current_rps_p10 =
+        distribution_percentile(&current.distribution.per_shard_median_rps, 10.0)?;
+    let baseline_p99_median =
+        distribution_percentile(&baseline.distribution.per_shard_median_p99_ms, 50.0)?;
+    let current_p99_median =
+        distribution_percentile(&current.distribution.per_shard_median_p99_ms, 50.0)?;
+    let baseline_p99_p90 =
+        distribution_percentile(&baseline.distribution.per_shard_median_p99_ms, 90.0)?;
+    let current_p99_p90 =
+        distribution_percentile(&current.distribution.per_shard_median_p99_ms, 90.0)?;
+
+    let rps_median_delta_percent =
+        percent_delta(Some(baseline_rps_median), Some(current_rps_median));
+    let rps_p10_delta_percent = percent_delta(Some(baseline_rps_p10), Some(current_rps_p10));
+    let p99_median_delta_percent =
+        percent_delta(Some(baseline_p99_median), Some(current_p99_median));
+    let p99_p90_delta_percent = percent_delta(Some(baseline_p99_p90), Some(current_p99_p90));
+    let stable = rps_median_delta_percent
+        .is_some_and(|delta| delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT)
+        && rps_p10_delta_percent
+            .is_some_and(|delta| delta >= STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT)
+        && p99_median_delta_percent
+            .is_some_and(|delta| delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT)
+        && p99_p90_delta_percent
+            .is_some_and(|delta| delta <= STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT);
+
+    Some(StatBandReport {
+        mode: "per_shard_median_distribution".to_owned(),
+        status: if stable { "stable" } else { "regression" }.to_owned(),
+        baseline_schema_version,
+        baseline_shards: baseline.distribution.shard_count,
+        current_shards: current.distribution.shard_count,
+        baseline_samples: baseline.distribution.sample_count,
+        current_samples: current.distribution.sample_count,
+        rps_median_delta_percent,
+        rps_p10_delta_percent,
+        p99_median_delta_percent,
+        p99_p90_delta_percent,
+        rps_median_min_delta_percent: BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT,
+        rps_p10_min_delta_percent: STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT,
+        p99_median_max_delta_percent: BASELINE_P99_REGRESSION_TOLERANCE_PERCENT,
+        p99_p90_max_delta_percent: STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT,
+    })
 }
 
 fn baseline_report_label(baseline: Option<&BaselineGateContext>) -> &str {
@@ -3402,7 +4126,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         Ok(report) => report,
         Err(error) => {
             return DeltaReport {
-                schema_version: 2,
+                schema_version: DELTA_SCHEMA_VERSION,
                 baseline_report: baseline_label,
                 summary: DeltaSummary::default(),
                 rows: Vec::new(),
@@ -3413,6 +4137,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         }
     };
 
+    let baseline_schema_version = baseline.schema_version;
     let baseline_map = aggregate_lookup(&baseline.aggregates, &current.primary_target_cpu);
     let current_map = aggregate_lookup(&current.aggregates, &current.primary_target_cpu);
     let mut rows = Vec::new();
@@ -3422,6 +4147,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         Comparator::Nginx,
         &baseline_map,
         &current_map,
+        baseline_schema_version,
         &mut rows,
     );
     collect_delta_rows(
@@ -3430,6 +4156,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         Comparator::Caddy,
         &baseline_map,
         &current_map,
+        baseline_schema_version,
         &mut rows,
     );
     collect_delta_rows(
@@ -3438,6 +4165,7 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         Comparator::Nginx,
         &baseline_map,
         &current_map,
+        baseline_schema_version,
         &mut rows,
     );
     collect_delta_rows(
@@ -3446,11 +4174,12 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         Comparator::Caddy,
         &baseline_map,
         &current_map,
+        baseline_schema_version,
         &mut rows,
     );
 
     DeltaReport {
-        schema_version: 2,
+        schema_version: DELTA_SCHEMA_VERSION,
         baseline_report: baseline_label,
         summary: summarize_delta_rows(&rows),
         rows,
@@ -3483,6 +4212,7 @@ struct DeltaRowInput<'a> {
     after_oxibelt: Option<&'a AggregateStats>,
     before_comparator: Option<&'a AggregateStats>,
     after_comparator: Option<&'a AggregateStats>,
+    baseline_schema_version: Option<u32>,
 }
 
 fn collect_delta_rows(
@@ -3491,6 +4221,7 @@ fn collect_delta_rows(
     comparator: Comparator,
     baseline: &BTreeMap<(String, String), &AggregateStats>,
     current: &BTreeMap<(String, String), &AggregateStats>,
+    baseline_schema_version: Option<u32>,
     rows: &mut Vec<PerformanceDeltaRow>,
 ) {
     let comparator_name = comparator.as_str();
@@ -3509,6 +4240,7 @@ fn collect_delta_rows(
             after_oxibelt: current.get(&oxibelt_key).copied(),
             before_comparator: baseline.get(&comparator_key).copied(),
             after_comparator: current.get(&comparator_key).copied(),
+            baseline_schema_version,
         }));
     }
 }
@@ -3522,6 +4254,17 @@ fn delta_row(input: DeltaRowInput<'_>) -> PerformanceDeltaRow {
     let after_ratio = ratio(after_oxibelt_rps, after_comparator_rps);
     let before_oxibelt_p99_ms = input.before_oxibelt.and_then(|stats| stats.median_p99_ms);
     let after_oxibelt_p99_ms = input.after_oxibelt.and_then(|stats| stats.median_p99_ms);
+    let stat_band = input
+        .before_oxibelt
+        .zip(input.after_oxibelt)
+        .and_then(|(before, after)| {
+            build_stat_band_report_with_schema(before, after, input.baseline_schema_version)
+        });
+    let classification_source = if stat_band.is_some() {
+        "statistical_band"
+    } else {
+        "median_delta"
+    };
     let mut row = PerformanceDeltaRow {
         amd64_target_cpu: input.amd64_target_cpu.to_owned(),
         group: input.group.to_owned(),
@@ -3539,6 +4282,8 @@ fn delta_row(input: DeltaRowInput<'_>) -> PerformanceDeltaRow {
         before_oxibelt_p99_ms,
         after_oxibelt_p99_ms,
         oxibelt_p99_delta_percent: percent_delta(before_oxibelt_p99_ms, after_oxibelt_p99_ms),
+        classification_source: classification_source.to_owned(),
+        stat_band,
         classification: String::new(),
         reason: String::new(),
     };
@@ -3692,6 +4437,29 @@ fn render_markdown(report: &Report) -> String {
     }
     writeln!(
         markdown,
+        "- Iteration status files parsed: `{}` ({} failed)",
+        report.sample_quality.iteration_status_files, report.sample_quality.failed_iterations
+    )
+    .unwrap();
+    writeln!(
+        markdown,
+        "- Sample quorum: `{}` (policy `{}`)",
+        report.quorum.status, report.quorum.policy
+    )
+    .unwrap();
+    writeln!(
+        markdown,
+        "- Baseline context: `{}`{}",
+        report.baseline_context.status,
+        report
+            .baseline_context
+            .schema_version
+            .map(|schema| format!(" (schema `{schema}`)"))
+            .unwrap_or_default()
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- Reverse proxy vs nginx: {}",
         format_ratio_summary(&report.summary.reverse_proxy.oxibelt_vs_nginx, "nginx")
     )
@@ -3762,6 +4530,7 @@ fn render_markdown(report: &Report) -> String {
     write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
     write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
     write_missing_table(&mut markdown, &report.skipped_or_missing_comparator_rows);
+    write_quorum_table(&mut markdown, &report.quorum);
     write_regression_gate_table(&mut markdown, &report.regression_gates);
     write_warnings(&mut markdown, report);
     markdown
@@ -4040,6 +4809,50 @@ fn write_missing_table(markdown: &mut String, rows: &[MissingComparatorRow]) {
     writeln!(markdown).unwrap();
 }
 
+fn write_quorum_table(markdown: &mut String, quorum: &QuorumReport) {
+    writeln!(markdown, "## Sample quorum\n").unwrap();
+    writeln!(
+        markdown,
+        "Status: `{}`; policy: `{}`; required samples: `{}`; required shards: `{}`\n",
+        quorum.status,
+        quorum.policy,
+        quorum
+            .required_sample_count
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_owned()),
+        quorum
+            .required_shards
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_owned()),
+    )
+    .unwrap();
+    if quorum.rows.is_empty() {
+        writeln!(markdown, "No quorum rows were evaluated.\n").unwrap();
+        return;
+    }
+    writeln!(
+        markdown,
+        "| Group | Scenario | Comparator | Samples | Shards | Status | Reason |"
+    )
+    .unwrap();
+    writeln!(markdown, "| --- | --- | --- | ---: | ---: | --- | --- |").unwrap();
+    for row in &quorum.rows {
+        writeln!(
+            markdown,
+            "| `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
+            row.group,
+            row.scenario,
+            row.comparator,
+            row.sample_count,
+            row.shard_count,
+            row.status,
+            row.reason
+        )
+        .unwrap();
+    }
+    writeln!(markdown).unwrap();
+}
+
 fn write_regression_gate_table(markdown: &mut String, gates: &RegressionGateReport) {
     writeln!(markdown, "## Regression gates\n").unwrap();
     writeln!(markdown, "Status: `{}`\n", gates.status).unwrap();
@@ -4061,20 +4874,21 @@ fn write_regression_gate_table(markdown: &mut String, gates: &RegressionGateRepo
 fn write_regression_gate_findings(markdown: &mut String, findings: &[RegressionGateViolation]) {
     writeln!(
         markdown,
-        "| Target CPU | Disposition | Gate | Group | Scenario | Metric | Observed | Threshold | Comparator | Message |"
+        "| Target CPU | Disposition | Mode | Gate | Group | Scenario | Metric | Observed | Threshold | Comparator | Message |"
     )
     .unwrap();
     writeln!(
         markdown,
-        "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |"
+        "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |"
     )
     .unwrap();
     for violation in findings {
         writeln!(
             markdown,
-            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | `{}` | {} |",
             violation.amd64_target_cpu,
             violation.disposition,
+            violation.evaluation_mode,
             violation.gate,
             violation.group,
             violation.scenario,
@@ -4134,18 +4948,18 @@ fn render_delta_markdown(report: &DeltaReport) -> String {
     } else {
         writeln!(
             markdown,
-            "| Target CPU | Group | Scenario | Comparator | OxiBelt RPS delta | Comparator RPS delta | Ratio delta | OxiBelt p99 delta | Classification | Reason |"
+            "| Target CPU | Group | Scenario | Comparator | OxiBelt RPS delta | Comparator RPS delta | Ratio delta | OxiBelt p99 delta | Source | Classification | Reason |"
         )
         .unwrap();
         writeln!(
             markdown,
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |"
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |"
         )
         .unwrap();
         for row in &report.rows {
             writeln!(
                 markdown,
-                "| `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | `{}` | {} |",
+                "| `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | `{}` | `{}` | {} |",
                 row.amd64_target_cpu,
                 row.group,
                 row.scenario,
@@ -4154,6 +4968,7 @@ fn render_delta_markdown(report: &DeltaReport) -> String {
                 format_percent(row.comparator_rps_delta_percent),
                 format_percent(row.ratio_delta_percent),
                 format_percent(row.oxibelt_p99_delta_percent),
+                row.classification_source,
                 row.classification,
                 row.reason,
             )
@@ -4200,6 +5015,26 @@ fn percentile(values: &mut [f64], percent: f64) -> Option<f64> {
         let weight = rank - (low as f64);
         Some(values[low] * (1.0 - weight) + values[high] * weight)
     }
+}
+
+fn distribution_percentile(values: &[f64], percent: f64) -> Option<f64> {
+    let mut values = values.to_vec();
+    percentile(&mut values, percent)
+}
+
+fn per_shard_medians(values_by_shard: BTreeMap<String, Vec<f64>>) -> Vec<f64> {
+    values_by_shard
+        .into_values()
+        .filter_map(|mut values| percentile(&mut values, 50.0))
+        .collect()
+}
+
+fn shard_id_from_source_file(source_file: &str) -> String {
+    source_file
+        .split(['/', '\\'])
+        .find(|component| component.contains("-shard-"))
+        .unwrap_or(source_file)
+        .to_owned()
 }
 
 fn min_value(values: &[f64]) -> Option<f64> {
@@ -4265,6 +5100,7 @@ mod tests {
             skipped_count: 0,
             skip_reasons: Vec::new(),
             source_files: vec!["synthetic/results.json".to_owned()],
+            distribution: AggregateDistribution::default(),
         }
     }
 
@@ -4284,6 +5120,7 @@ mod tests {
     fn baseline_context_for(aggregates: &PrimaryAggregateMap) -> BaselineGateContext {
         BaselineGateContext {
             report: "synthetic-baseline.json".to_owned(),
+            schema_version: Some(COMPARISON_SCHEMA_VERSION),
             aggregates: aggregates
                 .iter()
                 .map(|((comparator, scenario), aggregate)| {
@@ -4301,15 +5138,18 @@ mod tests {
         let input_dir = temp_dir("schema-thresholds");
         let report = aggregate(
             input_dir.path(),
-            Some("smoke".to_owned()),
-            None,
-            None,
-            Vec::new(),
-            DEFAULT_AMD64_TARGET_CPU.to_owned(),
-            None,
+            AggregateOptions {
+                profile: Some("smoke".to_owned()),
+                expected_runs: None,
+                expected_shards: None,
+                expected_target_cpus: Vec::new(),
+                primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+                baseline_report: None,
+                baseline_context: None,
+            },
         );
 
-        assert_eq!(report.schema_version, 9);
+        assert_eq!(report.schema_version, COMPARISON_SCHEMA_VERSION);
         assert_eq!(
             report
                 .regression_gates
@@ -4639,12 +5479,15 @@ mod tests {
 
         let report = aggregate(
             input_dir.path(),
-            Some("smoke".to_owned()),
-            Some(5),
-            Some(2),
-            Vec::new(),
-            DEFAULT_AMD64_TARGET_CPU.to_owned(),
-            None,
+            AggregateOptions {
+                profile: Some("smoke".to_owned()),
+                expected_runs: Some(5),
+                expected_shards: Some(2),
+                expected_target_cpus: Vec::new(),
+                primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+                baseline_report: None,
+                baseline_context: None,
+            },
         );
 
         assert_eq!(report.artifact_discovery.results_files, 0);
@@ -4690,16 +5533,19 @@ mod tests {
 
         let report = aggregate(
             input_dir.path(),
-            Some("smoke".to_owned()),
-            Some(1),
-            Some(1),
-            vec![
-                "x86-64-v2".to_owned(),
-                "x86-64-v3".to_owned(),
-                "x86-64-v4".to_owned(),
-            ],
-            DEFAULT_AMD64_TARGET_CPU.to_owned(),
-            None,
+            AggregateOptions {
+                profile: Some("smoke".to_owned()),
+                expected_runs: Some(1),
+                expected_shards: Some(1),
+                expected_target_cpus: vec![
+                    "x86-64-v2".to_owned(),
+                    "x86-64-v3".to_owned(),
+                    "x86-64-v4".to_owned(),
+                ],
+                primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+                baseline_report: None,
+                baseline_context: None,
+            },
         );
 
         assert_eq!(report.artifact_discovery.unsupported_cpu.count, 1);
@@ -4737,12 +5583,15 @@ mod tests {
 
         let report = aggregate(
             input_dir.path(),
-            Some("benchmark".to_owned()),
-            Some(5),
-            Some(20),
-            Vec::new(),
-            DEFAULT_AMD64_TARGET_CPU.to_owned(),
-            None,
+            AggregateOptions {
+                profile: Some("benchmark".to_owned()),
+                expected_runs: Some(5),
+                expected_shards: Some(20),
+                expected_target_cpus: Vec::new(),
+                primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+                baseline_report: None,
+                baseline_context: None,
+            },
         );
         let markdown = render_markdown(&report);
 

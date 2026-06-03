@@ -1471,6 +1471,8 @@ jobs:
             for iteration in $(seq 1 "${PERFORMANCE_ITERATIONS}"); do
               echo "Running Docker performance profile ${PERFORMANCE_PROFILE} serving type ${PERFORMANCE_SERVING_TYPE} shard ${PERFORMANCE_SHARD}, target ${target_cpu}, iteration ${iteration}/${PERFORMANCE_ITERATIONS}"
               status=0
+              run_dir="${target_artifact_dir}/run-${iteration}"
+              mkdir -p "${run_dir}"
               profile_env=()
               if [[ "${selected_profile_label}" != "none" \
                     && "${PERFORMANCE_PROFILE}" == "smoke" \
@@ -1491,23 +1493,48 @@ jobs:
               OXIBELT_PERF_PROBE_IMAGE=oxibelt/perf-probe:ci \
               OXIBELT_NGINX_H3_MODE=required \
               OXIBELT_AMD64_TARGET_CPU="${target_cpu}" \
-              OXIBELT_TEST_ARTIFACT_DIR="${target_artifact_dir}/run-${iteration}" \
+              OXIBELT_TEST_ARTIFACT_DIR="${run_dir}" \
                 tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --serving-type "${PERFORMANCE_SERVING_TYPE}" --comparators oxibelt,nginx,caddy || status=$?
+              if [[ "${status}" == "0" ]]; then
+                iteration_status="ok"
+                iteration_reason="completed"
+              else
+                iteration_status="failed"
+                iteration_reason="run-proxy-performance exited with status ${status}"
+              fi
+              jq -n \
+                --arg profile "${PERFORMANCE_PROFILE}" \
+                --arg serving_type "${PERFORMANCE_SERVING_TYPE}" \
+                --arg target_cpu "${target_cpu}" \
+                --arg status "${iteration_status}" \
+                --arg reason "${iteration_reason}" \
+                --argjson shard "${PERFORMANCE_SHARD}" \
+                --argjson iteration "${iteration}" \
+                --argjson exit_code "${status}" \
+                '{
+                  schema_version: 1,
+                  profile: $profile,
+                  serving_type: $serving_type,
+                  shard: $shard,
+                  target_cpu: $target_cpu,
+                  iteration: $iteration,
+                  exit_code: $exit_code,
+                  status: $status,
+                  reason: $reason
+                }' >"${run_dir}/iteration-status.json"
               if [[ "${status}" != "0" ]]; then
                 failed_iterations+=("${target_cpu}:${iteration}:${status}")
-                echo "::error title=Docker performance iteration failed::profile=${PERFORMANCE_PROFILE} serving_type=${PERFORMANCE_SERVING_TYPE} shard=${PERFORMANCE_SHARD} target_cpu=${target_cpu} iteration=${iteration} status=${status}"
+                echo "::warning title=Docker performance iteration failed::profile=${PERFORMANCE_PROFILE} serving_type=${PERFORMANCE_SERVING_TYPE} shard=${PERFORMANCE_SHARD} target_cpu=${target_cpu} iteration=${iteration} status=${status}"
               fi
             done
           done
 
           if ! find "${RUNNER_TEMP}/oxibelt-performance/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}" -path '*/run-*/results.json' -print -quit 2>/dev/null | grep -q .; then
-            echo "Docker performance produced no supported target results for ${PERFORMANCE_PROFILE}/${PERFORMANCE_SERVING_TYPE}/shard-${PERFORMANCE_SHARD}" >&2
-            exit 1
+            echo "::warning title=Docker performance shard produced no results::profile=${PERFORMANCE_PROFILE} serving_type=${PERFORMANCE_SERVING_TYPE} shard=${PERFORMANCE_SHARD}"
           fi
 
           if (( ${#failed_iterations[@]} > 0 )); then
-            printf 'Docker performance failed in %d iteration(s): %s\n' "${#failed_iterations[@]}" "${failed_iterations[*]}" >&2
-            exit 1
+            printf 'Docker performance recorded %d failed iteration(s): %s\n' "${#failed_iterations[@]}" "${failed_iterations[*]}" >&2
           fi
 
       - name: Upload Docker performance artifacts
@@ -1561,56 +1588,115 @@ jobs:
 
       - name: Download previous Docker performance comparison
         id: download-performance-baseline
-        if: steps.performance-artifacts.outputs.found == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          CURRENT_REF_NAME: ${{ github.ref_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           baseline_dir="${RUNNER_TEMP}/oxibelt-performance-baseline"
           mkdir -p "${baseline_dir}"
 
-          runs_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/check-oxibelt.yml/runs?branch=${GITHUB_REF_NAME}&status=success&per_page=20"
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "${runs_url}" > "${baseline_dir}/runs.json"
+          declare -A seen_branches=()
+          fallback_branches=()
+          fallback_sources=()
+          for candidate in "same_branch:${CURRENT_REF_NAME}" "base_branch:${PR_BASE_REF}" "default_branch:${DEFAULT_BRANCH}"; do
+            source="${candidate%%:*}"
+            branch="${candidate#*:}"
+            if [[ -z "${branch}" || -n "${seen_branches[${branch}]:-}" ]]; then
+              continue
+            fi
+            seen_branches["${branch}"]=1
+            fallback_branches+=("${branch}")
+            fallback_sources+=("${source}")
+          done
 
-          baseline_run_id="$(jq -r --arg current "${GITHUB_RUN_ID}" 'first(.workflow_runs[] | select((.id | tostring) != $current) | .id) // empty' "${baseline_dir}/runs.json")"
-          if [[ -z "${baseline_run_id}" ]]; then
-            echo "::warning title=Docker performance delta::no previous successful Check OxiBelt run was found for ${GITHUB_REF_NAME}"
+          artifact_name="oxibelt-docker-performance-${PERFORMANCE_PROFILE}-comparison"
+          for index in "${!fallback_branches[@]}"; do
+            branch="${fallback_branches[${index}]}"
+            source="${fallback_sources[${index}]}"
+            runs_path="${baseline_dir}/runs-${index}.json"
+            runs_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/check-oxibelt.yml/runs?branch=${branch}&status=success&per_page=20"
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${runs_url}" > "${runs_path}"
+
+            baseline_run_id="$(jq -r --arg current "${GITHUB_RUN_ID}" 'first(.workflow_runs[] | select((.id | tostring) != $current) | .id) // empty' "${runs_path}")"
+            if [[ -z "${baseline_run_id}" ]]; then
+              echo "::notice title=Docker performance delta::no previous successful Check OxiBelt run was found for ${branch}"
+              continue
+            fi
+            baseline_sha="$(jq -r --arg id "${baseline_run_id}" 'first(.workflow_runs[] | select((.id | tostring) == $id) | .head_sha) // empty' "${runs_path}")"
+
+            artifacts_path="${baseline_dir}/artifacts-${index}.json"
+            artifacts_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${baseline_run_id}/artifacts?per_page=100"
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${artifacts_url}" > "${artifacts_path}"
+
+            artifact_url="$(jq -r --arg name "${artifact_name}" 'first(.artifacts[] | select(.name == $name and .expired == false) | .archive_download_url) // empty' "${artifacts_path}")"
+            artifact_id="$(jq -r --arg name "${artifact_name}" 'first(.artifacts[] | select(.name == $name and .expired == false) | .id) // empty' "${artifacts_path}")"
+            if [[ -z "${artifact_url}" ]]; then
+              echo "::notice title=Docker performance delta::run ${baseline_run_id} on ${branch} has no reusable performance comparison artifact"
+              continue
+            fi
+
+            comparison_dir="${baseline_dir}/comparison"
+            rm -rf "${comparison_dir}"
+            mkdir -p "${comparison_dir}"
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -L "${artifact_url}" \
+              -o "${baseline_dir}/comparison.zip"
+            unzip -q -o "${baseline_dir}/comparison.zip" -d "${comparison_dir}"
+            if [[ ! -f "${comparison_dir}/performance-comparison.json" ]]; then
+              echo "::warning title=Docker performance delta::baseline comparison artifact from run ${baseline_run_id} did not contain performance-comparison.json"
+              continue
+            fi
+
+            baseline_schema_version="$(jq -r '.schema_version // empty' "${comparison_dir}/performance-comparison.json")"
+            fallback_json="$(printf '%s\n' "${fallback_sources[@]}" | jq -R . | jq -s .)"
+            jq -n \
+              --argjson fallback_order "${fallback_json}" \
+              --arg source "${source}" \
+              --arg branch "${branch}" \
+              --arg run_id "${baseline_run_id}" \
+              --arg sha "${baseline_sha}" \
+              --arg artifact_id "${artifact_id}" \
+              --arg artifact_name "${artifact_name}" \
+              --arg schema_version "${baseline_schema_version}" \
+              '{
+                schema_version: 1,
+                fallback_order: $fallback_order,
+                selected: {
+                  source: $source,
+                  branch: $branch,
+                  run_id: $run_id,
+                  sha: $sha,
+                  artifact_id: $artifact_id,
+                  artifact_name: $artifact_name,
+                  schema_version: (if $schema_version == "" then null else ($schema_version | tonumber) end)
+                }
+              }' > "${baseline_dir}/baseline-context.json"
+            echo "baseline_report=${comparison_dir}/performance-comparison.json" >> "${GITHUB_OUTPUT}"
+            echo "baseline_context=${baseline_dir}/baseline-context.json" >> "${GITHUB_OUTPUT}"
+            echo "Selected Docker performance baseline run ${baseline_run_id} from ${source}:${branch}"
             exit 0
-          fi
+          done
 
-          artifacts_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${baseline_run_id}/artifacts?per_page=100"
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "${artifacts_url}" > "${baseline_dir}/artifacts.json"
-
-          artifact_url="$(jq -r --arg name "oxibelt-docker-performance-${PERFORMANCE_PROFILE}-comparison" 'first(.artifacts[] | select(.name == $name and .expired == false) | .archive_download_url) // empty' "${baseline_dir}/artifacts.json")"
-          if [[ -z "${artifact_url}" ]]; then
-            echo "::warning title=Docker performance delta::previous run ${baseline_run_id} has no reusable performance comparison artifact"
-            exit 0
-          fi
-
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -L "${artifact_url}" \
-            -o "${baseline_dir}/comparison.zip"
-          unzip -q -o "${baseline_dir}/comparison.zip" -d "${baseline_dir}/comparison"
-          if [[ -f "${baseline_dir}/comparison/performance-comparison.json" ]]; then
-            echo "baseline_report=${baseline_dir}/comparison/performance-comparison.json" >> "${GITHUB_OUTPUT}"
-          else
-            echo "::warning title=Docker performance delta::baseline comparison artifact did not contain performance-comparison.json"
-          fi
+          echo "::warning title=Docker performance delta::no reusable performance comparison baseline was found in same branch, PR base branch, or default branch"
 
       - name: Aggregate Docker performance comparison
-        if: steps.performance-artifacts.outputs.found == 'true'
         env:
           BASELINE_REPORT: ${{ steps.download-performance-baseline.outputs.baseline_report }}
+          BASELINE_CONTEXT: ${{ steps.download-performance-baseline.outputs.baseline_context }}
         run: |
+          mkdir -p "${RUNNER_TEMP}/oxibelt-performance-artifacts"
           aggregate_args=(
             --input-dir "${RUNNER_TEMP}/oxibelt-performance-artifacts"
             --output-dir "${RUNNER_TEMP}/oxibelt-performance-comparison"
@@ -1626,6 +1712,9 @@ jobs:
           fi
           if [[ -n "${BASELINE_REPORT}" ]]; then
             aggregate_args+=(--baseline-report "${BASELINE_REPORT}")
+            if [[ -n "${BASELINE_CONTEXT}" ]]; then
+              aggregate_args+=(--baseline-context "${BASELINE_CONTEXT}")
+            fi
           else
             echo "::warning title=Docker performance delta::baseline comparison artifact was not available; delta report will be skipped"
           fi
@@ -1633,7 +1722,6 @@ jobs:
           cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate -- "${aggregate_args[@]}"
 
       - name: Append Docker performance comparison summary
-        if: steps.performance-artifacts.outputs.found == 'true'
         run: |
           cat "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.md" >> "${GITHUB_STEP_SUMMARY}"
           if [[ -f "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-delta.md" ]]; then
@@ -1651,7 +1739,6 @@ jobs:
           retention-days: 0
 
       - name: Evaluate Docker performance regression gates
-        if: steps.performance-artifacts.outputs.found == 'true'
         run: |
           results_files="$(jq -r '.artifact_discovery.results_files // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           unsupported_count="$(jq -r '.artifact_discovery.unsupported_cpu.count // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
@@ -1663,9 +1750,16 @@ jobs:
           failed=0
           missing_expected_count="$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if (( missing_expected_count > 0 )); then
-            jq -r '.artifact_discovery.missing_expected_paths[]? | "::error title=Docker performance missing expected result::" + .' \
+            jq -r '.artifact_discovery.missing_expected_paths[]? | "::warning title=Docker performance missing expected result::" + .' \
               "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
-            echo "Docker performance is missing ${missing_expected_count} expected result path(s)" >&2
+            echo "Docker performance is missing ${missing_expected_count} expected result path(s); sample quorum decides whether this blocks" >&2
+          fi
+
+          quorum_status="$(jq -r '.quorum.status // "unknown"' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          if [[ "${quorum_status}" != "pass" ]]; then
+            jq -r '.quorum.violations[]? | "::error title=Docker performance insufficient evidence::" + .' \
+              "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
+            echo "Docker performance sample quorum failed with status '${quorum_status}'" >&2
             failed=1
           fi
 

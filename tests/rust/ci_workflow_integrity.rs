@@ -930,11 +930,25 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     );
     assert!(
         workflow.contains("if (( ${#failed_iterations[@]} > 0 )); then"),
-        "docker-performance should fail after all configured iterations have run"
+        "docker-performance should summarize failed iterations after all configured iterations have run"
     );
     assert!(
-        workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${target_artifact_dir}/run-${iteration}\""),
+        workflow.contains("run_dir=\"${target_artifact_dir}/run-${iteration}\"")
+            && workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${run_dir}\""),
         "docker-performance should isolate artifacts by serving type, shard, target CPU, and iteration"
+    );
+    assert!(
+        workflow.contains("iteration-status.json")
+            && workflow.contains("schema_version: 1")
+            && workflow.contains("target_cpu: $target_cpu")
+            && workflow.contains("exit_code: $exit_code"),
+        "docker-performance should capture per-iteration status without relying on job-level failure"
+    );
+    assert!(
+        workflow.contains("::warning title=Docker performance iteration failed::")
+            && workflow.contains("Docker performance recorded %d failed iteration(s)")
+            && !workflow.contains("Docker performance failed in %d iteration(s)"),
+        "docker-performance matrix shards should warn about failed iterations and leave pass/fail ownership to the summary job"
     );
     assert!(
         workflow.contains(
@@ -991,8 +1005,15 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should look for the previous successful branch comparison artifact"
     );
     assert!(
-        workflow.contains("baseline_report=${baseline_dir}/comparison/performance-comparison.json"),
+        workflow.contains("baseline_report=${comparison_dir}/performance-comparison.json"),
         "summary job should expose the downloaded baseline report path"
+    );
+    assert!(
+        workflow.contains("baseline_context=${baseline_dir}/baseline-context.json")
+            && workflow.contains("same_branch:${CURRENT_REF_NAME}")
+            && workflow.contains("base_branch:${PR_BASE_REF}")
+            && workflow.contains("default_branch:${DEFAULT_BRANCH}"),
+        "summary job should record the selected baseline source and fallback order"
     );
     assert!(
         workflow.contains(
@@ -1025,6 +1046,10 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should pass the previous report to the aggregate binary when available"
     );
     assert!(
+        workflow.contains("--baseline-context \"${BASELINE_CONTEXT}\""),
+        "summary job should pass baseline selection metadata to the aggregate binary"
+    );
+    assert!(
         workflow.contains("name: Evaluate Docker performance regression gates"),
         "summary job should evaluate median regression gates after aggregation"
     );
@@ -1034,9 +1059,15 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     );
     assert!(
         workflow.contains("missing_expected_count=\"$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length'")
-            && workflow.contains("::error title=Docker performance missing expected result::")
-            && workflow.contains("Docker performance is missing ${missing_expected_count} expected result path(s)"),
-        "summary job should fail closed and emit errors for missing expected result paths"
+            && workflow.contains("::warning title=Docker performance missing expected result::")
+            && workflow.contains("sample quorum decides whether this blocks"),
+        "summary job should keep missing expected paths as warning evidence and let quorum decide whether they block"
+    );
+    assert!(
+        workflow.contains("quorum_status=\"$(jq -r '.quorum.status // \"unknown\"'")
+            && workflow.contains("::error title=Docker performance insufficient evidence::")
+            && workflow.contains("Docker performance sample quorum failed with status"),
+        "summary job should fail on insufficient evidence reported by sample quorum"
     );
     assert!(
         workflow.contains(".artifact_discovery.unsupported_cpu.count // 0"),

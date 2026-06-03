@@ -72,6 +72,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         "## AMD64 ISA comparison",
         "## OxiBelt-only results",
         "## Skipped/missing comparator rows",
+        "## Sample quorum",
         "## Regression gates",
         "## Warnings",
     ] {
@@ -365,6 +366,124 @@ fn write_feature_gate_rows(
     );
 }
 
+fn write_required_quorum_evidence(
+    input_dir: &Path,
+    shards: usize,
+    runs: usize,
+    h2_oxibelt_rps: f64,
+    h2_nginx_rps: f64,
+    oxibelt_p99: f64,
+) {
+    for shard in 1..=shards {
+        for run in 1..=runs {
+            let reverse_dir = input_dir.join(format!(
+                "oxibelt-docker-performance-smoke-reverse-proxy-shard-{shard}/run-{run}"
+            ));
+            write_results_array(
+                &reverse_dir,
+                vec![
+                    load_row("oxibelt-h1-keepalive", "h1", 100.0, 1.0, 4.0),
+                    load_row("nginx-h1-keepalive", "h1", 100.0, 1.0, 4.0),
+                    load_row("oxibelt-h2", "h2", h2_oxibelt_rps, 1.0, oxibelt_p99),
+                    load_row("nginx-h2", "h2", h2_nginx_rps, 1.0, 4.0),
+                    load_row("oxibelt-h3", "h3", 100.0, 1.0, 4.0),
+                    load_row("nginx-h3", "h3", 100.0, 1.0, 4.0),
+                ],
+            );
+            write_iteration_status(&reverse_dir, "reverse-proxy", shard, run, 0, "ok");
+
+            write_results_array(
+                &input_dir.join(format!(
+                    "oxibelt-docker-performance-smoke-static-files-shard-{shard}/run-{run}"
+                )),
+                vec![
+                    load_row("oxibelt-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+                    load_row("nginx-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+                    load_row("caddy-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+                ],
+            );
+            write_results_array(
+                &input_dir.join(format!(
+                    "oxibelt-docker-performance-smoke-remote-signer-shard-{shard}/run-{run}"
+                )),
+                vec![
+                    handshake_row("oxibelt-local-key-tls-handshake-h2", "h2", 100.0, 1.0, 4.0),
+                    handshake_row(
+                        "oxibelt-remote-signer-tls-handshake-h2",
+                        "h2",
+                        100.0,
+                        1.0,
+                        4.0,
+                    ),
+                ],
+            );
+            write_results_array(
+                &input_dir.join(format!(
+                    "oxibelt-docker-performance-smoke-oxibelt-features-shard-{shard}/run-{run}"
+                )),
+                vec![
+                    load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 4.0),
+                    load_row("oxibelt-waf-enforcing", "h2", 13000.0, 1.0, 4.0),
+                    load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 4.0),
+                    load_row("oxibelt-crs-enforcing", "h2", 10000.0, 1.0, 4.0),
+                ],
+            );
+        }
+    }
+}
+
+fn write_iteration_status(
+    dir: &Path,
+    serving_type: &str,
+    shard: usize,
+    iteration: usize,
+    exit_code: i64,
+    status: &str,
+) {
+    fs::write(
+        dir.join("iteration-status.json"),
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 1,
+            "profile": "smoke",
+            "serving_type": serving_type,
+            "shard": shard,
+            "target_cpu": "x86-64-v3",
+            "iteration": iteration,
+            "exit_code": exit_code,
+            "status": status,
+            "reason": if exit_code == 0 { "completed" } else { "synthetic failure" }
+        }))
+        .expect("iteration status should serialize"),
+    )
+    .expect("iteration status should be written");
+}
+
+fn aggregate_row_with_distribution(
+    comparator: &str,
+    scenario: &str,
+    group: &str,
+    rps: f64,
+    p99_ms: f64,
+    shards: usize,
+) -> Value {
+    let mut row = aggregate_row(comparator, scenario, group, rps, p99_ms);
+    row.as_object_mut()
+        .expect("aggregate row should be an object")
+        .insert("schema_version".to_owned(), json!(10));
+    row.as_object_mut()
+        .expect("aggregate row should be an object")
+        .insert(
+            "distribution".to_owned(),
+            json!({
+                "sample_count": shards,
+                "shard_count": shards,
+                "per_shard_median_rps": vec![rps; shards],
+                "per_shard_median_p99_ms": vec![p99_ms; shards]
+            }),
+        );
+    row
+}
+
 fn find_aggregate<'a>(report: &'a Value, comparator: &str, scenario: &str) -> &'a Value {
     report["aggregates"]
         .as_array()
@@ -614,7 +733,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 9);
+    assert_eq!(report["schema_version"], 10);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -785,6 +904,228 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
             .iter()
             .any(|warning| warning.contains("missing rps or handshake_per_sec")),
         "missing throughput fields should produce a warning: {warnings:?}"
+    );
+}
+
+#[test]
+fn schema_10_records_quorum_status_iteration_quality_and_distributions() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 100.0, 4.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--profile".to_owned(),
+            "smoke".to_owned(),
+            "--expected-runs".to_owned(),
+            "1".to_owned(),
+            "--expected-shards".to_owned(),
+            "20".to_owned(),
+        ],
+    );
+
+    assert_eq!(report["schema_version"], 10);
+    assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
+    assert_eq!(report["sample_quality"]["ok_iterations"], 16);
+    assert_eq!(report["sample_quality"]["failed_iterations"], 0);
+    assert_eq!(report["quorum"]["status"], "pass");
+    assert_eq!(report["quorum"]["required_sample_count"], 16);
+    assert_eq!(report["quorum"]["required_shards"], 16);
+    assert!(
+        !report["artifact_discovery"]["missing_expected_paths"]
+            .as_array()
+            .expect("missing paths should be an array")
+            .is_empty(),
+        "missing expected artifacts should remain warning evidence when quorum passes"
+    );
+
+    let h2 = find_aggregate(&report, "oxibelt", "h2");
+    assert_eq!(h2["sample_count"], 16);
+    assert_eq!(h2["distribution"]["shard_count"], 16);
+    assert_eq!(
+        h2["distribution"]["per_shard_median_rps"]
+            .as_array()
+            .expect("per-shard medians should be present")
+            .len(),
+        16
+    );
+}
+
+#[test]
+fn quorum_blocks_when_primary_rows_fall_below_eighty_percent() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    write_required_quorum_evidence(&input_dir, 15, 1, 100.0, 100.0, 4.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--profile".to_owned(),
+            "smoke".to_owned(),
+            "--expected-runs".to_owned(),
+            "1".to_owned(),
+            "--expected-shards".to_owned(),
+            "20".to_owned(),
+        ],
+    );
+
+    assert_eq!(report["quorum"]["status"], "fail");
+    let violations = report["quorum"]["violations"]
+        .as_array()
+        .expect("quorum violations should be an array");
+    assert!(
+        violations.iter().any(|violation| violation
+            .as_str()
+            .unwrap_or_default()
+            .contains("valid samples 15 < quorum 16")),
+        "quorum should block below the 80% valid sample requirement: {violations:?}"
+    );
+}
+
+#[test]
+fn schema_10_statistical_band_advises_comparator_shift_ratio_miss() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+    write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 145.0, 4.0);
+    fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 10,
+            "aggregates": [
+                aggregate_row_with_distribution("oxibelt", "h2", "reverse-proxy", 100.0, 4.0, 16)
+            ]
+        }))
+        .expect("baseline should serialize"),
+    )
+    .expect("baseline should be written");
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    let advisory = find_regression_advisory(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(advisory["evaluation_mode"], "statistical_band");
+    assert_eq!(advisory["stat_band"]["status"], "stable");
+    assert!(
+        advisory["message"]
+            .as_str()
+            .expect("advisory message should be a string")
+            .contains("comparator-driven threshold miss is advisory")
+    );
+}
+
+#[test]
+fn schema_10_statistical_band_blocks_material_oxibelt_regression() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+    write_required_quorum_evidence(&input_dir, 16, 1, 93.0, 120.0, 4.0);
+    fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 10,
+            "aggregates": [
+                aggregate_row_with_distribution("oxibelt", "h2", "reverse-proxy", 100.0, 4.0, 16)
+            ]
+        }))
+        .expect("baseline should serialize"),
+    )
+    .expect("baseline should be written");
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(violation["evaluation_mode"], "statistical_band");
+    assert_eq!(violation["stat_band"]["status"], "regression");
+    assert!(
+        violation["message"]
+            .as_str()
+            .expect("violation message should be a string")
+            .contains("material OxiBelt regression")
+    );
+}
+
+#[test]
+fn baseline_context_metadata_records_selected_fallback_source() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+    let baseline_context_path = temp_dir.path().join("baseline-context.json");
+    fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 10,
+            "aggregates": []
+        }))
+        .expect("baseline should serialize"),
+    )
+    .expect("baseline should be written");
+    fs::write(
+        &baseline_context_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 1,
+            "fallback_order": ["same_branch", "base_branch", "default_branch"],
+            "selected": {
+                "source": "base_branch",
+                "branch": "main",
+                "run_id": "26881638366",
+                "sha": "4f30232",
+                "artifact_id": "12345",
+                "artifact_name": "oxibelt-docker-performance-smoke-comparison",
+                "schema_version": 10
+            }
+        }))
+        .expect("baseline context should serialize"),
+    )
+    .expect("baseline context should be written");
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+            "--baseline-context".to_owned(),
+            baseline_context_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["baseline_context"]["status"], "loaded");
+    assert_eq!(report["baseline_context"]["schema_version"], 10);
+    assert_eq!(
+        report["baseline_context"]["selected"]["source"],
+        "base_branch"
+    );
+    assert_eq!(
+        report["baseline_context"]["selected"]["run_id"],
+        "26881638366"
+    );
+    assert_eq!(
+        report["baseline_context"]["fallback_order"],
+        json!(["same_branch", "base_branch", "default_branch"])
     );
 }
 
