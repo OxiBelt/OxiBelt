@@ -4,7 +4,6 @@ use http::Response;
 
 use super::access_log::SystemAccessLogContext;
 use super::body::ProxyBody;
-use crate::config::MetricsDetail;
 use crate::state::AppSnapshot;
 use crate::telemetry::{SpanKind, TelemetryRuntime, TelemetryStart, TraceAttribute, TraceContext};
 
@@ -117,11 +116,11 @@ pub(super) fn record_websocket_session_end(
 }
 
 fn telemetry_span_enabled(state: &Arc<AppSnapshot>, trace_context: Option<TraceContext>) -> bool {
-  trace_context.is_some() && state.telemetry.enabled()
+  trace_context.is_some() && state.request_path_features.telemetry
 }
 
 fn detailed_metrics_enabled(state: &Arc<AppSnapshot>) -> bool {
-  state.config.metrics.enabled && state.config.metrics.detail == MetricsDetail::Detailed
+  state.request_path_features.detailed_metrics
 }
 
 #[cfg(test)]
@@ -130,7 +129,7 @@ mod tests {
 
   use super::*;
   use crate::cache::CacheStats;
-  use crate::config::{Config, MetricsConfig};
+  use crate::config::{Config, MetricsConfig, MetricsDetail};
   use crate::proxy::http::response::text_response;
   use crate::tls::TlsServerSessionStorageStats;
   use crate::waf::{WafProtocol, WafTransportMetadataInput, WafTransportNetwork};

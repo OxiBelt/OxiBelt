@@ -8,6 +8,7 @@ use super::{
 };
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::proxy::http::static_files::{self, StaticResponsePlan};
+use crate::routes::RouteWafExecutionPlan;
 use crate::state::AppSnapshot;
 use crate::waf::{
   HeaderMutation, RequestWafDecision, WafProtocol, WafRequestInput, WafResponseInput,
@@ -19,6 +20,7 @@ use crate::waf::{
 pub(super) async fn apply_static_waf(
   request: &ParsedPlainRequest,
   snapshot: &AppSnapshot,
+  route_waf: RouteWafExecutionPlan,
   client_addr: SocketAddr,
   transport_metadata: WafTransportMetadataInput<'_>,
   mut access_log: StaticFastPathContext,
@@ -27,8 +29,8 @@ pub(super) async fn apply_static_waf(
 ) -> TimedStaticResponsePlan {
   let tls = WafTlsMetadata::default();
   let dynamic_policy = DynamicPolicyContext::default();
-  let request_waf_enabled = snapshot.waf.has_request_rules(&access_log.route_name);
-  let response_waf_enabled = snapshot.waf.has_response_rules(&access_log.route_name);
+  let request_waf_enabled = route_waf.request.enabled();
+  let response_waf_enabled = route_waf.response.enabled();
   let mut request_waf = if request_waf_enabled {
     access_log.ensure_request_ids();
     snapshot.waf.evaluate_request(WafRequestInput {

@@ -6,6 +6,7 @@ use crate::waf::{BodyNeed, WafEngine};
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct RouteExecutionPlan {
   pub fast_path: FastPathPlan,
+  pub features: RouteFeaturePlan,
   pub waf: RouteWafExecutionPlan,
 }
 
@@ -17,6 +18,19 @@ pub struct FastPathPlan {
   pub static_small_object: bool,
   pub static_sendfile_like: bool,
   pub cache_hit: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct RouteFeaturePlan {
+  pub cache: bool,
+  pub compression: bool,
+  pub connect_tunneling: bool,
+  pub external_auth: bool,
+  pub generic_http_upgrade: bool,
+  pub grpc_web: bool,
+  pub ipm: bool,
+  pub static_files: bool,
+  pub upstream_pool: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -64,6 +78,14 @@ impl WafExecutionPlan {
   pub fn enabled(self) -> bool {
     self != Self::None
   }
+
+  pub fn body_need(self) -> BodyNeed {
+    match self {
+      Self::None | Self::HeaderOnly => BodyNeed::None,
+      Self::SizeOnly => BodyNeed::SizeOnly,
+      Self::PrefixBody | Self::FullBody => BodyNeed::PrefixBytes,
+    }
+  }
 }
 
 pub(super) fn route_execution_plan(
@@ -71,6 +93,7 @@ pub(super) fn route_execution_plan(
   route: &RouteConfig,
   waf: RouteWafExecutionPlan,
 ) -> RouteExecutionPlan {
+  let features = route_feature_plan(config, route);
   let can_plain_proxy = can_plain_proxy_fast_path(config, route) && waf.plain_proxy_fast_path_safe;
   let can_static_sendfile =
     can_static_sendfile_fast_path(config, route) && waf.static_sendfile_fast_path_safe;
@@ -89,7 +112,22 @@ pub(super) fn route_execution_plan(
       static_sendfile_like: can_static_sendfile,
       cache_hit: route.cache.is_some(),
     },
+    features,
     waf,
+  }
+}
+
+fn route_feature_plan(config: &Config, route: &RouteConfig) -> RouteFeaturePlan {
+  RouteFeaturePlan {
+    cache: config.cache.enabled && route.static_root.is_none(),
+    compression: config.compression.enabled && route.compression.as_deref() != Some("off"),
+    connect_tunneling: route.connect_tunneling,
+    external_auth: route.external_auth.is_some(),
+    generic_http_upgrade: route.generic_http_upgrade,
+    grpc_web: route.grpc_web,
+    ipm: route.ipm.enabled,
+    static_files: route.static_root.is_some(),
+    upstream_pool: route.upstream_pool.is_some(),
   }
 }
 
@@ -209,8 +247,62 @@ sendfile = "auto"
     assert!(plan.fast_path.plain_proxy_h1);
     assert!(plan.fast_path.plain_proxy_h2);
     assert!(plan.fast_path.plain_proxy_h3);
+    assert_eq!(plan.features, RouteFeaturePlan::default());
     assert_eq!(plan.waf.request, WafExecutionPlan::None);
     assert_eq!(plan.waf.response, WafExecutionPlan::None);
+  }
+
+  #[test]
+  fn route_feature_plan_tracks_cache_compression_and_route_controls() {
+    let plan = execution_plan(&minimal_proxy_config(
+      r#"
+
+[cache]
+enabled = true
+store = "memory"
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+
+[routes.ipm]
+enabled = true
+action = "route:Invoke"
+"#,
+    ));
+
+    assert!(plan.features.cache);
+    assert!(plan.features.ipm);
+    assert!(!plan.features.static_files);
+    assert!(!plan.features.external_auth);
+
+    let temp_dir = common::TempDir::new("route-plan-compression-feature");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "route-plan-compression-feature");
+    let compression_plan = execution_plan(&parse_config(&format!(
+      "{}{}",
+      common::minimal_config_toml(&cert_path, &key_path),
+      r#"
+compression = "default"
+"#
+    )));
+    assert!(compression_plan.features.compression);
+  }
+
+  #[test]
+  fn static_routes_do_not_enable_cache_feature_from_default_policy() {
+    let plan = execution_plan(&minimal_static_config(
+      r#"
+
+[cache]
+enabled = true
+store = "memory"
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+"#,
+    ));
+
+    assert!(plan.features.static_files);
+    assert!(!plan.features.cache);
+    assert!(plan.fast_path.static_sendfile_like);
   }
 
   #[test]

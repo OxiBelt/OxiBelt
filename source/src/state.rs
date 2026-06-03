@@ -42,8 +42,10 @@ use crate::webtransport_admin::WebTransportAdminRegistry;
 
 pub(crate) mod handle;
 mod http1_upgrade;
+mod request_path_features;
 
 pub use handle::AppHandle;
+pub(crate) use request_path_features::RequestPathFeaturePlan;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type UpstreamBody = BoxBody<Bytes, BoxError>;
@@ -158,6 +160,7 @@ pub struct AppSnapshot {
   pub mitigation: MitigationSink,
   pub access_logs: AccessLogSinks,
   pub system_access_log: SystemAccessLog,
+  pub(crate) request_path_features: RequestPathFeaturePlan,
   pub(crate) alt_svc_header_value: Option<HeaderValue>,
   pub(crate) http1_upgrades_possible: bool,
 }
@@ -317,6 +320,14 @@ impl AppSnapshot {
     let system_access_log = SystemAccessLog::new(&config.logging.access_log)
       .await
       .context("failed to build system access log")?;
+    let request_path_features = RequestPathFeaturePlan::new(
+      &config,
+      cache.enabled(),
+      dynamic_policy.enabled(),
+      telemetry.enabled(),
+      system_access_log.enabled(),
+      waf.has_person_proof_api_paths(),
+    );
     let alt_svc_header_value = build_alt_svc_header_value(&config)
       .context("failed to build precomputed Alt-Svc header value")?;
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
@@ -357,6 +368,7 @@ impl AppSnapshot {
       mitigation,
       access_logs,
       system_access_log,
+      request_path_features,
       alt_svc_header_value,
       http1_upgrades_possible,
     })
@@ -403,6 +415,14 @@ impl AppSnapshot {
       .context("failed to build IPM runtime")?;
     let upstream_pool_generation = next_upstream_pool_generation(&config, Some(previous));
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
+    let request_path_features = RequestPathFeaturePlan::new(
+      &config,
+      previous.cache.enabled(),
+      previous.dynamic_policy.enabled(),
+      previous.telemetry.enabled(),
+      previous.system_access_log.enabled(),
+      previous.waf.has_person_proof_api_paths(),
+    );
 
     Ok(Self {
       config,
@@ -439,6 +459,7 @@ impl AppSnapshot {
       mitigation: previous.mitigation.clone(),
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
+      request_path_features,
       alt_svc_header_value,
       http1_upgrades_possible,
     })

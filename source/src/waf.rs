@@ -1631,23 +1631,21 @@ impl WafEngine {
   pub fn has_response_rules(&self, route_name: &str) -> bool {
     self.route_plan(route_name).response().enabled()
   }
-
   pub fn has_request_rules(&self, route_name: &str) -> bool {
     self.route_plan(route_name).request().enabled()
   }
-
   pub fn person_proof_api_path_role(&self, path: &str) -> Option<PersonProofApiPathRole> {
     person_proof_api::api_path_role(&self.person_proof, path)
   }
-
   pub fn has_person_proof_api_path(&self, path: &str) -> bool {
     self.person_proof_api_path_role(path).is_some()
   }
-
+  pub fn has_person_proof_api_paths(&self) -> bool {
+    !self.person_proof.policies.is_empty()
+  }
   pub fn has_person_proof_verify_path(&self, path: &str) -> bool {
     self.person_proof_api_path_role(path) == Some(PersonProofApiPathRole::Verify)
   }
-
   pub fn person_proof_session_document(
     &self,
     input: WafRequestInput<'_>,

@@ -67,7 +67,11 @@ pub(crate) async fn prepare_webtransport(
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
   let request_headers = request.headers().clone();
-  let trace_context = state.telemetry.context_from_headers(&request_headers);
+  let trace_context = if state.request_path_features.telemetry {
+    state.telemetry.context_from_headers(&request_headers)
+  } else {
+    None
+  };
   let received_at_unix_ms = crate::waf::current_unix_ms();
   let mut tags: Option<HashMap<String, String>> = None;
   let client_addr = match crate::identity::resolve_client_addr(
@@ -99,7 +103,7 @@ pub(crate) async fn prepare_webtransport(
     )));
   };
 
-  let dynamic_policy = if state.dynamic_policy.enabled() {
+  let dynamic_policy = if state.request_path_features.dynamic_policy {
     state.dynamic_policy.evaluate(
       DynamicPolicyRequest {
         client_ip: client_addr.ip(),
@@ -120,7 +124,9 @@ pub(crate) async fn prepare_webtransport(
         return Err(Box::new(text_response(status, &body)));
       }
       DynamicPolicyTerminal::Challenge { status } => {
-        if !state.waf.has_person_proof_api_path(request_uri.path()) {
+        let person_proof_api_path = state.request_path_features.person_proof_api
+          && state.waf.has_person_proof_api_path(request_uri.path());
+        if !person_proof_api_path {
           let request_id = crate::waf::new_access_log_id();
           let transaction_id = crate::waf::new_access_log_id();
           let decision = state
@@ -169,7 +175,9 @@ pub(crate) async fn prepare_webtransport(
   }
 
   let mut auth_request = request.clone();
-  if let Some(provider) = resolved.route.external_auth.as_deref() {
+  if resolved.execution_plan.features.external_auth
+    && let Some(provider) = resolved.route.external_auth.as_deref()
+  {
     match state
       .external_auth
       .authorize(
@@ -191,7 +199,7 @@ pub(crate) async fn prepare_webtransport(
   let request_headers = auth_request.headers().clone();
 
   let mut request_ids = None;
-  let mut request_waf = if state.waf.enabled() {
+  let mut request_waf = if resolved.execution_plan.waf.request.enabled() {
     let request_id = crate::waf::new_access_log_id();
     let transaction_id = crate::waf::new_access_log_id();
     let decision = state.waf.evaluate_request(WafRequestInput {
@@ -238,7 +246,7 @@ pub(crate) async fn prepare_webtransport(
     )));
   }
 
-  let stream_waf = if state.waf.requires_stream_inspection(&resolved.route.name) {
+  let stream_waf = if resolved.execution_plan.waf.stream_enabled {
     let (request_id, transaction_id) = request_ids.unwrap_or_else(|| {
       (
         crate::waf::new_access_log_id(),

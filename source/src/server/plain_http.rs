@@ -308,13 +308,13 @@ fn sendfile_disabled_reason(
   if !kernel_sendfile_available {
     return Some("Linux kernel sendfile is not available");
   }
-  if !config.rate_limits.is_empty() {
+  if snapshot.request_path_features.rate_limits {
     return Some("rate limits are configured");
   }
-  if config.dynamic_policy.enabled {
+  if snapshot.request_path_features.dynamic_policy {
     return Some("dynamic policy is enabled");
   }
-  if config.compression.enabled {
+  if snapshot.request_path_features.compression {
     return Some("compression is enabled");
   }
   if config.limits.connection_limit_identity != ConnectionLimitIdentityMode::ProxyProtocol {
@@ -372,7 +372,7 @@ async fn eligible_static_plan(
     return None;
   }
   let response_send_timeout = static_files::static_response_send_timeout(snapshot, resolved.route);
-  let access_log_needed = snapshot.system_access_log.enabled()
+  let access_log_needed = snapshot.request_path_features.system_access_log
     || resolved.execution_plan.waf.request.enabled()
     || resolved.execution_plan.waf.response.enabled();
   let mut access_log = access_log_needed.then(|| {
@@ -434,6 +434,7 @@ async fn eligible_static_plan(
     static_waf::apply_static_waf(
       request,
       snapshot,
+      resolved.execution_plan.waf,
       client_addr,
       transport_metadata,
       access_log.expect("static WAF should create fast-path access-log context"),

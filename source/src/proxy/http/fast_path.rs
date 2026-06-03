@@ -67,10 +67,12 @@ impl PlainProxyFastPath {
   {
     plain_proxy_fast_path_enabled_for_version(request, resolved)
       && Self::supported_route(state, resolved)
-      && !state.waf.has_person_proof_api_path(request.uri().path())
-      && !state
-        .cache
-        .policy_enabled(resolved.route.cache.as_deref(), request.method())
+      && (!state.request_path_features.person_proof_api
+        || !state.waf.has_person_proof_api_path(request.uri().path()))
+      && (!resolved.execution_plan.features.cache
+        || !state
+          .cache
+          .policy_enabled(resolved.route.cache.as_deref(), request.method()))
       && !semantics::is_native_grpc_request(request.headers(), &state.config)
       && !is_upgrade_request(request)
       && request.method() != Method::CONNECT

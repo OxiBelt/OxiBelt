@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use crate::config::{Config, HotReloadMode, RuntimeOverrides, TlsConfig};
 use crate::routes::RouteTable;
 use crate::server::ListenerSupervisor;
-use crate::state::{AppHandle, AppSnapshot};
+use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
 use crate::tls;
 use crate::waf::WafEngine;
 
@@ -109,6 +109,14 @@ impl ReloadManager {
     let ipm = crate::ipm::IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
+    let request_path_features = RequestPathFeaturePlan::new(
+      &config,
+      active.cache.enabled(),
+      active.dynamic_policy.enabled(),
+      active.telemetry.enabled(),
+      active.system_access_log.enabled(),
+      waf.has_person_proof_api_paths(),
+    );
     let upstream_pool_generation = if config.upstream_pools == active.config.upstream_pools {
       active.upstream_pool_generation
     } else {
@@ -149,6 +157,7 @@ impl ReloadManager {
       mitigation: active.mitigation.clone(),
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
+      request_path_features,
       alt_svc_header_value: active.alt_svc_header_value.clone(),
       http1_upgrades_possible: active.http1_upgrades_possible,
     };
@@ -222,6 +231,14 @@ impl ReloadManager {
     let ipm = crate::ipm::IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
+    let request_path_features = RequestPathFeaturePlan::new(
+      &config,
+      active.cache.enabled(),
+      active.dynamic_policy.enabled(),
+      active.telemetry.enabled(),
+      active.system_access_log.enabled(),
+      active.waf.has_person_proof_api_paths(),
+    );
     let upstream_pool_generation = if config.upstream_pools == active.config.upstream_pools {
       active.upstream_pool_generation
     } else {
@@ -262,6 +279,7 @@ impl ReloadManager {
       mitigation: active.mitigation.clone(),
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
+      request_path_features,
       alt_svc_header_value: active.alt_svc_header_value.clone(),
       http1_upgrades_possible: active.http1_upgrades_possible,
     };

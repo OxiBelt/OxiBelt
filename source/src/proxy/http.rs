@@ -131,7 +131,7 @@ fn emit_system_access_log(
   context: &mut SystemAccessLogContext<'_>,
   response: &Response<ProxyBody>,
 ) {
-  if !state.system_access_log.enabled() {
+  if !state.request_path_features.system_access_log {
     return;
   }
   if let Some(input) = context.response_input(response) {
@@ -339,8 +339,12 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
   B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
 {
-  let system_access_log_enabled = state.system_access_log.enabled();
-  let trace_context = state.telemetry.context_from_headers(request.headers());
+  let system_access_log_enabled = state.request_path_features.system_access_log;
+  let trace_context = if state.request_path_features.telemetry {
+    state.telemetry.context_from_headers(request.headers())
+  } else {
+    None
+  };
   let telemetry_start = request_observability_start(&state, trace_context);
   let access_log_metadata_enabled = system_access_log_enabled || telemetry_start.is_some();
   let mut access_log = SystemAccessLogContext::new(
@@ -502,7 +506,7 @@ where
     }
   }
 
-  if !state.config.rate_limits.is_empty()
+  if state.request_path_features.rate_limits
     && let Some(status) = state
       .limits
       .check_pre_route_rate_limits(client_addr.ip(), &state.config.rate_limits)
@@ -518,7 +522,7 @@ where
   };
   access_log.set_route_name(&resolved.route.name);
 
-  if resolved.route.ipm.enabled {
+  if resolved.execution_plan.features.ipm {
     let Some(actor) = state.ipm.actor_from_headers(request.headers()) else {
       return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
     };
@@ -606,13 +610,13 @@ where
 
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
-  let request_waf_enabled = state.waf.has_request_rules(&resolved.route.name);
-  let response_waf_enabled = state.waf.has_response_rules(&resolved.route.name);
-  let request_body_need = state.waf.request_body_need(&resolved.route.name);
-  let response_body_need = state.waf.response_body_need(&resolved.route.name);
+  let request_waf_enabled = resolved.execution_plan.waf.request.enabled();
+  let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
+  let request_body_need = resolved.execution_plan.waf.request.body_need();
+  let response_body_need = resolved.execution_plan.waf.response.body_need();
   let effective_buffering = buffering::EffectiveBuffering::new(&state.config, resolved.route);
 
-  if !state.config.rate_limits.is_empty() {
+  if state.request_path_features.rate_limits {
     let rate_limit_context = RateLimitContext::route(
       client_addr.ip(),
       &resolved.route.name,
@@ -627,7 +631,7 @@ where
     }
   }
 
-  let dynamic_policy = if state.dynamic_policy.enabled() {
+  let dynamic_policy = if state.request_path_features.dynamic_policy {
     state.dynamic_policy.evaluate(
       DynamicPolicyRequest {
         client_ip: client_addr.ip(),
@@ -646,7 +650,9 @@ where
     match terminal {
       DynamicPolicyTerminal::Text { status, body } => return text_response(status, &body),
       DynamicPolicyTerminal::Challenge { status } => {
-        if !state.waf.has_person_proof_api_path(request_uri.path()) {
+        let person_proof_api_path = state.request_path_features.person_proof_api
+          && state.waf.has_person_proof_api_path(request_uri.path());
+        if !person_proof_api_path {
           access_log.ensure_request_ids();
           let decision = match state.waf.evaluate_dynamic_person_proof_challenge(
             WafRequestInput {
@@ -687,7 +693,9 @@ where
     }
   }
 
-  if state.waf.has_person_proof_api_path(request_uri.path()) {
+  let person_proof_api_path = state.request_path_features.person_proof_api
+    && state.waf.has_person_proof_api_path(request_uri.path());
+  if person_proof_api_path {
     access_log.ensure_request_ids();
     return handle_person_proof_api(
       request,
@@ -714,7 +722,9 @@ where
     .await;
   }
 
-  if let Some(provider) = resolved.route.external_auth.as_deref() {
+  if resolved.execution_plan.features.external_auth
+    && let Some(provider) = resolved.route.external_auth.as_deref()
+  {
     match state
       .external_auth
       .authorize(
@@ -870,7 +880,7 @@ where
   }
 
   if is_upgrade_request(&request) {
-    let stream_waf = if state.waf.requires_stream_inspection(&resolved.route.name) {
+    let stream_waf = if resolved.execution_plan.waf.stream_enabled {
       access_log.ensure_request_ids();
       StreamWafRequestContext::from_seed(
         state.as_ref(),
@@ -1014,12 +1024,13 @@ where
     Ok(request) => request,
     Err(error) => return request_buffering_error_response(error),
   };
-  let cache_enabled_for_route = state
-    .cache
-    .policy_enabled(resolved.route.cache.as_deref(), &request_method);
+  let cache_enabled_for_route = resolved.execution_plan.features.cache
+    && state
+      .cache
+      .policy_enabled(resolved.route.cache.as_deref(), &request_method);
   let request_headers = if cache_enabled_for_route || response_waf_enabled || native_grpc_request {
     request.headers().clone()
-  } else if state.config.compression.enabled {
+  } else if resolved.execution_plan.features.compression {
     compression::request_header_subset(request.headers())
   } else {
     HeaderMap::new()
@@ -2800,7 +2811,7 @@ fn handle_cache_lookup_result(
     }
     crate::cache::CacheLookup::Stale(stale) => {
       if stale.background_refresh
-        && can_background_refresh(state, &resolved.route.name, upstream, upstream_version)
+        && can_background_refresh(resolved.execution_plan.waf, upstream, upstream_version)
         && spawn_background_refresh(
           state.clone(),
           outbound,
@@ -2882,15 +2893,13 @@ fn handle_cache_lookup_result(
 }
 
 fn can_background_refresh(
-  state: &AppSnapshot,
-  route_name: &str,
+  waf: crate::routes::RouteWafExecutionPlan,
   upstream: &UpstreamConfig,
   upstream_version: HttpVersion,
 ) -> bool {
   upstream_version != HttpVersion::H3
     && upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off
-    && !state.waf.has_response_rules(route_name)
-    && !state.waf.requires_response_body_inspection(route_name)
+    && !waf.response.enabled()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3129,7 +3138,7 @@ async fn maybe_cache_response_with_store_permission(
   route: Option<&RouteConfig>,
   allow_store: bool,
 ) -> Response<ProxyBody> {
-  if !state.cache.policy_enabled(route_cache, method) {
+  if !state.request_path_features.cache || !state.cache.policy_enabled(route_cache, method) {
     let mut response = response;
     cache_status::strip_headers(response.headers_mut());
     return response;
