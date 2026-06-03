@@ -22,6 +22,7 @@ mod load_scope;
 mod request;
 #[cfg(test)]
 mod tests;
+mod tls_reload;
 
 pub(super) use load_scope::{ControlPlaneConfigPermissions, validate_control_plane_config_scope};
 pub(super) use request::{
@@ -484,31 +485,9 @@ async fn apply_downstream_tls_reload(
     .await;
     return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
   }
-  let tls_server_config = match crate::tls::build_server_config_with_resumption(
-    &config.tls,
-    &config.listeners,
-    Some(&active.tls_resumption),
-  ) {
-    Ok(config) => config,
-    Err(error) => {
-      record_operation(
-        control,
-        "tls_downstream_reload",
-        "rejected",
-        Some(error.to_string()),
-      )
-      .await;
-      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-    }
-  };
-  let quic_server_config = if config.listeners.http3 {
-    match crate::tls::build_quic_server_config_with_resumption(
-      &config.tls,
-      &config.quic,
-      config.source_paths.cert_dir.as_deref(),
-      Some(&active.tls_resumption),
-    ) {
-      Ok(config) => Some(config),
+  let (ocsp_staple, tls_server_config, quic_server_config) =
+    match tls_reload::build_downstream_tls_reload_configs(&config, active.as_ref()).await {
+      Ok(configs) => configs,
       Err(error) => {
         record_operation(
           control,
@@ -519,12 +498,10 @@ async fn apply_downstream_tls_reload(
         .await;
         return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
       }
-    }
-  } else {
-    None
-  };
+    };
   let mut snapshot = active.as_ref().clone();
   snapshot.config = config;
+  snapshot.ocsp_staple = ocsp_staple;
   snapshot.tls_server_config = tls_server_config;
   snapshot.quic_server_config = quic_server_config;
   if let Err(error) =

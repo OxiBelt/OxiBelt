@@ -156,6 +156,7 @@ pub struct AppSnapshot {
   pub lifecycle: Arc<LifecycleState>,
   pub admin_audit: AdminAuditRuntime,
   pub shared_state: Option<Arc<SharedState>>,
+  pub(crate) ocsp_staple: tls::OcspStapleRuntime,
   pub tls_server_config: Arc<rustls::ServerConfig>,
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
   pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
@@ -268,10 +269,14 @@ impl AppSnapshot {
     let admin_audit = AdminAuditRuntime::new(&config)
       .await
       .context("failed to build admin audit runtime")?;
-    let tls_server_config = tls::build_server_config_with_resumption(
+    let ocsp_staple = tls::OcspStapleRuntime::new(&config.tls, &control_http, metrics.clone())
+      .await
+      .context("failed to build OCSP staple runtime")?;
+    let tls_server_config = tls::build_server_config_with_resumption_and_ocsp(
       &config.tls,
       &config.listeners,
       Some(&tls_resumption),
+      Some(&ocsp_staple),
     )
     .context("failed to build downstream TLS config")?;
     let admin_tls_server_config = if config.admin.enabled && config.admin.tls.enabled {
@@ -284,11 +289,12 @@ impl AppSnapshot {
     };
     let quic_server_config = if config.listeners.http3 {
       Some(
-        tls::build_quic_server_config_with_resumption(
+        tls::build_quic_server_config_with_resumption_and_ocsp(
           &config.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),
           Some(&tls_resumption),
+          Some(&ocsp_staple),
         )
         .context("failed to build QUIC TLS config")?,
       )
@@ -364,6 +370,7 @@ impl AppSnapshot {
       lifecycle,
       admin_audit,
       shared_state,
+      ocsp_staple,
       tls_server_config,
       admin_tls_server_config,
       quic_server_config,
@@ -455,6 +462,7 @@ impl AppSnapshot {
       lifecycle: previous.lifecycle.clone(),
       admin_audit: previous.admin_audit.clone(),
       shared_state: previous.shared_state.clone(),
+      ocsp_staple: previous.ocsp_staple.clone(),
       tls_server_config: previous.tls_server_config.clone(),
       admin_tls_server_config: previous.admin_tls_server_config.clone(),
       quic_server_config: previous.quic_server_config.clone(),

@@ -81,13 +81,17 @@ questions.
 | Question | Primary signal | Notes |
 | --- | --- | --- |
 | Is the proxy up? | `/ready`, `/live`, `oxibelt_requests_total`, `oxibelt_responses_total` | Readiness returns `503 draining` while lifecycle drain is active. |
-| Are certificates healthy? | `GET /admin/v1/tls/downstream`, TLS session storage metrics | Certificate inventory and reload state stay on the authenticated Admin API. |
+| Are certificates healthy? | `GET /admin/v1/tls/downstream`, `oxibelt_tls_ocsp_*`, TLS session storage metrics | Certificate inventory and OCSP runtime state stay on the authenticated Admin API. Public OCSP metrics use fixed series only and omit responder URLs, SNI, issuers, and certificate fingerprints. |
 | Are upstreams healthy? | `oxibelt_upstream_requests_total`, `oxibelt_upstream_errors_total`, `oxibelt_upstream_pool_servers`, `oxibelt_upstream_pool_health_reports_total`, `oxibelt_upstream_pool_outlier_ejections_total`, upstream latency histograms | Public pool metrics use pool/source/state/outcome/reason labels and omit origins, discovery endpoints, tokens, raw errors, and response bodies. Use Admin upstream-pool APIs for per-server health reason, slow-start, ejection, and active control. |
 | Is security automation active? | dynamic-policy, external-auth, and mitigation counters | Public metrics expose aggregate behavior, not sensitive WAF metadata. |
 | Is HTTP/3 working? | detailed HTTP protocol labels and `oxibelt_quic_retries_total` | Detailed metrics must be enabled for per-protocol request panels. |
 | Are reloads and drains safe? | `/ready`, Admin lifecycle state, runtime snapshot endpoints | Use `redact=true` on runtime and support-bundle endpoints. |
 
 ## WAF Telemetry Boundary
+
+Downstream live OCSP fetch status is split by audience. Authenticated Admin TLS status, runtime snapshots, and support bundles include bounded fields for `status`, `staple_present`, `this_update`, `next_update`, `last_fetch_at`, `last_success_at`, `last_error_code`, `next_refresh_at`, and `failure_policy = "drop_stale"`. Public Prometheus output exposes only aggregate `oxibelt_tls_ocsp_fetch_success_total`, `oxibelt_tls_ocsp_fetch_errors_total`, `oxibelt_tls_ocsp_staple_present`, `oxibelt_tls_ocsp_next_update_timestamp_seconds`, and `oxibelt_tls_ocsp_stale_drops_total`.
+
+OCSP fetch failures degrade serving without a staple instead of making TLS handshakes perform network I/O. Expired OCSP responses are dropped before they can be stapled.
 
 The public metrics listener is intentionally unauthenticated and therefore
 omits WAF rule names, IDs, tags, per-rule hit counts, and cost details. Use the

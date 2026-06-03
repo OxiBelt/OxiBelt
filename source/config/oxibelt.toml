@@ -81,6 +81,14 @@ verify_depth = 4
 
 [tls.ocsp]
 mode = "disabled"
+# mode = "static_file"
+# response_file = "ocsp.der"
+# mode = "live_fetch"
+# responder_url = "https://ocsp.example.test/status"
+# request_timeout_ms = 3000
+# max_response_bytes = 16384
+# refresh_jitter_pct = 10
+# clock_skew_seconds = 300
 
 [quic]
 retry = true

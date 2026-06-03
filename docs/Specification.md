@@ -94,7 +94,7 @@ Supported downstream TLS features:
 - Server certificate chain loading with local private key loading or Unix socket remote signing.
 - Optional or required downstream client certificate authentication.
 - Client CA roots from configured cert-directory files.
-- Static file-based OCSP stapling.
+- Static file-based OCSP stapling and live OCSP fetch/refresh for downstream TLS.
 - Session tickets with configurable rotation interval.
 
 Remote private-key signing is intended to keep downstream and TURN TLS private keys outside the OxiBelt process memory. OxiBelt connects to `oxibelt-keysigner` over a Unix domain socket, authenticates with a base64 32-byte token, verifies that the signer-reported public key matches the configured certificate, and requests signatures through rustls' signing interface. The signer caps concurrently handled IPC connections and applies server-side request/response I/O deadlines before token validation, so local idle or trickled socket peers cannot hold signer tasks indefinitely. The signer defaults to TLS 1.3 server CertificateVerify inputs only; TLS 1.2 unstructured signing requires explicit opt-in on both OxiBelt and the signer sidecar.
@@ -174,7 +174,7 @@ Hot reload modes:
 
 - `off`: no runtime reload.
 - `oxirule`: reload WAF-owned configuration and external OxiRule files only.
-- `downstream_tls`: reload the current downstream certificate, private key, and static OCSP response.
+- `downstream_tls`: reload the current downstream certificate, private key, static OCSP response, or live OCSP runtime.
 - `full`: reload OxiRule, TOML configuration, upstream clients, access-log sinks, downstream TLS material, downstream listener bind/protocol settings, and admin listener enable/bind settings.
 
 Reload apply behavior is failure-safe: invalid TOML, invalid rules, invalid certificate/key pairs, unreadable files, failed upstream client setup, failed database access-log setup, or failed listener binds leave the previous active state in place. Successful reloads publish a new data-plane snapshot and gracefully drain HTTP connections that captured the previous snapshot, even when listener binds do not change. Successful full reloads also activate replacement listeners before old listener generations drain, so readiness remains OK for the active instance while in-flight requests on the old generation finish. HTTP/1.1 and HTTP/2 listener or snapshot-generation drain asks Hyper to gracefully close old connections; HTTP/3 stops accepting on drained generations and closes endpoints after the graceful timeout when a listener generation is retired. Upgraded tunnels, WebTransport, and TCP stream bridges are protected by the configured long-connection close delay, but new request streams received by a drained WebTransport HTTP/3 bridge are rejected instead of being evaluated against the old snapshot.
@@ -207,7 +207,7 @@ Lifecycle endpoints are:
 - `POST /admin/v1/config/rollback`: requires `config:Rollback` and matching `If-Match`, restores the last-good runtime snapshot. Rollbacks that change `[admin]` or `[ipm]` require the same protected config update actions as config load.
 - `POST /admin/v1/files/sync`: writes explicit files under configured config/OxiRule roots and can apply `none`, `oxirule`, `full`, or `downstream_tls`. Config-root writes require `config:SyncFiles`; OxiRule and OxiRule group writes require the matching `waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, or `waf:DeleteOxiRuleGroup`. OxiRule file-sync roots are suffix-bound: `oxirule` accepts `.oxirule.toml` paths and `oxirule_group` accepts `.oxirule-group.toml` paths. `apply = "oxirule"` requires `waf:ReloadOxiRule`. Config-root writes and `apply = "full"` are prechecked so staged or disk-candidate `[admin]` and `[ipm]` changes require the protected config update actions before files are committed.
 - `GET /admin/v1/tls/downstream`: requires `config:ReadDownstreamTls`, returns downstream TLS material status.
-- `POST /admin/v1/tls/downstream/reload`: requires `config:ReloadDownstreamTls` and matching `If-Match`, reloads configured certificate, key, and static OCSP files from disk.
+- `POST /admin/v1/tls/downstream/reload`: requires `config:ReloadDownstreamTls` and matching `If-Match`, reloads configured certificate, key, and static OCSP files from disk or rebuilds the live OCSP runtime.
 - `GET /admin/v1/lifecycle`: requires `lifecycle:Get`, returns draining state and reason.
 - `POST /admin/v1/lifecycle/drain`: requires `lifecycle:Drain`, starts admin drain.
 - `POST /admin/v1/lifecycle/undrain`: requires `lifecycle:Undrain`, clears admin drain.
@@ -263,7 +263,7 @@ Security rationale: ACME account keys, DNS provider API tokens, and challenge cr
 
 The current implementation reserves or defers this work:
 
-- Live OCSP fetch and refresh workers.
+- CRLite distribution and enforcement.
 - Sticky-cookie upstream sessions.
 - CRS stream-payload inspection for WebSocket and WebTransport traffic.
 - Downstream ECH configuration.

@@ -6421,6 +6421,100 @@ fn static_ocsp_requires_a_response_file() {
 }
 
 #[test]
+fn live_ocsp_accepts_operator_responder_url_and_defaults() {
+    let temp_dir = common::TempDir::new("ocsp-live");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ocsp-live");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "mode = \"disabled\"",
+        "mode = \"live_fetch\"\nresponder_url = \"https://ocsp.example.test/status\"",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config.validate().expect("live OCSP config should validate");
+    assert_eq!(config.tls.ocsp.mode, OcspMode::LiveFetch);
+    assert_eq!(config.tls.ocsp.request_timeout_ms, 3_000);
+    assert_eq!(config.tls.ocsp.max_response_bytes, 16_384);
+    assert_eq!(config.tls.ocsp.refresh_jitter_pct, 10);
+    assert_eq!(config.tls.ocsp.clock_skew_seconds, 300);
+}
+
+#[test]
+fn live_ocsp_rejects_static_response_file() {
+    let temp_dir = common::TempDir::new("ocsp-live-response-file");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "ocsp-live-response-file");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "mode = \"disabled\"",
+        "mode = \"live_fetch\"\nresponse_file = \"ocsp.der\"",
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("live OCSP must reject response_file");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tls.ocsp.response_file cannot be used"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn live_ocsp_rejects_unsafe_responder_urls_and_zero_limits() {
+    let cases = [
+        (
+            "responder_url = \"ftp://ocsp.example.test/status\"",
+            "scheme must be http or https",
+        ),
+        (
+            "responder_url = \"https://user:pass@ocsp.example.test/status\"",
+            "must not include credentials",
+        ),
+        (
+            "responder_url = \"https://ocsp.example.test/status#frag\"",
+            "must not include a fragment",
+        ),
+        (
+            "request_timeout_ms = 0",
+            "request_timeout_ms must be greater than 0",
+        ),
+        (
+            "max_response_bytes = 0",
+            "max_response_bytes must be greater than 0",
+        ),
+        (
+            "refresh_jitter_pct = 101",
+            "refresh_jitter_pct must be between 0 and 100",
+        ),
+    ];
+
+    for (setting, expected) in cases {
+        let temp_dir = common::TempDir::new("ocsp-live-invalid");
+        let (cert_path, key_path) =
+            common::create_self_signed_cert(temp_dir.path(), "ocsp-live-invalid");
+        let ocsp_settings = if setting.starts_with("responder_url") {
+            format!("mode = \"live_fetch\"\n{setting}")
+        } else {
+            format!(
+                "mode = \"live_fetch\"\nresponder_url = \"https://ocsp.example.test/status\"\n{setting}"
+            )
+        };
+        let raw = common::minimal_config_toml(&cert_path, &key_path)
+            .replace("mode = \"disabled\"", &ocsp_settings);
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("config should be rejected");
+
+        assert!(
+            error.to_string().contains(expected),
+            "setting {setting} produced unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn compression_header_order_remains_stable() {
     let config = CompressionConfig {
         enabled: true,

@@ -21,10 +21,13 @@ use crate::config::{
 mod admin_quic;
 mod cert_metadata;
 mod client_auth;
+mod ocsp;
 mod resumption;
 pub(crate) use cert_metadata::client_certificate_metadata;
 
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
+pub use ocsp::OcspRuntimeStatus;
+pub(crate) use ocsp::OcspStapleRuntime;
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
 use resumption::{
   TlsServerResumptionKey, certificate_identity, client_auth_identity, configure_server_resumption,
@@ -73,13 +76,18 @@ pub fn build_server_config_with_resumption(
   listeners: &ListenerConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(downstream_crypto_provider(tls));
-  let mut certified_key = load_downstream_certified_key(tls, &provider)
-    .context("failed to create rustls certified key")?;
-  let server_identity = certificate_identity(&certified_key.cert);
-  certified_key.ocsp = load_ocsp_response(tls)?;
+  build_server_config_with_resumption_and_ocsp(tls, listeners, resumption_state, None)
+}
 
-  let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
+pub(crate) fn build_server_config_with_resumption_and_ocsp(
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  let provider = Arc::new(downstream_crypto_provider(tls));
+  let (server_identity, cert_resolver) =
+    ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
   let versions = tls_protocol_versions(tls.min_version, tls.max_version);
   let builder = ServerConfig::builder_with_provider(provider.clone())
     .with_protocol_versions(&versions)
@@ -88,7 +96,7 @@ pub fn build_server_config_with_resumption(
     Some(verifier) => builder.with_client_cert_verifier(verifier),
     None => builder.with_no_client_auth(),
   }
-  .with_cert_resolver(Arc::new(cert_resolver));
+  .with_cert_resolver(cert_resolver);
   configure_server_resumption(
     &mut server_config,
     &tls.resumption,
@@ -129,13 +137,25 @@ pub fn build_quic_server_config_with_resumption(
   quic_host_key_base_dir: Option<&std::path::Path>,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  let provider = Arc::new(downstream_crypto_provider(tls));
-  let mut certified_key = load_downstream_certified_key(tls, &provider)
-    .context("failed to create rustls certified key")?;
-  let server_identity = certificate_identity(&certified_key.cert);
-  certified_key.ocsp = load_ocsp_response(tls)?;
+  build_quic_server_config_with_resumption_and_ocsp(
+    tls,
+    quic,
+    quic_host_key_base_dir,
+    resumption_state,
+    None,
+  )
+}
 
-  let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
+pub(crate) fn build_quic_server_config_with_resumption_and_ocsp(
+  tls: &TlsConfig,
+  quic: &QuicConfig,
+  quic_host_key_base_dir: Option<&std::path::Path>,
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+) -> anyhow::Result<QuinnServerConfig> {
+  let provider = Arc::new(downstream_crypto_provider(tls));
+  let (server_identity, cert_resolver) =
+    ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
   let builder = ServerConfig::builder_with_provider(provider.clone())
     .with_protocol_versions(&[&rustls::version::TLS13])
     .context("failed to configure QUIC TLS versions")?;
@@ -143,7 +163,7 @@ pub fn build_quic_server_config_with_resumption(
     Some(verifier) => builder.with_client_cert_verifier(verifier),
     None => builder.with_no_client_auth(),
   }
-  .with_cert_resolver(Arc::new(cert_resolver));
+  .with_cert_resolver(cert_resolver);
   if quic.zero_rtt == QuicZeroRttMode::SafeMethods {
     server_config.max_early_data_size = u32::MAX;
   }

@@ -11,6 +11,7 @@ use crate::config::{MetricsConfig, MetricsDetail};
 use crate::tls::TlsServerSessionStorageStats;
 
 mod detail;
+mod ocsp;
 mod pool;
 mod sni_forward;
 
@@ -48,6 +49,7 @@ pub struct Metrics {
   mitigation_fail_closed_total: AtomicU64,
   mitigation_queue_depth: AtomicU64,
   mitigation_writer_healthy: AtomicU64,
+  ocsp: ocsp::OcspMetrics,
   sni_forward: sni_forward::SniForwardMetrics,
   pool: pool::PoolMetrics,
   detailed: Mutex<detail::DetailedMetrics>,
@@ -526,6 +528,7 @@ impl Metrics {
       "gauge",
       self.mitigation_writer_healthy.load(Ordering::Relaxed),
     );
+    self.append_ocsp_prometheus(&mut output);
     self.append_sni_forward_prometheus(&mut output);
     self.append_upstream_pool_prometheus(&mut output);
     append_metric(

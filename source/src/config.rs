@@ -1073,12 +1073,12 @@ impl Config {
         }
       }
       OcspMode::LiveFetch => {
-        return Err(anyhow!(
-          "tls.ocsp.mode = \"live_fetch\" is reserved but not implemented yet"
-        ));
+        if self.tls.ocsp.response_file.is_some() {
+          bail!("tls.ocsp.response_file cannot be used when tls.ocsp.mode = \"live_fetch\"");
+        }
       }
     }
-
+    self.tls.ocsp.validate_fetch_settings()?;
     crate::waf::validate_config(self)?;
 
     Ok(())
@@ -2310,7 +2310,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "socket_path",
       "token_env",
     ][..],
-    "tls.ocsp" => &["mode", "response_file"][..],
+    "tls.ocsp" => tls::OCSP_CONFIG_KEYS,
     "tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
     "quic" => &[
       "alt_svc",

@@ -122,6 +122,7 @@ pub struct TlsRuntimeSnapshot {
   pub downstream_private_key_configured: bool,
   pub ocsp_mode: String,
   pub ocsp_response_file_configured: bool,
+  pub ocsp: crate::tls::OcspRuntimeStatus,
   pub quic_host_key_configured: bool,
   pub remote_signer_enabled: bool,
   pub admin_tls_configured: bool,
@@ -363,6 +364,7 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
         .source_paths
         .downstream_tls_ocsp_response_file
         .is_some(),
+      ocsp: snapshot.ocsp_staple.status(),
       quic_host_key_configured: snapshot.config.source_paths.quic_host_key_file.is_some(),
       remote_signer_enabled: snapshot.config.tls.remote_signer.enabled,
       admin_tls_configured: snapshot.admin_tls_server_config.is_some(),
@@ -705,6 +707,7 @@ mod tests {
       .expect("runtime snapshot should serialize");
 
     assert!(value.contains("https://app.internal.example/private"));
+    assert!(value.contains("\"failure_policy\":\"drop_stale\""));
     assert!(!value.contains("user:secret"));
     assert!(!value.contains("token=secret"));
   }

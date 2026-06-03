@@ -151,6 +151,7 @@ impl ReloadManager {
       lifecycle: active.lifecycle.clone(),
       admin_audit: active.admin_audit.clone(),
       shared_state: active.shared_state.clone(),
+      ocsp_staple: active.ocsp_staple.clone(),
       tls_server_config: active.tls_server_config.clone(),
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config: active.quic_server_config.clone(),
@@ -211,19 +212,25 @@ impl ReloadManager {
 
     let mut config = active.config.clone();
     reload_downstream_tls_paths(&mut config)?;
-    let tls_server_config = tls::build_server_config_with_resumption(
+    let ocsp_staple =
+      tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
+        .await
+        .context("failed to build OCSP staple runtime")?;
+    let tls_server_config = tls::build_server_config_with_resumption_and_ocsp(
       &config.tls,
       &config.listeners,
       Some(&active.tls_resumption),
+      Some(&ocsp_staple),
     )
     .context("failed to rebuild downstream TLS config")?;
     let quic_server_config = if config.listeners.http3 {
       Some(
-        tls::build_quic_server_config_with_resumption(
+        tls::build_quic_server_config_with_resumption_and_ocsp(
           &config.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),
           Some(&active.tls_resumption),
+          Some(&ocsp_staple),
         )
         .context("failed to rebuild QUIC TLS config")?,
       )
@@ -273,6 +280,7 @@ impl ReloadManager {
       lifecycle: active.lifecycle.clone(),
       admin_audit: active.admin_audit.clone(),
       shared_state: active.shared_state.clone(),
+      ocsp_staple,
       tls_server_config,
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config,
@@ -364,6 +372,11 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     ocsp: crate::config::OcspConfig {
       mode: old_tls.ocsp.mode,
       response_file: ocsp,
+      responder_url: old_tls.ocsp.responder_url,
+      request_timeout_ms: old_tls.ocsp.request_timeout_ms,
+      max_response_bytes: old_tls.ocsp.max_response_bytes,
+      refresh_jitter_pct: old_tls.ocsp.refresh_jitter_pct,
+      clock_skew_seconds: old_tls.ocsp.clock_skew_seconds,
     },
   };
   config.quic = old_quic;

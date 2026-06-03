@@ -681,7 +681,124 @@
         "summary": "Fetch downstream TLS material status.",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "Downstream TLS material and bounded OCSP runtime status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "cert_chain",
+                    "private_key_configured",
+                    "remote_signer_enabled",
+                    "ocsp_mode",
+                    "ocsp_response_file",
+                    "ocsp",
+                    "etag"
+                  ],
+                  "properties": {
+                    "cert_chain": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "private_key_configured": {
+                      "type": "boolean"
+                    },
+                    "remote_signer_enabled": {
+                      "type": "boolean"
+                    },
+                    "ocsp_mode": {
+                      "type": "string"
+                    },
+                    "ocsp_response_file": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "ocsp": {
+                      "type": "object",
+                      "required": [
+                        "status",
+                        "staple_present",
+                        "this_update",
+                        "next_update",
+                        "last_fetch_at",
+                        "last_success_at",
+                        "last_error_code",
+                        "next_refresh_at",
+                        "failure_policy"
+                      ],
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "disabled",
+                            "static_file",
+                            "fresh",
+                            "degraded"
+                          ]
+                        },
+                        "staple_present": {
+                          "type": "boolean"
+                        },
+                        "this_update": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "next_update": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "last_fetch_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "last_success_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "last_error_code": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "next_refresh_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "failure_policy": {
+                          "type": "string",
+                          "enum": [
+                            "drop_stale"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "etag": {}
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -698,7 +815,7 @@
           "config"
         ],
         "operationId": "reloadDownstreamTls",
-        "summary": "Reload downstream TLS certificate, key, and static OCSP files.",
+        "summary": "Reload downstream TLS certificate, key, and OCSP runtime.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
