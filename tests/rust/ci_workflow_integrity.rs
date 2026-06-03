@@ -493,7 +493,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
 }
 
 #[test]
-fn riscv64_docker_image_artifact_is_scheduled_or_manual_only() {
+fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
     let workflow = workflow_text();
     let jobs = parse_jobs(&workflow);
     let qemu_job = jobs
@@ -501,7 +501,7 @@ fn riscv64_docker_image_artifact_is_scheduled_or_manual_only() {
         .expect("workflow should keep the RISC-V compile-check job");
     let riscv64_image_job = jobs
         .get("docker-alpine-musl-image-riscv64")
-        .expect("workflow should define the scheduled/manual RISC-V Docker image job");
+        .expect("workflow should define the RISC-V Docker image job");
     let other_start = workflow
         .find("  docker-alpine-musl-image-other:")
         .expect("workflow should define the non-AMD64 image job");
@@ -529,20 +529,20 @@ fn riscv64_docker_image_artifact_is_scheduled_or_manual_only() {
         "RISC-V Docker image builds should still wait for normal test gates"
     );
     assert!(
-        workflow.contains(
+        !workflow.contains(
             "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
         ),
-        "RISC-V Docker image artifact should run only on scheduled/manual workflows"
+        "RISC-V Docker image artifact should run on push, pull request, scheduled, and manual workflows"
     );
     assert!(
         !other_job.contains("arch: riscv64"),
-        "push/PR non-AMD64 Docker image matrix should not include the long RISC-V build"
+        "non-AMD64 Docker image matrix should keep the dedicated RISC-V build separate"
     );
     assert!(
         workflow.contains("\"linux/riscv64\"")
             && workflow.contains("\"riscv64\"")
             && workflow.contains("name: oxibelt-alpine-musl-riscv64-image"),
-        "scheduled/manual RISC-V Docker image job should build and upload the riscv64 artifact"
+        "RISC-V Docker image job should build and upload the riscv64 artifact"
     );
 }
 
