@@ -66,7 +66,7 @@ pub(super) fn build_upstream_uri(
   })?;
 
   let rendered_query = match rewrite.query.as_deref() {
-    Some(template) => Some(render_template(template, context).with_context(|| {
+    Some(template) => Some(render_query_template(template, context).with_context(|| {
       format!(
         "route {} actions.rewrite.query failed to render",
         route.name
@@ -166,6 +166,27 @@ fn render_template(
   template: &str,
   context: RouteActionRenderContext<'_>,
 ) -> anyhow::Result<String> {
+  render_template_with(template, context, RouteActionTemplateTarget::Raw)
+}
+
+fn render_query_template(
+  template: &str,
+  context: RouteActionRenderContext<'_>,
+) -> anyhow::Result<String> {
+  render_template_with(template, context, RouteActionTemplateTarget::QueryComponent)
+}
+
+#[derive(Clone, Copy)]
+enum RouteActionTemplateTarget {
+  Raw,
+  QueryComponent,
+}
+
+fn render_template_with(
+  template: &str,
+  context: RouteActionRenderContext<'_>,
+  target: RouteActionTemplateTarget,
+) -> anyhow::Result<String> {
   let mut rendered = String::with_capacity(template.len());
   let mut index = 0;
   let mut literal_start = 0;
@@ -179,7 +200,7 @@ fn render_template(
         };
         let close = index + 1 + close_offset;
         let token = &template[index + 1..close];
-        rendered.push_str(&render_template_token(token, context)?);
+        rendered.push_str(&render_template_token(token, context, target)?);
         index = close + 1;
         literal_start = index;
       }
@@ -199,15 +220,20 @@ fn render_template(
 fn render_template_token(
   token: &str,
   context: RouteActionRenderContext<'_>,
+  target: RouteActionTemplateTarget,
 ) -> anyhow::Result<String> {
   match token {
-    "scheme" => Ok(context.downstream_scheme.to_string()),
-    "host" => Ok(context.downstream_host.to_string()),
-    "path" => Ok(context.downstream_uri.path().to_string()),
-    "path_suffix" => {
-      Ok(path_suffix(context.route_prefix, context.downstream_uri.path()).to_string())
-    }
-    "query" => Ok(context.downstream_uri.query().unwrap_or("").to_string()),
+    "scheme" => Ok(render_token_value(context.downstream_scheme, target)),
+    "host" => Ok(render_token_value(context.downstream_host, target)),
+    "path" => Ok(render_token_value(context.downstream_uri.path(), target)),
+    "path_suffix" => Ok(render_token_value(
+      path_suffix(context.route_prefix, context.downstream_uri.path()),
+      target,
+    )),
+    "query" => Ok(render_token_value(
+      context.downstream_uri.query().unwrap_or(""),
+      target,
+    )),
     _ => {
       if let Some(name) = token.strip_prefix("query:") {
         let value = query_value(context.downstream_uri.query().unwrap_or(""), name);
@@ -224,6 +250,13 @@ fn render_template_token(
       }
       bail!("unsupported route action template token {{{token}}}");
     }
+  }
+}
+
+fn render_token_value(value: &str, target: RouteActionTemplateTarget) -> String {
+  match target {
+    RouteActionTemplateTarget::Raw => value.to_string(),
+    RouteActionTemplateTarget::QueryComponent => encode_query_component(value),
   }
 }
 
@@ -373,6 +406,34 @@ mod tests {
     assert_eq!(
       rewritten.to_string(),
       "http://upstream/edge?id=123&debug=a+b"
+    );
+  }
+
+  #[test]
+  fn rewrite_query_encodes_path_suffix_as_component() {
+    let origin = UpstreamUriParts::from_url(&url::Url::parse("http://upstream").unwrap()).unwrap();
+    let route = route_with_rewrite(Some("/edge"), Some("item={path_suffix}"));
+    let uri = Uri::from_static("/api/foo&admin=true");
+
+    let rewritten = build_upstream_uri(&origin, &route, context(&route, &[], &uri)).unwrap();
+
+    assert_eq!(
+      rewritten.to_string(),
+      "http://upstream/edge?item=%2Ffoo%26admin%3Dtrue"
+    );
+  }
+
+  #[test]
+  fn rewrite_query_encodes_original_query_as_component() {
+    let origin = UpstreamUriParts::from_url(&url::Url::parse("http://upstream").unwrap()).unwrap();
+    let route = route_with_rewrite(Some("/edge"), Some("original={query}"));
+    let uri = Uri::from_static("/api/orders?a=1&admin=true");
+
+    let rewritten = build_upstream_uri(&origin, &route, context(&route, &[], &uri)).unwrap();
+
+    assert_eq!(
+      rewritten.to_string(),
+      "http://upstream/edge?original=a%3D1%26admin%3Dtrue"
     );
   }
 
