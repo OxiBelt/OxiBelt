@@ -9,7 +9,7 @@ use crate::waf::WafEngine;
 
 mod matchers;
 mod plan;
-use self::matchers::CompiledRouteMatcher;
+use self::matchers::{CompiledRouteMatcher, RouteMatcherResult};
 pub use self::matchers::{RouteMatchContext, RouteRequestProtocol};
 use self::plan::route_execution_plan;
 pub use self::plan::{FastPathPlan, RouteExecutionPlan, RouteWafExecutionPlan, WafExecutionPlan};
@@ -89,6 +89,7 @@ pub struct ResolvedRoute<'a> {
   pub upstream: Option<&'a UpstreamConfig>,
   pub upstream_index: Option<usize>,
   pub execution_plan: &'a RouteExecutionPlan,
+  pub path_captures: Vec<String>,
 }
 
 impl RouteTable {
@@ -270,6 +271,7 @@ impl RouteTable {
       upstream,
       upstream_index,
       execution_plan: &entry.execution_plan,
+      path_captures: route_match.match_result.path_captures,
     }
   }
 
@@ -286,12 +288,13 @@ impl RouteTable {
     if !path_prefix_matches(entry.route.effective_path_prefix(), context.path) {
       return;
     }
-    if !entry.matcher.matches(context) {
+    let Some(match_result) = entry.matcher.match_request(context) else {
       return;
-    }
+    };
 
     let candidate = RouteMatch {
       route_index,
+      match_result,
       priority: entry.route.r#match.priority,
       host_score,
       path_len: entry.route.effective_path_prefix().len(),
@@ -306,9 +309,10 @@ impl RouteTable {
   }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct RouteMatch {
   route_index: usize,
+  match_result: RouteMatcherResult,
   priority: i32,
   host_score: usize,
   path_len: usize,
@@ -316,7 +320,7 @@ struct RouteMatch {
 }
 
 impl RouteMatch {
-  fn is_better_than(self, current: &Self) -> bool {
+  fn is_better_than(&self, current: &Self) -> bool {
     self.priority > current.priority
       || (self.priority == current.priority && self.host_score > current.host_score)
       || (self.priority == current.priority
@@ -416,6 +420,7 @@ mod tests {
       path_prefix: path_prefix.into(),
       r#match: Default::default(),
       replace_prefix_with: None,
+      actions: Default::default(),
       upstream: Some(upstream.into()),
       upstream_pool: None,
       static_root: None,
@@ -443,6 +448,7 @@ mod tests {
         path_prefix: "/".into(),
         r#match: Default::default(),
         replace_prefix_with: None,
+        actions: Default::default(),
         upstream: Some("wild".into()),
         upstream_pool: None,
         static_root: None,
@@ -465,6 +471,7 @@ mod tests {
         path_prefix: "/".into(),
         r#match: Default::default(),
         replace_prefix_with: None,
+        actions: Default::default(),
         upstream: Some("exact".into()),
         upstream_pool: None,
         static_root: None,
@@ -522,6 +529,7 @@ mod tests {
         path_prefix: "/".into(),
         r#match: Default::default(),
         replace_prefix_with: None,
+        actions: Default::default(),
         upstream: Some("root".into()),
         upstream_pool: None,
         static_root: None,
@@ -544,6 +552,7 @@ mod tests {
         path_prefix: "/api".into(),
         r#match: Default::default(),
         replace_prefix_with: None,
+        actions: Default::default(),
         upstream: Some("api".into()),
         upstream_pool: None,
         static_root: None,

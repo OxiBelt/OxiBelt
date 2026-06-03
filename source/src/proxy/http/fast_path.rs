@@ -22,9 +22,9 @@ use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
 use crate::proxy::http::response::{
   apply_security_headers, apply_sticky_cookie, text_response, waf_terminal_response,
 };
+use crate::proxy::http::route_actions::{self, RouteActionRenderContext};
 use crate::proxy::http::semantics::{self, configured_error_response, filter_trailers};
 use crate::proxy::http::upstream::select_request_upstream;
-use crate::proxy::http::uri::rewrite_uri;
 use crate::proxy::http::version::select_upstream_http_version;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
@@ -229,11 +229,16 @@ impl PlainProxyFastPath {
       warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
       return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
     };
-    let target_uri = match rewrite_uri(
+    let target_uri = match route_actions::build_upstream_uri(
       upstream_uri,
-      resolved.route.effective_path_prefix(),
-      resolved.route.replace_prefix_with.as_deref(),
-      &parts.uri,
+      resolved.route,
+      RouteActionRenderContext {
+        route_prefix: resolved.route.effective_path_prefix(),
+        path_captures: &resolved.path_captures,
+        downstream_scheme,
+        downstream_host: host,
+        downstream_uri: &parts.uri,
+      },
     ) {
       Ok(uri) => uri,
       Err(error) => {
@@ -299,8 +304,10 @@ impl PlainProxyFastPath {
         selection,
         resolved.route,
         original_uri,
+        &resolved.path_captures,
         client_addr,
         host,
+        downstream_scheme,
         pool_retry_cookie.as_ref(),
         &request_waf,
         timeouts,

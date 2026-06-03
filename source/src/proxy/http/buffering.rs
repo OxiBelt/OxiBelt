@@ -648,6 +648,7 @@ private_key = "/tmp/key.pem"
       path_prefix: "/".to_string(),
       r#match: Default::default(),
       replace_prefix_with: None,
+      actions: Default::default(),
       upstream: Some("app".to_string()),
       upstream_pool: None,
       static_root: None,

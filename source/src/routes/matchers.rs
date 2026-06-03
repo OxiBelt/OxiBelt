@@ -28,6 +28,11 @@ pub(super) struct CompiledRouteMatcher {
   specificity: usize,
 }
 
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub(super) struct RouteMatcherResult {
+  pub(super) path_captures: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum RouteRequestProtocol {
   Http1,
@@ -189,27 +194,27 @@ impl CompiledRouteMatcher {
     }
   }
 
-  pub(super) fn matches(&self, context: RouteMatchContext<'_>) -> bool {
+  pub(super) fn match_request(&self, context: RouteMatchContext<'_>) -> Option<RouteMatcherResult> {
     if !self.valid {
-      return false;
+      return None;
     }
     if !self.methods.is_empty()
       && !context
         .method
         .is_some_and(|method| self.methods.iter().any(|candidate| candidate == method))
     {
-      return false;
+      return None;
     }
     if !self.headers.is_empty() {
       let Some(headers) = context.headers else {
-        return false;
+        return None;
       };
       if !self
         .headers
         .iter()
         .all(|matcher| matcher.matches_header(headers))
       {
-        return false;
+        return None;
       }
     }
     if !self.queries.is_empty() {
@@ -219,25 +224,33 @@ impl CompiledRouteMatcher {
         .iter()
         .all(|matcher| matcher.matches_query(query))
       {
-        return false;
+        return None;
       }
     }
     if let Some(exact) = &self.path_exact
       && context.path != exact
     {
-      return false;
+      return None;
     }
-    if let Some(regex) = &self.path_regex
-      && !regex.is_match(context.path)
-    {
-      return false;
-    }
+    let path_captures = if let Some(regex) = &self.path_regex {
+      let captures = regex.captures(context.path)?;
+      captures
+        .iter()
+        .map(|capture| {
+          capture
+            .map(|item| item.as_str().to_string())
+            .unwrap_or_default()
+        })
+        .collect()
+    } else {
+      Vec::new()
+    };
     if !self.source_cidrs.is_empty()
       && !context
         .source_ip
         .is_some_and(|ip| self.source_cidrs.iter().any(|cidr| cidr.contains(ip)))
     {
-      return false;
+      return None;
     }
     if !self.protocols.is_empty()
       && !context.protocol.is_some_and(|protocol| {
@@ -247,9 +260,12 @@ impl CompiledRouteMatcher {
           .any(|matcher| matcher.matches(protocol))
       })
     {
-      return false;
+      return None;
     }
-    self.client_cert.matches(context.tls, context.protocol)
+    if !self.client_cert.matches(context.tls, context.protocol) {
+      return None;
+    }
+    Some(RouteMatcherResult { path_captures })
   }
 
   pub(super) fn specificity(&self) -> usize {

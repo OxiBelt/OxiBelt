@@ -5611,6 +5611,30 @@ fn config_load_rejects_unknown_fields_by_default() {
 }
 
 #[test]
+fn config_load_rejects_unknown_route_action_fields_by_default() {
+    let temp_dir = common::TempDir::new("strict-route-action-unknown");
+    let config_path = write_loadable_config(&temp_dir, "strict-route-action-unknown", |raw| {
+        raw.replace(
+            "upstream = \"app\"",
+            r#"upstream = "app"
+
+[routes.actions.rewrite]
+path = "/edge{path_suffix}"
+unexpected = true"#,
+        )
+    });
+
+    let error = Config::load(&config_path).expect_err("unknown route action field should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("routes.actions.rewrite.unexpected"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
 fn config_load_accepts_quic_endpoint_transport_sections() {
     let temp_dir = common::TempDir::new("strict-quic-endpoint-transport");
     let config_path = write_loadable_config(&temp_dir, "strict-quic-endpoint-transport", |raw| {
@@ -7212,6 +7236,203 @@ fn route_path_values_reject_encoded_dot_and_slash_separators() {
 }
 
 #[test]
+fn route_actions_parse_valid_rewrite_and_redirect_blocks() {
+    let temp_dir = common::TempDir::new("route-actions-valid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-actions-valid");
+
+    let rewrite_raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        r#"upstream = "app"
+
+[routes.match.path]
+regex = "^/items/([0-9]+)$"
+
+[routes.actions.rewrite]
+path = "/edge{path_suffix}"
+query = "id={capture:1}&debug={query:debug}""#,
+    );
+    let rewrite_config: Config = toml::from_str(&rewrite_raw).expect("config should parse");
+    rewrite_config
+        .validate()
+        .expect("rewrite action should validate");
+    let rewrite = rewrite_config.routes[0]
+        .actions
+        .rewrite
+        .as_ref()
+        .expect("rewrite action should parse");
+    assert_eq!(rewrite.path.as_deref(), Some("/edge{path_suffix}"));
+    assert_eq!(
+        rewrite.query.as_deref(),
+        Some("id={capture:1}&debug={query:debug}")
+    );
+
+    let redirect_raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        r#"[routes.actions.redirect]
+status = 308
+location_template = "/new{path_suffix}?{query}""#,
+    );
+    let redirect_config: Config = toml::from_str(&redirect_raw).expect("config should parse");
+    redirect_config
+        .validate()
+        .expect("redirect action should validate");
+    let redirect = redirect_config.routes[0]
+        .actions
+        .redirect
+        .as_ref()
+        .expect("redirect action should parse");
+    assert_eq!(redirect.status, Some(308));
+    assert_eq!(
+        redirect.location_template.as_deref(),
+        Some("/new{path_suffix}?{query}")
+    );
+}
+
+#[test]
+fn route_actions_reject_invalid_shapes_and_combinations() {
+    let temp_dir = common::TempDir::new("route-actions-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-actions-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (raw, expected) in [
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.actions.rewrite]"#,
+            ),
+            "actions.rewrite must set path or query",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+replace_prefix_with = "/edge"
+
+[routes.actions.rewrite]
+path = "/edge{path_suffix}""#,
+            ),
+            "cannot set replace_prefix_with when actions.rewrite is configured",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"[routes.actions.redirect]
+status = 308
+location_template = "/new{path_suffix}"
+
+[routes.actions.rewrite]
+path = "/edge{path_suffix}""#,
+            ),
+            "cannot configure both actions.rewrite and actions.redirect",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.actions.redirect]
+status = 302
+location_template = "/new{path_suffix}""#,
+            ),
+            "must set exactly one of upstream, upstream_pool, static_root, or actions.redirect",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"[routes.actions.redirect]
+status = 305
+location_template = "/new{path_suffix}""#,
+            ),
+            "must be one of 301, 302, 303, 307, or 308",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"[routes.actions.redirect]
+status = 308
+location_template = "/new\rbad""#,
+            ),
+            "must not contain unsafe characters",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"[routes.actions.redirect]
+status = 308
+location_template = "https://example.com/new""#,
+            ),
+            "must render to an origin-relative location",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.actions.rewrite]
+path = "//edge""#,
+            ),
+            "must start with one '/'",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.actions.rewrite]
+path = "/edge%2fadmin""#,
+            ),
+            "must not contain encoded dot or slash separators",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.actions.rewrite]
+path = "/edge{capture:1}""#,
+            ),
+            "cannot reference captures without match.path.regex",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.match.path]
+regex = "^/items/([0-9]+)$"
+
+[routes.actions.rewrite]
+path = "/edge{capture:2}""#,
+            ),
+            "references capture 2",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.actions.rewrite]
+path = "/edge{unknown}""#,
+            ),
+            "unsupported template token",
+        ),
+    ] {
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("route action config should be rejected");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
 fn route_match_config_parses_and_validates() {
     let temp_dir = common::TempDir::new("route-match-parse");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "route-match");
@@ -7548,7 +7769,7 @@ fn static_route_rejects_multiple_targets() {
     assert!(
         error
             .to_string()
-            .contains("exactly one of upstream, upstream_pool, or static_root"),
+            .contains("exactly one of upstream, upstream_pool, static_root, or actions.redirect"),
         "unexpected error: {error}"
     );
 }

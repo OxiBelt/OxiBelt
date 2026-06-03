@@ -26,7 +26,8 @@ use super::headers::{
   strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
 use super::response::{text_response, waf_terminal_response};
-use super::uri::{rewrite_uri, validate_downstream_path};
+use super::route_actions::{self, RouteActionRenderContext};
+use super::uri::validate_downstream_path;
 use super::version::select_upstream_http_version;
 use super::{EffectiveTimeouts, tags_ref};
 
@@ -184,6 +185,27 @@ pub(crate) async fn prepare_webtransport(
           dynamic_challenge_response_mutations.extend(decision.response_header_mutations);
         }
       }
+    }
+  }
+
+  match route_actions::redirect_response(
+    resolved.route,
+    RouteActionRenderContext {
+      route_prefix: resolved.route.effective_path_prefix(),
+      path_captures: &resolved.path_captures,
+      downstream_scheme: "https",
+      downstream_host: &host,
+      downstream_uri: &request_uri,
+    },
+  ) {
+    Ok(Some(response)) => return Err(Box::new(response)),
+    Ok(None) => {}
+    Err(error) => {
+      warn!(error = %error, route = %resolved.route.name, "failed to build route redirect response");
+      return Err(Box::new(text_response(
+        StatusCode::BAD_REQUEST,
+        "invalid route redirect",
+      )));
     }
   }
 
@@ -377,11 +399,16 @@ pub(crate) async fn prepare_webtransport(
       "upstream URI is not configured",
     )));
   };
-  let target_uri = rewrite_uri(
+  let target_uri = route_actions::build_upstream_uri(
     upstream_uri,
-    resolved.route.effective_path_prefix(),
-    resolved.route.replace_prefix_with.as_deref(),
-    request.uri(),
+    resolved.route,
+    RouteActionRenderContext {
+      route_prefix: resolved.route.effective_path_prefix(),
+      path_captures: &resolved.path_captures,
+      downstream_scheme: "https",
+      downstream_host: &host,
+      downstream_uri: request.uri(),
+    },
   )
   .map_err(|error| {
     warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream WebTransport URI");

@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::waf::RouteWafConfig;
 
+use super::route_actions::RouteActionsConfig;
 use super::{
   BufferingMode, HttpVersion, RetryCondition, RouteIpmConfig, default_hosts, default_path_prefix,
 };
@@ -24,6 +25,8 @@ pub struct RouteConfig {
   pub r#match: RouteMatchConfig,
   #[serde(default)]
   pub replace_prefix_with: Option<String>,
+  #[serde(default)]
+  pub actions: RouteActionsConfig,
   #[serde(default)]
   pub upstream: Option<String>,
   #[serde(default)]

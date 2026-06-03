@@ -32,6 +32,8 @@ pub struct RouteFeaturePlan {
   pub generic_http_upgrade: bool,
   pub grpc_web: bool,
   pub ipm: bool,
+  pub redirect_action: bool,
+  pub rewrite_action: bool,
   pub static_files: bool,
   pub upstream_pool: bool,
 }
@@ -101,6 +103,7 @@ pub(super) fn route_execution_plan(
   let can_static_sendfile =
     can_static_sendfile_fast_path(config, route) && waf.static_sendfile_fast_path_safe;
   let can_static_small_object = route.static_root.is_some()
+    && !route.actions.has_actions()
     && route
       .compression
       .as_deref()
@@ -129,6 +132,8 @@ fn route_feature_plan(config: &Config, route: &RouteConfig) -> RouteFeaturePlan 
     generic_http_upgrade: route.generic_http_upgrade,
     grpc_web: route.grpc_web,
     ipm: route.ipm.enabled,
+    redirect_action: route.actions.redirect.is_some(),
+    rewrite_action: route.actions.rewrite.is_some(),
     static_files: route.static_root.is_some(),
     upstream_pool: route.upstream_pool.is_some(),
   }
@@ -140,6 +145,7 @@ fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
     && route.external_auth.is_none()
     && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
     && route.static_root.is_none()
+    && !route.actions.has_actions()
     && !route.grpc_web
     && !route.generic_http_upgrade
     && !route.connect_tunneling
@@ -157,6 +163,7 @@ fn can_static_sendfile_fast_path(config: &Config, route: &RouteConfig) -> bool {
     && route.external_auth.is_none()
     && !config.compression.enabled
     && route.static_root.is_some()
+    && !route.actions.has_actions()
     && route
       .compression
       .as_deref()
@@ -253,6 +260,44 @@ sendfile = "auto"
     assert_eq!(plan.features, RouteFeaturePlan::default());
     assert_eq!(plan.waf.request, WafExecutionPlan::None);
     assert_eq!(plan.waf.response, WafExecutionPlan::None);
+  }
+
+  #[test]
+  fn rewrite_action_disables_plain_proxy_fast_path_plan() {
+    let plan = execution_plan(&minimal_proxy_config(
+      r#"
+
+[routes.actions.rewrite]
+path = "/edge{path_suffix}"
+"#,
+    ));
+
+    assert!(plan.features.rewrite_action);
+    assert!(!plan.fast_path.plain_proxy_h1);
+    assert!(!plan.fast_path.plain_proxy_h2);
+    assert!(!plan.fast_path.plain_proxy_h3);
+  }
+
+  #[test]
+  fn redirect_action_is_tracked_as_terminal_route_feature() {
+    let temp_dir = common::TempDir::new("route-plan-redirect-action");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "route-plan-redirect-action");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+      "path_prefix = \"/\"\nupstream = \"app\"",
+      r#"path_prefix = "/"
+
+[routes.actions.redirect]
+status = 308
+location_template = "/new{path_suffix}""#,
+    );
+
+    let plan = execution_plan(&parse_config(&raw));
+
+    assert!(plan.features.redirect_action);
+    assert!(!plan.fast_path.plain_proxy_h1);
+    assert!(!plan.fast_path.plain_proxy_h2);
+    assert!(!plan.fast_path.plain_proxy_h3);
   }
 
   #[test]

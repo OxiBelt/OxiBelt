@@ -32,6 +32,10 @@ impl UpstreamUriParts {
       base_path,
     })
   }
+
+  pub(crate) fn base_path(&self) -> &str {
+    &self.base_path
+  }
 }
 
 pub(crate) fn validate_downstream_path(path: &str) -> anyhow::Result<()> {
@@ -109,7 +113,10 @@ pub(crate) fn rewrite_uri(
   build_uri(origin, path_and_query)
 }
 
-fn build_uri(origin: &UpstreamUriParts, path_and_query: PathAndQuery) -> anyhow::Result<Uri> {
+pub(crate) fn build_uri(
+  origin: &UpstreamUriParts,
+  path_and_query: PathAndQuery,
+) -> anyhow::Result<Uri> {
   let mut parts = http::uri::Parts::default();
   parts.scheme = Some(origin.scheme.clone());
   parts.authority = Some(origin.authority.clone());
@@ -117,7 +124,7 @@ fn build_uri(origin: &UpstreamUriParts, path_and_query: PathAndQuery) -> anyhow:
   Uri::from_parts(parts).map_err(|error| anyhow::anyhow!("failed to build rewritten URI: {error}"))
 }
 
-fn join_paths(base: &str, suffix: &str) -> String {
+pub(crate) fn join_paths(base: &str, suffix: &str) -> String {
   let normalized_base = if base.is_empty() { "/" } else { base };
   let left = normalized_base.trim_end_matches('/');
   let right = suffix.trim_start_matches('/');

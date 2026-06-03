@@ -12,8 +12,8 @@ use crate::pools::PoolSelection;
 use crate::state::{AppSnapshot, UpstreamClientRef};
 
 use super::body::ProxyBody;
+use super::route_actions::{self, RouteActionRenderContext};
 use super::upstream::select_pool_upstream_excluding;
-use super::uri::rewrite_uri;
 use super::version::{select_upstream_http_version, upstream_request_version};
 use super::{EffectiveTimeouts, UpstreamFirstByteTimeout, full_body, is_idempotent, parts_clone};
 
@@ -286,8 +286,10 @@ pub(super) async fn send_pool_with_retry(
   initial_pool_selection: PoolSelection,
   route: &RouteConfig,
   original_uri: &http::Uri,
+  path_captures: &[String],
   client_addr: std::net::SocketAddr,
   downstream_host: &str,
+  downstream_scheme: &str,
   cookie_header: Option<&HeaderValue>,
   request_waf: &crate::waf::RequestWafDecision,
   timeouts: EffectiveTimeouts,
@@ -395,11 +397,16 @@ pub(super) async fn send_pool_with_retry(
       );
       continue;
     };
-    let target_uri = rewrite_uri(
+    let target_uri = route_actions::build_upstream_uri(
       upstream_uri,
-      route.effective_path_prefix(),
-      route.replace_prefix_with.as_deref(),
-      original_uri,
+      route,
+      RouteActionRenderContext {
+        route_prefix: route.effective_path_prefix(),
+        path_captures,
+        downstream_scheme,
+        downstream_host,
+        downstream_uri: original_uri,
+      },
     )?;
     let Some(client) = state.clients.for_upstream_index(
       current_upstream_index,

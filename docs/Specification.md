@@ -109,12 +109,14 @@ Person proof challenges in OxiRule are anti-automation controls. They are not au
 
 ## Routing and Upstreams
 
-Routes match by host and path prefix. Wildcard host routes such as `*.example.com` require at least one non-empty request-host label before the suffix. A route may rewrite the matched path prefix with `replace_prefix_with` before forwarding.
+Routes match by host and path prefix. Wildcard host routes such as `*.example.com` require at least one non-empty request-host label before the suffix. A route may rewrite the matched path prefix with legacy `replace_prefix_with`, or use `actions.rewrite` to render a bounded upstream path/query template before forwarding. A route may also use terminal `actions.redirect` with an origin-relative `Location`.
 
 Targets may be:
 
 - A named `[[upstreams]]` entry.
 - A named `[[upstream_pools]]` entry.
+- A `static_root` directory.
+- A terminal `actions.redirect` response.
 
 Routes may reference an `external_auth` provider. OxiBelt runs that authorization check after route-level rate limits and dynamic policy and before WAF/body handling or upstream selection. Client-supplied identity headers are stripped before trusted identity headers are injected from Authelia forward-auth responses, OAuth2 token introspection data, or OIDC UserInfo claims. Routes with external auth are excluded from plain proxy and static sendfile fast paths.
 

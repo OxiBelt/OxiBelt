@@ -49,6 +49,7 @@ pub(crate) mod request;
 pub(crate) mod request_framing;
 pub(crate) mod response;
 mod retry;
+mod route_actions;
 pub(crate) mod semantics;
 pub(crate) mod static_files;
 pub(crate) mod upstream;
@@ -86,7 +87,7 @@ use self::response::{
 use self::retry::{EffectiveRetryPolicy, send_one_shot, send_pool_with_retry, send_with_retry};
 use self::semantics::{configured_error_response, filter_trailers};
 use self::upstream::{UpstreamSelectionError, select_request_upstream};
-use self::uri::{rewrite_uri, validate_downstream_path};
+use self::uri::validate_downstream_path;
 use self::version::select_upstream_http_version;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
 
@@ -735,6 +736,16 @@ where
     .await;
   }
 
+  match route_actions::resolved_redirect_response(&resolved, downstream_scheme, &host, &request_uri)
+  {
+    Ok(Some(response)) => return response,
+    Ok(None) => {}
+    Err(error) => {
+      warn!(error = %error, route = %resolved.route.name, "failed to build route redirect response");
+      return text_response(StatusCode::BAD_REQUEST, "invalid route redirect");
+    }
+  }
+
   if resolved.execution_plan.features.external_auth
     && let Some(provider) = resolved.route.external_auth.as_deref()
   {
@@ -1053,11 +1064,12 @@ where
     warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
     return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
   };
-  let target_uri = match rewrite_uri(
+  let target_uri = match route_actions::build_resolved_upstream_uri(
     upstream_uri,
-    resolved.route.effective_path_prefix(),
-    resolved.route.replace_prefix_with.as_deref(),
-    request.uri(),
+    &resolved,
+    downstream_scheme,
+    &host,
+    &request_uri,
   ) {
     Ok(uri) => uri,
     Err(error) => {
@@ -1426,8 +1438,10 @@ where
           selection,
           resolved.route,
           &request_uri,
+          &resolved.path_captures,
           client_addr,
           &host,
+          downstream_scheme,
           pool_retry_cookie.as_ref(),
           &request_waf,
           timeouts,
@@ -2301,10 +2315,11 @@ async fn handle_upgrade_request(
       "upstream URI is not configured",
     ));
   };
-  let target_uri = match rewrite_uri(
+  let target_uri = match route_actions::build_resolved_upstream_uri(
     upstream_uri,
-    resolved.route.effective_path_prefix(),
-    resolved.route.replace_prefix_with.as_deref(),
+    resolved,
+    downstream_scheme,
+    downstream_host,
     request.uri(),
   ) {
     Ok(uri) => uri,

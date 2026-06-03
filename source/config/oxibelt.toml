@@ -1060,6 +1060,14 @@ grpc_web = false
 # name = "debug"
 # present = true
 #
+# [routes.actions.rewrite]
+# path = "/edge{path_suffix}"
+# query = "id={capture:1}&debug={query:debug}"
+#
+# [routes.actions.redirect]
+# status = 308
+# location_template = "/new{path_suffix}?{query}"
+#
 # [routes.match.tls.client_cert]
 # present = true
 #

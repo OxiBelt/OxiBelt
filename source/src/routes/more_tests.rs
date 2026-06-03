@@ -37,6 +37,7 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     path_prefix: path_prefix.into(),
     r#match: Default::default(),
     replace_prefix_with: None,
+    actions: Default::default(),
     upstream: Some(upstream.into()),
     upstream_pool: None,
     static_root: None,
@@ -125,6 +126,22 @@ fn extended_matchers_filter_candidates() {
     )
     .unwrap();
   assert_eq!(resolved_without_cert.route.name, "fallback");
+}
+
+#[test]
+fn regex_path_match_exposes_bounded_captures() {
+  let mut matched = route("matched", &["api.example.com"], "/api", "matched");
+  matched.r#match.path.regex = Some("^/api/items/([0-9]+)$".to_string());
+  let routes = vec![route("fallback", &["*"], "/", "fallback"), matched];
+  let upstreams = vec![upstream("fallback"), upstream("matched")];
+  let table = RouteTable::from_routes_for_tests(routes);
+
+  let resolved = table
+    .resolve("api.example.com", "/api/items/42", &upstreams)
+    .unwrap();
+
+  assert_eq!(resolved.route.name, "matched");
+  assert_eq!(resolved.path_captures, vec!["/api/items/42", "42"]);
 }
 
 #[test]

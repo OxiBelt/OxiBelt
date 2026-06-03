@@ -26,6 +26,7 @@ mod loader;
 mod quic;
 mod retry;
 mod route;
+mod route_actions;
 mod sni_forward;
 mod stream;
 mod telemetry;
@@ -51,6 +52,7 @@ pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
 pub use retry::*;
 pub use route::*;
+pub use route_actions::*;
 pub use sni_forward::*;
 pub use stream::*;
 pub use telemetry::*;
@@ -890,32 +892,40 @@ impl Config {
       if let Some(replacement) = &route.replace_prefix_with {
         route::validate_route_path_value(&route.name, "replace_prefix_with", replacement)?;
       }
+      route_actions::validate_route_actions_config(route)?;
       let target_count = usize::from(route.upstream.is_some())
         + usize::from(route.upstream_pool.is_some())
-        + usize::from(route.static_root.is_some());
+        + usize::from(route.static_root.is_some())
+        + usize::from(route.actions.redirect.is_some());
       if target_count != 1 {
         bail!(
-          "route {} must set exactly one of upstream, upstream_pool, or static_root",
+          "route {} must set exactly one of upstream, upstream_pool, static_root, or actions.redirect",
           route.name
         );
       }
-      match (&route.upstream, &route.upstream_pool, &route.static_root) {
-        (Some(upstream), None, None) if !upstream_names.contains(upstream) => {
+      route_actions::validate_route_action_target_compatibility(route)?;
+      match (
+        &route.upstream,
+        &route.upstream_pool,
+        &route.static_root,
+        &route.actions.redirect,
+      ) {
+        (Some(upstream), None, None, None) if !upstream_names.contains(upstream) => {
           bail!(
             "route {} references unknown upstream {}",
             route.name,
             upstream
           );
         }
-        (None, Some(pool), None) if !pool_names.contains(pool) => {
+        (None, Some(pool), None, None) if !pool_names.contains(pool) => {
           bail!(
             "route {} references unknown upstream_pool {}",
             route.name,
             pool
           );
         }
-        (Some(_), None, None) | (None, Some(_), None) => {}
-        (None, None, Some(static_root)) => {
+        (Some(_), None, None, None) | (None, Some(_), None, None) => {}
+        (None, None, Some(static_root), None) => {
           crate::proxy::http::static_files::validate_static_root(static_root)
             .with_context(|| format!("route {} static_root is invalid", route.name))?;
           if route.replace_prefix_with.is_some() {
@@ -943,6 +953,7 @@ impl Config {
             );
           }
         }
+        (None, None, None, Some(_)) => {}
         _ => {}
       }
       if let Some(cache) = &route.cache
@@ -2109,6 +2120,7 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.path_prefix == right.path_prefix
         && left.r#match == right.r#match
         && left.replace_prefix_with == right.replace_prefix_with
+        && left.actions == right.actions
         && left.upstream == right.upstream
         && left.upstream_pool == right.upstream_pool
         && left.static_root == right.static_root
@@ -2908,6 +2920,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "upstream_pools.servers" => &["backup", "id", "max_conns", "origin", "state", "weight"][..],
     "routes" => &[
+      "actions",
       "buffering",
       "cache",
       "compression",
@@ -2929,6 +2942,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "timeouts",
       "waf",
     ][..],
+    "routes.actions" => &["redirect", "rewrite"][..],
+    "routes.actions.redirect" => &["location_template", "status"][..],
+    "routes.actions.rewrite" => &["path", "query"][..],
     "routes.match" => &[
       "headers",
       "methods",

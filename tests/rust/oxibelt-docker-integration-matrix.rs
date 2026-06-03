@@ -5507,7 +5507,18 @@ run_case_checks() {
             ExpectStart::Failure,
             Needs::default(),
             "",
-            Some("must set exactly one of upstream, upstream_pool, or static_root"),
+            Some(
+                "must set exactly one of upstream, upstream_pool, static_root, or actions.redirect",
+            ),
+        ),
+        docker_case(
+            "config-invalid",
+            "route-action-invalid",
+            "route rewrite and redirect actions reject invalid combinations",
+            ExpectStart::Failure,
+            Needs::default(),
+            "",
+            Some("cannot set replace_prefix_with when actions.rewrite is configured"),
         ),
         docker_case(
             "config-invalid",
@@ -5592,6 +5603,39 @@ run_case_checks() {
   local response
   response="$(client_request "example.test" "/app/v1/items?x=1" 200)"
   assert_body_jq "${response}" '.path == "/origin/edge/v1/items?x=1"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "rewrite-action",
+            "route rewrite action rewrites upstream path and query",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/item/42?debug=true" 200)"
+  assert_body_jq "${response}" '.path == "/origin/edge/item/42?id=42&debug=true"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-routing",
+            "redirect-action",
+            "route redirect action returns terminal Location",
+            ExpectStart::Success,
+            Needs::default(),
+            r#"
+run_case_checks() {
+  local response
+  response="$(client_request "example.test" "/app/old?debug=true" 308)"
+  assert_response_jq "${response}" '.headers.location == "/new/old?debug=true"'
 }
 "#,
             None,
