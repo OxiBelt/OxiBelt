@@ -29,6 +29,7 @@ mod entry;
 mod fill;
 mod index;
 mod range;
+mod revalidation;
 pub mod signing;
 mod streaming;
 
@@ -813,19 +814,7 @@ impl ResponseCache {
     cached_entry: &CacheEntry,
     not_modified_headers: &HeaderMap,
   ) {
-    let mut headers = cached_entry.headers.clone();
-    for (name, value) in not_modified_headers {
-      if matches!(
-        name.as_str().to_ascii_lowercase().as_str(),
-        "cache-control" | "expires" | "etag" | "last-modified" | "vary"
-      ) {
-        headers.insert(name.clone(), value.clone());
-      }
-    }
-    self.insert(
-      ctx,
-      CacheEntry::memory(cached_entry.status, headers, cached_entry.body.clone()),
-    );
+    revalidation::update_from_not_modified(self, ctx, cached_entry, not_modified_headers);
   }
 
   pub fn response_head_decision(

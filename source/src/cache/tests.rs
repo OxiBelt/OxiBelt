@@ -7,6 +7,8 @@ mod core;
 mod fill;
 #[path = "tests_index.rs"]
 mod index;
+#[path = "tests_revalidation.rs"]
+mod revalidation;
 #[path = "tests_semantics.rs"]
 mod semantics;
 #[path = "tests_shared.rs"]
