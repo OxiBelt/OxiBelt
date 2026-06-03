@@ -515,7 +515,6 @@ jobs:
 
   docker-alpine-musl-image-riscv64:
     name: Docker image (Alpine musl, riscv64)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
