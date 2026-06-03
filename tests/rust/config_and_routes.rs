@@ -7564,6 +7564,49 @@ upstream = "other"
 }
 
 #[test]
+fn routes_allow_distinguishable_equal_specificity_ties() {
+    let temp_dir = common::TempDir::new("route-match-distinguishable-tie");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-match-distinguishable-tie");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[[upstreams]]
+name = "other"
+origin = "https://other.internal"
+
+[[routes]]
+name = "header-tie"
+hosts = ["example.com"]
+path_prefix = "/same"
+upstream = "app"
+
+[routes.match]
+
+[[routes.match.headers]]
+name = "X-Tie"
+exact = "yes"
+
+[[routes]]
+name = "query-tie"
+hosts = ["example.com"]
+path_prefix = "/same"
+upstream = "other"
+
+[routes.match]
+
+[[routes.match.queries]]
+name = "tie"
+exact = "yes"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("distinguishable equal-specificity routes should validate");
+}
+
+#[test]
 fn routes_reject_empty_host_lists_and_duplicate_names() {
     let temp_dir = common::TempDir::new("route-identity-invalid");
     let (cert_path, key_path) =

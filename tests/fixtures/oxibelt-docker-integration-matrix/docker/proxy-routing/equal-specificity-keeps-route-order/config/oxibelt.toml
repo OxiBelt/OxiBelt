@@ -79,8 +79,20 @@ hosts = ["tie.example.test"]
 path_prefix = "/same"
 upstream = "http-upstream"
 
+[routes.match]
+
+[[routes.match.headers]]
+name = "X-Tie"
+exact = "yes"
+
 [[routes]]
 name = "second-tie"
 hosts = ["tie.example.test"]
 path_prefix = "/same"
 upstream = "alt-upstream"
+
+[routes.match]
+
+[[routes.match.queries]]
+name = "tie"
+exact = "yes"

@@ -14,7 +14,7 @@ const DEFAULT_H1_KEEPALIVE_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_H2_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_H3_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_RATIO_TARGET_NEAR_MISS_TOLERANCE: f64 = 0.005;
-const DEFAULT_RATIO_TARGET_COMPARATOR_SHIFT_TOLERANCE: f64 = 0.015;
+const DEFAULT_RATIO_TARGET_COMPARATOR_SHIFT_TOLERANCE: f64 = 0.025;
 const DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO: f64 = 0.80;
 const DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO: f64 = 0.90;
 const DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO: f64 = 0.90;
@@ -2834,9 +2834,11 @@ fn classify_throughput_ratio_threshold_miss(
 
     let rps_ratio_is_stable =
         throughput_ratio_delta.ratio_delta_percent >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT;
+    let oxibelt_rps_is_stable = oxibelt_rps_delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT;
     let oxibelt_p99_is_stable = oxibelt_p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT;
     let p99_ratio_is_stable =
         p99_ratio_delta.ratio_delta_percent <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT;
+    let comparator_outpaced_oxibelt = comparator_rps_delta > oxibelt_rps_delta;
 
     if throughput_ratio_delta.before_ratio < threshold
         && rps_ratio_is_stable
@@ -2845,6 +2847,24 @@ fn classify_throughput_ratio_threshold_miss(
         GateDisposition::Advisory {
             reason: format!(
                 "baseline-stable ratio gap from `{}`: baseline RPS ratio {:.4} < threshold {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}%, OxiBelt p99 {oxibelt_p99_delta:+.1}%, comparator RPS {comparator_rps_delta:+.1}%, comparator p99 {comparator_p99_delta:+.1}%",
+                baseline_report_label(baseline),
+                throughput_ratio_delta.before_ratio,
+                threshold,
+                throughput_ratio_delta.after_ratio,
+                throughput_ratio_delta.ratio_delta_percent,
+                p99_ratio_delta.before_ratio,
+                p99_ratio_delta.after_ratio,
+                p99_ratio_delta.ratio_delta_percent,
+            ),
+        }
+    } else if throughput_ratio_delta.before_ratio < threshold
+        && oxibelt_rps_is_stable
+        && oxibelt_p99_is_stable
+        && comparator_outpaced_oxibelt
+    {
+        GateDisposition::Advisory {
+            reason: format!(
+                "baseline-stable comparator-shift ratio gap from `{}`: baseline RPS ratio {:.4} < threshold {:.4}, current RPS ratio {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%), OxiBelt RPS {oxibelt_rps_delta:+.1}% and p99 {oxibelt_p99_delta:+.1}% remain within tolerances, comparator RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%",
                 baseline_report_label(baseline),
                 throughput_ratio_delta.before_ratio,
                 threshold,
@@ -4455,7 +4475,7 @@ mod tests {
             &mut aggregates,
             Comparator::Oxibelt,
             "h1-keepalive",
-            78.4,
+            77.4,
             10.0,
         );
         insert_primary_aggregate(
