@@ -124,10 +124,13 @@ Resource-specific Admin/IPM resources include:
   `simulation/current`
 
 Cache purge, key-explain, and warm operations check the effective cache policy
-and the normalized host. Tag purge without a host checks `host/*`. Dynamic
-policy create, apply, import, patch, and delete operations check the
-`source/<source>/name/<name>` target and, when present, the `route/<route>`
-target. Upstream server mutations check `<pool>/server/<server_id>`. IPM
+and the normalized host. Cache warm derives that policy from the same
+synthesized request context used for execution, including `Host`, trusted
+Real-IP, and scheme-derived TLS metadata. Tag purge without a host checks
+`host/*`. Dynamic policy create, apply, import, patch, and delete operations
+check the `source/<source>/name/<name>` target and, when present, the
+`route/<route>` target. Upstream server mutations check
+`<pool>/server/<server_id>`. IPM
 credential assignment checks both the credential and target principal; binding
 create checks the binding, target principal or group, and policy.
 `POST /admin/v1/ipm/simulate` uses the same `simulation/current` resource.

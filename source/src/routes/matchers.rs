@@ -213,9 +213,7 @@ impl CompiledRouteMatcher {
       }
     }
     if !self.queries.is_empty() {
-      let Some(query) = context.query else {
-        return false;
-      };
+      let query = context.query.unwrap_or("");
       if !self
         .queries
         .iter()
@@ -251,7 +249,7 @@ impl CompiledRouteMatcher {
     {
       return false;
     }
-    self.client_cert.matches(context.tls)
+    self.client_cert.matches(context.tls, context.protocol)
   }
 
   pub(super) fn specificity(&self) -> usize {
@@ -280,6 +278,9 @@ impl CompiledNamedValueMatcher {
     let Some(name) = &self.header_name else {
       return false;
     };
+    if let Some(present) = self.value.raw_presence_match() {
+      return headers.get_all(name).iter().next().is_some() == present;
+    }
     self.value.matches(
       headers
         .get_all(name)
@@ -345,6 +346,13 @@ impl CompiledValueMatcher {
       _ => saw_value && matched,
     }
   }
+
+  fn raw_presence_match(&self) -> Option<bool> {
+    match self {
+      Self::Present(present) => Some(*present),
+      _ => None,
+    }
+  }
 }
 
 impl CompiledClientCertMatcher {
@@ -356,11 +364,19 @@ impl CompiledClientCertMatcher {
       + usize::from(self.san_ip.is_some()) * 2
   }
 
-  fn matches(&self, tls: Option<&WafTlsMetadata>) -> bool {
+  fn matches(&self, tls: Option<&WafTlsMetadata>, protocol: Option<RouteRequestProtocol>) -> bool {
     if self.specificity() == 0 {
       return true;
     }
     let cert = tls.and_then(|tls| tls.client_certificate.as_ref());
+    if cert.is_none()
+      && matches!(
+        protocol,
+        Some(RouteRequestProtocol::Http3 | RouteRequestProtocol::Webtransport)
+      )
+    {
+      return false;
+    }
     if let Some(present) = self.present
       && (cert.is_some()) != present
     {

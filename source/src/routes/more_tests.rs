@@ -128,6 +128,176 @@ fn extended_matchers_filter_candidates() {
 }
 
 #[test]
+fn query_absence_matcher_accepts_missing_query_string() {
+  let mut absent = route("absent-query", &["example.com"], "/", "absent-query");
+  absent.r#match.queries.push(RouteNamedValueMatchConfig {
+    name: "debug".to_string(),
+    value: RouteValueMatchConfig {
+      present: Some(false),
+      ..RouteValueMatchConfig::default()
+    },
+  });
+  let routes = vec![route("fallback", &["example.com"], "/", "fallback"), absent];
+  let upstreams = vec![upstream("fallback"), upstream("absent-query")];
+  let table = RouteTable::from_routes_for_tests(routes);
+
+  let resolved = table
+    .resolve_normalized_host_with_context(
+      "example.com",
+      RouteMatchContext {
+        path: "/",
+        query: None,
+        ..RouteMatchContext::default()
+      },
+      &upstreams,
+    )
+    .unwrap();
+  assert_eq!(resolved.route.name, "absent-query");
+
+  let resolved = table
+    .resolve_normalized_host_with_context(
+      "example.com",
+      RouteMatchContext {
+        path: "/",
+        query: Some("debug=true"),
+        ..RouteMatchContext::default()
+      },
+      &upstreams,
+    )
+    .unwrap();
+  assert_eq!(resolved.route.name, "fallback");
+}
+
+#[test]
+fn header_presence_matcher_counts_raw_header_values() {
+  let mut present = route("present-header", &["example.com"], "/", "present-header");
+  present.r#match.headers.push(RouteNamedValueMatchConfig {
+    name: "x-route-flag".to_string(),
+    value: RouteValueMatchConfig {
+      present: Some(true),
+      ..RouteValueMatchConfig::default()
+    },
+  });
+  let routes = vec![
+    route("fallback", &["example.com"], "/", "fallback"),
+    present,
+  ];
+  let upstreams = vec![upstream("fallback"), upstream("present-header")];
+  let table = RouteTable::from_routes_for_tests(routes);
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    "x-route-flag",
+    HeaderValue::from_bytes(b"flag\xfa").expect("raw header value should be accepted"),
+  );
+
+  let resolved = table
+    .resolve_normalized_host_with_context(
+      "example.com",
+      RouteMatchContext {
+        path: "/",
+        headers: Some(&headers),
+        ..RouteMatchContext::default()
+      },
+      &upstreams,
+    )
+    .unwrap();
+  assert_eq!(resolved.route.name, "present-header");
+}
+
+#[test]
+fn header_absence_matcher_rejects_raw_header_values() {
+  let mut absent = route("absent-header", &["example.com"], "/", "absent-header");
+  absent.r#match.headers.push(RouteNamedValueMatchConfig {
+    name: "x-route-flag".to_string(),
+    value: RouteValueMatchConfig {
+      present: Some(false),
+      ..RouteValueMatchConfig::default()
+    },
+  });
+  let routes = vec![route("fallback", &["example.com"], "/", "fallback"), absent];
+  let upstreams = vec![upstream("fallback"), upstream("absent-header")];
+  let table = RouteTable::from_routes_for_tests(routes);
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    "x-route-flag",
+    HeaderValue::from_bytes(b"flag\xfa").expect("raw header value should be accepted"),
+  );
+
+  let resolved = table
+    .resolve_normalized_host_with_context(
+      "example.com",
+      RouteMatchContext {
+        path: "/",
+        headers: Some(&headers),
+        ..RouteMatchContext::default()
+      },
+      &upstreams,
+    )
+    .unwrap();
+  assert_eq!(resolved.route.name, "fallback");
+
+  let empty_headers = HeaderMap::new();
+  let resolved = table
+    .resolve_normalized_host_with_context(
+      "example.com",
+      RouteMatchContext {
+        path: "/",
+        headers: Some(&empty_headers),
+        ..RouteMatchContext::default()
+      },
+      &upstreams,
+    )
+    .unwrap();
+  assert_eq!(resolved.route.name, "absent-header");
+}
+
+#[test]
+fn client_cert_absence_fails_closed_when_http3_metadata_is_unavailable() {
+  let mut no_cert = route("no-cert", &["example.com"], "/", "no-cert");
+  no_cert.r#match.tls.client_cert.present = Some(false);
+  let routes = vec![
+    route("fallback", &["example.com"], "/", "fallback"),
+    no_cert,
+  ];
+  let upstreams = vec![upstream("fallback"), upstream("no-cert")];
+  let table = RouteTable::from_routes_for_tests(routes);
+  let tls = WafTlsMetadata::default();
+
+  let resolved = table
+    .resolve_normalized_host_with_context(
+      "example.com",
+      RouteMatchContext {
+        path: "/",
+        protocol: Some(RouteRequestProtocol::Http2),
+        tls: Some(&tls),
+        ..RouteMatchContext::default()
+      },
+      &upstreams,
+    )
+    .unwrap();
+  assert_eq!(resolved.route.name, "no-cert");
+
+  for protocol in [
+    RouteRequestProtocol::Http3,
+    RouteRequestProtocol::Webtransport,
+  ] {
+    let resolved = table
+      .resolve_normalized_host_with_context(
+        "example.com",
+        RouteMatchContext {
+          path: "/",
+          protocol: Some(protocol),
+          tls: Some(&tls),
+          ..RouteMatchContext::default()
+        },
+        &upstreams,
+      )
+      .unwrap();
+    assert_eq!(resolved.route.name, "fallback");
+  }
+}
+
+#[test]
 fn priority_can_beat_host_specificity() {
   let mut wildcard = route("priority", &["*"], "/", "priority");
   wildcard.r#match.priority = 10;

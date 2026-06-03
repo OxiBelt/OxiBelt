@@ -12,7 +12,9 @@ use crate::state::{AppHandle, AppSnapshot};
 
 use super::super::super::{AdminAuthorization, admin_operations};
 use super::super::{collect_admin_json, json_response};
-use super::{authorize_cache_target, effective_warm_policy, header_map_from_strings};
+use super::{
+  CacheWarmPolicyInput, authorize_cache_target, effective_warm_policy, header_map_from_strings,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 struct AdminCacheWarmRequest {
@@ -169,13 +171,25 @@ fn prepare_cache_warm_plan(
     };
     let effective_policy = effective_warm_policy(
       &snapshot,
-      &item.host,
-      item.policy.as_deref(),
-      &uri,
-      &request_method,
-      &headers,
-      Some(peer_addr.ip()),
+      CacheWarmPolicyInput {
+        host: &item.host,
+        requested_policy: item.policy.as_deref(),
+        scheme: &item.scheme,
+        uri: &uri,
+        method: &request_method,
+        headers: &headers,
+        peer_addr,
+      },
     );
+    let effective_policy = match effective_policy {
+      Ok(policy) => policy,
+      Err(_) => {
+        plan.push(CacheWarmPlanItem::ValidationError(
+          json!({ "uri": item.uri, "result": "validation_error" }),
+        ));
+        continue;
+      }
+    };
     if !authorize_cache_target(
       authorization,
       "cache:Warm",
@@ -262,13 +276,17 @@ fn ensure_cache_warm_policy_is_current(
     .map_err(|_| "cache warm authorization is stale; retry request".to_string())?;
   let current_policy = effective_warm_policy(
     snapshot,
-    &item.host,
-    item.policy.as_deref(),
-    &uri,
-    &item.method,
-    &item.headers,
-    Some(peer_addr.ip()),
-  );
+    CacheWarmPolicyInput {
+      host: &item.host,
+      requested_policy: item.policy.as_deref(),
+      scheme: &item.scheme,
+      uri: &uri,
+      method: &item.method,
+      headers: &item.headers,
+      peer_addr,
+    },
+  )
+  .map_err(|_| "cache warm authorization is stale; retry request".to_string())?;
   if current_policy == item.authorized_policy {
     return Ok(());
   }
@@ -353,8 +371,87 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn cache_warm_authorization_uses_trusted_real_ip_route_context() {
+    let temp_dir = common::TempDir::new("cache-warm-real-ip-policy");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "cache-warm-real-ip-policy");
+    let state =
+      cache_warm_state_from_config(cache_warm_real_ip_config(&cert_path, &key_path)).await;
+    let snapshot = state.snapshot();
+    let actor = scoped_actor();
+    let context = IpmRequestContext::default();
+    let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &context);
+    let peer_addr = "127.0.0.1:12345".parse().expect("peer address");
+    let mut headers = HashMap::new();
+    headers.insert("X-Forwarded-For".to_string(), "203.0.113.9".to_string());
+
+    let error = match prepare_cache_warm_plan(
+      AdminCacheWarmRequest {
+        items: vec![AdminCacheWarmItem {
+          policy: None,
+          method: None,
+          scheme: "http".to_string(),
+          host: "example.com".to_string(),
+          uri: "/cached".to_string(),
+          headers,
+        }],
+      },
+      &state,
+      &authorization,
+      peer_addr,
+    ) {
+      Ok(_) => panic!("warm plan should require the forwarded-IP selected policy"),
+      Err(error) => error,
+    };
+
+    assert_eq!(error.status(), StatusCode::FORBIDDEN);
+  }
+
+  #[tokio::test]
+  async fn cache_warm_authorization_uses_synthesized_host_header() {
+    let temp_dir = common::TempDir::new("cache-warm-host-policy");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "cache-warm-host-policy");
+    let state =
+      cache_warm_state_from_config(cache_warm_host_header_config(&cert_path, &key_path)).await;
+    let snapshot = state.snapshot();
+    let actor = scoped_actor();
+    let context = IpmRequestContext::default();
+    let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &context);
+
+    let error = match prepare_cache_warm_plan(
+      AdminCacheWarmRequest {
+        items: vec![AdminCacheWarmItem {
+          policy: None,
+          method: None,
+          scheme: "http".to_string(),
+          host: "example.com".to_string(),
+          uri: "/cached".to_string(),
+          headers: HashMap::new(),
+        }],
+      },
+      &state,
+      &authorization,
+      "127.0.0.1:12345".parse().expect("peer address"),
+    ) {
+      Ok(_) => panic!("warm plan should require the host-header selected policy"),
+      Err(error) => error,
+    };
+
+    assert_eq!(error.status(), StatusCode::FORBIDDEN);
+  }
+
   async fn cache_warm_state(cert_path: &Path, key_path: &Path, policy: &str) -> AppHandle {
     AppHandle::new(cache_warm_snapshot(cert_path, key_path, policy).await)
+  }
+
+  async fn cache_warm_state_from_config(config: Config) -> AppHandle {
+    AppHandle::new(
+      AppSnapshot::new(config)
+        .await
+        .expect("snapshot should initialize"),
+    )
   }
 
   async fn cache_warm_snapshot(cert_path: &Path, key_path: &Path, policy: &str) -> AppSnapshot {
@@ -394,12 +491,142 @@ name = "policy-b"
     config
   }
 
+  fn cache_warm_real_ip_config(cert_path: &Path, key_path: &Path) -> Config {
+    let raw = common::minimal_config_toml(cert_path, key_path)
+      .replace("unprivileged_mode = true", "unprivileged_mode = false")
+      .replace(
+        "https_bind = \"127.0.0.1:8443\"",
+        "https_bind = \"127.0.0.1:0\"",
+      )
+      .replace(
+        "upstream = \"app\"",
+        r#"upstream = "app"
+cache = "policy-a"
+
+[routes.match]
+source_cidrs = ["127.0.0.1/32"]"#,
+      );
+    parse_cache_warm_config_with_extra_routes(
+      raw,
+      r#"
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["127.0.0.1/32"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = false
+
+[[routes]]
+name = "forwarded-client"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+cache = "policy-b"
+
+[routes.match]
+source_cidrs = ["203.0.113.0/24"]
+"#,
+    )
+  }
+
+  fn cache_warm_host_header_config(cert_path: &Path, key_path: &Path) -> Config {
+    let raw = common::minimal_config_toml(cert_path, key_path)
+      .replace("unprivileged_mode = true", "unprivileged_mode = false")
+      .replace(
+        "https_bind = \"127.0.0.1:8443\"",
+        "https_bind = \"127.0.0.1:0\"",
+      )
+      .replace(
+        "upstream = \"app\"",
+        r#"upstream = "app"
+cache = "policy-a""#,
+      );
+    parse_cache_warm_config_with_extra_routes(
+      raw,
+      r#"
+[[routes]]
+name = "host-header"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+cache = "policy-b"
+
+[[routes.match.headers]]
+name = "host"
+exact = "example.com"
+"#,
+    )
+  }
+
+  fn parse_cache_warm_config_with_extra_routes(mut raw: String, extra: &str) -> Config {
+    raw.push_str(
+      r#"
+
+[cache]
+enabled = true
+store = "memory"
+cache_methods = ["GET"]
+
+[[cache.policies]]
+name = "policy-a"
+
+[[cache.policies]]
+name = "policy-b"
+"#,
+    );
+    raw.push_str(extra);
+    raw.push_str(
+      r#"
+
+[ipm]
+enabled = true
+namespace = "oxibelt"
+
+[[ipm.principals]]
+id = "operator"
+subject = "operator@example.com"
+
+[[ipm.credentials]]
+name = "operator-token"
+principal = "operator"
+bearer_token_env = "PATH"
+
+[[ipm.policies]]
+name = "scoped-cache-warm"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["cache:Warm"]
+resources = [
+  "oxibelt:oxibelt:cache:policy/policy-a",
+  "oxibelt:oxibelt:cache:host/example.com",
+]
+
+[[ipm.bindings]]
+principal = "operator"
+policy = "scoped-cache-warm"
+"#,
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    config
+  }
+
   fn bootstrap_actor() -> AdminActor {
     AdminActor {
       name: "bootstrap-admin".to_string(),
       principal: "bootstrap-admin".to_string(),
       subject: "bootstrap-admin".to_string(),
       groups: vec!["ipm-admin".to_string()],
+    }
+  }
+
+  fn scoped_actor() -> AdminActor {
+    AdminActor {
+      name: "operator-token".to_string(),
+      principal: "operator".to_string(),
+      subject: "operator@example.com".to_string(),
+      groups: Vec::new(),
     }
   }
 }

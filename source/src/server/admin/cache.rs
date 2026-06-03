@@ -41,34 +41,69 @@ fn authorize_cache_target(
   allowed(authorization, action, &host_resource)
 }
 
+struct CacheWarmPolicyInput<'a> {
+  host: &'a str,
+  requested_policy: Option<&'a str>,
+  scheme: &'a str,
+  uri: &'a Uri,
+  method: &'a Method,
+  headers: &'a HeaderMap,
+  peer_addr: SocketAddr,
+}
+
 fn effective_warm_policy(
   snapshot: &AppSnapshot,
-  host: &str,
-  requested_policy: Option<&str>,
-  uri: &Uri,
-  method: &Method,
-  headers: &HeaderMap,
-  source_ip: Option<std::net::IpAddr>,
-) -> String {
-  snapshot
-    .route_table
-    .resolve_normalized_host_with_context(
-      &normalize_host(host),
-      RouteMatchContext {
-        path: uri.path(),
-        method: Some(method),
-        headers: Some(headers),
-        query: uri.query(),
-        source_ip,
-        protocol: Some(RouteRequestProtocol::Http1),
-        tls: None,
-      },
-      &snapshot.upstreams,
-    )
-    .and_then(|resolved| resolved.route.cache.as_deref())
-    .or(requested_policy)
-    .unwrap_or("default")
-    .to_string()
+  input: CacheWarmPolicyInput<'_>,
+) -> Result<String, &'static str> {
+  let CacheWarmPolicyInput {
+    host,
+    requested_policy,
+    scheme,
+    uri,
+    method,
+    headers,
+    peer_addr,
+  } = input;
+  if scheme != "http" && scheme != "https" {
+    return Err("scheme must be http or https");
+  }
+  let mut request_headers = headers.clone();
+  request_headers.insert(
+    ::http::header::HOST,
+    HeaderValue::from_str(host).map_err(|_| "invalid warm host")?,
+  );
+  let client_addr = crate::identity::resolve_client_addr(
+    &request_headers,
+    peer_addr,
+    &snapshot.config.proxy.real_ip,
+  )
+  .map_err(|_| "invalid real IP metadata")?;
+  let tls = crate::waf::WafTlsMetadata {
+    enabled: scheme == "https",
+    sni: Some(host.to_string()),
+    ..crate::waf::WafTlsMetadata::default()
+  };
+  Ok(
+    snapshot
+      .route_table
+      .resolve_normalized_host_with_context(
+        &normalize_host(host),
+        RouteMatchContext {
+          path: uri.path(),
+          method: Some(method),
+          headers: Some(&request_headers),
+          query: uri.query(),
+          source_ip: Some(client_addr.ip()),
+          protocol: Some(RouteRequestProtocol::Http1),
+          tls: Some(&tls),
+        },
+        &snapshot.upstreams,
+      )
+      .map(|resolved| resolved.route.cache.as_deref().unwrap_or("default"))
+      .or(requested_policy)
+      .unwrap_or("default")
+      .to_string(),
+  )
 }
 
 #[derive(Debug, Deserialize)]
