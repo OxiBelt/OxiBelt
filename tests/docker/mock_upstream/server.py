@@ -4,6 +4,7 @@ import re
 import ssl
 import threading
 import time
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -102,6 +103,16 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.send_header("etag", etag)
       if last_modified:
         self.send_header("last-modified", last_modified)
+      self.end_headers()
+      return
+    if last_modified and _if_modified_since_matches(
+      self.headers.get("if-modified-since"),
+      last_modified,
+    ):
+      self.send_response(304)
+      self.send_header("last-modified", last_modified)
+      if etag:
+        self.send_header("etag", etag)
       self.end_headers()
       return
     payload = {
@@ -227,6 +238,15 @@ def _sequence_value(query, key, index, default):
 
 def _query_header(query, key, default=""):
   return _safe_header_value(key, query.get(key, [default])[0])
+
+
+def _if_modified_since_matches(request_value, last_modified):
+  if not request_value:
+    return False
+  try:
+    return parsedate_to_datetime(request_value) >= parsedate_to_datetime(last_modified)
+  except (TypeError, ValueError, IndexError):
+    return request_value == last_modified
 
 
 def _safe_header_value(key, value):

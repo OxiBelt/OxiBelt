@@ -1,4 +1,7 @@
 use super::*;
+use http::header::{
+  CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, HeaderName, HeaderValue, RANGE, VARY,
+};
 
 #[test]
 fn cache_key_expands_dynamic_tokens() {
@@ -23,11 +26,7 @@ fn cache_key_expands_dynamic_tokens() {
 fn range_entry_returns_partial_body() {
   let mut headers = HeaderMap::new();
   headers.insert(CONTENT_LENGTH, HeaderValue::from_static("10"));
-  let entry = CacheEntry {
-    status: StatusCode::OK,
-    headers,
-    body: Bytes::from_static(b"0123456789"),
-  };
+  let entry = CacheEntry::memory(StatusCode::OK, headers, Bytes::from_static(b"0123456789"));
   let mut request_headers = HeaderMap::new();
   request_headers.insert(RANGE, HeaderValue::from_static("bytes=2-5"));
   let entry = range_entry(entry, &Method::GET, &request_headers);
@@ -61,11 +60,11 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
         uri: &uri,
         request_headers: &HeaderMap::new(),
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers,
-        body: Bytes::from_static(b"surrogate"),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers,
+        Bytes::from_static(b"surrogate")
+      ),
     ),
     CacheInsertOutcome::Stored
   );
@@ -183,11 +182,11 @@ fn vary_variant_cap_rejects_exploding_variants() {
         uri: &uri,
         request_headers: &first_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers.clone(),
-        body: Bytes::from_static(b"a"),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers.clone(),
+        Bytes::from_static(b"a")
+      ),
     ),
     CacheInsertOutcome::Stored
   );
@@ -201,11 +200,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
         uri: &uri,
         request_headers: &second_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers,
-        body: Bytes::from_static(b"b"),
-      },
+      CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"b")),
     ),
     CacheInsertOutcome::Rejected
   );
@@ -235,11 +230,11 @@ fn cookie_requests_bypass_cache_by_default() {
         uri: &uri,
         request_headers: &request_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: HeaderMap::new(),
-        body: Bytes::from_static(b"profile"),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        HeaderMap::new(),
+        Bytes::from_static(b"profile")
+      ),
     ),
     CacheInsertOutcome::NotCacheable
   );
@@ -277,11 +272,11 @@ fn named_policy_can_define_negative_cache_defaults() {
         uri: &uri,
         request_headers: &HeaderMap::new(),
       },
-      CacheEntry {
-        status: StatusCode::NOT_FOUND,
-        headers: HeaderMap::new(),
-        body: Bytes::from_static(b"missing"),
-      },
+      CacheEntry::memory(
+        StatusCode::NOT_FOUND,
+        HeaderMap::new(),
+        Bytes::from_static(b"missing")
+      ),
     ),
     CacheInsertOutcome::Stored
   );
@@ -351,11 +346,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
           uri: &uri,
           request_headers: &request_headers,
         },
-        CacheEntry {
-          status: StatusCode::OK,
-          headers: response_headers.clone(),
-          body,
-        },
+        CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
       CacheInsertOutcome::Stored
     );
@@ -369,7 +360,14 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
     uri: &uri,
     request_headers: &request_headers,
   }) {
-    Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"second-body")),
+    Some(CacheLookup::Fresh(entry)) => {
+      let body = if let Some(file) = entry.body_file {
+        std::fs::read(file.path).unwrap()
+      } else {
+        entry.body.to_vec()
+      };
+      assert_eq!(body, b"second-body");
+    }
     other => panic!("expected replacement cache hit, got {other:?}"),
   }
 
@@ -402,11 +400,11 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
         uri: &uri,
         request_headers: &headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: HeaderMap::new(),
-        body: Bytes::from_static(b"disk-body"),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        HeaderMap::new(),
+        Bytes::from_static(b"disk-body")
+      ),
     ),
     CacheInsertOutcome::Stored
   );
@@ -462,11 +460,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
           uri,
           request_headers: &headers,
         },
-        CacheEntry {
-          status: StatusCode::OK,
-          headers: response_headers,
-          body,
-        },
+        CacheEntry::memory(StatusCode::OK, response_headers, body),
       ),
       CacheInsertOutcome::Stored
     );
@@ -510,11 +504,11 @@ fn admission_min_hits_rejects_until_threshold() {
     uri: &uri,
     request_headers: &headers,
   };
-  let entry = CacheEntry {
-    status: StatusCode::OK,
-    headers: HeaderMap::new(),
-    body: Bytes::from_static(b"body"),
-  };
+  let entry = CacheEntry::memory(
+    StatusCode::OK,
+    HeaderMap::new(),
+    Bytes::from_static(b"body"),
+  );
   assert_eq!(
     cache.insert(ctx.clone(), entry.clone()),
     CacheInsertOutcome::AdmissionWarming
@@ -633,11 +627,11 @@ fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
           uri: &uri,
           request_headers: &HeaderMap::new(),
         },
-        CacheEntry {
-          status: StatusCode::OK,
-          headers: HeaderMap::new(),
-          body: Bytes::from_static(b"disk-body"),
-        },
+        CacheEntry::memory(
+          StatusCode::OK,
+          HeaderMap::new(),
+          Bytes::from_static(b"disk-body")
+        ),
       ),
       CacheInsertOutcome::Stored
     );
@@ -678,6 +672,7 @@ fn disk_cache_recovery_does_not_trust_metadata_body_path() {
     stale_if_error_until: None,
     stale_while_revalidate_until: None,
     must_revalidate: false,
+    stored_at: UNIX_EPOCH + Duration::from_secs(1),
     vary: Vec::new(),
     tags: Vec::new(),
     size: 4,

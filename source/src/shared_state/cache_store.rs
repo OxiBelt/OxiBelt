@@ -146,10 +146,9 @@ impl SharedState {
       return Ok(None);
     };
     if method == Method::HEAD {
-      return Ok(Some(CacheLookup::Fresh(CacheEntry {
-        body: bytes::Bytes::new(),
-        ..cache_entry
-      })));
+      return Ok(Some(CacheLookup::Fresh(
+        cache_entry.with_body(bytes::Bytes::new()),
+      )));
     }
     if request_no_cache || entry.must_revalidate || entry.expires_at_ms <= now {
       let validators = validator_headers(&cache_entry.headers);
@@ -424,11 +423,16 @@ impl SharedCacheEntry {
       let value = HeaderValue::from_bytes(value).ok()?;
       headers.append(name, value);
     }
-    Some(CacheEntry {
-      status: http::StatusCode::from_u16(self.status).ok()?,
-      headers,
-      body: bytes::Bytes::from(self.body.clone()),
-    })
+    let stored_at =
+      std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.stored_at_ms.max(0) as u64);
+    Some(
+      CacheEntry::memory(
+        http::StatusCode::from_u16(self.status).ok()?,
+        headers,
+        bytes::Bytes::from(self.body.clone()),
+      )
+      .with_stored_at(stored_at),
+    )
   }
 }
 

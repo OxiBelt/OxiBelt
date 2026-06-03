@@ -10,8 +10,8 @@ use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use bytes::Bytes;
 use http::header::{
-  ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, EXPIRES,
-  HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, PRAGMA, RANGE, VARY,
+  CACHE_CONTROL, CONTENT_TYPE, ETAG, EXPIRES, HeaderName, HeaderValue, IF_MODIFIED_SINCE,
+  IF_NONE_MATCH, LAST_MODIFIED, PRAGMA, VARY,
 };
 use http::{HeaderMap, Method, StatusCode, Uri};
 use ring::digest;
@@ -25,23 +25,22 @@ use crate::config::{
 };
 use crate::shared_state::{SharedCacheEntry, SharedState, SharedVaryMatcher};
 
+mod entry;
 mod fill;
 mod index;
+mod range;
 pub mod signing;
+mod streaming;
 
+pub use entry::{CacheBodyFile, CacheEntry};
 pub(crate) use fill::{CacheFillDecision, CacheFillSuppressionReason};
 pub use fill::{CacheFillGuard, CacheFillWaiter};
+pub(crate) use range::range_entry;
+pub(crate) use streaming::{CacheStreamingInsert, CacheStreamingInsertDecision};
 
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
 const SURROGATE_CONTROL_HEADER: &str = "surrogate-control";
 const MAX_VARY_VALUE_BYTES: usize = 8_192;
-#[derive(Debug, Clone)]
-pub struct CacheEntry {
-  pub status: StatusCode,
-  pub headers: HeaderMap,
-  pub body: Bytes,
-}
-
 #[derive(Debug, Clone)]
 pub struct Revalidation {
   pub entry: CacheEntry,
@@ -171,6 +170,7 @@ struct StoredEntry {
   stale_if_error_until: Option<SystemTime>,
   stale_while_revalidate_until: Option<SystemTime>,
   must_revalidate: bool,
+  stored_at: SystemTime,
   vary: Vec<VaryMatcher>,
   tags: Vec<String>,
   size: usize,
@@ -229,6 +229,7 @@ struct CacheInner {
   purge_nonce_order: VecDeque<String>,
   memory_size: usize,
   disk_size: usize,
+  disk_inflight_size: usize,
   tmpfs_size: usize,
   admission_counts: HashMap<String, u32>,
   admission_order: VecDeque<String>,
@@ -385,6 +386,18 @@ impl ResponseCache {
   }
 
   pub fn is_cacheable_method(&self, method: &Method) -> bool {
+    if method == Method::HEAD {
+      return self
+        .config
+        .cache_methods
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(Method::GET.as_str()))
+        || self
+          .config
+          .cache_methods
+          .iter()
+          .any(|item| item.eq_ignore_ascii_case(Method::HEAD.as_str()));
+    }
     self
       .config
       .cache_methods
@@ -747,6 +760,7 @@ impl ResponseCache {
         stale_if_error_until: prepared.metadata.stale_if_error_until,
         stale_while_revalidate_until: prepared.metadata.stale_while_revalidate_until,
         must_revalidate: prepared.metadata.must_revalidate,
+        stored_at: prepared.metadata.stored_at,
         vary: prepared.metadata.vary,
         tags,
         size,
@@ -810,11 +824,7 @@ impl ResponseCache {
     }
     self.insert(
       ctx,
-      CacheEntry {
-        status: cached_entry.status,
-        headers,
-        body: cached_entry.body.clone(),
-      },
+      CacheEntry::memory(cached_entry.status, headers, cached_entry.body.clone()),
     );
   }
 
@@ -840,6 +850,9 @@ impl ResponseCache {
     content_length: Option<usize>,
   ) -> CachePreparedInsertDecision {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
+      return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
+    }
+    if ctx.method == Method::HEAD {
       return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     }
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
@@ -1262,12 +1275,12 @@ impl ResponseCache {
       || self
         .config
         .disk_max_size_bytes
-        .is_some_and(|limit| inner.disk_size > limit)
+        .is_some_and(|limit| inner.disk_size.saturating_add(inner.disk_inflight_size) > limit)
       || policy
         .disk_max_size_bytes
-        .is_some_and(|limit| inner.disk_size > limit)
+        .is_some_and(|limit| inner.disk_size.saturating_add(inner.disk_inflight_size) > limit)
       || inner.tmpfs_size > policy.memory_max_size_bytes
-      || total_size(inner) > self.config.max_size_bytes
+      || total_size(inner).saturating_add(inner.disk_inflight_size) > self.config.max_size_bytes
     {
       let Some(oldest) = inner.order.pop_front() else {
         break;
@@ -1387,6 +1400,7 @@ impl Drop for ResponseCache {
     inner.index.clear();
     inner.memory_size = 0;
     inner.disk_size = 0;
+    inner.disk_inflight_size = 0;
     inner.tmpfs_size = 0;
   }
 }
@@ -1399,56 +1413,13 @@ pub fn validate_disk_dir(path: &Path) -> anyhow::Result<()> {
   validated_disk_dir(path).map(|_| ())
 }
 
-pub fn range_entry(entry: CacheEntry, method: &Method, request_headers: &HeaderMap) -> CacheEntry {
-  if method == Method::HEAD {
-    return CacheEntry {
-      body: Bytes::new(),
-      ..entry
-    };
-  }
-  let Some(range) = request_headers
-    .get(RANGE)
-    .and_then(|value| value.to_str().ok())
-  else {
-    return entry;
-  };
-  let Some((start, end)) = parse_byte_range(range, entry.body.len()) else {
-    let mut headers = entry.headers;
-    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    headers.insert(
-      CONTENT_RANGE,
-      HeaderValue::from_str(&format!("bytes */{}", entry.body.len()))
-        .unwrap_or_else(|_| HeaderValue::from_static("bytes */0")),
-    );
-    headers.remove(CONTENT_LENGTH);
-    return CacheEntry {
-      status: StatusCode::RANGE_NOT_SATISFIABLE,
-      headers,
-      body: Bytes::new(),
-    };
-  };
-  let body = entry.body.slice(start..end + 1);
-  let mut headers = entry.headers;
-  headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-  if let Ok(value) = HeaderValue::from_str(&format!("bytes {start}-{end}/{}", entry.body.len())) {
-    headers.insert(CONTENT_RANGE, value);
-  }
-  if let Ok(value) = HeaderValue::from_str(&body.len().to_string()) {
-    headers.insert(CONTENT_LENGTH, value);
-  }
-  CacheEntry {
-    status: StatusCode::PARTIAL_CONTENT,
-    headers,
-    body,
-  }
-}
-
 #[derive(Debug)]
 struct ResponseMetadata {
   expires_at: SystemTime,
   stale_if_error_until: Option<SystemTime>,
   stale_while_revalidate_until: Option<SystemTime>,
   must_revalidate: bool,
+  stored_at: SystemTime,
   vary: Vec<VaryMatcher>,
 }
 
@@ -1563,6 +1534,7 @@ fn cache_metadata(
     stale_while_revalidate_until: (stale_while_revalidate_seconds > 0)
       .then_some(expires_at + Duration::from_secs(stale_while_revalidate_seconds)),
     must_revalidate,
+    stored_at: now,
     vary,
   })
 }
@@ -1752,10 +1724,12 @@ fn surrogate_control_directives(headers: &HeaderMap) -> Option<SurrogateControl>
 fn expires_ttl(headers: &HeaderMap, now: SystemTime) -> Option<u64> {
   let expires = headers.get(EXPIRES)?.to_str().ok()?;
   let expires = httpdate::parse_http_date(expires).ok()?;
-  expires
-    .duration_since(now)
-    .ok()
-    .map(|duration| duration.as_secs())
+  Some(
+    expires
+      .duration_since(now)
+      .map(|duration| duration.as_secs())
+      .unwrap_or_default(),
+  )
 }
 
 fn expanded_cache_key(
@@ -2028,29 +2002,6 @@ fn normalized_content_type(headers: &HeaderMap) -> String {
     .unwrap_or_default()
 }
 
-fn parse_byte_range(range: &str, len: usize) -> Option<(usize, usize)> {
-  let range = range.strip_prefix("bytes=")?;
-  if range.contains(',') || len == 0 {
-    return None;
-  }
-  let (start, end) = range.split_once('-')?;
-  if start.is_empty() {
-    let suffix = end.parse::<usize>().ok()?;
-    if suffix == 0 {
-      return None;
-    }
-    let start = len.saturating_sub(suffix);
-    return Some((start, len - 1));
-  }
-  let start = start.parse::<usize>().ok()?;
-  let end = if end.is_empty() {
-    len - 1
-  } else {
-    end.parse::<usize>().ok()?
-  };
-  (start <= end && start < len).then_some((start, end.min(len - 1)))
-}
-
 fn policy_runtime(
   config: &CacheConfig,
   policy: &CachePolicyConfig,
@@ -2314,6 +2265,7 @@ fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
     body_len: body.len(),
     body_chunks: Vec::new(),
     body,
+    stored_at_ms: system_time_ms(entry.stored_at),
     expires_at_ms: system_time_ms(entry.expires_at),
     stale_if_error_until_ms: entry.stale_if_error_until.map(system_time_ms),
     stale_while_revalidate_until_ms: entry.stale_while_revalidate_until.map(system_time_ms),
@@ -2340,15 +2292,22 @@ fn system_time_ms(time: SystemTime) -> i64 {
 
 impl StoredEntry {
   fn to_cache_entry(&self) -> Option<CacheEntry> {
-    let body = match &self.body {
-      StoredBody::Memory(body) => body.clone(),
-      StoredBody::Tmpfs(path) | StoredBody::Disk(path) => Bytes::from(std::fs::read(path).ok()?),
-    };
-    Some(CacheEntry {
-      status: self.status,
-      headers: self.headers.clone(),
-      body,
-    })
+    match &self.body {
+      StoredBody::Memory(body) => Some(
+        CacheEntry::memory(self.status, self.headers.clone(), body.clone())
+          .with_stored_at(self.stored_at),
+      ),
+      StoredBody::Tmpfs(path) | StoredBody::Disk(path) => {
+        let body_len = std::fs::metadata(path).ok()?.len().try_into().ok()?;
+        Some(CacheEntry::file(
+          self.status,
+          self.headers.clone(),
+          path.clone(),
+          body_len,
+          self.stored_at,
+        ))
+      }
+    }
   }
 
   fn remove_body(self) {
@@ -2491,6 +2450,7 @@ fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
       .unwrap_or(0)
   ));
   lines.push(format!("must_revalidate={}", entry.must_revalidate));
+  lines.push(format!("stored_at={}", unix_seconds(entry.stored_at)));
   lines.push(format!("size={}", entry.size));
   for matcher in &entry.vary {
     lines.push(format!(
@@ -2574,6 +2534,7 @@ fn decode_metadata(path: &Path, disk_dir: &Path) -> anyhow::Result<StoredEntry> 
     .get("must_revalidate")
     .and_then(|items| items.first())
     .is_some_and(|value| value == "true");
+  let stored_at = metadata_optional_time(&values, "stored_at")?.unwrap_or_else(SystemTime::now);
   let size = values
     .get("size")
     .and_then(|items| items.first())
@@ -2617,6 +2578,7 @@ fn decode_metadata(path: &Path, disk_dir: &Path) -> anyhow::Result<StoredEntry> 
     stale_if_error_until,
     stale_while_revalidate_until,
     must_revalidate,
+    stored_at,
     vary,
     tags,
     size,

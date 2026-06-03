@@ -113,6 +113,8 @@ pub struct SharedCacheEntry {
   pub body_len: usize,
   #[serde(default)]
   pub body_chunks: Vec<String>,
+  #[serde(default = "shared_cache_entry_now_ms")]
+  pub stored_at_ms: i64,
   pub expires_at_ms: i64,
   pub stale_if_error_until_ms: Option<i64>,
   pub stale_while_revalidate_until_ms: Option<i64>,
@@ -120,6 +122,13 @@ pub struct SharedCacheEntry {
   pub vary: Vec<SharedVaryMatcher>,
   #[serde(default)]
   pub tags: Vec<String>,
+}
+
+fn shared_cache_entry_now_ms() -> i64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+    .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

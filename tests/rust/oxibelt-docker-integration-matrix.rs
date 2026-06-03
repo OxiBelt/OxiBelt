@@ -4300,6 +4300,44 @@ run_case_checks() {
         ),
         docker_case(
             "cache",
+            "rfc9111-semantics",
+            "cache follows RFC 9111 freshness, validators, and no-cache request semantics",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path response revalidated conditional past_path past miss
+  path="/app/rfc-smaxage?body=smaxage&cache_control_value=public%2C%20max-age%3D0%2C%20s-maxage%3D60&content_type=text/plain"
+  response="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${response}" '.body == "smaxage"'
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
+  response="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
+
+  path="/app/rfc-revalidate?body=reval&cache_control=public&etag=rfc-v1&content_type=text/plain"
+  response="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
+  revalidated="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "Pragma: no-cache")"
+  assert_response_jq "${revalidated}" '.body == "reval"'
+  assert_response_jq "${revalidated}" '.headers["x-oxibelt-cache"] == "revalidated" and .headers["x-oxibelt-cache-reason"] == "not_modified"'
+  conditional="$(client_request_with_headers "example.test" "${path}" 304 "GET" "" "If-None-Match: rfc-v1")"
+  assert_response_jq "${conditional}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh" and (.headers["age"] != null)'
+
+  past_path="/app/rfc-past?body=past&expires=Tue%2C%2001%20Jan%201980%2000%3A00%3A00%20GMT&content_type=text/plain"
+  past="$(client_request "example.test" "${past_path}" 200)"
+  assert_response_jq "${past}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "not_cacheable"'
+  docker rm -f "${http_container}" >/dev/null
+  miss="$(client_request "example.test" "${past_path}" 502)"
+  assert_response_jq "${miss}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
             "range-hit",
             "cache serves byte ranges from a stored full response",
             ExpectStart::Success,
@@ -4315,6 +4353,33 @@ run_case_checks() {
   docker rm -f "${http_container}" >/dev/null
   response="$(client_request_with_headers "example.test" "/app/range?body=0123456789&cache_control=public&content_type=text/plain" 206 "GET" "" "Range: bytes=2-5")"
   assert_response_jq "${response}" '.body == "2345" and .headers["content-range"] == "bytes 2-5/10"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "multi-range-hit",
+            "cache serves multipart byte ranges from a stored full response",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path response excessive_range
+  path="/app/multi-range?body=0123456789&cache_control=public&content_type=text/plain"
+  response="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${response}" '.body == "0123456789"'
+  docker rm -f "${http_container}" >/dev/null
+  response="$(client_request_with_headers "example.test" "${path}" 206 "GET" "" "Range: bytes=0-1,8-9")"
+  assert_response_jq "${response}" '.headers["content-type"] | startswith("multipart/byteranges; boundary=")'
+  assert_response_jq "${response}" '.body | contains("Content-Range: bytes 0-1/10") and contains("Content-Range: bytes 8-9/10")'
+  excessive_range="bytes=0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0"
+  response="$(client_request_with_headers "example.test" "${path}" 200 "GET" "" "Range: ${excessive_range}")"
+  assert_response_jq "${response}" '.body == "0123456789"'
+  assert_response_jq "${response}" '(.headers["content-type"] // "") == "text/plain"'
 }
 "#,
             None,
@@ -4415,6 +4480,42 @@ run_case_checks() {
   docker rm -f "${http_container}" >/dev/null
   response="$(client_request "example.test" "/app/admin-plain-purge?cache_control=public" 502)"
   assert_response_jq "${response}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "purge-audit",
+            "cache purge emits audit logs without raw URI query leakage",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                postgres: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path response purge logs audit_logs
+  path="/app/audit-purge?cache_control=public&token=raw-secret-not-for-audit"
+  response="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
+  purge="$(plain_client_request_with_headers_on_port 9092 "proxy" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/audit-purge%3Fcache_control%3Dpublic%26token%3Draw-secret-not-for-audit" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${purge}" '.body == "purged=2\n"'
+  logs="$(docker logs "${proxy_container}" 2>&1 || true)"
+  audit_logs="$(grep -F 'oxibelt.admin.audit' <<<"${logs}" || true)"
+  if ! grep -F 'cache_purge' <<<"${audit_logs}" | grep -F 'applied' >/dev/null; then
+    echo "${logs}" >&2
+    fail_with_diagnostics "cache purge audit event was not emitted"
+  fi
+  if ! grep -F 'service' <<<"${audit_logs}" | grep -F 'cache' >/dev/null; then
+    echo "${logs}" >&2
+    fail_with_diagnostics "cache purge authorization audit did not record service=cache"
+  fi
+  if grep -F 'raw-secret-not-for-audit' <<<"${audit_logs}" >/dev/null; then
+    echo "${audit_logs}" >&2
+    fail_with_diagnostics "cache purge audit leaked raw URI query value"
+  fi
 }
 "#,
             None,
@@ -4619,6 +4720,141 @@ run_case_checks() {
   docker rm -f "${http_container}" >/dev/null
   miss="$(client_request "example.test" "${path}" 502)"
   assert_response_jq "${miss}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "huge-object-streaming-disk",
+            "disk cache streams huge cacheable responses and serves them after upstream removal",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path first cached
+  path="/app/huge-disk?body_repeat=131072&body_repeat_char=H&cache_control=public&content_type=text/plain"
+  first="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${first}" '(.body | length) == 131072'
+  assert_response_jq "${first}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
+  sleep 1
+  docker rm -f "${http_container}" >/dev/null
+  cached="$(client_request "example.test" "${path}" 200)"
+  assert_response_jq "${cached}" '(.body | length) == 131072'
+  assert_response_jq "${cached}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "streaming-disk-reservation",
+            "disk cache accounts concurrent streaming temp files against disk limits",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first_path second_path first_file second_file first second first_reason second_reason cached_path rejected_path cached miss
+  first_path="/app/reserve-a?body_repeat=131072&body_repeat_char=A&cache_control=public&content_type=text/plain&body_split_at=1&body_split_delay_ms=1000"
+  second_path="/app/reserve-b?body_repeat=131072&body_repeat_char=B&cache_control=public&content_type=text/plain"
+  first_file="${work_dir}/reserve-first.json"
+  second_file="${work_dir}/reserve-second.json"
+  client_request "example.test" "${first_path}" 200 >"${first_file}" &
+  sleep 0.1
+  client_request "example.test" "${second_path}" 200 >"${second_file}" &
+  wait
+  first="$(cat "${first_file}")"
+  second="$(cat "${second_file}")"
+  assert_response_jq "${first}" '(.body | length) == 131072'
+  assert_response_jq "${second}" '(.body | length) == 131072'
+  first_reason="$(jq -r '.headers["x-oxibelt-cache-reason"]' <<<"${first}")"
+  second_reason="$(jq -r '.headers["x-oxibelt-cache-reason"]' <<<"${second}")"
+  if [[ "${first_reason}" == "stored" && "${second_reason}" == "admission_rejected" ]]; then
+    cached_path="${first_path}"
+    rejected_path="${second_path}"
+  elif [[ "${first_reason}" == "admission_rejected" && "${second_reason}" == "stored" ]]; then
+    cached_path="${second_path}"
+    rejected_path="${first_path}"
+  else
+    echo "expected one stored and one admission_rejected response, got ${first_reason}/${second_reason}" >&2
+    exit 1
+  fi
+  sleep 1
+  docker rm -f "${http_container}" >/dev/null
+  cached="$(client_request "example.test" "${cached_path}" 200)"
+  assert_response_jq "${cached}" '(.body | length) == 131072'
+  assert_response_jq "${cached}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
+  miss="$(client_request "example.test" "${rejected_path}" 502)"
+  assert_response_jq "${miss}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "disk-index-churn",
+            "disk cache index remains coherent after eviction churn",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local first second third fourth newest evicted
+  first="$(client_request "example.test" "/app/churn-a?body_repeat=128&body_repeat_char=A&cache_control=public&content_type=text/plain" 200)"
+  second="$(client_request "example.test" "/app/churn-b?body_repeat=128&body_repeat_char=B&cache_control=public&content_type=text/plain" 200)"
+  third="$(client_request "example.test" "/app/churn-c?body_repeat=128&body_repeat_char=C&cache_control=public&content_type=text/plain" 200)"
+  fourth="$(client_request "example.test" "/app/churn-d?body_repeat=128&body_repeat_char=D&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${first}" '.headers["x-oxibelt-cache"] == "miss"'
+  assert_response_jq "${second}" '.headers["x-oxibelt-cache"] == "miss"'
+  assert_response_jq "${third}" '.headers["x-oxibelt-cache"] == "miss"'
+  assert_response_jq "${fourth}" '.headers["x-oxibelt-cache"] == "miss"'
+  sleep 1
+  docker rm -f "${http_container}" >/dev/null
+  newest="$(client_request "example.test" "/app/churn-d?body_repeat=128&body_repeat_char=D&cache_control=public&content_type=text/plain" 200)"
+  assert_response_jq "${newest}" '(.body | length) == 128 and .headers["x-oxibelt-cache"] == "hit"'
+  evicted="$(client_request "example.test" "/app/churn-a?body_repeat=128&body_repeat_char=A&cache_control=public&content_type=text/plain" 502)"
+  assert_response_jq "${evicted}" '.status == 502'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "cache",
+            "lock-starvation",
+            "streaming cache fills keep collapsed forwarding waiters from timing out",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local path first_file second_file third_file first second third metrics
+  path="/app/stream-lock?body_repeat=131072&body_repeat_char=S&cache_control=public&content_type=text/plain&header_delay_ms=400"
+  first_file="${work_dir}/stream-lock-first.json"
+  second_file="${work_dir}/stream-lock-second.json"
+  third_file="${work_dir}/stream-lock-third.json"
+  client_request "example.test" "${path}" 200 >"${first_file}" &
+  sleep 0.1
+  client_request "example.test" "${path}" 200 >"${second_file}" &
+  client_request "example.test" "${path}" 200 >"${third_file}" &
+  wait
+  first="$(cat "${first_file}")"
+  second="$(cat "${second_file}")"
+  third="$(cat "${third_file}")"
+  assert_response_jq "${first}" '(.body | length) == 131072'
+  assert_response_jq "${second}" '(.body | length) == 131072'
+  assert_response_jq "${third}" '(.body | length) == 131072'
+  metrics="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
+  assert_response_jq "${metrics}" '.body | contains("oxibelt_cache_fill_lock_timeouts_total 0")'
 }
 "#,
             None,

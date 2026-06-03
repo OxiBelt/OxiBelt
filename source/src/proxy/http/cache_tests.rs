@@ -5,6 +5,9 @@ mod common {
   ));
 }
 
+#[path = "cache_tests_streaming.rs"]
+mod streaming;
+
 use http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -122,6 +125,7 @@ cache_methods = ["GET"]
     &request_headers,
     None,
     false,
+    None,
   )
   .await;
 
@@ -540,11 +544,11 @@ fn cached_status_response_marks_hit_stale_and_revalidated() {
     headers.insert("x-oxibelt-cache", HeaderValue::from_static("miss"));
     headers.insert("x-oxibelt-cache-reason", HeaderValue::from_static("forged"));
     let response = super::cache_status::cached_status_response(
-      crate::cache::CacheEntry {
-        status: StatusCode::OK,
+      crate::cache::CacheEntry::memory(
+        StatusCode::OK,
         headers,
-        body: bytes::Bytes::from_static(b"cached"),
-      },
+        bytes::Bytes::from_static(b"cached"),
+      ),
       &Method::GET,
       &request_headers,
       outcome,

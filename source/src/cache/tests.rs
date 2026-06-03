@@ -7,6 +7,8 @@ mod core;
 mod fill;
 #[path = "tests_index.rs"]
 mod index;
+#[path = "tests_semantics.rs"]
+mod semantics;
 #[path = "tests_shared.rs"]
 mod shared;
 
@@ -90,11 +92,7 @@ fn insert_stale_revalidate_entry(
         uri,
         request_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers,
-        body,
-      },
+      CacheEntry::memory(StatusCode::OK, headers, body),
     ),
     CacheInsertOutcome::Stored
   );

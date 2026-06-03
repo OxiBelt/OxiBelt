@@ -567,11 +567,11 @@ fn seed_cache_entry(snapshot: &AppSnapshot, uri: &str, tag: Option<&str>) {
         uri: &uri,
         request_headers: &HeaderMap::new(),
       },
-      crate::cache::CacheEntry {
-        status: StatusCode::OK,
+      crate::cache::CacheEntry::memory(
+        StatusCode::OK,
         headers,
-        body: bytes::Bytes::from_static(b"cached"),
-      },
+        bytes::Bytes::from_static(b"cached")
+      ),
     ),
     crate::cache::CacheInsertOutcome::Stored
   );

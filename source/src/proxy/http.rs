@@ -39,6 +39,7 @@ pub(crate) mod access_log;
 pub(crate) mod body;
 pub(crate) mod buffering;
 mod cache_status;
+mod cache_streaming;
 pub(crate) mod compression;
 pub(crate) mod fast_path;
 pub(crate) mod grpc_web;
@@ -1598,18 +1599,13 @@ where
         &parts.headers,
       );
     }
-    let mut headers = entry.headers.clone();
+    let mut cached_entry = entry;
+    let mut headers = cached_entry.headers.clone();
     merge_not_modified_headers(&mut headers, &parts.headers);
+    cached_entry.headers = headers;
     state.metrics.record_cache_hit();
-    let mut response = cache_status::cached_entry_response(
-      crate::cache::CacheEntry {
-        status: entry.status,
-        headers,
-        body: entry.body,
-      },
-      &request_method,
-      &request_headers,
-    );
+    let mut response =
+      cache_status::cached_entry_response(cached_entry, &request_method, &request_headers);
     cache_status::apply(
       &mut response,
       CacheOutcome::Revalidated,
@@ -1753,6 +1749,7 @@ where
     &request_headers,
     Some(resolved.route),
     cache_store_allowed,
+    _cache_fill_guard.take(),
   )
   .await;
   let response = compression::maybe_compress_response(
@@ -3086,11 +3083,7 @@ async fn background_refresh(
       uri: &uri,
       request_headers: &request_headers,
     },
-    crate::cache::CacheEntry {
-      status: parts.status,
-      headers: parts.headers,
-      body: bytes,
-    },
+    crate::cache::CacheEntry::memory(parts.status, parts.headers, bytes),
   ) {
     crate::cache::CacheInsertOutcome::Stored => {
       state.metrics.record_cache_background_refresh_success();
@@ -3149,6 +3142,7 @@ async fn maybe_cache_response(
     request_headers,
     route,
     true,
+    None,
   )
   .await
 }
@@ -3165,13 +3159,14 @@ async fn maybe_cache_response_with_store_permission(
   request_headers: &HeaderMap,
   route: Option<&RouteConfig>,
   allow_store: bool,
+  mut cache_fill_guard: Option<crate::cache::CacheFillGuard>,
 ) -> Response<ProxyBody> {
   if !state.request_path_features.cache || !state.cache.policy_enabled(route_cache, method) {
     let mut response = response;
     cache_status::strip_headers(response.headers_mut());
     return response;
   }
-  let (mut parts, body) = response.into_parts();
+  let (mut parts, mut body) = response.into_parts();
   cache_status::strip_headers(&mut parts.headers);
   if !allow_store {
     if state.cache.strip_surrogate_control(route_cache) {
@@ -3185,7 +3180,7 @@ async fn maybe_cache_response_with_store_permission(
     );
     return response;
   }
-  let content_length = exact_response_content_length(&parts.headers);
+  let content_length = cache_streaming::exact_response_content_length(&parts.headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
     policy_name: route_cache,
     scheme,
@@ -3243,12 +3238,35 @@ async fn maybe_cache_response_with_store_permission(
         return response;
       }
     };
-  let collect_limit = cache_response_collect_limit(&state.config);
-  if body
-    .size_hint()
-    .upper()
-    .is_none_or(|upper| upper as usize > collect_limit)
-  {
+  let collect_limit = cache_streaming::response_collect_limit(&state.config);
+  let body_size_hint = body.size_hint();
+  let known_body_len =
+    content_length.or_else(|| cache_streaming::exact_body_size_hint_len(&body_size_hint));
+  if known_body_len.is_none_or(|len| len > collect_limit) {
+    if let Some(expected_body_len) = known_body_len {
+      match cache_streaming::maybe_stream_cache_response(
+        state,
+        route_cache,
+        scheme,
+        host,
+        method,
+        uri,
+        request_headers,
+        route,
+        parts,
+        body,
+        prepared,
+        expected_body_len,
+        cache_fill_guard.take(),
+      ) {
+        Ok(response) => return response,
+        Err(returned) => {
+          let (returned_parts, returned_body) = *returned;
+          parts = returned_parts;
+          body = returned_body;
+        }
+      }
+    }
     record_fill_stage("body_collect", "too_large", Instant::now());
     state.cache.note_fill_not_stored_reason(
       insert_ctx(),
@@ -3271,11 +3289,7 @@ async fn maybe_cache_response_with_store_permission(
       let store_started = Instant::now();
       let reason = match state.cache.insert_prepared(
         *prepared,
-        crate::cache::CacheEntry {
-          status: parts.status,
-          headers: parts.headers.clone(),
-          body: bytes.clone(),
-        },
+        crate::cache::CacheEntry::memory(parts.status, parts.headers.clone(), bytes.clone()),
       ) {
         crate::cache::CacheInsertOutcome::Rejected => {
           record_fill_stage("local_store", "rejected", store_started);
@@ -3340,22 +3354,6 @@ async fn maybe_cache_response_with_store_permission(
       ))
     }
   }
-}
-
-fn exact_response_content_length(headers: &HeaderMap) -> Option<usize> {
-  let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
-  let value = values.next()?;
-  if values.next().is_some() {
-    return None;
-  }
-  value.to_str().ok()?.trim().parse().ok()
-}
-
-fn cache_response_collect_limit(config: &Config) -> usize {
-  config
-    .cache
-    .max_size_bytes
-    .min(config.proxy.buffering.max_memory_body_bytes)
 }
 
 async fn collect_cache_response_body(

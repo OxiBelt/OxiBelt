@@ -206,9 +206,7 @@ impl CompiledRouteMatcher {
       return None;
     }
     if !self.headers.is_empty() {
-      let Some(headers) = context.headers else {
-        return None;
-      };
+      let headers = context.headers?;
       if !self
         .headers
         .iter()

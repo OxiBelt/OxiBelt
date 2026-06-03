@@ -22,11 +22,11 @@ fn shared_cache_tag_purge_removes_l2_entry() {
       uri: &uri,
       request_headers: &request_headers,
     },
-    CacheEntry {
-      status: StatusCode::OK,
-      headers: response_headers,
-      body: Bytes::from_static(b"tagged"),
-    },
+    CacheEntry::memory(
+      StatusCode::OK,
+      response_headers,
+      Bytes::from_static(b"tagged"),
+    ),
   );
   assert!(matches!(
     second.lookup(CacheLookupContext {
@@ -83,11 +83,11 @@ fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
       uri: &uri,
       request_headers: &headers,
     },
-    CacheEntry {
-      status: StatusCode::OK,
-      headers: HeaderMap::new(),
-      body: Bytes::from_static(b"shared-cache"),
-    },
+    CacheEntry::memory(
+      StatusCode::OK,
+      HeaderMap::new(),
+      Bytes::from_static(b"shared-cache"),
+    ),
   );
   assert_eq!(first.stats().memory_entries, 1);
   let index_keys = shared.test_cache_raw_keys("cache:index:");
@@ -143,11 +143,11 @@ fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
         uri: &uri,
         request_headers: &headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers,
-        body: Bytes::from_static(b"legacy-cache"),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers,
+        Bytes::from_static(b"legacy-cache")
+      ),
     ),
     CacheInsertOutcome::Stored
   );
@@ -202,11 +202,11 @@ fn shared_cache_vary_lookup_uses_indexed_variant() {
         uri: &uri,
         request_headers: &request_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers,
-        body: Bytes::from_static(b"vary-en"),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers,
+        Bytes::from_static(b"vary-en")
+      ),
     ),
     CacheInsertOutcome::Stored
   );
@@ -251,11 +251,7 @@ fn shared_cache_large_body_uses_retrievable_chunks() {
         uri: &uri,
         request_headers: &headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: HeaderMap::new(),
-        body: body.clone(),
-      },
+      CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body.clone()),
     ),
     CacheInsertOutcome::Stored
   );
@@ -300,11 +296,11 @@ fn shared_cache_requires_exact_uri_when_cache_key_collides() {
       uri: &secret_uri,
       request_headers: &headers,
     },
-    CacheEntry {
-      status: StatusCode::OK,
-      headers: HeaderMap::new(),
-      body: Bytes::from_static(b"secret-token-response"),
-    },
+    CacheEntry::memory(
+      StatusCode::OK,
+      HeaderMap::new(),
+      Bytes::from_static(b"secret-token-response"),
+    ),
   );
 
   let other_ctx = CacheLookupContext {

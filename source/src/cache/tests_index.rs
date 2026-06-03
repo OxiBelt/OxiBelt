@@ -29,11 +29,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
           uri: &uri,
           request_headers,
         },
-        CacheEntry {
-          status: StatusCode::OK,
-          headers: response_headers.clone(),
-          body,
-        },
+        CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
       CacheInsertOutcome::Stored
     );
@@ -105,11 +101,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
           uri: &uri,
           request_headers: &first_headers,
         },
-        CacheEntry {
-          status: StatusCode::OK,
-          headers: response_headers.clone(),
-          body,
-        },
+        CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
       CacheInsertOutcome::Stored
     );
@@ -124,11 +116,11 @@ fn vary_variant_count_updates_after_replace_and_purge() {
         uri: &uri,
         request_headers: &second_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers.clone(),
-        body: Bytes::from_static(b"b"),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers.clone(),
+        Bytes::from_static(b"b")
+      ),
     ),
     CacheInsertOutcome::Rejected
   );
@@ -147,11 +139,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
         uri: &uri,
         request_headers: &second_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers,
-        body: Bytes::from_static(b"b"),
-      },
+      CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"b")),
     ),
     CacheInsertOutcome::Stored
   );
@@ -191,11 +179,11 @@ fn vary_variant_count_updates_after_eviction() {
         uri: &uri,
         request_headers: &first_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers.clone(),
-        body: Bytes::from(vec![b'a'; 20]),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers.clone(),
+        Bytes::from(vec![b'a'; 20])
+      ),
     ),
     CacheInsertOutcome::Stored
   );
@@ -209,11 +197,11 @@ fn vary_variant_count_updates_after_eviction() {
         uri: &filler_uri,
         request_headers: &request_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: HeaderMap::new(),
-        body: Bytes::from(vec![b'f'; 80]),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        HeaderMap::new(),
+        Bytes::from(vec![b'f'; 80])
+      ),
     ),
     CacheInsertOutcome::Stored
   );
@@ -239,11 +227,11 @@ fn vary_variant_count_updates_after_eviction() {
         uri: &uri,
         request_headers: &second_headers,
       },
-      CacheEntry {
-        status: StatusCode::OK,
-        headers: response_headers,
-        body: Bytes::from(vec![b'b'; 20]),
-      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers,
+        Bytes::from(vec![b'b'; 20])
+      ),
     ),
     CacheInsertOutcome::Stored
   );
