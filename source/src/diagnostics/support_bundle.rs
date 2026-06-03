@@ -1,3 +1,6 @@
+//! Support bundle assembly and redacted runtime snapshots.
+//! Bundle fields must be useful for debugging without exposing credentials or private URLs.
+
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +22,7 @@ use process::process_snapshot;
 const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 1;
 const WAF_RULE_LIMIT: usize = 50;
 
+/// Redacted support bundle assembled from runtime, config, and system snapshots.
 #[derive(Debug, Serialize)]
 pub struct SupportBundle {
   pub metadata: SupportBundleMetadata,

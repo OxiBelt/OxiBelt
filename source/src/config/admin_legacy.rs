@@ -1,3 +1,6 @@
+//! Legacy admin configuration compatibility checks.
+//! Legacy fields are validated separately so migration behavior stays explicit.
+
 use anyhow::bail;
 use serde::Deserialize;
 

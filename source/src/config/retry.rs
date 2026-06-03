@@ -1,3 +1,6 @@
+//! Upstream retry configuration validation.
+//! Retry conditions are normalized before request dispatch can use them.
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

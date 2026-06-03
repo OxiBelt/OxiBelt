@@ -1,3 +1,6 @@
+//! Cache-warm request execution.
+//! Warmups reuse proxy planning while staying outside client-facing response paths.
+
 use std::sync::Arc;
 use std::time::Duration;
 

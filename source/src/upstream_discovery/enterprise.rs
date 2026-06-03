@@ -1,3 +1,6 @@
+//! Enterprise upstream discovery provider.
+//! Provider data is normalized before it enters the common discovery supervisor.
+
 use std::net::IpAddr;
 use std::time::Duration;
 

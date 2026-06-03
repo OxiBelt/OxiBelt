@@ -1,3 +1,6 @@
+//! CRS transform implementations.
+//! Transforms operate on derived values and never rewrite upstream-bound metadata.
+
 use std::borrow::Cow;
 
 use anyhow::bail;

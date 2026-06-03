@@ -1,3 +1,6 @@
+//! Devtools fixture construction for repeatable OxiRule analysis.
+//! Fixtures isolate sample data from live proxy traffic.
+
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 

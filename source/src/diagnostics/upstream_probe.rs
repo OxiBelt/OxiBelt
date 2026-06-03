@@ -1,3 +1,6 @@
+//! Upstream probe execution.
+//! Probes reuse runtime clients where possible while keeping failures diagnostic-only.
+
 use std::sync::Arc;
 use std::time::Duration;
 

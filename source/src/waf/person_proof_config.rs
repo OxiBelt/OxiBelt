@@ -1,3 +1,6 @@
+//! Person proof configuration validation and defaults.
+//! Challenge settings are validated before runtime issuance can depend on them.
+
 use std::collections::HashMap;
 
 use anyhow::{Context, bail};

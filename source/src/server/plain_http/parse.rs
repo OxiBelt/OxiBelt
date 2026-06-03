@@ -1,3 +1,6 @@
+//! Minimal HTTP/1 request parser for the plain listener path.
+//! Parsed targets and headers remain untrusted until later validation stages accept them.
+
 use std::time::Duration;
 
 use ::http::{HeaderMap, HeaderName, HeaderValue, Method};

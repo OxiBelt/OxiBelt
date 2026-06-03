@@ -1,3 +1,6 @@
+//! Admin operation endpoint dispatch.
+//! Long-running operations are tracked separately from request/response lifetimes.
+
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde_json::json;

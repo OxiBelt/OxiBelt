@@ -1,3 +1,6 @@
+//! Persistent IPM store access.
+//! SQL reads and writes are centralized so audit, refresh, and validation remain consistent.
+
 use std::str::FromStr;
 use std::time::Duration;
 

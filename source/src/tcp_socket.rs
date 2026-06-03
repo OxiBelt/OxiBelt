@@ -1,3 +1,6 @@
+//! TCP socket option helpers shared by listeners.
+//! Platform-specific socket setup stays isolated from protocol handlers.
+
 use std::net::SocketAddr;
 
 use tokio::net::TcpStream;

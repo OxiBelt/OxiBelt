@@ -1,3 +1,6 @@
+//! Route lookup and per-route execution planning.
+//! Host and path matching stay deterministic because routing decides which policy boundary applies.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -8,6 +11,7 @@ mod plan;
 use self::plan::route_execution_plan;
 pub use self::plan::{FastPathPlan, RouteExecutionPlan, RouteWafExecutionPlan, WafExecutionPlan};
 
+/// Immutable route index built from validated configuration.
 #[derive(Debug, Clone)]
 pub struct RouteTable {
   routes: Vec<RouteEntry>,
@@ -74,6 +78,7 @@ impl WildcardHostTrie {
   }
 }
 
+/// Borrowed route resolution result used by request handlers.
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute<'a> {
   pub route: &'a RouteConfig,
@@ -293,6 +298,7 @@ impl RouteMatch {
   }
 }
 
+/// Normalizes a host value for route matching without validating ownership.
 pub fn normalize_host(raw: &str) -> String {
   normalize_host_cow(raw).into_owned()
 }
@@ -324,6 +330,7 @@ fn ascii_lower_cow(value: &str) -> Cow<'_, str> {
   }
 }
 
+/// Returns whether a request path is within a configured route prefix boundary.
 pub fn path_prefix_matches(prefix: &str, path: &str) -> bool {
   if prefix == "/" {
     return true;

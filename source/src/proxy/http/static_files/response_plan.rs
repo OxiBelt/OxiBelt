@@ -1,3 +1,6 @@
+//! Static-file response planning.
+//! Range and conditional-request decisions are computed before streaming file contents.
+
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;

@@ -1,3 +1,6 @@
+//! Admin QUIC TLS builder.
+//! Admin transport uses a separate resumption scope from public data-plane QUIC.
+
 use std::sync::Arc;
 
 use anyhow::Context;

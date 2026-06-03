@@ -1,3 +1,6 @@
+//! Limit configuration defaults and validation.
+//! Limit names and identities are resolved before runtime enforcement begins.
+
 use super::LimitsConfig;
 
 impl LimitsConfig {

@@ -1,3 +1,6 @@
+//! Mitigation action compilation for HTTP and stream decisions.
+//! Actions are validated before they can mutate responses or emit enforcement events.
+
 use std::fmt::Write as _;
 use std::net::IpAddr;
 

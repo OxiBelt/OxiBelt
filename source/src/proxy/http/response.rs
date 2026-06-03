@@ -1,3 +1,6 @@
+//! Response builders shared by proxy, WAF, and error paths.
+//! Centralized builders keep security headers and terminal WAF responses consistent.
+
 use bytes::Bytes;
 use http::header::HeaderMap;
 use http::{HeaderValue, Method, Response, StatusCode, Uri};

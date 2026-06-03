@@ -1,3 +1,6 @@
+//! Mitigation event emission for fail-closed and out-of-band enforcement flows.
+//! Queued actions are isolated from request handling so sink failures can be surfaced safely.
+
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;

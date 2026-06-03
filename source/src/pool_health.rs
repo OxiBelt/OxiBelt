@@ -1,3 +1,5 @@
+//! Upstream health snapshot projection for admin and diagnostics.
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;

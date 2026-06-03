@@ -1,3 +1,6 @@
+//! Shared devtools data types for OxiRule candidate workflows.
+//! Types keep scan input, generated policy, and reporting fields distinct.
+
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};

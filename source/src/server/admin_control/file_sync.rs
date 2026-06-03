@@ -1,3 +1,6 @@
+//! Admin-controlled file synchronization.
+//! Sync targets are restricted by load scope before writing managed files.
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

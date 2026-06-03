@@ -1,3 +1,6 @@
+//! HTTP data-plane forwarding for downstream requests and upstream responses.
+//! Security-sensitive framing, header, body, and WAF decisions stay explicit in this module tree.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::LazyLock;

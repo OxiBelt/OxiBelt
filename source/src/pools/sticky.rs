@@ -1,3 +1,6 @@
+//! Sticky-session cookie parsing and signing.
+//! Sticky identifiers are validated before they can influence upstream selection.
+
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;

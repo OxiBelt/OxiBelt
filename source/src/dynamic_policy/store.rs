@@ -1,3 +1,6 @@
+//! Persistent dynamic policy store access.
+//! Store rows are parsed into validated records before they reach runtime state.
+
 use std::str::FromStr;
 use std::time::Duration;
 

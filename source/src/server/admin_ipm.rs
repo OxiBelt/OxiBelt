@@ -1,3 +1,6 @@
+//! Admin IPM resource endpoints.
+//! Handlers enforce IPM permissions before returning mutable identity state.
+
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde_json::json;

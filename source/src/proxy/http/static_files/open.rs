@@ -1,3 +1,6 @@
+//! Static-file open helpers.
+//! File metadata is read after path confinement so response planning cannot follow unsafe targets.
+
 use std::fs::Metadata;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};

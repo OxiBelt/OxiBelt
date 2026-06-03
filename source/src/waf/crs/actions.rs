@@ -1,3 +1,6 @@
+//! CRS action parsing and execution mapping.
+//! Parsed actions are reduced to OxiBelt decisions before runtime evaluation.
+
 use std::borrow::Cow;
 use std::sync::LazyLock;
 

@@ -1,3 +1,5 @@
+//! Binary entrypoint for loading configuration and starting the OxiBelt runtime.
+
 use std::path::PathBuf;
 
 use anyhow::Context;

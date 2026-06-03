@@ -1,3 +1,6 @@
+//! Dynamic policy admin store helpers.
+//! Admin queries use one projection so list and detail responses agree.
+
 use anyhow::Context;
 use serde_json::{Value, json};
 use sqlx::{Pool, Postgres, QueryBuilder, Row, Transaction};

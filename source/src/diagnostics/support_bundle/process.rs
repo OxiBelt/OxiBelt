@@ -1,3 +1,6 @@
+//! Process-level support bundle snapshot helpers.
+//! Platform details are collected read-only and reported without affecting runtime state.
+
 use std::collections::BTreeMap;
 use std::fs;
 

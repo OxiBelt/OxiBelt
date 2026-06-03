@@ -1,3 +1,6 @@
+//! Static-file path resolution.
+//! Request paths are untrusted and must stay confined beneath the configured root.
+
 use std::path::{Path, PathBuf};
 
 pub(crate) fn resolve_request_path(

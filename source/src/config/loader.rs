@@ -1,3 +1,6 @@
+//! TOML loading, include processing, and runtime override application.
+//! Includes are resolved deliberately so config assembly cannot escape expected roots.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

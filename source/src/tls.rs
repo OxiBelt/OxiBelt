@@ -1,3 +1,6 @@
+//! TLS configuration builders for downstream, upstream, admin, TURN, and QUIC transports.
+//! Certificate loading and resumption keys stay scoped to the transport that uses them.
+
 use std::fs;
 use std::sync::Arc;
 
@@ -54,6 +57,7 @@ fn supported_key_exchange_group(
   }
 }
 
+/// Builds the shared downstream TCP TLS server configuration for HTTP/1 and HTTP/2.
 pub fn build_server_config(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
@@ -61,6 +65,7 @@ pub fn build_server_config(
   build_server_config_with_resumption(tls, listeners, None)
 }
 
+/// Builds the downstream TCP TLS server configuration with optional shared resumption storage.
 pub fn build_server_config_with_resumption(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
@@ -107,6 +112,7 @@ pub fn build_server_config_with_resumption(
   Ok(Arc::new(server_config))
 }
 
+/// Builds the downstream QUIC server configuration used by HTTP/3 listeners.
 pub fn build_quic_server_config(
   tls: &TlsConfig,
   quic: &QuicConfig,
@@ -160,10 +166,12 @@ pub fn build_quic_server_config_with_resumption(
   Ok(quic_config)
 }
 
+/// Builds the TCP TLS server configuration for the admin listener.
 pub fn build_admin_server_config(tls: &AdminTlsConfig) -> anyhow::Result<Arc<ServerConfig>> {
   build_admin_server_config_with_resumption(tls, None)
 }
 
+/// Builds the admin TCP TLS server configuration with optional shared resumption storage.
 pub fn build_admin_server_config_with_resumption(
   tls: &AdminTlsConfig,
   resumption_state: Option<&TlsResumptionState>,
@@ -409,6 +417,7 @@ fn admin_sni_matches(pattern: &str, server_name: &str) -> bool {
   pattern == server_name
 }
 
+/// Builds the upstream TCP TLS client configuration used by proxy clients.
 pub fn build_upstream_client_config(
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,

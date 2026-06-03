@@ -1,3 +1,6 @@
+//! CRS compatibility reporting.
+//! Reports are descriptive so unsupported syntax does not silently change enforcement.
+
 use serde::Serialize;
 
 pub(super) const SUPPORTED_CRS_CURRENT_VERSION: &str = "v4.25.0";

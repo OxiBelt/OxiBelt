@@ -1,3 +1,6 @@
+//! TLS diagnostic checks.
+//! Certificate parsing reports validity problems without changing live TLS configuration.
+
 use std::net::IpAddr;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};

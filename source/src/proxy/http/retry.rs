@@ -1,3 +1,6 @@
+//! Upstream retry planning and dispatch.
+//! Retry decisions preserve request safety, pool health accounting, and body replay limits.
+
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use http::{HeaderValue, Method, Request, Response, StatusCode};

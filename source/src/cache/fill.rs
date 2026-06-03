@@ -1,3 +1,6 @@
+//! Cache fill coordination.
+//! One fill owner streams the upstream response while waiters observe the committed entry.
+
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};

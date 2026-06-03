@@ -1,3 +1,6 @@
+//! Linux sendfile support for static-file responses.
+//! Kernel-assisted transfer is used only after static path and WAF checks have passed.
+
 use std::sync::OnceLock;
 
 static KERNEL_SENDFILE_AVAILABLE: OnceLock<bool> = OnceLock::new();

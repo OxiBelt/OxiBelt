@@ -1,3 +1,6 @@
+//! Admin runtime configuration validation.
+//! Operation and transport limits are checked before the admin listener starts.
+
 use anyhow::{Context, anyhow, bail};
 
 use super::{Config, ConfigPathRoots, redact_effective_toml, validate_merged_toml_shape};

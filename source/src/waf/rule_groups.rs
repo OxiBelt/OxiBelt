@@ -1,3 +1,6 @@
+//! Rule-group resolution for scoped WAF configuration.
+//! Scopes are resolved before evaluation so route-specific rules do not bleed across routes.
+
 use std::collections::HashSet;
 
 use anyhow::{Context, bail};

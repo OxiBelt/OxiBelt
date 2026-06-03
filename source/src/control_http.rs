@@ -1,3 +1,6 @@
+//! Internal HTTP client used for control-plane probes and administrative calls.
+//! The client is separate from proxy clients to avoid mixing trust boundaries.
+
 use std::convert::Infallible;
 use std::time::Duration;
 

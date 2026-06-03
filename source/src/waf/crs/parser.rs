@@ -1,3 +1,6 @@
+//! CRS file parser.
+//! Parser errors remain explicit so rulepacks cannot partially load with changed meaning.
+
 use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};

@@ -1,3 +1,6 @@
+//! Registry for admin-visible WebTransport sessions.
+//! Session metadata is scoped to diagnostics and drain operations rather than request policy.
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, Weak};

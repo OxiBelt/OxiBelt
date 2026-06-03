@@ -1,3 +1,6 @@
+//! Admin HTTP route dispatch.
+//! Handlers share authorization and response helpers so admin endpoints fail consistently.
+
 use ::http::{Response, StatusCode};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;

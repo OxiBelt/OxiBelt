@@ -1,3 +1,6 @@
+//! Cross-worker shared state containers.
+//! Optional backends are hidden behind stable runtime handles so callers keep the same semantics.
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};

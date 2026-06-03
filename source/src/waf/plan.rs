@@ -1,3 +1,6 @@
+//! Per-route WAF execution planning.
+//! Plans make body-inspection needs explicit before proxy fast paths are chosen.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 

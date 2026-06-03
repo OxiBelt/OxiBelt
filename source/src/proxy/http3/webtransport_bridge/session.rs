@@ -1,3 +1,6 @@
+//! WebTransport session runtime for bridged HTTP/3 streams.
+//! Session state owns stream tasks until drain or close so cleanup is coordinated.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

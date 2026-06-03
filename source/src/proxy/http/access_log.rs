@@ -1,3 +1,6 @@
+//! HTTP access-log projection.
+//! Request and response metadata is captured without retaining full body contents.
+
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 

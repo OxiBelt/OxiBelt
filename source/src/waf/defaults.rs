@@ -1,3 +1,6 @@
+//! WAF default configuration values.
+//! Defaults are explicit so generated config and runtime behavior agree.
+
 use super::{AccessLogFieldConfig, PersonProofTokenBinding};
 
 pub(super) fn default_access_log_field_configs() -> Vec<AccessLogFieldConfig> {

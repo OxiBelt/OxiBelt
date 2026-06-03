@@ -1,3 +1,6 @@
+//! WebTransport preparation for HTTP proxy routes.
+//! Session setup validates route and upstream capabilities before handing off to HTTP/3.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

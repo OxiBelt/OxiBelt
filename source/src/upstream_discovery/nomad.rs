@@ -1,3 +1,6 @@
+//! Nomad upstream discovery provider.
+//! Service records are validated before pool membership changes.
+
 use std::net::IpAddr;
 use std::time::Duration;
 

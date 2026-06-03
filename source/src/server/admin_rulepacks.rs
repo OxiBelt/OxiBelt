@@ -1,3 +1,6 @@
+//! Admin rulepack endpoints.
+//! Rulepack inspection and rendering are exposed through the same admin authorization boundary.
+
 use crate::config::Config;
 
 pub(super) fn active_rulepack_summaries(config: &Config) -> Vec<crate::waf::WafRulepackSummary> {

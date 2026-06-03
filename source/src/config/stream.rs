@@ -1,3 +1,6 @@
+//! Raw stream listener configuration validation.
+//! Stream routes are checked before they can bypass HTTP-specific safeguards.
+
 use std::collections::HashSet;
 use std::net::SocketAddr;
 

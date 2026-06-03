@@ -1,3 +1,6 @@
+//! IPM binding mutation helpers.
+//! Binding changes are validated against principals and policies before persistence.
+
 use anyhow::Context;
 
 use crate::config::validate_runtime_identifier;

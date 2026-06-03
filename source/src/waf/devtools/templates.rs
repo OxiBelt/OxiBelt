@@ -1,3 +1,6 @@
+//! Template rendering for generated OxiRule artifacts.
+//! Rendering is data-only and does not validate runtime policy semantics.
+
 use super::types::{
   OxiRuleDevtoolsReport, OxiRuleFalsePositiveRequest, OxiRuleTemplateRenderRequest,
   OxiRuleTemplateSummary,

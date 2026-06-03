@@ -1,3 +1,6 @@
+//! Worker-count and CPU-affinity configuration validation.
+//! Runtime sizing stays explicit so deployment choices are reproducible.
+
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};

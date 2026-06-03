@@ -1,3 +1,6 @@
+//! Prometheus metrics registration and update helpers.
+//! Label values are constrained at call sites so exported series remain low-cardinality.
+
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 

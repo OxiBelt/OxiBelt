@@ -1,3 +1,6 @@
+//! Streaming response helpers for admin operations.
+//! Stream formatting is transport-specific while operation state remains shared.
+
 use ::http::{Response, StatusCode};
 use bytes::Bytes;
 use hyper::body::Frame;

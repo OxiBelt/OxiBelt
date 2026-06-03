@@ -1,3 +1,6 @@
+//! Request framing classification for security-sensitive body handling.
+//! Ambiguous `Content-Length` and `Transfer-Encoding` combinations must be rejected consistently.
+
 use http::header::{CONTENT_LENGTH, HeaderMap, TRANSFER_ENCODING};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

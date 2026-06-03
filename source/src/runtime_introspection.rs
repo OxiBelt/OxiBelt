@@ -1,3 +1,6 @@
+//! Low-overhead runtime counters surfaced through authorized diagnostics.
+//! Counters are observational only and must not influence proxy decisions.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};

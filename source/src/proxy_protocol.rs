@@ -1,3 +1,6 @@
+//! PROXY protocol parsing for downstream peer identity.
+//! Parsed metadata is trusted only after listener-level configuration permits it.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{Context, bail};

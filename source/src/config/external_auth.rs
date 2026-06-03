@@ -1,3 +1,6 @@
+//! External authorization configuration validation.
+//! Request projection settings are constrained before traffic can depend on them.
+
 use std::collections::HashSet;
 
 use anyhow::{Context, bail};

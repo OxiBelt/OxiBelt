@@ -1,3 +1,6 @@
+//! IPM bearer-token hashing and verification.
+//! Token material is compared through hashes so plaintext credentials do not enter snapshots.
+
 use base64::Engine;
 use ring::rand::SecureRandom;
 use subtle::ConstantTimeEq;

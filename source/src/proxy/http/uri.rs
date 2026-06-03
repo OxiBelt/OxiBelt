@@ -1,3 +1,6 @@
+//! URI validation and upstream rewrite helpers.
+//! Downstream targets are untrusted and must be normalized before route or upstream use.
+
 use std::str::FromStr;
 
 use http::Uri;

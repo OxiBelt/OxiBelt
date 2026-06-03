@@ -1,3 +1,6 @@
+//! SNI forwarding configuration validation.
+//! TCP and QUIC forwarding targets are constrained before listener startup.
+
 use std::collections::HashSet;
 
 use anyhow::{Context, bail};

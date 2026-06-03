@@ -1,3 +1,6 @@
+//! Dynamic policy quota enforcement.
+//! Quotas are checked before records are written to the persistent store.
+
 use anyhow::{Context, bail};
 use sqlx::{Postgres, Transaction};
 

@@ -1,3 +1,6 @@
+//! Minimal admin HTTP client used by local tooling and tests.
+//! Request construction stays narrow so admin authentication material is handled consistently.
+
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

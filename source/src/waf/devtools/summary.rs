@@ -1,3 +1,5 @@
+//! Devtools summary projection for generated rule candidates.
+
 use super::super::{
   BodyNeed, BodyTextCaches, CompiledAction, EvalContext, HeaderMutation, PersonProofRequestStatus,
   RequestWafDecision, ResponseWafDecision, TransactionBudget, WafActionConfig, WafEngine, WafPhase,

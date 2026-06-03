@@ -1,9 +1,13 @@
+//! Serializable Admin API types for IPM resources.
+//! Request and response shapes stay here so handlers do not duplicate wire contracts.
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::IpmPolicyStatementConfig;
 
 use super::{IpmEntrySource, IpmSnapshotCounts, RedactedIpmCredential};
 
+/// Admin-visible IPM status snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct IpmAdminStatus {
   pub enabled: bool,

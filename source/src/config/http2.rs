@@ -1,3 +1,6 @@
+//! HTTP/2 tuning configuration.
+//! Values are validated before they are applied to downstream or upstream transports.
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]

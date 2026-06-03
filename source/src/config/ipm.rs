@@ -1,3 +1,6 @@
+//! IPM configuration validation.
+//! Identity, policy, credential, and store settings are checked before authorization starts.
+
 use std::collections::HashSet;
 
 use anyhow::{Context, bail};

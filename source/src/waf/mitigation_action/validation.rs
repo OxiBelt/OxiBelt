@@ -1,3 +1,6 @@
+//! Validation helpers for WAF mitigation actions.
+//! Validation ensures response and stream actions are safe before compilation.
+
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, bail};

@@ -1,3 +1,6 @@
+//! Admin operation endpoint router.
+//! Transport negotiation happens after the caller is authorized for the operation.
+
 use std::net::SocketAddr;
 
 use ::http::{Response, StatusCode};

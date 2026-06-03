@@ -1,3 +1,6 @@
+//! Admin metadata endpoint.
+//! Metadata is operational context and must not expose request-plane secrets.
+
 use ::http::{Response, StatusCode};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};

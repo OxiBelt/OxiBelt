@@ -1,3 +1,5 @@
+//! Runtime store for dynamic policy records and signatures.
+
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;

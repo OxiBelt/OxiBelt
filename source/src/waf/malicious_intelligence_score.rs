@@ -1,3 +1,6 @@
+//! Local malicious-intelligence score helper used by OxiRule expressions.
+//! Scoring is deterministic and bounded so request evaluation stays hot-path safe.
+
 use anyhow::bail;
 use http::HeaderMap;
 use http::header::USER_AGENT;

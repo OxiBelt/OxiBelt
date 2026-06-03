@@ -1,3 +1,6 @@
+//! Request and response body text caches for WAF expression evaluation.
+//! Cached views are scoped to one evaluation so transformed body data does not leak across requests.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};

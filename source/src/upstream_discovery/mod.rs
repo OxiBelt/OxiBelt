@@ -1,3 +1,6 @@
+//! Runtime upstream discovery registry and reconciliation.
+//! Discovery providers update candidate upstreams without bypassing route validation.
+
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;

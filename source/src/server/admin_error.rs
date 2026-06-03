@@ -1,3 +1,6 @@
+//! Admin error envelope construction.
+//! Error responses keep machine-readable codes separate from sensitive internal detail.
+
 use ::http::{Response, StatusCode};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};

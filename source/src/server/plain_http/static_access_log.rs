@@ -1,3 +1,5 @@
+//! Access-log projection for static responses served by the plain HTTP path.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::LazyLock;

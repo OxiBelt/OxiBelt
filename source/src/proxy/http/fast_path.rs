@@ -1,3 +1,6 @@
+//! Optimized HTTP forwarding paths that are only used when policy permits bypassing slower work.
+//! Each shortcut keeps WAF, body, cache, and protocol preconditions explicit.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};

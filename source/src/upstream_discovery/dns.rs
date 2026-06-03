@@ -1,3 +1,6 @@
+//! DNS upstream discovery configuration and resolver helpers.
+//! DNS results are treated as dynamic candidates, not permanent configuration.
+
 use anyhow::bail;
 
 pub(super) fn canonical_dns_name(name: &str) -> anyhow::Result<String> {

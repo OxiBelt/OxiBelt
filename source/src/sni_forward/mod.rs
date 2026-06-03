@@ -1,3 +1,5 @@
+//! SNI-based forwarding for TCP and QUIC flows.
+
 pub(crate) mod client_hello;
 pub(crate) mod connection_limits;
 pub(crate) mod matcher;

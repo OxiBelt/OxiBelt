@@ -1,3 +1,6 @@
+//! Person proof policy compilation.
+//! Policy state is separated from token issuance so route decisions remain inspectable.
+
 use super::person_proof::PersonProofPolicy;
 use super::person_proof::{PersonProofClearancePolicy, PersonProofRequestStatus, PersonProofState};
 use super::person_proof_v2;

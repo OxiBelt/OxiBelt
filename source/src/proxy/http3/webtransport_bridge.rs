@@ -1,3 +1,6 @@
+//! Bridge between HTTP proxy decisions and HTTP/3 WebTransport sessions.
+//! The bridge owns session handoff so request policy is settled before streams are accepted.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

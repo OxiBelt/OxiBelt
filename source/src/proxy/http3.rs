@@ -1,3 +1,6 @@
+//! HTTP/3 downstream and upstream handling.
+//! QUIC session state stays explicit because stream lifetimes differ from TCP request lifetimes.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

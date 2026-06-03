@@ -1,3 +1,6 @@
+//! Passive and active upstream health accounting.
+//! Health transitions are isolated from request dispatch so outlier state is explainable.
+
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 

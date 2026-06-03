@@ -1,3 +1,6 @@
+//! Wire types for admin operation status and events.
+//! Types are shared by polling, streaming, WebSocket, and WebTransport responses.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

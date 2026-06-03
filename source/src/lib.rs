@@ -1,5 +1,8 @@
 #![deny(unsafe_code)]
 
+//! Application entrypoints and module wiring for the OxiBelt proxy runtime.
+//! Keep this crate root declarative so ownership stays in focused modules.
+
 #[cfg(not(target_os = "linux"))]
 compile_error!("oxibelt-proxy intentionally targets Linux only.");
 
@@ -60,16 +63,19 @@ use anyhow::Context;
 use config::{Config, RuntimeOverrides};
 use state::{AppHandle, AppSnapshot};
 
+/// Runtime options that are not part of the persistent configuration file.
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
   pub config_path: Option<std::path::PathBuf>,
   pub runtime_overrides: RuntimeOverrides,
 }
 
+/// Runs OxiBelt with a validated, in-memory configuration.
 pub async fn run(config: Config) -> anyhow::Result<()> {
   run_with_options(config, RunOptions::default()).await
 }
 
+/// Runs OxiBelt with explicit runtime metadata for reload and admin surfaces.
 pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
   let observability = runtime::init_observability(&config)?;
   config.validate()?;

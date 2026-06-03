@@ -1,3 +1,6 @@
+//! PROXY protocol emission for upstream connections that require original peer metadata.
+//! Egress framing is explicit so upstream identity propagation cannot happen accidentally.
+
 use std::net::{IpAddr, SocketAddr};
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};

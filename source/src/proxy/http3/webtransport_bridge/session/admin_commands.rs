@@ -1,3 +1,6 @@
+//! Admin command handling for live WebTransport sessions.
+//! Commands are scoped by session id so diagnostics cannot act on unrelated streams.
+
 use h3_webtransport::SessionId;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;

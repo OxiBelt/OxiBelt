@@ -1,3 +1,6 @@
+//! WebTransport transport for admin operations.
+//! Final event flushing is explicit because QUIC stream close timing differs from HTTP responses.
+
 use std::time::Duration;
 
 use ::http::{Response, StatusCode};

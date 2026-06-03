@@ -1,3 +1,6 @@
+//! Cache metadata signing helpers.
+//! Signatures protect stored response metadata from being trusted after tampering.
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};

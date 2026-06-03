@@ -1,3 +1,6 @@
+//! HTTP/1 upgrade planning for runtime snapshots.
+//! Upgrade decisions are precomputed from config so request handling stays cheap.
+
 use crate::config::{Config, RouteConfig, UpstreamConfig};
 
 pub(super) fn http1_upgrades_possible(config: &Config, upstreams: &[UpstreamConfig]) -> bool {

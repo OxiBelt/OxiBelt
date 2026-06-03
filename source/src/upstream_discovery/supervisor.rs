@@ -1,3 +1,6 @@
+//! Upstream discovery supervisor.
+//! Provider snapshots are merged under one generation so route handlers see coherent updates.
+
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 

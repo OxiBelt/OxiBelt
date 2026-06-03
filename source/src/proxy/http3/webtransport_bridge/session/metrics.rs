@@ -1,3 +1,5 @@
+//! Metric projection for active WebTransport sessions.
+
 use super::ActiveWebTransportSession;
 use crate::telemetry::{SpanKind, TraceAttribute};
 use crate::waf::WafStreamClose;

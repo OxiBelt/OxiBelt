@@ -1,3 +1,5 @@
+//! WAF configuration, compilation, and evaluation for inspected requests, responses, and streams.
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

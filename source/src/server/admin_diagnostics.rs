@@ -1,3 +1,6 @@
+//! Admin diagnostics endpoints.
+//! Diagnostics are scoped and redacted before leaving the control plane.
+
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde::Deserialize;

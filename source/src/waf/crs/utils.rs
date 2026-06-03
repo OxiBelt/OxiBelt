@@ -1,3 +1,6 @@
+//! CRS variable extraction helpers.
+//! Extracted values are request snapshots used only for rule matching.
+
 use http::{HeaderMap, Uri, Version};
 
 use super::super::WafBodyInput;

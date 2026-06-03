@@ -1,3 +1,6 @@
+//! Object-model helpers exposed to OxiRule expressions.
+//! Callers receive normalized read-only views of request and response metadata.
+
 use anyhow::{Context, bail};
 use http::HeaderMap;
 use http::header::{COOKIE, SET_COOKIE};

@@ -1,3 +1,6 @@
+//! Known configuration-key lists used for typo detection.
+//! Keeping keys centralized avoids accepting misspelled settings silently.
+
 pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "admin",
   "cache",

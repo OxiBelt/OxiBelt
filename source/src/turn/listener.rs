@@ -1,3 +1,6 @@
+//! TURN listener tasks for UDP and TCP transports.
+//! Listener admission is separated from relay forwarding so auth and limits run first.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

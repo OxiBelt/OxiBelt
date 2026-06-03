@@ -1,3 +1,6 @@
+//! TCP SNI forwarding runtime.
+//! Forwarding starts only after ClientHello routing metadata is parsed.
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

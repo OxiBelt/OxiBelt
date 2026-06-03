@@ -1,3 +1,6 @@
+//! HTTP metadata normalization for WAF matching.
+//! Normalized views are derived data and must not rewrite the original request.
+
 use http::{HeaderMap, Uri};
 use unicode_normalization::UnicodeNormalization;
 use url::form_urlencoded;

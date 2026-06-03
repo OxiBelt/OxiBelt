@@ -1,3 +1,6 @@
+//! Immutable runtime snapshots and shared client pools used by request handlers.
+//! Reloads swap snapshots so in-flight work can finish against a consistent view.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -92,6 +95,7 @@ impl UpstreamClientRef<'_> {
   }
 }
 
+/// Per-upstream HTTP client pools keyed by validated upstream configuration.
 #[derive(Clone)]
 pub struct UpstreamClientPools {
   by_upstream: HashMap<String, usize>,
@@ -124,6 +128,7 @@ impl UpstreamClientPools {
   }
 }
 
+/// Immutable snapshot of runtime configuration and derived state.
 #[derive(Clone)]
 pub struct AppSnapshot {
   pub config: Config,

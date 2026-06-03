@@ -1,3 +1,6 @@
+//! CRS parsed rule model.
+//! The model preserves source intent while exposing a smaller runtime surface.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 

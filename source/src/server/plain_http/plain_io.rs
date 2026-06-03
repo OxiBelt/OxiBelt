@@ -1,3 +1,5 @@
+//! Plain TCP IO helpers for the lightweight HTTP path.
+
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};

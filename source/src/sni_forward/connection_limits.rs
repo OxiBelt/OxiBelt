@@ -1,3 +1,6 @@
+//! Connection-limit context for SNI forwarding sessions.
+//! Limits are checked before forwarding sockets are established.
+
 use std::net::SocketAddr;
 
 use http::StatusCode;

@@ -1,3 +1,6 @@
+//! TURN protocol parsing and packet helpers.
+//! Packet data is untrusted until message integrity and allocation state agree.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{Context, bail};

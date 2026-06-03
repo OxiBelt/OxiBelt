@@ -1,3 +1,6 @@
+//! Body capture, timeout, and streaming helpers for HTTP proxying.
+//! Captured prefixes are bounded because request and response bodies are attacker controlled.
+
 use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;

@@ -1,3 +1,6 @@
+//! Admin control request payload types.
+//! Payload parsing is kept separate from authorization and mutation execution.
+
 use serde::Deserialize;
 use tokio::sync::oneshot;
 

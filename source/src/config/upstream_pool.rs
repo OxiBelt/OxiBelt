@@ -1,3 +1,6 @@
+//! Upstream-pool configuration validation.
+//! Pool membership and health policy are validated before selection can route traffic.
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 

@@ -1,3 +1,6 @@
+//! Dynamic policy signature verification.
+//! Signatures are checked before imported policy can affect request handling.
+
 use anyhow::{Context, bail};
 use base64::Engine;
 use ring::hmac;

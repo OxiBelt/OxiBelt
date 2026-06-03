@@ -1,3 +1,6 @@
+//! TLS resumption state and cache partitioning.
+//! Resumption keys include transport and auth identity so tickets cannot cross trust boundaries.
+
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,3 +1,6 @@
+//! HTTP/2 transport tuning helpers.
+//! Tunables are applied through typed config rather than ad hoc listener changes.
+
 use std::time::Duration;
 
 use hyper_util::rt::{TokioExecutor, TokioTimer};

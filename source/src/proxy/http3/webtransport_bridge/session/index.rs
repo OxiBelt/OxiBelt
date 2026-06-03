@@ -1,3 +1,6 @@
+//! In-memory WebTransport session index.
+//! The index is observational and drain-oriented, not an authorization store.
+
 use std::collections::HashMap;
 
 use h3::quic::StreamId;

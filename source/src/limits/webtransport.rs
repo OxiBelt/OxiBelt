@@ -1,3 +1,6 @@
+//! WebTransport-specific limit context helpers.
+//! Session limits reuse connection identity without pretending streams are HTTP requests.
+
 use std::net::IpAddr;
 use std::sync::Arc;
 

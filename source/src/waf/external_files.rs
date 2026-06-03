@@ -1,3 +1,6 @@
+//! External WAF file resolution helpers.
+//! Paths are resolved against configured roots before rule loading.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;

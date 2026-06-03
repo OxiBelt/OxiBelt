@@ -1,3 +1,6 @@
+//! Admin API facade for dynamic policy records.
+//! Handlers validate and persist records before refreshing runtime policy.
+
 use std::sync::Arc;
 
 use anyhow::{Context, bail};

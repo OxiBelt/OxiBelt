@@ -1,3 +1,6 @@
+//! Admin IPM simulation endpoint.
+//! Simulation preparation avoids disclosing protected targets before authorization succeeds.
+
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 

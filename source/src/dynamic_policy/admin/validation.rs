@@ -1,3 +1,6 @@
+//! Dynamic policy admin payload validation.
+//! Validation rejects malformed policy before signature checks or writes proceed.
+
 use anyhow::bail;
 
 use super::{DynamicPolicyAdminCreate, DynamicPolicyAdminPatch, DynamicPolicyAdminRecord};

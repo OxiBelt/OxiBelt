@@ -1,3 +1,6 @@
+//! WebSocket transport for admin operations.
+//! The socket mirrors operation events without becoming the source of operation truth.
+
 use ::http::{HeaderMap, HeaderName, Response, StatusCode};
 use base64::Engine;
 use bytes::Bytes;

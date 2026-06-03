@@ -1,3 +1,6 @@
+//! SNI forwarding matcher.
+//! Exact and wildcard priorities are deterministic so forwarding policy is predictable.
+
 use std::cmp::Reverse;
 use std::sync::Arc;
 use std::time::Duration;

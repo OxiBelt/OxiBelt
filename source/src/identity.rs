@@ -1,3 +1,6 @@
+//! Network identity helpers shared by routing, limits, and policy code.
+//! CIDR matching is centralized so callers do not reimplement address math.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{Context, bail};

@@ -1,3 +1,6 @@
+//! Cache-status header helpers.
+//! Header values describe cache decisions without exposing internal keys.
+
 use http::{HeaderMap, HeaderValue, Method, Response};
 
 use crate::config::RouteConfig;

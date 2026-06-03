@@ -1,3 +1,6 @@
+//! Local diagnostic check definitions.
+//! Checks report operator-facing state without becoming runtime readiness gates.
+
 use std::net::IpAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;

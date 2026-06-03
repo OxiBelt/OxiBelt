@@ -1,3 +1,6 @@
+//! TURN queue configuration validation.
+//! Queue bounds are checked before TURN relay work can be admitted.
+
 use anyhow::bail;
 use serde::Deserialize;
 

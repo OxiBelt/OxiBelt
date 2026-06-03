@@ -1,3 +1,6 @@
+//! Body-related OxiRule function evaluation.
+//! Body access is mediated through cached slots so size limits remain enforceable.
+
 use anyhow::{anyhow, bail};
 
 use super::binary_format::bytes_match_format;

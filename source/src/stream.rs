@@ -1,3 +1,6 @@
+//! Raw stream listener runtime and upstream forwarding.
+//! Stream handling keeps transport metadata available for WAF and limit decisions.
+
 use std::net::SocketAddr;
 use std::time::Duration;
 

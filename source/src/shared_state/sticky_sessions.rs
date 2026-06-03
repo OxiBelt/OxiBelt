@@ -1,3 +1,6 @@
+//! Shared sticky-session state.
+//! Backend operations keep session affinity data separate from route selection logic.
+
 use anyhow::anyhow;
 
 use super::SharedState;

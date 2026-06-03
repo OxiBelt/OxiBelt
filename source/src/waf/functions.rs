@@ -1,3 +1,6 @@
+//! OxiRule function definitions and arity validation.
+//! Validation happens at compile time so runtime evaluation can fail closed on bad rulepacks.
+
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, anyhow, bail};

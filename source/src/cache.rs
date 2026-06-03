@@ -1,3 +1,6 @@
+//! Response cache coordination and cache-key enforcement for proxy traffic.
+//! Cache admission remains separate from HTTP forwarding so policy decisions stay auditable.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

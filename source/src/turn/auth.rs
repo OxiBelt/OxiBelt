@@ -1,3 +1,6 @@
+//! TURN credential validation.
+//! Time-bound credentials are checked before relay state is allocated.
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};

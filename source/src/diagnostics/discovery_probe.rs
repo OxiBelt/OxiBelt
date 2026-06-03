@@ -1,3 +1,6 @@
+//! Upstream-discovery probe orchestration.
+//! Probes observe configured discovery sources without mutating runtime membership.
+
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};

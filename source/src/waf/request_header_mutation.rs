@@ -1,3 +1,6 @@
+//! Request-header mutation validation.
+//! Mutations are constrained before WAF decisions can alter upstream-bound headers.
+
 use anyhow::{Context, bail};
 use http::header::{HeaderName, HeaderValue};
 

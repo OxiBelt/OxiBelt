@@ -1,3 +1,6 @@
+//! Request context used by rate and connection limit keys.
+//! Context values are derived once so limit decisions are consistent across modules.
+
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 

@@ -1,3 +1,6 @@
+//! TURN listener and pool configuration validation.
+//! TURN credentials and upstream references are checked before UDP/TCP listeners bind.
+
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};

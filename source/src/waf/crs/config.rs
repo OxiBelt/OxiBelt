@@ -1,3 +1,6 @@
+//! CRS configuration validation.
+//! Rule-file paths and engine options are validated before rulepack loading.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

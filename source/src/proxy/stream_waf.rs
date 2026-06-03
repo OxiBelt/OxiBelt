@@ -1,3 +1,6 @@
+//! WAF inspection adapters for bidirectional stream transports.
+//! Stream decisions are direction-aware so close actions do not lose protocol context.
+
 use std::sync::Arc;
 use std::time::Duration;
 

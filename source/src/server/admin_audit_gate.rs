@@ -1,3 +1,6 @@
+//! Admin audit enforcement gate.
+//! Authorization checks are recorded without changing the decision returned by IPM.
+
 use ::http::Response;
 use hyper::body::Incoming;
 use std::net::SocketAddr;

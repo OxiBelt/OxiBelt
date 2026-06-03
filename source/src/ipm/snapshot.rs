@@ -1,3 +1,6 @@
+//! Redacted IPM snapshot projections.
+//! Snapshot types expose policy state without returning credential secrets.
+
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 

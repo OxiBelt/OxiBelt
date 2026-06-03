@@ -1,3 +1,6 @@
+//! Dynamic policy admin precondition handling.
+//! ETags protect concurrent writes from overwriting newer policy state.
+
 use std::fmt;
 
 use serde::Serialize;

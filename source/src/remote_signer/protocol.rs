@@ -1,3 +1,6 @@
+//! Remote signer wire protocol helpers.
+//! Requests and responses stay length-delimited to avoid mixing adjacent signing operations.
+
 use std::io::{Read, Write};
 use std::time::Duration;
 

@@ -1,3 +1,6 @@
+//! Upstream-pool runtime state and selection entrypoints.
+//! Selection, health, and sticky routing stay coordinated through one snapshot.
+
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;

@@ -1,3 +1,6 @@
+//! Access-log sink setup and record delivery for proxy and WAF events.
+//! Logging failures are isolated from request enforcement decisions.
+
 use std::str::FromStr;
 use std::time::Duration;
 

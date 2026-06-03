@@ -1,3 +1,6 @@
+//! Admin request body parsing helpers.
+//! Body limits are applied before deserialization so large control-plane payloads fail early.
+
 use ::http::{Response, StatusCode};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;

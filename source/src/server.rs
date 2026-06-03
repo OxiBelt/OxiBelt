@@ -1,3 +1,6 @@
+//! Listener supervision and control-plane orchestration for the running proxy.
+//! This module binds transports together without owning protocol-specific policy.
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;

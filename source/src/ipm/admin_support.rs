@@ -1,3 +1,5 @@
+//! Admin helpers for IPM mutation, audit, and bootstrap authority.
+
 use anyhow::{Context, bail};
 use sqlx::{Postgres, Row, Transaction};
 

@@ -1,3 +1,6 @@
+//! Header normalization and forwarding helpers for HTTP proxying.
+//! Hop-by-hop and authority-sensitive headers are handled here before upstream dispatch.
+
 use std::borrow::Cow;
 use std::net::IpAddr;
 use std::str::FromStr;

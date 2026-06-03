@@ -1,3 +1,6 @@
+//! Shared cache-store abstractions.
+//! Serialized cache entries keep HTTP metadata separate from backend storage details.
+
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
 use ring::digest;
 use std::sync::Arc;

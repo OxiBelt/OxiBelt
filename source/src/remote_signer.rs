@@ -1,3 +1,6 @@
+//! Remote certificate signing client and local protocol server support.
+//! Signing keys are delegated over a narrow socket protocol instead of being copied into proxy code.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::io;

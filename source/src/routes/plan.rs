@@ -1,3 +1,6 @@
+//! Route execution-plan derivation.
+//! Plans capture fast-path and WAF requirements before request handling begins.
+
 use crate::config::{
   BufferingMode, Config, ErrorResponseMode, RouteConfig, StaticFilesSendfileMode,
 };

@@ -1,3 +1,6 @@
+//! In-memory cache index and tag tracking.
+//! Index updates remain separate from object storage so purge semantics are deterministic.
+
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]

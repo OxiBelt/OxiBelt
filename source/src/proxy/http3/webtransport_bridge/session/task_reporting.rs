@@ -1,3 +1,6 @@
+//! Task-result reporting for WebTransport stream workers.
+//! Reporting is best effort and must not hide the primary session close reason.
+
 use h3_webtransport::SessionId;
 use tokio::sync::mpsc;
 use tracing::warn;

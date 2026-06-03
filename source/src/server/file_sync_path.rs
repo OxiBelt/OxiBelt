@@ -1,3 +1,6 @@
+//! Admin file-sync path validation.
+//! Paths are resolved against configured roots before filesystem access is attempted.
+
 use std::path::{Component, Path};
 
 use super::admin_control::AdminFileRoot;

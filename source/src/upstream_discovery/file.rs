@@ -1,3 +1,6 @@
+//! File-backed upstream discovery provider.
+//! File contents are parsed into candidates before runtime state is replaced.
+
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};

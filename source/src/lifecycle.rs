@@ -1,3 +1,6 @@
+//! Lifecycle state shared by listeners, connections, and admin drain operations.
+//! Drain signals are explicit so shutdown does not race active proxy sessions.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -1,3 +1,6 @@
+//! Shared list, filter, sort, and cursor handling for admin APIs.
+//! Pagination remains deterministic so clients can safely resume across stable snapshots.
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context, bail};
@@ -9,6 +12,7 @@ const CURSOR_VERSION: u8 = 1;
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
 
+/// Sort direction accepted by shared admin list endpoints.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminListOrder {
@@ -16,6 +20,7 @@ pub enum AdminListOrder {
   Desc,
 }
 
+/// Static list contract used to validate admin query parameters.
 #[derive(Debug, Clone)]
 pub struct AdminListSpec {
   pub endpoint: &'static str,
@@ -24,6 +29,7 @@ pub struct AdminListSpec {
   pub allowed_filters: &'static [&'static str],
 }
 
+/// Parsed admin list query with validated pagination and filtering.
 #[derive(Debug, Clone)]
 pub struct AdminListQuery {
   endpoint: &'static str,

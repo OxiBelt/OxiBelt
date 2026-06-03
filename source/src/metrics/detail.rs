@@ -1,3 +1,6 @@
+//! Detailed metric families and labels.
+//! Detail metrics are opt-in because high-cardinality labels can be expensive.
+
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 

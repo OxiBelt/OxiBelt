@@ -1,3 +1,6 @@
+//! Connection and rate-limit enforcement shared across transports.
+//! Limit decisions are fail-closed where accepting more traffic would hide enforcement errors.
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};

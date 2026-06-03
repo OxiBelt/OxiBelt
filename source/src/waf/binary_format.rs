@@ -1,3 +1,5 @@
+//! Bounded binary-format probes for WAF body classification.
+
 pub(super) fn bytes_match_format(bytes: &[u8], format: &str) -> bool {
   match normalize_binary_format(format).as_str() {
     "7z" | "7zip" | "application/x-7z-compressed" => bytes.starts_with(b"\x37\x7a\xbc\xaf\x27\x1c"),

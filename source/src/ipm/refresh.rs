@@ -1,3 +1,6 @@
+//! IPM store refresh coordination.
+//! Refreshes replace snapshots atomically so authorization reads a consistent policy set.
+
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 

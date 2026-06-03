@@ -1,3 +1,6 @@
+//! Upstream-pool metric helpers.
+//! Pool labels are generated from configured names and health sources only.
+
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 

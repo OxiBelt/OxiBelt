@@ -1,3 +1,6 @@
+//! CRS variable parser and selector validation.
+//! Invalid selectors fail during rule loading rather than during request handling.
+
 use anyhow::bail;
 use regex::Regex;
 

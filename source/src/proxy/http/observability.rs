@@ -1,3 +1,6 @@
+//! HTTP request observability helpers.
+//! Timing and trace data is recorded independently from enforcement decisions.
+
 use std::sync::Arc;
 
 use http::Response;

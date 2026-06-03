@@ -1,3 +1,5 @@
+//! Runtime initialization for tracing and telemetry resources.
+
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 

@@ -1,3 +1,6 @@
+//! Upstream selection for direct routes and pools.
+//! Selection errors stay explicit so callers can distinguish policy denial from transport failure.
+
 use http::HeaderValue;
 
 use crate::config::UpstreamConfig;

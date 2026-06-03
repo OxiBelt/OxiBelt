@@ -1,3 +1,6 @@
+//! Body inspection planning and scan execution.
+//! The scanner treats all decoded body text as untrusted rule input.
+
 use std::sync::Arc;
 
 use regex::Regex;

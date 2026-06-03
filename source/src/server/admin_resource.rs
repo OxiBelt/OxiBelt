@@ -1,3 +1,6 @@
+//! Admin resource-name helpers for IPM authorization.
+//! Centralized names keep handler checks aligned with policy statements.
+
 pub(super) fn cache_policy(policy: &str) -> String {
   format!("policy/{}", component(policy))
 }

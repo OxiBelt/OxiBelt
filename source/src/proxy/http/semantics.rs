@@ -1,3 +1,6 @@
+//! HTTP semantic helpers shared across success and error paths.
+//! Trailer, expectation, and error-response handling stays centralized to avoid protocol drift.
+
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};

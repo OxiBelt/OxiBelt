@@ -1,3 +1,6 @@
+//! Admin IPM listing helpers.
+//! Sorting and filtering operate on redacted records.
+
 use std::cmp::Ordering;
 
 use crate::admin_list::{

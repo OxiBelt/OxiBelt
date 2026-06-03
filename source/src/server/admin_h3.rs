@@ -1,3 +1,6 @@
+//! HTTP/3 admin listener support.
+//! Admin H3 reuses the same authorization path as TCP admin endpoints.
+
 use std::net::SocketAddr;
 use std::time::Duration;
 

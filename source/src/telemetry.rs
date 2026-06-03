@@ -1,3 +1,6 @@
+//! Telemetry exporters and trace context propagation.
+//! Export paths are best-effort observability and must not become request authorization gates.
+
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, SyncSender, TrySendError};

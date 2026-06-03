@@ -1,3 +1,6 @@
+//! TURN edge session state.
+//! Allocation state is scoped to the listener that admitted it.
+
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;

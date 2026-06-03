@@ -1,3 +1,6 @@
+//! Admin config diff rendering.
+//! Diffs compare redacted effective config so secrets are not returned to callers.
+
 use serde_json::json;
 
 pub(super) fn diff_toml_values(

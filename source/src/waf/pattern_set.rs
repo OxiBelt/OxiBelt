@@ -1,3 +1,6 @@
+//! Pattern-set compilation and lookup for WAF rules.
+//! Sets are compiled once so per-request evaluation does not parse policy files.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

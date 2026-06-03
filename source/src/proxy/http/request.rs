@@ -1,3 +1,6 @@
+//! Request rebuild helpers for upstream forwarding.
+//! Authority and encoding headers are set in one place to avoid route-specific drift.
+
 use http::header::{ACCEPT_ENCODING, HOST};
 use http::{Request, Uri, request};
 use http_body_util::BodyExt;

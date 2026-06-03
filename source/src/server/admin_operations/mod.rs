@@ -1,3 +1,6 @@
+//! Long-running admin operation transports and runtime wiring.
+//! All transports share the same operation state so progress and cancellation semantics match.
+
 mod endpoint;
 mod id;
 mod runtime;

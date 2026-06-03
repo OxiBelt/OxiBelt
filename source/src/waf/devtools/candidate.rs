@@ -1,3 +1,6 @@
+//! Candidate generation and scrubbing for OxiRule devtools.
+//! Candidate-only data is sanitized before it is surfaced outside the scanner.
+
 use anyhow::{Context, anyhow, bail};
 
 use crate::config::Config;

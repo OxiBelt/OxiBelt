@@ -1,3 +1,6 @@
+//! Admin upstream-pool status endpoints.
+//! Manual pool controls are reported separately from passive health automation.
+
 use std::net::SocketAddr;
 
 use ::http::{Response, StatusCode};

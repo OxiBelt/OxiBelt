@@ -1,3 +1,6 @@
+//! Administrative controls for upstream pool state.
+//! Operator overrides are explicit so health automation and manual actions do not conflict.
+
 use std::{collections::HashMap, fmt};
 
 use anyhow::{Context, bail};

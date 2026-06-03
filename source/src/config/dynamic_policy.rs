@@ -1,3 +1,6 @@
+//! Dynamic policy configuration validation.
+//! Signature and refresh settings are checked before policy records are loaded.
+
 use anyhow::{Context, bail};
 use base64::Engine;
 use serde::Deserialize;

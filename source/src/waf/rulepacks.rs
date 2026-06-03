@@ -1,3 +1,6 @@
+//! Rulepack manifest validation, inspection, and rendering.
+//! External rule files are resolved deliberately so installs cannot smuggle arbitrary paths.
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 

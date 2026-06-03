@@ -1,3 +1,6 @@
+//! SNI forwarding metric counters.
+//! Counters track routing and session outcomes without storing peer payload data.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::MetricsConfig;

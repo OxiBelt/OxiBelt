@@ -1,3 +1,6 @@
+//! Dynamic Person proof challenge evaluation.
+//! Dynamic outcomes are folded back into the same clearance boundary as static policy.
+
 use anyhow::Context;
 use http::StatusCode;
 

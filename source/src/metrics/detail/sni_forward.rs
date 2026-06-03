@@ -1,3 +1,5 @@
+//! Detailed SNI forwarding metric helpers.
+
 use crate::config::MetricsConfig;
 
 use super::{

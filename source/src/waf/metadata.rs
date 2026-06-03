@@ -1,3 +1,6 @@
+//! Transport and protocol metadata consumed by WAF rules.
+//! Metadata is descriptive and should not mutate the underlying request.
+
 #[derive(Debug, Clone, Default)]
 pub struct WafTlsMetadata {
   pub enabled: bool,

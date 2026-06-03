@@ -1,3 +1,6 @@
+//! Runtime store for long-running admin operations.
+//! Final events are retained briefly so reconnecting clients can observe completion.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Arc;

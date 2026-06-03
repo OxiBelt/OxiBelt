@@ -1,3 +1,6 @@
+//! Atomic application snapshot handle.
+//! Reloads publish a new snapshot without mutating the one used by in-flight requests.
+
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::watch;

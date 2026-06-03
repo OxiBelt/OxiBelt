@@ -1,3 +1,6 @@
+//! Structured WAF access-log records.
+//! Records carry rule context without retaining request or response bodies.
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::io::Write as _;

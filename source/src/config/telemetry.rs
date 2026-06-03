@@ -1,3 +1,6 @@
+//! Telemetry exporter configuration validation.
+//! Export destinations are validated before background telemetry tasks start.
+
 use anyhow::{Context, bail};
 use serde::Deserialize;
 use url::Url;

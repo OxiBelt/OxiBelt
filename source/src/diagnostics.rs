@@ -1,3 +1,6 @@
+//! Diagnostics entrypoints for local checks, probes, and support bundle assembly.
+//! Diagnostic output must describe runtime state without leaking credentials or private material.
+
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;

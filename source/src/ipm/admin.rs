@@ -1,3 +1,6 @@
+//! Admin-facing IPM read and mutation methods.
+//! Store mutations refresh snapshots so authorization observes committed state.
+
 use anyhow::{Context, bail};
 
 use crate::config::{IpmPolicyConfig, validate_runtime_identifier};

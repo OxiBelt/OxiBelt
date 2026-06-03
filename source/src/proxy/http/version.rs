@@ -1,3 +1,6 @@
+//! HTTP version selection helpers.
+//! Downstream and upstream protocol choices stay independent unless configuration binds them.
+
 use http::Version;
 
 use crate::config::HttpVersion;

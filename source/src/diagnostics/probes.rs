@@ -1,3 +1,6 @@
+//! Diagnostic probe planning and reporting.
+//! Probe output is structured so callers can distinguish configuration, network, and TLS failures.
+
 use std::collections::BTreeSet;
 use std::io::{BufReader, Write};
 use std::net::IpAddr;

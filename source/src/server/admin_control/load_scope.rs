@@ -1,3 +1,6 @@
+//! Admin control load-scope validation.
+//! Scope checks keep runtime updates inside configured control-plane boundaries.
+
 use ::http::StatusCode;
 
 use crate::config::Config;

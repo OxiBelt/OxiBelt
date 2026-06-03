@@ -1,3 +1,6 @@
+//! Downstream TLS client-auth verifier construction.
+//! Client identity policy is compiled before it can affect request admission.
+
 use std::fmt;
 use std::sync::Arc;
 

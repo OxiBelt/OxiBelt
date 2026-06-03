@@ -1,3 +1,6 @@
+//! WAF integration for static responses in the plain HTTP path.
+//! Static shortcuts still consult WAF plans before serving local content.
+
 use std::net::SocketAddr;
 use std::time::Duration;
 

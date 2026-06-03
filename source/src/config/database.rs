@@ -1,3 +1,6 @@
+//! Database configuration validation.
+//! Paths and TLS modes are resolved before shared-state or audit stores connect.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};

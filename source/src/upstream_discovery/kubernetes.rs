@@ -1,3 +1,6 @@
+//! Kubernetes upstream discovery provider.
+//! Watch results are reconciled into route-safe upstream candidates.
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;

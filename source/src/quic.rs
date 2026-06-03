@@ -1,3 +1,6 @@
+//! QUIC endpoint construction and transport defaults for HTTP/3-facing sockets.
+//! Host keys and retry policy stay explicit because they affect replay and amplification boundaries.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 use std::sync::Arc;

@@ -1,3 +1,6 @@
+//! Remote signer connection pooling.
+//! Connections are scoped to signer endpoints so signing requests do not share mutable state.
+
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

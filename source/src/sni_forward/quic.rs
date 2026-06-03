@@ -1,3 +1,4 @@
+//! QUIC SNI forwarding runtime.
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, IoSliceMut};

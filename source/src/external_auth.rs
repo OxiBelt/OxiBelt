@@ -1,3 +1,6 @@
+//! External authorization runtime and request projection.
+//! The proxy treats external auth failures as policy decisions instead of transport shortcuts.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,3 +1,6 @@
+//! Static-file route handling for local content.
+//! Path resolution, range handling, WAF, and cache decisions stay explicit before file reads.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

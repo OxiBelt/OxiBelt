@@ -1,3 +1,6 @@
+//! Person proof HTTP API handling.
+//! Challenge and clearance responses are routed before generic upstream proxying.
+
 use std::collections::HashMap;
 use std::time::Duration;
 

@@ -1,3 +1,6 @@
+//! CRS rule evaluation engine.
+//! The engine keeps ModSecurity-compatible matching isolated from native OxiRule evaluation.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

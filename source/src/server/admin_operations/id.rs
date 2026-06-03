@@ -1,3 +1,6 @@
+//! Admin operation identifier validation.
+//! IDs stay constrained so operation lookups cannot become path or log injection surfaces.
+
 use anyhow::bail;
 use ring::rand::{SecureRandom, SystemRandom};
 

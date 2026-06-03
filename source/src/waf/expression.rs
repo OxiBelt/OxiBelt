@@ -1,3 +1,6 @@
+//! OxiRule expression parser.
+//! Parsing keeps rulepack syntax separate from runtime request metadata.
+
 use anyhow::bail;
 
 use super::{BinaryOp, Expr};

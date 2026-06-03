@@ -1,3 +1,6 @@
+//! System diagnostic collection.
+//! Host and socket observations are best-effort diagnostics, not authorization signals.
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};

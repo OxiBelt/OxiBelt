@@ -1,3 +1,6 @@
+//! Admin authentication and authorization glue around IPM decisions.
+//! Denied checks can run silently when returning audit detail would disclose a protected target.
+
 use std::net::SocketAddr;
 
 use crate::admin_audit::AdminAuditHandle;

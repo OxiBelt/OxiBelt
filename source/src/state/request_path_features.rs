@@ -1,3 +1,6 @@
+//! Request-path feature planning.
+//! Path feature flags are derived from config and metrics detail settings once per snapshot.
+
 use crate::config::{Config, MetricsDetail};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

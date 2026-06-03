@@ -1,3 +1,6 @@
+//! Admin audit buffering and delivery.
+//! Authorization and mutation records stay structured so sensitive decisions remain reviewable.
+
 use std::net::SocketAddr;
 #[cfg(test)]
 use std::str::FromStr;

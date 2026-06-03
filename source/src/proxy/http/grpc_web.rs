@@ -1,3 +1,6 @@
+//! gRPC-Web request and response adaptation.
+//! Framing conversion stays explicit so HTTP semantics and body limits remain enforceable.
+
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
 use http::{HeaderMap, HeaderName, HeaderValue, Response, header};

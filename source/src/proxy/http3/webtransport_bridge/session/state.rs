@@ -1,3 +1,6 @@
+//! Shared state for a single WebTransport bridge session.
+//! State transitions are centralized so task shutdown and admin visibility agree.
+
 use std::sync::Arc;
 use std::time::Instant;
 

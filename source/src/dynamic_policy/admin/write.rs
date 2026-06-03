@@ -1,3 +1,6 @@
+//! Dynamic policy write helpers.
+//! Writes run inside caller-owned transactions so audit and refresh can stay consistent.
+
 use sqlx::{Postgres, Transaction};
 
 use super::{DynamicPolicyAdminCreate, DynamicPolicyAdminPatch};

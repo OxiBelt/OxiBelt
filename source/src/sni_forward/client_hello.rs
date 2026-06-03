@@ -1,3 +1,6 @@
+//! TLS ClientHello parsing for SNI forwarding.
+//! The parser extracts routing metadata without completing a TLS handshake.
+
 use anyhow::{Context, bail, ensure};
 
 use crate::config::normalize_sni_pattern;

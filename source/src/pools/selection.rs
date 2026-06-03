@@ -1,3 +1,6 @@
+//! Upstream-pool selection algorithms.
+//! Selection input is explicit so retries, sticky sessions, and exclusions agree.
+
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;

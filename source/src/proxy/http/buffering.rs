@@ -1,3 +1,6 @@
+//! Bounded buffering primitives for request and response bodies.
+//! File-backed spillover is explicit so backpressure and memory limits remain visible.
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;

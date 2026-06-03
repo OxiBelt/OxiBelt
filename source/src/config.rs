@@ -1,3 +1,6 @@
+//! Configuration parsing and validation for every runtime boundary.
+//! This module keeps defaults explicit before listeners, proxying, WAF, and admin code consume them.
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
@@ -57,6 +60,7 @@ pub use turn::*;
 pub use upstream_pool::*;
 pub use workers::*;
 
+/// Fully validated runtime configuration consumed by listeners, proxying, WAF, and admin code.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
   pub config: ConfigBehaviorConfig,
@@ -213,6 +217,7 @@ impl<'de> Deserialize<'de> for Config {
   }
 }
 
+/// Source-file metadata retained for diagnostics and reload-aware admin responses.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConfigSourcePaths {
   pub config_entry: Option<PathBuf>,

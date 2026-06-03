@@ -1,3 +1,6 @@
+//! Person proof provider challenge state.
+//! Provider responses are validated before they can issue local clearance material.
+
 use anyhow::{Context, anyhow, bail};
 use http::header::{CACHE_CONTROL, LOCATION};
 use http::{HeaderName, HeaderValue, StatusCode};

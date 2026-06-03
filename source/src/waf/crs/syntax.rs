@@ -1,3 +1,5 @@
+//! CRS syntax helpers shared by parser stages.
+
 pub(super) fn logical_lines(raw: &str) -> Vec<String> {
   let mut lines = Vec::new();
   let mut current = String::new();

@@ -1,3 +1,6 @@
+//! Connection-limit helpers for WebTransport session admission.
+//! Limit failures are converted before streams are accepted.
+
 use http::StatusCode;
 
 use crate::config::ConnectionLimitIdentityMode;

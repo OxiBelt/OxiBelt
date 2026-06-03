@@ -1,3 +1,6 @@
+//! HTTP response compression state and body wrappers.
+//! Compression eligibility is kept separate from upstream semantics and WAF decisions.
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};

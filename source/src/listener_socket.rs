@@ -1,3 +1,6 @@
+//! TCP listener binding helpers.
+//! Socket options are applied before binding so listeners have predictable kernel behavior.
+
 use std::net::SocketAddr;
 
 use anyhow::Context;

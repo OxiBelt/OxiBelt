@@ -1,3 +1,6 @@
+//! Connection adapter for HTTP/3 WebTransport bridging.
+//! The adapter keeps QUIC connection state separate from per-session accounting.
+
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::Poll;
 

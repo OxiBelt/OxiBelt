@@ -1,3 +1,6 @@
+//! CRS operator implementations.
+//! Operators consume normalized variables and return match state without mutating requests.
+
 use aho_corasick::AhoCorasick;
 use anyhow::bail;
 use regex::Regex;

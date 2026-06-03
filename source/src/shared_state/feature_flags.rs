@@ -1,3 +1,6 @@
+//! Shared feature-flag state.
+//! Feature reads are runtime observations and should not replace config validation.
+
 use super::SharedState;
 
 impl SharedState {

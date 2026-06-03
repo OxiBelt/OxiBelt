@@ -1,3 +1,6 @@
+//! Runtime state for static-file routes.
+//! Precomputed route metadata keeps hot-path file serving deterministic.
+
 use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;

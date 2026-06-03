@@ -1,3 +1,6 @@
+//! Admin audit read endpoint.
+//! Audit output is authorization-gated because it can describe denied sensitive operations.
+
 use ::http::{Response, StatusCode};
 use serde_json::json;
 

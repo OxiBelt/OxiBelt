@@ -1,3 +1,6 @@
+//! IPM reference validation for admin mutations.
+//! Reference checks keep deleted or disabled objects from silently affecting authorization.
+
 use anyhow::bail;
 
 pub(super) async fn ensure_principal_unreferenced(

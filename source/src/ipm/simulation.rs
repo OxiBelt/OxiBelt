@@ -1,3 +1,6 @@
+//! IPM simulation request preparation and response shaping.
+//! Simulation overlays are authorized before they can reveal policy or credential relationships.
+
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
@@ -14,6 +17,7 @@ use super::{
   IpmPolicyRuntime, IpmRequestContext, IpmRuntime, IpmSnapshot, authorize_snapshot, now_unix,
 };
 
+/// Admin request for evaluating IPM policy with optional overlays.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IpmSimulationRequest {

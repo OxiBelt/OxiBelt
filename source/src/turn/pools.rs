@@ -1,3 +1,6 @@
+//! TURN upstream-pool selection state.
+//! TURN relay targets are selected independently from HTTP upstream pools.
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;

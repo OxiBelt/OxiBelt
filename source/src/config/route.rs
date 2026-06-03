@@ -1,3 +1,6 @@
+//! Route configuration validation.
+//! Hosts, paths, upstream references, and per-route policy are checked before routing tables build.
+
 use std::path::PathBuf;
 
 use anyhow::bail;

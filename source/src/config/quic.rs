@@ -1,3 +1,6 @@
+//! QUIC transport configuration validation.
+//! Retry, key, and stream settings are checked before endpoint construction.
+
 use anyhow::bail;
 use serde::Deserialize;
 

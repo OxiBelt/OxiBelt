@@ -1,3 +1,6 @@
+//! Hot-reload loading and validation.
+//! New snapshots are built fully before replacing the active runtime state.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};

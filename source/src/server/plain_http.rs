@@ -1,3 +1,6 @@
+//! Plain HTTP listener fast path.
+//! This path parses enough HTTP/1 to enforce configured proxy and WAF policy before forwarding.
+
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;

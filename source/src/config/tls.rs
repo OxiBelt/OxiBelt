@@ -1,3 +1,6 @@
+//! TLS configuration validation.
+//! Certificate, trust, ECH, OCSP, and resumption settings are checked before rustls builders run.
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 

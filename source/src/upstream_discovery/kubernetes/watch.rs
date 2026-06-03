@@ -1,3 +1,6 @@
+//! Kubernetes watch loop and backoff handling.
+//! Watch failures are surfaced without deleting the last known good snapshot.
+
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
