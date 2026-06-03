@@ -2832,9 +2832,15 @@ fn classify_throughput_ratio_threshold_miss(
         Err(error) => return baseline_unavailable_blocking(error),
     };
 
+    let rps_ratio_is_stable =
+        throughput_ratio_delta.ratio_delta_percent >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT;
+    let oxibelt_p99_is_stable = oxibelt_p99_delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT;
+    let p99_ratio_is_stable =
+        p99_ratio_delta.ratio_delta_percent <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT;
+
     if throughput_ratio_delta.before_ratio < threshold
-        && throughput_ratio_delta.ratio_delta_percent >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT
-        && p99_ratio_delta.ratio_delta_percent <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT
+        && rps_ratio_is_stable
+        && (p99_ratio_is_stable || oxibelt_p99_is_stable)
     {
         GateDisposition::Advisory {
             reason: format!(

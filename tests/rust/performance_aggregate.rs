@@ -1540,6 +1540,51 @@ fn h3_ratio_gate_advises_when_baseline_gap_is_stable() {
 }
 
 #[test]
+fn h3_ratio_gate_advises_when_comparator_p99_improvement_moves_relative_tail_ratio() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h3_with_p99(&input_dir, 14114.375, 18552.750, 2.806, 2.106);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "h3", "reverse-proxy", 12892.4375, 2.864),
+            aggregate_row("nginx", "h3", "reverse-proxy", 16683.8125, 2.264),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    let advisory = find_regression_advisory(&report, "h3_min_nginx_ratio", "h3");
+    assert_eq!(advisory["disposition"], "advisory");
+    assert_close(
+        advisory["observed"]
+            .as_f64()
+            .expect("advisory ratio should exist"),
+        14114.375 / 18552.750,
+    );
+    let message = advisory["message"]
+        .as_str()
+        .expect("message should be present");
+    assert!(message.contains("baseline-stable ratio gap"));
+    assert!(message.contains("OxiBelt p99 -2.0%"));
+    assert!(message.contains("comparator p99 -7.0%"));
+}
+
+#[test]
 fn h2_ratio_gate_blocks_when_baseline_passes_and_current_misses() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
