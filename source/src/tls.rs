@@ -19,8 +19,10 @@ use crate::config::{
 };
 
 mod admin_quic;
+mod cert_metadata;
 mod client_auth;
 mod resumption;
+pub(crate) use cert_metadata::client_certificate_metadata;
 
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};

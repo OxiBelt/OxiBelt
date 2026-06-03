@@ -646,6 +646,7 @@ private_key = "/tmp/key.pem"
       name: "route".to_string(),
       hosts: vec!["example.com".to_string()],
       path_prefix: "/".to_string(),
+      r#match: Default::default(),
       replace_prefix_with: None,
       upstream: Some("app".to_string()),
       upstream_pool: None,

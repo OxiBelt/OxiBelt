@@ -154,6 +154,7 @@ impl BuiltFixture {
         alpn: fixture.request.tls.alpn,
         fingerprint: fixture.request.tls.fingerprint,
         fingerprint_scheme: fixture.request.tls.fingerprint_scheme,
+        client_certificate: None,
       },
       protocol: parse_protocol(&fixture.request.protocol)?,
       transport_network: parse_transport_network(&fixture.request.transport_network)?,

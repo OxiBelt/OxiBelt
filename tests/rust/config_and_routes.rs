@@ -7212,6 +7212,137 @@ fn route_path_values_reject_encoded_dot_and_slash_separators() {
 }
 
 #[test]
+fn route_match_config_parses_and_validates() {
+    let temp_dir = common::TempDir::new("route-match-parse");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "route-match");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        r#"upstream = "app"
+
+[routes.match]
+methods = ["GET", "HEAD"]
+source_cidrs = ["203.0.113.0/24"]
+protocols = ["http", "http2"]
+priority = 10
+terminal = true
+
+[routes.match.path]
+prefix = "/"
+regex = "^/assets(/[a-z0-9._-]+)?$"
+
+[[routes.match.headers]]
+name = "X-Route"
+exact = "assets"
+
+[[routes.match.queries]]
+name = "v"
+present = true
+
+[routes.match.tls.client_cert]
+present = true
+
+[routes.match.tls.client_cert.fingerprint_sha256]
+prefix = "abc"
+"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.routes[0].r#match.priority, 10);
+    assert!(config.routes[0].r#match.terminal);
+    assert_eq!(config.routes[0].r#match.headers[0].name, "X-Route");
+}
+
+#[test]
+fn route_match_config_rejects_invalid_regex_and_cidr() {
+    let temp_dir = common::TempDir::new("route-match-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-match-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    let invalid_regex = base.replace(
+        "upstream = \"app\"",
+        "upstream = \"app\"\n\n[routes.match.path]\nregex = \"[\"",
+    );
+    let config: Config = toml::from_str(&invalid_regex).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid route regex should be rejected");
+    assert!(
+        error.to_string().contains("match.path.regex"),
+        "unexpected error: {error}"
+    );
+
+    let invalid_cidr = base.replace(
+        "upstream = \"app\"",
+        "upstream = \"app\"\n\n[routes.match]\nsource_cidrs = [\"203.0.113.0/99\"]",
+    );
+    let config: Config = toml::from_str(&invalid_cidr).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid source CIDR should be rejected");
+    assert!(
+        error.to_string().contains("match.source_cidrs"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn route_match_path_prefix_must_not_conflict_with_legacy_prefix() {
+    let temp_dir = common::TempDir::new("route-match-prefix-conflict");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-match-prefix-conflict");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace("path_prefix = \"/\"", "path_prefix = \"/api\"")
+        .replace(
+            "upstream = \"app\"",
+            "upstream = \"app\"\n\n[routes.match.path]\nprefix = \"/v2\"",
+        );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("conflicting path prefixes should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("match.path.prefix must match path_prefix"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn routes_reject_indistinguishable_non_terminal_matchers() {
+    let temp_dir = common::TempDir::new("route-match-conflict");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-match-conflict");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[[upstreams]]
+name = "other"
+origin = "https://other.internal"
+
+[[routes]]
+name = "other-root"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "other"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("ambiguous non-terminal routes should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("indistinguishable non-terminal route matchers"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn routes_reject_empty_host_lists_and_duplicate_names() {
     let temp_dir = common::TempDir::new("route-identity-invalid");
     let (cert_path, key_path) =

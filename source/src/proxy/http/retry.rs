@@ -397,7 +397,7 @@ pub(super) async fn send_pool_with_retry(
     };
     let target_uri = rewrite_uri(
       upstream_uri,
-      route.path_prefix.as_str(),
+      route.effective_path_prefix(),
       route.replace_prefix_with.as_deref(),
       original_uri,
     )?;

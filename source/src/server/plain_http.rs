@@ -27,7 +27,7 @@ use crate::proxy::http;
 use crate::proxy::http::body::{BodyTimeoutError, BodyTimeoutKind};
 use crate::proxy::http::response::{apply_security_headers, text_response};
 use crate::proxy::http::static_files::{self, StaticBodyPlan, StaticResponsePlan};
-use crate::routes::normalize_host;
+use crate::routes::{RouteMatchContext, RouteRequestProtocol, normalize_host};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::tcp_hop;
@@ -357,11 +357,40 @@ async fn eligible_static_plan(
     .target
     .split_once('?')
     .map_or(request.target.as_str(), |(path, _)| path);
-  let resolved =
-    snapshot
-      .route_table
-      .resolve_normalized_host(&host, request_path, &snapshot.upstreams)?;
   let request_uri: Uri = request.target.parse().ok()?;
+  let client_addr = match crate::identity::resolve_client_addr(
+    &request.headers,
+    peer_addr,
+    &snapshot.config.proxy.real_ip,
+  ) {
+    Ok(addr) => addr,
+    Err(error) => {
+      warn!(error = %error, peer = %peer_addr, "rejected untrusted real IP metadata");
+      return Some(TimedStaticResponsePlan {
+        response: static_files::text_plan(
+          StatusCode::BAD_REQUEST,
+          "untrusted forwarded client IP metadata",
+        ),
+        response_send_timeout: Duration::from_millis(
+          snapshot.config.limits.response_send_timeout_ms,
+        ),
+        access_log: None,
+      });
+    }
+  };
+  let resolved = snapshot.route_table.resolve_normalized_host_with_context(
+    &host,
+    RouteMatchContext {
+      path: request_path,
+      method: Some(&request.method),
+      headers: Some(&request.headers),
+      query: request_uri.query(),
+      source_ip: Some(client_addr.ip()),
+      protocol: Some(RouteRequestProtocol::Http1),
+      tls: None,
+    },
+    &snapshot.upstreams,
+  )?;
   if !resolved.execution_plan.fast_path.static_sendfile_like {
     return None;
   }
@@ -386,24 +415,6 @@ async fn eligible_static_plan(
       resolved.route.name.clone(),
     )
   });
-  let client_addr = match crate::identity::resolve_client_addr(
-    &request.headers,
-    peer_addr,
-    &snapshot.config.proxy.real_ip,
-  ) {
-    Ok(addr) => addr,
-    Err(error) => {
-      warn!(error = %error, peer = %peer_addr, "rejected untrusted real IP metadata");
-      return Some(TimedStaticResponsePlan {
-        response: static_files::text_plan(
-          StatusCode::BAD_REQUEST,
-          "untrusted forwarded client IP metadata",
-        ),
-        response_send_timeout,
-        access_log,
-      });
-    }
-  };
   if let Some(access_log) = access_log.as_mut() {
     access_log.client_addr = client_addr;
   }
@@ -412,7 +423,7 @@ async fn eligible_static_plan(
     &request.headers,
     request_path,
     &resolved.route.name,
-    &resolved.route.path_prefix,
+    resolved.route.effective_path_prefix(),
     static_root,
     &snapshot.static_files,
   )

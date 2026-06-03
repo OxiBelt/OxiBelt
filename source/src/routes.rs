@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use crate::config::{Config, RouteConfig, UpstreamConfig};
 use crate::waf::WafEngine;
 
+mod matchers;
 mod plan;
+use self::matchers::CompiledRouteMatcher;
+pub use self::matchers::{RouteMatchContext, RouteRequestProtocol};
 use self::plan::route_execution_plan;
 pub use self::plan::{FastPathPlan, RouteExecutionPlan, RouteWafExecutionPlan, WafExecutionPlan};
 
@@ -23,6 +26,7 @@ pub struct RouteTable {
 #[derive(Debug, Clone)]
 struct RouteEntry {
   route: RouteConfig,
+  matcher: CompiledRouteMatcher,
   execution_plan: RouteExecutionPlan,
   upstream_index: Option<usize>,
 }
@@ -146,6 +150,14 @@ impl RouteTable {
     upstream_index: Option<usize>,
   ) {
     let route_index = self.routes.len();
+    let matcher = CompiledRouteMatcher::from_route(&route).unwrap_or_else(|error| {
+      tracing::warn!(
+        error = %error,
+        route = %route.name,
+        "route matcher compilation failed after validation"
+      );
+      CompiledRouteMatcher::never()
+    });
     for pattern in &route.hosts {
       let pattern = normalize_host(pattern);
       if pattern == "*" {
@@ -162,6 +174,7 @@ impl RouteTable {
     }
     self.routes.push(RouteEntry {
       route,
+      matcher,
       execution_plan,
       upstream_index,
     });
@@ -183,15 +196,25 @@ impl RouteTable {
     path: &str,
     upstreams: &'a [UpstreamConfig],
   ) -> Option<ResolvedRoute<'a>> {
+    self.resolve_normalized_host_with_context(
+      normalized_host,
+      RouteMatchContext::path_only(path),
+      upstreams,
+    )
+  }
+
+  pub(crate) fn resolve_normalized_host_with_context<'a>(
+    &'a self,
+    normalized_host: &str,
+    context: RouteMatchContext<'_>,
+    upstreams: &'a [UpstreamConfig],
+  ) -> Option<ResolvedRoute<'a>> {
     let mut best = None;
 
     if let Some(route_indices) = self.exact_hosts.get(normalized_host) {
       let host_score = 10_000 + normalized_host.len();
       for &route_index in route_indices {
-        self.consider_route(&mut best, route_index, host_score, path);
-      }
-      if let Some(route_match) = best {
-        return Some(self.resolve_match(route_match, upstreams));
+        self.consider_route(&mut best, route_index, host_score, context);
       }
     }
 
@@ -202,15 +225,12 @@ impl RouteTable {
           &mut best,
           wildcard.route_index,
           1_000 + wildcard.suffix_len,
-          path,
+          context,
         );
       });
-    if let Some(route_match) = best {
-      return Some(self.resolve_match(route_match, upstreams));
-    }
 
     for &route_index in &self.catch_all_hosts {
-      self.consider_route(&mut best, route_index, 1, path);
+      self.consider_route(&mut best, route_index, 1, context);
     }
 
     Some(self.resolve_match(best?, upstreams))
@@ -258,19 +278,24 @@ impl RouteTable {
     best: &mut Option<RouteMatch>,
     route_index: usize,
     host_score: usize,
-    path: &str,
+    context: RouteMatchContext<'_>,
   ) {
     let Some(entry) = self.routes.get(route_index) else {
       return;
     };
-    if !path_prefix_matches(&entry.route.path_prefix, path) {
+    if !path_prefix_matches(entry.route.effective_path_prefix(), context.path) {
+      return;
+    }
+    if !entry.matcher.matches(context) {
       return;
     }
 
     let candidate = RouteMatch {
       route_index,
+      priority: entry.route.r#match.priority,
       host_score,
-      path_len: entry.route.path_prefix.len(),
+      path_len: entry.route.effective_path_prefix().len(),
+      matcher_specificity: entry.matcher.specificity(),
     };
     if best
       .as_ref()
@@ -284,16 +309,27 @@ impl RouteTable {
 #[derive(Debug, Clone, Copy)]
 struct RouteMatch {
   route_index: usize,
+  priority: i32,
   host_score: usize,
   path_len: usize,
+  matcher_specificity: usize,
 }
 
 impl RouteMatch {
   fn is_better_than(self, current: &Self) -> bool {
-    self.host_score > current.host_score
-      || (self.host_score == current.host_score && self.path_len > current.path_len)
-      || (self.host_score == current.host_score
+    self.priority > current.priority
+      || (self.priority == current.priority && self.host_score > current.host_score)
+      || (self.priority == current.priority
+        && self.host_score == current.host_score
+        && self.path_len > current.path_len)
+      || (self.priority == current.priority
+        && self.host_score == current.host_score
         && self.path_len == current.path_len
+        && self.matcher_specificity > current.matcher_specificity)
+      || (self.priority == current.priority
+        && self.host_score == current.host_score
+        && self.path_len == current.path_len
+        && self.matcher_specificity == current.matcher_specificity
         && self.route_index < current.route_index)
   }
 }
@@ -378,6 +414,7 @@ mod tests {
       name: name.into(),
       hosts: hosts.iter().map(|host| (*host).into()).collect(),
       path_prefix: path_prefix.into(),
+      r#match: Default::default(),
       replace_prefix_with: None,
       upstream: Some(upstream.into()),
       upstream_pool: None,
@@ -404,6 +441,7 @@ mod tests {
         name: "wild".into(),
         hosts: vec!["*.example.com".into()],
         path_prefix: "/".into(),
+        r#match: Default::default(),
         replace_prefix_with: None,
         upstream: Some("wild".into()),
         upstream_pool: None,
@@ -425,6 +463,7 @@ mod tests {
         name: "exact".into(),
         hosts: vec!["api.example.com".into()],
         path_prefix: "/".into(),
+        r#match: Default::default(),
         replace_prefix_with: None,
         upstream: Some("exact".into()),
         upstream_pool: None,
@@ -481,6 +520,7 @@ mod tests {
         name: "root".into(),
         hosts: vec!["example.com".into()],
         path_prefix: "/".into(),
+        r#match: Default::default(),
         replace_prefix_with: None,
         upstream: Some("root".into()),
         upstream_pool: None,
@@ -502,6 +542,7 @@ mod tests {
         name: "api".into(),
         hosts: vec!["example.com".into()],
         path_prefix: "/api".into(),
+        r#match: Default::default(),
         replace_prefix_with: None,
         upstream: Some("api".into()),
         upstream_pool: None,
@@ -635,89 +676,7 @@ mod tests {
 
     assert_eq!(resolved.route.name, "first");
   }
-
-  #[test]
-  fn many_wildcards_preserve_priority_rules() {
-    let mut routes = Vec::new();
-    for index in 0..512 {
-      let name = format!("noise-{index}");
-      let host = format!("*.tenant-{index}.noise.example.net");
-      routes.push(route(&name, &[host.as_str()], "/", &name));
-    }
-    routes.extend([
-      route("fallback", &["*"], "/", "fallback"),
-      route("broad", &["*.example.com"], "/", "broad"),
-      route("narrow", &["*.api.example.com"], "/", "narrow"),
-      route("path-root", &["*.path.example.com"], "/", "path-root"),
-      route("path-api", &["*.path.example.com"], "/api", "path-api"),
-      route("tie-first", &["*.tie.example.com"], "/api", "tie-first"),
-      route("tie-second", &["*.tie.example.com"], "/api", "tie-second"),
-      route(
-        "target-wild",
-        &["*.target.example.com"],
-        "/api",
-        "target-wild",
-      ),
-      route(
-        "target-exact",
-        &["exact.target.example.com"],
-        "/",
-        "target-exact",
-      ),
-    ]);
-    let upstreams = routes
-      .iter()
-      .map(|route| upstream(route.upstream.as_deref().unwrap()))
-      .collect::<Vec<_>>();
-    let table = RouteTable::from_routes_for_tests(routes);
-
-    assert_eq!(
-      table
-        .resolve("v1.api.example.com", "/", &upstreams)
-        .unwrap()
-        .route
-        .name,
-      "narrow"
-    );
-    assert_eq!(
-      table
-        .resolve("api.example.com", "/", &upstreams)
-        .unwrap()
-        .route
-        .name,
-      "broad"
-    );
-    assert_eq!(
-      table
-        .resolve("svc.path.example.com", "/api/users", &upstreams)
-        .unwrap()
-        .route
-        .name,
-      "path-api"
-    );
-    assert_eq!(
-      table
-        .resolve("svc.tie.example.com", "/api/users", &upstreams)
-        .unwrap()
-        .route
-        .name,
-      "tie-first"
-    );
-    assert_eq!(
-      table
-        .resolve("exact.target.example.com", "/api/users", &upstreams)
-        .unwrap()
-        .route
-        .name,
-      "target-exact"
-    );
-    assert_eq!(
-      table
-        .resolve("unmatched.example.org", "/anything", &upstreams)
-        .unwrap()
-        .route
-        .name,
-      "fallback"
-    );
-  }
 }
+
+#[cfg(test)]
+mod more_tests;

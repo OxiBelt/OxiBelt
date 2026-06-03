@@ -1,9 +1,10 @@
 //! Route configuration validation.
 //! Hosts, paths, upstream references, and per-route policy are checked before routing tables build.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use crate::waf::RouteWafConfig;
@@ -19,6 +20,8 @@ pub struct RouteConfig {
   pub hosts: Vec<String>,
   #[serde(default = "default_path_prefix")]
   pub path_prefix: String,
+  #[serde(default, rename = "match")]
+  pub r#match: RouteMatchConfig,
   #[serde(default)]
   pub replace_prefix_with: Option<String>,
   #[serde(default)]
@@ -51,6 +54,364 @@ pub struct RouteConfig {
   pub retry: Option<RouteRetryConfig>,
   #[serde(default)]
   pub waf: RouteWafConfig,
+}
+
+impl RouteConfig {
+  pub fn effective_path_prefix(&self) -> &str {
+    self
+      .r#match
+      .path
+      .prefix
+      .as_deref()
+      .unwrap_or(&self.path_prefix)
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteMatchConfig {
+  #[serde(default)]
+  pub methods: Vec<String>,
+  #[serde(default)]
+  pub headers: Vec<RouteNamedValueMatchConfig>,
+  #[serde(default)]
+  pub queries: Vec<RouteNamedValueMatchConfig>,
+  #[serde(default)]
+  pub path: RoutePathMatchConfig,
+  #[serde(default)]
+  pub source_cidrs: Vec<String>,
+  #[serde(default)]
+  pub protocols: Vec<String>,
+  #[serde(default)]
+  pub priority: i32,
+  #[serde(default)]
+  pub terminal: bool,
+  #[serde(default)]
+  pub tls: RouteTlsMatchConfig,
+}
+
+impl RouteMatchConfig {
+  pub fn has_additional_conditions(&self) -> bool {
+    !self.methods.is_empty()
+      || !self.headers.is_empty()
+      || !self.queries.is_empty()
+      || self.path.exact.is_some()
+      || self.path.regex.is_some()
+      || !self.source_cidrs.is_empty()
+      || !self.protocols.is_empty()
+      || self.tls.client_cert.has_conditions()
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RoutePathMatchConfig {
+  #[serde(default)]
+  pub exact: Option<String>,
+  #[serde(default)]
+  pub prefix: Option<String>,
+  #[serde(default)]
+  pub regex: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteNamedValueMatchConfig {
+  pub name: String,
+  #[serde(flatten)]
+  pub value: RouteValueMatchConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteValueMatchConfig {
+  #[serde(default)]
+  pub present: Option<bool>,
+  #[serde(default)]
+  pub exact: Option<String>,
+  #[serde(default)]
+  pub prefix: Option<String>,
+  #[serde(default)]
+  pub suffix: Option<String>,
+  #[serde(default)]
+  pub contains: Option<String>,
+  #[serde(default)]
+  pub regex: Option<String>,
+}
+
+impl RouteValueMatchConfig {
+  pub fn has_conditions(&self) -> bool {
+    self.present.is_some()
+      || self.exact.is_some()
+      || self.prefix.is_some()
+      || self.suffix.is_some()
+      || self.contains.is_some()
+      || self.regex.is_some()
+  }
+
+  pub fn condition_count(&self) -> usize {
+    usize::from(self.present.is_some())
+      + usize::from(self.exact.is_some())
+      + usize::from(self.prefix.is_some())
+      + usize::from(self.suffix.is_some())
+      + usize::from(self.contains.is_some())
+      + usize::from(self.regex.is_some())
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteTlsMatchConfig {
+  #[serde(default)]
+  pub client_cert: RouteClientCertMatchConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteClientCertMatchConfig {
+  #[serde(default)]
+  pub present: Option<bool>,
+  #[serde(default)]
+  pub fingerprint_sha256: RouteValueMatchConfig,
+  #[serde(default)]
+  pub subject_cn: RouteValueMatchConfig,
+  #[serde(default)]
+  pub san_dns: RouteValueMatchConfig,
+  #[serde(default)]
+  pub san_ip: RouteValueMatchConfig,
+}
+
+impl RouteClientCertMatchConfig {
+  pub fn has_conditions(&self) -> bool {
+    self.present.is_some()
+      || self.fingerprint_sha256.has_conditions()
+      || self.subject_cn.has_conditions()
+      || self.san_dns.has_conditions()
+      || self.san_ip.has_conditions()
+  }
+}
+
+pub(super) fn validate_route_path_value(
+  route_name: &str,
+  field_name: &str,
+  value: &str,
+) -> anyhow::Result<()> {
+  if !value.starts_with('/') {
+    bail!("route {route_name} {field_name} must start with '/'");
+  }
+  if value
+    .bytes()
+    .any(|byte| byte.is_ascii_control() || matches!(byte, b'\\' | b'?' | b'#'))
+  {
+    bail!(
+      "route {route_name} {field_name} must not contain control characters, backslashes, queries, or fragments"
+    );
+  }
+
+  for segment in value.split('/') {
+    if matches!(segment, "." | "..") {
+      bail!("route {route_name} {field_name} must not contain dot segments");
+    }
+  }
+
+  let lower = value.to_ascii_lowercase();
+  if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+    bail!("route {route_name} {field_name} must not contain encoded dot or slash separators");
+  }
+
+  Ok(())
+}
+
+pub(super) fn validate_route_match_config(route: &RouteConfig) -> anyhow::Result<()> {
+  let route_name = &route.name;
+  let path = &route.r#match.path;
+  if let Some(prefix) = &path.prefix {
+    validate_route_path_value(route_name, "match.path.prefix", prefix)?;
+    if route.path_prefix != "/" && route.path_prefix != *prefix {
+      bail!("route {route_name} match.path.prefix must match path_prefix when both are configured");
+    }
+  }
+  if let Some(exact) = &path.exact {
+    validate_route_path_value(route_name, "match.path.exact", exact)?;
+  }
+  if let Some(regex) = &path.regex {
+    validate_route_regex(route_name, "match.path.regex", regex)?;
+  }
+
+  let mut methods = HashSet::new();
+  for method in &route.r#match.methods {
+    if method.trim() != method || method.is_empty() {
+      bail!("route {route_name} match.methods must not contain empty or padded values");
+    }
+    http::Method::from_bytes(method.as_bytes()).with_context(|| {
+      format!("route {route_name} match.methods contains invalid method {method}")
+    })?;
+    if !methods.insert(method.as_str()) {
+      bail!("route {route_name} match.methods contains duplicate {method}");
+    }
+  }
+
+  for matcher in &route.r#match.headers {
+    validate_named_value_match(route_name, "match.headers", matcher, true)?;
+  }
+  for matcher in &route.r#match.queries {
+    validate_named_value_match(route_name, "match.queries", matcher, false)?;
+  }
+
+  let mut cidrs = HashSet::new();
+  for cidr in &route.r#match.source_cidrs {
+    let parsed = crate::identity::Cidr::parse(cidr).with_context(|| {
+      format!("route {route_name} match.source_cidrs contains invalid CIDR {cidr}")
+    })?;
+    let canonical = parsed.canonical();
+    if !cidrs.insert(canonical.clone()) {
+      bail!("route {route_name} match.source_cidrs contains duplicate {canonical}");
+    }
+  }
+
+  let mut protocols = HashSet::new();
+  for protocol in &route.r#match.protocols {
+    match protocol.as_str() {
+      "http" | "http1" | "http2" | "http3" | "websocket" | "webtransport" => {}
+      _ => bail!("route {route_name} match.protocols contains unsupported protocol {protocol}"),
+    }
+    if !protocols.insert(protocol.as_str()) {
+      bail!("route {route_name} match.protocols contains duplicate {protocol}");
+    }
+  }
+
+  let client_cert = &route.r#match.tls.client_cert;
+  validate_optional_value_match(
+    route_name,
+    "match.tls.client_cert.fingerprint_sha256",
+    &client_cert.fingerprint_sha256,
+  )?;
+  validate_optional_value_match(
+    route_name,
+    "match.tls.client_cert.subject_cn",
+    &client_cert.subject_cn,
+  )?;
+  validate_optional_value_match(
+    route_name,
+    "match.tls.client_cert.san_dns",
+    &client_cert.san_dns,
+  )?;
+  validate_optional_value_match(
+    route_name,
+    "match.tls.client_cert.san_ip",
+    &client_cert.san_ip,
+  )?;
+
+  Ok(())
+}
+
+fn validate_named_value_match(
+  route_name: &str,
+  field_name: &str,
+  matcher: &RouteNamedValueMatchConfig,
+  header_name: bool,
+) -> anyhow::Result<()> {
+  if matcher.name.trim() != matcher.name || matcher.name.is_empty() {
+    bail!("route {route_name} {field_name}.name must not be empty or padded");
+  }
+  if header_name {
+    http::header::HeaderName::from_bytes(matcher.name.as_bytes()).with_context(|| {
+      format!(
+        "route {route_name} {field_name} contains invalid header name {}",
+        matcher.name
+      )
+    })?;
+  } else if matcher.name.bytes().any(|byte| byte.is_ascii_control()) {
+    bail!(
+      "route {route_name} {field_name} query name {} contains a control character",
+      matcher.name
+    );
+  }
+  validate_required_value_match(route_name, field_name, &matcher.value)
+}
+
+fn validate_required_value_match(
+  route_name: &str,
+  field_name: &str,
+  matcher: &RouteValueMatchConfig,
+) -> anyhow::Result<()> {
+  if matcher.condition_count() != 1 {
+    bail!("route {route_name} {field_name} entries must set exactly one value matcher");
+  }
+  validate_value_match_regex(route_name, field_name, matcher)
+}
+
+fn validate_optional_value_match(
+  route_name: &str,
+  field_name: &str,
+  matcher: &RouteValueMatchConfig,
+) -> anyhow::Result<()> {
+  if matcher.condition_count() > 1 {
+    bail!("route {route_name} {field_name} must set at most one value matcher");
+  }
+  validate_value_match_regex(route_name, field_name, matcher)
+}
+
+fn validate_value_match_regex(
+  route_name: &str,
+  field_name: &str,
+  matcher: &RouteValueMatchConfig,
+) -> anyhow::Result<()> {
+  if let Some(regex) = &matcher.regex {
+    validate_route_regex(route_name, field_name, regex)?;
+  }
+  Ok(())
+}
+
+fn validate_route_regex(route_name: &str, field_name: &str, regex: &str) -> anyhow::Result<()> {
+  if regex.is_empty() {
+    bail!("route {route_name} {field_name} must not be empty");
+  }
+  regex::Regex::new(regex)
+    .with_context(|| format!("route {route_name} {field_name} contains invalid regex"))?;
+  Ok(())
+}
+
+pub(super) fn validate_route_match_conflicts(routes: &[RouteConfig]) -> anyhow::Result<()> {
+  let mut seen = HashMap::<String, &str>::new();
+  for route in routes {
+    if route.r#match.terminal {
+      continue;
+    }
+    let key = route_match_conflict_key(route);
+    if let Some(previous) = seen.insert(key, route.name.as_str()) {
+      bail!(
+        "routes {previous} and {} have indistinguishable non-terminal route matchers",
+        route.name
+      );
+    }
+  }
+  Ok(())
+}
+
+fn route_match_conflict_key(route: &RouteConfig) -> String {
+  let mut hosts = route
+    .hosts
+    .iter()
+    .map(|host| host.trim().trim_end_matches('.').to_ascii_lowercase())
+    .collect::<Vec<_>>();
+  hosts.sort();
+  let mut methods = route.r#match.methods.clone();
+  methods.sort();
+  let mut source_cidrs = route
+    .r#match
+    .source_cidrs
+    .iter()
+    .filter_map(|cidr| crate::identity::Cidr::parse(cidr).ok())
+    .map(|cidr| cidr.canonical())
+    .collect::<Vec<_>>();
+  source_cidrs.sort();
+  let mut protocols = route.r#match.protocols.clone();
+  protocols.sort();
+  format!(
+    "hosts={hosts:?};priority={};path_prefix={};path_exact={:?};path_regex={:?};methods={methods:?};headers={:?};queries={:?};source_cidrs={source_cidrs:?};protocols={protocols:?};tls={:?}",
+    route.r#match.priority,
+    route.effective_path_prefix(),
+    route.r#match.path.exact,
+    route.r#match.path.regex,
+    route.r#match.headers,
+    route.r#match.queries,
+    route.r#match.tls,
+  )
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

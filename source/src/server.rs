@@ -1949,6 +1949,7 @@ pub(crate) fn downstream_quic_tls_metadata(
     alpn,
     fingerprint,
     fingerprint_scheme: Some(QUIC_TLS_FINGERPRINT_SCHEME.to_string()),
+    client_certificate: None,
   }
 }
 
@@ -2274,6 +2275,9 @@ fn downstream_tls_metadata(
     alpn,
     fingerprint,
     fingerprint_scheme: Some(TCP_TLS_FINGERPRINT_SCHEME.to_string()),
+    client_certificate: crate::tls::client_certificate_metadata(
+      connection.peer_certificates().unwrap_or_default(),
+    ),
   }
 }
 

@@ -1022,6 +1022,7 @@ Current implementation notes:
 
 - TCP request rules expose TCP transport metadata; HTTP/3 and WebTransport request rules expose UDP/QUIC metadata.
 - HTTP/3 TLS fingerprints use the `quinn-rustls-quic-v2` scheme.
+- `TlsMetadata.ClientCertificatePresent` reflects downstream TCP TLS client certificate presence. HTTP/3 client certificate identity is not currently exposed by the stable QUIC metadata path, so it remains unavailable there.
 - `Request.Id`, `Response.Id`, `Context.TransactionId`, request/response receive timestamps, and upstream first-byte timing are populated for HTTP request-wide and OxiRule access-log contexts.
 - Upstream connect timing is populated only where the proxy can measure it directly; otherwise it evaluates to `null`.
 - Some local endpoint fields, byte counters, request-level UDP datagram sizes, TCP socket metadata, and unavailable connection identifiers are reserved and may evaluate to `null`.

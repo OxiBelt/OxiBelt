@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use oxibelt::config::Config;
 use oxibelt::dynamic_policy::DynamicPolicyContext;
+use oxibelt::waf::metadata::WafClientCertificateMetadata;
 use oxibelt::waf::{
     BodyNeed, HeaderMutation, OxiRuleAnalyzeRequest, OxiRuleCandidate, OxiRuleDevtoolsCheckRequest,
     OxiRuleDevtoolsEvalRequest, OxiRuleDevtoolsReplayRequest, OxiRuleFixture,
@@ -4352,6 +4353,7 @@ body = "webtransport blocked"
         alpn: Some("h3".to_string()),
         fingerprint: Some("quic-fingerprint".to_string()),
         fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
+        client_certificate: None,
     };
 
     let rejected = engine.evaluate_request(request_input_with_protocol_and_network(
@@ -4413,6 +4415,7 @@ body = "blocked UDP connection id"
         alpn: Some("h3".to_string()),
         fingerprint: Some("quic-fingerprint".to_string()),
         fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
+        client_certificate: None,
     };
     let mut input = request_input_with_protocol_and_network(
         &method,
@@ -4479,6 +4482,7 @@ body = "quic fingerprint blocked"
         alpn: Some("h3".to_string()),
         fingerprint: Some("quic-fingerprint".to_string()),
         fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
+        client_certificate: None,
     };
 
     let rejected = engine.evaluate_request(request_input_with_protocol_and_network(
@@ -4490,6 +4494,74 @@ body = "quic fingerprint blocked"
         &tls,
         WafProtocol::Http,
         WafTransportNetwork::Udp,
+    ));
+    assert_eq!(
+        rejected.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+    );
+}
+
+#[test]
+fn request_rule_can_match_client_certificate_presence() {
+    let temp_dir = common::TempDir::new("waf-client-cert-present");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-client-cert-present");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "block-client-cert"
+phase = "request"
+priority = 1
+when = "Request.Tls.ClientCertificatePresent == true"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "client cert blocked"
+"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let method = Method::GET;
+    let uri: Uri = "https://example.com/".parse().expect("URI should parse");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let tls_without_cert = test_tls("browser-fingerprint");
+    let mut tls_with_cert = test_tls("browser-fingerprint");
+    tls_with_cert.client_certificate = Some(WafClientCertificateMetadata {
+        fingerprint_sha256: "abc123".to_string(),
+        subject_common_names: vec!["client.example".to_string()],
+        san_dns_names: vec!["client.example".to_string()],
+        san_ip_addresses: Vec::new(),
+    });
+
+    let allowed = engine.evaluate_request(request_input_with_tls(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        &tls_without_cert,
+    ));
+    assert!(allowed.terminal.is_none());
+
+    let rejected = engine.evaluate_request(request_input_with_tls(
+        &method,
+        &uri,
+        &headers,
+        &tags,
+        peer_addr,
+        &tls_with_cert,
     ));
     assert_eq!(
         rejected.terminal.as_ref().map(|terminal| terminal.status),
@@ -10079,6 +10151,7 @@ fn request_input<'a>(
         alpn: None,
         fingerprint: None,
         fingerprint_scheme: None,
+        client_certificate: None,
     };
 
     request_input_with_transport(method, uri, headers, tags, peer_addr, None, &TEST_TLS)
@@ -10128,6 +10201,7 @@ fn request_input_with_tcp_max_hop<'a>(
         alpn: None,
         fingerprint: None,
         fingerprint_scheme: None,
+        client_certificate: None,
     };
 
     request_input_with_transport(
@@ -10238,6 +10312,7 @@ fn test_tls(fingerprint: &str) -> WafTlsMetadata {
         alpn: Some("h2".to_string()),
         fingerprint: Some(fingerprint.to_string()),
         fingerprint_scheme: Some("rustls-tcp-negotiated-v2".to_string()),
+        client_certificate: None,
     }
 }
 

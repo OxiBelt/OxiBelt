@@ -10,6 +10,7 @@ use http_body_util::BodyExt;
 use tokio::sync::watch;
 
 use crate::lifecycle::ConnectionDrain;
+use crate::routes::{RouteMatchContext, RouteRequestProtocol};
 use crate::state::AppHandle;
 use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 
@@ -66,7 +67,7 @@ pub(crate) async fn warm_cache_request(
     peer_addr,
     None,
     WafTransportMetadataInput::default(),
-    tls,
+    tls.clone(),
     None,
     snapshot.clone(),
     WafProtocol::Http,
@@ -80,7 +81,19 @@ pub(crate) async fn warm_cache_request(
   let _ = response.into_body().collect().await;
   let result = snapshot
     .route_table
-    .resolve(host, uri.path(), &snapshot.upstreams)
+    .resolve_normalized_host_with_context(
+      &crate::routes::normalize_host(host),
+      RouteMatchContext {
+        path: uri.path(),
+        method: Some(&method),
+        headers: Some(&headers),
+        query: uri.query(),
+        source_ip: Some(peer_addr.ip()),
+        protocol: Some(RouteRequestProtocol::Http1),
+        tls: Some(tls.as_ref()),
+      },
+      &snapshot.upstreams,
+    )
     .and_then(|resolved| {
       snapshot.cache.lookup(crate::cache::CacheLookupContext {
         policy_name: resolved.route.cache.as_deref(),

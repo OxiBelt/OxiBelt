@@ -10,6 +10,15 @@ pub struct WafTlsMetadata {
   pub alpn: Option<String>,
   pub fingerprint: Option<String>,
   pub fingerprint_scheme: Option<String>,
+  pub client_certificate: Option<WafClientCertificateMetadata>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WafClientCertificateMetadata {
+  pub fingerprint_sha256: String,
+  pub subject_common_names: Vec<String>,
+  pub san_dns_names: Vec<String>,
+  pub san_ip_addresses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]

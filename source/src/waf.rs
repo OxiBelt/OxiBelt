@@ -1,17 +1,15 @@
 //! WAF configuration, compilation, and evaluation for inspected requests, responses, and streams.
-
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
 use anyhow::{Context, anyhow, bail};
 use http::header::{HeaderName, HeaderValue, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use regex::{Regex, RegexBuilder};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 use crate::config::{
@@ -35,7 +33,7 @@ mod expression;
 mod external_files;
 mod functions;
 mod malicious_intelligence_score;
-mod metadata;
+pub mod metadata;
 mod mitigation_action;
 pub(crate) mod normalization;
 mod object_model;
@@ -4170,62 +4168,7 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
         })
         .unwrap_or(Value::Null),
     ),
-    (ObjectRef::RequestTls, "Enabled") => Ok(Value::Bool(ctx.request.tls.enabled)),
-    (ObjectRef::RequestTls, "Version") => Ok(
-      ctx
-        .request
-        .tls
-        .version
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
-    (ObjectRef::RequestTls, "CipherSuite") => Ok(
-      ctx
-        .request
-        .tls
-        .cipher_suite
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
-    (ObjectRef::RequestTls, "Sni") => Ok(
-      ctx
-        .request
-        .tls
-        .sni
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
-    (ObjectRef::RequestTls, "Alpn") => Ok(
-      ctx
-        .request
-        .tls
-        .alpn
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
-    (ObjectRef::RequestTls, "Fingerprint") => Ok(
-      ctx
-        .request
-        .tls
-        .fingerprint
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
-    (ObjectRef::RequestTls, "FingerprintScheme") => Ok(
-      ctx
-        .request
-        .tls
-        .fingerprint_scheme
-        .as_ref()
-        .map(|value| Value::String(value.clone()))
-        .unwrap_or(Value::Null),
-    ),
-    (ObjectRef::RequestTls, "ClientCertificatePresent") => Ok(Value::Bool(false)),
+    (ObjectRef::RequestTls, field) => object_model::eval_request_tls_member(ctx, field),
     (ObjectRef::RequestTokenBindings, "UserAgent") => Ok(Value::String(
       request_token_binding_value(ctx.request, PersonProofTokenBinding::UserAgent),
     )),

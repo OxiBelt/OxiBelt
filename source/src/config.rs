@@ -885,9 +885,10 @@ impl Config {
       if route.hosts.is_empty() {
         bail!("route {} must have at least one host match", route.name);
       }
-      validate_route_path_value(&route.name, "path_prefix", &route.path_prefix)?;
+      route::validate_route_path_value(&route.name, "path_prefix", &route.path_prefix)?;
+      route::validate_route_match_config(route)?;
       if let Some(replacement) = &route.replace_prefix_with {
-        validate_route_path_value(&route.name, "replace_prefix_with", replacement)?;
+        route::validate_route_path_value(&route.name, "replace_prefix_with", replacement)?;
       }
       let target_count = usize::from(route.upstream.is_some())
         + usize::from(route.upstream_pool.is_some())
@@ -1047,6 +1048,7 @@ impl Config {
         }
       }
     }
+    route::validate_route_match_conflicts(&self.routes)?;
 
     self.validate_dynamic_policy(&route_names)?;
     self.validate_stream_listeners()?;
@@ -1914,37 +1916,6 @@ fn validate_tls_server_resumption(
   Ok(())
 }
 
-fn validate_route_path_value(
-  route_name: &str,
-  field_name: &str,
-  value: &str,
-) -> anyhow::Result<()> {
-  if !value.starts_with('/') {
-    bail!("route {route_name} {field_name} must start with '/'");
-  }
-  if value
-    .bytes()
-    .any(|byte| byte.is_ascii_control() || matches!(byte, b'\\' | b'?' | b'#'))
-  {
-    bail!(
-      "route {route_name} {field_name} must not contain control characters, backslashes, queries, or fragments"
-    );
-  }
-
-  for segment in value.split('/') {
-    if matches!(segment, "." | "..") {
-      bail!("route {route_name} {field_name} must not contain dot segments");
-    }
-  }
-
-  let lower = value.to_ascii_lowercase();
-  if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
-    bail!("route {route_name} {field_name} must not contain encoded dot or slash separators");
-  }
-
-  Ok(())
-}
-
 fn validate_compression_statuses(field_name: &str, statuses: &[u16]) -> anyhow::Result<()> {
   if statuses.is_empty() {
     bail!("{field_name} must include at least one status");
@@ -2136,6 +2107,7 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
       left.name == right.name
         && left.hosts == right.hosts
         && left.path_prefix == right.path_prefix
+        && left.r#match == right.r#match
         && left.replace_prefix_with == right.replace_prefix_with
         && left.upstream == right.upstream
         && left.upstream_pool == right.upstream_pool
@@ -2940,6 +2912,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "cache",
       "compression",
       "hosts",
+      "match",
       "name",
       "path_prefix",
       "replace_prefix_with",
@@ -2956,6 +2929,44 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "timeouts",
       "waf",
     ][..],
+    "routes.match" => &[
+      "headers",
+      "methods",
+      "path",
+      "priority",
+      "protocols",
+      "queries",
+      "source_cidrs",
+      "terminal",
+      "tls",
+    ][..],
+    "routes.match.headers" => &[
+      "contains", "exact", "name", "prefix", "present", "regex", "suffix",
+    ][..],
+    "routes.match.queries" => &[
+      "contains", "exact", "name", "prefix", "present", "regex", "suffix",
+    ][..],
+    "routes.match.path" => &["exact", "prefix", "regex"][..],
+    "routes.match.tls" => &["client_cert"][..],
+    "routes.match.tls.client_cert" => &[
+      "fingerprint_sha256",
+      "present",
+      "san_dns",
+      "san_ip",
+      "subject_cn",
+    ][..],
+    "routes.match.tls.client_cert.fingerprint_sha256" => {
+      &["contains", "exact", "prefix", "present", "regex", "suffix"][..]
+    }
+    "routes.match.tls.client_cert.san_dns" => {
+      &["contains", "exact", "prefix", "present", "regex", "suffix"][..]
+    }
+    "routes.match.tls.client_cert.san_ip" => {
+      &["contains", "exact", "prefix", "present", "regex", "suffix"][..]
+    }
+    "routes.match.tls.client_cert.subject_cn" => {
+      &["contains", "exact", "prefix", "present", "regex", "suffix"][..]
+    }
     "routes.buffering" => &[
       "max_memory_body_bytes",
       "max_temp_file_bytes",

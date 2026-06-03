@@ -1957,6 +1957,32 @@ upstream = "app"
 # cache = "default"
 # compression = "default" # default | off | named policy
 
+[routes.match]
+# methods = ["GET", "HEAD"]
+# source_cidrs = ["203.0.113.0/24"]
+# protocols = ["http", "http2"] # http | http1 | http2 | http3 | websocket | webtransport
+# priority = 0
+# terminal = false
+
+[routes.match.path]
+# exact = "/v1/users"
+# prefix = "/v1"
+# regex = "^/v1/(users|groups)(/|$)"
+
+#[[routes.match.headers]]
+# name = "X-Route-Mode"
+# exact = "canary"
+
+#[[routes.match.queries]]
+# name = "debug"
+# present = true
+
+#[routes.match.tls.client_cert]
+# present = true
+
+#[routes.match.tls.client_cert.subject_cn]
+# suffix = ".example.com"
+
 [routes.timeouts]
 # client_body_timeout_ms = 15000
 # response_send_timeout_ms = 30000
@@ -2002,12 +2028,19 @@ Fields:
 - `name`: unique route name.
 - `hosts`: host match list; defaults to `["*"]`. Wildcard hosts such as `*.example.com` match only request hosts with at least one non-empty label before the suffix.
 - `path_prefix`: path prefix match; defaults to `/`.
+- `match`: optional extended route matcher. Conditions inside one `[routes.match]` table are ANDed together. Values inside list fields such as `methods`, `source_cidrs`, and `protocols` are ORed. Use multiple `[[routes]]` entries for broader OR logic.
 - `replace_prefix_with`: optional upstream path prefix replacement.
 - `upstream`, `upstream_pool`, or `static_root`: exactly one target.
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
+
+Extended route matching keeps existing `hosts` and `path_prefix` behavior by default. `match.path.prefix` is an alias for the effective route prefix; when `path_prefix` is also set to a non-root value, both prefixes must be identical. `match.path.exact` and `match.path.regex` add extra path constraints without changing the prefix used for upstream rewrite or static-file stripping.
+
+Header, query, and client-certificate value matchers allow exactly one of `present`, `exact`, `prefix`, `suffix`, `contains`, or `regex`. Regex values are compiled during configuration validation. Header matching checks any duplicate value for the named header. Query matching uses form-style decoded query pairs. `source_cidrs` matches the resolved client IP after trusted Real-IP processing. `priority` defaults to `0`; higher values win before host and path specificity. `terminal = true` documents an intentional final route and is honored by conflict detection, but it does not override a route with a higher priority or more specific match.
+
+TLS client-certificate route matchers can check `present`, `fingerprint_sha256`, `subject_cn`, `san_dns`, and `san_ip`. TCP TLS populates this metadata from the presented downstream client certificate. HTTP/3 currently exposes TLS SNI, ALPN, and fingerprint metadata, but not client-certificate identity through the stable QUIC metadata path; client-certificate-specific matchers therefore fail closed for HTTP/3 requests unless that metadata becomes available.
 
 `static_root` enables the built-in static file server for the route. The value must resolve to an existing directory; absolute paths are accepted, and relative paths loaded through `Config::load` resolve under the configuration directory. OxiBelt strips the matched `path_prefix`, percent-decodes each remaining path segment, and serves only regular files whose resolved path stays under `static_root`. Directory listing is forbidden, and symlinks are allowed only when secure resolution can prove they remain inside the static root. On Linux kernels with `openat2(2)`, OxiBelt opens static files relative to a read-only `static_root` directory file descriptor with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS`; this path does not require `/proc/self/fd` and is compatible with read-only root filesystems. On kernels without `openat2`, and on non-Linux platforms, OxiBelt falls back to opening the file and rechecking the opened descriptor through `/proc/self/fd`; if that verification is unavailable, the request fails closed instead of serving an unverified file. Response metadata, validators, ranges, and bytes are all derived from the same verified descriptor. Static routes accept `GET` and `HEAD`, emit `ETag`, `Last-Modified`, and `Accept-Ranges`, support a single `Range: bytes=...` request, and honor `If-None-Match` and `If-Modified-Since`. Request WAF, response WAF, rate limits, dynamic policy, security headers, compression, and Alt-Svc still apply on the general path. Static routes reject upstream-only options such as `replace_prefix_with`, `cache`, `upstream_http_version`, `generic_http_upgrade`, `connect_tunneling`, and `grpc_web`.
 

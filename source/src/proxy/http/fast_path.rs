@@ -231,7 +231,7 @@ impl PlainProxyFastPath {
     };
     let target_uri = match rewrite_uri(
       upstream_uri,
-      resolved.route.path_prefix.as_str(),
+      resolved.route.effective_path_prefix(),
       resolved.route.replace_prefix_with.as_deref(),
       &parts.uri,
     ) {

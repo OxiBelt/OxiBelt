@@ -68,7 +68,7 @@ pub(in crate::server) async fn cache_warm_response(
     Ok(body) => body,
     Err(response) => return response,
   };
-  let plan = match prepare_cache_warm_plan(body, &state, authorization) {
+  let plan = match prepare_cache_warm_plan(body, &state, authorization, peer_addr) {
     Ok(plan) => plan,
     Err(response) => return *response,
   };
@@ -106,7 +106,7 @@ pub(in crate::server) async fn enqueue_cache_warm_operation(
     Ok(body) => body,
     Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid cache_warm request"),
   };
-  let plan = match prepare_cache_warm_plan(body, &state, authorization) {
+  let plan = match prepare_cache_warm_plan(body, &state, authorization, peer_addr) {
     Ok(plan) => plan,
     Err(response) => return *response,
   };
@@ -130,6 +130,7 @@ fn prepare_cache_warm_plan(
   body: AdminCacheWarmRequest,
   state: &AppHandle,
   authorization: &AdminAuthorization<'_>,
+  peer_addr: SocketAddr,
 ) -> Result<Vec<CacheWarmPlanItem>, Box<Response<ProxyBody>>> {
   if body.items.is_empty() || body.items.len() > 128 {
     return Err(Box::new(text_response(
@@ -166,8 +167,15 @@ fn prepare_cache_warm_plan(
         continue;
       }
     };
-    let effective_policy =
-      effective_warm_policy(&snapshot, &item.host, item.policy.as_deref(), &uri);
+    let effective_policy = effective_warm_policy(
+      &snapshot,
+      &item.host,
+      item.policy.as_deref(),
+      &uri,
+      &request_method,
+      &headers,
+      Some(peer_addr.ip()),
+    );
     if !authorize_cache_target(
       authorization,
       "cache:Warm",
@@ -211,7 +219,7 @@ async fn execute_cache_warm_plan(
         continue;
       }
     };
-    ensure_cache_warm_policy_is_current(&state.snapshot(), &item)?;
+    ensure_cache_warm_policy_is_current(&state.snapshot(), &item, peer_addr)?;
     match http::warm_cache_request(
       state.clone(),
       peer_addr,
@@ -246,12 +254,21 @@ async fn execute_cache_warm_plan(
 fn ensure_cache_warm_policy_is_current(
   snapshot: &AppSnapshot,
   item: &PreparedCacheWarmItem,
+  peer_addr: SocketAddr,
 ) -> Result<(), String> {
   let uri = item
     .uri
     .parse::<Uri>()
     .map_err(|_| "cache warm authorization is stale; retry request".to_string())?;
-  let current_policy = effective_warm_policy(snapshot, &item.host, item.policy.as_deref(), &uri);
+  let current_policy = effective_warm_policy(
+    snapshot,
+    &item.host,
+    item.policy.as_deref(),
+    &uri,
+    &item.method,
+    &item.headers,
+    Some(peer_addr.ip()),
+  );
   if current_policy == item.authorized_policy {
     return Ok(());
   }
@@ -301,6 +318,7 @@ mod tests {
       let actor = bootstrap_actor();
       let context = IpmRequestContext::default();
       let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &context);
+      let peer_addr = "127.0.0.1:12345".parse().expect("peer address");
       prepare_cache_warm_plan(
         AdminCacheWarmRequest {
           items: vec![AdminCacheWarmItem {
@@ -314,6 +332,7 @@ mod tests {
         },
         &state,
         &authorization,
+        peer_addr,
       )
       .unwrap_or_else(|_| panic!("cache warm plan should prepare"))
     };

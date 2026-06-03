@@ -12,6 +12,7 @@ use crate::dynamic_policy::{DynamicPolicyRequest, DynamicPolicyTerminal};
 use crate::external_auth::ExternalAuthOutcome;
 use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
+use crate::routes::{RouteMatchContext, RouteRequestProtocol};
 use crate::state::AppSnapshot;
 use crate::telemetry::TraceContext;
 use crate::waf::{
@@ -96,10 +97,19 @@ pub(crate) async fn prepare_webtransport(
     client_addr,
     state.config.proxy.forwarded_headers.client_ip_source,
   );
-  let Some(resolved) = state
-    .route_table
-    .resolve_normalized_host(&host, &path, &state.upstreams)
-  else {
+  let Some(resolved) = state.route_table.resolve_normalized_host_with_context(
+    &host,
+    RouteMatchContext {
+      path: &path,
+      method: Some(&request_method),
+      headers: Some(&request_headers),
+      query: request_uri.query(),
+      source_ip: Some(client_addr.ip()),
+      protocol: Some(RouteRequestProtocol::Webtransport),
+      tls: Some(tls),
+    },
+    &state.upstreams,
+  ) else {
     return Err(Box::new(text_response(
       StatusCode::NOT_FOUND,
       "no matching route",
@@ -369,7 +379,7 @@ pub(crate) async fn prepare_webtransport(
   };
   let target_uri = rewrite_uri(
     upstream_uri,
-    resolved.route.path_prefix.as_str(),
+    resolved.route.effective_path_prefix(),
     resolved.route.replace_prefix_with.as_deref(),
     request.uri(),
   )

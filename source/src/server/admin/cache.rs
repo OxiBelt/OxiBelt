@@ -10,6 +10,7 @@ use tracing::info;
 
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
+use crate::routes::{RouteMatchContext, RouteRequestProtocol, normalize_host};
 use crate::state::AppSnapshot;
 
 use super::super::{
@@ -45,10 +46,25 @@ fn effective_warm_policy(
   host: &str,
   requested_policy: Option<&str>,
   uri: &Uri,
+  method: &Method,
+  headers: &HeaderMap,
+  source_ip: Option<std::net::IpAddr>,
 ) -> String {
   snapshot
     .route_table
-    .resolve(host, uri.path(), &snapshot.upstreams)
+    .resolve_normalized_host_with_context(
+      &normalize_host(host),
+      RouteMatchContext {
+        path: uri.path(),
+        method: Some(method),
+        headers: Some(headers),
+        query: uri.query(),
+        source_ip,
+        protocol: Some(RouteRequestProtocol::Http1),
+        tls: None,
+      },
+      &snapshot.upstreams,
+    )
     .and_then(|resolved| resolved.route.cache.as_deref())
     .or(requested_policy)
     .unwrap_or("default")

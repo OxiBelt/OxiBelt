@@ -39,6 +39,20 @@ pub(super) fn eval_response_transport_member(
   }
 }
 
+pub(super) fn eval_request_tls_member(ctx: &EvalContext<'_>, field: &str) -> anyhow::Result<Value> {
+  match field {
+    "Enabled" => Ok(Value::Bool(ctx.request.tls.enabled)),
+    "Version" => Ok(optional_string_value(&ctx.request.tls.version)),
+    "CipherSuite" => Ok(optional_string_value(&ctx.request.tls.cipher_suite)),
+    "Sni" => Ok(optional_string_value(&ctx.request.tls.sni)),
+    "Alpn" => Ok(optional_string_value(&ctx.request.tls.alpn)),
+    "Fingerprint" => Ok(optional_string_value(&ctx.request.tls.fingerprint)),
+    "FingerprintScheme" => Ok(optional_string_value(&ctx.request.tls.fingerprint_scheme)),
+    "ClientCertificatePresent" => Ok(Value::Bool(ctx.request.tls.client_certificate.is_some())),
+    _ => bail!("unknown WAF object property RequestTls.{field}"),
+  }
+}
+
 pub(super) fn eval_request_cookie_call(
   ctx: &EvalContext<'_>,
   method: &str,
@@ -60,6 +74,13 @@ pub(super) fn eval_response_cookie_call(
     ctx.limits.max_helper_items,
   );
   eval_pair_map_call(&pairs, method, args, ctx, regex_args)
+}
+
+fn optional_string_value(value: &Option<String>) -> Value {
+  value
+    .as_ref()
+    .map(|value| Value::String(value.clone()))
+    .unwrap_or(Value::Null)
 }
 
 fn request_cookie_pairs(headers: &HeaderMap, max_items: usize) -> Vec<(String, String)> {

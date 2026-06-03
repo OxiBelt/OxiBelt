@@ -26,6 +26,7 @@ use crate::ipm::{IpmDecision, IpmRequestContext, resource as ipm_resource};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
+use crate::routes::{RouteMatchContext, RouteRequestProtocol};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::telemetry::{TelemetryRuntime, TraceContext};
@@ -517,10 +518,19 @@ where
     return text_response(status, "rate limit exceeded");
   }
 
-  let Some(resolved) = state
-    .route_table
-    .resolve_normalized_host(&host, path, &state.upstreams)
-  else {
+  let Some(resolved) = state.route_table.resolve_normalized_host_with_context(
+    &host,
+    RouteMatchContext {
+      path,
+      method: Some(request.method()),
+      headers: Some(request.headers()),
+      query: request.uri().query(),
+      source_ip: Some(client_addr.ip()),
+      protocol: Some(RouteRequestProtocol::from_http(request_version, protocol)),
+      tls: Some(tls.as_ref()),
+    },
+    &state.upstreams,
+  ) else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.set_route_name(&resolved.route.name);
@@ -832,7 +842,7 @@ where
     let response = static_files::serve(
       &request,
       &resolved.route.name,
-      &resolved.route.path_prefix,
+      resolved.route.effective_path_prefix(),
       static_root,
       &state.static_files,
       state.config.proxy.static_files.inline_max_bytes,
@@ -1045,7 +1055,7 @@ where
   };
   let target_uri = match rewrite_uri(
     upstream_uri,
-    resolved.route.path_prefix.as_str(),
+    resolved.route.effective_path_prefix(),
     resolved.route.replace_prefix_with.as_deref(),
     request.uri(),
   ) {
@@ -2293,7 +2303,7 @@ async fn handle_upgrade_request(
   };
   let target_uri = match rewrite_uri(
     upstream_uri,
-    resolved.route.path_prefix.as_str(),
+    resolved.route.effective_path_prefix(),
     resolved.route.replace_prefix_with.as_deref(),
     request.uri(),
   ) {
