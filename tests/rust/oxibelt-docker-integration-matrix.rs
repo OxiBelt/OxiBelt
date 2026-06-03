@@ -4906,11 +4906,13 @@ run_case_checks() {
 
   seed="$(client_request_with_headers "example.test" "${path}" 200 "GET" "")"
   assert_response_jq "${seed}" '.body == "old"'
+  assert_response_jq "${seed}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
 
   sleep 2
 
   revalidated="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${path}" 200 "GET" "")"
-  assert_response_jq "${revalidated}" '.body == "new"'
+  assert_response_jq "${revalidated}" '.body == "old"'
+  assert_response_jq "${revalidated}" '.headers["x-oxibelt-cache"] == "revalidated" and .headers["x-oxibelt-cache-reason"] == "not_modified"'
 }
 "#,
             None,
