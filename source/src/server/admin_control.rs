@@ -12,7 +12,7 @@ use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::reload::{reload_downstream_tls_paths, validate_full_reload_runtime_compatibility};
 use crate::routes::RouteTable;
-use crate::state::{AppHandle, AppSnapshot};
+use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
 use crate::waf::WafEngine;
 
 use super::{ListenerSupervisor, admin::json_response, admin_auth::AdminAuthorization};
@@ -611,12 +611,30 @@ async fn apply_oxirule_from_files(
     Some(active.limits.clone()),
     active.mitigation.clone(),
   )?;
+  let snapshot = build_oxirule_reload_snapshot(active.as_ref(), config, waf);
+  install_snapshot(snapshot, state, listeners, Some(rollback), control, None).await
+}
+
+fn build_oxirule_reload_snapshot(
+  active: &AppSnapshot,
+  config: Config,
+  waf: WafEngine,
+) -> AppSnapshot {
   let route_table = RouteTable::new_with_waf(&config, &waf);
-  let mut snapshot = active.as_ref().clone();
+  let request_path_features = RequestPathFeaturePlan::new(
+    &config,
+    active.cache.enabled(),
+    active.dynamic_policy.enabled(),
+    active.telemetry.enabled(),
+    active.system_access_log.enabled(),
+    waf.has_person_proof_api_paths(),
+  );
+  let mut snapshot = active.clone();
   snapshot.config = config;
   snapshot.route_table = route_table;
   snapshot.waf = waf;
-  install_snapshot(snapshot, state, listeners, Some(rollback), control, None).await
+  snapshot.request_path_features = request_path_features;
+  snapshot
 }
 
 async fn install_snapshot(

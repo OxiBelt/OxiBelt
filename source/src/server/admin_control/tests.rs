@@ -165,3 +165,60 @@ fn rollback_scope_uses_current_to_snapshot_delta() {
   )
   .expect("rollback should pass when both protected config permissions are present");
 }
+
+#[tokio::test]
+async fn oxirule_reload_snapshot_recomputes_person_proof_request_path_features() {
+  let temp_dir = common::TempDir::new("admin-oxirule-person-proof-features");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-oxirule-person-proof-features");
+  let base_raw = common::minimal_config_toml(&cert_path, &key_path);
+  let base_config: Config = toml::from_str(&base_raw).expect("base config should parse");
+  base_config.validate().expect("base config should validate");
+  let active = AppSnapshot::new(base_config)
+    .await
+    .expect("base snapshot should initialize");
+  assert!(!active.waf.has_person_proof_api_paths());
+  assert!(!active.request_path_features.person_proof_api);
+
+  let candidate_raw = format!(
+    "{}\n{}",
+    base_raw,
+    r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "proof"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/protected'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+"#
+  );
+  let config: Config = toml::from_str(&candidate_raw).expect("candidate config should parse");
+  config.validate().expect("candidate config should validate");
+  assert!(active.config.non_waf_equivalent(&config));
+  assert!(!active.config.waf_equivalent(&config));
+  let waf = WafEngine::new_with_previous_limits_and_mitigation(
+    &config,
+    Some(&active.waf),
+    active.shared_state.clone(),
+    Some(active.limits.clone()),
+    active.mitigation.clone(),
+  )
+  .expect("candidate WAF should rebuild");
+
+  let snapshot = build_oxirule_reload_snapshot(&active, config, waf);
+
+  assert!(snapshot.waf.has_person_proof_api_paths());
+  assert!(
+    snapshot
+      .waf
+      .has_person_proof_api_path("/.oxibelt/person-proof/session")
+  );
+  assert!(snapshot.request_path_features.person_proof_api);
+}
