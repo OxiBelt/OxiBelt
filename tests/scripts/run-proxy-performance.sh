@@ -12,6 +12,15 @@ Environment:
   OXIBELT_NGINX_H3_MODE            auto, required, optional, or disabled (default: auto)
   OXIBELT_CADDY_IMAGE              Caddy comparator image (default: caddy:2-alpine)
   OXIBELT_PERF_PROBE_IMAGE         prebuilt perf-probe image to reuse; built locally when unset
+  OXIBELT_EXTERNAL_BENCHMARKS      run h2load/oha/wrk validation rows, 1 or 0 (default: 1)
+  OXIBELT_EXTERNAL_BENCHMARK_TOOLS comma-separated h2load,oha,wrk subset (default: h2load,oha,wrk)
+  OXIBELT_EXTERNAL_BENCHMARK_IMAGE prebuilt external benchmark image to reuse; built locally when unset
+  OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE
+                                      fail or warn for external benchmark failures (default: warn)
+  OXIBELT_EXTERNAL_OHA_QPS         fixed oha request rate for SLO validation (default: 1000)
+  OXIBELT_EXTERNAL_OHA_MAX_P99_MS  max oha p99 latency in milliseconds (default: 250)
+  OXIBELT_EXTERNAL_OHA_MAX_ERROR_RATE
+                                      max oha error rate from 0.0 to 1.0 (default: 0)
   OXIBELT_PERF_DURATION_SECONDS    load duration override
   OXIBELT_PERF_WARMUP_SECONDS      warmup duration override
   OXIBELT_PERF_CONCURRENCY         load concurrency override
@@ -114,22 +123,30 @@ tls_dir="${work_dir}/proxy-tls"
 static_dir="${work_dir}/static"
 results_jsonl="${work_dir}/results.jsonl"
 results_json="${work_dir}/results.json"
+external_results_jsonl="${work_dir}/external-results.jsonl"
+external_results_json="${work_dir}/external-results.json"
 summary_md="${work_dir}/summary.md"
 stats_jsonl="${work_dir}/docker-stats.jsonl"
 resource_snapshots_jsonl="${work_dir}/resource-snapshots.jsonl"
 resource_drift_json="${work_dir}/resource-drift.json"
+external_h2load_dir="${work_dir}/external-h2load"
+external_oha_dir="${work_dir}/external-oha"
+external_wrk_dir="${work_dir}/external-wrk"
 network_name="oxibelt-perf-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 perf_probe_image="${OXIBELT_PERF_PROBE_IMAGE:-oxibelt/perf-probe:${run_id}}"
+external_benchmark_image="${OXIBELT_EXTERNAL_BENCHMARK_IMAGE:-oxibelt/external-benchmarks:${run_id}}"
 oxibelt_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/perf-proxy:${run_id}}"
 nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
 nginx_h3_mode_override="${OXIBELT_NGINX_H3_MODE:-auto}"
 remove_perf_probe_image=0
+remove_external_benchmark_image=0
 remove_oxibelt_image=0
 active_proxy_container=""
 active_remote_signer_container=""
 active_remote_signer_volume=""
+external_summary_started=0
 nginx_h3_supported=0
 
 case "${profile}" in
@@ -167,6 +184,12 @@ waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-10000}"
 crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-8000}"
 waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.30}"
 regression_gate_mode="${OXIBELT_PERF_REGRESSION_GATE_MODE:-fail}"
+external_benchmarks="${OXIBELT_EXTERNAL_BENCHMARKS:-1}"
+external_benchmark_tools="${OXIBELT_EXTERNAL_BENCHMARK_TOOLS:-h2load,oha,wrk}"
+external_benchmark_gate_mode="${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE:-warn}"
+external_oha_qps="${OXIBELT_EXTERNAL_OHA_QPS:-1000}"
+external_oha_max_p99_ms="${OXIBELT_EXTERNAL_OHA_MAX_P99_MS:-250}"
+external_oha_max_error_rate="${OXIBELT_EXTERNAL_OHA_MAX_ERROR_RATE:-0}"
 amd64_target_cpu="${OXIBELT_AMD64_TARGET_CPU:-unspecified}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
 oxibelt_aggressive_scenario="${OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO:-baseline-aggressive-long-run}"
@@ -181,6 +204,32 @@ profile_call_graph="${OXIBELT_PERF_PROFILE_CALL_GRAPH:-dwarf,8192}"
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
+  exit 2
+fi
+case "${external_benchmarks}" in
+  0|1) ;;
+  *)
+    echo "OXIBELT_EXTERNAL_BENCHMARKS must be 1 or 0; got '${external_benchmarks}'" >&2
+    exit 2
+    ;;
+esac
+case "${external_benchmark_gate_mode}" in
+  fail|warn) ;;
+  *)
+    echo "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE must be fail or warn; got '${external_benchmark_gate_mode}'" >&2
+    exit 2
+    ;;
+esac
+if [[ ! "${external_oha_qps}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "OXIBELT_EXTERNAL_OHA_QPS must be a positive integer; got '${external_oha_qps}'" >&2
+  exit 2
+fi
+if [[ ! "${external_oha_max_p99_ms}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_EXTERNAL_OHA_MAX_P99_MS must be a non-negative number; got '${external_oha_max_p99_ms}'" >&2
+  exit 2
+fi
+if [[ ! "${external_oha_max_error_rate}" =~ ^(0|0[.][0-9]+|1|1[.]0+)$ ]]; then
+  echo "OXIBELT_EXTERNAL_OHA_MAX_ERROR_RATE must be a number from 0.0 to 1.0; got '${external_oha_max_error_rate}'" >&2
   exit 2
 fi
 for integer_env in \
@@ -237,6 +286,9 @@ cleanup() {
   if [[ "${remove_perf_probe_image}" == "1" ]]; then
     docker rmi -f "${perf_probe_image}" >/dev/null 2>&1 || true
   fi
+  if [[ "${remove_external_benchmark_image}" == "1" ]]; then
+    docker rmi -f "${external_benchmark_image}" >/dev/null 2>&1 || true
+  fi
   if [[ "${remove_oxibelt_image}" == "1" ]]; then
     docker rmi -f "${oxibelt_image}" >/dev/null 2>&1 || true
   fi
@@ -246,8 +298,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${logs_dir}" "${probe_logs_dir}" "${profiles_dir}" "${configs_dir}" "${tls_dir}" "${static_dir}"
+mkdir -p "${logs_dir}" "${probe_logs_dir}" "${profiles_dir}" "${configs_dir}" "${tls_dir}" "${static_dir}" "${external_h2load_dir}" "${external_oha_dir}" "${external_wrk_dir}"
 : >"${results_jsonl}"
+: >"${external_results_jsonl}"
 : >"${stats_jsonl}"
 : >"${resource_snapshots_jsonl}"
 
@@ -274,6 +327,7 @@ if [[ -n "${profile_label}" ]]; then
 fi
 
 IFS=',' read -r -a comparator_list <<<"${comparators}"
+IFS=',' read -r -a external_tool_list <<<"${external_benchmark_tools}"
 
 has_comparator() {
   local wanted="$1"
@@ -285,6 +339,41 @@ has_comparator() {
   done
   return 1
 }
+
+has_external_tool() {
+  local wanted="$1"
+  local item
+  for item in "${external_tool_list[@]}"; do
+    if [[ "${item}" == "${wanted}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+external_benchmark_serving_type_enabled() {
+  [[ "${external_benchmarks}" == "1" ]] || return 1
+  case "${serving_type}" in
+    all|reverse-proxy) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ "${external_benchmarks}" == "1" ]]; then
+  for external_tool in "${external_tool_list[@]}"; do
+    case "${external_tool}" in
+      h2load|oha|wrk) ;;
+      "")
+        echo "OXIBELT_EXTERNAL_BENCHMARK_TOOLS must not contain empty entries" >&2
+        exit 2
+        ;;
+      *)
+        echo "OXIBELT_EXTERNAL_BENCHMARK_TOOLS entries must be h2load, oha, or wrk; got '${external_tool}'" >&2
+        exit 2
+        ;;
+    esac
+  done
+fi
 
 generate_tls() {
   cat >"${work_dir}/downstream.cnf" <<'EOF'
@@ -307,6 +396,7 @@ DNS.3 = nginx
 DNS.4 = caddy
 DNS.5 = localhost
 DNS.6 = perf-upstream-h2
+DNS.7 = example.test
 IP.1 = 127.0.0.1
 EOF
 
@@ -340,9 +430,7 @@ retry_command() {
   local attempt status
 
   for attempt in $(seq 1 "${attempts}"); do
-    if "$@"; then
-      return 0
-    fi
+    "$@" && return 0
     status=$?
     if [[ "${attempt}" == "${attempts}" ]]; then
       return "${status}"
@@ -371,6 +459,27 @@ build_perf_probe_image() {
     || fail_with_diagnostics "failed to build performance probe image ${perf_probe_image}"
 }
 
+build_external_benchmark_image() {
+  if ! external_benchmark_serving_type_enabled; then
+    return 0
+  fi
+  if [[ -n "${OXIBELT_EXTERNAL_BENCHMARK_IMAGE:-}" ]]; then
+    return 0
+  fi
+
+  remove_external_benchmark_image=1
+  local base_image
+  for base_image in rust:1.95.0-trixie debian:trixie debian:trixie-slim; do
+    retry_command 3 docker pull "${base_image}" >/dev/null \
+      || fail_with_diagnostics "failed to pull external benchmark base image ${base_image}"
+  done
+  retry_command 3 docker build \
+    -t "${external_benchmark_image}" \
+    -f "${repo_root}/tests/docker/external_benchmarks/Dockerfile" \
+    "${repo_root}/tests/docker/external_benchmarks" >/dev/null \
+    || fail_with_diagnostics "failed to build external benchmark image ${external_benchmark_image}"
+}
+
 fail_with_diagnostics() {
   echo "$1" >&2
   collect_logs
@@ -386,6 +495,20 @@ handle_regression_gate_violation() {
       echo "::warning title=Docker performance regression gate::${message}" >&2
     else
       echo "Docker performance regression gate warning: ${message}" >&2
+    fi
+    return
+  fi
+
+  fail_with_diagnostics "${message}"
+}
+
+handle_external_benchmark_failure() {
+  local message="$1"
+  if [[ "${external_benchmark_gate_mode}" == "warn" ]]; then
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+      echo "::warning title=External benchmark validation::${message}" >&2
+    else
+      echo "External benchmark validation warning: ${message}" >&2
     fi
     return
   fi
@@ -784,6 +907,307 @@ assert_diagnostic_result() {
   requests="$(jq -r '.requests // .handshakes // 0' <<<"${json}")"
   if [[ "${requests}" == "0" ]]; then
     fail_with_diagnostics "diagnostic performance probe produced zero requests: $(jq -r '.label' <<<"${json}")"
+  fi
+}
+
+external_artifact_name() {
+  local name="$1"
+  name="${name//[^A-Za-z0-9_.-]/_}"
+  if [[ -z "${name}" ]]; then
+    echo external
+  else
+    echo "${name}"
+  fi
+}
+
+append_external_result() {
+  local json="$1"
+  json="$(jq -c --arg target "${amd64_target_cpu}" '. + {amd64_target_cpu: $target}' <<<"${json}")"
+  printf '%s\n' "${json}" >>"${external_results_jsonl}"
+
+  if [[ "${external_summary_started}" != "1" ]]; then
+    {
+      echo
+      echo "External benchmarks:"
+      echo
+      echo "| Tool | Scenario | Comparator | Protocol | Status | Result | Notes |"
+      echo "| --- | --- | --- | --- | --- | --- | --- |"
+    } >>"${summary_md}"
+    external_summary_started=1
+  fi
+
+  local tool scenario comparator protocol status rps p99 error_rate reason
+  tool="$(jq -r '.tool // "unknown"' <<<"${json}")"
+  scenario="$(jq -r '.scenario // "unknown"' <<<"${json}")"
+  comparator="$(jq -r '.comparator // "unknown"' <<<"${json}")"
+  protocol="$(jq -r '.protocol // "-"' <<<"${json}")"
+  status="$(jq -r '.status // "unknown"' <<<"${json}")"
+  rps="$(jq -r 'if .rps == null then "-" else (.rps | tostring) end' <<<"${json}")"
+  p99="$(jq -r 'if .p99_ms == null then "-" else (.p99_ms | tostring) end' <<<"${json}")"
+  error_rate="$(jq -r 'if .error_rate == null then "-" else (.error_rate | tostring) end' <<<"${json}")"
+  reason="$(jq -r '.reason // "-"' <<<"${json}")"
+  printf '| `%s` | `%s` | `%s` | `%s` | `%s` | rps=%s, p99_ms=%s, error_rate=%s | %s |\n' \
+    "${tool}" "${scenario}" "${comparator}" "${protocol}" "${status}" "${rps}" "${p99}" "${error_rate}" "${reason}" >>"${summary_md}"
+}
+
+external_result_json() {
+  local label="$1"
+  local tool="$2"
+  local comparator="$3"
+  local scenario="$4"
+  local protocol="$5"
+  local status="$6"
+  local output_file="$7"
+  local exit_code="$8"
+  local reason="$9"
+  local rps="${10}"
+  local p95="${11}"
+  local p99="${12}"
+  local error_rate="${13}"
+  local requests="${14}"
+  jq -cn \
+    --arg label "${label}" \
+    --arg tool "${tool}" \
+    --arg comparator "${comparator}" \
+    --arg scenario "${scenario}" \
+    --arg protocol "${protocol}" \
+    --arg status "${status}" \
+    --arg output_file "${output_file}" \
+    --arg reason "${reason}" \
+    --arg rps "${rps}" \
+    --arg p95 "${p95}" \
+    --arg p99 "${p99}" \
+    --arg error_rate "${error_rate}" \
+    --arg requests "${requests}" \
+    --arg gate_mode "${external_benchmark_gate_mode}" \
+    --argjson exit_code "${exit_code}" \
+    'def maybe_number($value): if $value == "" then null else ($value | tonumber) end;
+     {
+       schema_version: 1,
+       label: $label,
+       tool: $tool,
+       comparator: $comparator,
+       scenario: $scenario,
+       protocol: $protocol,
+       status: $status,
+       gate_mode: $gate_mode,
+       output_file: $output_file,
+       exit_code: $exit_code,
+       reason: (if $reason == "" then null else $reason end),
+       rps: maybe_number($rps),
+       p95_ms: maybe_number($p95),
+       p99_ms: maybe_number($p99),
+       error_rate: maybe_number($error_rate),
+       requests: maybe_number($requests)
+     }'
+}
+
+run_external_container() {
+  local output_path="$1"
+  local command="$2"
+  local container="oxibelt-external-benchmark-${run_id}-${RANDOM}"
+  local output status start_output wait_output
+  docker create \
+    --name "${container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    "${external_benchmark_image}" \
+    sh -c "${command}" >/dev/null
+  docker cp "${tls_dir}/fullchain.pem" "${container}:/tls/proxy-ca.pem"
+
+  status=0
+  start_output="$(docker start "${container}" 2>&1 >/dev/null)" || status=$?
+  if [[ "${status}" != "0" ]]; then
+    output="${start_output}"
+  else
+    wait_output="$(docker wait "${container}" 2>&1)" || status=$?
+    if [[ "${status}" != "0" ]]; then
+      output="${wait_output}"
+    elif [[ "${wait_output}" =~ ^[0-9]+$ ]]; then
+      status="${wait_output}"
+      output="$(docker logs "${container}" 2>&1 || true)"
+    else
+      status=1
+      output="${wait_output}"
+    fi
+  fi
+  printf '%s\n' "${output}" >"${output_path}"
+  docker rm -f "${container}" >/dev/null 2>&1 || true
+  return "${status}"
+}
+
+record_external_skip() {
+  local label="$1"
+  local tool="$2"
+  local comparator="$3"
+  local scenario="$4"
+  local protocol="$5"
+  local output_file="$6"
+  local reason="$7"
+  local json
+  json="$(external_result_json "${label}" "${tool}" "${comparator}" "${scenario}" "${protocol}" skipped "${output_file}" 0 "${reason}" "" "" "" "" "")"
+  append_external_result "${json}"
+}
+
+run_external_h2load() {
+  local comparator="$1"
+  local host="$2"
+  local scenario="$3"
+  local protocol="$4"
+  local label="${comparator}-external-h2load-${scenario}"
+  local artifact_name output_path output_file command status reason rps requests json row_status
+  artifact_name="$(external_artifact_name "${label}")"
+  output_path="${external_h2load_dir}/${artifact_name}.txt"
+  output_file="external-h2load/${artifact_name}.txt"
+  if [[ "${protocol}" == "h3" ]]; then
+    command="cp /tls/proxy-ca.pem /usr/local/share/ca-certificates/oxibelt-proxy.crt && update-ca-certificates >/dev/null && exec h2load -D ${duration_seconds}s --warm-up-time=${warmup_seconds}s -c ${concurrency} -m 16 --h3 --no-udp-gso --connect-to ${host}:8443 --sni proxy -H ':authority: example.test' 'https://proxy:8443/perf/h2?body=ok'"
+  else
+    command="cp /tls/proxy-ca.pem /usr/local/share/ca-certificates/oxibelt-proxy.crt && update-ca-certificates >/dev/null && exec h2load -D ${duration_seconds}s --warm-up-time=${warmup_seconds}s -c ${concurrency} -m 16 --alpn-list h2 --connect-to ${host}:8443 --sni proxy -H ':authority: example.test' 'https://proxy:8443/perf/h2?body=ok'"
+  fi
+
+  status=0
+  run_external_container "${output_path}" "${command}" || status=$?
+  rps="$(sed -n 's/^finished in .*, \([0-9.][0-9.]*\) req\/s.*/\1/p' "${output_path}" | tail -n 1)"
+  requests="$(sed -n 's/^requests: .* \([0-9][0-9]*\) done.*/\1/p' "${output_path}" | tail -n 1)"
+  reason=""
+  row_status=pass
+  if [[ "${status}" != "0" ]]; then
+    reason="h2load exited with status ${status}"
+    row_status=fail
+  elif [[ -z "${requests}" || "${requests}" == "0" ]]; then
+    status=1
+    reason="h2load produced no completed requests"
+    row_status=fail
+  fi
+  json="$(external_result_json "${label}" h2load "${comparator}" "${scenario}" "${protocol}" "${row_status}" "${output_file}" "${status}" "${reason}" "${rps}" "" "" "" "${requests}")"
+  append_external_result "${json}"
+  if [[ "${status}" != "0" ]]; then
+    handle_external_benchmark_failure "h2load ${protocol} external benchmark failed for ${comparator}: ${reason}"
+  fi
+}
+
+run_external_oha() {
+  local comparator="$1"
+  local host="$2"
+  local label="${comparator}-external-oha-h2-fixed-qps"
+  local artifact_name output_path output_file command status json_valid p99_ms error_rate rps requests reason json row_status
+  artifact_name="$(external_artifact_name "${label}")"
+  output_path="${external_oha_dir}/${artifact_name}.json"
+  output_file="external-oha/${artifact_name}.json"
+  command="exec oha -z ${duration_seconds}s -c ${concurrency} -q ${external_oha_qps} --http-version 2 --cacert /tls/proxy-ca.pem --host example.test --connect-to example.test:8443:${host}:8443 --latency-correction --no-tui --disable-color --output-format json 'https://example.test:8443/perf/h2?body=ok'"
+
+  status=0
+  run_external_container "${output_path}" "${command}" || status=$?
+  json_valid=1
+  jq -e . >/dev/null <"${output_path}" || json_valid=0
+  reason=""
+  p99_ms=""
+  error_rate=""
+  rps=""
+  requests=""
+  row_status=pass
+  if [[ "${json_valid}" == "1" ]]; then
+    p99_ms="$(jq -r '((.latencyPercentiles.p99 // null) * 1000) // empty' "${output_path}")"
+    error_rate="$(jq -r '1 - (.summary.successRate // 0)' "${output_path}")"
+    rps="$(jq -r '.summary.requestsPerSec // empty' "${output_path}")"
+    requests="$(jq -r '[.statusCodeDistribution[]?, .errorDistribution[]?] | add // empty' "${output_path}")"
+    if [[ "${status}" == "0" ]] && jq -n -e --argjson p99 "${p99_ms:-0}" --argjson max "${external_oha_max_p99_ms}" '$p99 > $max' >/dev/null; then
+      status=1
+      reason="oha p99 ${p99_ms}ms exceeded ${external_oha_max_p99_ms}ms"
+    fi
+    if [[ "${status}" == "0" ]] && jq -n -e --argjson observed_error_rate "${error_rate:-1}" --argjson max "${external_oha_max_error_rate}" '$observed_error_rate > $max' >/dev/null; then
+      status=1
+      reason="oha error rate ${error_rate} exceeded ${external_oha_max_error_rate}"
+    fi
+  else
+    reason="oha output was not valid JSON"
+  fi
+  if [[ "${status}" != "0" && -z "${reason}" ]]; then
+    reason="oha exited with status ${status}"
+  fi
+  if [[ "${status}" != "0" || "${json_valid}" != "1" ]]; then
+    row_status=fail
+  fi
+  json="$(external_result_json "${label}" oha "${comparator}" fixed-qps-h2 h2 "${row_status}" "${output_file}" "${status}" "${reason}" "${rps}" "" "${p99_ms}" "${error_rate}" "${requests}")"
+  append_external_result "${json}"
+  if [[ "${status}" != "0" || "${json_valid}" != "1" ]]; then
+    handle_external_benchmark_failure "oha fixed-QPS external benchmark failed for ${comparator}: ${reason}"
+  fi
+}
+
+run_external_wrk() {
+  local comparator="$1"
+  local host="$2"
+  local label="${comparator}-external-wrk-h1-keepalive"
+  local artifact_name output_path output_file command status reason rps requests p99 json row_status
+  artifact_name="$(external_artifact_name "${label}")"
+  output_path="${external_wrk_dir}/${artifact_name}.txt"
+  output_file="external-wrk/${artifact_name}.txt"
+  command="exec wrk -t2 -c ${concurrency} -d ${duration_seconds}s -H 'Host: example.test' 'http://${host}:8080/perf/h1?body=ok'"
+
+  status=0
+  run_external_container "${output_path}" "${command}" || status=$?
+  rps="$(sed -n 's/^Requests\/sec:[[:space:]]*\([0-9.][0-9.]*\).*/\1/p' "${output_path}" | tail -n 1)"
+  requests="$(sed -n 's/^[[:space:]]*\([0-9][0-9]*\) requests in .*/\1/p' "${output_path}" | tail -n 1)"
+  p99="$(sed -n 's/^[[:space:]]*99%[[:space:]]*\([0-9.][0-9.]*\)ms.*/\1/p' "${output_path}" | tail -n 1)"
+  reason=""
+  row_status=pass
+  if [[ "${status}" != "0" ]]; then
+    reason="wrk exited with status ${status}"
+    row_status=fail
+  elif [[ -z "${rps}" || "${rps}" == "0" ]]; then
+    status=1
+    reason="wrk produced no positive Requests/sec value"
+    row_status=fail
+  fi
+  json="$(external_result_json "${label}" wrk "${comparator}" h1-keepalive h1 "${row_status}" "${output_file}" "${status}" "${reason}" "${rps}" "" "${p99}" "" "${requests}")"
+  append_external_result "${json}"
+  if [[ "${status}" != "0" ]]; then
+    handle_external_benchmark_failure "wrk HTTP/1.1 external benchmark failed for ${comparator}: ${reason}"
+  fi
+}
+
+run_external_benchmarks_for_comparator() {
+  local comparator="$1"
+  local host="$2"
+  local h3_mode="$3"
+  local h3_label h3_output_file
+  if [[ "${external_benchmarks}" != "1" ]]; then
+    return
+  fi
+
+  if has_external_tool h2load; then
+    run_external_h2load "${comparator}" "${host}" h2 h2
+    case "${h3_mode}" in
+      required)
+        run_external_h2load "${comparator}" "${host}" h3 h3
+        ;;
+      optional)
+        if h3_probe_succeeds "${host}"; then
+          run_external_h2load "${comparator}" "${host}" h3 h3
+        else
+          h3_label="${comparator}-external-h2load-h3"
+          h3_output_file="external-h2load/$(external_artifact_name "${h3_label}").txt"
+          record_external_skip "${h3_label}" h2load "${comparator}" h3 h3 "${h3_output_file}" "HTTP/3 is not available for this comparator image"
+        fi
+        ;;
+      disabled)
+        h3_label="${comparator}-external-h2load-h3"
+        h3_output_file="external-h2load/$(external_artifact_name "${h3_label}").txt"
+        record_external_skip "${h3_label}" h2load "${comparator}" h3 h3 "${h3_output_file}" "HTTP/3 is not available for this comparator image"
+        ;;
+      *)
+        handle_external_benchmark_failure "invalid HTTP/3 external benchmark mode for ${comparator}: ${h3_mode}"
+        ;;
+    esac
+  fi
+
+  if has_external_tool oha; then
+    run_external_oha "${comparator}" "${host}"
+  fi
+
+  if has_external_tool wrk; then
+    run_external_wrk "${comparator}" "${host}"
   fi
 }
 
@@ -1599,6 +2023,7 @@ run_reverse_proxy_group() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_common_loads oxibelt oxibelt required
+    run_external_benchmarks_for_comparator oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
     run_oxibelt_h2_split_loads
     start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
@@ -1611,12 +2036,14 @@ run_reverse_proxy_group() {
     start_nginx
     nginx_h3_mode="$(resolve_nginx_h3_mode)"
     run_common_loads nginx nginx "${nginx_h3_mode}"
+    run_external_benchmarks_for_comparator nginx nginx "${nginx_h3_mode}"
     run_handshake "nginx-tls-handshake-h2" h2 nginx
   fi
 
   if has_comparator caddy; then
     start_caddy
     run_common_loads caddy caddy required
+    run_external_benchmarks_for_comparator caddy caddy required
     run_handshake "caddy-tls-handshake-h2" h2 caddy
   fi
 }
@@ -1749,6 +2176,7 @@ run_all_serving_types() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_common_loads oxibelt oxibelt required
+    run_external_benchmarks_for_comparator oxibelt oxibelt required
     run_static_loads oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
     start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
@@ -1764,6 +2192,7 @@ run_all_serving_types() {
     start_nginx
     nginx_h3_mode="$(resolve_nginx_h3_mode)"
     run_common_loads nginx nginx "${nginx_h3_mode}"
+    run_external_benchmarks_for_comparator nginx nginx "${nginx_h3_mode}"
     run_handshake "nginx-tls-handshake-h2" h2 nginx
     run_static_loads nginx nginx "${nginx_h3_mode}"
   fi
@@ -1771,6 +2200,7 @@ run_all_serving_types() {
   if has_comparator caddy; then
     start_caddy
     run_common_loads caddy caddy required
+    run_external_benchmarks_for_comparator caddy caddy required
     run_handshake "caddy-tls-handshake-h2" h2 caddy
     run_static_loads caddy caddy required
   fi
@@ -1795,14 +2225,23 @@ finalize_results() {
   else
     printf '[]\n' >"${results_json}"
   fi
+  if [[ -s "${external_results_jsonl}" ]]; then
+    jq -s '.' "${external_results_jsonl}" >"${external_results_json}"
+  else
+    printf '[]\n' >"${external_results_json}"
+  fi
   {
     echo
     echo "Artifacts:"
     echo
     echo "- results.json"
+    echo "- external-results.json"
     echo "- docker-stats.jsonl"
     echo "- logs/"
     echo "- probe-logs/"
+    echo "- external-h2load/"
+    echo "- external-oha/"
+    echo "- external-wrk/"
     echo "- configs/"
   } >>"${summary_md}"
 }
@@ -1822,6 +2261,10 @@ cat >"${summary_md}" <<EOF
 - OxiBelt handshake fixture: \`${oxibelt_handshake_scenario}\`
 - OxiBelt AMD64 target CPU: \`${amd64_target_cpu}\`
 - Perf probe image: \`${perf_probe_image}\`
+- External benchmarks: \`${external_benchmarks}\`
+- External benchmark tools: \`${external_benchmark_tools}\`
+- External benchmark image: \`${external_benchmark_image}\`
+- External benchmark gate mode: \`${external_benchmark_gate_mode}\`
 - Duration: \`${duration_seconds}s\`
 - Warmup: \`${warmup_seconds}s\`
 - Concurrency: \`${concurrency}\`
@@ -1834,6 +2277,7 @@ EOF
 docker network create "${network_name}" >/dev/null
 
 build_perf_probe_image
+build_external_benchmark_image
 
 if has_comparator oxibelt && [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   remove_oxibelt_image=1

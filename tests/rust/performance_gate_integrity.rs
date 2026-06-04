@@ -341,6 +341,27 @@ fn waf_crs_gate_harness(
     HarnessRun { output, events }
 }
 
+fn external_benchmark_failure_harness(gate_mode: &str) -> HarnessRun {
+    let function = extract_bash_function(
+        &performance_script_text(),
+        "handle_external_benchmark_failure",
+    );
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-external-gate-");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    write_external_benchmark_failure_harness(&harness_path, &function);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("GATE_MODE", gate_mode)
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+
+    HarnessRun { output, events }
+}
+
 fn write_harness(path: &Path, run_common_loads: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
@@ -604,6 +625,29 @@ fail_with_diagnostics() {{
 {functions}
 
 assert_waf_crs_regression_gates
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_external_benchmark_failure_harness(path: &Path, function: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+external_benchmark_gate_mode="${{GATE_MODE:?}}"
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{function}
+
+handle_external_benchmark_failure "synthetic external benchmark failure"
+printf 'CONTINUE\n' >>"${{events}}"
 "#
     );
     fs::write(path, harness).expect("Bash harness should be writable");
@@ -1687,6 +1731,98 @@ fn performance_probe_image_override_skips_local_probe_build() {
 }
 
 #[test]
+fn external_benchmark_failures_warn_by_default_and_can_fail_closed() {
+    let warn = external_benchmark_failure_harness("warn");
+    assert!(
+        warn.output.status.success(),
+        "warn mode should continue after an external benchmark failure"
+    );
+    assert!(
+        warn.events.contains("CONTINUE"),
+        "warn mode should continue the harness after recording the warning"
+    );
+    assert!(
+        String::from_utf8_lossy(&warn.output.stderr).contains(
+            "External benchmark validation warning: synthetic external benchmark failure"
+        ),
+        "warn mode should emit a local warning diagnostic"
+    );
+
+    let fail = external_benchmark_failure_harness("fail");
+    assert!(
+        !fail.output.status.success(),
+        "fail mode should stop after an external benchmark failure"
+    );
+    assert!(
+        fail.events
+            .contains("FAIL synthetic external benchmark failure"),
+        "fail mode should route through normal diagnostics"
+    );
+    assert!(
+        !fail.events.contains("CONTINUE"),
+        "fail mode should not continue the harness"
+    );
+}
+
+#[test]
+fn external_benchmark_layer_keeps_primary_results_separate() {
+    let script = performance_script_text();
+
+    for expected in [
+        "OXIBELT_EXTERNAL_BENCHMARKS      run h2load/oha/wrk validation rows, 1 or 0 (default: 1)",
+        "OXIBELT_EXTERNAL_BENCHMARK_TOOLS comma-separated h2load,oha,wrk subset (default: h2load,oha,wrk)",
+        "OXIBELT_EXTERNAL_BENCHMARK_IMAGE prebuilt external benchmark image to reuse; built locally when unset",
+        "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE",
+        "OXIBELT_EXTERNAL_OHA_QPS",
+        "OXIBELT_EXTERNAL_OHA_MAX_P99_MS",
+        "OXIBELT_EXTERNAL_OHA_MAX_ERROR_RATE",
+    ] {
+        assert!(
+            script.contains(expected),
+            "usage should document {expected:?}"
+        );
+    }
+    assert!(
+        script.contains("external_results_jsonl=\"${work_dir}/external-results.jsonl\"")
+            && script.contains("external_results_json=\"${work_dir}/external-results.json\"")
+            && script.contains("external_h2load_dir=\"${work_dir}/external-h2load\"")
+            && script.contains("external_oha_dir=\"${work_dir}/external-oha\"")
+            && script.contains("external_wrk_dir=\"${work_dir}/external-wrk\""),
+        "external benchmark artifacts should live beside the primary performance artifacts"
+    );
+    assert!(
+        script.contains("external_benchmark_image=\"${OXIBELT_EXTERNAL_BENCHMARK_IMAGE:-oxibelt/external-benchmarks:${run_id}}\"")
+            && script.contains("external_benchmark_serving_type_enabled()")
+            && script.contains("all|reverse-proxy) return 0")
+            && script.contains("if [[ -n \"${OXIBELT_EXTERNAL_BENCHMARK_IMAGE:-}\" ]]; then\n    return 0\n  fi")
+            && script.contains("if [[ \"${remove_external_benchmark_image}\" == \"1\" ]]; then")
+            && script.contains("docker rmi -f \"${external_benchmark_image}\""),
+        "external benchmark image overrides should skip local builds and avoid deleting provided images"
+    );
+    assert!(
+        script.contains("DNS.7 = example.test"),
+        "generated TLS material should include the normal external benchmark authority"
+    );
+    assert!(
+        script.contains("jq -s '.' \"${external_results_jsonl}\" >\"${external_results_json}\""),
+        "performance script should finalize external-results.json separately from results.json"
+    );
+    assert!(
+        script.contains("append_external_result()")
+            && script.contains("printf '%s\\n' \"${json}\" >>\"${external_results_jsonl}\""),
+        "external rows should be appended to external-results.jsonl, not the primary results.jsonl append path"
+    );
+    assert!(
+        script.contains("run_external_benchmarks_for_comparator oxibelt oxibelt required")
+            && script.contains(
+                "run_external_benchmarks_for_comparator nginx nginx \"${nginx_h3_mode}\""
+            )
+            && script.contains("run_external_benchmarks_for_comparator caddy caddy required"),
+        "reverse-proxy comparators should reuse active fixtures for external validation"
+    );
+}
+
+#[test]
 fn local_performance_probe_build_retries_base_pulls_and_build() {
     let script = performance_script_text();
 
@@ -1703,6 +1839,28 @@ fn local_performance_probe_build_retries_base_pulls_and_build() {
             "fail_with_diagnostics \"failed to build performance probe image ${perf_probe_image}\""
         ),
         "probe image build failures should copy normal performance diagnostics"
+    );
+}
+
+#[test]
+fn local_external_benchmark_build_retries_base_pulls_and_build() {
+    let script = performance_script_text();
+
+    assert!(
+        script
+            .contains("for base_image in rust:1.95.0-trixie debian:trixie debian:trixie-slim; do")
+            && script.contains("retry_command 3 docker pull \"${base_image}\"")
+            && script.contains("retry_command 3 docker build")
+            && script.contains("tests/docker/external_benchmarks/Dockerfile"),
+        "local external benchmark image builds should retry every base-image pull and the Docker build"
+    );
+    assert!(
+        script.contains(
+            "fail_with_diagnostics \"failed to pull external benchmark base image ${base_image}\""
+        ) && script.contains(
+            "fail_with_diagnostics \"failed to build external benchmark image ${external_benchmark_image}\""
+        ),
+        "external benchmark image build failures should copy normal performance diagnostics"
     );
 }
 

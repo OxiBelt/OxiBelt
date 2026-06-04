@@ -61,6 +61,16 @@ fn performance_probe_build_script_text() -> String {
         .expect("performance probe build script should be readable")
 }
 
+fn external_benchmark_build_script_text() -> String {
+    fs::read_to_string(repo_root().join("tests/scripts/build-external-benchmark-image-artifact.sh"))
+        .expect("external benchmark build script should be readable")
+}
+
+fn external_benchmark_dockerfile_text() -> String {
+    fs::read_to_string(repo_root().join("tests/docker/external_benchmarks/Dockerfile"))
+        .expect("external benchmark Dockerfile should be readable")
+}
+
 fn docker_integration_helper_build_script_text() -> String {
     fs::read_to_string(
         repo_root().join("tests/scripts/build-docker-integration-helper-images-artifact.sh"),
@@ -317,6 +327,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "docker-alpine-musl-image-amd64",
         "docker-alpine-comparator-musl-image-amd64",
         "docker-performance-probe-image",
+        "docker-external-benchmark-image",
         "docker-integration-helper-images",
         "docker-alpine-musl-image-other",
         "docker-alpine-musl-image-riscv64",
@@ -732,6 +743,57 @@ fn docker_performance_probe_image_job_builds_reusable_artifact() {
 }
 
 #[test]
+fn docker_external_benchmark_image_job_builds_reusable_artifact() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let external_job = jobs
+        .get("docker-external-benchmark-image")
+        .expect("workflow should define the external benchmark image job");
+    let script = external_benchmark_build_script_text();
+    let dockerfile = external_benchmark_dockerfile_text();
+
+    assert_eq!(
+        external_job.needs,
+        vec![
+            "test".to_owned(),
+            "test-riscv64-qemu".to_owned(),
+            "fuzz-smoke".to_owned()
+        ],
+        "external benchmark image builds should follow the normal test gates"
+    );
+    assert!(
+        workflow.contains("name: Docker external benchmark image"),
+        "external benchmark image job should have a clear display name"
+    );
+    assert!(
+        workflow.contains("tests/scripts/build-external-benchmark-image-artifact.sh")
+            && workflow.contains("name: oxibelt-external-benchmark-image")
+            && workflow.contains("oxibelt-external-benchmark-image.tar"),
+        "external benchmark image job should build and upload a reusable tar artifact"
+    );
+    assert!(
+        script.contains("image_tag=\"oxibelt/external-benchmarks:ci\"")
+            && script
+                .contains("image_tar=\"${output_dir%/}/oxibelt-external-benchmark-image.tar\""),
+        "external benchmark build script should produce a deterministic tag and tar name"
+    );
+    for expected in ["h2load --h3 --version", "oha --version", "wrk --version"] {
+        assert!(
+            dockerfile.contains(expected),
+            "external benchmark Dockerfile should self-check {expected}"
+        );
+    }
+    assert!(
+        dockerfile.contains("cargo install oha")
+            && dockerfile.contains("nghttp2")
+            && dockerfile.contains("ngtcp2")
+            && dockerfile.contains("nghttp3")
+            && dockerfile.contains("github.com/wg/wrk"),
+        "external benchmark Dockerfile should include h2load with HTTP/3 support, oha, and wrk"
+    );
+}
+
+#[test]
 fn docker_performance_job_uses_sharded_repeated_sampling() {
     let workflow = workflow_text();
     let jobs = parse_jobs(&workflow);
@@ -837,6 +899,13 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
             .contains(&"docker-performance-probe-image".to_owned()),
         "docker-performance should wait for the reusable probe image"
     );
+    assert!(
+        jobs.get("docker-performance")
+            .expect("workflow should define docker-performance")
+            .needs
+            .contains(&"docker-external-benchmark-image".to_owned()),
+        "docker-performance should wait for the reusable external benchmark image"
+    );
     let performance_needs = &jobs
         .get("docker-performance")
         .expect("workflow should define docker-performance")
@@ -904,13 +973,23 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         performance_job.contains("OXIBELT_NGINX_IMAGE=\"${nginx_image_tag}\"")
             && performance_job.contains("OXIBELT_CADDY_IMAGE=\"${caddy_image_tag}\"")
             && performance_job.contains("OXIBELT_PERF_PROBE_IMAGE=oxibelt/perf-probe:ci")
+            && performance_job
+                .contains("OXIBELT_EXTERNAL_BENCHMARK_IMAGE=oxibelt/external-benchmarks:ci")
+            && performance_job.contains(
+                "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=\"${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}\""
+            )
             && performance_job.contains("OXIBELT_NGINX_H3_MODE=required"),
-        "docker-performance should compare against target-specific comparator images, reuse the probe image, and require nginx HTTP/3 in CI"
+        "docker-performance should compare target-specific images, reuse probe and external images, and require nginx HTTP/3 in CI"
     );
     assert!(
         performance_job.contains("name: Download performance probe image artifact")
             && performance_job.contains("docker load --input \"${RUNNER_TEMP}/oxibelt-performance-probe-image/oxibelt-performance-probe.tar\""),
         "docker-performance should download and load the prebuilt probe image before iterations"
+    );
+    assert!(
+        performance_job.contains("name: Download external benchmark image artifact")
+            && performance_job.contains("docker load --input \"${RUNNER_TEMP}/oxibelt-external-benchmark-image/oxibelt-external-benchmark-image.tar\""),
+        "docker-performance should download and load the prebuilt external benchmark image before iterations"
     );
     assert!(
         workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),
@@ -1056,6 +1135,16 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         workflow.contains("gate_status=\"$(jq -r '.regression_gates.status // \"unknown\"'"),
         "summary job should read the regression gate status from the comparison JSON"
+    );
+    assert!(
+        workflow.contains(
+            "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars.OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE || 'warn' }}"
+        ) && workflow.contains(
+            "external_failure_count=\"$(jq -r '[.external_benchmarks[]? | (.fail_count // 0)] | add // 0'"
+        ) && workflow.contains("::warning title=External benchmark validation::")
+            && workflow.contains("::error title=External benchmark validation gate::")
+            && workflow.contains("if [[ \"${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}\" == \"fail\" ]]; then"),
+        "summary job should warn on external benchmark failures by default and fail only in fail mode"
     );
     assert!(
         workflow.contains("missing_expected_count=\"$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length'")

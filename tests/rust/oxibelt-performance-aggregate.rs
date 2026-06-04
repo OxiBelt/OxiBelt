@@ -28,7 +28,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 10;
+const COMPARISON_SCHEMA_VERSION: u32 = 11;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
@@ -141,6 +141,7 @@ impl WarningBag {
 
 struct DiscoveredFiles {
     results: Vec<PathBuf>,
+    external_results: Vec<PathBuf>,
     summary_count: usize,
     docker_stats_count: usize,
     iteration_statuses: Vec<PathBuf>,
@@ -150,6 +151,7 @@ struct DiscoveredFiles {
 #[derive(Serialize)]
 struct ArtifactDiscovery {
     results_files: usize,
+    external_results_files: usize,
     summary_files: usize,
     docker_stats_files: usize,
     iteration_status_files: usize,
@@ -185,6 +187,25 @@ struct BenchmarkRow {
     reason: Option<String>,
 }
 
+#[derive(Clone)]
+struct ExternalBenchmarkSample {
+    source_file: String,
+    amd64_target_cpu: String,
+    label: String,
+    tool: String,
+    comparator: String,
+    scenario: String,
+    protocol: String,
+    status: String,
+    rps: Option<f64>,
+    p95_ms: Option<f64>,
+    p99_ms: Option<f64>,
+    error_rate: Option<f64>,
+    requests: Option<f64>,
+    reason: Option<String>,
+    output_file: Option<String>,
+}
+
 #[derive(Default)]
 struct AggregateBuilder {
     amd64_target_cpu: String,
@@ -205,6 +226,27 @@ struct AggregateBuilder {
     skipped_count: u64,
     skip_reasons: BTreeSet<String>,
     source_files: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct ExternalBenchmarkBuilder {
+    amd64_target_cpu: String,
+    tool: String,
+    comparator: String,
+    scenario: String,
+    protocol: String,
+    labels: BTreeSet<String>,
+    rps_values: Vec<f64>,
+    p95_values: Vec<f64>,
+    p99_values: Vec<f64>,
+    error_rate_values: Vec<f64>,
+    request_values: Vec<f64>,
+    pass_count: usize,
+    fail_count: usize,
+    skipped_count: usize,
+    reasons: BTreeSet<String>,
+    source_files: BTreeSet<String>,
+    output_files: BTreeSet<String>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -241,6 +283,28 @@ struct AggregateStats {
     source_files: Vec<String>,
     #[serde(default)]
     distribution: AggregateDistribution,
+}
+
+#[derive(Clone, Serialize)]
+struct ExternalBenchmarkStats {
+    amd64_target_cpu: String,
+    tool: String,
+    comparator: String,
+    scenario: String,
+    protocol: String,
+    sample_count: usize,
+    pass_count: usize,
+    fail_count: usize,
+    skipped_count: usize,
+    median_rps: Option<f64>,
+    median_p95_ms: Option<f64>,
+    median_p99_ms: Option<f64>,
+    median_error_rate: Option<f64>,
+    total_requests: Option<f64>,
+    labels: Vec<String>,
+    reasons: Vec<String>,
+    source_files: Vec<String>,
+    output_files: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -331,6 +395,7 @@ struct ReportSummary {
     static_files: GroupSummary,
     accept_multipliers: AcceptMultiplierSummary,
     remote_signer: RemoteSignerSummary,
+    external_benchmark_row_count: usize,
     oxibelt_only_row_count: usize,
 }
 
@@ -681,6 +746,7 @@ struct Report {
     accept_multiplier_comparisons: Vec<AcceptMultiplierComparison>,
     remote_signer_comparisons: Vec<RemoteSignerComparison>,
     amd64_isa_comparisons: Vec<Amd64IsaComparison>,
+    external_benchmarks: Vec<ExternalBenchmarkStats>,
     oxibelt_only_results: Vec<AggregateStats>,
     skipped_or_missing_comparator_rows: Vec<MissingComparatorRow>,
     regression_gates: RegressionGateReport,
@@ -831,6 +897,88 @@ impl AggregateBuilder {
     }
 }
 
+impl ExternalBenchmarkBuilder {
+    fn push(&mut self, sample: ExternalBenchmarkSample) {
+        if self.amd64_target_cpu.is_empty() {
+            self.amd64_target_cpu = sample.amd64_target_cpu;
+        }
+        if self.tool.is_empty() {
+            self.tool = sample.tool;
+        }
+        if self.comparator.is_empty() {
+            self.comparator = sample.comparator;
+        }
+        if self.scenario.is_empty() {
+            self.scenario = sample.scenario;
+        }
+        if self.protocol.is_empty() {
+            self.protocol = sample.protocol;
+        }
+        self.labels.insert(sample.label);
+        match sample.status.as_str() {
+            "pass" => self.pass_count += 1,
+            "fail" => self.fail_count += 1,
+            "skipped" => self.skipped_count += 1,
+            _ => self.fail_count += 1,
+        }
+        if let Some(rps) = sample.rps {
+            self.rps_values.push(rps);
+        }
+        if let Some(p95) = sample.p95_ms {
+            self.p95_values.push(p95);
+        }
+        if let Some(p99) = sample.p99_ms {
+            self.p99_values.push(p99);
+        }
+        if let Some(error_rate) = sample.error_rate {
+            self.error_rate_values.push(error_rate);
+        }
+        if let Some(requests) = sample.requests {
+            self.request_values.push(requests);
+        }
+        if let Some(reason) = sample.reason {
+            self.reasons.insert(reason);
+        }
+        if let Some(output_file) = sample.output_file {
+            self.output_files.insert(output_file);
+        }
+        self.source_files.insert(sample.source_file);
+    }
+
+    fn finish(self) -> ExternalBenchmarkStats {
+        let mut rps_values = self.rps_values;
+        let mut p95_values = self.p95_values;
+        let mut p99_values = self.p99_values;
+        let mut error_rate_values = self.error_rate_values;
+        let total_requests = if self.request_values.is_empty() {
+            None
+        } else {
+            Some(self.request_values.iter().sum())
+        };
+
+        ExternalBenchmarkStats {
+            amd64_target_cpu: self.amd64_target_cpu,
+            tool: self.tool,
+            comparator: self.comparator,
+            scenario: self.scenario,
+            protocol: self.protocol,
+            sample_count: self.pass_count + self.fail_count + self.skipped_count,
+            pass_count: self.pass_count,
+            fail_count: self.fail_count,
+            skipped_count: self.skipped_count,
+            median_rps: percentile(&mut rps_values, 50.0),
+            median_p95_ms: percentile(&mut p95_values, 50.0),
+            median_p99_ms: percentile(&mut p99_values, 50.0),
+            median_error_rate: percentile(&mut error_rate_values, 50.0),
+            total_requests,
+            labels: self.labels.into_iter().collect(),
+            reasons: self.reasons.into_iter().collect(),
+            source_files: self.source_files.into_iter().collect(),
+            output_files: self.output_files.into_iter().collect(),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let report = aggregate(
@@ -903,8 +1051,18 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
                 .any(|unsupported_dir| path.starts_with(unsupported_dir))
         })
         .collect::<Vec<_>>();
+    let external_results = discovered
+        .external_results
+        .iter()
+        .filter(|path| {
+            !unsupported_artifact_dirs
+                .iter()
+                .any(|unsupported_dir| path.starts_with(unsupported_dir))
+        })
+        .collect::<Vec<_>>();
     let mut artifact_discovery = ArtifactDiscovery {
         results_files: results.len(),
+        external_results_files: external_results.len(),
         summary_files: discovered.summary_count,
         docker_stats_files: discovered.docker_stats_count,
         iteration_status_files: discovered.iteration_statuses.len(),
@@ -955,6 +1113,29 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
         aggregate_map.insert(key, builder.finish());
     }
 
+    let mut external_builders: BTreeMap<
+        (String, String, String, String, String),
+        ExternalBenchmarkBuilder,
+    > = BTreeMap::new();
+    for external_results_path in external_results {
+        for sample in parse_external_results_file(input_dir, external_results_path, &mut warnings) {
+            external_builders
+                .entry((
+                    sample.amd64_target_cpu.clone(),
+                    sample.tool.clone(),
+                    sample.comparator.clone(),
+                    sample.scenario.clone(),
+                    sample.protocol.clone(),
+                ))
+                .or_default()
+                .push(sample);
+        }
+    }
+    let external_benchmarks = external_builders
+        .into_values()
+        .map(ExternalBenchmarkBuilder::finish)
+        .collect::<Vec<_>>();
+
     let reverse_proxy = build_group_comparisons(ScenarioGroup::ReverseProxy, &aggregate_map);
     let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
     let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
@@ -997,6 +1178,10 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
             &primary_accept_multiplier_comparisons,
         ),
         remote_signer: summarize_remote_signer_comparisons(&primary_remote_signer_comparisons),
+        external_benchmark_row_count: external_benchmarks
+            .iter()
+            .filter(|row| row.amd64_target_cpu == primary_target_cpu)
+            .count(),
         oxibelt_only_row_count: oxibelt_only_results
             .iter()
             .filter(|row| row.amd64_target_cpu == primary_target_cpu)
@@ -1023,6 +1208,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
         accept_multiplier_comparisons,
         remote_signer_comparisons,
         amd64_isa_comparisons,
+        external_benchmarks,
         oxibelt_only_results,
         skipped_or_missing_comparator_rows,
         regression_gates,
@@ -1217,6 +1403,7 @@ fn load_baseline_context_report(
 fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFiles {
     let mut discovered = DiscoveredFiles {
         results: Vec::new(),
+        external_results: Vec::new(),
         summary_count: 0,
         docker_stats_count: 0,
         iteration_statuses: Vec::new(),
@@ -1269,6 +1456,7 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
 
             match entry.file_name().to_string_lossy().as_ref() {
                 "results.json" => discovered.results.push(entry.path()),
+                "external-results.json" => discovered.external_results.push(entry.path()),
                 "summary.md" => discovered.summary_count += 1,
                 "docker-stats.jsonl" => discovered.docker_stats_count += 1,
                 "iteration-status.json" => discovered.iteration_statuses.push(entry.path()),
@@ -1279,6 +1467,7 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
     }
 
     discovered.results.sort();
+    discovered.external_results.sort();
     discovered.iteration_statuses.sort();
     discovered.unsupported_cpu_markers.sort();
     discovered
@@ -1762,6 +1951,161 @@ fn parse_results_file(
         }
         Err(_) => parse_jsonl_results(&raw, &rel_path, warnings),
     }
+}
+
+fn parse_external_results_file(
+    input_dir: &Path,
+    path: &Path,
+    warnings: &mut WarningBag,
+) -> Vec<ExternalBenchmarkSample> {
+    let rel_path = display_path(input_dir, path);
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            warnings.push(format!("failed to inspect {rel_path}: {error}"));
+            return Vec::new();
+        }
+    };
+    if metadata.len() > MAX_RESULTS_BYTES {
+        warnings.push(format!(
+            "skipping {rel_path}: external results file is larger than {} bytes",
+            MAX_RESULTS_BYTES
+        ));
+        return Vec::new();
+    }
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            warnings.push(format!("failed to read {rel_path}: {error}"));
+            return Vec::new();
+        }
+    };
+
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Array(values)) => values
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                parse_external_result_value(value, &rel_path, index + 1, warnings)
+            })
+            .collect(),
+        Ok(value @ Value::Object(_)) => parse_external_result_value(value, &rel_path, 1, warnings)
+            .into_iter()
+            .collect(),
+        Ok(_) => {
+            warnings.push(format!(
+                "ignoring {rel_path}: external results top-level JSON is not an object or array"
+            ));
+            Vec::new()
+        }
+        Err(error) => {
+            warnings.push(format!("failed to parse {rel_path} as JSON: {error}"));
+            Vec::new()
+        }
+    }
+}
+
+fn parse_external_result_value(
+    value: Value,
+    source_file: &str,
+    row_index: usize,
+    warnings: &mut WarningBag,
+) -> Option<ExternalBenchmarkSample> {
+    let Some(object) = value.as_object() else {
+        warnings.push(format!(
+            "{source_file} external row {row_index}: expected a JSON object"
+        ));
+        return None;
+    };
+
+    let Some(label) = string_field(object.get("label")) else {
+        warnings.push(format!(
+            "{source_file} external row {row_index}: missing string field label"
+        ));
+        return None;
+    };
+    let Some(tool) = string_field(object.get("tool")) else {
+        warnings.push(format!(
+            "{source_file} external row {row_index} ({label}): missing string field tool"
+        ));
+        return None;
+    };
+    let Some(comparator) = string_field(object.get("comparator")) else {
+        warnings.push(format!(
+            "{source_file} external row {row_index} ({label}): missing string field comparator"
+        ));
+        return None;
+    };
+    let Some(scenario) = string_field(object.get("scenario")) else {
+        warnings.push(format!(
+            "{source_file} external row {row_index} ({label}): missing string field scenario"
+        ));
+        return None;
+    };
+    let Some(protocol) = string_field(object.get("protocol")) else {
+        warnings.push(format!(
+            "{source_file} external row {row_index} ({label}): missing string field protocol"
+        ));
+        return None;
+    };
+    let Some(status) = string_field(object.get("status")) else {
+        warnings.push(format!(
+            "{source_file} external row {row_index} ({label}): missing string field status"
+        ));
+        return None;
+    };
+
+    if !matches!(tool, "h2load" | "oha" | "wrk") {
+        warnings.push(format!(
+            "{source_file} external row {row_index} ({label}): unknown tool {tool:?}"
+        ));
+    }
+    if !matches!(comparator, "oxibelt" | "nginx" | "caddy") {
+        warnings.push(format!(
+            "{source_file} external row {row_index} ({label}): unknown comparator {comparator:?}"
+        ));
+    }
+    if !matches!(status, "pass" | "fail" | "skipped") {
+        warnings.push(format!(
+            "{source_file} external row {row_index} ({label}): unknown status {status:?}"
+        ));
+    }
+
+    Some(ExternalBenchmarkSample {
+        source_file: source_file.to_owned(),
+        amd64_target_cpu: string_field(object.get("amd64_target_cpu"))
+            .filter(|target| is_known_amd64_target_cpu(target))
+            .map(str::to_owned)
+            .or_else(|| infer_amd64_target_cpu_from_path(source_file))
+            .unwrap_or_else(default_amd64_target_cpu),
+        label: label.to_owned(),
+        tool: tool.to_owned(),
+        comparator: comparator.to_owned(),
+        scenario: scenario.to_owned(),
+        protocol: protocol.to_owned(),
+        status: status.to_owned(),
+        rps: numeric_field(object, &["rps"], source_file, row_index, label, warnings),
+        p95_ms: numeric_field(object, &["p95_ms"], source_file, row_index, label, warnings),
+        p99_ms: numeric_field(object, &["p99_ms"], source_file, row_index, label, warnings),
+        error_rate: numeric_field(
+            object,
+            &["error_rate"],
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
+        requests: numeric_field(
+            object,
+            &["requests"],
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
+        reason: string_field(object.get("reason")).map(str::to_owned),
+        output_file: string_field(object.get("output_file")).map(str::to_owned),
+    })
 }
 
 fn parse_jsonl_results(raw: &str, rel_path: &str, warnings: &mut WarningBag) -> Vec<BenchmarkRow> {
@@ -4406,6 +4750,12 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- External result files parsed: `{}`",
+        report.artifact_discovery.external_results_files
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- Primary AMD64 target CPU: `{}`",
         report.primary_target_cpu
     )
@@ -4503,6 +4853,12 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- External benchmark rows: `{}`",
+        report.summary.external_benchmark_row_count
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- Regression gates: `{}` ({} violation(s), {} advisory/advisories)",
         report.regression_gates.status,
         report.regression_gates.violations.len(),
@@ -4529,6 +4885,7 @@ fn render_markdown(report: &Report) -> String {
     write_accept_multiplier_table(&mut markdown, &report.accept_multiplier_comparisons);
     write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
     write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
+    write_external_benchmark_table(&mut markdown, &report.external_benchmarks);
     write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
     write_missing_table(&mut markdown, &report.skipped_or_missing_comparator_rows);
     write_quorum_table(&mut markdown, &report.quorum);
@@ -4745,6 +5102,47 @@ fn write_amd64_isa_table(markdown: &mut String, comparisons: &[Amd64IsaCompariso
             )
             .unwrap();
         }
+    }
+    writeln!(markdown).unwrap();
+}
+
+fn write_external_benchmark_table(markdown: &mut String, rows: &[ExternalBenchmarkStats]) {
+    writeln!(markdown, "## External benchmark validation\n").unwrap();
+    if rows.is_empty() {
+        writeln!(markdown, "No external benchmark rows were found.\n").unwrap();
+        return;
+    }
+
+    writeln!(
+        markdown,
+        "| Target CPU | Tool | Comparator | Scenario | Protocol | Samples | Passed | Failed | Skipped | Median rate/sec | Median p99 ms | Median error rate | Output files | Reasons |"
+    )
+    .unwrap();
+    writeln!(
+        markdown,
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
+    )
+    .unwrap();
+    for row in rows {
+        writeln!(
+            markdown,
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.amd64_target_cpu,
+            row.tool,
+            row.comparator,
+            row.scenario,
+            row.protocol,
+            row.sample_count,
+            row.pass_count,
+            row.fail_count,
+            row.skipped_count,
+            format_number(row.median_rps),
+            format_number(row.median_p99_ms),
+            format_number(row.median_error_rate),
+            format_list_cell(&row.output_files),
+            format_list_cell(&row.reasons),
+        )
+        .unwrap();
     }
     writeln!(markdown).unwrap();
 }
@@ -5052,6 +5450,18 @@ fn format_number(value: Option<f64>) -> String {
 
 fn format_percent(value: Option<f64>) -> String {
     value.map_or_else(|| "n/a".to_owned(), |value| format!("{value:.1}%"))
+}
+
+fn format_list_cell(values: &[String]) -> String {
+    if values.is_empty() {
+        "-".to_owned()
+    } else {
+        values
+            .iter()
+            .map(|value| format!("`{value}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn display_path(input_dir: &Path, path: &Path) -> String {

@@ -468,6 +468,37 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-performance-probe-image/oxibelt-performance-probe.tar
           retention-days: 0
 
+  docker-external-benchmark-image:
+    name: Docker external benchmark image
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - test-riscv64-qemu
+      - fuzz-smoke
+    permissions:
+      contents: read
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
+
+      - name: Build external benchmark Docker image artifact
+        run: |
+          tests/scripts/build-external-benchmark-image-artifact.sh \
+            "linux/amd64" \
+            "${RUNNER_TEMP}/oxibelt-external-benchmark-image"
+
+      - name: Upload external benchmark Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-external-benchmark-image
+          path: ${{ runner.temp }}/oxibelt-external-benchmark-image/oxibelt-external-benchmark-image.tar
+          retention-days: 0
+
   docker-alpine-musl-image-other:
     name: Docker image (Alpine musl, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -1254,6 +1285,7 @@ jobs:
       - browser-webdriver
       - docker-alpine-comparator-musl-image-amd64
       - docker-performance-probe-image
+      - docker-external-benchmark-image
     permissions:
       actions: read
       contents: read
@@ -1298,6 +1330,7 @@ jobs:
       PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile_label || 'none' }}
       PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}
       OXIBELT_PERF_REGRESSION_GATE_MODE: warn
+      OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars.OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE || 'warn' }}
 
     steps:
       - name: Checkout
@@ -1355,6 +1388,12 @@ jobs:
           name: oxibelt-performance-probe-image
           path: ${{ runner.temp }}/oxibelt-performance-probe-image
 
+      - name: Download external benchmark image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-external-benchmark-image
+          path: ${{ runner.temp }}/oxibelt-external-benchmark-image
+
       - name: Load AMD64 v2 OxiBelt Docker image
         if: steps.select-amd64-v2.outputs.supported == 'true'
         env:
@@ -1376,6 +1415,9 @@ jobs:
 
       - name: Load performance probe Docker image
         run: docker load --input "${RUNNER_TEMP}/oxibelt-performance-probe-image/oxibelt-performance-probe.tar"
+
+      - name: Load external benchmark Docker image
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-external-benchmark-image/oxibelt-external-benchmark-image.tar"
 
       - name: Install Linux perf for performance profiling
         if: github.event_name == 'workflow_dispatch' && inputs.performance_profile == 'smoke' && matrix.serving_type == 'reverse-proxy' && matrix.shard == 1 && (inputs.performance_h2_profile || inputs.performance_profile_label != 'none')
@@ -1490,6 +1532,8 @@ jobs:
               OXIBELT_NGINX_IMAGE="${nginx_image_tag}" \
               OXIBELT_CADDY_IMAGE="${caddy_image_tag}" \
               OXIBELT_PERF_PROBE_IMAGE=oxibelt/perf-probe:ci \
+              OXIBELT_EXTERNAL_BENCHMARK_IMAGE=oxibelt/external-benchmarks:ci \
+              OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE="${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}" \
               OXIBELT_NGINX_H3_MODE=required \
               OXIBELT_AMD64_TARGET_CPU="${target_cpu}" \
               OXIBELT_TEST_ARTIFACT_DIR="${run_dir}" \
@@ -1557,6 +1601,7 @@ jobs:
     env:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
       PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
+      OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars.OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE || 'warn' }}
 
     steps:
       - name: Checkout
@@ -1762,6 +1807,18 @@ jobs:
             failed=1
           fi
 
+          external_failure_count="$(jq -r '[.external_benchmarks[]? | (.fail_count // 0)] | add // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          if (( external_failure_count > 0 )); then
+            jq -r '.external_benchmarks[]? | select((.fail_count // 0) > 0) | "::warning title=External benchmark validation::" + .tool + " " + .comparator + " " + .scenario + "/" + .protocol + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
+              "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
+            echo "Docker performance external benchmark validation reported ${external_failure_count} failed sample(s)" >&2
+            if [[ "${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}" == "fail" ]]; then
+              jq -r '.external_benchmarks[]? | select((.fail_count // 0) > 0) | "::error title=External benchmark validation gate::" + .tool + " " + .comparator + " " + .scenario + "/" + .protocol + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
+                "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
+              failed=1
+            fi
+          fi
+
           gate_status="$(jq -r '.regression_gates.status // "unknown"' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if [[ "${gate_status}" == "pass" && "${failed}" == "0" ]]; then
             echo "Docker performance regression gates passed"
@@ -1774,7 +1831,7 @@ jobs:
             echo "Docker performance regression gates failed with status '${gate_status}'" >&2
             failed=1
           fi
-          exit 1
+          exit "${failed}"
 
   docker-aggressive-long-run:
     name: Docker aggressive long-run

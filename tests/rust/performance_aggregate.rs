@@ -70,6 +70,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         "## Static file comparison",
         "## Accept multiplier comparison",
         "## AMD64 ISA comparison",
+        "## External benchmark validation",
         "## OxiBelt-only results",
         "## Skipped/missing comparator rows",
         "## Sample quorum",
@@ -97,6 +98,15 @@ fn write_results_array(dir: &Path, rows: Vec<Value>) {
     .expect("results should be written");
     fs::write(dir.join("summary.md"), "# summary\n").expect("summary should be written");
     fs::write(dir.join("docker-stats.jsonl"), "{}\n").expect("stats should be written");
+}
+
+fn write_external_results_array(dir: &Path, rows: Vec<Value>) {
+    fs::create_dir_all(dir).expect("external result directory should be created");
+    fs::write(
+        dir.join("external-results.json"),
+        serde_json::to_string_pretty(&rows).expect("external rows should serialize"),
+    )
+    .expect("external results should be written");
 }
 
 fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> Value {
@@ -733,7 +743,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 10);
+    assert_eq!(report["schema_version"], 11);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -908,7 +918,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 }
 
 #[test]
-fn schema_10_records_quorum_status_iteration_quality_and_distributions() {
+fn schema_11_records_quorum_status_iteration_quality_and_distributions() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -927,7 +937,7 @@ fn schema_10_records_quorum_status_iteration_quality_and_distributions() {
         ],
     );
 
-    assert_eq!(report["schema_version"], 10);
+    assert_eq!(report["schema_version"], 11);
     assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
     assert_eq!(report["sample_quality"]["ok_iterations"], 16);
     assert_eq!(report["sample_quality"]["failed_iterations"], 0);
@@ -952,6 +962,84 @@ fn schema_10_records_quorum_status_iteration_quality_and_distributions() {
             .len(),
         16
     );
+}
+
+#[test]
+fn external_benchmarks_are_reported_without_affecting_primary_gates() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 100.0, 4.0);
+    write_external_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![json!({
+            "label": "nginx-external-oha-h2",
+            "tool": "oha",
+            "comparator": "nginx",
+            "scenario": "fixed-qps-h2",
+            "protocol": "h2",
+            "status": "fail",
+            "amd64_target_cpu": "x86-64-v3",
+            "requests": 1000,
+            "rps": 1000.0,
+            "p95_ms": 120.0,
+            "p99_ms": 275.0,
+            "error_rate": 0.01,
+            "reason": "p99 275.00ms exceeded external oha gate 250ms",
+            "output_file": "external-oha/nginx-h2.json"
+        })],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--profile".to_owned(),
+            "smoke".to_owned(),
+            "--expected-runs".to_owned(),
+            "1".to_owned(),
+            "--expected-shards".to_owned(),
+            "20".to_owned(),
+        ],
+    );
+
+    assert_eq!(report["artifact_discovery"]["results_files"], 64);
+    assert_eq!(report["artifact_discovery"]["external_results_files"], 1);
+    assert_eq!(report["summary"]["external_benchmark_row_count"], 1);
+    assert_eq!(report["quorum"]["status"], "pass");
+    assert_eq!(report["regression_gates"]["status"], "pass");
+
+    let external_rows = report["external_benchmarks"]
+        .as_array()
+        .expect("external benchmark rows should be present");
+    assert_eq!(external_rows.len(), 1);
+    let row = &external_rows[0];
+    assert_eq!(row["tool"], "oha");
+    assert_eq!(row["comparator"], "nginx");
+    assert_eq!(row["scenario"], "fixed-qps-h2");
+    assert_eq!(row["protocol"], "h2");
+    assert_eq!(row["sample_count"], 1);
+    assert_eq!(row["fail_count"], 1);
+    assert_close(
+        row["median_p99_ms"].as_f64().expect("p99 should exist"),
+        275.0,
+    );
+
+    let aggregate_labels = report["aggregates"]
+        .as_array()
+        .expect("aggregate rows should be present")
+        .iter()
+        .map(|aggregate| aggregate["label"].as_str().expect("label should be text"))
+        .collect::<Vec<_>>();
+    assert!(
+        !aggregate_labels.contains(&"nginx-external-oha-h2"),
+        "external benchmark rows must not be mixed into primary aggregates"
+    );
+
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains("## External benchmark validation"));
+    assert!(markdown.contains("`external-oha/nginx-h2.json`"));
 }
 
 #[test]
