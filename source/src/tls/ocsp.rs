@@ -5,7 +5,6 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, anyhow, bail};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use der::{Decode, Encode};
 use http::header::{ACCEPT, CONTENT_TYPE};
 use rustls::pki_types::{CertificateDer, SignatureVerificationAlgorithm, UnixTime};
 use rustls::server::ResolvesServerCert;
@@ -14,6 +13,7 @@ use sha1::Digest;
 use url::Url;
 use webpki::{EndEntityCert, KeyUsage, anchor_from_trusted_cert};
 use x509_cert::Certificate;
+use x509_cert::der::{Decode, Encode};
 use x509_cert::ext::pkix::AuthorityInfoAccessSyntax;
 use x509_cert::ext::pkix::name::GeneralName;
 use x509_ocsp::builder::OcspRequestBuilder;
@@ -26,7 +26,9 @@ use crate::config::{OcspMode, TlsConfig};
 use crate::control_http::{ControlHttpClient, full_body, uri_from_url};
 use crate::metrics::Metrics;
 
+mod cert_id;
 mod status;
+use cert_id::build_sha1_cert_id;
 pub use status::OcspRuntimeStatus;
 use status::{OcspStatusState, system_time_to_unix};
 
@@ -294,7 +296,7 @@ impl LiveOcspContext {
     let leaf = Certificate::from_der(&leaf_der).context("failed to parse leaf certificate")?;
     let issuer =
       Certificate::from_der(&issuer_der).context("failed to parse issuer certificate")?;
-    let expected_cert_id = CertId::from_cert::<sha1::Sha1>(&issuer, &leaf)
+    let expected_cert_id = build_sha1_cert_id(&issuer, &leaf)
       .map_err(|error| anyhow!("failed to build OCSP CertID: {error}"))?;
     let request = Request::new(expected_cert_id.clone());
     let request_der = OcspRequestBuilder::new(Version::V1)

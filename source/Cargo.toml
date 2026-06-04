@@ -19,7 +19,7 @@ async-compression = { version = "0.4", features = ["brotli", "gzip", "tokio", "z
 base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
-der = "0.7"
+der = "0.8"
 glob = "0.3"
 gateway-api = "0.21.0"
 http = "1"
@@ -48,7 +48,7 @@ webpki = { package = "rustls-webpki", version = "0.103" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-sha1 = { version = "0.10", features = ["oid"] }
+sha1 = { version = "0.11", features = ["oid"] }
 socket2 = "0.6"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
 subtle = "2.6"
