@@ -1085,10 +1085,11 @@ impl DiagnosticProfileBuilder {
             sample.resource,
             sample.memory_metadata,
             sample.heap_dir,
-        ] {
-            if let Some(artifact) = artifact {
-                self.artifact_files.insert(artifact);
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.artifact_files.insert(artifact);
         }
         self.source_files.insert(sample.source_file);
     }
