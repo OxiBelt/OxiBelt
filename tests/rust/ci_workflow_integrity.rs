@@ -844,8 +844,10 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
             && workflow.contains("heaptrack")
             && workflow.contains("zstd")
             && workflow.contains("41fee1f99f9276008b7cd112fca19dc3ea84ac32")
-            && workflow.contains("088f82e6848a4f12a56e1e8e8170ee6761fccf12e5615cd64630f6b087c99ea7")
-            && workflow.contains("74faa47a29d8df07cb06731dfd8bb94dc4c165b9d811ac6b4c9449eea2ac25d8")
+            && workflow
+                .contains("088f82e6848a4f12a56e1e8e8170ee6761fccf12e5615cd64630f6b087c99ea7")
+            && workflow
+                .contains("74faa47a29d8df07cb06731dfd8bb94dc4c165b9d811ac6b4c9449eea2ac25d8")
             && workflow.contains("/usr/local/bin/flamegraph.pl")
             && workflow.contains("/usr/local/bin/stackcollapse-perf.pl")
             && workflow.contains("sha256sum --check --status")
