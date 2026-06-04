@@ -626,6 +626,8 @@ pub enum OcspMode {
   LiveFetch,
 }
 
+pub const OCSP_MODE_WIRE_VALUES: &[&str] = &["disabled", "static_file", "live_fetch"];
+
 fn default_ocsp_request_timeout_ms() -> u64 {
   3_000
 }

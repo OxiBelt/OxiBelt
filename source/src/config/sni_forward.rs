@@ -206,6 +206,8 @@ pub enum SniForwardProtocol {
   Quic,
 }
 
+pub const SNI_FORWARD_PROTOCOL_WIRE_VALUES: &[&str] = &["tcp_tls", "quic"];
+
 fn default_client_hello_max_bytes() -> usize {
   DEFAULT_CLIENT_HELLO_MAX_BYTES
 }

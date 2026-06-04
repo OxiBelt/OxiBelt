@@ -237,4 +237,11 @@ OxiBelt intentionally keeps ACME challenge handling, including HTTP-01 and DNS-0
 
 This keeps ACME account keys, DNS provider API tokens, challenge credentials, and optionally TLS private keys outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised process should not also contain the credentials needed to issue arbitrary new TLS certificates or export configured private keys, especially through DNS-01 provider tokens.
 
-Live OCSP fetch/refresh, sticky-cookie upstream sessions, downstream ECH configuration, and general-purpose UDP stream proxying outside the configured same-port QUIC SNI forwarding path remain reserved or deferred. SNI-based TCP TLS forwarding and same-port QUIC forwarding are current `[sni_forward]` features. See [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work) for the full list.
+Downstream ECH configuration, CRLite enforcement, CRS stream-payload inspection
+for WebSocket/WebTransport, and general-purpose UDP stream proxying outside the
+configured same-port QUIC SNI forwarding path remain reserved or deferred.
+SNI-based TCP TLS forwarding, same-port QUIC forwarding, live OCSP
+fetch/refresh, and sticky-cookie upstream pools are current features. See
+[docs/FeatureStatus.md](docs/FeatureStatus.md) for the canonical lifecycle
+matrix and [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work)
+for the design rationale behind reserved work.

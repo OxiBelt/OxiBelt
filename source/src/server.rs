@@ -74,6 +74,39 @@ use admin_auth::{AdminActor, AdminAuthorization, admin_actor, admin_request_cont
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 use admin_operations::AdminOperationRuntime;
 use admin_upstream_pools::admin_upstream_pools_response;
+
+pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
+  "config_load",
+  "file_sync",
+  "dynamic_policy",
+  "ipm_store",
+  "waf_devtools",
+  "runtime_introspection",
+  "cache_admin",
+  "upstream_pool_runtime_control",
+  "admin_operations",
+  "admin_http3",
+  "admin_operation_webtransport",
+  "admin_audit",
+];
+pub const ADMIN_OPERATION_KIND_WIRE_VALUES: &[&str] = &[
+  "cache_warm",
+  "oxirule_replay",
+  "diagnostics_preflight",
+  "support_bundle",
+  "dynamic_policy_import",
+  "webtransport_snapshot",
+  "webtransport_drain",
+];
+pub const ADMIN_OPERATION_STATE_WIRE_VALUES: &[&str] = &[
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "expired",
+];
+
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
 const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
 pub async fn serve(

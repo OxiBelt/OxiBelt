@@ -126,5 +126,9 @@ name = "admin_openapi_contract"
 path = "../tests/rust/admin_openapi_contract.rs"
 
 [[test]]
+name = "feature_status_contract"
+path = "../tests/rust/feature_status_contract.rs"
+
+[[test]]
 name = "observability_assets"
 path = "../tests/rust/observability_assets.rs"

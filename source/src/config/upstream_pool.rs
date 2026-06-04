@@ -13,6 +13,20 @@ use super::{
   validate_optional_non_empty,
 };
 
+pub const HTTP_POOL_LOAD_BALANCING_ALGORITHM_WIRE_VALUES: &[&str] = &[
+  "power_of_two_choices",
+  "weighted_least_conn",
+  "rendezvous_hash",
+  "rendezvous_ip_hash",
+  "ewma",
+  "least_time",
+  "sticky_cookie",
+];
+pub const UPSTREAM_DISCOVERY_PROVIDER_WIRE_VALUES: &[&str] =
+  &["dns", "file", "kubernetes", "consul", "etcd", "nomad"];
+pub const UPSTREAM_POOL_SERVER_STATE_WIRE_VALUES: &[&str] =
+  &["ready", "drain", "down", "maintenance"];
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum KubernetesDiscoveryResource {
@@ -161,6 +175,15 @@ pub enum StickyCookieFallbackAlgorithm {
   Ewma,
   LeastTime,
 }
+
+pub const STICKY_COOKIE_FALLBACK_ALGORITHM_WIRE_VALUES: &[&str] = &[
+  "power_of_two_choices",
+  "weighted_least_conn",
+  "rendezvous_hash",
+  "rendezvous_ip_hash",
+  "ewma",
+  "least_time",
+];
 
 impl From<StickyCookieFallbackAlgorithm> for LoadBalancingAlgorithm {
   fn from(value: StickyCookieFallbackAlgorithm) -> Self {

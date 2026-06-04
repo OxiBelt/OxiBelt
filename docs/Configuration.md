@@ -3,7 +3,11 @@
 Status: Draft
 Target project: OxiBelt Rust-based reverse proxy
 
-This document describes the OxiBelt TOML configuration format. For behavior-level context, see [Specification.md](Specification.md). For OxiRule rule syntax, see [OxiRule.md](OxiRule.md). For metrics, tracing, access-log, and dashboard guidance, see [Observability.md](Observability.md).
+This document describes the OxiBelt TOML configuration format. For
+behavior-level context, see [Specification.md](Specification.md). For canonical
+feature lifecycle status, see [FeatureStatus.md](FeatureStatus.md). For OxiRule
+rule syntax, see [OxiRule.md](OxiRule.md). For metrics, tracing, access-log, and
+dashboard guidance, see [Observability.md](Observability.md).
 
 The repository example configuration is:
 

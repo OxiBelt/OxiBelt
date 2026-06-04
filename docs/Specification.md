@@ -3,7 +3,10 @@
 Status: Draft
 Target project: OxiBelt Rust-based reverse proxy
 
-This document is the compact behavior specification for OxiBelt. Configuration syntax is covered in [Configuration.md](Configuration.md), and OxiRule WAF syntax is covered in [OxiRule.md](OxiRule.md).
+This document is the compact behavior specification for OxiBelt. Configuration
+syntax is covered in [Configuration.md](Configuration.md), OxiRule WAF syntax is
+covered in [OxiRule.md](OxiRule.md), and canonical feature lifecycle status is
+covered in [FeatureStatus.md](FeatureStatus.md).
 
 ## Scope
 
@@ -265,7 +268,9 @@ Security rationale: ACME account keys, DNS provider API tokens, and challenge cr
 The current implementation reserves or defers this work:
 
 - CRLite distribution and enforcement.
-- Sticky-cookie upstream sessions.
 - CRS stream-payload inspection for WebSocket and WebTransport traffic.
 - Downstream ECH configuration.
 - General-purpose UDP stream proxying outside the configured same-port QUIC SNI forwarding path.
+
+See [FeatureStatus.md](FeatureStatus.md) for the canonical supported,
+experimental, reserved, and removed feature matrix.

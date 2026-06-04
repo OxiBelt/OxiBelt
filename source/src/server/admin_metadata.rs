@@ -4,7 +4,7 @@
 use ::http::{Response, StatusCode};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::dynamic_policy::MAX_DYNAMIC_POLICY_BODY_BYTES;
 use crate::proxy::http::body::ProxyBody;
@@ -51,25 +51,28 @@ pub(super) fn admin_metadata_response(
 }
 
 fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
+  let features = json!({
+    "config_load": true,
+    "file_sync": true,
+    "dynamic_policy": snapshot.config.dynamic_policy.automation_api.enabled,
+    "ipm_store": snapshot.config.ipm.enabled && snapshot.config.ipm_backend_name().is_some(),
+    "waf_devtools": true,
+    "runtime_introspection": true,
+    "cache_admin": true,
+    "upstream_pool_runtime_control": true,
+    "admin_operations": snapshot.config.admin.operations.enabled,
+    "admin_http3": snapshot.config.admin.http3.enabled,
+    "admin_operation_webtransport": snapshot.config.admin.operations.webtransport,
+    "admin_audit": snapshot.config.admin.audit.enabled,
+  });
+  debug_assert_capability_feature_keys(&features);
+
   admin::json_response(
     StatusCode::OK,
     &json!({
       "api_version": ADMIN_API_VERSION,
       "package_version": env!("CARGO_PKG_VERSION"),
-      "features": {
-        "config_load": true,
-        "file_sync": true,
-        "dynamic_policy": snapshot.config.dynamic_policy.automation_api.enabled,
-        "ipm_store": snapshot.config.ipm.enabled && snapshot.config.ipm_backend_name().is_some(),
-        "waf_devtools": true,
-        "runtime_introspection": true,
-        "cache_admin": true,
-        "upstream_pool_runtime_control": true,
-        "admin_operations": snapshot.config.admin.operations.enabled,
-        "admin_http3": snapshot.config.admin.http3.enabled,
-        "admin_operation_webtransport": snapshot.config.admin.operations.webtransport,
-        "admin_audit": snapshot.config.admin.audit.enabled,
-      },
+      "features": features,
       "limits": {
         "admin_json_body_bytes": ADMIN_JSON_BODY_LIMIT,
         "config_body_bytes": ADMIN_CONFIG_BODY_LIMIT,
@@ -78,6 +81,19 @@ fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
       },
     }),
   )
+}
+
+fn debug_assert_capability_feature_keys(features: &Value) {
+  let mut actual = features
+    .as_object()
+    .expect("Admin capabilities features must be an object")
+    .keys()
+    .map(String::as_str)
+    .collect::<Vec<_>>();
+  let mut expected = super::ADMIN_CAPABILITY_FEATURE_KEYS.to_vec();
+  actual.sort_unstable();
+  expected.sort_unstable();
+  debug_assert_eq!(actual, expected);
 }
 
 fn version_response() -> Response<ProxyBody> {

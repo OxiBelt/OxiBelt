@@ -7,6 +7,8 @@ authenticated Admin API.
 The controller is intentionally narrow in v1. It is useful for running
 OxiBelt in Kubernetes without making OxiBelt itself own certificate issuance,
 listener binding, Admin/IPM policy, or base runtime configuration.
+The controller, Gateway API translations, and Helm chart are currently
+`experimental` in the canonical [feature lifecycle matrix](FeatureStatus.md).
 
 ## Supported Resources
 

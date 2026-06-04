@@ -120,6 +120,14 @@ mod tests {
       (AdminOperationKind::WebTransportDrain, "webtransport_drain"),
     ];
 
+    assert_eq!(
+      cases
+        .iter()
+        .map(|(_, wire_name)| *wire_name)
+        .collect::<Vec<_>>(),
+      crate::server::ADMIN_OPERATION_KIND_WIRE_VALUES
+    );
+
     for (kind, wire_name) in cases {
       assert_eq!(kind.as_str(), wire_name);
       assert_eq!(serde_json::to_value(kind).unwrap(), json!(wire_name));
@@ -127,6 +135,30 @@ mod tests {
         serde_json::from_value::<AdminOperationKind>(json!(wire_name)).unwrap(),
         kind
       );
+    }
+  }
+
+  #[test]
+  fn operation_state_wire_names_match_contract() {
+    let cases = [
+      (AdminOperationState::Queued, "queued"),
+      (AdminOperationState::Running, "running"),
+      (AdminOperationState::Succeeded, "succeeded"),
+      (AdminOperationState::Failed, "failed"),
+      (AdminOperationState::Cancelled, "cancelled"),
+      (AdminOperationState::Expired, "expired"),
+    ];
+
+    assert_eq!(
+      cases
+        .iter()
+        .map(|(_, wire_name)| *wire_name)
+        .collect::<Vec<_>>(),
+      crate::server::ADMIN_OPERATION_STATE_WIRE_VALUES
+    );
+
+    for (state, wire_name) in cases {
+      assert_eq!(serde_json::to_value(state).unwrap(), json!(wire_name));
     }
   }
 }
