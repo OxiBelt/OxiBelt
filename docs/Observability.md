@@ -11,7 +11,7 @@ Use `[metrics]`, `[health]`, `[telemetry.tracing]`, and
 The supporting Prometheus, OpenTelemetry Collector, and Grafana assets live in:
 
 ```text
-devops/observability/
+deploy/observability/
 ```
 
 ## Secure Starter Configuration
@@ -58,15 +58,15 @@ request IDs, route names, status, client network metadata, and upstream timing.
 
 The bundle is intentionally small:
 
-- `devops/observability/prometheus.yml`: scrapes OxiBelt's `/metrics`
+- `deploy/observability/prometheus.yml`: scrapes OxiBelt's `/metrics`
   endpoint at `oxibelt:9090`.
-- `devops/observability/otel-collector.yaml`: accepts OTLP traces on
+- `deploy/observability/otel-collector.yaml`: accepts OTLP traces on
   `4318` for OxiBelt's HTTP exporter and `4317` for tools that use OTLP gRPC.
-- `devops/observability/grafana/provisioning/datasources/oxibelt.yml`:
+- `deploy/observability/grafana/provisioning/datasources/oxibelt.yml`:
   provisions a Prometheus data source.
-- `devops/observability/grafana/provisioning/dashboards/oxibelt.yml`:
+- `deploy/observability/grafana/provisioning/dashboards/oxibelt.yml`:
   provisions the dashboard directory.
-- `devops/observability/grafana/dashboards/oxibelt-overview.json`: a starter
+- `deploy/observability/grafana/dashboards/oxibelt-overview.json`: a starter
   dashboard based only on public-safe `oxibelt_*` metrics.
 
 When using the assets in Compose or another orchestrator, mount the Grafana

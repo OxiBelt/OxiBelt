@@ -44,7 +44,7 @@ Lifecycle states are intentionally limited:
 | `gateway-controller` | `experimental` | Kubernetes/controller | `oxibelt-gateway-controller` renders a controller-owned TOML include and applies it through Admin file sync. |
 | `gateway-api-httproute` | `experimental` | Kubernetes/controller | Gateway API `HTTPRoute` basic translation supports host intersection, path prefix/exact, method, exact header/query matches, weighted Service backends, bounded URL rewrite, and origin-relative redirects. |
 | `gateway-api-tlsroute` | `experimental` | Kubernetes/controller | Gateway API `TLSRoute` passthrough translation emits `[[sni_forward.rules]]` for `tls.mode = "Passthrough"`. |
-| `helm-gateway-controller` | `experimental` | DevOps | The minimal Helm chart under `devops/helm/oxibelt-gateway-controller` installs the controller deployment, service account, RBAC, Admin token secret reference, health probes, and examples. |
+| `helm-gateway-controller` | `experimental` | Deploy | The minimal Helm chart under `deploy/helm/oxibelt-gateway-controller` installs the controller deployment, service account, RBAC, Admin token secret reference, health probes, and examples. |
 | `acme` | `reserved` | TLS/certificate lifecycle | ACME issuance and HTTP-01/DNS-01 challenge handling stay outside OxiBelt. |
 | `crlite` | `reserved` | TLS/revocation | CRLite distribution and enforcement are reserved. |
 | `downstream-ech` | `reserved` | Downstream TLS | Downstream ECH configuration is reserved until server-side TLS provider support is available. |

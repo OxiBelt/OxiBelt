@@ -139,7 +139,7 @@ Render local manifests without contacting Kubernetes or Admin:
 ```sh
 cargo run --manifest-path source/Cargo.toml \
   --bin oxibelt-gateway-controller -- \
-  render --input devops/helm/oxibelt-gateway-controller/examples --output -
+  render --input deploy/helm/oxibelt-gateway-controller/examples --output -
 ```
 
 Run in-cluster:
@@ -162,7 +162,7 @@ limit namespaced resource polling.
 A minimal chart lives under:
 
 ```text
-devops/helm/oxibelt-gateway-controller
+deploy/helm/oxibelt-gateway-controller
 ```
 
 It installs a controller `Deployment`, `ServiceAccount`, RBAC, Admin token
