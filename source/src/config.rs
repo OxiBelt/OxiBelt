@@ -3093,7 +3093,6 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
 }
 
 const REDACTED_TOML_VALUE: &str = "<redacted>";
-
 fn redact_effective_toml(value: &mut toml::Value) {
   redact_toml_path(value, &["database", "access_log", "connection_url"]);
   redact_toml_path(value, &["database", "mitigation", "connection_url"]);
@@ -3136,6 +3135,7 @@ fn redact_effective_toml(value: &mut toml::Value) {
       }
     }
   }
+  redact_toml_url_sensitive_parts(value, &["tls", "ocsp", "responder_url"]);
   if let Some(upstreams) = value
     .get_mut("upstreams")
     .and_then(toml::Value::as_array_mut)

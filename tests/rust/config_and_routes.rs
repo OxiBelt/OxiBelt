@@ -3177,6 +3177,31 @@ origin = "https://pooluser:poolsecret@pool.internal.example/base?pool_token=secr
 }
 
 #[test]
+fn effective_config_dump_redacts_ocsp_responder_url_sensitive_url_parts() {
+    let temp_dir = common::TempDir::new("ocsp-responder-url-redacted");
+    let config_path = write_loadable_config(&temp_dir, "ocsp-responder-url-redacted", |raw| {
+        raw.replace(
+            "mode = \"disabled\"",
+            "mode = \"live_fetch\"\nresponder_url = \"https://ocsp.internal.example/status?tenant=prod&token=SECRET_QUERY_TOKEN\"",
+        )
+    });
+
+    let value = Config::load_effective_toml_redacted(&config_path).unwrap();
+    let ocsp = value
+        .get("tls")
+        .and_then(|tls| tls.get("ocsp"))
+        .expect("effective TOML should contain tls.ocsp");
+    assert_eq!(
+        ocsp.get("responder_url").and_then(toml::Value::as_str),
+        Some("https://ocsp.internal.example/status")
+    );
+
+    let redacted = toml::to_string_pretty(&value).expect("redacted TOML should serialize");
+    assert!(!redacted.contains("tenant=prod"));
+    assert!(!redacted.contains("SECRET_QUERY_TOKEN"));
+}
+
+#[test]
 fn effective_config_dump_redacts_break_glass_access_hashes() {
     let temp_dir = common::TempDir::new("ipm-break-glass-redacted");
     let hash = test_argon2id_hash("break-glass-secret", 8);
