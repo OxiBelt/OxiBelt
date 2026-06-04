@@ -99,6 +99,7 @@ impl KubernetesPoller {
         .await
         .unwrap_or_default(),
     );
+    objects.extend(self.list_objects("/api/v1/namespaces").await?);
     objects.extend(self.list_namespaced("/api/v1", "services").await?);
     Ok(objects)
   }

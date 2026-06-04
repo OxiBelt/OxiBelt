@@ -5,6 +5,8 @@ use clap::Parser;
 mod admin_sync;
 #[path = "oxibelt_gateway_controller/cli.rs"]
 mod cli;
+#[path = "oxibelt_gateway_controller/gateway_policy.rs"]
+mod gateway_policy;
 #[path = "oxibelt_gateway_controller/health.rs"]
 mod health;
 #[path = "oxibelt_gateway_controller/model.rs"]

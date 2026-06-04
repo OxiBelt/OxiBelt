@@ -5,11 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value, json};
 
 use super::cli::SharedArgs;
+use super::gateway_policy::{self, ListenerPolicy, RoutePolicyDecision};
 use super::model::{
   Diagnostic, DiagnosticSeverity, KubernetesObject, ObjectKey, object_ref as model_object_ref,
 };
 
-const GATEWAY_GROUP: &str = "gateway.networking.k8s.io";
 const CONDITION_TRUE: &str = "True";
 const CONDITION_FALSE: &str = "False";
 
@@ -38,6 +38,7 @@ struct ListenerSummary {
   hostname: Option<String>,
   port: Option<u16>,
   tls_mode: Option<String>,
+  allowed_routes: ListenerPolicy,
 }
 
 pub fn print_diagnostics(diagnostics: &[Diagnostic]) {
@@ -58,6 +59,7 @@ pub fn build_status_patches(
   let now = rfc3339_now();
   let accepted_classes = accepted_gateway_classes(objects, args);
   let gateways = gateway_summaries(objects, &accepted_classes);
+  let namespace_labels = gateway_policy::namespace_labels(objects);
   let diagnostics_by_object = diagnostics_by_object(diagnostics);
   let mut patches = Vec::new();
 
@@ -77,7 +79,14 @@ pub fn build_status_patches(
         ));
       }
       "HTTPRoute" | "TLSRoute" | "TCPRoute" => {
-        if let Some(patch) = route_patch(object, args, &gateways, &diagnostics_by_object, &now) {
+        if let Some(patch) = route_patch(
+          object,
+          args,
+          &gateways,
+          &namespace_labels,
+          &diagnostics_by_object,
+          &now,
+        ) {
           patches.push(patch);
         }
       }
@@ -201,7 +210,7 @@ fn listener_status(
   let mut supported_kinds = Vec::new();
   if let Some(kind) = supported_kind {
     supported_kinds.push(json!({
-      "group": GATEWAY_GROUP,
+      "group": gateway_policy::GATEWAY_GROUP,
       "kind": kind,
     }));
   }
@@ -264,6 +273,7 @@ fn route_patch(
   object: &KubernetesObject,
   args: &SharedArgs,
   gateways: &HashMap<ObjectKey, GatewaySummary>,
+  namespace_labels: &HashMap<String, BTreeMap<String, String>>,
   diagnostics: &HashMap<String, Vec<&Diagnostic>>,
   now: &str,
 ) -> Option<StatusPatch> {
@@ -288,6 +298,7 @@ fn route_patch(
       object,
       &parent,
       gateway,
+      namespace_labels,
       &args.controller_name,
       diagnostics,
       now,
@@ -311,6 +322,7 @@ fn route_parent_status(
   object: &KubernetesObject,
   parent: &Value,
   gateway: &GatewaySummary,
+  namespace_labels: &HashMap<String, BTreeMap<String, String>>,
   controller_name: &str,
   diagnostics: &HashMap<String, Vec<&Diagnostic>>,
   now: &str,
@@ -329,7 +341,7 @@ fn route_parent_status(
 
   let object_ref = model_object_ref(object);
   let object_errors = diagnostics.get(&object_ref).cloned().unwrap_or_default();
-  let listener_matches = route_has_matching_listener(object, parent, gateway);
+  let listener_matches = route_has_matching_listener(object, parent, gateway, namespace_labels);
   let has_error = object_errors
     .iter()
     .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
@@ -425,6 +437,7 @@ fn gateway_summaries(
           hostname: string_at(&listener, &["hostname"]).map(str::to_string),
           port: u16_at(&listener, &["port"]),
           tls_mode: string_at(&listener, &["tls", "mode"]).map(str::to_string),
+          allowed_routes: gateway_policy::parse_listener_policy(&listener),
         })
       })
       .collect();
@@ -434,31 +447,41 @@ fn gateway_summaries(
 }
 
 fn listener_supported_kind(listener: &ListenerSummary) -> Option<&'static str> {
-  match listener.protocol.as_str() {
-    "HTTP" | "HTTPS" => Some("HTTPRoute"),
-    "TLS" if listener.tls_mode.as_deref() == Some("Passthrough") => Some("TLSRoute"),
-    _ => None,
-  }
+  gateway_policy::listener_default_route_kind(&listener.protocol, listener.tls_mode.as_deref())
 }
 
 fn route_has_matching_listener(
   route: &KubernetesObject,
   parent: &Value,
   gateway: &GatewaySummary,
+  namespace_labels: &HashMap<String, BTreeMap<String, String>>,
 ) -> bool {
   let section_name = string_at(parent, &["sectionName"]);
   gateway.listeners.iter().any(|listener| {
     if section_name.is_some() && Some(listener.name.as_str()) != section_name {
       return false;
     }
-    match route.kind.as_str() {
+    (match route.kind.as_str() {
       "HTTPRoute" => matches!(listener.protocol.as_str(), "HTTP" | "HTTPS"),
       "TLSRoute" => {
         listener.protocol == "TLS" && listener.tls_mode.as_deref() == Some("Passthrough")
       }
       "TCPRoute" => true,
       _ => false,
-    }
+    }) && matches!(
+      gateway_policy::listener_allows_route(
+        &listener.allowed_routes,
+        route,
+        parent
+          .get("namespace")
+          .and_then(Value::as_str)
+          .unwrap_or(route.namespace()),
+        &listener.protocol,
+        listener.tls_mode.as_deref(),
+        namespace_labels,
+      ),
+      RoutePolicyDecision::Allowed
+    )
   })
 }
 
@@ -480,7 +503,7 @@ fn normalized_parent_ref(parent: &Value) -> Value {
     "group".to_string(),
     Value::String(
       string_at(parent, &["group"])
-        .unwrap_or(GATEWAY_GROUP)
+        .unwrap_or(gateway_policy::GATEWAY_GROUP)
         .to_string(),
     ),
   );
@@ -520,9 +543,9 @@ fn parent_refs(object: &KubernetesObject) -> Vec<Value> {
 }
 
 fn parent_ref_is_gateway(parent: &Value) -> bool {
-  let group = string_at(parent, &["group"]).unwrap_or(GATEWAY_GROUP);
+  let group = string_at(parent, &["group"]).unwrap_or(gateway_policy::GATEWAY_GROUP);
   let kind = string_at(parent, &["kind"]).unwrap_or("Gateway");
-  group == GATEWAY_GROUP && kind == "Gateway"
+  group == gateway_policy::GATEWAY_GROUP && kind == "Gateway"
 }
 
 fn listener_conflicts(

@@ -143,7 +143,9 @@ impl TranslationState {
     }
     let name = string_at(backend, &["name"])?;
     let namespace = string_at(backend, &["namespace"]).unwrap_or(route.namespace());
-    if namespace != route.namespace() && !self.reference_allowed(route, from_kind, namespace) {
+    if namespace != route.namespace()
+      && !self.reference_allowed(route, from_kind, namespace, "Service", name)
+    {
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
         format!("cross-namespace backendRef to {namespace}/{name} requires ReferenceGrant"),

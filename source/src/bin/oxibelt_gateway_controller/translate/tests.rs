@@ -14,6 +14,9 @@ mod common {
   ));
 }
 
+#[path = "policy_tests.rs"]
+mod policy_tests;
+
 fn args() -> SharedArgs {
   SharedArgs {
     controller_name: "oxibelt.dev/gateway-controller".to_string(),

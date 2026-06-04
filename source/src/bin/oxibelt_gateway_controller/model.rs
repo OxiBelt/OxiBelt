@@ -12,6 +12,8 @@ pub struct ObjectMeta {
   #[serde(default)]
   pub annotations: BTreeMap<String, String>,
   #[serde(default)]
+  pub labels: BTreeMap<String, String>,
+  #[serde(default)]
   pub generation: Option<i64>,
 }
 

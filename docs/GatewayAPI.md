@@ -77,6 +77,22 @@ Cross-namespace `Service` references require a `ReferenceGrant` in the target
 namespace. Without the grant, the controller emits a blocking diagnostic and
 does not apply the generated config.
 
+Gateway listener `allowedRoutes` is enforced for `HTTPRoute` and `TLSRoute`
+attachment. Omitted `allowedRoutes.namespaces` defaults to `Same`, so routes in
+other namespaces must be explicitly allowed with `All` or a matching
+`Selector`. Namespace selectors are evaluated from the Kubernetes `Namespace`
+objects in the controller snapshot. If a selector cannot be evaluated, the
+route is not attached.
+
+`allowedRoutes.kinds` may further restrict which Gateway API route kinds bind
+to a listener. When omitted or empty, the controller uses the listener protocol
+default: `HTTPRoute` for `HTTP` and `HTTPS`, and `TLSRoute` for passthrough
+`TLS`.
+
+`ReferenceGrant.spec.to[].name` narrows a cross-namespace `Service` grant to the
+named Service. When `name` is omitted, the grant allows all Services of that
+kind in the ReferenceGrant namespace, matching Gateway API semantics.
+
 ## Status Updates
 
 In `run` mode the controller patches Kubernetes status subresources for

@@ -128,3 +128,123 @@ spec:
     CONDITION_FALSE
   );
 }
+
+#[test]
+fn route_status_rejects_parent_disallowed_by_allowed_routes() {
+  let objects = vec![
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: oxibelt
+spec:
+  controllerName: oxibelt.dev/gateway-controller
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: platform
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app
+  namespace: tenant
+spec:
+  parentRefs:
+  - name: edge
+    namespace: platform
+    sectionName: http
+"#,
+    ),
+  ];
+  let patches = build_status_patches(&objects, &args(), &[]);
+
+  let route = patches
+    .iter()
+    .find(|patch| patch.resource == "httproutes")
+    .expect("route patch");
+  assert_eq!(
+    route.status["parents"][0]["conditions"][0]["reason"],
+    "NoMatchingListener"
+  );
+  assert_eq!(
+    route.status["parents"][0]["conditions"][0]["status"],
+    CONDITION_FALSE
+  );
+}
+
+#[test]
+fn route_status_marks_reference_grant_name_mismatch_as_unresolved() {
+  let objects = vec![
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: oxibelt
+spec:
+  controllerName: oxibelt.dev/gateway-controller
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: frontend
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: secret
+  namespace: frontend
+spec:
+  parentRefs:
+  - name: edge
+"#,
+    ),
+  ];
+  let diagnostics = vec![Diagnostic::error(
+    "HTTPRoute/frontend/secret",
+    "cross-namespace backendRef to backend/secret requires ReferenceGrant",
+  )];
+  let patches = build_status_patches(&objects, &args(), &diagnostics);
+
+  let route = patches
+    .iter()
+    .find(|patch| patch.resource == "httproutes")
+    .expect("route patch");
+  assert_eq!(
+    route.status["parents"][0]["conditions"][1]["reason"],
+    "RefNotPermitted"
+  );
+  assert_eq!(
+    route.status["parents"][0]["conditions"][1]["status"],
+    CONDITION_FALSE
+  );
+}
