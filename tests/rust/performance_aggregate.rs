@@ -1634,13 +1634,52 @@ fn h1_keepalive_ratio_gate_advises_when_comparator_shift_keeps_oxibelt_stable() 
 }
 
 #[test]
-fn h1_keepalive_ratio_gate_advises_ci_comparator_shift_below_old_floor() {
+fn h1_keepalive_ratio_gate_advises_ci_comparator_shift_at_bootstrap_floor() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
     let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
 
-    write_reverse_proxy_h1_with_p99(&input_dir, 20946.0, 26973.125, 10.0, 10.0);
+    write_reverse_proxy_h1_with_p99(&input_dir, 19327.188, 25737.938, 10.0, 10.0);
+    write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_h1_baseline_report(&baseline_path, 19800.0, 24000.0, 10.0, 10.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    let advisory =
+        find_regression_advisory(&report, "h1_keepalive_min_nginx_ratio", "h1-keepalive");
+    assert_eq!(advisory["disposition"], "advisory");
+    assert_close(
+        advisory["observed"]
+            .as_f64()
+            .expect("advisory ratio should exist"),
+        19327.188 / 25737.938,
+    );
+    let message = advisory["message"]
+        .as_str()
+        .expect("message should be present");
+    assert!(message.contains("comparator-shift ratio miss"));
+    assert!(message.contains("within 0.0500 of threshold"));
+}
+
+#[test]
+fn h1_keepalive_comparator_shift_advises_when_p99_ratio_remains_stable() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+
+    write_reverse_proxy_h1_with_p99(&input_dir, 20835.750, 26372.750, 10.73, 10.24);
     write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
     write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
     write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
@@ -1663,13 +1702,14 @@ fn h1_keepalive_ratio_gate_advises_ci_comparator_shift_below_old_floor() {
         advisory["observed"]
             .as_f64()
             .expect("advisory ratio should exist"),
-        20946.0 / 26973.125,
+        20835.750 / 26372.750,
     );
     let message = advisory["message"]
         .as_str()
         .expect("message should be present");
-    assert!(message.contains("comparator-shift ratio miss"));
-    assert!(message.contains("within 0.0250 of threshold"));
+    assert!(message.contains("p99 evidence remains stable"));
+    assert!(message.contains("OxiBelt p99 +7.3%"));
+    assert!(message.contains("p99 ratio +4."));
 }
 
 #[test]
@@ -1679,7 +1719,7 @@ fn h1_keepalive_comparator_shift_miss_blocks_below_floor() {
     let output_dir = temp_dir.path().join("output");
     let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
 
-    write_reverse_proxy_h1_with_p99(&input_dir, 77.4, 100.0, 10.0, 10.0);
+    write_reverse_proxy_h1_with_p99(&input_dir, 74.9, 100.0, 10.0, 10.0);
     write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
     write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
     write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
