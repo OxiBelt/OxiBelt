@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+const OBSERVABILITY_DIR: &str = "deploy/observability";
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -16,9 +18,13 @@ fn read_repo(path: &str) -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", full_path.display()))
 }
 
+fn read_observability(path: &str) -> String {
+    read_repo(&format!("{OBSERVABILITY_DIR}/{path}"))
+}
+
 #[test]
 fn grafana_dashboard_is_valid_json_with_oxibelt_promql() {
-    let raw = read_repo("devops/observability/grafana/dashboards/oxibelt-overview.json");
+    let raw = read_observability("grafana/dashboards/oxibelt-overview.json");
     let dashboard: Value =
         serde_json::from_str(&raw).expect("OxiBelt Grafana dashboard should parse as JSON");
 
@@ -49,18 +55,18 @@ fn grafana_dashboard_is_valid_json_with_oxibelt_promql() {
 
 #[test]
 fn observability_bundle_wires_prometheus_and_grafana_assets() {
-    let prometheus = read_repo("devops/observability/prometheus.yml");
+    let prometheus = read_observability("prometheus.yml");
     assert!(prometheus.contains("metrics_path: /metrics"));
     assert!(prometheus.contains("oxibelt:9090"));
 
-    let collector = read_repo("devops/observability/otel-collector.yaml");
+    let collector = read_observability("otel-collector.yaml");
     assert!(collector.contains("0.0.0.0:4318"));
     assert!(collector.contains("traces:"));
 
-    let dashboards = read_repo("devops/observability/grafana/provisioning/dashboards/oxibelt.yml");
+    let dashboards = read_observability("grafana/provisioning/dashboards/oxibelt.yml");
     assert!(dashboards.contains("/etc/grafana/provisioning/dashboards/oxibelt"));
 
-    let datasource = read_repo("devops/observability/grafana/provisioning/datasources/oxibelt.yml");
+    let datasource = read_observability("grafana/provisioning/datasources/oxibelt.yml");
     assert!(datasource.contains("url: http://prometheus:9090"));
 }
 
@@ -77,7 +83,7 @@ fn observability_docs_keep_opt_in_private_defaults() {
 #[test]
 fn public_observability_assets_avoid_sensitive_examples() {
     let mut scanned = Vec::new();
-    collect_files(&repo_root().join("devops/observability"), &mut scanned);
+    collect_files(&repo_root().join(OBSERVABILITY_DIR), &mut scanned);
     scanned.push(repo_root().join("docs/Observability.md"));
 
     let forbidden = [
