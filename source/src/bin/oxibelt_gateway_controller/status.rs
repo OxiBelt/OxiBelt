@@ -65,10 +65,10 @@ pub fn build_status_patches(
 
   for object in objects {
     match object.kind.as_str() {
-      "GatewayClass" => {
-        if string_at(&object.spec, &["controllerName"]) == Some(args.controller_name.as_str()) {
-          patches.push(gateway_class_patch(object, &now));
-        }
+      "GatewayClass"
+        if string_at(&object.spec, &["controllerName"]) == Some(args.controller_name.as_str()) =>
+      {
+        patches.push(gateway_class_patch(object, &now));
       }
       "Gateway" if gateways.contains_key(&object.key()) => {
         patches.push(gateway_patch(

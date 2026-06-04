@@ -161,10 +161,11 @@ impl TranslationState {
           let service = parse_service(object)?;
           self.services.insert(object.key(), service);
         }
-        "GatewayClass" => {
-          if string_at(&object.spec, &["controllerName"]) == Some(args.controller_name.as_str()) {
-            self.gateway_classes.insert(object.name().to_string());
-          }
+        "GatewayClass"
+          if string_at(&object.spec, &["controllerName"])
+            == Some(args.controller_name.as_str()) =>
+        {
+          self.gateway_classes.insert(object.name().to_string());
         }
         "Gateway" => {
           if let Some(gateway) = parse_gateway(object, &self.gateway_classes) {
