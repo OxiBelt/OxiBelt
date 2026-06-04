@@ -355,6 +355,7 @@ fn external_benchmark_failure_harness(gate_mode: &str) -> HarnessRun {
         .arg(&harness_path)
         .env("EVENTS_FILE", &events_path)
         .env("GATE_MODE", gate_mode)
+        .env_remove("GITHUB_ACTIONS")
         .output()
         .expect("Bash harness should execute");
     let events = fs::read_to_string(&events_path).unwrap_or_default();
