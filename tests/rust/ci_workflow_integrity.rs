@@ -829,12 +829,29 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         workflow.contains("PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile_label || 'none' }}"),
         "docker-performance should keep exact profiling labels disabled outside manual dispatch"
     );
+    let legacy_apt_flamegraph_packages = [
+        "linux-tools-common",
+        "linux-tools-generic",
+        "zstd",
+        "flamegraph",
+        "heaptrack",
+    ]
+    .join(" ");
     assert!(
         workflow.contains("name: Install Linux perf and heap tooling for performance profiling")
-            && workflow
-                .contains("linux-tools-common linux-tools-generic zstd flamegraph heaptrack")
+            && workflow.contains("linux-tools-common")
+            && workflow.contains("linux-tools-generic")
+            && workflow.contains("heaptrack")
+            && workflow.contains("zstd")
+            && workflow.contains("41fee1f99f9276008b7cd112fca19dc3ea84ac32")
+            && workflow.contains("088f82e6848a4f12a56e1e8e8170ee6761fccf12e5615cd64630f6b087c99ea7")
+            && workflow.contains("74faa47a29d8df07cb06731dfd8bb94dc4c165b9d811ac6b4c9449eea2ac25d8")
+            && workflow.contains("/usr/local/bin/flamegraph.pl")
+            && workflow.contains("/usr/local/bin/stackcollapse-perf.pl")
+            && workflow.contains("sha256sum --check --status")
+            && !workflow.contains(&legacy_apt_flamegraph_packages)
             && workflow.contains("sudo sysctl kernel.perf_event_paranoid=-1"),
-        "performance profiling should prepare host perf, compression, flamegraph, and heap tooling"
+        "performance profiling should prepare host perf, compression, verified FlameGraph scripts, and heap tooling"
     );
     assert!(
         performance_job.contains("selected_profile_label=\"${PERFORMANCE_PROFILE_LABEL}\"")

@@ -112,6 +112,8 @@ For H2 or H3 hot-path investigations, set `OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2
 
 Smoke performance runs in GitHub Actions also enable separate diagnostic profiling replays with `OXIBELT_PERF_DIAGNOSTIC_PROFILES=1`. These replay rows run after the primary `perf-probe` row has already been written, so `results.json` remains the only primary regression-gate source. CPU evidence uses host `perf` against the active proxy container host PIDs, including nginx worker child PIDs when they are visible, and writes compressed `perf.data`, `perf report --stdio`, `perf script`, flamegraph SVG, stderr, and metadata under `profiles/cpu/`. Memory evidence records before/after RSS, FD, task, and thread snapshots under `profiles/memory/*.resource.json`; heap allocation stack capture is best-effort, and unsupported runtimes write `profiles/memory/<label>/heap/unsupported.json` with `unsupported_heap_reason`. Diagnostic profiling failures warn by default and only fail the summary job when `OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=fail`.
 
+CI installs the FlameGraph Perl scripts from a pinned `brendangregg/FlameGraph` commit with SHA256 verification instead of relying on an Ubuntu `flamegraph` APT package, which may be absent on newer LTS runner images. If the verified scripts cannot be installed, the harness keeps the run usable and writes the documented placeholder SVG for flamegraph artifacts.
+
 To reproduce the scheduled long-run locally with a shorter duration:
 
 ```sh

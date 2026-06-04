@@ -1424,7 +1424,55 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.performance_profile == 'smoke' || inputs.performance_h2_profile || inputs.performance_profile_label != 'none'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic zstd flamegraph heaptrack
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            heaptrack \
+            linux-tools-common \
+            linux-tools-generic \
+            perl \
+            zstd
+          install_flamegraph_tooling() {
+            local commit="41fee1f99f9276008b7cd112fca19dc3ea84ac32"
+            local base_url="https://raw.githubusercontent.com/brendangregg/FlameGraph/${commit}"
+            local install_dir="${RUNNER_TEMP}/flamegraph-${commit}"
+            local ok=1
+            mkdir -p "${install_dir}"
+
+            download_flamegraph_script() {
+              local script="$1"
+              local sha256="$2"
+              local target="${install_dir}/${script}"
+              if ! curl --fail --silent --show-error --location --retry 3 --retry-all-errors --retry-delay 2 \
+                  --output "${target}" "${base_url}/${script}"; then
+                echo "::warning title=FlameGraph tooling::failed to download ${script}; CPU profile artifacts will use placeholder flamegraph SVGs"
+                return 1
+              fi
+              if ! printf '%s  %s\n' "${sha256}" "${target}" | sha256sum --check --status; then
+                echo "::warning title=FlameGraph tooling::${script} failed SHA256 verification; skipping FlameGraph script install"
+                rm -f "${target}"
+                return 1
+              fi
+              chmod 0755 "${target}"
+            }
+
+            download_flamegraph_script \
+              flamegraph.pl \
+              088f82e6848a4f12a56e1e8e8170ee6761fccf12e5615cd64630f6b087c99ea7 || ok=0
+            download_flamegraph_script \
+              stackcollapse-perf.pl \
+              74faa47a29d8df07cb06731dfd8bb94dc4c165b9d811ac6b4c9449eea2ac25d8 || ok=0
+
+            if [[ "${ok}" == "1" ]]; then
+              if ! sudo install -m 0755 "${install_dir}/flamegraph.pl" /usr/local/bin/flamegraph.pl \
+                  || ! sudo install -m 0755 "${install_dir}/stackcollapse-perf.pl" /usr/local/bin/stackcollapse-perf.pl; then
+                echo "::warning title=FlameGraph tooling::failed to install verified FlameGraph scripts; CPU profile artifacts will use placeholder flamegraph SVGs"
+              fi
+            else
+              echo "::warning title=FlameGraph tooling::verified FlameGraph scripts are unavailable; CPU profile artifacts will use placeholder flamegraph SVGs"
+            fi
+          }
+          install_flamegraph_tooling
           if ! perf --version >/dev/null 2>&1; then
             perf_path="$(find /usr/lib/linux-tools* -type f -name perf | sort -V | tail -n 1)"
             if [[ -z "${perf_path}" ]]; then
