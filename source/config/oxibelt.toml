@@ -1,3 +1,5 @@
+include = ["conf.d/*.toml"]
+
 [config]
 strict_unknown_fields = true
 warn_on_deprecated_fields = true

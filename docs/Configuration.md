@@ -141,6 +141,18 @@ include = [
 ]
 ```
 
+The default example config also allows controller-owned modules with:
+
+```toml
+include = ["conf.d/*.toml"]
+```
+
+This is the expected apply target for `oxibelt-gateway-controller`, which writes
+`conf.d/gateway-api.generated.toml` through Admin `POST /admin/v1/files/sync`.
+The controller-generated file contains only route, upstream-pool, and SNI
+forwarding rule arrays; operator-owned listener, TLS, Admin/IPM, and scalar
+`[sni_forward]` settings stay in the base config.
+
 `include` may be a single string or an array of strings. Include entries support exact file paths and glob patterns using `*`, `?`, and `[...]`.
 
 Include behavior:

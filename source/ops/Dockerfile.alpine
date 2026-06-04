@@ -67,15 +67,17 @@ RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
         ln -sf "${libgcc_s_path}" /tmp/oxibelt-libgcc/libgcc_s.so && \
         export LIBRARY_PATH="/tmp/oxibelt-libgcc:$(dirname "${libgcc_s_path}")${LIBRARY_PATH:+:${LIBRARY_PATH}}"; \
       fi && \
-      cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibeltctl --target "${OXIBELT_RUST_TARGET}" && \
+      cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibeltctl --bin oxibelt-gateway-controller --target "${OXIBELT_RUST_TARGET}" && \
       cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt" /tmp/oxibelt && \
       cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt-keysigner" /tmp/oxibelt-keysigner && \
-      cp "target/${OXIBELT_RUST_TARGET}/release/oxibeltctl" /tmp/oxibeltctl; \
+      cp "target/${OXIBELT_RUST_TARGET}/release/oxibeltctl" /tmp/oxibeltctl && \
+      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt-gateway-controller" /tmp/oxibelt-gateway-controller; \
     else \
-      cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibeltctl && \
+      cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibeltctl --bin oxibelt-gateway-controller && \
       cp target/release/oxibelt /tmp/oxibelt && \
       cp target/release/oxibelt-keysigner /tmp/oxibelt-keysigner && \
-      cp target/release/oxibeltctl /tmp/oxibeltctl; \
+      cp target/release/oxibeltctl /tmp/oxibeltctl && \
+      cp target/release/oxibelt-gateway-controller /tmp/oxibelt-gateway-controller; \
     fi
 
 FROM ${OXIBELT_RUNTIME_IMAGE} AS runtime
@@ -104,11 +106,13 @@ WORKDIR /app
 COPY --from=builder /tmp/oxibelt /usr/local/bin/oxibelt
 COPY --from=builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner
 COPY --from=builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl
+COPY --from=builder /tmp/oxibelt-gateway-controller /usr/local/bin/oxibelt-gateway-controller
 COPY source/config/oxibelt.toml /etc/oxibelt/config/oxibelt.toml
 
 RUN chmod 0755 /usr/local/bin/oxibelt && \
     chmod 0755 /usr/local/bin/oxibelt-keysigner && \
     chmod 0755 /usr/local/bin/oxibeltctl && \
+    chmod 0755 /usr/local/bin/oxibelt-gateway-controller && \
     chmod 0755 /etc/oxibelt /etc/oxibelt/config /etc/oxibelt/cert /etc/oxibelt/oxirule && \
     chmod 0755 /var/cache/oxibelt && \
     chmod 0644 /etc/oxibelt/config/oxibelt.toml

@@ -143,6 +143,12 @@ The legacy signed query purge endpoints under `/cache/purge*` are documented
 in `docs/Configuration.md`; they are intentionally outside the first
 `/admin/v1/*` OpenAPI contract.
 
+`oxibelt-gateway-controller` uses the existing `GET /admin/v1/config/status`
+and `POST /admin/v1/files/sync` endpoints. It fetches the active config ETag,
+writes only its managed config-root include file, and sends `apply = "full"` so
+OxiBelt validates and loads the replacement runtime view. The controller does
+not build candidates from redacted effective config output.
+
 ## IPM Administration
 
 `GET /admin/v1/ipm/status` returns the active IPM `generation`, `etag`,

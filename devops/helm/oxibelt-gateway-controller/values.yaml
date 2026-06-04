@@ -1,0 +1,25 @@
+image:
+  repository: oxibelt
+  tag: latest
+  pullPolicy: IfNotPresent
+
+controllerName: oxibelt.dev/gateway-controller
+managedConfigPath: conf.d/gateway-api.generated.toml
+watchNamespace: ""
+dryRun: false
+
+admin:
+  url: http://oxibelt-admin.oxibelt.svc.cluster.local:9092
+  tokenSecretName: oxibelt-admin-token
+  tokenSecretKey: token
+  caSecretName: ""
+  caSecretKey: ca.crt
+  clientTlsSecretName: ""
+  clientCertKey: tls.crt
+  clientKeyKey: tls.key
+
+healthBind: 0.0.0.0:9090
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -18,6 +18,9 @@ The current implementation is a production-oriented foundation: configuration is
 - Request-wide structured system access logs with stdout and PostgreSQL sinks.
 - Prometheus metrics with aggregate or detailed route/upstream/protocol labels, plus optional W3C tracecontext propagation and OTLP trace export.
 - Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload, with graceful listener drain for in-flight requests and long-lived tunnels.
+- Kubernetes Gateway API controller binary that can translate `HTTPRoute` and
+  passthrough `TLSRoute` resources into a controller-owned OxiBelt TOML include
+  and apply it through the Admin API.
 
 See [docs/Specification.md](docs/Specification.md) for the compact behavior spec and current non-goals.
 
@@ -108,6 +111,8 @@ ignored for downstream route IPM requests.
 
 - [Technical specification](docs/Specification.md): proxy behavior, request pipeline, runtime model, security posture, and non-goals.
 - [Configuration reference](docs/Configuration.md): TOML sections, includes, path rules, validation, and examples.
+- [Gateway API controller](docs/GatewayAPI.md): Kubernetes GatewayClass,
+  Gateway, HTTPRoute, TLSRoute, ReferenceGrant, and Service translation.
 - [OxiRule WAF reference](docs/OxiRule.md): rule shape, expression language, actions, object model, helpers, and examples.
 - [OxiRule examples](docs/example/OxiRule.md): cookbook-style request, response, routing, Person proof, and access-log rules.
 - [Contributing guide](CONTRIBUTING.md): contributor workflow, security requirements, PR checklist, and commit-message format.
@@ -156,12 +161,14 @@ The standard container layout is:
 /etc/oxibelt/oxirule  External .oxirule.toml rule files
 ```
 
-The image also bundles `/usr/local/bin/oxibeltctl` for Admin API operations while
-keeping the container entrypoint on `oxibelt`. For example:
+The image also bundles `/usr/local/bin/oxibeltctl` for Admin API operations and
+`/usr/local/bin/oxibelt-gateway-controller` for Kubernetes Gateway API
+automation while keeping the container entrypoint on `oxibelt`. For example:
 
 ```sh
 docker exec -it oxibelt oxibeltctl status
 docker exec -it oxibelt oxibeltctl lifecycle drain
+docker exec -it oxibelt oxibelt-gateway-controller render --input /manifests --output -
 ```
 
 Run a mounted configuration through local preflight by overriding the entrypoint:

@@ -1,0 +1,49 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: oxibelt
+spec:
+  controllerName: oxibelt.dev/gateway-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: default
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    hostname: app.example.com
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: default
+spec:
+  ports:
+  - name: http
+    port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app
+  namespace: default
+spec:
+  parentRefs:
+  - name: edge
+    sectionName: http
+  hostnames:
+  - app.example.com
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: app
+      port: 8080
