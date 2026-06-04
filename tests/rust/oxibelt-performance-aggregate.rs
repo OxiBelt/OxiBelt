@@ -28,7 +28,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 11;
+const COMPARISON_SCHEMA_VERSION: u32 = 12;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
@@ -142,6 +142,7 @@ impl WarningBag {
 struct DiscoveredFiles {
     results: Vec<PathBuf>,
     external_results: Vec<PathBuf>,
+    profile_results: Vec<PathBuf>,
     summary_count: usize,
     docker_stats_count: usize,
     iteration_statuses: Vec<PathBuf>,
@@ -152,6 +153,7 @@ struct DiscoveredFiles {
 struct ArtifactDiscovery {
     results_files: usize,
     external_results_files: usize,
+    profile_results_files: usize,
     summary_files: usize,
     docker_stats_files: usize,
     iteration_status_files: usize,
@@ -206,6 +208,29 @@ struct ExternalBenchmarkSample {
     output_file: Option<String>,
 }
 
+#[derive(Clone)]
+struct DiagnosticProfileSample {
+    source_file: String,
+    amd64_target_cpu: String,
+    label: String,
+    comparator: String,
+    scenario: String,
+    protocol: String,
+    profile_mode: String,
+    status: String,
+    reason: Option<String>,
+    cpu_enabled: bool,
+    memory_enabled: bool,
+    perf_data: Option<String>,
+    perf_report: Option<String>,
+    perf_script: Option<String>,
+    flamegraph: Option<String>,
+    cpu_metadata: Option<String>,
+    resource: Option<String>,
+    memory_metadata: Option<String>,
+    heap_dir: Option<String>,
+}
+
 #[derive(Default)]
 struct AggregateBuilder {
     amd64_target_cpu: String,
@@ -247,6 +272,24 @@ struct ExternalBenchmarkBuilder {
     reasons: BTreeSet<String>,
     source_files: BTreeSet<String>,
     output_files: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct DiagnosticProfileBuilder {
+    amd64_target_cpu: String,
+    comparator: String,
+    scenario: String,
+    protocol: String,
+    profile_mode: String,
+    labels: BTreeSet<String>,
+    pass_count: usize,
+    fail_count: usize,
+    skipped_count: usize,
+    cpu_enabled_count: usize,
+    memory_enabled_count: usize,
+    reasons: BTreeSet<String>,
+    source_files: BTreeSet<String>,
+    artifact_files: BTreeSet<String>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -305,6 +348,25 @@ struct ExternalBenchmarkStats {
     reasons: Vec<String>,
     source_files: Vec<String>,
     output_files: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct DiagnosticProfileStats {
+    amd64_target_cpu: String,
+    comparator: String,
+    scenario: String,
+    protocol: String,
+    profile_mode: String,
+    sample_count: usize,
+    pass_count: usize,
+    fail_count: usize,
+    skipped_count: usize,
+    cpu_enabled_count: usize,
+    memory_enabled_count: usize,
+    labels: Vec<String>,
+    reasons: Vec<String>,
+    source_files: Vec<String>,
+    artifact_files: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -396,6 +458,7 @@ struct ReportSummary {
     accept_multipliers: AcceptMultiplierSummary,
     remote_signer: RemoteSignerSummary,
     external_benchmark_row_count: usize,
+    diagnostic_profile_row_count: usize,
     oxibelt_only_row_count: usize,
 }
 
@@ -747,6 +810,7 @@ struct Report {
     remote_signer_comparisons: Vec<RemoteSignerComparison>,
     amd64_isa_comparisons: Vec<Amd64IsaComparison>,
     external_benchmarks: Vec<ExternalBenchmarkStats>,
+    profiling: Vec<DiagnosticProfileStats>,
     oxibelt_only_results: Vec<AggregateStats>,
     skipped_or_missing_comparator_rows: Vec<MissingComparatorRow>,
     regression_gates: RegressionGateReport,
@@ -979,6 +1043,77 @@ impl ExternalBenchmarkBuilder {
     }
 }
 
+impl DiagnosticProfileBuilder {
+    fn push(&mut self, sample: DiagnosticProfileSample) {
+        if self.amd64_target_cpu.is_empty() {
+            self.amd64_target_cpu = sample.amd64_target_cpu;
+        }
+        if self.comparator.is_empty() {
+            self.comparator = sample.comparator;
+        }
+        if self.scenario.is_empty() {
+            self.scenario = sample.scenario;
+        }
+        if self.protocol.is_empty() {
+            self.protocol = sample.protocol;
+        }
+        if self.profile_mode.is_empty() {
+            self.profile_mode = sample.profile_mode;
+        }
+        self.labels.insert(sample.label);
+        match sample.status.as_str() {
+            "pass" => self.pass_count += 1,
+            "fail" => self.fail_count += 1,
+            "skipped" => self.skipped_count += 1,
+            _ => self.fail_count += 1,
+        }
+        if sample.cpu_enabled {
+            self.cpu_enabled_count += 1;
+        }
+        if sample.memory_enabled {
+            self.memory_enabled_count += 1;
+        }
+        if let Some(reason) = sample.reason {
+            self.reasons.insert(reason);
+        }
+        for artifact in [
+            sample.perf_data,
+            sample.perf_report,
+            sample.perf_script,
+            sample.flamegraph,
+            sample.cpu_metadata,
+            sample.resource,
+            sample.memory_metadata,
+            sample.heap_dir,
+        ] {
+            if let Some(artifact) = artifact {
+                self.artifact_files.insert(artifact);
+            }
+        }
+        self.source_files.insert(sample.source_file);
+    }
+
+    fn finish(self) -> DiagnosticProfileStats {
+        DiagnosticProfileStats {
+            amd64_target_cpu: self.amd64_target_cpu,
+            comparator: self.comparator,
+            scenario: self.scenario,
+            protocol: self.protocol,
+            profile_mode: self.profile_mode,
+            sample_count: self.pass_count + self.fail_count + self.skipped_count,
+            pass_count: self.pass_count,
+            fail_count: self.fail_count,
+            skipped_count: self.skipped_count,
+            cpu_enabled_count: self.cpu_enabled_count,
+            memory_enabled_count: self.memory_enabled_count,
+            labels: self.labels.into_iter().collect(),
+            reasons: self.reasons.into_iter().collect(),
+            source_files: self.source_files.into_iter().collect(),
+            artifact_files: self.artifact_files.into_iter().collect(),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let report = aggregate(
@@ -1060,9 +1195,19 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
                 .any(|unsupported_dir| path.starts_with(unsupported_dir))
         })
         .collect::<Vec<_>>();
+    let profile_results = discovered
+        .profile_results
+        .iter()
+        .filter(|path| {
+            !unsupported_artifact_dirs
+                .iter()
+                .any(|unsupported_dir| path.starts_with(unsupported_dir))
+        })
+        .collect::<Vec<_>>();
     let mut artifact_discovery = ArtifactDiscovery {
         results_files: results.len(),
         external_results_files: external_results.len(),
+        profile_results_files: profile_results.len(),
         summary_files: discovered.summary_count,
         docker_stats_files: discovered.docker_stats_count,
         iteration_status_files: discovered.iteration_statuses.len(),
@@ -1136,6 +1281,29 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
         .map(ExternalBenchmarkBuilder::finish)
         .collect::<Vec<_>>();
 
+    let mut profile_builders: BTreeMap<
+        (String, String, String, String, String),
+        DiagnosticProfileBuilder,
+    > = BTreeMap::new();
+    for profile_results_path in profile_results {
+        for sample in parse_profile_results_file(input_dir, profile_results_path, &mut warnings) {
+            profile_builders
+                .entry((
+                    sample.amd64_target_cpu.clone(),
+                    sample.comparator.clone(),
+                    sample.scenario.clone(),
+                    sample.protocol.clone(),
+                    sample.profile_mode.clone(),
+                ))
+                .or_default()
+                .push(sample);
+        }
+    }
+    let profiling = profile_builders
+        .into_values()
+        .map(DiagnosticProfileBuilder::finish)
+        .collect::<Vec<_>>();
+
     let reverse_proxy = build_group_comparisons(ScenarioGroup::ReverseProxy, &aggregate_map);
     let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
     let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
@@ -1182,6 +1350,10 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
             .iter()
             .filter(|row| row.amd64_target_cpu == primary_target_cpu)
             .count(),
+        diagnostic_profile_row_count: profiling
+            .iter()
+            .filter(|row| row.amd64_target_cpu == primary_target_cpu)
+            .count(),
         oxibelt_only_row_count: oxibelt_only_results
             .iter()
             .filter(|row| row.amd64_target_cpu == primary_target_cpu)
@@ -1209,6 +1381,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
         remote_signer_comparisons,
         amd64_isa_comparisons,
         external_benchmarks,
+        profiling,
         oxibelt_only_results,
         skipped_or_missing_comparator_rows,
         regression_gates,
@@ -1404,6 +1577,7 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
     let mut discovered = DiscoveredFiles {
         results: Vec::new(),
         external_results: Vec::new(),
+        profile_results: Vec::new(),
         summary_count: 0,
         docker_stats_count: 0,
         iteration_statuses: Vec::new(),
@@ -1457,6 +1631,7 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
             match entry.file_name().to_string_lossy().as_ref() {
                 "results.json" => discovered.results.push(entry.path()),
                 "external-results.json" => discovered.external_results.push(entry.path()),
+                "profile-results.json" => discovered.profile_results.push(entry.path()),
                 "summary.md" => discovered.summary_count += 1,
                 "docker-stats.jsonl" => discovered.docker_stats_count += 1,
                 "iteration-status.json" => discovered.iteration_statuses.push(entry.path()),
@@ -1468,6 +1643,7 @@ fn discover_files(input_dir: &Path, warnings: &mut WarningBag) -> DiscoveredFile
 
     discovered.results.sort();
     discovered.external_results.sort();
+    discovered.profile_results.sort();
     discovered.iteration_statuses.sort();
     discovered.unsupported_cpu_markers.sort();
     discovered
@@ -2105,6 +2281,182 @@ fn parse_external_result_value(
         ),
         reason: string_field(object.get("reason")).map(str::to_owned),
         output_file: string_field(object.get("output_file")).map(str::to_owned),
+    })
+}
+
+fn parse_profile_results_file(
+    input_dir: &Path,
+    path: &Path,
+    warnings: &mut WarningBag,
+) -> Vec<DiagnosticProfileSample> {
+    let rel_path = display_path(input_dir, path);
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            warnings.push(format!("failed to inspect {rel_path}: {error}"));
+            return Vec::new();
+        }
+    };
+    if metadata.len() > MAX_RESULTS_BYTES {
+        warnings.push(format!(
+            "skipping {rel_path}: profile results file is larger than {} bytes",
+            MAX_RESULTS_BYTES
+        ));
+        return Vec::new();
+    }
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            warnings.push(format!("failed to read {rel_path}: {error}"));
+            return Vec::new();
+        }
+    };
+
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Array(values)) => values
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                parse_profile_result_value(value, &rel_path, index + 1, warnings)
+            })
+            .collect(),
+        Ok(value @ Value::Object(_)) => parse_profile_result_value(value, &rel_path, 1, warnings)
+            .into_iter()
+            .collect(),
+        Ok(_) => {
+            warnings.push(format!(
+                "ignoring {rel_path}: profile results top-level JSON is not an object or array"
+            ));
+            Vec::new()
+        }
+        Err(error) => {
+            warnings.push(format!("failed to parse {rel_path} as JSON: {error}"));
+            Vec::new()
+        }
+    }
+}
+
+fn parse_profile_result_value(
+    value: Value,
+    source_file: &str,
+    row_index: usize,
+    warnings: &mut WarningBag,
+) -> Option<DiagnosticProfileSample> {
+    let Some(object) = value.as_object() else {
+        warnings.push(format!(
+            "{source_file} profile row {row_index}: expected a JSON object"
+        ));
+        return None;
+    };
+
+    let Some(label) = string_field(object.get("label")) else {
+        warnings.push(format!(
+            "{source_file} profile row {row_index}: missing string field label"
+        ));
+        return None;
+    };
+    let Some(comparator) = string_field(object.get("comparator")) else {
+        warnings.push(format!(
+            "{source_file} profile row {row_index} ({label}): missing string field comparator"
+        ));
+        return None;
+    };
+    let Some(scenario) = string_field(object.get("scenario")) else {
+        warnings.push(format!(
+            "{source_file} profile row {row_index} ({label}): missing string field scenario"
+        ));
+        return None;
+    };
+    let Some(protocol) = string_field(object.get("protocol")) else {
+        warnings.push(format!(
+            "{source_file} profile row {row_index} ({label}): missing string field protocol"
+        ));
+        return None;
+    };
+    let Some(profile_mode) = string_field(object.get("profile_mode")) else {
+        warnings.push(format!(
+            "{source_file} profile row {row_index} ({label}): missing string field profile_mode"
+        ));
+        return None;
+    };
+    let Some(status) = string_field(object.get("status")) else {
+        warnings.push(format!(
+            "{source_file} profile row {row_index} ({label}): missing string field status"
+        ));
+        return None;
+    };
+
+    if !matches!(comparator, "oxibelt" | "nginx" | "caddy" | "unknown") {
+        warnings.push(format!(
+            "{source_file} profile row {row_index} ({label}): unknown comparator {comparator:?}"
+        ));
+    }
+    if !matches!(profile_mode, "cpu" | "memory" | "cpu-memory") {
+        warnings.push(format!(
+            "{source_file} profile row {row_index} ({label}): unknown profile_mode {profile_mode:?}"
+        ));
+    }
+    if !matches!(status, "pass" | "fail" | "skipped") {
+        warnings.push(format!(
+            "{source_file} profile row {row_index} ({label}): unknown status {status:?}"
+        ));
+    }
+
+    let cpu = object.get("cpu").and_then(Value::as_object);
+    let memory = object.get("memory").and_then(Value::as_object);
+    let cpu_artifacts = cpu
+        .and_then(|cpu| cpu.get("artifacts"))
+        .and_then(Value::as_object);
+    let memory_artifacts = memory
+        .and_then(|memory| memory.get("artifacts"))
+        .and_then(Value::as_object);
+
+    Some(DiagnosticProfileSample {
+        source_file: source_file.to_owned(),
+        amd64_target_cpu: string_field(object.get("amd64_target_cpu"))
+            .filter(|target| is_known_amd64_target_cpu(target))
+            .map(str::to_owned)
+            .or_else(|| infer_amd64_target_cpu_from_path(source_file))
+            .unwrap_or_else(default_amd64_target_cpu),
+        label: label.to_owned(),
+        comparator: comparator.to_owned(),
+        scenario: scenario.to_owned(),
+        protocol: protocol.to_owned(),
+        profile_mode: profile_mode.to_owned(),
+        status: status.to_owned(),
+        reason: string_field(object.get("reason")).map(str::to_owned),
+        cpu_enabled: cpu
+            .and_then(|cpu| cpu.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        memory_enabled: memory
+            .and_then(|memory| memory.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        perf_data: cpu_artifacts
+            .and_then(|artifacts| string_field(artifacts.get("perf_data")))
+            .map(str::to_owned),
+        perf_report: cpu_artifacts
+            .and_then(|artifacts| string_field(artifacts.get("perf_report")))
+            .map(str::to_owned),
+        perf_script: cpu_artifacts
+            .and_then(|artifacts| string_field(artifacts.get("perf_script")))
+            .map(str::to_owned),
+        flamegraph: cpu_artifacts
+            .and_then(|artifacts| string_field(artifacts.get("flamegraph")))
+            .map(str::to_owned),
+        cpu_metadata: cpu_artifacts
+            .and_then(|artifacts| string_field(artifacts.get("metadata")))
+            .map(str::to_owned),
+        resource: memory_artifacts
+            .and_then(|artifacts| string_field(artifacts.get("resource")))
+            .map(str::to_owned),
+        memory_metadata: memory_artifacts
+            .and_then(|artifacts| string_field(artifacts.get("metadata")))
+            .map(str::to_owned),
+        heap_dir: memory_artifacts
+            .and_then(|artifacts| string_field(artifacts.get("heap_dir")))
+            .map(str::to_owned),
     })
 }
 
@@ -4756,6 +5108,12 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- Profile result files parsed: `{}`",
+        report.artifact_discovery.profile_results_files
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- Primary AMD64 target CPU: `{}`",
         report.primary_target_cpu
     )
@@ -4859,6 +5217,12 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- Diagnostic profiling rows: `{}`",
+        report.summary.diagnostic_profile_row_count
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- Regression gates: `{}` ({} violation(s), {} advisory/advisories)",
         report.regression_gates.status,
         report.regression_gates.violations.len(),
@@ -4886,6 +5250,7 @@ fn render_markdown(report: &Report) -> String {
     write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
     write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
     write_external_benchmark_table(&mut markdown, &report.external_benchmarks);
+    write_diagnostic_profile_table(&mut markdown, &report.profiling);
     write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
     write_missing_table(&mut markdown, &report.skipped_or_missing_comparator_rows);
     write_quorum_table(&mut markdown, &report.quorum);
@@ -5140,6 +5505,46 @@ fn write_external_benchmark_table(markdown: &mut String, rows: &[ExternalBenchma
             format_number(row.median_p99_ms),
             format_number(row.median_error_rate),
             format_list_cell(&row.output_files),
+            format_list_cell(&row.reasons),
+        )
+        .unwrap();
+    }
+    writeln!(markdown).unwrap();
+}
+
+fn write_diagnostic_profile_table(markdown: &mut String, rows: &[DiagnosticProfileStats]) {
+    writeln!(markdown, "## Diagnostic profiling\n").unwrap();
+    if rows.is_empty() {
+        writeln!(markdown, "No diagnostic profiling rows were found.\n").unwrap();
+        return;
+    }
+
+    writeln!(
+        markdown,
+        "| Target CPU | Comparator | Scenario | Protocol | Mode | Samples | Passed | Failed | Skipped | CPU samples | Memory samples | Artifacts | Reasons |"
+    )
+    .unwrap();
+    writeln!(
+        markdown,
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
+    )
+    .unwrap();
+    for row in rows {
+        writeln!(
+            markdown,
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.amd64_target_cpu,
+            row.comparator,
+            row.scenario,
+            row.protocol,
+            row.profile_mode,
+            row.sample_count,
+            row.pass_count,
+            row.fail_count,
+            row.skipped_count,
+            row.cpu_enabled_count,
+            row.memory_enabled_count,
+            format_list_cell(&row.artifact_files),
             format_list_cell(&row.reasons),
         )
         .unwrap();

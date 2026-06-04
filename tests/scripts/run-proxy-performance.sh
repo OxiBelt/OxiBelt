@@ -60,6 +60,13 @@ Environment:
   OXIBELT_PERF_PROFILE_LABEL         exact load label to record with host perf, for diagnostics only
   OXIBELT_PERF_PROFILE_FREQUENCY     perf sampling frequency for diagnostic profiling (default: 99)
   OXIBELT_PERF_PROFILE_CALL_GRAPH    perf call graph mode for diagnostic profiling (default: dwarf,8192)
+  OXIBELT_PERF_DIAGNOSTIC_PROFILES   run separate profile-only replay rows, 1 or 0 (default: 0)
+  OXIBELT_PERF_DIAGNOSTIC_PROFILE_MODE
+                                      cpu, memory, or cpu-memory (default: cpu-memory)
+  OXIBELT_PERF_DIAGNOSTIC_EVENT      perf event for diagnostic CPU replay (default: cpu-clock)
+  OXIBELT_PERF_DIAGNOSTIC_FREQUENCY  perf frequency for diagnostic CPU replay (default: 49)
+  OXIBELT_PERF_DIAGNOSTIC_GATE_MODE  fail or warn for diagnostic profiling failures (default: warn)
+  OXIBELT_PERF_DIAGNOSTIC_COMPRESS   compress bulky perf artifacts with zstd, 1 or 0 (default: 1)
   OXIBELT_TEST_ARTIFACT_DIR        copy summary, results, logs, probe logs, configs, and stats here
   KEEP_TEST_ARTIFACTS=1            keep tests/.tmp performance work directory
 EOF
@@ -118,6 +125,8 @@ work_dir="${repo_root}/tests/.tmp/performance-${run_id}"
 logs_dir="${work_dir}/logs"
 probe_logs_dir="${work_dir}/probe-logs"
 profiles_dir="${work_dir}/profiles"
+profile_cpu_dir="${profiles_dir}/cpu"
+profile_memory_dir="${profiles_dir}/memory"
 configs_dir="${work_dir}/configs"
 tls_dir="${work_dir}/proxy-tls"
 static_dir="${work_dir}/static"
@@ -125,6 +134,8 @@ results_jsonl="${work_dir}/results.jsonl"
 results_json="${work_dir}/results.json"
 external_results_jsonl="${work_dir}/external-results.jsonl"
 external_results_json="${work_dir}/external-results.json"
+profile_results_jsonl="${work_dir}/profile-results.jsonl"
+profile_results_json="${work_dir}/profile-results.json"
 summary_md="${work_dir}/summary.md"
 stats_jsonl="${work_dir}/docker-stats.jsonl"
 resource_snapshots_jsonl="${work_dir}/resource-snapshots.jsonl"
@@ -201,6 +212,12 @@ resource_settle_seconds="${OXIBELT_PERF_RESOURCE_SETTLE_SECONDS:-30}"
 profile_label="${OXIBELT_PERF_PROFILE_LABEL:-}"
 profile_frequency="${OXIBELT_PERF_PROFILE_FREQUENCY:-99}"
 profile_call_graph="${OXIBELT_PERF_PROFILE_CALL_GRAPH:-dwarf,8192}"
+diagnostic_profiles="${OXIBELT_PERF_DIAGNOSTIC_PROFILES:-0}"
+diagnostic_profile_mode="${OXIBELT_PERF_DIAGNOSTIC_PROFILE_MODE:-cpu-memory}"
+diagnostic_profile_event="${OXIBELT_PERF_DIAGNOSTIC_EVENT:-cpu-clock}"
+diagnostic_profile_frequency="${OXIBELT_PERF_DIAGNOSTIC_FREQUENCY:-49}"
+diagnostic_profile_gate_mode="${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE:-warn}"
+diagnostic_profile_compress="${OXIBELT_PERF_DIAGNOSTIC_COMPRESS:-1}"
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
@@ -278,6 +295,42 @@ case "${nginx_h3_mode_override}" in
     exit 2
     ;;
 esac
+case "${diagnostic_profiles}" in
+  0|1) ;;
+  *)
+    echo "OXIBELT_PERF_DIAGNOSTIC_PROFILES must be 1 or 0; got '${diagnostic_profiles}'" >&2
+    exit 2
+    ;;
+esac
+case "${diagnostic_profile_mode}" in
+  cpu|memory|cpu-memory) ;;
+  *)
+    echo "OXIBELT_PERF_DIAGNOSTIC_PROFILE_MODE must be cpu, memory, or cpu-memory; got '${diagnostic_profile_mode}'" >&2
+    exit 2
+    ;;
+esac
+case "${diagnostic_profile_gate_mode}" in
+  fail|warn) ;;
+  *)
+    echo "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE must be fail or warn; got '${diagnostic_profile_gate_mode}'" >&2
+    exit 2
+    ;;
+esac
+case "${diagnostic_profile_compress}" in
+  0|1) ;;
+  *)
+    echo "OXIBELT_PERF_DIAGNOSTIC_COMPRESS must be 1 or 0; got '${diagnostic_profile_compress}'" >&2
+    exit 2
+    ;;
+esac
+if [[ ! "${diagnostic_profile_frequency}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "OXIBELT_PERF_DIAGNOSTIC_FREQUENCY must be a positive integer; got '${diagnostic_profile_frequency}'" >&2
+  exit 2
+fi
+if [[ -z "${diagnostic_profile_event}" ]]; then
+  echo "OXIBELT_PERF_DIAGNOSTIC_EVENT must not be empty when diagnostic profiling is configured" >&2
+  exit 2
+fi
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -298,9 +351,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${logs_dir}" "${probe_logs_dir}" "${profiles_dir}" "${configs_dir}" "${tls_dir}" "${static_dir}" "${external_h2load_dir}" "${external_oha_dir}" "${external_wrk_dir}"
+mkdir -p "${logs_dir}" "${probe_logs_dir}" "${profiles_dir}" "${profile_cpu_dir}" "${profile_memory_dir}" "${configs_dir}" "${tls_dir}" "${static_dir}" "${external_h2load_dir}" "${external_oha_dir}" "${external_wrk_dir}"
 : >"${results_jsonl}"
 : >"${external_results_jsonl}"
+: >"${profile_results_jsonl}"
 : >"${stats_jsonl}"
 : >"${resource_snapshots_jsonl}"
 
@@ -516,6 +570,44 @@ handle_external_benchmark_failure() {
   fail_with_diagnostics "${message}"
 }
 
+handle_diagnostic_profile_failure() {
+  local message="$1"
+  if [[ "${diagnostic_profile_gate_mode}" == "warn" ]]; then
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+      echo "::warning title=Docker performance diagnostic profiling::${message}" >&2
+    else
+      echo "Docker performance diagnostic profiling warning: ${message}" >&2
+    fi
+    return
+  fi
+
+  fail_with_diagnostics "${message}"
+}
+
+diagnostic_profile_mode_has_cpu() {
+  [[ "${diagnostic_profile_mode}" == "cpu" || "${diagnostic_profile_mode}" == "cpu-memory" ]]
+}
+
+diagnostic_profile_mode_has_memory() {
+  [[ "${diagnostic_profile_mode}" == "memory" || "${diagnostic_profile_mode}" == "cpu-memory" ]]
+}
+
+diagnostic_profile_comparator_from_label() {
+  local label="$1"
+  case "${label}" in
+    oxibelt*) echo oxibelt ;;
+    nginx*) echo nginx ;;
+    caddy*) echo caddy ;;
+    *) echo unknown ;;
+  esac
+}
+
+append_profile_result() {
+  local json="$1"
+  json="$(jq -c --arg target "${amd64_target_cpu}" '. + {amd64_target_cpu: $target}' <<<"${json}")"
+  printf '%s\n' "${json}" >>"${profile_results_jsonl}"
+}
+
 collect_logs() {
   mkdir -p "${logs_dir}"
   local container
@@ -523,6 +615,161 @@ collect_logs() {
     [[ -z "${container}" ]] && continue
     docker logs "${container}" >"${logs_dir}/${container}.log" 2>&1 || true
   done < <(docker ps -a --filter "label=${test_label}" --format '{{.Names}}')
+}
+
+diagnostic_host_pids_csv() {
+  local containers=()
+  local container root_pid child grandchild csv=""
+  if [[ -n "${active_proxy_container}" ]]; then
+    containers+=("${active_proxy_container}")
+  fi
+  if [[ -n "${active_remote_signer_container}" ]]; then
+    containers+=("${active_remote_signer_container}")
+  fi
+
+  for container in "${containers[@]}"; do
+    root_pid="$(docker inspect -f '{{.State.Pid}}' "${container}" 2>/dev/null || true)"
+    [[ "${root_pid}" =~ ^[1-9][0-9]*$ ]] || continue
+    if [[ -z "${csv}" ]]; then
+      csv="${root_pid}"
+    else
+      csv="${csv},${root_pid}"
+    fi
+    if command -v pgrep >/dev/null 2>&1; then
+      while read -r child; do
+        [[ "${child}" =~ ^[1-9][0-9]*$ ]] || continue
+        csv="${csv},${child}"
+        while read -r grandchild; do
+          [[ "${grandchild}" =~ ^[1-9][0-9]*$ ]] || continue
+          csv="${csv},${grandchild}"
+        done < <(pgrep -P "${child}" 2>/dev/null || true)
+      done < <(pgrep -P "${root_pid}" 2>/dev/null || true)
+    fi
+  done
+  echo "${csv}"
+}
+
+diagnostic_container_resource_json() {
+  local container="$1"
+  local role="$2"
+  local sample="$3"
+  local values rss_kb fd_count task_count threads memory_bytes
+  if [[ -z "${container}" ]]; then
+    jq -cn --arg role "${role}" --arg sample "${sample}" \
+      '{sample: $sample, role: $role, available: false, reason: "container is not active"}'
+    return
+  fi
+
+  values="$(docker exec "${container}" sh -c '
+    rss=0
+    fds=0
+    tasks=0
+    threads=0
+    for d in /proc/[0-9]*; do
+      [ -r "$d/status" ] || continue
+      r="$(awk "/^VmRSS:/{print \$2}" "$d/status" 2>/dev/null || true)"
+      t="$(awk "/^Threads:/{print \$2}" "$d/status" 2>/dev/null || true)"
+      rss=$((rss + ${r:-0}))
+      threads=$((threads + ${t:-0}))
+      tasks=$((tasks + 1))
+      if [ -d "$d/fd" ]; then
+        c="$(ls -1 "$d/fd" 2>/dev/null | wc -l || true)"
+        fds=$((fds + ${c:-0}))
+      fi
+    done
+    printf "%s %s %s %s\n" "$rss" "$fds" "$tasks" "$threads"
+  ' 2>/dev/null || echo "0 0 0 0")"
+  read -r rss_kb fd_count task_count threads <<<"${values}"
+  memory_bytes=$(( ${rss_kb:-0} * 1024 ))
+  jq -cn \
+    --arg sample "${sample}" \
+    --arg role "${role}" \
+    --arg container "${container}" \
+    --argjson memory_rss_bytes "${memory_bytes}" \
+    --argjson fd_count "${fd_count:-0}" \
+    --argjson task_count "${task_count:-0}" \
+    --argjson thread_count "${threads:-0}" \
+    '{
+      sample: $sample,
+      role: $role,
+      container: $container,
+      available: true,
+      memory_rss_bytes: $memory_rss_bytes,
+      fd_count: $fd_count,
+      task_count: $task_count,
+      thread_count: $thread_count
+    }'
+}
+
+diagnostic_collect_resources_json() {
+  local sample="$1"
+  local proxy_json remote_json
+  proxy_json="$(diagnostic_container_resource_json "${active_proxy_container}" proxy "${sample}")"
+  if [[ -n "${active_remote_signer_container}" ]]; then
+    remote_json="$(diagnostic_container_resource_json "${active_remote_signer_container}" remote_signer "${sample}")"
+    jq -cn --argjson proxy "${proxy_json}" --argjson remote "${remote_json}" '[$proxy, $remote]'
+  else
+    jq -cn --argjson proxy "${proxy_json}" '[$proxy]'
+  fi
+}
+
+write_heap_evidence() {
+  local comparator="$1"
+  local heap_dir="$2"
+  local reason="$3"
+  mkdir -p "${heap_dir}"
+  jq -n \
+    --arg comparator "${comparator}" \
+    --arg reason "${reason}" \
+    '{
+      schema_version: 1,
+      comparator: $comparator,
+      status: "unsupported",
+      unsupported_heap_reason: $reason
+    }' >"${heap_dir}/unsupported.json"
+  if [[ -n "${active_proxy_container}" ]]; then
+    docker exec "${active_proxy_container}" sh -c 'cat /proc/1/smaps_rollup 2>/dev/null || true' \
+      >"${heap_dir}/smaps-rollup-after.txt" 2>/dev/null || true
+  fi
+}
+
+diagnostic_binary_path_for_comparator() {
+  local comparator="$1"
+  case "${comparator}" in
+    oxibelt) echo /usr/local/bin/oxibelt ;;
+    nginx) echo /usr/sbin/nginx ;;
+    caddy) echo /usr/bin/caddy ;;
+    *) echo "" ;;
+  esac
+}
+
+write_unavailable_flamegraph() {
+  local path="$1"
+  local reason="$2"
+  printf '%s\n' \
+    '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="80">' \
+    '<rect width="100%" height="100%" fill="#f8f8f8"/>' \
+    "<text x=\"16\" y=\"44\" font-family=\"sans-serif\" font-size=\"16\">${reason}</text>" \
+    '</svg>' >"${path}"
+}
+
+compress_profile_artifact() {
+  local path="$1"
+  if [[ "${diagnostic_profile_compress}" == "1" && -s "${path}" ]]; then
+    if command -v zstd >/dev/null 2>&1; then
+      zstd -f -q "${path}" >/dev/null 2>&1 && {
+        rm -f "${path}"
+        echo "${path}.zst"
+        return
+      }
+    fi
+  fi
+  echo "${path}"
+}
+
+profile_relpath() {
+  local path="$1"
+  printf '%s\n' "${path#"${work_dir}/"}"
 }
 
 sample_stats() {
@@ -657,6 +904,220 @@ profile_duration_seconds() {
   local duration="$1"
   jq -n -r --arg duration "${duration}" --arg warmup "${warmup_seconds}" \
     '($duration | tonumber) + ($warmup | tonumber) + 2'
+}
+
+run_diagnostic_profile_replay() {
+  local label="$1"
+  local duration="$2"
+  local protocol="$3"
+  shift 3
+  local probe_args=("$@")
+  local comparator profile_name profile_seconds started_at finished_at
+  local status="pass" reason="" replay_status=0 replay_json=""
+  local cpu_json memory_json before_json after_json resource_path memory_metadata_path heap_dir heap_reason
+  local perf_pid="" perf_status=0 pid_csv="" perf_data="" perf_report="" perf_script="" perf_stderr="" perf_flamegraph="" perf_metadata=""
+  local perf_data_final="" perf_script_final="" copied_binary="" binary_path buildid_dir
+  [[ "${diagnostic_profiles:-0}" == "1" ]] || return 0
+
+  comparator="$(diagnostic_profile_comparator_from_label "${label}")"
+  profile_name="$(profile_artifact_name "${label}")"
+  profile_seconds="$(profile_duration_seconds "${duration}")"
+  started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  cpu_json="$(jq -cn '{enabled: false}')"
+  memory_json="$(jq -cn '{enabled: false}')"
+
+  if diagnostic_profile_mode_has_memory; then
+    before_json="$(diagnostic_collect_resources_json before)"
+  fi
+
+  if diagnostic_profile_mode_has_cpu; then
+    mkdir -p "${profile_cpu_dir}"
+    perf_data="${profile_cpu_dir}/${profile_name}.perf.data"
+    perf_report="${profile_cpu_dir}/${profile_name}.perf.report.txt"
+    perf_script="${profile_cpu_dir}/${profile_name}.perf.script.txt"
+    perf_stderr="${profile_cpu_dir}/${profile_name}.perf.stderr.log"
+    perf_flamegraph="${profile_cpu_dir}/${profile_name}.flamegraph.svg"
+    perf_metadata="${profile_cpu_dir}/${profile_name}.metadata.json"
+    buildid_dir="${profile_cpu_dir}/.build-id"
+    mkdir -p "${buildid_dir}"
+    : >"${perf_stderr}"
+    pid_csv="$(diagnostic_host_pids_csv)"
+    binary_path="$(diagnostic_binary_path_for_comparator "${comparator}")"
+    if [[ -n "${binary_path}" && -n "${active_proxy_container}" ]]; then
+      copied_binary="${profile_cpu_dir}/${profile_name}.${comparator}.binary"
+      docker cp "${active_proxy_container}:${binary_path}" "${copied_binary}" >>"${perf_stderr}" 2>&1 || copied_binary=""
+      if [[ -n "${copied_binary}" ]]; then
+        chmod 0644 "${copied_binary}" || true
+        PERF_BUILDID_DIR="${buildid_dir}" perf buildid-cache --add "${copied_binary}" >>"${perf_stderr}" 2>&1 || true
+      fi
+    fi
+    if ! command -v perf >/dev/null 2>&1; then
+      status="fail"
+      reason="perf is not installed for diagnostic profiling"
+    elif [[ -z "${pid_csv}" ]]; then
+      status="fail"
+      reason="no active host PIDs were available for diagnostic profiling"
+    else
+      perf record \
+        --event "${diagnostic_profile_event}" \
+        --freq "${diagnostic_profile_frequency}" \
+        --call-graph "${profile_call_graph}" \
+        --pid "${pid_csv}" \
+        --output "${perf_data}" \
+        -- sleep "${profile_seconds}" >>"${perf_stderr}" 2>&1 &
+      perf_pid=$!
+      sleep 0.2
+    fi
+  fi
+
+  replay_json="$(run_probe_json "${probe_args[@]}")" || replay_status=$?
+  if [[ "${replay_status}" != "0" ]]; then
+    status="fail"
+    if [[ -z "${reason}" ]]; then
+      reason="diagnostic replay exited with status ${replay_status}"
+    fi
+  fi
+
+  if [[ -n "${perf_pid}" ]]; then
+    if kill -0 "${perf_pid}" >/dev/null 2>&1; then
+      kill -INT "${perf_pid}" >/dev/null 2>&1 || true
+    fi
+    wait "${perf_pid}" || perf_status=$?
+    if [[ "${perf_status}" != "0" && "${perf_status}" != "130" && "${perf_status}" != "143" ]]; then
+      status="fail"
+      reason="${reason:-perf record failed with status ${perf_status}}"
+    elif [[ ! -s "${perf_data}" ]]; then
+      status="fail"
+      reason="${reason:-perf record produced no data}"
+    else
+      PERF_BUILDID_DIR="${buildid_dir}" perf report --stdio --input "${perf_data}" >"${perf_report}" 2>>"${perf_stderr}" \
+        || {
+          status="fail"
+          reason="${reason:-perf report failed}"
+        }
+      PERF_BUILDID_DIR="${buildid_dir}" perf script --input "${perf_data}" >"${perf_script}" 2>>"${perf_stderr}" \
+        || {
+          status="fail"
+          reason="${reason:-perf script failed}"
+        }
+      if [[ -s "${perf_script}" ]] && command -v stackcollapse-perf.pl >/dev/null 2>&1 && command -v flamegraph.pl >/dev/null 2>&1; then
+        stackcollapse-perf.pl "${perf_script}" 2>>"${perf_stderr}" | flamegraph.pl >"${perf_flamegraph}" 2>>"${perf_stderr}" \
+          || write_unavailable_flamegraph "${perf_flamegraph}" "flamegraph generation failed"
+      else
+        write_unavailable_flamegraph "${perf_flamegraph}" "flamegraph tooling unavailable"
+      fi
+    fi
+    perf_data_final="$(compress_profile_artifact "${perf_data}")"
+    perf_script_final="$(compress_profile_artifact "${perf_script}")"
+    cpu_json="$(jq -cn \
+      --arg event "${diagnostic_profile_event}" \
+      --arg frequency "${diagnostic_profile_frequency}" \
+      --arg call_graph "${profile_call_graph}" \
+      --arg pids "${pid_csv:-}" \
+      --arg perf_data "$(profile_relpath "${perf_data_final}")" \
+      --arg perf_report "$(profile_relpath "${perf_report}")" \
+      --arg perf_script "$(profile_relpath "${perf_script_final}")" \
+      --arg perf_stderr "$(profile_relpath "${perf_stderr}")" \
+      --arg flamegraph "$(profile_relpath "${perf_flamegraph}")" \
+      --arg metadata "$(profile_relpath "${perf_metadata}")" \
+      --arg binary "${copied_binary:+$(profile_relpath "${copied_binary}")}" \
+      '{
+        enabled: true,
+        event: $event,
+        frequency: ($frequency | tonumber),
+        call_graph: $call_graph,
+        host_pids: (if $pids == "" then [] else ($pids | split(",") | map(tonumber)) end),
+        artifacts: {
+          perf_data: $perf_data,
+          perf_report: $perf_report,
+          perf_script: $perf_script,
+          perf_stderr: $perf_stderr,
+          flamegraph: $flamegraph,
+          metadata: $metadata,
+          binary: (if $binary == "" then null else $binary end)
+        }
+      }')"
+    printf '%s\n' "${cpu_json}" >"${perf_metadata}"
+  elif diagnostic_profile_mode_has_cpu; then
+    cpu_json="$(jq -cn --arg reason "${reason:-cpu profiling was not started}" '{enabled: true, status: "unavailable", reason: $reason}')"
+  fi
+
+  if diagnostic_profile_mode_has_memory; then
+    after_json="$(diagnostic_collect_resources_json after)"
+    resource_path="${profile_memory_dir}/${profile_name}.resource.json"
+    memory_metadata_path="${profile_memory_dir}/${profile_name}.metadata.json"
+    heap_dir="${profile_memory_dir}/${profile_name}/heap"
+    heap_reason="allocation stack heap profiling is not enabled for ${comparator}; use RSS, FD, task, thread, and smaps evidence from this diagnostic run"
+    write_heap_evidence "${comparator}" "${heap_dir}" "${heap_reason}"
+    memory_json="$(jq -cn \
+      --argjson before "${before_json}" \
+      --argjson after "${after_json}" \
+      --arg resource "$(profile_relpath "${resource_path}")" \
+      --arg metadata "$(profile_relpath "${memory_metadata_path}")" \
+      --arg heap_dir "$(profile_relpath "${heap_dir}")" \
+      --arg unsupported_heap_reason "${heap_reason}" \
+      'def sum_field($rows; $field): [$rows[]? | select(.available == true) | .[$field] // 0] | add // 0;
+       {
+         enabled: true,
+         before: $before,
+         after: $after,
+         deltas: {
+           memory_rss_bytes: (sum_field($after; "memory_rss_bytes") - sum_field($before; "memory_rss_bytes")),
+           fd_count: (sum_field($after; "fd_count") - sum_field($before; "fd_count")),
+           task_count: (sum_field($after; "task_count") - sum_field($before; "task_count")),
+           thread_count: (sum_field($after; "thread_count") - sum_field($before; "thread_count"))
+         },
+         artifacts: {
+           resource: $resource,
+           metadata: $metadata,
+           heap_dir: $heap_dir
+         },
+         unsupported_heap_reason: $unsupported_heap_reason
+       }')"
+    printf '%s\n' "${memory_json}" >"${resource_path}"
+    printf '%s\n' "${memory_json}" >"${memory_metadata_path}"
+  fi
+
+  finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  append_profile_result "$(jq -cn \
+    --arg label "${label}" \
+    --arg comparator "${comparator}" \
+    --arg protocol "${protocol}" \
+    --arg mode "${diagnostic_profile_mode}" \
+    --arg status "${status}" \
+    --arg reason "${reason}" \
+    --arg gate_mode "${diagnostic_profile_gate_mode}" \
+    --arg started_at "${started_at}" \
+    --arg finished_at "${finished_at}" \
+    --arg duration_seconds "${duration}" \
+    --arg warmup_seconds "${warmup_seconds}" \
+    --arg profile_seconds "${profile_seconds}" \
+    --argjson replay_exit_code "${replay_status}" \
+    --argjson cpu "${cpu_json}" \
+    --argjson memory "${memory_json}" \
+    '{
+      schema_version: 1,
+      label: $label,
+      comparator: $comparator,
+      scenario: $label,
+      protocol: $protocol,
+      profile_mode: $mode,
+      status: $status,
+      gate_mode: $gate_mode,
+      reason: (if $reason == "" then null else $reason end),
+      started_at: $started_at,
+      finished_at: $finished_at,
+      load_duration_seconds: ($duration_seconds | tonumber),
+      warmup_seconds: ($warmup_seconds | tonumber),
+      profile_seconds: ($profile_seconds | tonumber),
+      replay_exit_code: $replay_exit_code,
+      cpu: $cpu,
+      memory: $memory
+    }')"
+
+  if [[ "${status}" != "pass" ]]; then
+    handle_diagnostic_profile_failure "diagnostic profiling failed for ${label}: ${reason:-unknown failure}"
+  fi
 }
 
 run_profiled_probe_json() {
@@ -1371,6 +1832,9 @@ run_load() {
   append_result "${json}"
   assert_result "${json}"
   sample_stats "${label}"
+  if [[ "${diagnostic_profiles:-0}" == "1" ]]; then
+    run_diagnostic_profile_replay "${label}" "${duration}" "${protocol}" "${probe_args[@]}"
+  fi
 }
 
 run_static_h3_load() {
@@ -1471,6 +1935,19 @@ run_handshake_with_options() {
     assert_diagnostic_result "${json}"
   fi
   sample_stats "${label}"
+  if [[ "${diagnostic_profiles:-0}" == "1" ]]; then
+    run_diagnostic_profile_replay "${label}" "${duration_seconds}" "${protocol}" handshake \
+      --label "${label}" \
+      --protocol "${protocol}" \
+      --host "${host}" \
+      --port 8443 \
+      --server-name proxy \
+      --ca-cert /tls/proxy-ca.pem \
+      --duration-seconds "${duration_seconds}" \
+      --concurrency "${concurrency}" \
+      --client-resumption "${client_resumption}" \
+      --post-handshake-observe-ms "${post_handshake_observe_ms}"
+  fi
 }
 
 server_session_storage_metrics() {
@@ -1538,6 +2015,18 @@ run_stress() {
   append_result "${json}"
   assert_result "${json}"
   sample_stats "${label}"
+  if [[ "${diagnostic_profiles:-0}" == "1" ]]; then
+    run_diagnostic_profile_replay "${label}" "${duration}" "${mode}" stress \
+      --label "${label}" \
+      --mode "${mode}" \
+      --host oxibelt \
+      --port 8080 \
+      --authority example.test \
+      --connections "${connections}" \
+      --duration-seconds "${duration}" \
+      --bytes "${bytes}" \
+      "${extra_args[@]}"
+  fi
 }
 
 h3_probe_succeeds() {
@@ -2230,15 +2719,23 @@ finalize_results() {
   else
     printf '[]\n' >"${external_results_json}"
   fi
+  if [[ -s "${profile_results_jsonl}" ]]; then
+    jq -s '.' "${profile_results_jsonl}" >"${profile_results_json}"
+  else
+    printf '[]\n' >"${profile_results_json}"
+  fi
   {
     echo
     echo "Artifacts:"
     echo
     echo "- results.json"
     echo "- external-results.json"
+    echo "- profile-results.json"
     echo "- docker-stats.jsonl"
     echo "- logs/"
     echo "- probe-logs/"
+    echo "- profiles/cpu/"
+    echo "- profiles/memory/"
     echo "- external-h2load/"
     echo "- external-oha/"
     echo "- external-wrk/"
@@ -2265,6 +2762,11 @@ cat >"${summary_md}" <<EOF
 - External benchmark tools: \`${external_benchmark_tools}\`
 - External benchmark image: \`${external_benchmark_image}\`
 - External benchmark gate mode: \`${external_benchmark_gate_mode}\`
+- Diagnostic profiles: \`${diagnostic_profiles}\`
+- Diagnostic profile mode: \`${diagnostic_profile_mode}\`
+- Diagnostic profile event: \`${diagnostic_profile_event}\`
+- Diagnostic profile frequency: \`${diagnostic_profile_frequency}\`
+- Diagnostic profile gate mode: \`${diagnostic_profile_gate_mode}\`
 - Duration: \`${duration_seconds}s\`
 - Warmup: \`${warmup_seconds}s\`
 - Concurrency: \`${concurrency}\`

@@ -69,6 +69,12 @@ OXIBELT_EXTERNAL_OHA_MAX_ERROR_RATE=0
 OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2
 OXIBELT_PERF_PROFILE_FREQUENCY=99
 OXIBELT_PERF_PROFILE_CALL_GRAPH=dwarf,8192
+OXIBELT_PERF_DIAGNOSTIC_PROFILES=0
+OXIBELT_PERF_DIAGNOSTIC_PROFILE_MODE=cpu-memory
+OXIBELT_PERF_DIAGNOSTIC_EVENT=cpu-clock
+OXIBELT_PERF_DIAGNOSTIC_FREQUENCY=49
+OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=warn
+OXIBELT_PERF_DIAGNOSTIC_COMPRESS=1
 OXIBELT_TEST_ARTIFACT_DIR=/tmp/oxibelt-performance
 ```
 
@@ -104,6 +110,8 @@ In GitHub Actions, `workflow_dispatch` also accepts `performance_iterations`, wh
 
 For H2 or H3 hot-path investigations, set `OXIBELT_PERF_PROFILE_LABEL=oxibelt-h2` or `OXIBELT_PERF_PROFILE_LABEL=oxibelt-h3` on a local run with host `perf` installed. The harness samples only the load row whose label exactly matches the value, copies the active container's `/usr/local/bin/oxibelt` binary, and writes `perf.data`, `perf report --stdio`, `perf script`, stderr, and metadata under `profiles/` in the artifact directory. Use this as diagnostic evidence only: the profiler changes the measured run and its RPS should not be used as regression-gate or acceptance evidence. Manual `workflow_dispatch` runs can set `performance_profile_label` to `oxibelt-h2` or `oxibelt-h3`; the workflow then enables profiling only for the `smoke` `reverse-proxy` shard `1`, target `x86-64-v3`, iteration `1` row with that exact label. The legacy `performance_h2_profile = true` input remains an alias for `performance_profile_label = oxibelt-h2`.
 
+Smoke performance runs in GitHub Actions also enable separate diagnostic profiling replays with `OXIBELT_PERF_DIAGNOSTIC_PROFILES=1`. These replay rows run after the primary `perf-probe` row has already been written, so `results.json` remains the only primary regression-gate source. CPU evidence uses host `perf` against the active proxy container host PIDs, including nginx worker child PIDs when they are visible, and writes compressed `perf.data`, `perf report --stdio`, `perf script`, flamegraph SVG, stderr, and metadata under `profiles/cpu/`. Memory evidence records before/after RSS, FD, task, and thread snapshots under `profiles/memory/*.resource.json`; heap allocation stack capture is best-effort, and unsupported runtimes write `profiles/memory/<label>/heap/unsupported.json` with `unsupported_heap_reason`. Diagnostic profiling failures warn by default and only fail the summary job when `OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=fail`.
+
 To reproduce the scheduled long-run locally with a shorter duration:
 
 ```sh
@@ -122,6 +130,14 @@ The runner writes:
 - `resource-snapshots.jsonl`: OxiBelt procfs RSS, FD, task, and thread snapshots for aggressive long-runs.
 - `resource-drift.json`: before/after resource drift and gate limits for aggressive long-runs.
 - `external-results.json`: normalized h2load, oha, and wrk validation evidence. These rows are separate from `results.json`.
+- `profile-results.json`: normalized diagnostic CPU and memory profiling replay evidence. These rows are separate from `results.json`.
+- `profiles/cpu/*.perf.data.zst`: compressed raw host `perf record` data when `zstd` is available.
+- `profiles/cpu/*.perf.report.txt`: function-level `perf report --stdio` output.
+- `profiles/cpu/*.perf.script.txt.zst`: compressed `perf script` output when `zstd` is available.
+- `profiles/cpu/*.flamegraph.svg`: generated flamegraph, or a placeholder SVG when flamegraph tooling is unavailable.
+- `profiles/cpu/*.metadata.json`: CPU profiling metadata for legacy exact-label profile runs.
+- `profiles/memory/*.resource.json`: before/after RSS, FD, task, and thread drift evidence.
+- `profiles/memory/*/heap/`: heap evidence or an `unsupported.json` file explaining why allocation stack capture was unavailable.
 - `external-h2load/*.txt`: raw h2load HTTP/2 and HTTP/3 output.
 - `external-oha/*.json`: raw oha fixed-QPS JSON output.
 - `external-wrk/*.txt`: raw wrk HTTP/1.1 output.
@@ -137,10 +153,10 @@ CI runs the `docker-performance` job as 20 parallel `ubuntu-latest` shards for e
 After the sharded jobs finish, CI runs a `Docker performance summary` job that downloads all `oxibelt-docker-performance-<profile>-*` artifacts from the same workflow run and writes an aggregate artifact named `oxibelt-docker-performance-<profile>-comparison`. That artifact contains:
 
 - `performance-comparison.md`: a run-summary-friendly comparison report.
-- `performance-comparison.json`: schema `11`, with aggregate rows, baseline selection metadata, sample quality, evidence quorum, per-shard distributions, separate `external_benchmarks` rows, and regression gate decisions.
+- `performance-comparison.json`: schema `12`, with aggregate rows, baseline selection metadata, sample quality, evidence quorum, per-shard distributions, separate `external_benchmarks` and `profiling` rows, and regression gate decisions.
 - `performance-delta.md` and `performance-delta.json`: baseline comparison reports when a previous successful run artifact is available.
 
-The comparison job appends `performance-comparison.md` to the GitHub Actions run summary and is the only benchmark pass/fail owner. It fails when no `results.json` files were collected, when primary `x86-64-v3` quorum is insufficient, when required primary rows are missing or malformed, or when schema `11` statistical gates report a material OxiBelt regression. Missing expected artifact paths remain visible under `artifact_discovery.missing_expected_paths`, but they are warning evidence when the required primary rows still satisfy quorum. External benchmark failures are emitted as warnings by default and only fail the summary job when `OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=fail`. Baseline selection falls back in order from the same branch's latest successful comparison, to the pull request base branch, to the repository default branch. The selected branch, run ID, SHA, artifact ID, artifact name, and baseline schema version are recorded in `baseline_context`.
+The comparison job appends `performance-comparison.md` to the GitHub Actions run summary and is the only benchmark pass/fail owner. It fails when no `results.json` files were collected, when primary `x86-64-v3` quorum is insufficient, when required primary rows are missing or malformed, or when schema `12` statistical gates report a material OxiBelt regression. Missing expected artifact paths remain visible under `artifact_discovery.missing_expected_paths`, but they are warning evidence when the required primary rows still satisfy quorum. External benchmark failures are emitted as warnings by default and only fail the summary job when `OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=fail`; diagnostic profiling failures follow the same warning-first behavior and only fail when `OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=fail`. Baseline selection falls back in order from the same branch's latest successful comparison, to the pull request base branch, to the repository default branch. The selected branch, run ID, SHA, artifact ID, artifact name, and baseline schema version are recorded in `baseline_context`.
 
 Evidence quorum applies to each required primary `x86-64-v3` gate row: H1 keep-alive OxiBelt/nginx, H2 OxiBelt/nginx, H3 OxiBelt/nginx, `static-16k-h1c` OxiBelt/nginx/Caddy, remote signer local/remote handshake rows, and WAF/CRS monitor/enforcing rows. With the default 20 shards and five iterations, each required row needs at least `80%` valid samples and at least `16/20` shards; the same `80%` shard rule applies when the iteration count changes. Rows below quorum are reported as `quorum.status = "fail"` with `insufficient_evidence` messages, while rows at or above quorum can still carry warnings about failed iterations or missing artifact paths.
 

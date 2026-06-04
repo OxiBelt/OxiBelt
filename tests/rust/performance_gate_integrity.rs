@@ -1823,6 +1823,61 @@ fn external_benchmark_layer_keeps_primary_results_separate() {
 }
 
 #[test]
+fn diagnostic_profile_layer_keeps_primary_results_separate() {
+    let script = performance_script_text();
+
+    for expected in [
+        "OXIBELT_PERF_DIAGNOSTIC_PROFILES   run separate profile-only replay rows, 1 or 0 (default: 0)",
+        "OXIBELT_PERF_DIAGNOSTIC_PROFILE_MODE",
+        "OXIBELT_PERF_DIAGNOSTIC_EVENT      perf event for diagnostic CPU replay (default: cpu-clock)",
+        "OXIBELT_PERF_DIAGNOSTIC_FREQUENCY  perf frequency for diagnostic CPU replay (default: 49)",
+        "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE  fail or warn for diagnostic profiling failures (default: warn)",
+        "OXIBELT_PERF_DIAGNOSTIC_COMPRESS   compress bulky perf artifacts with zstd, 1 or 0 (default: 1)",
+    ] {
+        assert!(
+            script.contains(expected),
+            "usage should document {expected:?}"
+        );
+    }
+    assert!(
+        script.contains("profile_results_jsonl=\"${work_dir}/profile-results.jsonl\"")
+            && script.contains("profile_results_json=\"${work_dir}/profile-results.json\"")
+            && script.contains("profile_cpu_dir=\"${profiles_dir}/cpu\"")
+            && script.contains("profile_memory_dir=\"${profiles_dir}/memory\""),
+        "diagnostic profile artifacts should live beside the primary performance artifacts"
+    );
+    assert!(
+        script.contains("append_profile_result()")
+            && script.contains("printf '%s\\n' \"${json}\" >>\"${profile_results_jsonl}\"")
+            && script
+                .contains("jq -s '.' \"${profile_results_jsonl}\" >\"${profile_results_json}\""),
+        "diagnostic profile rows should be finalized separately from primary results.json"
+    );
+    assert!(
+        script.contains("run_diagnostic_profile_replay \"${label}\" \"${duration}\" \"${protocol}\"")
+            && script.contains("run_diagnostic_profile_replay \"${label}\" \"${duration_seconds}\" \"${protocol}\" handshake")
+            && script.contains("run_diagnostic_profile_replay \"${label}\" \"${duration}\" \"${mode}\" stress"),
+        "load, handshake, and stress rows should get separate diagnostic replay hooks"
+    );
+    for expected in [
+        "profiles/cpu/",
+        "profiles/memory/",
+        ".perf.data",
+        ".perf.report.txt",
+        ".perf.script.txt",
+        ".flamegraph.svg",
+        ".resource.json",
+        "/heap",
+        "unsupported_heap_reason",
+    ] {
+        assert!(
+            script.contains(expected),
+            "diagnostic profile artifact contract should contain {expected:?}"
+        );
+    }
+}
+
+#[test]
 fn local_performance_probe_build_retries_base_pulls_and_build() {
     let script = performance_script_text();
 

@@ -71,6 +71,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         "## Accept multiplier comparison",
         "## AMD64 ISA comparison",
         "## External benchmark validation",
+        "## Diagnostic profiling",
         "## OxiBelt-only results",
         "## Skipped/missing comparator rows",
         "## Sample quorum",
@@ -107,6 +108,15 @@ fn write_external_results_array(dir: &Path, rows: Vec<Value>) {
         serde_json::to_string_pretty(&rows).expect("external rows should serialize"),
     )
     .expect("external results should be written");
+}
+
+fn write_profile_results_array(dir: &Path, rows: Vec<Value>) {
+    fs::create_dir_all(dir).expect("profile result directory should be created");
+    fs::write(
+        dir.join("profile-results.json"),
+        serde_json::to_string_pretty(&rows).expect("profile rows should serialize"),
+    )
+    .expect("profile results should be written");
 }
 
 fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> Value {
@@ -743,7 +753,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 11);
+    assert_eq!(report["schema_version"], 12);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -918,7 +928,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 }
 
 #[test]
-fn schema_11_records_quorum_status_iteration_quality_and_distributions() {
+fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
     let temp_dir = TempDir::new();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -937,7 +947,7 @@ fn schema_11_records_quorum_status_iteration_quality_and_distributions() {
         ],
     );
 
-    assert_eq!(report["schema_version"], 11);
+    assert_eq!(report["schema_version"], 12);
     assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
     assert_eq!(report["sample_quality"]["ok_iterations"], 16);
     assert_eq!(report["sample_quality"]["failed_iterations"], 0);
@@ -1040,6 +1050,100 @@ fn external_benchmarks_are_reported_without_affecting_primary_gates() {
         .expect("markdown report should be readable");
     assert!(markdown.contains("## External benchmark validation"));
     assert!(markdown.contains("`external-oha/nginx-h2.json`"));
+}
+
+#[test]
+fn diagnostic_profiles_are_reported_without_affecting_primary_gates() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 100.0, 4.0);
+    write_profile_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![json!({
+            "schema_version": 1,
+            "label": "nginx-h2",
+            "comparator": "nginx",
+            "scenario": "nginx-h2",
+            "protocol": "h2",
+            "profile_mode": "cpu-memory",
+            "status": "fail",
+            "amd64_target_cpu": "x86-64-v3",
+            "reason": "perf record produced no data",
+            "cpu": {
+                "enabled": true,
+                "artifacts": {
+                    "perf_data": "profiles/cpu/nginx-h2.perf.data.zst",
+                    "perf_report": "profiles/cpu/nginx-h2.perf.report.txt",
+                    "perf_script": "profiles/cpu/nginx-h2.perf.script.txt.zst",
+                    "flamegraph": "profiles/cpu/nginx-h2.flamegraph.svg"
+                }
+            },
+            "memory": {
+                "enabled": true,
+                "artifacts": {
+                    "resource": "profiles/memory/nginx-h2.resource.json",
+                    "heap_dir": "profiles/memory/nginx-h2/heap"
+                }
+            }
+        })],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--profile".to_owned(),
+            "smoke".to_owned(),
+            "--expected-runs".to_owned(),
+            "1".to_owned(),
+            "--expected-shards".to_owned(),
+            "20".to_owned(),
+        ],
+    );
+
+    assert_eq!(report["artifact_discovery"]["results_files"], 64);
+    assert_eq!(report["artifact_discovery"]["profile_results_files"], 1);
+    assert_eq!(report["summary"]["diagnostic_profile_row_count"], 1);
+    assert_eq!(report["quorum"]["status"], "pass");
+    assert_eq!(report["regression_gates"]["status"], "pass");
+
+    let profile_rows = report["profiling"]
+        .as_array()
+        .expect("profile rows should be present");
+    assert_eq!(profile_rows.len(), 1);
+    let row = &profile_rows[0];
+    assert_eq!(row["comparator"], "nginx");
+    assert_eq!(row["scenario"], "nginx-h2");
+    assert_eq!(row["protocol"], "h2");
+    assert_eq!(row["profile_mode"], "cpu-memory");
+    assert_eq!(row["fail_count"], 1);
+    assert_eq!(row["cpu_enabled_count"], 1);
+    assert_eq!(row["memory_enabled_count"], 1);
+
+    let aggregate_sources = report["aggregates"]
+        .as_array()
+        .expect("aggregate rows should be present")
+        .iter()
+        .flat_map(|aggregate| {
+            aggregate["source_files"]
+                .as_array()
+                .expect("source files should be present")
+                .iter()
+                .map(|source| source.as_str().expect("source should be text"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        aggregate_sources
+            .iter()
+            .all(|source| !source.ends_with("profile-results.json")),
+        "diagnostic profile rows must not be mixed into primary aggregates"
+    );
+
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains("## Diagnostic profiling"));
+    assert!(markdown.contains("`profiles/cpu/nginx-h2.perf.report.txt`"));
 }
 
 #[test]

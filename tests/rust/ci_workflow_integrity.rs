@@ -830,10 +830,11 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should keep exact profiling labels disabled outside manual dispatch"
     );
     assert!(
-        workflow.contains("name: Install Linux perf for performance profiling")
-            && workflow.contains("inputs.performance_profile_label != 'none'")
+        workflow.contains("name: Install Linux perf and heap tooling for performance profiling")
+            && workflow
+                .contains("linux-tools-common linux-tools-generic zstd flamegraph heaptrack")
             && workflow.contains("sudo sysctl kernel.perf_event_paranoid=-1"),
-        "manual profiling should prepare host perf only for the opt-in diagnostic path"
+        "performance profiling should prepare host perf, compression, flamegraph, and heap tooling"
     );
     assert!(
         performance_job.contains("selected_profile_label=\"${PERFORMANCE_PROFILE_LABEL}\"")
@@ -843,6 +844,17 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
             && performance_job.contains(r#"&& "${target_cpu}" == "x86-64-v3""#)
             && performance_job.contains(r#"&& "${iteration}" == "1""#),
         "profiling env should be scoped to one exact first x86-64-v3 smoke sample"
+    );
+    assert!(
+        performance_job.contains("diagnostic_profile_env=()")
+            && performance_job.contains(r#"if [[ "${PERFORMANCE_PROFILE}" == "smoke" ]]; then"#)
+            && performance_job.contains("OXIBELT_PERF_DIAGNOSTIC_PROFILES=1")
+            && performance_job.contains("OXIBELT_PERF_DIAGNOSTIC_PROFILE_MODE=cpu-memory")
+            && performance_job.contains("OXIBELT_PERF_DIAGNOSTIC_FREQUENCY=49")
+            && performance_job.contains(
+                "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\""
+            ),
+        "smoke performance runs should enable diagnostic CPU and memory profiling artifacts separately from primary rows"
     );
     assert!(
         workflow.contains("timeout-minutes: 360"),
@@ -978,8 +990,11 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
             && performance_job.contains(
                 "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=\"${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}\""
             )
+            && performance_job.contains(
+                "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\""
+            )
             && performance_job.contains("OXIBELT_NGINX_H3_MODE=required"),
-        "docker-performance should compare target-specific images, reuse probe and external images, and require nginx HTTP/3 in CI"
+        "docker-performance should compare target-specific images, reuse probe and external images, pass diagnostic gate mode, and require nginx HTTP/3 in CI"
     );
     assert!(
         performance_job.contains("name: Download performance probe image artifact")
@@ -1145,6 +1160,16 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
             && workflow.contains("::error title=External benchmark validation gate::")
             && workflow.contains("if [[ \"${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}\" == \"fail\" ]]; then"),
         "summary job should warn on external benchmark failures by default and fail only in fail mode"
+    );
+    assert!(
+        workflow.contains(
+            "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars.OXIBELT_PERF_DIAGNOSTIC_GATE_MODE || 'warn' }}"
+        ) && workflow.contains(
+            "profile_failure_count=\"$(jq -r '[.profiling[]? | (.fail_count // 0)] | add // 0'"
+        ) && workflow.contains("::warning title=Docker performance diagnostic profiling::")
+            && workflow.contains("::error title=Docker performance diagnostic profiling gate::")
+            && workflow.contains("if [[ \"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\" == \"fail\" ]]; then"),
+        "summary job should warn on diagnostic profiling failures by default and fail only in fail mode"
     );
     assert!(
         workflow.contains("missing_expected_count=\"$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length'")
