@@ -1904,9 +1904,8 @@ jobs:
 
           profile_failure_count="$(jq -r '[.profiling[]? | (.fail_count // 0)] | add // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if (( profile_failure_count > 0 )); then
-            jq -r '.profiling[]? | select((.fail_count // 0) > 0) | "::warning title=Docker performance diagnostic profiling::" + .comparator + " " + .scenario + "/" + .protocol + " " + .profile_mode + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
-              "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
-            echo "Docker performance diagnostic profiling reported ${profile_failure_count} failed sample(s)" >&2
+            echo "::warning title=Docker performance diagnostic profiling::Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md"
+            echo "Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md" >&2
             if [[ "${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}" == "fail" ]]; then
               jq -r '.profiling[]? | select((.fail_count // 0) > 0) | "::error title=Docker performance diagnostic profiling gate::" + .comparator + " " + .scenario + "/" + .protocol + " " + .profile_mode + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
                 "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"

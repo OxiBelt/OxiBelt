@@ -1080,33 +1080,58 @@ fn diagnostic_profiles_are_reported_without_affecting_primary_gates() {
     write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 100.0, 4.0);
     write_profile_results_array(
         &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
-        vec![json!({
-            "schema_version": 1,
-            "label": "nginx-h2",
-            "comparator": "nginx",
-            "scenario": "nginx-h2",
-            "protocol": "h2",
-            "profile_mode": "cpu-memory",
-            "status": "fail",
-            "amd64_target_cpu": "x86-64-v3",
-            "reason": "perf record produced no data",
-            "cpu": {
-                "enabled": true,
-                "artifacts": {
-                    "perf_data": "profiles/cpu/nginx-h2.perf.data.zst",
-                    "perf_report": "profiles/cpu/nginx-h2.perf.report.txt",
-                    "perf_script": "profiles/cpu/nginx-h2.perf.script.txt.zst",
-                    "flamegraph": "profiles/cpu/nginx-h2.flamegraph.svg"
+        vec![
+            json!({
+                "schema_version": 1,
+                "label": "nginx-h2",
+                "comparator": "nginx",
+                "scenario": "nginx-h2",
+                "protocol": "h2",
+                "profile_mode": "cpu-memory",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "reason": "failed",
+                "cpu": {
+                    "enabled": true,
+                    "artifacts": {
+                        "perf_data": "profiles/cpu/nginx-h2.perf.data.zst",
+                        "perf_report": "profiles/cpu/nginx-h2.perf.report.txt",
+                        "perf_script": "profiles/cpu/nginx-h2.perf.script.txt.zst",
+                        "flamegraph": "profiles/cpu/nginx-h2.flamegraph.svg"
+                    }
+                },
+                "memory": {
+                    "enabled": true,
+                    "artifacts": {
+                        "resource": "profiles/memory/nginx-h2.resource.json",
+                        "heap_dir": "profiles/memory/nginx-h2/heap"
+                    }
                 }
-            },
-            "memory": {
-                "enabled": true,
-                "artifacts": {
-                    "resource": "profiles/memory/nginx-h2.resource.json",
-                    "heap_dir": "profiles/memory/nginx-h2/heap"
+            }),
+            json!({
+                "schema_version": 1,
+                "label": "nginx-h3",
+                "comparator": "nginx",
+                "scenario": "nginx-h3",
+                "protocol": "h3",
+                "profile_mode": "cpu-memory",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "reason": "perf record failed with status 255",
+                "cpu": {
+                    "enabled": true,
+                    "artifacts": {
+                        "perf_report": "profiles/cpu/nginx-h3.perf.report.txt"
+                    }
+                },
+                "memory": {
+                    "enabled": true,
+                    "artifacts": {
+                        "resource": "profiles/memory/nginx-h3.resource.json"
+                    }
                 }
-            }
-        })],
+            }),
+        ],
     );
 
     let report = run_aggregate_with_args(
@@ -1124,22 +1149,44 @@ fn diagnostic_profiles_are_reported_without_affecting_primary_gates() {
 
     assert_eq!(report["artifact_discovery"]["results_files"], 64);
     assert_eq!(report["artifact_discovery"]["profile_results_files"], 1);
-    assert_eq!(report["summary"]["diagnostic_profile_row_count"], 1);
+    assert_eq!(report["summary"]["diagnostic_profile_row_count"], 2);
     assert_eq!(report["quorum"]["status"], "pass");
     assert_eq!(report["regression_gates"]["status"], "pass");
 
     let profile_rows = report["profiling"]
         .as_array()
         .expect("profile rows should be present");
-    assert_eq!(profile_rows.len(), 1);
-    let row = &profile_rows[0];
-    assert_eq!(row["comparator"], "nginx");
-    assert_eq!(row["scenario"], "nginx-h2");
-    assert_eq!(row["protocol"], "h2");
-    assert_eq!(row["profile_mode"], "cpu-memory");
-    assert_eq!(row["fail_count"], 1);
-    assert_eq!(row["cpu_enabled_count"], 1);
-    assert_eq!(row["memory_enabled_count"], 1);
+    assert_eq!(profile_rows.len(), 2);
+    let h2_row = profile_rows
+        .iter()
+        .find(|row| row["scenario"] == "nginx-h2")
+        .expect("h2 profile row should be present");
+    assert_eq!(h2_row["comparator"], "nginx");
+    assert_eq!(h2_row["protocol"], "h2");
+    assert_eq!(h2_row["profile_mode"], "cpu-memory");
+    assert_eq!(h2_row["fail_count"], 1);
+    assert_eq!(h2_row["cpu_enabled_count"], 1);
+    assert_eq!(h2_row["memory_enabled_count"], 1);
+    assert!(
+        h2_row["reasons"]
+            .as_array()
+            .expect("reasons should be present")
+            .iter()
+            .any(|reason| reason == "failed"),
+        "raw diagnostic profile JSON should keep the original generic reason"
+    );
+    assert!(
+        profile_rows
+            .iter()
+            .flat_map(|row| {
+                row["reasons"]
+                    .as_array()
+                    .expect("reasons should be present")
+                    .iter()
+            })
+            .any(|reason| reason == "perf record failed with status 255"),
+        "raw diagnostic profile JSON should keep the original perf status reason"
+    );
 
     let aggregate_sources = report["aggregates"]
         .as_array()
@@ -1163,7 +1210,14 @@ fn diagnostic_profiles_are_reported_without_affecting_primary_gates() {
     let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
         .expect("markdown report should be readable");
     assert!(markdown.contains("## Diagnostic profiling"));
+    assert!(markdown.contains("| Target CPU | Comparator | Scenario | Protocol | Mode | Samples | Passed | Failed | Skipped | CPU samples | Memory samples | Artifacts | Notes |"));
     assert!(markdown.contains("`profiles/cpu/nginx-h2.perf.report.txt`"));
+    assert!(markdown.contains("`profiling evidence unavailable; see artifacts`"));
+    assert!(markdown.contains("`perf record exited with status 255; see artifacts`"));
+    assert!(
+        !markdown.contains("`failed`"),
+        "diagnostic profiling Markdown should not surface generic failure reasons as-is"
+    );
 }
 
 #[test]

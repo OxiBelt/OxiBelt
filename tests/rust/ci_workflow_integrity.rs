@@ -1314,10 +1314,11 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
             "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars.OXIBELT_PERF_DIAGNOSTIC_GATE_MODE || 'warn' }}"
         ) && workflow.contains(
             "profile_failure_count=\"$(jq -r '[.profiling[]? | (.fail_count // 0)] | add // 0'"
-        ) && workflow.contains("::warning title=Docker performance diagnostic profiling::")
+        ) && workflow.contains("::warning title=Docker performance diagnostic profiling::Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md")
             && workflow.contains("::error title=Docker performance diagnostic profiling gate::")
-            && workflow.contains("if [[ \"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\" == \"fail\" ]]; then"),
-        "summary job should warn on diagnostic profiling failures by default and fail only in fail mode"
+            && workflow.contains("if [[ \"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\" == \"fail\" ]]; then")
+            && !workflow.contains(".profiling[]? | select((.fail_count // 0) > 0) | \"::warning title=Docker performance diagnostic profiling::\" + .comparator"),
+        "summary job should emit one diagnostic profiling warning by default and fail only in fail mode"
     );
     assert!(
         workflow.contains("missing_expected_count=\"$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length'")

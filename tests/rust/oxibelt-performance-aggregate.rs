@@ -5655,7 +5655,7 @@ fn write_diagnostic_profile_table(markdown: &mut String, rows: &[DiagnosticProfi
 
     writeln!(
         markdown,
-        "| Target CPU | Comparator | Scenario | Protocol | Mode | Samples | Passed | Failed | Skipped | CPU samples | Memory samples | Artifacts | Reasons |"
+        "| Target CPU | Comparator | Scenario | Protocol | Mode | Samples | Passed | Failed | Skipped | CPU samples | Memory samples | Artifacts | Notes |"
     )
     .unwrap();
     writeln!(
@@ -5664,6 +5664,7 @@ fn write_diagnostic_profile_table(markdown: &mut String, rows: &[DiagnosticProfi
     )
     .unwrap();
     for row in rows {
+        let notes = diagnostic_profile_notes(row);
         writeln!(
             markdown,
             "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |",
@@ -5679,11 +5680,39 @@ fn write_diagnostic_profile_table(markdown: &mut String, rows: &[DiagnosticProfi
             row.cpu_enabled_count,
             row.memory_enabled_count,
             format_list_cell(&row.artifact_files),
-            format_list_cell(&row.reasons),
+            format_list_cell(&notes),
         )
         .unwrap();
     }
     writeln!(markdown).unwrap();
+}
+
+fn diagnostic_profile_notes(row: &DiagnosticProfileStats) -> Vec<String> {
+    let mut notes = row
+        .reasons
+        .iter()
+        .map(|reason| normalize_diagnostic_profile_reason(reason))
+        .collect::<BTreeSet<_>>();
+    if notes.is_empty() && row.fail_count > 0 {
+        notes.insert("profiling evidence unavailable; see artifacts".to_owned());
+    }
+    notes.into_iter().collect()
+}
+
+fn normalize_diagnostic_profile_reason(reason: &str) -> String {
+    let reason = reason.trim();
+    let normalized = reason.to_ascii_lowercase();
+    match normalized.as_str() {
+        "failed" | "failure" | "unknown failure" => {
+            "profiling evidence unavailable; see artifacts".to_owned()
+        }
+        "perf report failed" => "perf report unavailable; see artifacts".to_owned(),
+        "perf script failed" => "perf script unavailable; see artifacts".to_owned(),
+        _ => reason
+            .strip_prefix("perf record failed with status ")
+            .map(|status| format!("perf record exited with status {status}; see artifacts"))
+            .unwrap_or_else(|| reason.to_owned()),
+    }
 }
 
 fn write_oxibelt_only_table(markdown: &mut String, rows: &[AggregateStats]) {
