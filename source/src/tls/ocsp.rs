@@ -28,7 +28,7 @@ use crate::metrics::Metrics;
 
 mod cert_id;
 mod status;
-use cert_id::build_sha1_cert_id;
+use cert_id::{build_sha1_cert_id, cert_ids_match};
 pub use status::OcspRuntimeStatus;
 use status::{OcspStatusState, system_time_to_unix};
 
@@ -436,7 +436,7 @@ fn verify_ocsp_response(
     bail!("ocsp_response_count");
   }
   let single = &basic.tbs_response_data.responses[0];
-  if single.cert_id != context.expected_cert_id {
+  if !cert_ids_match(&single.cert_id, &context.expected_cert_id) {
     bail!("ocsp_cert_id_mismatch");
   }
   if !matches!(single.cert_status, CertStatus::Good(_)) {
