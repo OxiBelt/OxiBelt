@@ -906,6 +906,13 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         .and_then(|(_, rest)| rest.split_once("\n  docker-performance-summary:"))
         .map(|(job, _)| job)
         .expect("workflow should contain docker-performance before its summary job");
+    let summary_input_prepare_step = performance_job
+        .split_once("      - name: Prepare Docker performance summary input artifact")
+        .and_then(|(_, rest)| {
+            rest.split_once("\n      - name: Upload Docker performance summary input artifact")
+        })
+        .map(|(step, _)| step)
+        .expect("docker-performance should prepare summary input before upload");
 
     assert!(
         workflow.contains("performance_iterations:"),
@@ -1178,10 +1185,12 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should upload one grouped raw artifact per serving type and shard"
     );
     assert!(
-        workflow.contains("name: Prepare Docker performance summary input artifact")
-            && workflow.contains("tests/scripts/copy-performance-summary-input-artifacts.sh")
-            && workflow.contains("raw_artifact_name=\"oxibelt-docker-performance-${PERFORMANCE_PROFILE}-${PERFORMANCE_SERVING_TYPE}-shard-${PERFORMANCE_SHARD}\"")
-            && workflow.contains("\"${RUNNER_TEMP}/oxibelt-performance-summary-input/${raw_artifact_name}\""),
+        summary_input_prepare_step.contains("PERFORMANCE_SHARD: ${{ matrix.shard }}")
+            && summary_input_prepare_step
+                .contains("tests/scripts/copy-performance-summary-input-artifacts.sh")
+            && summary_input_prepare_step.contains("raw_artifact_name=\"oxibelt-docker-performance-${PERFORMANCE_PROFILE}-${PERFORMANCE_SERVING_TYPE}-shard-${PERFORMANCE_SHARD}\"")
+            && summary_input_prepare_step
+                .contains("\"${RUNNER_TEMP}/oxibelt-performance-summary-input/${raw_artifact_name}\""),
         "docker-performance should prepare a slim summary input tree with the raw artifact directory shape"
     );
     assert!(

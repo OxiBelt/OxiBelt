@@ -1643,6 +1643,8 @@ jobs:
 
       - name: Prepare Docker performance summary input artifact
         if: always()
+        env:
+          PERFORMANCE_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           raw_artifact_name="oxibelt-docker-performance-${PERFORMANCE_PROFILE}-${PERFORMANCE_SERVING_TYPE}-shard-${PERFORMANCE_SHARD}"
