@@ -394,6 +394,26 @@ fn write_required_quorum_evidence(
     h2_nginx_rps: f64,
     oxibelt_p99: f64,
 ) {
+    write_required_quorum_evidence_with_h2_p99(
+        input_dir,
+        shards,
+        runs,
+        h2_oxibelt_rps,
+        h2_nginx_rps,
+        oxibelt_p99,
+        4.0,
+    );
+}
+
+fn write_required_quorum_evidence_with_h2_p99(
+    input_dir: &Path,
+    shards: usize,
+    runs: usize,
+    h2_oxibelt_rps: f64,
+    h2_nginx_rps: f64,
+    oxibelt_p99: f64,
+    nginx_p99: f64,
+) {
     for shard in 1..=shards {
         for run in 1..=runs {
             let reverse_dir = input_dir.join(format!(
@@ -405,7 +425,7 @@ fn write_required_quorum_evidence(
                     load_row("oxibelt-h1-keepalive", "h1", 100.0, 1.0, 4.0),
                     load_row("nginx-h1-keepalive", "h1", 100.0, 1.0, 4.0),
                     load_row("oxibelt-h2", "h2", h2_oxibelt_rps, 1.0, oxibelt_p99),
-                    load_row("nginx-h2", "h2", h2_nginx_rps, 1.0, 4.0),
+                    load_row("nginx-h2", "h2", h2_nginx_rps, 1.0, nginx_p99),
                     load_row("oxibelt-h3", "h3", 100.0, 1.0, 4.0),
                     load_row("nginx-h3", "h3", 100.0, 1.0, 4.0),
                 ],
@@ -1257,6 +1277,88 @@ fn schema_10_statistical_band_blocks_material_oxibelt_regression() {
             .expect("violation message should be a string")
             .contains("material OxiBelt regression")
     );
+}
+
+#[test]
+fn schema_10_statistical_band_advises_shared_comparator_shift_ratio_miss() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+    write_required_quorum_evidence_with_h2_p99(
+        &input_dir, 16, 1, 12888.1875, 17886.5, 2.487, 2.072,
+    );
+    fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 10,
+            "aggregates": [
+                aggregate_row_with_distribution("oxibelt", "h2", "reverse-proxy", 13924.875, 2.320, 16),
+                aggregate_row_with_distribution("nginx", "h2", "reverse-proxy", 20561.6875, 1.918, 16)
+            ]
+        }))
+        .expect("baseline should serialize"),
+    )
+    .expect("baseline should be written");
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    let advisory = find_regression_advisory(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(advisory["evaluation_mode"], "statistical_band");
+    assert_eq!(advisory["stat_band"]["status"], "regression");
+    let message = advisory["message"]
+        .as_str()
+        .expect("advisory message should be a string");
+    assert!(message.contains("shared nginx shift"));
+    assert!(message.contains("comparator-driven threshold miss is advisory"));
+}
+
+#[test]
+fn schema_10_statistical_band_blocks_when_ratio_regresses_despite_comparator_shift() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+    write_required_quorum_evidence_with_h2_p99(&input_dir, 16, 1, 11000.0, 17886.5, 2.750, 2.072);
+    fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 10,
+            "aggregates": [
+                aggregate_row_with_distribution("oxibelt", "h2", "reverse-proxy", 13924.875, 2.320, 16),
+                aggregate_row_with_distribution("nginx", "h2", "reverse-proxy", 20561.6875, 1.918, 16)
+            ]
+        }))
+        .expect("baseline should serialize"),
+    )
+    .expect("baseline should be written");
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    let violation = find_regression_violation(&report, "h2_min_nginx_ratio", "h2");
+    assert_eq!(violation["evaluation_mode"], "statistical_band");
+    assert_eq!(violation["stat_band"]["status"], "regression");
+    let message = violation["message"]
+        .as_str()
+        .expect("violation message should be a string");
+    assert!(message.contains("material OxiBelt regression"));
+    assert!(!message.contains("shared nginx shift"));
 }
 
 #[test]

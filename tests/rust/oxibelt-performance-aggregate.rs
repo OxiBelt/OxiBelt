@@ -3545,6 +3545,7 @@ fn collect_static_regression_gate(
             Comparator::Caddy,
             scenario,
             threshold,
+            false,
         );
         push_threshold_regression_gate_metric(
             findings,
@@ -3641,6 +3642,8 @@ fn collect_comparator_ratio_regression_gate(
 
     let ratio = oxibelt_rps / comparator_rps;
     if ratio < gate.threshold {
+        let allow_statistical_comparator_shift =
+            gate.group == ScenarioGroup::ReverseProxy && gate.comparator == Comparator::Nginx;
         let decision = if gate.allow_baseline_advisory {
             classify_throughput_ratio_threshold_miss(
                 aggregates,
@@ -3649,6 +3652,7 @@ fn collect_comparator_ratio_regression_gate(
                 gate.comparator,
                 gate.scenario,
                 gate.threshold,
+                allow_statistical_comparator_shift,
             )
         } else if let Some(policy) = gate.baseline_stable_advisory_policy {
             classify_baseline_stable_ratio_threshold_miss(
@@ -3662,6 +3666,7 @@ fn collect_comparator_ratio_regression_gate(
                     policy,
                     current_ratio: ratio,
                 },
+                allow_statistical_comparator_shift,
             )
         } else {
             GateDisposition::threshold_blocking(
@@ -3768,6 +3773,7 @@ fn collect_remote_signer_handshake_regression_gate(
             Comparator::Oxibelt,
             local_scenario,
             threshold,
+            false,
         );
         push_threshold_regression_gate_metric(
             findings,
@@ -4081,9 +4087,16 @@ fn classify_throughput_ratio_threshold_miss(
     comparator: Comparator,
     comparator_scenario: &str,
     threshold: f64,
+    allow_statistical_comparator_shift: bool,
 ) -> GateDisposition {
-    if let Some(decision) = classify_statistical_oxibelt_row(aggregates, baseline, oxibelt_scenario)
-    {
+    if let Some(decision) = classify_statistical_ratio_threshold_miss(
+        aggregates,
+        baseline,
+        oxibelt_scenario,
+        comparator,
+        comparator_scenario,
+        allow_statistical_comparator_shift,
+    ) {
         return decision;
     }
 
@@ -4211,10 +4224,16 @@ fn classify_baseline_stable_ratio_threshold_miss(
     aggregates: &PrimaryAggregateMap,
     baseline: Option<&BaselineGateContext>,
     miss: BaselineStableRatioMiss<'_>,
+    allow_statistical_comparator_shift: bool,
 ) -> GateDisposition {
-    if let Some(decision) =
-        classify_statistical_oxibelt_row(aggregates, baseline, miss.oxibelt_scenario)
-    {
+    if let Some(decision) = classify_statistical_ratio_threshold_miss(
+        aggregates,
+        baseline,
+        miss.oxibelt_scenario,
+        miss.comparator,
+        miss.comparator_scenario,
+        allow_statistical_comparator_shift,
+    ) {
         return decision;
     }
 
@@ -4454,6 +4473,24 @@ fn classify_statistical_oxibelt_row(
     baseline: Option<&BaselineGateContext>,
     scenario: &str,
 ) -> Option<GateDisposition> {
+    classify_statistical_ratio_threshold_miss(
+        aggregates,
+        baseline,
+        scenario,
+        Comparator::Oxibelt,
+        scenario,
+        false,
+    )
+}
+
+fn classify_statistical_ratio_threshold_miss(
+    aggregates: &PrimaryAggregateMap,
+    baseline: Option<&BaselineGateContext>,
+    scenario: &str,
+    comparator: Comparator,
+    comparator_scenario: &str,
+    allow_statistical_comparator_shift: bool,
+) -> Option<GateDisposition> {
     let baseline = baseline?;
     let current = aggregates.get(&(Comparator::Oxibelt, scenario.to_owned()))?;
     let previous = baseline
@@ -4464,6 +4501,30 @@ fn classify_statistical_oxibelt_row(
     let reason = if stable {
         format!(
             "statistical baseline band from `{}` keeps OxiBelt stable: RPS median {}, RPS p10 {}, p99 median {}, p99 p90 {}; comparator-driven threshold miss is advisory",
+            baseline.report,
+            format_percent(stat_band.rps_median_delta_percent),
+            format_percent(stat_band.rps_p10_delta_percent),
+            format_percent(stat_band.p99_median_delta_percent),
+            format_percent(stat_band.p99_p90_delta_percent),
+        )
+    } else if allow_statistical_comparator_shift {
+        if let Some(reason) = statistical_shared_comparator_shift_reason(
+            aggregates,
+            baseline,
+            scenario,
+            comparator,
+            comparator_scenario,
+            &stat_band,
+        ) {
+            return Some(GateDisposition::statistical(
+                false,
+                reason,
+                stat_band,
+                Some(baseline.report.clone()),
+            ));
+        }
+        format!(
+            "statistical baseline band from `{}` found material OxiBelt regression: RPS median {}, RPS p10 {}, p99 median {}, p99 p90 {}",
             baseline.report,
             format_percent(stat_band.rps_median_delta_percent),
             format_percent(stat_band.rps_p10_delta_percent),
@@ -4485,6 +4546,78 @@ fn classify_statistical_oxibelt_row(
         reason,
         stat_band,
         Some(baseline.report.clone()),
+    ))
+}
+
+fn statistical_shared_comparator_shift_reason(
+    aggregates: &PrimaryAggregateMap,
+    baseline: &BaselineGateContext,
+    oxibelt_scenario: &str,
+    comparator: Comparator,
+    comparator_scenario: &str,
+    stat_band: &StatBandReport,
+) -> Option<String> {
+    let comparator_rps_delta = baseline_metric_delta_percent(
+        aggregates,
+        Some(baseline),
+        comparator,
+        comparator.as_str(),
+        comparator_scenario,
+        GateMetric::Rps,
+    )
+    .ok()?;
+    let comparator_p99_delta = baseline_metric_delta_percent(
+        aggregates,
+        Some(baseline),
+        comparator,
+        comparator.as_str(),
+        comparator_scenario,
+        GateMetric::P99,
+    )
+    .ok()?;
+    let throughput_ratio_delta = baseline_metric_ratio_delta_percent(
+        aggregates,
+        Some(baseline),
+        oxibelt_scenario,
+        comparator,
+        comparator_scenario,
+        GateMetric::Rps,
+    )
+    .ok()?;
+    let p99_ratio_delta = baseline_metric_ratio_delta_percent(
+        aggregates,
+        Some(baseline),
+        oxibelt_scenario,
+        comparator,
+        comparator_scenario,
+        GateMetric::P99,
+    )
+    .ok()?;
+
+    let comparator_rps_fell = comparator_rps_delta <= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT;
+    let rps_ratio_is_stable =
+        throughput_ratio_delta.ratio_delta_percent >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT;
+    let p99_ratio_is_stable =
+        p99_ratio_delta.ratio_delta_percent <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT;
+
+    if !comparator_rps_fell || !rps_ratio_is_stable || !p99_ratio_is_stable {
+        return None;
+    }
+
+    let comparator_name = comparator.as_str();
+    Some(format!(
+        "statistical baseline band from `{}` saw shared {comparator_name} shift: RPS median {}, RPS p10 {}, p99 median {}, p99 p90 {}; {comparator_name} RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%, RPS ratio {:.4} -> {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%); comparator-driven threshold miss is advisory",
+        baseline.report,
+        format_percent(stat_band.rps_median_delta_percent),
+        format_percent(stat_band.rps_p10_delta_percent),
+        format_percent(stat_band.p99_median_delta_percent),
+        format_percent(stat_band.p99_p90_delta_percent),
+        throughput_ratio_delta.before_ratio,
+        throughput_ratio_delta.after_ratio,
+        throughput_ratio_delta.ratio_delta_percent,
+        p99_ratio_delta.before_ratio,
+        p99_ratio_delta.after_ratio,
+        p99_ratio_delta.ratio_delta_percent,
     ))
 }
 
