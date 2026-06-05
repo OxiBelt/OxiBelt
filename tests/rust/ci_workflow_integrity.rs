@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Clone, Debug)]
 struct Job {
@@ -37,6 +38,15 @@ fn workflow_text() -> String {
         .expect("check-oxibelt workflow should be readable")
 }
 
+fn write_test_file(path: &Path, contents: &str) {
+    fs::create_dir_all(
+        path.parent()
+            .expect("test file should have a parent directory"),
+    )
+    .expect("test file parent should be creatable");
+    fs::write(path, contents).expect("test file should be writable");
+}
+
 fn dockerfile_text() -> String {
     fs::read_to_string(repo_root().join("source/ops/Dockerfile.alpine"))
         .expect("Alpine Dockerfile should be readable")
@@ -64,6 +74,15 @@ fn performance_probe_build_script_text() -> String {
 fn external_benchmark_build_script_text() -> String {
     fs::read_to_string(repo_root().join("tests/scripts/build-external-benchmark-image-artifact.sh"))
         .expect("external benchmark build script should be readable")
+}
+
+fn performance_summary_input_script_path() -> PathBuf {
+    repo_root().join("tests/scripts/copy-performance-summary-input-artifacts.sh")
+}
+
+fn performance_summary_input_script_text() -> String {
+    fs::read_to_string(performance_summary_input_script_path())
+        .expect("performance summary input copy script should be readable")
 }
 
 fn external_benchmark_dockerfile_text() -> String {
@@ -794,6 +813,91 @@ fn docker_external_benchmark_image_job_builds_reusable_artifact() {
 }
 
 #[test]
+fn performance_summary_input_helper_copies_only_aggregate_inputs() {
+    let script = performance_summary_input_script_text();
+    for expected in [
+        "results.json",
+        "external-results.json",
+        "profile-results.json",
+        "iteration-status.json",
+        "unsupported-cpu.json",
+    ] {
+        assert!(
+            script.contains(expected),
+            "summary input helper should allow-list {expected}"
+        );
+    }
+
+    let temp_dir = tempfile::Builder::new()
+        .prefix("oxibelt-summary-input-")
+        .tempdir()
+        .expect("temporary directory should be creatable");
+    let source_dir = temp_dir.path().join("source");
+    let destination_dir = temp_dir.path().join("destination");
+    let run_dir = source_dir.join("x86-64-v3/run-1");
+
+    for file_name in [
+        "results.json",
+        "external-results.json",
+        "profile-results.json",
+        "iteration-status.json",
+    ] {
+        write_test_file(&run_dir.join(file_name), "[]\n");
+    }
+    write_test_file(&source_dir.join("unsupported-cpu.json"), "{}\n");
+    write_test_file(&run_dir.join("results.jsonl"), "{}\n");
+    write_test_file(
+        &run_dir.join("profiles/cpu/nginx-h2.perf.data.zst"),
+        "raw perf data\n",
+    );
+    write_test_file(
+        &run_dir.join("profiles/memory/nginx-h2.resource.json"),
+        "{}\n",
+    );
+    write_test_file(&run_dir.join("external-h2load/nginx-h2.txt"), "h2load\n");
+    write_test_file(&run_dir.join("logs/oxibelt.log"), "log\n");
+    write_test_file(&run_dir.join("configs/oxibelt.toml"), "config\n");
+
+    let output = Command::new("bash")
+        .arg(performance_summary_input_script_path())
+        .arg(&source_dir)
+        .arg(&destination_dir)
+        .output()
+        .expect("summary input copy helper should execute");
+    assert!(
+        output.status.success(),
+        "summary input copy helper should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for expected in [
+        "x86-64-v3/run-1/results.json",
+        "x86-64-v3/run-1/external-results.json",
+        "x86-64-v3/run-1/profile-results.json",
+        "x86-64-v3/run-1/iteration-status.json",
+        "unsupported-cpu.json",
+    ] {
+        assert!(
+            destination_dir.join(expected).exists(),
+            "summary helper should copy {expected}"
+        );
+    }
+    for raw_artifact in [
+        "x86-64-v3/run-1/results.jsonl",
+        "x86-64-v3/run-1/profiles/cpu/nginx-h2.perf.data.zst",
+        "x86-64-v3/run-1/profiles/memory/nginx-h2.resource.json",
+        "x86-64-v3/run-1/external-h2load/nginx-h2.txt",
+        "x86-64-v3/run-1/logs/oxibelt.log",
+        "x86-64-v3/run-1/configs/oxibelt.toml",
+    ] {
+        assert!(
+            !destination_dir.join(raw_artifact).exists(),
+            "summary helper should not copy raw artifact {raw_artifact}"
+        );
+    }
+}
+
+#[test]
 fn docker_performance_job_uses_sharded_repeated_sampling() {
     let workflow = workflow_text();
     let jobs = parse_jobs(&workflow);
@@ -1067,11 +1171,23 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         workflow.contains(
             "oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-${{ matrix.serving_type }}-shard-${{ matrix.shard }}"
         ),
-        "docker-performance artifact names should include the serving type and shard"
+        "docker-performance raw artifact names should include the serving type and shard"
     );
     assert!(
         workflow.contains("path: ${{ runner.temp }}/oxibelt-performance/${{ matrix.serving_type }}/shard-${{ matrix.shard }}"),
-        "docker-performance should upload one grouped artifact per serving type and shard"
+        "docker-performance should upload one grouped raw artifact per serving type and shard"
+    );
+    assert!(
+        workflow.contains("name: Prepare Docker performance summary input artifact")
+            && workflow.contains("tests/scripts/copy-performance-summary-input-artifacts.sh")
+            && workflow.contains("raw_artifact_name=\"oxibelt-docker-performance-${PERFORMANCE_PROFILE}-${PERFORMANCE_SERVING_TYPE}-shard-${PERFORMANCE_SHARD}\"")
+            && workflow.contains("\"${RUNNER_TEMP}/oxibelt-performance-summary-input/${raw_artifact_name}\""),
+        "docker-performance should prepare a slim summary input tree with the raw artifact directory shape"
+    );
+    assert!(
+        workflow.contains("name: oxibelt-docker-performance-summary-input-${{ env.PERFORMANCE_PROFILE }}-${{ matrix.serving_type }}-shard-${{ matrix.shard }}")
+            && workflow.contains("path: ${{ runner.temp }}/oxibelt-performance-summary-input"),
+        "docker-performance should upload a separate summary input artifact for aggregation"
     );
     assert!(
         workflow.contains("--serving-type \"${PERFORMANCE_SERVING_TYPE}\""),
@@ -1106,8 +1222,12 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should run even when performance matrix entries fail"
     );
     assert!(
-        workflow.contains("pattern: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-*"),
-        "summary job should download all profile-scoped performance artifacts"
+        summary_job.contains(
+            "pattern: oxibelt-docker-performance-summary-input-${{ env.PERFORMANCE_PROFILE }}-*"
+        ) && summary_job.contains("merge-multiple: true")
+            && !summary_job
+                .contains("pattern: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-*"),
+        "summary job should download only slim summary input artifacts and merge their preserved raw artifact directories"
     );
     assert!(
         workflow.contains("actions: read"),
