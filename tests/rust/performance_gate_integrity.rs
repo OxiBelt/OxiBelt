@@ -363,6 +363,28 @@ fn external_benchmark_failure_harness(gate_mode: &str) -> HarnessRun {
     HarnessRun { output, events }
 }
 
+fn diagnostic_profile_failure_harness(gate_mode: &str) -> HarnessRun {
+    let function = extract_bash_function(
+        &performance_script_text(),
+        "handle_diagnostic_profile_failure",
+    );
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-diagnostic-profile-gate-");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    write_diagnostic_profile_failure_harness(&harness_path, &function);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("GATE_MODE", gate_mode)
+        .env("GITHUB_ACTIONS", "true")
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+
+    HarnessRun { output, events }
+}
+
 fn write_harness(path: &Path, run_common_loads: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
@@ -648,6 +670,29 @@ fail_with_diagnostics() {{
 {function}
 
 handle_external_benchmark_failure "synthetic external benchmark failure"
+printf 'CONTINUE\n' >>"${{events}}"
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_diagnostic_profile_failure_harness(path: &Path, function: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+diagnostic_profile_gate_mode="${{GATE_MODE:?}}"
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{function}
+
+handle_diagnostic_profile_failure "diagnostic profiling failed for synthetic-profile: perf record failed with status 255"
 printf 'CONTINUE\n' >>"${{events}}"
 "#
     );
@@ -1855,6 +1900,10 @@ fn diagnostic_profile_layer_keeps_primary_results_separate() {
         "diagnostic profile rows should be finalized separately from primary results.json"
     );
     assert!(
+        !script.contains("::warning title=Docker performance diagnostic profiling::${message}"),
+        "diagnostic profile shard failures should not emit per-sample GitHub annotations"
+    );
+    assert!(
         script.contains("run_diagnostic_profile_replay \"${label}\" \"${duration}\" \"${protocol}\"")
             && script.contains("run_diagnostic_profile_replay \"${label}\" \"${duration_seconds}\" \"${protocol}\" handshake")
             && script.contains("run_diagnostic_profile_replay \"${label}\" \"${duration}\" \"${mode}\" stress"),
@@ -1917,6 +1966,46 @@ fn local_external_benchmark_build_retries_base_pulls_and_build() {
             "fail_with_diagnostics \"failed to build external benchmark image ${external_benchmark_image}\""
         ),
         "external benchmark image build failures should copy normal performance diagnostics"
+    );
+}
+
+#[test]
+fn diagnostic_profile_failures_warn_without_github_annotation_and_can_fail_closed() {
+    let warn = diagnostic_profile_failure_harness("warn");
+    assert!(
+        warn.output.status.success(),
+        "warn mode should continue after a diagnostic profiling failure"
+    );
+    assert!(
+        warn.events.contains("CONTINUE"),
+        "warn mode should continue the harness after recording the diagnostic"
+    );
+    let warn_stderr = String::from_utf8_lossy(&warn.output.stderr);
+    assert!(
+        warn_stderr.contains(
+            "Docker performance diagnostic profiling warning: diagnostic profiling failed for synthetic-profile: perf record failed with status 255"
+        ),
+        "warn mode should emit a plain diagnostic profiling warning"
+    );
+    assert!(
+        !warn_stderr.contains("::warning title=Docker performance diagnostic profiling::"),
+        "warn mode should not create per-sample GitHub annotations in shard jobs"
+    );
+
+    let fail = diagnostic_profile_failure_harness("fail");
+    assert!(
+        !fail.output.status.success(),
+        "fail mode should stop after a diagnostic profiling failure"
+    );
+    assert!(
+        fail.events.contains(
+            "FAIL diagnostic profiling failed for synthetic-profile: perf record failed with status 255"
+        ),
+        "fail mode should route through normal diagnostics"
+    );
+    assert!(
+        !fail.events.contains("CONTINUE"),
+        "fail mode should not continue the harness"
     );
 }
 

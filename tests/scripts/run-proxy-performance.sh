@@ -573,11 +573,7 @@ handle_external_benchmark_failure() {
 handle_diagnostic_profile_failure() {
   local message="$1"
   if [[ "${diagnostic_profile_gate_mode}" == "warn" ]]; then
-    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-      echo "::warning title=Docker performance diagnostic profiling::${message}" >&2
-    else
-      echo "Docker performance diagnostic profiling warning: ${message}" >&2
-    fi
+    echo "Docker performance diagnostic profiling warning: ${message}" >&2
     return
   fi
 
