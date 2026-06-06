@@ -175,6 +175,7 @@ pub(super) fn upstream_error_response(
     headers: request_headers,
     body: request_body,
     peer_addr,
+    client_asn: state.client_identity.asn.lookup(peer_addr.ip()),
     downstream_host,
     downstream_scheme: access_log.downstream_scheme,
     route_name,

@@ -2,6 +2,41 @@ use super::*;
 use crate::config::LimitKey;
 use std::time::Duration;
 
+fn rate_limit_config(name: &str, key: RateLimitKey) -> RateLimitConfig {
+  RateLimitConfig {
+    name: name.to_string(),
+    key,
+    ipv4_prefix_bits: default_rate_limit_ipv4_prefix_bits(),
+    ipv6_prefix_bits: default_rate_limit_ipv6_prefix_bits(),
+    identity_parts: Vec::new(),
+    token_bindings: Vec::new(),
+    routes: Vec::new(),
+    token_header: None,
+    rate: "1r/h".to_string(),
+    burst: 1,
+    max_buckets: default_rate_limit_max_buckets(),
+    mode: LimitMode::Enforcing,
+    status: 429,
+  }
+}
+
+fn rate_limit_check<'a>(key: RateLimitKey, token_header: Option<&'a str>) -> RateLimitCheck<'a> {
+  RateLimitCheck {
+    name: "test",
+    key,
+    token_header,
+    ipv4_prefix_bits: default_rate_limit_ipv4_prefix_bits(),
+    ipv6_prefix_bits: default_rate_limit_ipv6_prefix_bits(),
+    identity_parts: &[],
+    token_bindings: &[],
+    rate: "1r/h",
+    burst: 1,
+    max_buckets: default_rate_limit_max_buckets(),
+    mode: LimitMode::Enforcing,
+    status: 429,
+  }
+}
+
 #[test]
 fn parses_rates() {
   assert!((parse_rate("10r/s").unwrap().per_second - 10.0).abs() < f64::EPSILON);
@@ -77,6 +112,7 @@ fn shared_state_enforces_rate_and_connection_limits_across_instances() {
     max_buckets: default_rate_limit_max_buckets(),
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("per-ip", RateLimitKey::ClientIp)
   }];
 
   assert_eq!(first.check_rate_limits(ip, &rate_limits), None);
@@ -121,6 +157,7 @@ fn route_and_path_rate_limit_keys_are_isolated() {
     max_buckets: default_rate_limit_max_buckets(),
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("per-route", RateLimitKey::ClientIpRoute)
   }];
   let app = RateLimitContext::route(ip, "app", "/same", &headers);
   let admin = RateLimitContext::route(ip, "admin", "/same", &headers);
@@ -142,6 +179,7 @@ fn route_and_path_rate_limit_keys_are_isolated() {
     max_buckets: default_rate_limit_max_buckets(),
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("per-path", RateLimitKey::ClientIpPath)
   }];
   let first_path = RateLimitContext::route(ip, "app", "/first", &headers);
   let second_path = RateLimitContext::route(ip, "app", "/second", &headers);
@@ -172,6 +210,7 @@ fn global_rate_limit_key_is_shared_across_ips() {
     max_buckets: default_rate_limit_max_buckets(),
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("global", RateLimitKey::Global)
   }];
 
   assert_eq!(state.check_pre_route_rate_limits(first_ip, &limit), None);
@@ -197,6 +236,7 @@ fn route_rate_limit_key_is_shared_by_route_not_ip() {
     max_buckets: default_rate_limit_max_buckets(),
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("per-route", RateLimitKey::Route)
   }];
 
   assert_eq!(
@@ -237,6 +277,7 @@ fn route_filtered_global_rate_limit_runs_after_route_match() {
     max_buckets: default_rate_limit_max_buckets(),
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("filtered-global", RateLimitKey::Global)
   }];
 
   assert_eq!(state.check_pre_route_rate_limits(ip, &limit), None);
@@ -272,7 +313,10 @@ fn access_token_keys_hash_tokens_and_fallback_to_ip() {
   headers.insert("x-api-token", "header-secret".parse().unwrap());
   let context = RateLimitContext::route(ip, "app", "/tokens", &headers);
 
-  let bearer_key = rate_limit_key(context, RateLimitKey::AccessToken, Some("X-Api-Token"));
+  let bearer_key = rate_limit_key(
+    context,
+    &rate_limit_check(RateLimitKey::AccessToken, Some("X-Api-Token")),
+  );
   assert!(bearer_key.starts_with("access_token:token:"));
   assert!(!bearer_key.contains("bearer-secret"));
   assert!(!bearer_key.contains("header-secret"));
@@ -282,8 +326,7 @@ fn access_token_keys_hash_tokens_and_fallback_to_ip() {
   let header_context = RateLimitContext::route(ip, "app", "/tokens", &header_only);
   let header_key = rate_limit_key(
     header_context,
-    RateLimitKey::AccessTokenRoute,
-    Some("X-Api-Token"),
+    &rate_limit_check(RateLimitKey::AccessTokenRoute, Some("X-Api-Token")),
   );
   assert!(header_key.starts_with("access_token_route:token:"));
   assert!(header_key.ends_with(":app"));
@@ -295,8 +338,7 @@ fn access_token_keys_hash_tokens_and_fallback_to_ip() {
   assert_eq!(
     rate_limit_key(
       fallback_context,
-      RateLimitKey::AccessTokenPath,
-      Some("X-Api-Token"),
+      &rate_limit_check(RateLimitKey::AccessTokenPath, Some("X-Api-Token")),
     ),
     "access_token_path:fallback_ip:203.0.113.10:/tokens"
   );
@@ -316,6 +358,7 @@ fn access_token_rate_limits_are_isolated_by_token_and_fallback_ip() {
     max_buckets: default_rate_limit_max_buckets(),
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("per-token", RateLimitKey::AccessToken)
   }];
   let mut token_a = HeaderMap::new();
   token_a.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
@@ -358,6 +401,7 @@ fn local_rate_limit_rejects_new_bucket_when_max_buckets_exhausted() {
     max_buckets: 1,
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("per-token", RateLimitKey::AccessToken)
   }];
   let mut token_a = HeaderMap::new();
   token_a.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
@@ -396,6 +440,7 @@ fn local_rate_limit_monitor_mode_does_not_grow_after_bucket_cap() {
     max_buckets: 1,
     mode: LimitMode::Monitor,
     status: 429,
+    ..rate_limit_config("per-token-monitor", RateLimitKey::AccessToken)
   }];
   let mut token_a = HeaderMap::new();
   token_a.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
@@ -434,6 +479,7 @@ fn local_rate_limit_prunes_refilled_buckets_before_enforcing_cap() {
     max_buckets: 1,
     mode: LimitMode::Enforcing,
     status: 429,
+    ..rate_limit_config("per-path", RateLimitKey::ClientIpPath)
   }];
 
   assert_eq!(

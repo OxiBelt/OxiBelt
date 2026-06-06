@@ -712,6 +712,259 @@ body = "route slow down"
 }
 
 #[test]
+fn rate_limit_action_supports_sybil_oriented_request_identities() {
+    let temp_dir = common::TempDir::new("waf-sybil-rate-limit-action");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-sybil-rate-limit-action");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "tls-rate-limit"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/tls'"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "tls-limit"
+key = "tls_fingerprint_route"
+rate = "1r/h"
+burst = 1
+status = 429
+body = "tls slow down"
+
+[[waf.rules]]
+name = "binding-rate-limit"
+phase = "request"
+priority = 20
+when = "Request.Http.Path == '/binding'"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "binding-limit"
+key = "token_binding_hash_route"
+token_bindings = ["user_agent", "tls_fingerprint", "route", "direct_peer_ip_network_prefix"]
+rate = "1r/h"
+burst = 1
+status = 429
+body = "binding slow down"
+
+[[waf.rules]]
+name = "composite-rate-limit"
+phase = "request"
+priority = 30
+when = "Request.Http.Path == '/composite'"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "composite-limit"
+key = "composite_client_route"
+identity_parts = ["client_ip_prefix", "user_agent", "tls_fingerprint", "asn"]
+rate = "1r/h"
+burst = 1
+status = 429
+body = "composite slow down"
+
+[[waf.rules]]
+name = "asn-rate-limit"
+phase = "request"
+priority = 40
+when = "Request.Http.Path == '/asn'"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "asn-limit"
+key = "asn_route"
+rate = "1r/h"
+burst = 1
+status = 429
+body = "asn slow down"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::USER_AGENT,
+        HeaderValue::from_static("unit-test-agent"),
+    );
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let tls = test_tls("shared-fingerprint");
+    let other_tls = test_tls("other-fingerprint");
+    let evaluate = |path: &str, peer: &str, tls: &WafTlsMetadata, client_asn: Option<u32>| {
+        let uri: Uri = path.parse().expect("URI should parse");
+        let peer_addr: SocketAddr = peer.parse().expect("peer should parse");
+        let mut input = request_input_with_tls(&method, &uri, &headers, &tags, peer_addr, tls);
+        input.client_asn = client_asn;
+        engine.evaluate_request(input)
+    };
+
+    assert!(
+        evaluate("/tls", "203.0.113.10:49152", &tls, None)
+            .terminal
+            .is_none()
+    );
+    assert_eq!(
+        evaluate("/tls", "198.51.100.20:49152", &tls, None)
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("tls slow down")
+    );
+    assert!(
+        evaluate("/tls", "198.51.100.20:49152", &other_tls, None)
+            .terminal
+            .is_none()
+    );
+
+    assert!(
+        evaluate("/binding", "203.0.113.10:49152", &tls, None)
+            .terminal
+            .is_none()
+    );
+    assert_eq!(
+        evaluate("/binding", "203.0.113.42:49152", &tls, None)
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("binding slow down")
+    );
+
+    assert!(
+        evaluate("/composite", "203.0.113.10:49152", &tls, Some(64500))
+            .terminal
+            .is_none()
+    );
+    assert_eq!(
+        evaluate("/composite", "203.0.113.42:49152", &tls, Some(64500))
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("composite slow down")
+    );
+
+    assert!(
+        evaluate("/asn", "203.0.113.10:49152", &tls, Some(64500))
+            .terminal
+            .is_none()
+    );
+    assert_eq!(
+        evaluate("/asn", "198.51.100.20:49152", &other_tls, Some(64500))
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("asn slow down")
+    );
+}
+
+#[test]
+fn rate_limit_action_supports_person_proof_clearance_identity() {
+    let temp_dir = common::TempDir::new("waf-person-proof-clearance-rate-limit");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-clearance-rate-limit");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/protected' && Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+clearance.cookie.key = "__test_person_proof"
+single_use = false
+
+[[waf.rules]]
+name = "clearance-rate-limit"
+phase = "request"
+priority = 20
+when = "Request.Http.Path == '/protected' && Request.Client.PersonProof.State == 'valid'"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "clearance-limit"
+key = "person_proof_clearance_route"
+rate = "1r/h"
+burst = 1
+status = 429
+body = "clearance slow down"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let challenge = challenge_decision
+        .terminal
+        .as_ref()
+        .expect("missing person proof challenge");
+    let clearance_cookie = complete_pow_person_proof(
+        &engine,
+        request_input(&method, &uri, &headers, &tags, client_addr),
+        &challenge.body,
+        4,
+    );
+    let clearance_value = extract_cookie_value(&clearance_cookie);
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={clearance_value}")).unwrap(),
+    );
+
+    assert!(
+        engine
+            .evaluate_request(request_input(
+                &method,
+                &uri,
+                &solved_headers,
+                &tags,
+                client_addr,
+            ))
+            .terminal
+            .is_none()
+    );
+    assert_eq!(
+        engine
+            .evaluate_request(request_input(
+                &method,
+                &uri,
+                &solved_headers,
+                &tags,
+                client_addr,
+            ))
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("clearance slow down")
+    );
+}
+
+#[test]
 fn user_defined_functions_can_reuse_bounded_request_predicates() {
     let temp_dir = common::TempDir::new("waf-udf-request");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-udf");
@@ -10234,6 +10487,7 @@ fn request_input_with_transport<'a>(
         headers,
         body: None,
         peer_addr,
+        client_asn: None,
         downstream_host: "example.com",
         downstream_scheme: "https",
         route_name: "app-root",
@@ -10268,6 +10522,7 @@ fn request_input_with_protocol_and_network<'a>(
         headers,
         body: None,
         peer_addr,
+        client_asn: None,
         downstream_host: "example.com",
         downstream_scheme: "https",
         route_name: "app-root",

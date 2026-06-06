@@ -625,22 +625,24 @@ where
   } else {
     request
   };
-
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
+  let client_asn = state.client_identity.asn.lookup(client_addr.ip());
   let request_waf_enabled = resolved.execution_plan.waf.request.enabled();
   let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
   let request_body_need = resolved.execution_plan.waf.request.body_need();
   let response_body_need = resolved.execution_plan.waf.response.body_need();
   let effective_buffering = buffering::EffectiveBuffering::new(&state.config, resolved.route);
-
   if state.request_path_features.rate_limits {
     let rate_limit_context = RateLimitContext::route(
       client_addr.ip(),
       &resolved.route.name,
       request_uri.path(),
       request.headers(),
-    );
+    )
+    .with_tls_fingerprint(tls.fingerprint.as_deref())
+    .with_client_asn(client_asn)
+    .with_tcp_max_hop(tcp_max_hop);
     if let Some(status) = state
       .limits
       .check_route_rate_limits(rate_limit_context, &state.config.rate_limits)
@@ -648,7 +650,6 @@ where
       return text_response(status, "rate limit exceeded");
     }
   }
-
   let dynamic_policy = if state.request_path_features.dynamic_policy {
     state.dynamic_policy.evaluate(
       DynamicPolicyRequest {
@@ -683,6 +684,7 @@ where
               headers: request.headers(),
               body: None,
               peer_addr: client_addr,
+              client_asn,
               downstream_host: &host,
               downstream_scheme,
               route_name: &resolved.route.name,
@@ -710,7 +712,6 @@ where
       }
     }
   }
-
   let person_proof_api_path = state.request_path_features.person_proof_api
     && state.waf.has_person_proof_api_path(request_uri.path());
   if person_proof_api_path {
@@ -739,7 +740,6 @@ where
     )
     .await;
   }
-
   match route_actions::resolved_redirect_response(&resolved, downstream_scheme, &host, &request_uri)
   {
     Ok(Some(response)) => return response,
@@ -749,7 +749,6 @@ where
       return text_response(StatusCode::BAD_REQUEST, "invalid route redirect");
     }
   }
-
   if resolved.execution_plan.features.external_auth
     && let Some(provider) = resolved.route.external_auth.as_deref()
   {
@@ -769,7 +768,6 @@ where
       ExternalAuthOutcome::Denied(terminal) => return external_auth_response(terminal),
     }
   }
-
   let request = request.map(|body| {
     body::with_read_timeout(
       Limited::new(body, state.config.limits.max_request_body_bytes as usize).boxed(),
@@ -777,7 +775,6 @@ where
       BodyTimeoutKind::DownstreamRequestRead,
     )
   });
-
   let (request, captured_body) = if request_method != Method::CONNECT {
     match capture_request_body_for_waf(
       request,
@@ -812,6 +809,7 @@ where
       headers: request.headers(),
       body: request_body,
       peer_addr: client_addr,
+      client_asn,
       downstream_host: &host,
       downstream_scheme,
       route_name: &resolved.route.name,
@@ -1681,6 +1679,7 @@ where
       headers: &request_headers,
       body: request_body,
       peer_addr: client_addr,
+      client_asn,
       downstream_host: &host,
       downstream_scheme,
       route_name: &resolved.route.name,

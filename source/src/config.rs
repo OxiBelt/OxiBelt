@@ -16,6 +16,7 @@ use crate::waf::{AccessLogFieldConfig, WafConfig};
 mod admin_legacy;
 mod admin_runtime;
 mod allowed_keys;
+mod client_identity;
 mod crlite;
 mod database;
 mod dynamic_policy;
@@ -26,6 +27,7 @@ mod limits;
 mod loader;
 mod outbound_revocation;
 mod quic;
+mod rate_limit;
 mod retry;
 mod route;
 mod route_actions;
@@ -39,6 +41,7 @@ mod turn_queue;
 mod upstream_pool;
 mod workers;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
+pub use client_identity::*;
 pub use crlite::*;
 pub use database::*;
 pub use dynamic_policy::*;
@@ -55,6 +58,7 @@ use loader::{
 pub use outbound_revocation::*;
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
+pub use rate_limit::*;
 pub use retry::*;
 pub use route::*;
 pub use route_actions::*;
@@ -81,6 +85,7 @@ pub struct Config {
   pub limits: LimitsConfig,
   pub rate_limits: Vec<RateLimitConfig>,
   pub connection_limits: Vec<ConnectionLimitConfig>,
+  pub client_identity: ClientIdentityConfig,
   pub compression: CompressionConfig,
   pub cache: CacheConfig,
   pub ipm: IpmConfig,
@@ -124,6 +129,8 @@ struct RawConfig {
   rate_limits: Vec<RateLimitConfig>,
   #[serde(default)]
   connection_limits: Vec<ConnectionLimitConfig>,
+  #[serde(default)]
+  client_identity: ClientIdentityConfig,
   #[serde(default)]
   compression: CompressionConfig,
   #[serde(default)]
@@ -189,6 +196,7 @@ impl TryFrom<RawConfig> for Config {
       limits: raw.limits,
       rate_limits: raw.rate_limits,
       connection_limits: raw.connection_limits,
+      client_identity: raw.client_identity,
       compression: raw.compression,
       cache: raw.cache,
       ipm: raw.ipm,
@@ -383,6 +391,7 @@ impl Config {
       && self.limits == other.limits
       && self.rate_limits == other.rate_limits
       && self.connection_limits == other.connection_limits
+      && self.client_identity == other.client_identity
       && self.compression == other.compression
       && self.cache == other.cache
       && self.admin == other.admin
@@ -466,6 +475,11 @@ impl Config {
       &mut self.tls.crlite,
       &mut self.source_paths,
       &path_roots.cert_dir,
+    )?;
+    client_identity::resolve_asn_database_file(
+      &mut self.client_identity.asn,
+      &mut self.source_paths,
+      &path_roots.config_dir,
     )?;
     self.tls.client_auth.ca_certs = self
       .tls
@@ -1044,6 +1058,7 @@ impl Config {
     }
     self.tls.ocsp.validate_fetch_settings()?;
     self.tls.crlite.validate()?;
+    self.client_identity.validate()?;
     crate::waf::validate_config(self)?;
 
     Ok(())
@@ -1105,6 +1120,16 @@ impl Config {
         http::header::HeaderName::from_bytes(token_header.as_bytes())
           .with_context(|| format!("rate limit {} has invalid token_header", rate_limit.name))?;
       }
+      validate_rate_limit_identity_config(RateLimitIdentityValidation {
+        label: "rate limit",
+        name: &rate_limit.name,
+        key: rate_limit.key,
+        ipv4_prefix_bits: rate_limit.ipv4_prefix_bits,
+        ipv6_prefix_bits: rate_limit.ipv6_prefix_bits,
+        identity_parts: &rate_limit.identity_parts,
+        token_bindings: &rate_limit.token_bindings,
+        waf_context: false,
+      })?;
       let mut route_filter_names = HashSet::new();
       for route in &rate_limit.routes {
         if !route_filter_names.insert(route.as_str()) {
@@ -2236,6 +2261,12 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "proxy_protocol",
     ][..],
     "listeners.proxy_protocol" => &["enabled", "trusted_sources", "version"][..],
+    "client_identity" => client_identity::CLIENT_IDENTITY_CONFIG_KEYS,
+    "client_identity.asn" => client_identity::CLIENT_IDENTITY_ASN_CONFIG_KEYS,
+    "client_identity.asn.managed" => client_identity::CLIENT_IDENTITY_ASN_MANAGED_CONFIG_KEYS,
+    "client_identity.asn.iana_registry" => {
+      client_identity::CLIENT_IDENTITY_ASN_IANA_REGISTRY_CONFIG_KEYS
+    }
     "sni_forward" => sni_forward::SNI_FORWARD_CONFIG_KEYS,
     "sni_forward.rules" => sni_forward::SNI_FORWARD_RULE_KEYS,
     "tls" => &[
@@ -3046,6 +3077,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "rate_limits" => &[
       "burst",
+      "identity_parts",
+      "ipv4_prefix_bits",
+      "ipv6_prefix_bits",
       "key",
       "max_buckets",
       "mode",
@@ -3054,6 +3088,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "routes",
       "status",
       "token_header",
+      "token_bindings",
     ][..],
     "connection_limits" => &["key", "limit", "name", "status"][..],
     _ => return None,
@@ -4147,55 +4182,6 @@ pub enum ConnectionLimitIdentityMode {
   ProxyProtocol,
   FirstRequestRealIp,
   PerRequestRealIp,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct RateLimitConfig {
-  pub name: String,
-  #[serde(default)]
-  pub key: RateLimitKey,
-  #[serde(default)]
-  pub routes: Vec<String>,
-  #[serde(default)]
-  pub token_header: Option<String>,
-  pub rate: String,
-  #[serde(default)]
-  pub burst: u32,
-  #[serde(default = "crate::limits::default_rate_limit_max_buckets")]
-  pub max_buckets: usize,
-  #[serde(default)]
-  pub mode: LimitMode,
-  #[serde(default = "default_rate_limit_status")]
-  pub status: u16,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum RateLimitKey {
-  Global,
-  Route,
-  #[default]
-  #[serde(alias = "client-ip")]
-  ClientIp,
-  #[serde(alias = "client-ip-route")]
-  ClientIpRoute,
-  #[serde(alias = "client-ip-path")]
-  ClientIpPath,
-  #[serde(alias = "access-token")]
-  AccessToken,
-  #[serde(alias = "access-token-route")]
-  AccessTokenRoute,
-  #[serde(alias = "access-token-path")]
-  AccessTokenPath,
-}
-
-impl RateLimitKey {
-  pub fn uses_access_token(self) -> bool {
-    matches!(
-      self,
-      Self::AccessToken | Self::AccessTokenRoute | Self::AccessTokenPath
-    )
-  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -5525,10 +5511,6 @@ fn default_static_files_hot_object_cache_max_file_bytes() -> usize {
 
 fn default_buffering_max_memory_body_bytes() -> usize {
   1_048_576
-}
-
-fn default_rate_limit_status() -> u16 {
-  429
 }
 
 fn default_connection_limit_status() -> u16 {

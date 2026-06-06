@@ -15,6 +15,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
 use crate::cache::ResponseCache;
+use crate::client_identity::ClientIdentityRuntime;
 use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
@@ -152,6 +153,7 @@ pub struct AppSnapshot {
   pub ipm: IpmRuntime,
   pub dynamic_policy: DynamicPolicyRuntime,
   pub external_auth: ExternalAuthRuntime,
+  pub client_identity: ClientIdentityRuntime,
   pub runtime_introspection: Arc<RuntimeIntrospectionState>,
   pub webtransport_admin: Arc<WebTransportAdminRegistry>,
   pub lifecycle: Arc<LifecycleState>,
@@ -265,6 +267,9 @@ impl AppSnapshot {
     let dynamic_policy = DynamicPolicyRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build dynamic policy runtime")?;
+    let client_identity = ClientIdentityRuntime::new(&config, &control_http)
+      .await
+      .context("failed to build client identity runtime")?;
     let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
       .context("failed to build external auth runtime")?;
     let runtime_introspection = previous
@@ -386,6 +391,7 @@ impl AppSnapshot {
       ipm,
       dynamic_policy,
       external_auth,
+      client_identity,
       runtime_introspection,
       webtransport_admin,
       lifecycle,
@@ -452,6 +458,9 @@ impl AppSnapshot {
       .context("failed to build precomputed Alt-Svc header value")?;
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
+    let client_identity = ClientIdentityRuntime::new(&config, &control_http)
+      .await
+      .context("failed to build client identity runtime")?;
     let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
       .context("failed to build external auth runtime")?;
     let ipm = IpmRuntime::new(&config)
@@ -491,6 +500,7 @@ impl AppSnapshot {
       ipm,
       dynamic_policy: previous.dynamic_policy.clone(),
       external_auth,
+      client_identity,
       runtime_introspection: previous.runtime_introspection.clone(),
       webtransport_admin: previous.webtransport_admin.clone(),
       lifecycle: previous.lifecycle.clone(),

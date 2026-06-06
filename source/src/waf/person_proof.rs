@@ -72,6 +72,7 @@ pub(super) struct PersonProofRequestStatus {
   pub rate_limited: bool,
   pub weight: i64,
   pub allowed: bool,
+  pub(super) clearance_hash: Option<String>,
   pub(super) clearance: Option<PersonProofIssuedClearance>,
 }
 
@@ -127,6 +128,7 @@ impl Default for PersonProofRequestStatus {
       rate_limited: false,
       weight: 0,
       allowed: false,
+      clearance_hash: None,
       clearance: None,
     }
   }
@@ -423,6 +425,7 @@ impl PersonProofEngine {
             rate_limited: is_reuse_capacity_error(&error),
             weight: 0,
             allowed: false,
+            clearance_hash: None,
             clearance: None,
           });
         }

@@ -141,6 +141,10 @@ pub(super) fn emit_system_access_log(
         headers: &request.headers,
         body: None,
         peer_addr: access_log.client_addr,
+        client_asn: snapshot
+          .client_identity
+          .asn
+          .lookup(access_log.client_addr.ip()),
         downstream_host: &access_log.downstream_host,
         downstream_scheme: "http",
         route_name: &access_log.route_name,

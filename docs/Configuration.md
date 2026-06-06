@@ -99,6 +99,10 @@ include = ["conf.d/*.toml"]
 [proxy.retry]
 [proxy.buffering]
 [proxy.http]
+[client_identity]
+[client_identity.asn]
+[client_identity.asn.managed]
+[client_identity.asn.iana_registry]
 [limits]
 [shared_state]
 [[shared_state.backends]]
@@ -657,6 +661,42 @@ Static hot-object caching is opt-in. Set `open_file_cache_max_entries`, `open_fi
 
 `proxy.http.errors.mode = "json"` changes proxy-generated error bodies to JSON with stable `error`, `status`, `code`, and `request_id` fields. `legacy_plain` preserves the historical body text without setting a content type; `plain` emits the same text with `text/plain`.
 
+## Client Identity
+
+```toml
+[client_identity.asn]
+mode = "disabled" # disabled | local | managed
+database_file = "/etc/oxibelt/asn-prefixes.csv"
+database_sha256 = ""
+format = "prefix_asn_csv"
+max_database_bytes = 67108864
+max_entries = 1000000
+max_database_age_seconds = 86400
+failure_policy = "fail_closed" # fail_closed | degraded_null
+
+[client_identity.asn.managed]
+source_url = "https://operator.example/asn-prefixes.csv"
+cache_dir = "/var/lib/oxibelt/asn"
+tmpfs_dir = "/dev/shm/oxibelt-asn"
+storage = "disk" # disk | tmpfs | memory
+max_cache_bytes = 134217728
+refresh_interval_seconds = 21600
+request_timeout_ms = 3000
+
+[client_identity.asn.iana_registry]
+enabled = true
+source_urls = [
+  "https://www.iana.org/assignments/as-numbers/as-numbers-1.csv",
+  "https://www.iana.org/assignments/as-numbers/as-numbers-2.csv",
+]
+```
+
+ASN lookup is opt-in. `mode = "local"` loads an operator-supplied `prefix_asn_csv` file at startup; `mode = "managed"` downloads the same file shape from an HTTPS `source_url`, verifies size and optional SHA-256 pinning, writes disk/tmpfs cache entries atomically when configured, and refreshes in the background. `failure_policy = "fail_closed"` rejects startup or reload when the configured database cannot be loaded. `degraded_null` starts with null ASN lookups and reports degraded runtime status.
+
+`prefix_asn_csv` accepts `prefix,asn` rows, optional `prefix,asn` header, blank lines, and `#` comments. `asn` may be `64500` or `AS64500`. Prefixes are canonicalized and longest-prefix match wins for both IPv4 and IPv6. `Request.Client.Asn` and ASN rate-limit keys use this runtime table; `Request.Client.GeoCountry` remains `null`.
+
+The IANA AS Numbers registry URLs are metadata/provenance inputs only. They describe allocated AS number ranges and are not an IP prefix-to-origin-ASN routing database, so OxiBelt does not provide a built-in default origin-ASN database URL. Operators must supply the prefix-to-ASN database directly or through a managed internal source.
+
 ## Limits, Cache, and Ops
 
 ```toml
@@ -718,6 +758,25 @@ burst = 60
 max_buckets = 16384
 status = 429
 
+[[rate_limits]]
+name = "per-client-prefix-route"
+key = "client_ip_prefix_route"
+routes = ["api"]
+ipv4_prefix_bits = 24
+ipv6_prefix_bits = 56
+rate = "120r/m"
+burst = 120
+status = 429
+
+[[rate_limits]]
+name = "per-composite-client"
+key = "composite_client_route"
+routes = ["api"]
+identity_parts = ["client_ip_prefix", "user_agent", "tls_fingerprint", "asn"]
+rate = "120r/m"
+burst = 120
+status = 429
+
 [[connection_limits]]
 name = "per-ip-connections"
 key = "client_ip"
@@ -725,7 +784,7 @@ limit = 64
 status = 429
 ```
 
-Limit values must be greater than zero. Rate limit keys are `global`, `route`, `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, and `access_token_path`; `client-ip` style spellings are accepted as compatibility aliases for the client-IP keys. `global` uses one bucket shared by all clients, and when it has no `routes` filter it runs before route matching for the earliest rejection point. `route` uses one bucket per resolved route. `routes` restricts a rate limit to named routes. Access-token limits read `Authorization: Bearer <token>` first and then optional `token_header`; token values are hashed before storage, and missing tokens fall back to the client IP bucket. `max_buckets` caps the number of local process buckets kept for a single rate limit, defaults to `16384`, and should be lowered for attacker-controlled key modes when a route expects low identity cardinality. In process-local enforcing mode, a request that would create a new bucket after the cap is reached is rejected with the rate limit status until an existing bucket has fully refilled and can be reclaimed; monitor mode stops adding new buckets after the cap. Rate and connection limit state is process-local by default. When `[shared_state].enabled = true` and the relevant feature maps to a backend, route rate token buckets, WAF `rate_limit` action buckets, and downstream connection leases are shared across instances. This shared rate-limit path supports both Redis-compatible and PostgreSQL backends. `max_connections` applies at downstream accept time. `max_connections_per_ip` and `[[connection_limits]]` use the configured `connection_limit_identity`: `proxy_protocol` counts the direct peer or trusted PROXY protocol source for the whole connection, `first_request_real_ip` binds the connection to the first trusted Real-IP header value, and `per_request_real_ip` acquires a lease per HTTP request until its response body finishes. Active WebTransport sessions also acquire dedicated total and per-IP session leases; in Real-IP modes they must also acquire the same normal per-IP and named connection leases as ordinary requests for that identity. When not set, `max_webtransport_sessions` and `max_webtransport_sessions_per_ip` inherit `max_connections` and `max_connections_per_ip`, while `max_webtransport_sessions_per_connection` caps multiplexing on one downstream HTTP/3 connection. For HTTP/1 CONNECT, Upgrade tunnels, and WebTransport sessions, Real-IP connection leases remain held until the upgraded tunnel, session, or first-request connection context closes. TCP stream listeners use direct peer IPs. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
+Limit values must be greater than zero. Top-level rate limit keys are `global`, `route`, `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, `access_token_path`, `client_ip_prefix`, `client_ip_prefix_route`, `client_ip_prefix_path`, `tls_fingerprint`, `tls_fingerprint_route`, `composite_client`, `composite_client_route`, `asn`, and `asn_route`; `client-ip` style spellings are accepted as compatibility aliases for the client-IP keys. `global` uses one bucket shared by all clients, and when it has no `routes` filter it runs before route matching for the earliest rejection point. `route` uses one bucket per resolved route. `routes` restricts a rate limit to named routes. Access-token limits read `Authorization: Bearer <token>` first and then optional `token_header`; token values are hashed before storage, and missing tokens fall back to the client IP bucket. `client_ip_prefix*` canonicalizes the resolved client IP with `ipv4_prefix_bits` and `ipv6_prefix_bits`. `tls_fingerprint*` hashes OxiBelt's downstream TLS fingerprint and falls back to the client IP when unavailable. `asn*` uses `[client_identity.asn]` lookup and falls back to the client IP when no ASN is available. `composite_client*` hashes canonical `part=value` pairs from `identity_parts`, which may include `client_ip_prefix`, `user_agent`, `tls_fingerprint`, and `asn`; missing parts fall back to the client IP where possible instead of a shared unknown bucket. Top-level `[[rate_limits]]` rejects WAF-only `token_binding_hash*` and `person_proof_clearance*` keys. `max_buckets` caps the number of local process buckets kept for a single rate limit, defaults to `16384`, and should be lowered for attacker-controlled key modes when a route expects low identity cardinality. In process-local enforcing mode, a request that would create a new bucket after the cap is reached is rejected with the rate limit status until an existing bucket has fully refilled and can be reclaimed; monitor mode stops adding new buckets after the cap. Rate and connection limit state is process-local by default. When `[shared_state].enabled = true` and the relevant feature maps to a backend, route rate token buckets, WAF `rate_limit` action buckets, and downstream connection leases are shared across instances. This shared rate-limit path supports both Redis-compatible and PostgreSQL backends. `max_connections` applies at downstream accept time. `max_connections_per_ip` and `[[connection_limits]]` use the configured `connection_limit_identity`: `proxy_protocol` counts the direct peer or trusted PROXY protocol source for the whole connection, `first_request_real_ip` binds the connection to the first trusted Real-IP header value, and `per_request_real_ip` acquires a lease per HTTP request until its response body finishes. Active WebTransport sessions also acquire dedicated total and per-IP session leases; in Real-IP modes they must also acquire the same normal per-IP and named connection leases as ordinary requests for that identity. When not set, `max_webtransport_sessions` and `max_webtransport_sessions_per_ip` inherit `max_connections` and `max_connections_per_ip`, while `max_webtransport_sessions_per_connection` caps multiplexing on one downstream HTTP/3 connection. For HTTP/1 CONNECT, Upgrade tunnels, and WebTransport sessions, Real-IP connection leases remain held until the upgraded tunnel, session, or first-request connection context closes. TCP stream listeners use direct peer IPs. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, and WebTransport idle timeouts can be overridden per route.
 
 ```toml
 [shared_state]
@@ -2276,7 +2335,7 @@ Configuration validation rejects:
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
 - `runtime.drain.graceful_timeout_ms = 0` or `runtime.drain.long_connection_close_delay_ms = 0`.
-- TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, unsafe OCSP responder URLs, CRLite enforcement without `filter_file`, invalid CRLite filter limits/digests, invalid upstream revocation limits, or upstream CRLite enforcement without `filter_file`.
+- TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, unsafe OCSP responder URLs, CRLite enforcement without `filter_file`, invalid CRLite filter limits/digests, invalid upstream revocation limits, upstream CRLite enforcement without `filter_file`, invalid ASN identity database settings, or managed ASN sources that are not HTTPS.
 - Reserved sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
 - Invalid WebRTC TURN listener binds, missing proxy pools, open `edge_relay` auth, invalid TURN upstream schemes, or invalid relay port ranges.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.

@@ -303,11 +303,13 @@ pub(super) fn verify_clearance(
     rate_limited: false,
     weight: 0,
     allowed: false,
+    clearance_hash: None,
     clearance: None,
   };
   if status.state != PersonProofState::Valid {
     return Ok(status);
   }
+  status.clearance_hash = Some(clearance_hash(proof));
   if policy.single_use {
     if !engine.consume_reuse_token(&clearance_reuse_key(proof), now)? {
       bail!("person proof clearance token was already used");
@@ -333,6 +335,11 @@ pub(super) fn verify_clearance(
     )?);
   }
   Ok(status)
+}
+
+fn clearance_hash(proof: &str) -> String {
+  let digest = digest::digest(&digest::SHA256, proof.as_bytes());
+  hex_encode(digest.as_ref())
 }
 
 fn issue_clearance(

@@ -219,6 +219,7 @@ impl<'a> SystemAccessLogContext<'a> {
         headers: &request.headers,
         body: None,
         peer_addr: self.client_addr,
+        client_asn: None,
         downstream_host: &self.downstream_host,
         downstream_scheme: self.downstream_scheme,
         route_name: &self.route_name,

@@ -74,6 +74,7 @@ pub(crate) fn prepare_plain_fast_path_waf<B>(
       headers: request.headers(),
       body: None,
       peer_addr: client_addr,
+      client_asn: state.client_identity.asn.lookup(client_addr.ip()),
       downstream_host: host,
       downstream_scheme,
       route_name: &resolved.route.name,

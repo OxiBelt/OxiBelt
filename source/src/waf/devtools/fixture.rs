@@ -223,6 +223,7 @@ impl BuiltFixture {
         is_truncated: self.request_body_truncated,
       }),
       peer_addr: self.peer_addr,
+      client_asn: None,
       downstream_host: &self.downstream_host,
       downstream_scheme: &self.downstream_scheme,
       route_name: &self.route_name,

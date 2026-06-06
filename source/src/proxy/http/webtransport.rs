@@ -116,6 +116,7 @@ pub(crate) async fn prepare_webtransport(
       "no matching route",
     )));
   };
+  let client_asn = state.client_identity.asn.lookup(peer_addr.ip());
 
   let dynamic_policy = if state.request_path_features.dynamic_policy {
     state.dynamic_policy.evaluate(
@@ -156,6 +157,7 @@ pub(crate) async fn prepare_webtransport(
                 headers: request.headers(),
                 body: None,
                 peer_addr,
+                client_asn,
                 downstream_host: &host,
                 downstream_scheme: "https",
                 route_name: &resolved.route.name,
@@ -247,6 +249,7 @@ pub(crate) async fn prepare_webtransport(
       headers: &request_headers,
       body: None,
       peer_addr,
+      client_asn,
       downstream_host: &host,
       downstream_scheme: "https",
       route_name: &resolved.route.name,

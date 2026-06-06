@@ -5,16 +5,17 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-    AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
+    AdminTransportMode, BufferingMode, CacheStore, ClientIdentityAsnFailurePolicy,
+    ClientIdentityAsnManagedStorage, ClientIdentityAsnMode, CompressionConfig, Config,
     ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
     CrliteMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
     DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
     ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
     HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource, LoadBalancingAlgorithm,
     MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode,
-    ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition,
-    RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
-    TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
+    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol,
+    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
     UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
     UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
@@ -2979,6 +2980,150 @@ burst = 40
 }
 
 #[test]
+fn rate_limit_config_parses_sybil_oriented_top_level_keys() {
+    let temp_dir = common::TempDir::new("rate-limit-sybil-keys");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "rate-limit-sybil-keys");
+    let raw = format!(
+        r#"
+{}
+
+[[rate_limits]]
+name = "prefix-route"
+key = "client_ip_prefix_route"
+routes = ["app-root"]
+ipv4_prefix_bits = 20
+ipv6_prefix_bits = 60
+rate = "10r/m"
+
+[[rate_limits]]
+name = "tls-route"
+key = "tls_fingerprint_route"
+routes = ["app-root"]
+rate = "10r/m"
+
+[[rate_limits]]
+name = "composite-route"
+key = "composite_client_route"
+routes = ["app-root"]
+identity_parts = ["client_ip_prefix", "user_agent", "tls_fingerprint", "asn"]
+rate = "10r/m"
+
+[[rate_limits]]
+name = "asn-route"
+key = "asn_route"
+routes = ["app-root"]
+rate = "10r/m"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(config.rate_limits[0].key, RateLimitKey::ClientIpPrefixRoute);
+    assert_eq!(config.rate_limits[0].ipv4_prefix_bits, 20);
+    assert_eq!(config.rate_limits[0].ipv6_prefix_bits, 60);
+    assert_eq!(config.rate_limits[1].key, RateLimitKey::TlsFingerprintRoute);
+    assert_eq!(
+        config.rate_limits[2].key,
+        RateLimitKey::CompositeClientRoute
+    );
+    assert_eq!(
+        config.rate_limits[2].identity_parts,
+        [
+            RateLimitIdentityPart::ClientIpPrefix,
+            RateLimitIdentityPart::UserAgent,
+            RateLimitIdentityPart::TlsFingerprint,
+            RateLimitIdentityPart::Asn,
+        ]
+    );
+    assert_eq!(config.rate_limits[3].key, RateLimitKey::AsnRoute);
+}
+
+#[test]
+fn rate_limit_config_rejects_waf_only_keys_at_top_level() {
+    for key in ["token_binding_hash", "person_proof_clearance_route"] {
+        let key_label = key.replace('_', "-");
+        let temp_dir = common::TempDir::new(&format!("rate-limit-waf-only-{key_label}"));
+        let (cert_path, key_path) =
+            common::create_self_signed_cert(temp_dir.path(), &format!("rate-limit-{key_label}"));
+        let raw = format!(
+            r#"
+{}
+
+[[rate_limits]]
+name = "{key}-top-level"
+key = "{key}"
+rate = "10r/m"
+"#,
+            common::minimal_config_toml(&cert_path, &key_path)
+        );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("WAF-only rate-limit key should fail at top level");
+        assert!(
+            error
+                .to_string()
+                .contains("only valid in WAF rate_limit actions"),
+            "unexpected error for {key}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rate_limit_config_validates_prefix_bits_and_identity_parts() {
+    let temp_dir = common::TempDir::new("rate-limit-prefix-bits");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "rate-limit-prefix-bits");
+    let raw = format!(
+        r#"
+{}
+
+[[rate_limits]]
+name = "bad-prefix"
+key = "client_ip_prefix"
+ipv4_prefix_bits = 33
+rate = "10r/m"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid prefix bits should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("ipv4_prefix_bits must be between 0 and 32"),
+        "unexpected error: {error}"
+    );
+
+    let raw = format!(
+        r#"
+{}
+
+[[rate_limits]]
+name = "bad-composite"
+key = "composite_client"
+rate = "10r/m"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("composite without identity_parts should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("identity_parts must not be empty for composite_client keys"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rate_limit_config_rejects_token_header_for_global_and_route_keys() {
     for key in ["global", "route"] {
         let temp_dir = common::TempDir::new(&format!("rate-limit-token-header-{key}"));
@@ -3036,6 +3181,101 @@ rate = "10r/m"
         error
             .to_string()
             .contains("rate limit unknown-route references unknown route missing-route"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn client_identity_asn_config_validates_local_and_managed_modes() {
+    let temp_dir = common::TempDir::new("client-identity-asn-config");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "client-identity-asn-config");
+    let database_path = temp_dir.path().join("asn-prefixes.csv");
+    std::fs::write(&database_path, "prefix,asn\n203.0.113.0/24,AS64500\n")
+        .expect("ASN database fixture should write");
+    let raw = format!(
+        r#"
+{}
+
+[client_identity.asn]
+mode = "local"
+database_file = "{}"
+format = "prefix_asn_csv"
+max_database_bytes = 4096
+max_entries = 16
+max_database_age_seconds = 3600
+failure_policy = "degraded_null"
+
+[client_identity.asn.iana_registry]
+enabled = true
+"#,
+        common::minimal_config_toml(&cert_path, &key_path),
+        database_path.display()
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(
+        config.client_identity.asn.mode,
+        ClientIdentityAsnMode::Local
+    );
+    assert_eq!(
+        config.client_identity.asn.failure_policy,
+        ClientIdentityAsnFailurePolicy::DegradedNull
+    );
+    assert!(config.client_identity.asn.iana_registry.enabled);
+
+    let raw = format!(
+        r#"
+{}
+
+[client_identity.asn]
+mode = "managed"
+failure_policy = "degraded_null"
+
+[client_identity.asn.managed]
+source_url = "https://operator.example/asn-prefixes.csv"
+storage = "memory"
+refresh_interval_seconds = 3600
+request_timeout_ms = 500
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    assert_eq!(
+        config.client_identity.asn.mode,
+        ClientIdentityAsnMode::Managed
+    );
+    assert_eq!(
+        config.client_identity.asn.managed.storage,
+        ClientIdentityAsnManagedStorage::Memory
+    );
+}
+
+#[test]
+fn client_identity_asn_config_rejects_invalid_sources() {
+    let temp_dir = common::TempDir::new("client-identity-asn-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "client-identity-asn-invalid");
+    let raw = format!(
+        r#"
+{}
+
+[client_identity.asn]
+mode = "managed"
+
+[client_identity.asn.managed]
+source_url = "http://operator.example/asn-prefixes.csv"
+storage = "memory"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("managed ASN source must be HTTPS");
+    assert!(
+        error.to_string().contains("must use https://"),
         "unexpected error: {error}"
     );
 }

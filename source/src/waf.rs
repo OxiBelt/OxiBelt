@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 use crate::config::{
-  Config, LimitMode, MitigationFailurePolicy, RateLimitKey,
+  Config, LimitMode, MitigationFailurePolicy, RateLimitIdentityPart, RateLimitKey,
   resolve_existing_local_config_file_path_with_logical,
 };
 use crate::dynamic_policy::DynamicPolicyContext;
@@ -450,6 +450,14 @@ pub enum WafActionConfig {
     name: String,
     #[serde(default)]
     key: RateLimitKey,
+    #[serde(default = "crate::limits::default_rate_limit_ipv4_prefix_bits")]
+    ipv4_prefix_bits: u8,
+    #[serde(default = "crate::limits::default_rate_limit_ipv6_prefix_bits")]
+    ipv6_prefix_bits: u8,
+    #[serde(default)]
+    identity_parts: Vec<RateLimitIdentityPart>,
+    #[serde(default)]
+    token_bindings: Vec<PersonProofTokenBinding>,
     #[serde(default)]
     token_header: Option<String>,
     rate: String,
@@ -1124,6 +1132,10 @@ fn validate_actions(
       WafActionConfig::RateLimit {
         name,
         key,
+        ipv4_prefix_bits,
+        ipv6_prefix_bits,
+        identity_parts,
+        token_bindings,
         token_header,
         rate,
         max_buckets,
@@ -1152,6 +1164,18 @@ fn validate_actions(
           }
           validate_header_name(token_header)?;
         }
+        crate::config::validate_rate_limit_identity_config(
+          crate::config::RateLimitIdentityValidation {
+            label: "WAF rule rate_limit",
+            name,
+            key: *key,
+            ipv4_prefix_bits: *ipv4_prefix_bits,
+            ipv6_prefix_bits: *ipv6_prefix_bits,
+            identity_parts,
+            token_bindings,
+            waf_context: true,
+          },
+        )?;
         mutations += 1;
       }
       WafActionConfig::WeighPersonProof { weight, .. } => {
@@ -2639,6 +2663,7 @@ pub struct WafRequestInput<'a> {
   pub headers: &'a HeaderMap,
   pub body: Option<WafBodyInput<'a>>,
   pub peer_addr: std::net::SocketAddr,
+  pub client_asn: Option<u32>,
   pub downstream_host: &'a str,
   pub downstream_scheme: &'a str,
   pub route_name: &'a str,
@@ -2935,6 +2960,10 @@ fn apply_request_actions(
       CompiledAction::Config(WafActionConfig::RateLimit {
         name,
         key,
+        ipv4_prefix_bits,
+        ipv6_prefix_bits,
+        identity_parts,
+        token_bindings,
         token_header,
         rate,
         burst,
@@ -2948,11 +2977,19 @@ fn apply_request_actions(
           input.route_name,
           input.uri.path(),
           input.headers,
-        );
+        )
+        .with_tls_fingerprint(input.tls.fingerprint.as_deref())
+        .with_client_asn(input.client_asn)
+        .with_tcp_max_hop(input.tcp_max_hop)
+        .with_person_proof_clearance_hash(ctx.person_proof.clearance_hash.as_deref());
         let check = RateLimitCheck {
           name,
           key: *key,
           token_header: token_header.as_deref(),
+          ipv4_prefix_bits: *ipv4_prefix_bits,
+          ipv6_prefix_bits: *ipv6_prefix_bits,
+          identity_parts,
+          token_bindings,
           rate,
           burst: *burst,
           max_buckets: *max_buckets,
@@ -3958,7 +3995,14 @@ fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Resu
     }
     (ObjectRef::RequestClient, "Agent") => Ok(Value::Object(ObjectRef::RequestClientAgent)),
     (ObjectRef::RequestClient, "Bot") => Ok(Value::Object(ObjectRef::RequestClientBot)),
-    (ObjectRef::RequestClient, "GeoCountry") | (ObjectRef::RequestClient, "Asn") => Ok(Value::Null),
+    (ObjectRef::RequestClient, "GeoCountry") => Ok(Value::Null),
+    (ObjectRef::RequestClient, "Asn") => Ok(
+      ctx
+        .request
+        .client_asn
+        .map(|asn| Value::Int(asn.into()))
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::RequestClientPersonProof, "State") => {
       Ok(Value::String(ctx.person_proof.state.as_str().to_string()))
     }
