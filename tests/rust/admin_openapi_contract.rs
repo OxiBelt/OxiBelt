@@ -194,6 +194,14 @@ fn downstream_tls_status_documents_bounded_crlite_status() {
         "result",
         "failure_policy",
         "coverage_policy",
+        "managed",
+        "storage",
+        "cache_present",
+        "cache_fresh",
+        "last_refresh_at",
+        "next_refresh_at",
+        "last_success_at",
+        "last_error_kind",
     ] {
         assert!(
             crlite_required.contains(field),
@@ -213,6 +221,9 @@ fn downstream_tls_status_documents_bounded_crlite_status() {
         "filter_file",
         "filter_sha256",
         "filter_id",
+        "cache_dir",
+        "tmpfs_dir",
+        "url",
     ] {
         assert!(
             !properties.contains_key(sensitive),

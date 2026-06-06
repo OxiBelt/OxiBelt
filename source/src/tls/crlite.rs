@@ -1,20 +1,17 @@
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use clubcard_crlite::{CRLiteClubcard, CRLiteKey, CRLiteStatus};
 use ring::digest;
-use serde::Serialize;
 use x509_cert::Certificate;
 use x509_cert::der::{
   Decode, Encode,
   asn1::{ObjectIdentifier, OctetString},
 };
 
-use crate::config::{CrliteCoveragePolicy, CrliteFailurePolicy, CrliteMode, TlsConfig};
-use crate::metrics::Metrics;
+use crate::config::{CrliteCoveragePolicy, CrliteFailurePolicy, TlsConfig};
 
 const CT_PRECERT_SCTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.2");
 
@@ -23,127 +20,42 @@ type LogId = [u8; 32];
 type Serial = Vec<u8>;
 type SctEntries = Vec<(LogId, u64)>;
 
-#[derive(Clone, Debug)]
-pub(crate) struct CrliteRuntime {
-  status: Arc<CrliteRuntimeStatus>,
+pub(super) struct CrliteCheckOutcome {
+  pub(super) status: &'static str,
+  pub(super) result: Option<&'static str>,
+  pub(super) filter_loaded: bool,
+  pub(super) filter_stale: bool,
+  pub(super) error_code: Option<&'static str>,
+  pub(super) certificate_rejected: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct CrliteRuntimeStatus {
-  pub status: String,
-  pub enabled: bool,
-  pub filter_present: bool,
-  pub filter_loaded: bool,
-  pub filter_stale: bool,
-  pub last_checked_at: Option<u64>,
-  pub last_error_code: Option<String>,
-  pub result: Option<String>,
-  pub failure_policy: &'static str,
-  pub coverage_policy: &'static str,
-}
-
-struct CrliteCheckOutcome {
-  status: &'static str,
-  result: Option<&'static str>,
-  filter_loaded: bool,
-  filter_stale: bool,
-  error_code: Option<&'static str>,
-}
-
-impl CrliteRuntime {
-  pub(crate) fn new(tls: &TlsConfig, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
-    if tls.crlite.mode == CrliteMode::Disabled {
-      metrics.set_crlite_enabled(false);
-      metrics.set_crlite_filter_stale(false);
-      return Ok(Self {
-        status: Arc::new(disabled_status(&tls.crlite)),
-      });
-    }
-
-    metrics.set_crlite_enabled(true);
-    metrics.record_crlite_check();
-    let checked_at = Some(unix_now());
-    let filter_present = tls.crlite.filter_file.is_some();
-    match check_crlite(tls) {
-      Ok(outcome) => {
-        metrics.set_crlite_filter_stale(outcome.filter_stale);
-        if outcome.result == Some("revoked") {
-          metrics.record_crlite_revoked();
-          bail!("crlite_revoked_certificate");
-        }
-        if let Some(error_code) = outcome.error_code {
-          metrics.record_crlite_error();
-          if tls.crlite.failure_policy == CrliteFailurePolicy::FailClosed {
-            bail!("{error_code}");
-          }
-        }
-        Ok(Self {
-          status: Arc::new(CrliteRuntimeStatus {
-            status: outcome.status.to_string(),
-            enabled: true,
-            filter_present,
-            filter_loaded: outcome.filter_loaded,
-            filter_stale: outcome.filter_stale,
-            last_checked_at: checked_at,
-            last_error_code: outcome.error_code.map(str::to_string),
-            result: outcome.result.map(str::to_string),
-            failure_policy: failure_policy_name(tls.crlite.failure_policy),
-            coverage_policy: coverage_policy_name(tls.crlite.coverage_policy),
-          }),
-        })
-      }
-      Err(error) => {
-        metrics.record_crlite_error();
-        metrics.set_crlite_filter_stale(false);
-        let error_code = classify_crlite_error(&error);
-        if tls.crlite.failure_policy == CrliteFailurePolicy::FailClosed {
-          bail!("{error_code}");
-        }
-        Ok(Self {
-          status: Arc::new(CrliteRuntimeStatus {
-            status: "degraded".to_string(),
-            enabled: true,
-            filter_present,
-            filter_loaded: false,
-            filter_stale: false,
-            last_checked_at: checked_at,
-            last_error_code: Some(error_code.to_string()),
-            result: None,
-            failure_policy: failure_policy_name(tls.crlite.failure_policy),
-            coverage_policy: coverage_policy_name(tls.crlite.coverage_policy),
-          }),
-        })
-      }
-    }
-  }
-
-  pub(crate) fn status(&self) -> CrliteRuntimeStatus {
-    (*self.status).clone()
-  }
-}
-
-fn disabled_status(tls: &crate::config::CrliteConfig) -> CrliteRuntimeStatus {
-  CrliteRuntimeStatus {
-    status: "disabled".to_string(),
-    enabled: false,
-    filter_present: false,
-    filter_loaded: false,
-    filter_stale: false,
-    last_checked_at: None,
-    last_error_code: None,
-    result: None,
-    failure_policy: failure_policy_name(tls.failure_policy),
-    coverage_policy: coverage_policy_name(tls.coverage_policy),
-  }
-}
-
-fn check_crlite(tls: &TlsConfig) -> anyhow::Result<CrliteCheckOutcome> {
+pub(super) fn check_crlite(tls: &TlsConfig) -> anyhow::Result<CrliteCheckOutcome> {
   let filter_path = tls
     .crlite
     .filter_file
     .as_deref()
     .ok_or_else(|| anyhow!("crlite_missing_filter_file"))?;
   let (filter, stale) = load_filter(tls, filter_path)?;
+  check_crlite_filter(tls, &filter, stale)
+}
+
+pub(super) fn check_crlite_filter_bytes(
+  tls: &TlsConfig,
+  bytes: &[u8],
+  stale: bool,
+) -> anyhow::Result<CrliteCheckOutcome> {
+  if bytes.len() > tls.crlite.max_filter_bytes {
+    bail!("crlite_filter_too_large");
+  }
+  let filter = CRLiteClubcard::from_bytes(bytes).map_err(|_| anyhow!("crlite_filter_parse"))?;
+  check_crlite_filter(tls, &filter, stale)
+}
+
+fn check_crlite_filter(
+  tls: &TlsConfig,
+  filter: &CRLiteClubcard,
+  stale: bool,
+) -> anyhow::Result<CrliteCheckOutcome> {
   let (issuer_spki_hash, serial, scts) = crlite_query_material(tls)?;
   let key = CRLiteKey::new(&issuer_spki_hash, &serial);
   let status = filter.contains(
@@ -158,6 +70,7 @@ fn check_crlite(tls: &TlsConfig) -> anyhow::Result<CrliteCheckOutcome> {
       filter_loaded: true,
       filter_stale: stale,
       error_code: None,
+      certificate_rejected: true,
     });
   }
   if tls.crlite.coverage_policy == CrliteCoveragePolicy::RequireGood && status != CRLiteStatus::Good
@@ -168,6 +81,7 @@ fn check_crlite(tls: &TlsConfig) -> anyhow::Result<CrliteCheckOutcome> {
       filter_loaded: true,
       filter_stale: stale,
       error_code: Some(crlite_coverage_error_code(&status)),
+      certificate_rejected: true,
     });
   }
   Ok(CrliteCheckOutcome {
@@ -176,6 +90,7 @@ fn check_crlite(tls: &TlsConfig) -> anyhow::Result<CrliteCheckOutcome> {
     filter_loaded: true,
     filter_stale: stale,
     error_code: stale.then_some("crlite_filter_stale"),
+    certificate_rejected: false,
   })
 }
 
@@ -306,7 +221,7 @@ fn read_u16(bytes: &mut &[u8]) -> anyhow::Result<u16> {
   Ok(value)
 }
 
-fn classify_crlite_error(error: &anyhow::Error) -> &'static str {
+pub(super) fn classify_crlite_error(error: &anyhow::Error) -> &'static str {
   let message = format!("{error:#}");
   for code in [
     "crlite_filter_stale",
@@ -327,6 +242,34 @@ fn classify_crlite_error(error: &anyhow::Error) -> &'static str {
     "crlite_sct_length",
     "crlite_sct_short",
     "crlite_tls_vector_short",
+    "crlite_managed_attachment_base_url",
+    "crlite_managed_attachment_base_url_scheme",
+    "crlite_managed_attachment_fetch",
+    "crlite_managed_attachment_hash",
+    "crlite_managed_attachment_http_status",
+    "crlite_managed_attachment_size_mismatch",
+    "crlite_managed_attachment_too_large",
+    "crlite_managed_attachment_url",
+    "crlite_managed_attachment_url_scheme",
+    "crlite_managed_cache_filter_read",
+    "crlite_managed_cache_filter_write",
+    "crlite_managed_cache_hash_mismatch",
+    "crlite_managed_cache_metadata_encode",
+    "crlite_managed_cache_metadata_parse",
+    "crlite_managed_cache_metadata_read",
+    "crlite_managed_cache_metadata_write",
+    "crlite_managed_cache_size_mismatch",
+    "crlite_managed_cache_too_large",
+    "crlite_managed_http",
+    "crlite_managed_http_status",
+    "crlite_managed_json_parse",
+    "crlite_managed_missing_attachment",
+    "crlite_managed_missing_attachment_base_url",
+    "crlite_managed_no_filter_record",
+    "crlite_managed_records_fetch",
+    "crlite_managed_request_build",
+    "crlite_managed_root_fetch",
+    "crlite_managed_sha256_mismatch",
   ] {
     if message.contains(code) {
       return code;
@@ -335,14 +278,14 @@ fn classify_crlite_error(error: &anyhow::Error) -> &'static str {
   "crlite_error"
 }
 
-fn failure_policy_name(policy: CrliteFailurePolicy) -> &'static str {
+pub(super) fn failure_policy_name(policy: CrliteFailurePolicy) -> &'static str {
   match policy {
     CrliteFailurePolicy::FailClosed => "fail_closed",
     CrliteFailurePolicy::DegradedAllow => "degraded_allow",
   }
 }
 
-fn coverage_policy_name(policy: CrliteCoveragePolicy) -> &'static str {
+pub(super) fn coverage_policy_name(policy: CrliteCoveragePolicy) -> &'static str {
   match policy {
     CrliteCoveragePolicy::AllowUnknown => "allow_unknown",
     CrliteCoveragePolicy::RequireGood => "require_good",
@@ -359,7 +302,7 @@ fn hex_digest(bytes: &[u8]) -> String {
   out
 }
 
-fn unix_now() -> u64 {
+pub(super) fn unix_now() -> u64 {
   SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .unwrap_or_default()
@@ -368,8 +311,10 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+  use super::super::crlite_runtime::CrliteRuntime;
   use super::*;
-  use crate::config::{CrliteConfig, CrliteCoveragePolicy, CrliteFailurePolicy};
+  use crate::config::{CrliteConfig, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteMode};
+  use crate::metrics::Metrics;
   use base64::Engine;
   use clubcard::builder::{ApproximateRibbon, ClubcardBuilder, ExactRibbon};
   use clubcard_crlite::builder::CRLiteBuilderItem;
@@ -410,28 +355,34 @@ mod tests {
     );
   }
 
-  #[test]
-  fn invalid_filter_bytes_return_parse_error() {
+  #[tokio::test]
+  async fn invalid_filter_bytes_return_parse_error() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let filter = temp_dir.path().join("crlite.filter");
     fs::write(&filter, b"not a crlite clubcard").expect("write filter");
     let mut tls = test_tls_config(filter);
     tls.crlite.failure_policy = CrliteFailurePolicy::FailClosed;
 
-    let error = CrliteRuntime::new(&tls, Metrics::new()).expect_err("invalid filter should fail");
+    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
+    let error = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+      .await
+      .expect_err("invalid filter should fail");
 
     assert!(error.to_string().contains("crlite_filter_parse"));
   }
 
-  #[test]
-  fn degraded_allow_keeps_bounded_status_for_invalid_filter() {
+  #[tokio::test]
+  async fn degraded_allow_keeps_bounded_status_for_invalid_filter() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let filter = temp_dir.path().join("crlite.filter");
     fs::write(&filter, b"not a crlite clubcard").expect("write filter");
     let mut tls = test_tls_config(filter);
     tls.crlite.failure_policy = CrliteFailurePolicy::DegradedAllow;
 
-    let runtime = CrliteRuntime::new(&tls, Metrics::new()).expect("degraded allow should load");
+    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
+    let runtime = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+      .await
+      .expect("degraded allow should load");
     let status = runtime.status();
 
     assert_eq!(status.status, "degraded");
@@ -442,13 +393,16 @@ mod tests {
     assert!(!status.filter_loaded);
   }
 
-  #[test]
-  fn missing_filter_file_returns_bounded_error_code() {
+  #[tokio::test]
+  async fn missing_filter_file_returns_bounded_error_code() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let mut tls = test_tls_config(temp_dir.path().join("missing.filter"));
     tls.crlite.failure_policy = CrliteFailurePolicy::DegradedAllow;
 
-    let runtime = CrliteRuntime::new(&tls, Metrics::new()).expect("degraded allow should load");
+    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
+    let runtime = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+      .await
+      .expect("degraded allow should load");
     let status = runtime.status();
 
     assert_eq!(status.status, "degraded");
@@ -459,8 +413,8 @@ mod tests {
     assert!(!status.filter_loaded);
   }
 
-  #[test]
-  fn oversized_filter_is_rejected_before_parse() {
+  #[tokio::test]
+  async fn oversized_filter_is_rejected_before_parse() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let filter = temp_dir.path().join("crlite.filter");
     fs::write(&filter, b"too large").expect("write filter");
@@ -468,13 +422,16 @@ mod tests {
     tls.crlite.max_filter_bytes = 1;
     tls.crlite.failure_policy = CrliteFailurePolicy::FailClosed;
 
-    let error = CrliteRuntime::new(&tls, Metrics::new()).expect_err("oversized filter should fail");
+    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
+    let error = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+      .await
+      .expect_err("oversized filter should fail");
 
     assert!(error.to_string().contains("crlite_filter_too_large"));
   }
 
-  #[test]
-  fn filter_sha256_mismatch_is_rejected_before_parse() {
+  #[tokio::test]
+  async fn filter_sha256_mismatch_is_rejected_before_parse() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let filter = temp_dir.path().join("crlite.filter");
     fs::write(&filter, b"filter bytes").expect("write filter");
@@ -483,7 +440,10 @@ mod tests {
       Some("0000000000000000000000000000000000000000000000000000000000000000".to_string());
     tls.crlite.failure_policy = CrliteFailurePolicy::FailClosed;
 
-    let error = CrliteRuntime::new(&tls, Metrics::new()).expect_err("hash mismatch should fail");
+    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
+    let error = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+      .await
+      .expect_err("hash mismatch should fail");
 
     assert!(error.to_string().contains("crlite_filter_sha256_mismatch"));
   }

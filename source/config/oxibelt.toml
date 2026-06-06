@@ -95,12 +95,21 @@ mode = "disabled"
 [tls.crlite]
 mode = "disabled"
 # mode = "enforce"
+# mode = "managed"
 # filter_file = "crlite.filter"
 # filter_sha256 = ""
 # max_filter_bytes = 33554432
 # max_filter_age_seconds = 86400
 # failure_policy = "fail_closed"
 # coverage_policy = "allow_unknown"
+
+[tls.crlite.managed]
+# storage = "disk" # memory | tmpfs | disk
+# cache_dir = "/var/lib/oxibelt/crlite"
+# tmpfs_dir = "/dev/shm/oxibelt-crlite"
+# max_cache_bytes = 67108864
+# refresh_interval_seconds = 21600
+# request_timeout_ms = 3000
 
 [quic]
 retry = true

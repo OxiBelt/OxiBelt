@@ -13,6 +13,16 @@ pub(crate) const CRLITE_CONFIG_KEYS: &[&str] = &[
   "max_filter_age_seconds",
   "failure_policy",
   "coverage_policy",
+  "managed",
+];
+
+pub(crate) const CRLITE_MANAGED_CONFIG_KEYS: &[&str] = &[
+  "cache_dir",
+  "max_cache_bytes",
+  "refresh_interval_seconds",
+  "request_timeout_ms",
+  "storage",
+  "tmpfs_dir",
 ];
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -31,6 +41,8 @@ pub struct CrliteConfig {
   pub failure_policy: CrliteFailurePolicy,
   #[serde(default)]
   pub coverage_policy: CrliteCoveragePolicy,
+  #[serde(default)]
+  pub managed: CrliteManagedConfig,
 }
 
 impl Default for CrliteConfig {
@@ -43,6 +55,7 @@ impl Default for CrliteConfig {
       max_filter_age_seconds: default_crlite_max_filter_age_seconds(),
       failure_policy: CrliteFailurePolicy::FailClosed,
       coverage_policy: CrliteCoveragePolicy::AllowUnknown,
+      managed: CrliteManagedConfig::default(),
     }
   }
 }
@@ -54,6 +67,14 @@ impl CrliteConfig {
       CrliteMode::Enforce => {
         if self.filter_file.is_none() {
           bail!("tls.crlite.filter_file is required when tls.crlite.mode = \"enforce\"");
+        }
+      }
+      CrliteMode::Managed => {
+        if self.filter_file.is_some() {
+          bail!("tls.crlite.filter_file cannot be used when tls.crlite.mode = \"managed\"");
+        }
+        if self.filter_sha256.is_some() {
+          bail!("tls.crlite.filter_sha256 cannot be used when tls.crlite.mode = \"managed\"");
         }
       }
     }
@@ -68,6 +89,9 @@ impl CrliteConfig {
     {
       bail!("tls.crlite.filter_sha256 must be a 64-character hex SHA-256 digest");
     }
+    if self.mode == CrliteMode::Managed {
+      self.managed.validate()?;
+    }
     Ok(())
   }
 }
@@ -78,6 +102,7 @@ pub enum CrliteMode {
   #[default]
   Disabled,
   Enforce,
+  Managed,
 }
 
 impl CrliteMode {
@@ -85,6 +110,7 @@ impl CrliteMode {
     match self {
       Self::Disabled => "disabled",
       Self::Enforce => "enforce",
+      Self::Managed => "managed",
     }
   }
 }
@@ -105,9 +131,78 @@ pub enum CrliteCoveragePolicy {
   RequireGood,
 }
 
-pub const CRLITE_MODE_WIRE_VALUES: &[&str] = &["disabled", "enforce"];
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CrliteManagedConfig {
+  #[serde(default)]
+  pub storage: CrliteManagedStorage,
+  #[serde(default = "default_crlite_managed_cache_dir")]
+  pub cache_dir: PathBuf,
+  #[serde(default = "default_crlite_managed_tmpfs_dir")]
+  pub tmpfs_dir: PathBuf,
+  #[serde(default = "default_crlite_managed_max_cache_bytes")]
+  pub max_cache_bytes: usize,
+  #[serde(default = "default_crlite_managed_refresh_interval_seconds")]
+  pub refresh_interval_seconds: u64,
+  #[serde(default = "default_crlite_managed_request_timeout_ms")]
+  pub request_timeout_ms: u64,
+}
+
+impl Default for CrliteManagedConfig {
+  fn default() -> Self {
+    Self {
+      storage: CrliteManagedStorage::Disk,
+      cache_dir: default_crlite_managed_cache_dir(),
+      tmpfs_dir: default_crlite_managed_tmpfs_dir(),
+      max_cache_bytes: default_crlite_managed_max_cache_bytes(),
+      refresh_interval_seconds: default_crlite_managed_refresh_interval_seconds(),
+      request_timeout_ms: default_crlite_managed_request_timeout_ms(),
+    }
+  }
+}
+
+impl CrliteManagedConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.max_cache_bytes == 0 {
+      bail!("tls.crlite.managed.max_cache_bytes must be greater than 0");
+    }
+    if self.refresh_interval_seconds == 0 {
+      bail!("tls.crlite.managed.refresh_interval_seconds must be greater than 0");
+    }
+    if self.request_timeout_ms == 0 {
+      bail!("tls.crlite.managed.request_timeout_ms must be greater than 0");
+    }
+    match self.storage {
+      CrliteManagedStorage::Memory => {}
+      CrliteManagedStorage::Tmpfs => crate::cache::validate_tmpfs_dir(&self.tmpfs_dir)?,
+      CrliteManagedStorage::Disk => crate::cache::validate_disk_dir(&self.cache_dir)?,
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CrliteManagedStorage {
+  Memory,
+  Tmpfs,
+  #[default]
+  Disk,
+}
+
+impl CrliteManagedStorage {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Memory => "memory",
+      Self::Tmpfs => "tmpfs",
+      Self::Disk => "disk",
+    }
+  }
+}
+
+pub const CRLITE_MODE_WIRE_VALUES: &[&str] = &["disabled", "enforce", "managed"];
 pub const CRLITE_FAILURE_POLICY_WIRE_VALUES: &[&str] = &["fail_closed", "degraded_allow"];
 pub const CRLITE_COVERAGE_POLICY_WIRE_VALUES: &[&str] = &["allow_unknown", "require_good"];
+pub const CRLITE_MANAGED_STORAGE_WIRE_VALUES: &[&str] = &["memory", "tmpfs", "disk"];
 
 pub(crate) fn resolve_filter_file(
   config: &mut CrliteConfig,
@@ -138,4 +233,24 @@ fn default_crlite_max_filter_bytes() -> usize {
 
 fn default_crlite_max_filter_age_seconds() -> u64 {
   86_400
+}
+
+fn default_crlite_managed_cache_dir() -> PathBuf {
+  PathBuf::from("/var/lib/oxibelt/crlite")
+}
+
+fn default_crlite_managed_tmpfs_dir() -> PathBuf {
+  PathBuf::from("/dev/shm/oxibelt-crlite")
+}
+
+fn default_crlite_managed_max_cache_bytes() -> usize {
+  67_108_864
+}
+
+fn default_crlite_managed_refresh_interval_seconds() -> u64 {
+  21_600
+}
+
+fn default_crlite_managed_request_timeout_ms() -> u64 {
+  3_000
 }

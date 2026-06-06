@@ -271,7 +271,8 @@ impl AppSnapshot {
     let admin_audit = AdminAuditRuntime::new(&config)
       .await
       .context("failed to build admin audit runtime")?;
-    let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
+    let crlite = tls::CrliteRuntime::new(&config.tls, &control_http, metrics.clone())
+      .await
       .context("failed to build CRLite runtime")?;
     let ocsp_staple = tls::OcspStapleRuntime::new(&config.tls, &control_http, metrics.clone())
       .await
@@ -281,6 +282,7 @@ impl AppSnapshot {
       &config.listeners,
       Some(&tls_resumption),
       Some(&ocsp_staple),
+      Some(&crlite),
     )
     .context("failed to build downstream TLS config")?;
     let admin_tls_server_config = if config.admin.enabled && config.admin.tls.enabled {
@@ -299,6 +301,7 @@ impl AppSnapshot {
           config.source_paths.cert_dir.as_deref(),
           Some(&tls_resumption),
           Some(&ocsp_staple),
+          Some(&crlite),
         )
         .context("failed to build QUIC TLS config")?,
       )

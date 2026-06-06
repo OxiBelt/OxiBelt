@@ -725,7 +725,15 @@
                         "last_error_code",
                         "result",
                         "failure_policy",
-                        "coverage_policy"
+                        "coverage_policy",
+                        "managed",
+                        "storage",
+                        "cache_present",
+                        "cache_fresh",
+                        "last_refresh_at",
+                        "next_refresh_at",
+                        "last_success_at",
+                        "last_error_kind"
                       ],
                       "properties": {
                         "status": {
@@ -787,6 +795,54 @@
                           "enum": [
                             "allow_unknown",
                             "require_good"
+                          ]
+                        },
+                        "managed": {
+                          "type": "boolean"
+                        },
+                        "storage": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "memory",
+                            "tmpfs",
+                            "disk",
+                            null
+                          ]
+                        },
+                        "cache_present": {
+                          "type": "boolean"
+                        },
+                        "cache_fresh": {
+                          "type": "boolean"
+                        },
+                        "last_refresh_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "next_refresh_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "last_success_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "last_error_kind": {
+                          "type": [
+                            "string",
+                            "null"
                           ]
                         }
                       },

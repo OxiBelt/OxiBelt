@@ -30,7 +30,7 @@ Lifecycle states are intentionally limited:
 | `upstream-discovery` | `supported` | Config/runtime | Discovery providers: `dns`, `file`, `kubernetes`, `consul`, `etcd`, `nomad`. |
 | `upstream-pool-runtime-state` | `supported` | Config/Admin API | Server states: `ready`, `drain`, `down`, `maintenance`. |
 | `tls-ocsp` | `supported` | Config/TLS/Admin API | Downstream OCSP modes: `disabled`, `static_file`, `live_fetch`. Static file staples and live fetch/refresh are supported. |
-| `crlite` | `experimental` | TLS/revocation | Local downstream CRLite filter enforcement is implemented for operator-supplied filters. Modes: `disabled`, `enforce`; failure policies: `fail_closed`, `degraded_allow`; coverage policies: `allow_unknown`, `require_good`. Automatic CRLite distribution and upstream enforcement are planned separately. |
+| `crlite` | `experimental` | TLS/revocation | Downstream CRLite filter enforcement is implemented for operator-supplied local filters and managed Mozilla CRLite cache downloads. Modes: `disabled`, `enforce`, `managed`; failure policies: `fail_closed`, `degraded_allow`; coverage policies: `allow_unknown`, `require_good`. Upstream CRLite enforcement is planned separately. |
 | `tls-remote-signer` | `supported` | Config/TLS | Downstream certificate signing can use the `oxibelt-keysigner` Unix-socket sidecar. |
 | `tls-mtls-client-auth` | `supported` | Config/TLS/routing | Optional and required downstream client certificate authentication are supported for TCP TLS, with route matchers for available certificate metadata. |
 | `upstream-ech` | `supported` | Config/upstream TLS | Upstream ECH supports `disabled`, GREASE, and configured `ECHConfigList` modes. |

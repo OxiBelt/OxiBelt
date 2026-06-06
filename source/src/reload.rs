@@ -214,7 +214,8 @@ impl ReloadManager {
 
     let mut config = active.config.clone();
     reload_downstream_tls_paths(&mut config)?;
-    let crlite = tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
+    let crlite = tls::CrliteRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
+      .await
       .context("failed to build CRLite runtime")?;
     let ocsp_staple =
       tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
@@ -225,6 +226,7 @@ impl ReloadManager {
       &config.listeners,
       Some(&active.tls_resumption),
       Some(&ocsp_staple),
+      Some(&crlite),
     )
     .context("failed to rebuild downstream TLS config")?;
     let quic_server_config = if config.listeners.http3 {
@@ -235,6 +237,7 @@ impl ReloadManager {
           config.source_paths.cert_dir.as_deref(),
           Some(&active.tls_resumption),
           Some(&ocsp_staple),
+          Some(&crlite),
         )
         .context("failed to rebuild QUIC TLS config")?,
       )
@@ -398,6 +401,7 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
       max_filter_age_seconds: old_tls.crlite.max_filter_age_seconds,
       failure_policy: old_tls.crlite.failure_policy,
       coverage_policy: old_tls.crlite.coverage_policy,
+      managed: old_tls.crlite.managed,
     },
   };
   config.quic = old_quic;

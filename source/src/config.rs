@@ -2250,6 +2250,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     ][..],
     "tls.ocsp" => tls::OCSP_CONFIG_KEYS,
     "tls.crlite" => crlite::CRLITE_CONFIG_KEYS,
+    "tls.crlite.managed" => crlite::CRLITE_MANAGED_CONFIG_KEYS,
     "tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
     "quic" => &[
       "alt_svc",

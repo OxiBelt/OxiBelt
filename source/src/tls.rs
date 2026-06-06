@@ -22,13 +22,15 @@ mod admin_quic;
 mod cert_metadata;
 mod client_auth;
 mod crlite;
+mod crlite_managed;
+mod crlite_runtime;
 mod ocsp;
 mod resumption;
 pub(crate) use cert_metadata::client_certificate_metadata;
 
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
-pub(crate) use crlite::CrliteRuntime;
-pub use crlite::CrliteRuntimeStatus;
+pub(crate) use crlite_runtime::CrliteRuntime;
+pub use crlite_runtime::CrliteRuntimeStatus;
 pub use ocsp::OcspRuntimeStatus;
 pub(crate) use ocsp::OcspStapleRuntime;
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
@@ -79,7 +81,7 @@ pub fn build_server_config_with_resumption(
   listeners: &ListenerConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_server_config_with_resumption_and_ocsp(tls, listeners, resumption_state, None)
+  build_server_config_with_resumption_and_ocsp(tls, listeners, resumption_state, None, None)
 }
 
 pub(crate) fn build_server_config_with_resumption_and_ocsp(
@@ -87,10 +89,14 @@ pub(crate) fn build_server_config_with_resumption_and_ocsp(
   listeners: &ListenerConfig,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
   let provider = Arc::new(downstream_crypto_provider(tls));
-  let (server_identity, cert_resolver) =
+  let (server_identity, mut cert_resolver) =
     ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
+  if let Some(runtime) = crlite_runtime {
+    cert_resolver = runtime.wrap_resolver(cert_resolver);
+  }
   let versions = tls_protocol_versions(tls.min_version, tls.max_version);
   let builder = ServerConfig::builder_with_provider(provider.clone())
     .with_protocol_versions(&versions)
@@ -146,6 +152,7 @@ pub fn build_quic_server_config_with_resumption(
     quic_host_key_base_dir,
     resumption_state,
     None,
+    None,
   )
 }
 
@@ -155,10 +162,14 @@ pub(crate) fn build_quic_server_config_with_resumption_and_ocsp(
   quic_host_key_base_dir: Option<&std::path::Path>,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<QuinnServerConfig> {
   let provider = Arc::new(downstream_crypto_provider(tls));
-  let (server_identity, cert_resolver) =
+  let (server_identity, mut cert_resolver) =
     ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
+  if let Some(runtime) = crlite_runtime {
+    cert_resolver = runtime.wrap_resolver(cert_resolver);
+  }
   let builder = ServerConfig::builder_with_provider(provider.clone())
     .with_protocol_versions(&[&rustls::version::TLS13])
     .context("failed to configure QUIC TLS versions")?;

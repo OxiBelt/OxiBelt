@@ -98,7 +98,7 @@ Supported downstream TLS features:
 - Optional or required downstream client certificate authentication.
 - Client CA roots from configured cert-directory files.
 - Static file-based OCSP stapling and live OCSP fetch/refresh for downstream TLS.
-- Experimental local CRLite filter enforcement for the configured downstream TLS certificate.
+- Experimental CRLite filter enforcement for the configured downstream TLS certificate, including operator-supplied local filters and managed Mozilla CRLite cache downloads.
 - Session tickets with configurable rotation interval.
 
 Remote private-key signing is intended to keep downstream and TURN TLS private keys outside the OxiBelt process memory. OxiBelt connects to `oxibelt-keysigner` over a Unix domain socket, authenticates with a base64 32-byte token, verifies that the signer-reported public key matches the configured certificate, and requests signatures through rustls' signing interface. The signer caps concurrently handled IPC connections and applies server-side request/response I/O deadlines before token validation, so local idle or trickled socket peers cannot hold signer tasks indefinitely. The signer defaults to TLS 1.3 server CertificateVerify inputs only; TLS 1.2 unstructured signing requires explicit opt-in on both OxiBelt and the signer sidecar.
@@ -268,7 +268,7 @@ Security rationale: ACME account keys, DNS provider API tokens, and challenge cr
 
 The current implementation reserves or defers this work:
 
-- Automatic CRLite distribution and upstream CRLite enforcement.
+- Upstream CRLite enforcement.
 - CRS stream-payload inspection for WebSocket and WebTransport traffic.
 - Downstream ECH configuration.
 - General-purpose UDP stream proxying outside the configured same-port QUIC SNI forwarding path.

@@ -14,8 +14,10 @@ pub(super) async fn build_downstream_tls_reload_configs(
   Arc<rustls::ServerConfig>,
   Option<h3_quinn::quinn::ServerConfig>,
 )> {
-  let crlite = crate::tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
-    .context("failed to build CRLite runtime")?;
+  let crlite =
+    crate::tls::CrliteRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
+      .await
+      .context("failed to build CRLite runtime")?;
   let ocsp_staple =
     crate::tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
       .await
@@ -25,6 +27,7 @@ pub(super) async fn build_downstream_tls_reload_configs(
     &config.listeners,
     Some(&active.tls_resumption),
     Some(&ocsp_staple),
+    Some(&crlite),
   )
   .context("failed to rebuild downstream TLS config")?;
   let quic_server_config = if config.listeners.http3 {
@@ -35,6 +38,7 @@ pub(super) async fn build_downstream_tls_reload_configs(
         config.source_paths.cert_dir.as_deref(),
         Some(&active.tls_resumption),
         Some(&ocsp_staple),
+        Some(&crlite),
       )
       .context("failed to rebuild QUIC TLS config")?,
     )

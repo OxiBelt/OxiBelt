@@ -6,16 +6,16 @@ use std::path::Path;
 use base64::Engine;
 use oxibelt::config::{
     AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
-    ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteMode,
-    DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy,
-    EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ExternalAuthProvider,
-    ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode, IpmPolicyEffect,
-    KubernetesDiscoveryResource, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy,
-    OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol,
-    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
-    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-    UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
+    CrliteMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
+    DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
+    ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
+    HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource, LoadBalancingAlgorithm,
+    MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode,
+    ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides,
+    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
+    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -6564,6 +6564,13 @@ fn crlite_defaults_to_disabled_policy() {
         config.tls.crlite.coverage_policy,
         CrliteCoveragePolicy::AllowUnknown
     );
+    assert_eq!(
+        config.tls.crlite.managed.storage,
+        CrliteManagedStorage::Disk
+    );
+    assert_eq!(config.tls.crlite.managed.max_cache_bytes, 67_108_864);
+    assert_eq!(config.tls.crlite.managed.refresh_interval_seconds, 21_600);
+    assert_eq!(config.tls.crlite.managed.request_timeout_ms, 3_000);
 }
 
 #[test]
@@ -6630,6 +6637,209 @@ coverage_policy = "require_good"
         config.tls.crlite.coverage_policy,
         CrliteCoveragePolicy::RequireGood
     );
+}
+
+#[test]
+fn crlite_managed_disk_config_validates_and_coexists_with_live_ocsp() {
+    let temp_dir = common::TempDir::new("crlite-managed-disk");
+    let cache_dir = temp_dir.path().join("crlite-cache");
+    std::fs::create_dir(&cache_dir).expect("cache dir");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "crlite-managed-disk");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "mode = \"disabled\"",
+        "mode = \"live_fetch\"\nresponder_url = \"https://ocsp.example.test/status\"",
+    ) + &format!(
+        r#"
+
+[tls.crlite]
+mode = "managed"
+max_filter_bytes = 65536
+max_filter_age_seconds = 3600
+failure_policy = "degraded_allow"
+coverage_policy = "require_good"
+
+[tls.crlite.managed]
+storage = "disk"
+cache_dir = "{}"
+max_cache_bytes = 131072
+refresh_interval_seconds = 120
+request_timeout_ms = 500
+"#,
+        cache_dir.display()
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config
+        .validate()
+        .expect("managed CRLite disk config should validate");
+    assert_eq!(config.tls.ocsp.mode, OcspMode::LiveFetch);
+    assert_eq!(config.tls.crlite.mode, CrliteMode::Managed);
+    assert_eq!(
+        config.tls.crlite.managed.storage,
+        CrliteManagedStorage::Disk
+    );
+    assert_eq!(config.tls.crlite.managed.cache_dir, cache_dir);
+}
+
+#[test]
+fn crlite_managed_memory_config_validates_without_persistent_storage() {
+    let temp_dir = common::TempDir::new("crlite-managed-memory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "crlite-managed-memory");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[tls.crlite]
+mode = "managed"
+failure_policy = "degraded_allow"
+
+[tls.crlite.managed]
+storage = "memory"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config
+        .validate()
+        .expect("managed CRLite memory config should validate");
+    assert_eq!(
+        config.tls.crlite.managed.storage,
+        CrliteManagedStorage::Memory
+    );
+}
+
+#[test]
+fn crlite_managed_tmpfs_config_validates_when_tmpfs_dir_is_writable() {
+    let tmpfs_root = Path::new("/dev/shm");
+    if !tmpfs_root.is_dir() {
+        return;
+    }
+    let tmpfs_dir = tmpfs_root.join(format!("oxibelt-crlite-test-{}", std::process::id()));
+    if std::fs::create_dir_all(&tmpfs_dir).is_err() {
+        return;
+    }
+    struct RemoveDir(std::path::PathBuf);
+    impl Drop for RemoveDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = RemoveDir(tmpfs_dir.clone());
+    let temp_dir = common::TempDir::new("crlite-managed-tmpfs");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "crlite-managed-tmpfs");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + &format!(
+            r#"
+
+[tls.crlite]
+mode = "managed"
+failure_policy = "degraded_allow"
+
+[tls.crlite.managed]
+storage = "tmpfs"
+tmpfs_dir = "{}"
+"#,
+            tmpfs_dir.display()
+        );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config
+        .validate()
+        .expect("managed CRLite tmpfs config should validate");
+    assert_eq!(
+        config.tls.crlite.managed.storage,
+        CrliteManagedStorage::Tmpfs
+    );
+}
+
+#[test]
+fn crlite_managed_rejects_manual_filter_source() {
+    let cases = [
+        (
+            "filter_file = \"crlite.filter\"",
+            "filter_file cannot be used when tls.crlite.mode = \"managed\"",
+        ),
+        (
+            "filter_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "filter_sha256 cannot be used when tls.crlite.mode = \"managed\"",
+        ),
+    ];
+
+    for (setting, expected) in cases {
+        let temp_dir = common::TempDir::new("crlite-managed-manual-source");
+        let (cert_path, key_path) =
+            common::create_self_signed_cert(temp_dir.path(), "crlite-managed-manual-source");
+        let raw = common::minimal_config_toml(&cert_path, &key_path)
+            + &format!(
+                r#"
+
+[tls.crlite]
+mode = "managed"
+{setting}
+
+[tls.crlite.managed]
+storage = "memory"
+"#
+            );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("managed CRLite manual source should fail");
+
+        assert!(
+            error.to_string().contains(expected),
+            "setting {setting} produced unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn crlite_managed_rejects_invalid_limits() {
+    let cases = [
+        (
+            "max_cache_bytes = 0",
+            "managed.max_cache_bytes must be greater than 0",
+        ),
+        (
+            "refresh_interval_seconds = 0",
+            "managed.refresh_interval_seconds must be greater than 0",
+        ),
+        (
+            "request_timeout_ms = 0",
+            "managed.request_timeout_ms must be greater than 0",
+        ),
+    ];
+
+    for (setting, expected) in cases {
+        let temp_dir = common::TempDir::new("crlite-managed-invalid");
+        let (cert_path, key_path) =
+            common::create_self_signed_cert(temp_dir.path(), "crlite-managed-invalid");
+        let raw = common::minimal_config_toml(&cert_path, &key_path)
+            + &format!(
+                r#"
+
+[tls.crlite]
+mode = "managed"
+
+[tls.crlite.managed]
+storage = "memory"
+{setting}
+"#
+            );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("managed CRLite invalid limit should fail");
+
+        assert!(
+            error.to_string().contains(expected),
+            "setting {setting} produced unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
