@@ -127,10 +127,10 @@ fn crlite_coverage_error_code(status: &CRLiteStatus) -> &'static str {
 
 fn filter_is_stale(metadata: &fs::Metadata, max_age_seconds: u64) -> anyhow::Result<bool> {
   let modified = metadata.modified().context("crlite_filter_modified_time")?;
-  Ok(filter_age_is_stale(
-    modified.elapsed().unwrap_or_default(),
-    max_age_seconds,
-  ))
+  Ok(match modified.elapsed() {
+    Ok(age) => filter_age_is_stale(age, max_age_seconds),
+    Err(_) => true,
+  })
 }
 
 fn filter_age_is_stale(age: Duration, max_age_seconds: u64) -> bool {
@@ -452,6 +452,22 @@ mod tests {
   fn filter_age_policy_marks_old_filters_stale() {
     assert!(!filter_age_is_stale(Duration::from_secs(60), 60));
     assert!(filter_age_is_stale(Duration::from_secs(61), 60));
+  }
+
+  #[test]
+  fn future_filter_mtime_is_stale() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let filter = temp_dir.path().join("crlite.filter");
+    fs::write(&filter, b"filter bytes").expect("write filter");
+    let future = SystemTime::now() + Duration::from_secs(60);
+    let times = fs::FileTimes::new().set_modified(future);
+    fs::File::open(&filter)
+      .expect("open filter")
+      .set_times(times)
+      .expect("set future filter mtime");
+    let metadata = fs::metadata(&filter).expect("filter metadata");
+
+    assert!(filter_is_stale(&metadata, 60).expect("stale check"));
   }
 
   #[test]
