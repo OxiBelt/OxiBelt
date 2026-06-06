@@ -364,14 +364,16 @@ fn external_benchmark_failure_harness(gate_mode: &str) -> HarnessRun {
 }
 
 fn diagnostic_profile_failure_harness(gate_mode: &str) -> HarnessRun {
-    let function = extract_bash_function(
-        &performance_script_text(),
-        "handle_diagnostic_profile_failure",
+    let script = performance_script_text();
+    let functions = format!(
+        "{}\n\n{}",
+        extract_bash_function(&script, "handle_diagnostic_profile_failure"),
+        extract_bash_function(&script, "flush_diagnostic_profile_warnings")
     );
     let temp_dir = HarnessTempDir::new("oxibelt-performance-diagnostic-profile-gate-");
     let harness_path = temp_dir.join("harness.sh");
     let events_path = temp_dir.join("events.log");
-    write_diagnostic_profile_failure_harness(&harness_path, &function);
+    write_diagnostic_profile_failure_harness(&harness_path, &functions);
 
     let output = Command::new("bash")
         .arg(&harness_path)
@@ -683,6 +685,7 @@ set -euo pipefail
 
 events="${{EVENTS_FILE:?}}"
 diagnostic_profile_gate_mode="${{GATE_MODE:?}}"
+diagnostic_profile_warning_count=0
 
 fail_with_diagnostics() {{
   printf 'FAIL %s\n' "$1" >>"${{events}}"
@@ -692,7 +695,9 @@ fail_with_diagnostics() {{
 
 {function}
 
-handle_diagnostic_profile_failure "diagnostic profiling failed for synthetic-profile: perf record failed with status 255"
+handle_diagnostic_profile_failure "diagnostic profiling failed for synthetic-profile-a: perf record failed with status 255"
+handle_diagnostic_profile_failure "diagnostic profiling failed for synthetic-profile-b: perf record failed with status 255"
+flush_diagnostic_profile_warnings
 printf 'CONTINUE\n' >>"${{events}}"
 "#
     );
@@ -1900,6 +1905,12 @@ fn diagnostic_profile_layer_keeps_primary_results_separate() {
         "diagnostic profile rows should be finalized separately from primary results.json"
     );
     assert!(
+        script.contains("diagnostic_profile_warning_count=0")
+            && script.contains("flush_diagnostic_profile_warnings")
+            && script.contains("reported ${diagnostic_profile_warning_count} unavailable sample(s); see profile-results.json and profiles/"),
+        "diagnostic profile shard failures should be summarized once per script run"
+    );
+    assert!(
         !script.contains("::warning title=Docker performance diagnostic profiling::${message}"),
         "diagnostic profile shard failures should not emit per-sample GitHub annotations"
     );
@@ -1982,10 +1993,21 @@ fn diagnostic_profile_failures_warn_without_github_annotation_and_can_fail_close
     );
     let warn_stderr = String::from_utf8_lossy(&warn.output.stderr);
     assert!(
+        warn_stderr
+            .matches("Docker performance diagnostic profiling reported")
+            .count()
+            == 1,
+        "warn mode should emit one summarized diagnostic profiling warning"
+    );
+    assert!(
         warn_stderr.contains(
-            "Docker performance diagnostic profiling warning: diagnostic profiling failed for synthetic-profile: perf record failed with status 255"
+            "Docker performance diagnostic profiling reported 2 unavailable sample(s); see profile-results.json and profiles/"
         ),
-        "warn mode should emit a plain diagnostic profiling warning"
+        "warn mode should point reviewers to profile evidence instead of repeating per-sample reasons"
+    );
+    assert!(
+        !warn_stderr.contains("perf record failed with status 255"),
+        "warn mode should not repeat per-sample perf failures in the shard step log"
     );
     assert!(
         !warn_stderr.contains("::warning title=Docker performance diagnostic profiling::"),
@@ -1999,7 +2021,7 @@ fn diagnostic_profile_failures_warn_without_github_annotation_and_can_fail_close
     );
     assert!(
         fail.events.contains(
-            "FAIL diagnostic profiling failed for synthetic-profile: perf record failed with status 255"
+            "FAIL diagnostic profiling failed for synthetic-profile-a: perf record failed with status 255"
         ),
         "fail mode should route through normal diagnostics"
     );

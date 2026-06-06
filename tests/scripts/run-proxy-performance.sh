@@ -218,6 +218,7 @@ diagnostic_profile_event="${OXIBELT_PERF_DIAGNOSTIC_EVENT:-cpu-clock}"
 diagnostic_profile_frequency="${OXIBELT_PERF_DIAGNOSTIC_FREQUENCY:-49}"
 diagnostic_profile_gate_mode="${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE:-warn}"
 diagnostic_profile_compress="${OXIBELT_PERF_DIAGNOSTIC_COMPRESS:-1}"
+diagnostic_profile_warning_count=0
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
@@ -573,11 +574,17 @@ handle_external_benchmark_failure() {
 handle_diagnostic_profile_failure() {
   local message="$1"
   if [[ "${diagnostic_profile_gate_mode}" == "warn" ]]; then
-    echo "Docker performance diagnostic profiling warning: ${message}" >&2
+    diagnostic_profile_warning_count=$((diagnostic_profile_warning_count + 1))
     return
   fi
 
   fail_with_diagnostics "${message}"
+}
+
+flush_diagnostic_profile_warnings() {
+  if (( diagnostic_profile_warning_count > 0 )); then
+    echo "Docker performance diagnostic profiling reported ${diagnostic_profile_warning_count} unavailable sample(s); see profile-results.json and profiles/" >&2
+  fi
 }
 
 diagnostic_profile_mode_has_cpu() {
@@ -2823,6 +2830,7 @@ esac
 stop_active_proxy
 collect_logs
 finalize_results
+flush_diagnostic_profile_warnings
 copy_artifacts
 
 echo "Docker performance profile ${profile} serving type ${serving_type} completed"
