@@ -19,8 +19,8 @@ pub(super) fn fast_path_request_body<B>(
   empty_probe_allowed: bool,
 ) -> impl std::future::Future<Output = ProxyBody> + Send
 where
-  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
-  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
   async move {
     if body.is_end_stream() || definitely_empty {
@@ -46,13 +46,13 @@ fn fast_path_request_body_with_empty_probe<B>(
   timeout: std::time::Duration,
 ) -> impl std::future::Future<Output = ProxyBody> + Send
 where
-  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
-  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
   async move {
     let size_hint = body.size_hint();
-    let mut body = Box::pin(body);
-    let first = match fast_path_poll_request_body_once(body.as_mut()) {
+    let mut body = body;
+    let first = match fast_path_poll_request_body_once(Pin::new(&mut body)) {
       Poll::Ready(None) => return empty_body(),
       Poll::Ready(Some(frame)) => Some(frame),
       Poll::Pending => {
@@ -63,7 +63,7 @@ where
         if body.is_end_stream() {
           return empty_body();
         }
-        match fast_path_poll_request_body_once(body.as_mut()) {
+        match fast_path_poll_request_body_once(Pin::new(&mut body)) {
           Poll::Ready(None) => return empty_body(),
           Poll::Ready(Some(frame)) => Some(frame),
           Poll::Pending => None,
@@ -101,28 +101,28 @@ where
   B: Body<Data = bytes::Bytes>,
 {
   first: Option<Result<Frame<bytes::Bytes>, B::Error>>,
-  body: Pin<Box<B>>,
+  body: B,
   size_hint: SizeHint,
 }
 
-impl<B> Unpin for PeekedRequestBody<B> where B: Body<Data = bytes::Bytes> {}
-
 impl<B> Body for PeekedRequestBody<B>
 where
-  B: Body<Data = bytes::Bytes>,
+  B: Body<Data = bytes::Bytes> + Unpin,
+  B::Error: Unpin,
 {
   type Data = bytes::Bytes;
   type Error = B::Error;
 
   fn poll_frame(
-    mut self: Pin<&mut Self>,
+    self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    if let Some(frame) = self.first.take() {
+    let this = self.get_mut();
+    if let Some(frame) = this.first.take() {
       return Poll::Ready(Some(frame));
     }
 
-    self.body.as_mut().poll_frame(cx)
+    Pin::new(&mut this.body).poll_frame(cx)
   }
 
   fn is_end_stream(&self) -> bool {

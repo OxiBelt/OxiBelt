@@ -1,10 +1,12 @@
 use std::convert::Infallible;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use http::header::CONTENT_LENGTH;
 use http::{HeaderMap, Response, StatusCode};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Body;
 
 use crate::config::TrailerMode;
@@ -25,6 +27,7 @@ pub(super) async fn try_inline_response_body(
   body: ProxyBody,
   timeout: Duration,
   trailer_mode: TrailerMode,
+  materialize_body: bool,
 ) -> SmallResponseDisposition {
   let Some(length) = exact_known_small_content_length(headers, &body) else {
     return SmallResponseDisposition::Streaming(body);
@@ -58,7 +61,11 @@ pub(super) async fn try_inline_response_body(
     None
   };
   let inlined = body::InlinedKnownSmallResponseBody::new(collected.bytes, trailers);
-  let body = inline_body(&inlined);
+  let body = if materialize_body {
+    inline_body(&inlined)
+  } else {
+    empty_body()
+  };
   SmallResponseDisposition::Inlined { body, inlined }
 }
 
@@ -88,9 +95,12 @@ async fn collect_exact_small_response_body(
       break;
     }
 
-    let frame = tokio::time::timeout(timeout, body.frame())
-      .await
-      .map_err(|_| SmallResponseReadError::Timeout)?;
+    let frame = match poll_response_body_once(&mut body) {
+      Poll::Ready(frame) => frame,
+      Poll::Pending => tokio::time::timeout(timeout, body.frame())
+        .await
+        .map_err(|_| SmallResponseReadError::Timeout)?,
+    };
     let Some(frame) = frame else {
       break;
     };
@@ -139,14 +149,20 @@ async fn collect_exact_small_response_body(
   Ok(CollectedSmallResponse { bytes, trailers })
 }
 
+fn poll_response_body_once(
+  body: &mut ProxyBody,
+) -> Poll<Option<Result<hyper::body::Frame<Bytes>, body::BoxError>>> {
+  let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+  Pin::new(body).poll_frame(&mut context)
+}
+
 fn exact_known_small_content_length(headers: &HeaderMap, body: &ProxyBody) -> Option<usize> {
   let mut values = headers.get_all(CONTENT_LENGTH).iter();
   let value = values.next()?;
   if values.next().is_some() {
     return None;
   }
-  let value = value.to_str().ok()?;
-  let length = value.trim().parse::<usize>().ok()?;
+  let length = parse_small_content_length(value)?;
   if !body::is_known_small_response_body_len(length) {
     return None;
   }
@@ -154,6 +170,29 @@ fn exact_known_small_content_length(headers: &HeaderMap, body: &ProxyBody) -> Op
     Some(upper) if upper != length as u64 => None,
     _ => Some(length),
   }
+}
+
+fn parse_small_content_length(value: &http::HeaderValue) -> Option<usize> {
+  parse_ascii_content_length(value.as_bytes())
+    .or_else(|| value.to_str().ok()?.trim().parse::<usize>().ok())
+}
+
+fn parse_ascii_content_length(bytes: &[u8]) -> Option<usize> {
+  let mut length = 0usize;
+  let mut digits = 0usize;
+  for &byte in bytes {
+    if !byte.is_ascii_digit() {
+      return None;
+    }
+    digits += 1;
+    length = length
+      .checked_mul(10)?
+      .checked_add(usize::from(byte - b'0'))?;
+    if !body::is_known_small_response_body_len(length) {
+      return None;
+    }
+  }
+  (digits != 0).then_some(length)
 }
 
 fn inline_body(inlined: &body::InlinedKnownSmallResponseBody) -> ProxyBody {
@@ -169,6 +208,12 @@ fn inline_body(inlined: &body::InlinedKnownSmallResponseBody) -> ProxyBody {
 
 fn full_body(bytes: Bytes) -> ProxyBody {
   Full::new(bytes)
+    .map_err(|never| -> body::BoxError { match never {} })
+    .boxed()
+}
+
+fn empty_body() -> ProxyBody {
+  Empty::<Bytes>::new()
     .map_err(|never| -> body::BoxError { match never {} })
     .boxed()
 }
@@ -327,6 +372,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -344,6 +390,31 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn exact_small_content_length_can_skip_materialized_body() {
+    let body = full_body(Bytes::from_static(b"ok"));
+
+    let disposition = try_inline_response_body(
+      &headers(&["2"]),
+      body,
+      Duration::from_secs(1),
+      TrailerMode::Drop,
+      false,
+    )
+    .await;
+
+    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+      panic!("expected inline body");
+    };
+    assert_eq!(inlined.data.as_ref(), b"ok");
+    let bytes = body
+      .collect()
+      .await
+      .expect("placeholder body should collect")
+      .to_bytes();
+    assert!(bytes.is_empty());
+  }
+
+  #[tokio::test]
   async fn exact_small_content_length_uses_end_stream_shortcut() {
     let body = EndAfterDataBody { yielded: false }.boxed();
 
@@ -352,6 +423,32 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
+    )
+    .await;
+
+    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+      panic!("expected inline body");
+    };
+    assert_eq!(inlined.data.as_ref(), b"ok");
+    let bytes = body
+      .collect()
+      .await
+      .expect("inline body should collect")
+      .to_bytes();
+    assert_eq!(bytes.as_ref(), b"ok");
+  }
+
+  #[tokio::test]
+  async fn trimmed_content_length_fallback_still_collects_inline_body() {
+    let body = full_body(Bytes::from_static(b"ok"));
+
+    let disposition = try_inline_response_body(
+      &headers(&[" 2 "]),
+      body,
+      Duration::from_secs(1),
+      TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -384,6 +481,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Pass,
+      true,
     )
     .await;
 
@@ -411,6 +509,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -429,6 +528,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -445,6 +545,7 @@ mod tests {
       panic_body_with_upper(Some(2)),
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -461,6 +562,7 @@ mod tests {
       panic_body_with_upper(Some(2)),
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -477,6 +579,7 @@ mod tests {
       frames_body_without_size_hint(vec![Frame::data(Bytes::from_static(b"ok"))], 2),
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -499,6 +602,7 @@ mod tests {
       panic_body_with_upper(Some(3)),
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -517,6 +621,7 @@ mod tests {
       panic_body_with_upper(Some(length as u64)),
       Duration::from_secs(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 
@@ -535,6 +640,7 @@ mod tests {
       body,
       Duration::from_millis(1),
       TrailerMode::Drop,
+      true,
     )
     .await;
 

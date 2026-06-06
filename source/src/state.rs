@@ -136,6 +136,7 @@ pub struct AppSnapshot {
   pub(crate) sni_forward: SniForwardTable,
   pub upstreams: Vec<UpstreamConfig>,
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
+  pub(crate) upstream_uri_parts_by_index: Vec<UpstreamUriParts>,
   pub clients: UpstreamClientPools,
   pub(crate) control_http: ControlHttpClient,
   pub(crate) h3_clients: UpstreamH3Pools,
@@ -197,7 +198,7 @@ impl AppSnapshot {
   ) -> anyhow::Result<Self> {
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
-    let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
+    let (upstream_uri_parts, upstream_uri_parts_by_index) = build_upstream_uri_parts(&upstreams)?;
     let tls_resumption = previous
       .map(|snapshot| snapshot.tls_resumption.clone())
       .unwrap_or_default();
@@ -350,6 +351,7 @@ impl AppSnapshot {
       sni_forward,
       upstreams,
       upstream_uri_parts,
+      upstream_uri_parts_by_index,
       clients,
       control_http,
       h3_clients,
@@ -395,7 +397,7 @@ impl AppSnapshot {
     let route_table = RouteTable::new_with_waf(&config, &previous.waf);
     let sni_forward =
       SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
-    let upstream_uri_parts = build_upstream_uri_parts(&upstreams)?;
+    let (upstream_uri_parts, upstream_uri_parts_by_index) = build_upstream_uri_parts(&upstreams)?;
     let clients = build_clients(
       &upstreams,
       &config.proxy.trusted_ca_certs,
@@ -442,6 +444,7 @@ impl AppSnapshot {
       sni_forward,
       upstreams,
       upstream_uri_parts,
+      upstream_uri_parts_by_index,
       clients,
       control_http: control_http.clone(),
       h3_clients,
@@ -496,17 +499,16 @@ fn publish_upstream_pool_server_metrics(pools: &Arc<PoolState>) {
 
 fn build_upstream_uri_parts(
   upstreams: &[UpstreamConfig],
-) -> anyhow::Result<HashMap<String, UpstreamUriParts>> {
-  upstreams
-    .iter()
-    .map(|upstream| {
-      Ok((
-        upstream.name.clone(),
-        UpstreamUriParts::from_url(&upstream.origin)
-          .with_context(|| format!("failed to precompute URI parts for {}", upstream.name))?,
-      ))
-    })
-    .collect()
+) -> anyhow::Result<(HashMap<String, UpstreamUriParts>, Vec<UpstreamUriParts>)> {
+  let mut by_name = HashMap::with_capacity(upstreams.len());
+  let mut by_index = Vec::with_capacity(upstreams.len());
+  for upstream in upstreams {
+    let parts = UpstreamUriParts::from_url(&upstream.origin)
+      .with_context(|| format!("failed to precompute URI parts for {}", upstream.name))?;
+    by_name.insert(upstream.name.clone(), parts.clone());
+    by_index.push(parts);
+  }
+  Ok((by_name, by_index))
 }
 
 fn build_alt_svc_header_value(config: &Config) -> anyhow::Result<Option<HeaderValue>> {

@@ -342,8 +342,8 @@ async fn handle_inner<B>(
   drain: ConnectionDrain,
 ) -> Response<ProxyBody>
 where
-  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
-  B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
+  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
 {
   let system_access_log_enabled = state.request_path_features.system_access_log;
   let trace_context = if state.request_path_features.telemetry {
@@ -373,7 +373,7 @@ where
     transport_metadata,
     tls,
     connection_limit_context,
-    state.clone(),
+    &state,
     protocol,
     transport_network,
     _reject_connect,
@@ -408,7 +408,7 @@ async fn handle_inner_impl<B>(
   transport_metadata: WafTransportMetadataInput<'_>,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
-  state: Arc<AppSnapshot>,
+  state: &Arc<AppSnapshot>,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
   _reject_connect: bool,
@@ -419,8 +419,8 @@ async fn handle_inner_impl<B>(
   trace_context: Option<TraceContext>,
 ) -> Response<ProxyBody>
 where
-  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
-  B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
+  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
 {
   state.metrics.record_request();
 
@@ -432,7 +432,7 @@ where
     semantics::validate_expect(request.headers(), state.config.proxy.http.expect_continue)
   {
     return proxy_error_response(
-      &state,
+      state,
       access_log,
       StatusCode::EXPECTATION_FAILED,
       rejection.message(),
@@ -563,11 +563,12 @@ where
   }
 
   let host = host.into_owned();
-  let request = if !h2_or_h3_content_length_zero_guard_required(request_version, request.headers())
-  {
+  let cl0_guard_required =
+    h2_or_h3_content_length_zero_guard_required(request_version, request.headers());
+  let request = if !cl0_guard_required {
     match fast_path::try_handle_plain_proxy(
       request,
-      state.clone(),
+      state,
       &resolved,
       forwarded_client_addr,
       client_addr,
@@ -591,36 +592,38 @@ where
   } else {
     request
   };
-
   let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
   let request =
     match reject_content_length_zero_data(request, client_body_timeout, request_version).await {
       Ok(request) => request,
       Err(response) => return response,
     };
-
-  let mut request = match fast_path::try_handle_plain_proxy(
-    request,
-    state.clone(),
-    &resolved,
-    forwarded_client_addr,
-    client_addr,
-    &host,
-    downstream_port,
-    tcp_max_hop,
-    tls.as_ref(),
-    protocol,
-    downstream_scheme,
-    request_version,
-    transport_network,
-    transport_metadata,
-    access_log,
-    trace_context,
-  )
-  .await
-  {
-    Ok(response) => return response,
-    Err(request) => request,
+  let mut request = if cl0_guard_required {
+    match fast_path::try_handle_plain_proxy(
+      request,
+      state,
+      &resolved,
+      forwarded_client_addr,
+      client_addr,
+      &host,
+      downstream_port,
+      tcp_max_hop,
+      tls.as_ref(),
+      protocol,
+      downstream_scheme,
+      request_version,
+      transport_network,
+      transport_metadata,
+      access_log,
+      trace_context,
+    )
+    .await
+    {
+      Ok(response) => return response,
+      Err(request) => request,
+    }
+  } else {
+    request
   };
 
   let request_method = request.method().clone();
@@ -889,7 +892,7 @@ where
   if request_method == Method::CONNECT {
     return handle_connect_request(
       request,
-      &state,
+      state,
       &resolved,
       client_addr,
       &host,
@@ -938,7 +941,7 @@ where
     };
     if let Some(response) = handle_upgrade_request(
       request,
-      &state,
+      state,
       &resolved,
       forwarded_client_addr,
       client_addr,
@@ -1136,7 +1139,7 @@ where
     request_headers: &request_headers,
   }) {
     if let Some(response) = handle_cache_lookup_result(
-      &state,
+      state,
       &resolved,
       lookup,
       &mut outbound,
@@ -1158,7 +1161,7 @@ where
     }
   } else if cache_enabled_for_route {
     state.metrics.record_cache_miss();
-    record_route_cache_event(&state, resolved.route, "miss", "lookup");
+    record_route_cache_event(state, resolved.route, "miss", "lookup");
   }
 
   if cache_enabled_for_route {
@@ -1192,7 +1195,7 @@ where
             })
             .and_then(|lookup| {
               handle_cache_lookup_result(
-                &state,
+                state,
                 &resolved,
                 lookup,
                 &mut outbound,
@@ -1228,18 +1231,18 @@ where
             .await
           {
             record_route_cache_fill_stage(
-              &state,
+              state,
               resolved.route,
               "lock_wait",
               "timeout",
               lock_wait_started,
             );
             state.metrics.record_cache_fill_lock_timeout();
-            record_route_cache_event(&state, resolved.route, "miss", "fill_lock_timeout");
+            record_route_cache_event(state, resolved.route, "miss", "fill_lock_timeout");
             break;
           }
           record_route_cache_fill_stage(
-            &state,
+            state,
             resolved.route,
             "lock_wait",
             "notified",
@@ -1254,7 +1257,7 @@ where
             request_headers: &request_headers,
           }) {
             if let Some(response) = handle_cache_lookup_result(
-              &state,
+              state,
               &resolved,
               lookup,
               &mut outbound,
@@ -1276,17 +1279,17 @@ where
             }
           } else {
             state.metrics.record_cache_miss();
-            record_route_cache_event(&state, resolved.route, "miss", "fill_not_stored");
+            record_route_cache_event(state, resolved.route, "miss", "fill_not_stored");
             break;
           }
         }
         crate::cache::CacheFillDecision::SharedConflict => {
           state.metrics.record_cache_fill_lock_conflict();
-          record_route_cache_event(&state, resolved.route, "miss", "shared_lock_conflict");
+          record_route_cache_event(state, resolved.route, "miss", "shared_lock_conflict");
           break;
         }
         crate::cache::CacheFillDecision::Suppressed(reason) => {
-          record_route_cache_event(&state, resolved.route, "miss", reason.as_str());
+          record_route_cache_event(state, resolved.route, "miss", reason.as_str());
           break;
         }
       }
@@ -1326,7 +1329,7 @@ where
           return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
         }
         return upstream_error_response(
-          &state,
+          state,
           &resolved.route.name,
           &request_method,
           &request_uri,
@@ -1373,7 +1376,7 @@ where
           return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
         }
         return upstream_error_response(
-          &state,
+          state,
           &resolved.route.name,
           &request_method,
           &request_uri,
@@ -1464,7 +1467,7 @@ where
         })
       } else {
         let result = if retry_policy.enabled {
-          send_with_retry(client, outbound, timeouts, &state, &retry_policy).await
+          send_with_retry(client, outbound, timeouts, state, &retry_policy).await
         } else {
           send_one_shot(client, outbound, timeouts).await
         };
@@ -1479,7 +1482,7 @@ where
       send_one_shot_with_proxy_protocol(
         outbound,
         upstream,
-        &state,
+        state,
         upstream_version,
         client_addr,
         timeouts,
@@ -1530,7 +1533,7 @@ where
           return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
         }
         return upstream_error_response(
-          &state,
+          state,
           &resolved.route.name,
           &request_method,
           &request_uri,
@@ -1740,7 +1743,7 @@ where
 
   let response = maybe_cache_response_with_store_permission(
     Response::from_parts(parts, body),
-    &state,
+    state,
     resolved.route.cache.as_deref(),
     downstream_scheme,
     &host,
@@ -1784,7 +1787,8 @@ pub(super) fn apply_alt_svc_header(
   if !should_add_alt_svc(status, state, downstream_scheme, request_version) {
     return;
   }
-  if let Some(value) = state.alt_svc_header_value.clone() {
+  if let Some(value) = state.alt_svc_header_value.as_ref() {
+    let value = value.clone();
     headers.insert(http::header::ALT_SVC, value);
   }
 }
@@ -1795,8 +1799,7 @@ fn should_add_alt_svc(
   downstream_scheme: &str,
   request_version: http::Version,
 ) -> bool {
-  state.config.listeners.http3
-    && state.config.quic.alt_svc.enabled
+  state.alt_svc_header_value.is_some()
     && downstream_scheme == "https"
     && matches!(
       request_version,
@@ -1814,8 +1817,7 @@ pub(super) fn with_downstream_response_timeout(
     return mark_downstream_response_timeout(response, timeout);
   }
 
-  let response = mark_downstream_response_timeout(response, timeout);
-  let (parts, body) = response.into_parts();
+  let (mut parts, body) = response.into_parts();
   if parts
     .extensions
     .get::<body::KnownSmallResponseBody>()
@@ -1823,6 +1825,9 @@ pub(super) fn with_downstream_response_timeout(
   {
     return Response::from_parts(parts, body);
   }
+  parts
+    .extensions
+    .insert(DownstreamResponseSendTimeout(timeout));
   let body = body::with_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
   Response::from_parts(parts, body)
 }
@@ -2754,8 +2759,8 @@ async fn reject_content_length_zero_data<B>(
   version: http::Version,
 ) -> Result<Request<Either<B, ProxyBody>>, Response<ProxyBody>>
 where
-  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
-  B::Error: Into<self::body::BoxError> + Send + Sync + 'static,
+  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
 {
   if !h2_or_h3_content_length_zero_guard_required(version, request.headers()) {
     let (parts, body) = request.into_parts();

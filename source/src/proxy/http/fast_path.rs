@@ -57,6 +57,22 @@ fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> 
   tags.as_ref().unwrap_or(&EMPTY_TAGS)
 }
 
+fn fast_path_upstream_timing_required(
+  state: &AppSnapshot,
+  response_waf_enabled: bool,
+  pool_selected: bool,
+) -> bool {
+  response_waf_enabled
+    || pool_selected
+    || state.request_path_features.system_access_log
+    || state.request_path_features.detailed_metrics
+    || state.request_path_features.telemetry
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+  started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
 pub(crate) struct PlainProxyFastPath;
 
 impl PlainProxyFastPath {
@@ -103,7 +119,7 @@ impl PlainProxyFastPath {
   #[allow(clippy::too_many_arguments)]
   pub(crate) async fn handle<B>(
     request: Request<B>,
-    state: Arc<AppSnapshot>,
+    state: &Arc<AppSnapshot>,
     resolved: &ResolvedRoute<'_>,
     forwarded_client_addr: SocketAddr,
     client_addr: SocketAddr,
@@ -123,8 +139,8 @@ impl PlainProxyFastPath {
     trace_context: Option<TraceContext>,
   ) -> Response<ProxyBody>
   where
-    B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
-    B::Error: Into<body::BoxError> + Send + Sync + 'static,
+    B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+    B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
   {
     let direct_retry_enabled =
       direct_http_retry_enabled(state.as_ref(), resolved.route, request.method());
@@ -225,8 +241,12 @@ impl PlainProxyFastPath {
       fast_path_request_body_is_definitely_empty(request.version(), request.headers());
     let (mut parts, body) = request.into_parts();
 
-    let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
-      warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
+    let Some(upstream_uri) = state.upstream_uri_parts_by_index.get(upstream_index) else {
+      warn!(
+        upstream = %upstream.name,
+        upstream_index,
+        "missing precomputed upstream URI parts"
+      );
       return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
     };
     let target_uri = match route_actions::build_upstream_uri(
@@ -291,7 +311,12 @@ impl PlainProxyFastPath {
       warn!(upstream = %upstream.name, "missing upstream client pool");
       return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
     };
-    let upstream_started_at = Instant::now();
+    let upstream_started_at = fast_path_upstream_timing_required(
+      state.as_ref(),
+      response_waf_enabled,
+      pool_selection.is_some(),
+    )
+    .then(Instant::now);
     let mut report_pool_success = false;
     let upstream_response = match if let Some(selection) = pool_selection.take() {
       let (original_uri, pool_retry_cookie) = pool_retry_context
@@ -324,7 +349,7 @@ impl PlainProxyFastPath {
         success.response
       })
     } else if retry_policy.enabled {
-      send_with_retry(client, outbound, timeouts, &state, &retry_policy).await
+      send_with_retry(client, outbound, timeouts, state.as_ref(), &retry_policy).await
     } else {
       send_one_shot(client, outbound, timeouts).await
     } {
@@ -340,11 +365,9 @@ impl PlainProxyFastPath {
         } else {
           "connect_error"
         };
-        let upstream_first_byte_time_ms = upstream_started_at
-          .elapsed()
-          .as_millis()
-          .min(u128::from(u64::MAX)) as u64;
-        access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
+        if let Some(upstream_first_byte_time_ms) = upstream_started_at.map(elapsed_ms) {
+          access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
+        }
         access_log.record_upstream_error(code, &message);
         let status = if code == "read_timeout" {
           StatusCode::GATEWAY_TIMEOUT
@@ -357,21 +380,16 @@ impl PlainProxyFastPath {
         return response;
       }
     };
-    if report_pool_success {
-      let latency_ms = upstream_started_at
-        .elapsed()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
+    if report_pool_success && let Some(latency_ms) = upstream_started_at.map(elapsed_ms) {
       state
         .pools
         .report_success_latency(&upstream.name, latency_ms);
     }
 
-    let upstream_first_byte_time_ms = upstream_started_at
-      .elapsed()
-      .as_millis()
-      .min(u128::from(u64::MAX)) as u64;
-    access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
+    let upstream_first_byte_time_ms = upstream_started_at.map(elapsed_ms);
+    if let Some(upstream_first_byte_time_ms) = upstream_first_byte_time_ms {
+      access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
+    }
     let (mut parts, response_body) = upstream_response
       .map(|body| body.map_err(boxed_error).boxed())
       .into_parts();
@@ -381,6 +399,7 @@ impl PlainProxyFastPath {
         response_body,
         timeouts.upstream_read,
         state.config.proxy.http.trailers,
+        request_version != http::Version::HTTP_3,
       )
       .await
       {
@@ -400,9 +419,6 @@ impl PlainProxyFastPath {
         }
       };
     strip_hop_by_hop_headers(&mut parts.headers);
-    if state.config.proxy.http.trailers == TrailerMode::Drop {
-      parts.headers.remove(http::header::TRAILER);
-    }
     apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
     apply_security_headers(&mut parts.headers, &state.config.security.headers);
     apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
@@ -465,13 +481,15 @@ impl PlainProxyFastPath {
       }
       apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
     }
-    apply_alt_svc_header(
-      &mut parts.headers,
-      parts.status,
-      state.as_ref(),
-      downstream_scheme,
-      request_version,
-    );
+    if request_version != http::Version::HTTP_3 {
+      apply_alt_svc_header(
+        &mut parts.headers,
+        parts.status,
+        state.as_ref(),
+        downstream_scheme,
+        request_version,
+      );
+    }
     tracing::debug!(
       upstream_first_byte_time_ms,
       route = %resolved.route.name,
@@ -486,9 +504,11 @@ impl PlainProxyFastPath {
     };
     let mut response = Response::from_parts(parts, response_body);
     if let Some(inlined) = inlined_known_small_body {
-      response
-        .extensions_mut()
-        .insert(body::KnownSmallResponseBody);
+      if request_version != http::Version::HTTP_3 {
+        response
+          .extensions_mut()
+          .insert(body::KnownSmallResponseBody);
+      }
       response.extensions_mut().insert(inlined);
     }
     let mut response =
@@ -503,7 +523,7 @@ impl PlainProxyFastPath {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn try_handle_plain_proxy<B>(
   request: Request<B>,
-  state: Arc<AppSnapshot>,
+  state: &Arc<AppSnapshot>,
   resolved: &ResolvedRoute<'_>,
   forwarded_client_addr: SocketAddr,
   client_addr: SocketAddr,
@@ -520,10 +540,10 @@ pub(crate) async fn try_handle_plain_proxy<B>(
   trace_context: Option<TraceContext>,
 ) -> Result<Response<ProxyBody>, Request<B>>
 where
-  B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
-  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
-  if !PlainProxyFastPath::eligible(&request, &state, resolved) {
+  if !PlainProxyFastPath::eligible(&request, state.as_ref(), resolved) {
     return Err(request);
   }
   let fast_path_waf = if plain_fast_path_waf_required(resolved) {

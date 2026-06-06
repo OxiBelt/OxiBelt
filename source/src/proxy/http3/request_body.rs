@@ -1,25 +1,27 @@
 use std::fmt;
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
+use std::pin::Pin;
+use std::sync::{Mutex, TryLockError};
 use std::task::{Context, Poll};
 
 use ::http::Request;
 use bytes::{Buf, Bytes};
 use http_body_util::{BodyExt, Empty};
-use hyper::body::Frame;
+use hyper::body::{Body, Frame, SizeHint};
 
-use crate::proxy::http::body::{BoxError, ProxyBody, boxed_error, channel_body};
+use crate::proxy::http::body::{BoxError, ProxyBody, boxed_error};
 use crate::proxy::http::request_framing::h2_or_h3_safe_method_empty_probe_allowed;
 
-use super::{H3_BODY_CHANNEL_CAPACITY, H3RequestRecvStream};
+use super::H3RequestRecvStream;
 
 pub(super) async fn prepare_h3_request_body(
   request: Request<()>,
   stream: H3RequestRecvStream,
 ) -> Request<ProxyBody> {
-  prepare_h3_request_body_with_spawner(request, stream, &TokioBodyTaskSpawner).await
+  prepare_h3_request_body_inner(request, stream).await
 }
 
-trait H3RequestBodyStream: Send + 'static {
+trait H3RequestBodyStream: Send + Unpin + 'static {
   type Error: fmt::Display + Send + Sync + 'static;
 
   fn is_end_stream(&self) -> bool {
@@ -30,10 +32,6 @@ trait H3RequestBodyStream: Send + 'static {
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<Result<Option<Bytes>, Self::Error>>;
-
-  fn recv_data_bytes(
-    &mut self,
-  ) -> impl Future<Output = Result<Option<Bytes>, Self::Error>> + Send + '_;
 }
 
 impl H3RequestBodyStream for H3RequestRecvStream {
@@ -52,42 +50,11 @@ impl H3RequestBodyStream for H3RequestRecvStream {
       })
     })
   }
-
-  async fn recv_data_bytes(&mut self) -> Result<Option<Bytes>, Self::Error> {
-    self.recv_data().await.map(|chunk| {
-      chunk.map(|mut chunk| {
-        let len = chunk.remaining();
-        chunk.copy_to_bytes(len)
-      })
-    })
-  }
 }
 
-trait BodyTaskSpawner {
-  fn spawn_request_body_task<F>(&self, future: F)
-  where
-    F: Future<Output = ()> + Send + 'static;
-}
-
-struct TokioBodyTaskSpawner;
-
-impl BodyTaskSpawner for TokioBodyTaskSpawner {
-  fn spawn_request_body_task<F>(&self, future: F)
-  where
-    F: Future<Output = ()> + Send + 'static,
-  {
-    tokio::spawn(future);
-  }
-}
-
-async fn prepare_h3_request_body_with_spawner<S, Spawner>(
-  request: Request<()>,
-  mut stream: S,
-  spawner: &Spawner,
-) -> Request<ProxyBody>
+async fn prepare_h3_request_body_inner<S>(request: Request<()>, mut stream: S) -> Request<ProxyBody>
 where
   S: H3RequestBodyStream,
-  Spawner: BodyTaskSpawner,
 {
   let first = match poll_h3_request_body_once(&mut stream).await {
     None
@@ -118,15 +85,14 @@ where
       Request::from_parts(parts, empty_body())
     }
     Some(Ok(Some(chunk))) => {
-      stream_h3_request_body_with_initial(request, stream, Some(Ok(Frame::data(chunk))), spawner)
+      direct_h3_request_body_with_initial(request, stream, Some(Ok(Frame::data(chunk))))
     }
-    Some(Err(error)) => stream_h3_request_body_with_initial(
+    Some(Err(error)) => direct_h3_request_body_with_initial(
       request,
       stream,
       Some(Err(downstream_h3_request_body_error(error))),
-      spawner,
     ),
-    None => stream_h3_request_body(request, stream, spawner),
+    None => direct_h3_request_body(request, stream),
   }
 }
 
@@ -141,64 +107,91 @@ where
   .await
 }
 
-fn stream_h3_request_body<S, Spawner>(
-  request: Request<()>,
-  stream: S,
-  spawner: &Spawner,
-) -> Request<ProxyBody>
+fn direct_h3_request_body<S>(request: Request<()>, stream: S) -> Request<ProxyBody>
 where
   S: H3RequestBodyStream,
-  Spawner: BodyTaskSpawner,
 {
-  stream_h3_request_body_with_initial(request, stream, None, spawner)
+  direct_h3_request_body_with_initial(request, stream, None)
 }
 
-fn stream_h3_request_body_with_initial<S, Spawner>(
+fn direct_h3_request_body_with_initial<S>(
   request: Request<()>,
   stream: S,
   initial_frame: Option<Result<Frame<Bytes>, BoxError>>,
-  spawner: &Spawner,
 ) -> Request<ProxyBody>
 where
   S: H3RequestBodyStream,
-  Spawner: BodyTaskSpawner,
 {
   let (parts, _) = request.into_parts();
-  let (body_sender, body) = channel_body(H3_BODY_CHANNEL_CAPACITY);
-  let mut stream = stream;
-  let initial_is_error = initial_frame.as_ref().is_some_and(Result::is_err);
-  spawner.spawn_request_body_task(async move {
-    if let Some(frame) = initial_frame
-      && body_sender.send(frame).await.is_err()
-    {
-      return;
-    }
-    if initial_is_error {
-      return;
-    }
-    loop {
-      tokio::select! {
-        () = body_sender.closed() => break,
-        result = stream.recv_data_bytes() => {
-          match result {
-            Ok(Some(chunk)) => {
-              if body_sender.send(Ok(Frame::data(chunk))).await.is_err() {
-                break;
-              }
-            }
-            Ok(None) => break,
-            Err(error) => {
-              let _ = body_sender
-                .send(Err(downstream_h3_request_body_error(error)))
-                .await;
-              break;
-            }
-          }
-        }
-      }
-    }
-  });
+  let body = H3DirectRequestBody {
+    initial_frame,
+    stream: Mutex::new(stream),
+    ended: false,
+  }
+  .boxed();
   Request::from_parts(parts, body)
+}
+
+struct H3DirectRequestBody<S> {
+  initial_frame: Option<Result<Frame<Bytes>, BoxError>>,
+  stream: Mutex<S>,
+  ended: bool,
+}
+
+impl<S> Body for H3DirectRequestBody<S>
+where
+  S: H3RequestBodyStream,
+{
+  type Data = Bytes;
+  type Error = BoxError;
+
+  fn poll_frame(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    let this = self.get_mut();
+    if let Some(frame) = this.initial_frame.take() {
+      if frame.is_err() {
+        this.ended = true;
+      }
+      return Poll::Ready(Some(frame));
+    }
+    if this.ended {
+      return Poll::Ready(None);
+    }
+
+    let poll = {
+      let mut stream = match this.stream.try_lock() {
+        Ok(stream) => stream,
+        Err(TryLockError::WouldBlock) => {
+          cx.waker().wake_by_ref();
+          return Poll::Pending;
+        }
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+      };
+      stream.poll_recv_data_bytes(cx)
+    };
+    match poll {
+      Poll::Ready(Ok(Some(chunk))) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
+      Poll::Ready(Ok(None)) => {
+        this.ended = true;
+        Poll::Ready(None)
+      }
+      Poll::Ready(Err(error)) => {
+        this.ended = true;
+        Poll::Ready(Some(Err(downstream_h3_request_body_error(error))))
+      }
+      Poll::Pending => Poll::Pending,
+    }
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.ended
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::new()
+  }
 }
 
 fn downstream_h3_request_body_error(error: impl fmt::Display) -> BoxError {
@@ -217,7 +210,6 @@ fn empty_body() -> ProxyBody {
 mod tests {
   use std::collections::VecDeque;
   use std::fmt;
-  use std::future::{Future, poll_fn};
   use std::sync::Arc;
   use std::sync::atomic::{AtomicUsize, Ordering};
   use std::task::{Context, Poll};
@@ -247,11 +239,9 @@ mod tests {
       FakeStreamEvent::Data(Bytes::from_static(b"abc")),
       FakeStreamEvent::End,
     ]);
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 1);
     let body = request
       .into_body()
       .collect()
@@ -266,11 +256,9 @@ mod tests {
     let request = request_with_content_length(Method::GET, &["0"]);
     let stream = FakeRequestStream::new([FakeStreamEvent::End]);
     let poll_count = stream.poll_count();
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 0);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
     let body = request
       .into_body()
@@ -286,11 +274,9 @@ mod tests {
     let request = request_with_content_length(Method::GET, &["0"]);
     let stream = FakeRequestStream::pending();
     let poll_count = stream.poll_count();
-    let spawner = CountingSpawner::default();
 
-    let _request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let _request = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 1);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
   }
 
@@ -298,11 +284,8 @@ mod tests {
   async fn get_without_content_length_uses_streaming_path_when_body_might_arrive() {
     let request = request(Method::GET);
     let stream = FakeRequestStream::pending();
-    let spawner = CountingSpawner::default();
 
-    let _request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
-
-    assert_eq!(spawner.spawned(), 1);
+    let _request = prepare_h3_request_body_inner(request, stream).await;
   }
 
   #[tokio::test]
@@ -311,11 +294,9 @@ mod tests {
       let request = request(method);
       let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
       let poll_count = stream.poll_count();
-      let spawner = CountingSpawner::default();
 
-      let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+      let request = prepare_h3_request_body_inner(request, stream).await;
 
-      assert_eq!(spawner.spawned(), 0);
       assert_eq!(poll_count.load(Ordering::SeqCst), 1);
       let body = request
         .into_body()
@@ -331,11 +312,9 @@ mod tests {
   async fn post_without_framing_headers_does_not_use_empty_probe() {
     let request = request(Method::POST);
     let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 1);
     let body = request
       .into_body()
       .collect()
@@ -350,11 +329,9 @@ mod tests {
     let request = request_with_content_length(Method::GET, &["5"]);
     let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
     let poll_count = stream.poll_count();
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 1);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
     let body = request
       .into_body()
@@ -373,11 +350,9 @@ mod tests {
       FakeStreamEvent::Data(Bytes::from_static(b"body")),
       FakeStreamEvent::End,
     ]);
-    let spawner = CountingSpawner::default();
 
-    let prepared = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 1);
     let body = prepared
       .into_body()
       .collect()
@@ -391,11 +366,9 @@ mod tests {
       FakeStreamEvent::Pending,
       FakeStreamEvent::Error("stream reset"),
     ]);
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 1);
     let error = request
       .into_body()
       .collect()
@@ -412,11 +385,9 @@ mod tests {
   async fn h3_stream_error_propagates_through_streaming_body() {
     let request = request(Method::POST);
     let stream = FakeRequestStream::new([FakeStreamEvent::Error("stream reset")]);
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 1);
     let error = request
       .into_body()
       .collect()
@@ -430,7 +401,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn dropping_proxy_body_stops_background_recv_task() {
+  async fn dropping_proxy_body_drops_direct_recv_stream() {
     let request = request(Method::POST);
     let stream = FakeRequestStream::new([
       FakeStreamEvent::Data(Bytes::from_static(b"first")),
@@ -438,10 +409,8 @@ mod tests {
       FakeStreamEvent::End,
     ]);
     let drop_count = stream.drop_count();
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
-    assert_eq!(spawner.spawned(), 1);
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
     drop(request);
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -453,18 +422,16 @@ mod tests {
       }
     })
     .await
-    .expect("recv task should stop after downstream body is dropped");
+    .expect("direct recv stream should drop with downstream body");
   }
 
   #[tokio::test]
-  async fn dropping_pending_proxy_body_stops_background_recv_task() {
+  async fn dropping_pending_proxy_body_drops_direct_recv_stream() {
     let request = request(Method::POST);
     let stream = FakeRequestStream::pending();
     let drop_count = stream.drop_count();
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
-    assert_eq!(spawner.spawned(), 1);
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
     drop(request);
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -476,7 +443,7 @@ mod tests {
       }
     })
     .await
-    .expect("pending recv task should stop after downstream body is dropped");
+    .expect("pending direct recv stream should drop with downstream body");
   }
 
   async fn assert_content_length_zero_data_is_streamed(method: Method) {
@@ -486,11 +453,9 @@ mod tests {
       FakeStreamEvent::End,
     ]);
     let poll_count = stream.poll_count();
-    let spawner = CountingSpawner::default();
 
-    let request = prepare_h3_request_body_with_spawner(request, stream, &spawner).await;
+    let request = prepare_h3_request_body_inner(request, stream).await;
 
-    assert_eq!(spawner.spawned(), 1);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
     let body = request
       .into_body()
@@ -517,27 +482,6 @@ mod tests {
         .append(CONTENT_LENGTH, HeaderValue::from_static(value));
     }
     request
-  }
-
-  #[derive(Default)]
-  struct CountingSpawner {
-    spawned: Arc<AtomicUsize>,
-  }
-
-  impl CountingSpawner {
-    fn spawned(&self) -> usize {
-      self.spawned.load(Ordering::SeqCst)
-    }
-  }
-
-  impl BodyTaskSpawner for CountingSpawner {
-    fn spawn_request_body_task<F>(&self, future: F)
-    where
-      F: Future<Output = ()> + Send + 'static,
-    {
-      self.spawned.fetch_add(1, Ordering::SeqCst);
-      tokio::spawn(future);
-    }
   }
 
   enum FakeStreamEvent {
@@ -614,12 +558,6 @@ mod tests {
         FakeStreamEvent::End => Poll::Ready(Ok(None)),
         FakeStreamEvent::Error(message) => Poll::Ready(Err(FakeStreamError(message))),
       }
-    }
-
-    fn recv_data_bytes(
-      &mut self,
-    ) -> impl Future<Output = Result<Option<Bytes>, Self::Error>> + Send + '_ {
-      poll_fn(|cx| self.poll_recv_data_bytes(cx))
     }
   }
 
