@@ -271,7 +271,7 @@ impl AppSnapshot {
     let admin_audit = AdminAuditRuntime::new(&config)
       .await
       .context("failed to build admin audit runtime")?;
-    let crlite = tls::CrliteRuntime::new(&config.tls, &control_http, metrics.clone())
+    let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
     let ocsp_staple = tls::OcspStapleRuntime::new(&config.tls, &control_http, metrics.clone())

@@ -21,6 +21,7 @@ use crate::config::{
 mod admin_quic;
 mod cert_metadata;
 mod client_auth;
+mod client_roots;
 mod crlite;
 mod crlite_managed;
 mod crlite_runtime;
@@ -29,6 +30,7 @@ mod resumption;
 pub(crate) use cert_metadata::client_certificate_metadata;
 
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
+pub(crate) use client_roots::load_upstream_root_store;
 pub(crate) use crlite_runtime::CrliteRuntime;
 pub use crlite_runtime::CrliteRuntimeStatus;
 pub use ocsp::OcspRuntimeStatus;
@@ -467,6 +469,17 @@ pub fn build_upstream_client_config(
   )
 }
 
+pub(crate) fn build_webpki_client_config() -> anyhow::Result<ClientConfig> {
+  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let roots = client_roots::load_webpki_root_store();
+  let builder = ClientConfig::builder_with_provider(provider)
+    .with_safe_default_protocol_versions()
+    .context("failed to configure WebPKI TLS versions")?;
+  let mut client_config = builder.with_root_certificates(roots).with_no_client_auth();
+  client_config.resumption = upstream_client_resumption(&UpstreamTlsResumptionConfig::default());
+  Ok(client_config)
+}
+
 pub fn build_upstream_client_config_with_resumption(
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,
@@ -658,26 +671,6 @@ pub(super) fn read_existing_file(
   }
 
   fs::read(&canonical_path).with_context(|| format!("failed to read {}", canonical_path.display()))
-}
-
-pub(crate) fn load_upstream_root_store(
-  extra_root_certificates: &[std::path::PathBuf],
-) -> anyhow::Result<RootCertStore> {
-  let mut roots = RootCertStore::empty();
-  roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-  for path in extra_root_certificates {
-    let certs = load_certs(path)?;
-    let (added, _ignored) = roots.add_parsable_certificates(certs);
-    if added == 0 {
-      bail!(
-        "no parsable upstream root certificates found in {}",
-        path.display()
-      );
-    }
-  }
-
-  Ok(roots)
 }
 
 fn load_client_auth_root_store(paths: &[std::path::PathBuf]) -> anyhow::Result<RootCertStore> {

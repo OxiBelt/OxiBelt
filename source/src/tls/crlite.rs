@@ -363,8 +363,7 @@ mod tests {
     let mut tls = test_tls_config(filter);
     tls.crlite.failure_policy = CrliteFailurePolicy::FailClosed;
 
-    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
-    let error = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+    let error = CrliteRuntime::new(&tls, Metrics::new())
       .await
       .expect_err("invalid filter should fail");
 
@@ -379,8 +378,7 @@ mod tests {
     let mut tls = test_tls_config(filter);
     tls.crlite.failure_policy = CrliteFailurePolicy::DegradedAllow;
 
-    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
-    let runtime = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+    let runtime = CrliteRuntime::new(&tls, Metrics::new())
       .await
       .expect("degraded allow should load");
     let status = runtime.status();
@@ -399,8 +397,7 @@ mod tests {
     let mut tls = test_tls_config(temp_dir.path().join("missing.filter"));
     tls.crlite.failure_policy = CrliteFailurePolicy::DegradedAllow;
 
-    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
-    let runtime = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+    let runtime = CrliteRuntime::new(&tls, Metrics::new())
       .await
       .expect("degraded allow should load");
     let status = runtime.status();
@@ -422,8 +419,7 @@ mod tests {
     tls.crlite.max_filter_bytes = 1;
     tls.crlite.failure_policy = CrliteFailurePolicy::FailClosed;
 
-    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
-    let error = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+    let error = CrliteRuntime::new(&tls, Metrics::new())
       .await
       .expect_err("oversized filter should fail");
 
@@ -440,8 +436,7 @@ mod tests {
       Some("0000000000000000000000000000000000000000000000000000000000000000".to_string());
     tls.crlite.failure_policy = CrliteFailurePolicy::FailClosed;
 
-    let control_http = crate::control_http::ControlHttpClient::new(&[]).expect("control client");
-    let error = CrliteRuntime::new(&tls, &control_http, Metrics::new())
+    let error = CrliteRuntime::new(&tls, Metrics::new())
       .await
       .expect_err("hash mismatch should fail");
 

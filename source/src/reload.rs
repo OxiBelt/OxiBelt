@@ -214,7 +214,7 @@ impl ReloadManager {
 
     let mut config = active.config.clone();
     reload_downstream_tls_paths(&mut config)?;
-    let crlite = tls::CrliteRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
+    let crlite = tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
     let ocsp_staple =

@@ -43,6 +43,16 @@ impl ControlHttpClient {
     let tls_config =
       tls::build_upstream_client_config(extra_root_certs, &UpstreamEchConfig::default())
         .context("failed to build control-plane TLS client config")?;
+    Ok(Self::from_tls_config(tls_config))
+  }
+
+  pub(crate) fn new_webpki_only() -> anyhow::Result<Self> {
+    let tls_config = tls::build_webpki_client_config()
+      .context("failed to build WebPKI-only control-plane TLS client config")?;
+    Ok(Self::from_tls_config(tls_config))
+  }
+
+  fn from_tls_config(tls_config: rustls::ClientConfig) -> Self {
     let mut http = HttpConnector::new();
     http.enforce_http(false);
     http.set_connect_timeout(Some(Duration::from_secs(5)));
@@ -57,9 +67,9 @@ impl ControlHttpClient {
     builder.pool_timer(TokioTimer::new());
     builder.pool_idle_timeout(Duration::from_secs(30));
     builder.pool_max_idle_per_host(16);
-    Ok(Self {
+    Self {
       client: builder.build(connector),
-    })
+    }
   }
 
   pub async fn request(
@@ -144,6 +154,11 @@ mod tests {
   use http::StatusCode;
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::TcpListener;
+
+  #[test]
+  fn webpki_only_client_builds_without_operator_roots() {
+    ControlHttpClient::new_webpki_only().expect("WebPKI-only control HTTP client should build");
+  }
 
   #[tokio::test]
   async fn request_timeout_covers_response_body_collection() {

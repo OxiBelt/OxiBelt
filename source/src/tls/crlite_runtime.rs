@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use rustls::server::ResolvesServerCert;
 use rustls::sign::CertifiedKey;
 use serde::Serialize;
@@ -60,11 +60,7 @@ pub struct CrliteRuntimeStatus {
 }
 
 impl CrliteRuntime {
-  pub(crate) async fn new(
-    tls: &TlsConfig,
-    control_http: &ControlHttpClient,
-    metrics: Arc<Metrics>,
-  ) -> anyhow::Result<Self> {
+  pub(crate) async fn new(tls: &TlsConfig, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
     if tls.crlite.mode == CrliteMode::Disabled {
       metrics.set_crlite_enabled(false);
       metrics.set_crlite_filter_stale(false);
@@ -80,9 +76,7 @@ impl CrliteRuntime {
     match tls.crlite.mode {
       CrliteMode::Disabled => unreachable!("disabled CRLite returned above"),
       CrliteMode::Enforce => Self::from_local_filter(tls, metrics, checked_at),
-      CrliteMode::Managed => {
-        Self::from_managed_filter(tls, control_http, metrics, checked_at).await
-      }
+      CrliteMode::Managed => Self::from_managed_filter(tls, metrics, checked_at).await,
     }
   }
 
@@ -131,12 +125,13 @@ impl CrliteRuntime {
 
   async fn from_managed_filter(
     tls: &TlsConfig,
-    control_http: &ControlHttpClient,
     metrics: Arc<Metrics>,
     checked_at: Option<u64>,
   ) -> anyhow::Result<Self> {
+    let control_http =
+      ControlHttpClient::new_webpki_only().context("failed to build managed CRLite HTTP client")?;
     let reject_handshakes = Arc::new(AtomicBool::new(false));
-    let loaded = super::crlite_managed::load_or_fetch_filter(tls, control_http).await;
+    let loaded = super::crlite_managed::load_or_fetch_filter(tls, &control_http).await;
     record_managed_load_metrics(&loaded, &metrics);
     let status_context = managed_status_context(tls, checked_at, loaded.as_ref().ok());
     let status = evaluate_crlite_result(
@@ -149,7 +144,7 @@ impl CrliteRuntime {
     let status = Arc::new(Mutex::new(status));
     let worker = spawn_managed_worker(
       tls.clone(),
-      control_http.clone(),
+      control_http,
       metrics,
       status.clone(),
       reject_handshakes.clone(),
