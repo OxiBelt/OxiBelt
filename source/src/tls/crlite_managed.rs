@@ -8,7 +8,7 @@ use ring::digest;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::config::{CrliteManagedStorage, TlsConfig};
+use crate::config::{CrliteConfig, CrliteManagedStorage, TlsConfig};
 use crate::control_http::{ControlHttpClient, empty_body, uri_from_url};
 
 const REMOTE_SETTINGS_ROOT: &str = "https://firefox.settings.services.mozilla.com/v1/";
@@ -88,8 +88,15 @@ pub(super) async fn load_or_fetch_filter(
   tls: &TlsConfig,
   control_http: &ControlHttpClient,
 ) -> anyhow::Result<ManagedFilter> {
-  if tls.crlite.managed.storage == CrliteManagedStorage::Memory {
-    return fetch_filter(tls, control_http)
+  load_or_fetch_filter_for_config(&tls.crlite, control_http).await
+}
+
+pub(super) async fn load_or_fetch_filter_for_config(
+  config: &CrliteConfig,
+  control_http: &ControlHttpClient,
+) -> anyhow::Result<ManagedFilter> {
+  if config.managed.storage == CrliteManagedStorage::Memory {
+    return fetch_filter(config, control_http)
       .await
       .map(|filter| ManagedFilter {
         bytes: filter.bytes,
@@ -100,7 +107,7 @@ pub(super) async fn load_or_fetch_filter(
       });
   }
 
-  let cached = load_cached_filter(tls).ok();
+  let cached = load_cached_filter(config).ok();
   if let Some(cached) = cached.as_ref()
     && !cached.stale
   {
@@ -113,7 +120,7 @@ pub(super) async fn load_or_fetch_filter(
     });
   }
 
-  match fetch_and_store_filter(tls, control_http).await {
+  match fetch_and_store_filter_for_config(config, control_http).await {
     Ok(filter) => Ok(filter),
     Err(error) => {
       if let Some(cached) = cached {
@@ -134,14 +141,21 @@ pub(super) async fn fetch_and_store_filter(
   tls: &TlsConfig,
   control_http: &ControlHttpClient,
 ) -> anyhow::Result<ManagedFilter> {
-  let filter = fetch_filter(tls, control_http).await?;
-  if tls.crlite.managed.storage != CrliteManagedStorage::Memory {
-    store_cached_filter(tls, &filter)?;
+  fetch_and_store_filter_for_config(&tls.crlite, control_http).await
+}
+
+pub(super) async fn fetch_and_store_filter_for_config(
+  config: &CrliteConfig,
+  control_http: &ControlHttpClient,
+) -> anyhow::Result<ManagedFilter> {
+  let filter = fetch_filter(config, control_http).await?;
+  if config.managed.storage != CrliteManagedStorage::Memory {
+    store_cached_filter(config, &filter)?;
   }
   Ok(ManagedFilter {
     bytes: filter.bytes,
-    cache_present: tls.crlite.managed.storage != CrliteManagedStorage::Memory,
-    cache_fresh: tls.crlite.managed.storage != CrliteManagedStorage::Memory,
+    cache_present: config.managed.storage != CrliteManagedStorage::Memory,
+    cache_fresh: config.managed.storage != CrliteManagedStorage::Memory,
     filter_stale: false,
     last_success_at: Some(unix_now()),
   })
@@ -151,17 +165,15 @@ pub(super) fn storage_name(storage: CrliteManagedStorage) -> &'static str {
   storage.as_str()
 }
 
-fn load_cached_filter(tls: &TlsConfig) -> anyhow::Result<CachedFilter> {
-  let dir = cache_dir(tls);
+fn load_cached_filter(config: &CrliteConfig) -> anyhow::Result<CachedFilter> {
+  let dir = cache_dir(config);
   let metadata_path = dir.join(METADATA_CACHE_FILE);
   let filter_path = dir.join(FILTER_CACHE_FILE);
   let metadata: CacheMetadata = serde_json::from_slice(
     &fs::read(&metadata_path).with_context(|| "crlite_managed_cache_metadata_read")?,
   )
   .with_context(|| "crlite_managed_cache_metadata_parse")?;
-  if metadata.size > tls.crlite.max_filter_bytes
-    || metadata.size > tls.crlite.managed.max_cache_bytes
-  {
+  if metadata.size > config.max_filter_bytes || metadata.size > config.managed.max_cache_bytes {
     bail!("crlite_managed_cache_too_large");
   }
   let bytes = fs::read(&filter_path).with_context(|| "crlite_managed_cache_filter_read")?;
@@ -171,13 +183,13 @@ fn load_cached_filter(tls: &TlsConfig) -> anyhow::Result<CachedFilter> {
   verify_sha256(&metadata.sha256, &bytes).with_context(|| "crlite_managed_cache_hash_mismatch")?;
   Ok(CachedFilter {
     bytes,
-    stale: cache_is_stale(metadata.fetched_at, tls.crlite.max_filter_age_seconds),
+    stale: cache_is_stale(metadata.fetched_at, config.max_filter_age_seconds),
     metadata,
   })
 }
 
-fn store_cached_filter(tls: &TlsConfig, filter: &RemoteFilter) -> anyhow::Result<()> {
-  let dir = cache_dir(tls);
+fn store_cached_filter(config: &CrliteConfig, filter: &RemoteFilter) -> anyhow::Result<()> {
+  let dir = cache_dir(config);
   let metadata = CacheMetadata {
     sha256: filter.sha256.clone(),
     size: filter.size,
@@ -186,7 +198,7 @@ fn store_cached_filter(tls: &TlsConfig, filter: &RemoteFilter) -> anyhow::Result
   };
   let metadata_bytes =
     serde_json::to_vec(&metadata).with_context(|| "crlite_managed_cache_metadata_encode")?;
-  if filter.bytes.len() + metadata_bytes.len() > tls.crlite.managed.max_cache_bytes {
+  if filter.bytes.len() + metadata_bytes.len() > config.managed.max_cache_bytes {
     bail!("crlite_managed_cache_too_large");
   }
   atomic_write(&dir.join(FILTER_CACHE_FILE), &filter.bytes)
@@ -197,10 +209,10 @@ fn store_cached_filter(tls: &TlsConfig, filter: &RemoteFilter) -> anyhow::Result
 }
 
 async fn fetch_filter(
-  tls: &TlsConfig,
+  config: &CrliteConfig,
   control_http: &ControlHttpClient,
 ) -> anyhow::Result<RemoteFilter> {
-  let timeout = Duration::from_millis(tls.crlite.managed.request_timeout_ms);
+  let timeout = Duration::from_millis(config.managed.request_timeout_ms);
   let root_url = Url::parse(REMOTE_SETTINGS_ROOT).expect("Remote Settings root URL is valid");
   let root: RootResponse = fetch_json(control_http, root_url.clone(), timeout)
     .await
@@ -220,9 +232,7 @@ async fn fetch_filter(
   let expected_hash = normalize_sha256(&attachment.hash)?;
   let expected_size =
     usize::try_from(attachment.size).map_err(|_| anyhow!("crlite_managed_attachment_too_large"))?;
-  if expected_size > tls.crlite.max_filter_bytes
-    || expected_size > tls.crlite.managed.max_cache_bytes
-  {
+  if expected_size > config.max_filter_bytes || expected_size > config.managed.max_cache_bytes {
     bail!("crlite_managed_attachment_too_large");
   }
   let attachment_url = attachment_url(&base_url, attachment)?;
@@ -329,11 +339,11 @@ fn attachment_url(base_url: &Url, attachment: &RemoteAttachment) -> anyhow::Resu
     .context("crlite_managed_attachment_url")
 }
 
-fn cache_dir(tls: &TlsConfig) -> PathBuf {
-  match tls.crlite.managed.storage {
+fn cache_dir(config: &CrliteConfig) -> PathBuf {
+  match config.managed.storage {
     CrliteManagedStorage::Memory => PathBuf::new(),
-    CrliteManagedStorage::Tmpfs => tls.crlite.managed.tmpfs_dir.clone(),
-    CrliteManagedStorage::Disk => tls.crlite.managed.cache_dir.clone(),
+    CrliteManagedStorage::Tmpfs => config.managed.tmpfs_dir.clone(),
+    CrliteManagedStorage::Disk => config.managed.cache_dir.clone(),
   }
 }
 
@@ -415,8 +425,8 @@ mod tests {
       record_last_modified: Some(42),
     };
 
-    store_cached_filter(&tls, &filter).expect("cache write");
-    let cached = load_cached_filter(&tls).expect("cache read");
+    store_cached_filter(&tls.crlite, &filter).expect("cache write");
+    let cached = load_cached_filter(&tls.crlite).expect("cache read");
 
     assert_eq!(cached.bytes, bytes);
     assert!(!cached.stale);
@@ -440,7 +450,7 @@ mod tests {
     .expect("metadata write");
     fs::write(temp_dir.path().join(FILTER_CACHE_FILE), b"test").expect("filter write");
 
-    let error = load_cached_filter(&tls).expect_err("hash mismatch");
+    let error = load_cached_filter(&tls.crlite).expect_err("hash mismatch");
 
     assert!(format!("{error:#}").contains("crlite_managed_cache_hash_mismatch"));
   }

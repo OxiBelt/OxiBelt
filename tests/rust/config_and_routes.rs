@@ -11,11 +11,12 @@ use oxibelt::config::{
     DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
     ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
     HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource, LoadBalancingAlgorithm,
-    MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode,
-    ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides,
-    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
-    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
-    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode,
+    ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition,
+    RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
+    TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
+    UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -6918,6 +6919,141 @@ failure_policy = "degraded_allow"
             .contains(&filter_path)
     );
     assert!(config.source_paths.runtime_files.contains(&filter_path));
+}
+
+#[test]
+fn upstream_revocation_defaults_are_disabled() {
+    let temp_dir = common::TempDir::new("upstream-revocation-defaults");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "upstream-revocation-defaults");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert_eq!(
+        config.proxy.upstream_revocation.ocsp.mode,
+        OutboundOcspMode::Disabled
+    );
+    assert_eq!(
+        config.proxy.upstream_revocation.crlite.mode,
+        CrliteMode::Disabled
+    );
+    assert!(config.upstreams[0].tls.upstream_revocation.is_none());
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn upstream_revocation_parses_global_policy_and_upstream_override() {
+    let temp_dir = common::TempDir::new("upstream-revocation-parse");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "upstream-revocation-parse");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[proxy.upstream_revocation.ocsp]
+mode = "live_fetch"
+failure_policy = "degraded_allow"
+request_timeout_ms = 2500
+
+[upstreams.tls.upstream_revocation.ocsp]
+mode = "disabled"
+failure_policy = "fail_closed"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert_eq!(
+        config.proxy.upstream_revocation.ocsp.mode,
+        OutboundOcspMode::LiveFetch
+    );
+    assert_eq!(
+        config.proxy.upstream_revocation.ocsp.failure_policy,
+        CrliteFailurePolicy::DegradedAllow
+    );
+    assert_eq!(
+        config.proxy.upstream_revocation.ocsp.request_timeout_ms,
+        2500
+    );
+    let override_policy = config.upstreams[0]
+        .tls
+        .upstream_revocation
+        .as_ref()
+        .expect("upstream override should parse");
+    assert_eq!(override_policy.ocsp.mode, OutboundOcspMode::Disabled);
+    assert_eq!(
+        override_policy.ocsp.failure_policy,
+        CrliteFailurePolicy::FailClosed
+    );
+    config.validate().expect("config should validate");
+}
+
+#[test]
+fn upstream_revocation_rejects_invalid_ocsp_limits() {
+    let cases = [
+        (
+            "request_timeout_ms = 0",
+            "proxy.upstream_revocation.ocsp.request_timeout_ms must be greater than 0",
+        ),
+        (
+            "max_response_bytes = 0",
+            "proxy.upstream_revocation.ocsp.max_response_bytes must be greater than 0",
+        ),
+        (
+            "refresh_jitter_pct = 101",
+            "proxy.upstream_revocation.ocsp.refresh_jitter_pct must be between 0 and 100",
+        ),
+    ];
+
+    for (setting, expected) in cases {
+        let temp_dir = common::TempDir::new("upstream-revocation-invalid");
+        let (cert_path, key_path) =
+            common::create_self_signed_cert(temp_dir.path(), "upstream-revocation-invalid");
+        let raw = common::minimal_config_toml(&cert_path, &key_path)
+            + &format!(
+                r#"
+
+[proxy.upstream_revocation.ocsp]
+mode = "live_fetch"
+{setting}
+"#
+            );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid upstream OCSP limit should fail");
+
+        assert!(
+            error.to_string().contains(expected),
+            "setting {setting} produced unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn upstream_crlite_filter_file_is_tracked_for_runtime_reload_only() {
+    let temp_dir = common::TempDir::new("upstream-crlite-reload-path");
+    let config_path = write_loadable_config(&temp_dir, "upstream-crlite-reload-path", |raw| {
+        raw + r#"
+
+[proxy.upstream_revocation.crlite]
+mode = "enforce"
+filter_file = "upstream-crlite.filter"
+failure_policy = "degraded_allow"
+"#
+    });
+    let filter_path = temp_dir.path().join("cert").join("upstream-crlite.filter");
+    std::fs::write(&filter_path, b"test upstream filter bytes")
+        .expect("failed to write upstream CRLite filter");
+
+    let config = Config::load(&config_path).expect("config should load");
+
+    assert!(config.source_paths.runtime_files.contains(&filter_path));
+    assert!(
+        !config
+            .source_paths
+            .downstream_tls_reload_files()
+            .contains(&filter_path)
+    );
 }
 
 #[test]

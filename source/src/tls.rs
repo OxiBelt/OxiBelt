@@ -5,17 +5,15 @@ use std::fs;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
-use h3_quinn::quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use h3_quinn::quinn::{ClientConfig as QuinnClientConfig, ServerConfig as QuinnServerConfig};
-use rustls::client::{EchConfig, EchGreaseConfig, EchMode};
-use rustls::crypto::hpke::Hpke;
-use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer};
-use rustls::{ClientConfig, RootCertStore, ServerConfig, sign::CertifiedKey};
+use h3_quinn::quinn::ServerConfig as QuinnServerConfig;
+use h3_quinn::quinn::crypto::rustls::QuicServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::{RootCertStore, ServerConfig, sign::CertifiedKey};
 
 use crate::config::{
   AdminTlsConfig, ListenerConfig, OcspMode, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
   TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsVersion, TurnListenerTlsConfig,
-  UpstreamEchConfig, UpstreamEchMode, UpstreamTlsResumptionConfig, canonicalize_existing_file,
+  canonicalize_existing_file,
 };
 
 mod admin_quic;
@@ -26,19 +24,29 @@ mod crlite;
 mod crlite_managed;
 mod crlite_runtime;
 mod ocsp;
+mod outbound_revocation;
 mod resumption;
+mod upstream_client;
 pub(crate) use cert_metadata::client_certificate_metadata;
 
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
-pub(crate) use client_roots::load_upstream_root_store;
 pub(crate) use crlite_runtime::CrliteRuntime;
 pub use crlite_runtime::CrliteRuntimeStatus;
 pub use ocsp::OcspRuntimeStatus;
 pub(crate) use ocsp::OcspStapleRuntime;
+pub(crate) use outbound_revocation::OutboundRevocationRuntime;
+pub use outbound_revocation::OutboundRevocationRuntimeStatus;
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
 use resumption::{
   TlsServerResumptionKey, certificate_identity, client_auth_identity, configure_server_resumption,
-  upstream_client_config_key, upstream_client_resumption,
+};
+pub use upstream_client::{
+  build_upstream_client_config, build_upstream_client_config_with_resumption,
+  build_upstream_quic_client_config, build_upstream_quic_client_config_with_resumption,
+};
+pub(crate) use upstream_client::{
+  build_upstream_client_config_with_resumption_and_revocation,
+  build_upstream_quic_client_config_with_resumption_and_revocation, build_webpki_client_config,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
@@ -455,130 +463,6 @@ fn admin_sni_matches(pattern: &str, server_name: &str) -> bool {
   pattern == server_name
 }
 
-/// Builds the upstream TCP TLS client configuration used by proxy clients.
-pub fn build_upstream_client_config(
-  extra_root_certificates: &[std::path::PathBuf],
-  ech: &UpstreamEchConfig,
-) -> anyhow::Result<ClientConfig> {
-  build_upstream_client_config_with_resumption(
-    extra_root_certificates,
-    ech,
-    &UpstreamTlsResumptionConfig::default(),
-    None,
-    "default",
-  )
-}
-
-pub(crate) fn build_webpki_client_config() -> anyhow::Result<ClientConfig> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-  let roots = client_roots::load_webpki_root_store();
-  let builder = ClientConfig::builder_with_provider(provider)
-    .with_safe_default_protocol_versions()
-    .context("failed to configure WebPKI TLS versions")?;
-  let mut client_config = builder.with_root_certificates(roots).with_no_client_auth();
-  client_config.resumption = upstream_client_resumption(&UpstreamTlsResumptionConfig::default());
-  Ok(client_config)
-}
-
-pub fn build_upstream_client_config_with_resumption(
-  extra_root_certificates: &[std::path::PathBuf],
-  ech: &UpstreamEchConfig,
-  resumption: &UpstreamTlsResumptionConfig,
-  state: Option<&TlsResumptionState>,
-  upstream_name: &str,
-) -> anyhow::Result<ClientConfig> {
-  let key = upstream_client_config_key(
-    "tcp",
-    upstream_name,
-    extra_root_certificates,
-    ech,
-    resumption,
-  )?;
-  if let Some(state) = state {
-    return state.upstream_client_config(key, || {
-      build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, false)
-    });
-  }
-  build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, false)
-}
-
-fn build_uncached_upstream_client_config(
-  extra_root_certificates: &[std::path::PathBuf],
-  ech: &UpstreamEchConfig,
-  resumption: &UpstreamTlsResumptionConfig,
-  quic_only: bool,
-) -> anyhow::Result<ClientConfig> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-  let roots = load_upstream_root_store(extra_root_certificates)?;
-
-  let builder = ClientConfig::builder_with_provider(provider);
-  let builder = match upstream_ech_mode(ech)? {
-    Some(mode) => builder
-      .with_ech(mode)
-      .context("failed to configure upstream TLS 1.3 ECH")?,
-    None if quic_only => builder
-      .with_protocol_versions(&[&rustls::version::TLS13])
-      .context("failed to configure upstream QUIC TLS versions")?,
-    None => builder
-      .with_safe_default_protocol_versions()
-      .context("failed to configure upstream TLS versions")?,
-  };
-
-  let mut client_config = builder.with_root_certificates(roots).with_no_client_auth();
-  client_config.resumption = upstream_client_resumption(resumption);
-
-  Ok(client_config)
-}
-
-pub fn build_upstream_quic_client_config(
-  extra_root_certificates: &[std::path::PathBuf],
-  ech: &UpstreamEchConfig,
-  quic: &QuicConfig,
-) -> anyhow::Result<QuinnClientConfig> {
-  build_upstream_quic_client_config_with_resumption(
-    extra_root_certificates,
-    ech,
-    quic,
-    &UpstreamTlsResumptionConfig::default(),
-    None,
-    "default",
-  )
-}
-
-pub fn build_upstream_quic_client_config_with_resumption(
-  extra_root_certificates: &[std::path::PathBuf],
-  ech: &UpstreamEchConfig,
-  quic: &QuicConfig,
-  resumption: &UpstreamTlsResumptionConfig,
-  state: Option<&TlsResumptionState>,
-  upstream_name: &str,
-) -> anyhow::Result<QuinnClientConfig> {
-  let key = upstream_client_config_key(
-    "quic",
-    upstream_name,
-    extra_root_certificates,
-    ech,
-    resumption,
-  )?;
-  let mut client_config = if let Some(state) = state {
-    state.upstream_client_config(key, || {
-      build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, true)
-    })?
-  } else {
-    build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, true)?
-  };
-  client_config.alpn_protocols = vec![b"h3".to_vec()];
-
-  let quic_crypto =
-    QuicClientConfig::try_from(client_config).context("failed to build QUIC client TLS config")?;
-  let mut quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
-  quic_config.transport_config(crate::quic::transport_config(
-    &quic.upstream.transport,
-    "quic.upstream.transport",
-  )?);
-  Ok(quic_config)
-}
-
 pub(super) fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
   let bytes = read_existing_file("certificate file", path)?;
   let mut cursor = bytes.as_slice();
@@ -609,45 +493,6 @@ fn load_ocsp_response(tls: &TlsConfig) -> anyhow::Result<Option<Vec<u8>>> {
     }
     OcspMode::LiveFetch => Ok(None),
   }
-}
-
-fn upstream_ech_mode(ech: &UpstreamEchConfig) -> anyhow::Result<Option<EchMode>> {
-  match ech.mode {
-    UpstreamEchMode::Disabled => Ok(None),
-    UpstreamEchMode::Grease => Ok(Some(EchMode::Grease(build_ech_grease_config()?))),
-    UpstreamEchMode::ConfigList => Ok(Some(EchMode::Enable(load_ech_config(ech)?))),
-  }
-}
-
-fn build_ech_grease_config() -> anyhow::Result<EchGreaseConfig> {
-  let suite = default_ech_hpke_suites()
-    .first()
-    .copied()
-    .ok_or_else(|| anyhow!("aws-lc-rs provider does not expose HPKE suites for ECH"))?;
-  let (public_key, _private_key) = suite
-    .generate_key_pair()
-    .context("failed to generate ECH GREASE placeholder key")?;
-
-  Ok(EchGreaseConfig::new(suite, public_key))
-}
-
-fn load_ech_config(ech: &UpstreamEchConfig) -> anyhow::Result<EchConfig> {
-  let path = ech
-    .config_list_file
-    .as_ref()
-    .ok_or_else(|| anyhow!("upstream ECH config_list_file must be configured"))?;
-  let bytes = read_existing_file("upstream ECH config list file", path)?;
-
-  EchConfig::new(EchConfigListBytes::from(bytes), default_ech_hpke_suites()).with_context(|| {
-    format!(
-      "failed to parse upstream ECH config list from {}",
-      path.display()
-    )
-  })
-}
-
-fn default_ech_hpke_suites() -> &'static [&'static dyn Hpke] {
-  rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES
 }
 
 pub(super) fn read_existing_file(

@@ -373,6 +373,31 @@ mode = "disabled" # disabled | enforce | managed
 # max_cache_bytes = 67108864
 # refresh_interval_seconds = 21600
 # request_timeout_ms = 3000
+
+[proxy.upstream_revocation.ocsp]
+mode = "disabled" # disabled | live_fetch
+# failure_policy = "fail_closed" # fail_closed | degraded_allow
+# request_timeout_ms = 3000
+# max_response_bytes = 16384
+# refresh_jitter_pct = 10
+# clock_skew_seconds = 300
+
+[proxy.upstream_revocation.crlite]
+mode = "disabled" # disabled | enforce | managed
+# filter_file = "upstream-crlite.filter"
+# filter_sha256 = ""
+# max_filter_bytes = 33554432
+# max_filter_age_seconds = 86400
+# failure_policy = "fail_closed" # fail_closed | degraded_allow
+# coverage_policy = "allow_unknown" # allow_unknown | require_good
+
+[proxy.upstream_revocation.crlite.managed]
+# storage = "disk" # memory | tmpfs | disk
+# cache_dir = "/var/lib/oxibelt/upstream-crlite"
+# tmpfs_dir = "/dev/shm/oxibelt-upstream-crlite"
+# max_cache_bytes = 67108864
+# refresh_interval_seconds = 21600
+# request_timeout_ms = 3000
 ```
 
 `cert_chain` is always required. `private_key` is required unless `tls.remote_signer.enabled = true`; when remote signing is enabled, `private_key` must not be set. `key_exchange_groups` controls the downstream TCP TLS, HTTP/3 TLS, and TURN TLS groups exposed through the aws-lc-rs provider. The default keeps rustls' post-quantum hybrid first: `["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]`. For handshake-heavy deployments that prefer lower cold-handshake CPU cost over post-quantum hybrid negotiation, omit `x25519mlkem768`, for example `["x25519", "secp256r1", "secp384r1"]`. In TLS 1.3 server mode, rustls chooses from the client supported-group order, so moving `x25519mlkem768` later does not force classical ECDHE when clients offer the hybrid group first. The remote signer uses a Unix domain socket and a base64 32-byte token from `token_env`; `socket_path` must be absolute, and `key_id` selects the signer-held key. `pool_max_idle_connections` caps reusable idle signer sockets per remote signing key and defaults to `64`; set it to `0` to open a fresh Unix socket for each signing request. Idle pooled sockets older than `sign_timeout_ms` are discarded before reuse. By default, remote signing is limited to TLS 1.3 server CertificateVerify inputs. Set `allow_tls12_unstructured_signing = true` only when TLS 1.2 compatibility is required and the signer sidecar is started with the same opt-in.
@@ -400,13 +425,21 @@ With `tls.ocsp.mode = "live_fetch"`, OxiBelt builds and verifies an OCSP request
 
 Live OCSP fetches run at snapshot startup/reload and in a bounded background refresh worker. TLS handshakes, including TCP TLS and HTTP/3, never perform network OCSP I/O; both transports share the refreshed staple through snapshot runtime state. `request_timeout_ms` and `max_response_bytes` bound each fetch, redirects are not followed, and responder URLs may only use `http` or `https` without credentials or fragments. When `responder_url` is omitted, the responder source is certificate-provided AIA, so operators should treat certificate issuance policy as part of the egress trust boundary. Public Prometheus OCSP metrics use fixed series names only and do not expose responder URLs, SNI, issuer names, or certificate fingerprints.
 
-`tls.crlite.mode = "enforce"` enables experimental local CRLite enforcement for the configured downstream TLS leaf certificate using an operator-supplied filter. `tls.crlite.mode = "managed"` enables experimental Mozilla CRLite Remote Settings download, integrity checking, and local cache management for the same downstream certificate check. CRLite is separate from `tls.ocsp`: OCSP controls stapling for clients, while CRLite controls whether OxiBelt accepts its own configured serving certificate during startup, downstream TLS reload, and managed refresh. Managed Remote Settings downloads use public WebPKI roots only and do not inherit `proxy.trusted_ca_certs`. `enforce` requires `filter_file`, resolves it under the cert directory, and can pin `filter_sha256`. `managed` rejects `filter_file` and `filter_sha256` so manual and managed sources cannot be mixed. `max_filter_bytes` bounds filter reads/downloads, and `max_filter_age_seconds` treats older local or cached filters as stale.
+`tls.crlite.mode = "enforce"` enables experimental local CRLite enforcement for the configured downstream TLS leaf certificate using an operator-supplied filter. `tls.crlite.mode = "managed"` enables experimental Mozilla CRLite Remote Settings download, integrity checking, and local cache management for the same downstream certificate check. Downstream CRLite is separate from `tls.ocsp`: OCSP controls stapling for clients, while CRLite controls whether OxiBelt accepts its own configured serving certificate during startup, downstream TLS reload, and managed refresh. Managed Remote Settings downloads use public WebPKI roots only and do not inherit `proxy.trusted_ca_certs`. `enforce` requires `filter_file`, resolves it under the cert directory, and can pin `filter_sha256`. `managed` rejects `filter_file` and `filter_sha256` so manual and managed sources cannot be mixed. `max_filter_bytes` bounds filter reads/downloads, and `max_filter_age_seconds` treats older local or cached filters as stale.
 
 With `failure_policy = "fail_closed"`, missing, oversized, stale, hash-mismatched, unparseable, or unavailable CRLite filters reject startup or reload. With `failure_policy = "degraded_allow"`, those filter health failures are reported through Admin TLS status, support bundles, and public aggregate metrics while the existing TLS snapshot can continue. A `revoked` CRLite result always rejects the configured downstream certificate, even under `degraded_allow`. `coverage_policy = "allow_unknown"` permits CRLite `not_covered` and `not_enrolled` results; `require_good` rejects anything other than `good`.
 
 Managed CRLite storage defaults to `disk` at `/var/lib/oxibelt/crlite`, which should be a writable persistent volume in production. Use `tmpfs` with `tmpfs_dir = "/dev/shm/oxibelt-crlite"` for read-only root filesystems that still provide writable tmpfs. Use `memory` only for ephemeral deployments that accept refetching on every restart and possible fail-closed startup if the managed filter cannot be fetched. The cache contains public revocation data, but it is integrity-sensitive; keep the directory owned by the OxiBelt runtime user and avoid sharing write access with unrelated processes.
 
-OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, certificate renewal, upstream CRLite enforcement, or private key rotation itself. OCSP live fetch is revocation-status stapling for already provisioned certificates; CRLite enforcement is a local filter check for already provisioned downstream certificates. Neither changes private key handling, remote signer isolation, or certificate renewal. Provision and renew TLS files with external automation such as Certbot or the `certbot/certbot` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
+`proxy.upstream_revocation` enables opt-in revocation checks for runtime outbound TLS clients. It applies to HTTPS upstream clients, upstream-pool generated HTTPS clients, HTTP/3 and WebTransport upstream QUIC clients, external auth and discovery HTTP clients, `turns://` TURN upstreams, and diagnostics probes. The default is disabled for compatibility. When enabled globally, each direct `[[upstreams]]` entry can override the policy under `[upstreams.tls.upstream_revocation]`; upstream-pool discovery, external auth, discovery, TURN, and diagnostics clients use the global policy. Standalone helper clients such as `oxibeltctl` fetches are outside this runtime policy.
+
+`proxy.upstream_revocation.ocsp.mode = "live_fetch"` verifies a stapled upstream OCSP response when the server provides one. Without a staple, OxiBelt builds a request from the upstream certificate AIA, uses a bounded background fetch/cache, and applies `failure_policy` to the current handshake when the cache is missing, stale, or invalid. The TLS handshake verifier never performs network I/O; it only validates the WebPKI chain/hostname, checks the supplied staple or local cache, and schedules a bounded fetch on the runtime. `fail_closed` rejects missing or invalid revocation state; `degraded_allow` permits rollout while reporting the bounded error code. Revoked responses always reject.
+
+`proxy.upstream_revocation.crlite.mode = "enforce"` checks the verified upstream server leaf plus issuer certificate against an operator-supplied local filter. `managed` uses the same Mozilla CRLite Remote Settings machinery as downstream CRLite but stores and reports upstream status separately. Local `filter_file` paths are resolved under the cert directory and tracked as runtime reload files, not downstream TLS reload files. Managed CRLite and OCSP responder bootstrap downloads use dedicated non-revocation HTTP clients so revocation refreshes cannot recursively depend on themselves.
+
+Authenticated `GET /admin/v1/tls/upstream`, `POST /admin/v1/tls/upstream/refresh`, runtime snapshots, and support bundles expose only bounded upstream revocation status: enabled flag, default modes, cache counts, fetch counts, managed-filter counts, and compact error codes. They do not expose responder URLs, SNI, issuer names, certificate serial numbers, fingerprints, filter paths, cache paths, or Remote Settings URLs. Public Prometheus metrics use fixed aggregate names: `oxibelt_tls_upstream_ocsp_success_total`, `oxibelt_tls_upstream_ocsp_errors_total`, `oxibelt_tls_upstream_crlite_checks_total`, `oxibelt_tls_upstream_crlite_revoked_total`, and `oxibelt_tls_upstream_crlite_errors_total`.
+
+OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, certificate renewal, or private key rotation itself. OCSP live fetch is revocation-status stapling for already provisioned downstream certificates or outbound revocation checking for already provisioned upstream certificates; CRLite enforcement is a local or managed filter check for already provisioned downstream and upstream certificates. Neither changes private key handling, remote signer isolation, or certificate renewal. Provision and renew TLS files with external automation such as Certbot or the `certbot/certbot` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
 
 Keep ACME credentials, DNS-01 provider tokens, renewal state, and private signing keys out of the OxiBelt process/container when possible. This limits blast radius if a proxy vulnerability ever exposes process memory or permits remote code execution: the running proxy may have access to certificate chains and remote signing capability, but it should not also contain private keys or the DNS/ACME credentials needed to mint arbitrary new certificates. A compromised OxiBelt process that still has signer socket and token access may request signatures while that access remains valid, so socket permissions, peer UID/GID allowlists, token rotation, and process isolation remain important.
 
@@ -1369,6 +1402,8 @@ Admin config and downstream TLS endpoints:
 - `POST /admin/v1/config/rollback`
 - `GET /admin/v1/tls/downstream`
 - `POST /admin/v1/tls/downstream/reload`
+- `GET /admin/v1/tls/upstream`
+- `POST /admin/v1/tls/upstream/refresh`
 - `GET /admin/v1/ipm/principals`
 - `GET /admin/v1/ipm/credentials`
 - `GET /admin/v1/ipm/policies`
@@ -1392,7 +1427,7 @@ parameters. Calls without these list query parameters keep returning the full
 legacy array; paginated responses add a `pagination` object with an opaque
 `next_cursor` when more rows are available.
 
-Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, and downstream TLS operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Load and rollback require `admin:UpdateConfig` for `[admin]` changes and `ipm:UpdateConfig` for `[ipm]` changes. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk or rebuilds the live OCSP runtime, and preserves the active TLS state if validation fails.
+Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, downstream TLS, and upstream TLS revocation operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Load and rollback require `admin:UpdateConfig` for `[admin]` changes and `ipm:UpdateConfig` for `[ipm]` changes. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk or rebuilds the live OCSP runtime, and preserves the active TLS state if validation fails. Upstream TLS status reads require `config:ReadUpstreamTls`; `POST /admin/v1/tls/upstream/refresh` requires `config:RefreshUpstreamTls` and refreshes known upstream OCSP cache contexts without exposing certificate identifiers or responder URLs.
 
 Admin diagnostics endpoints return the same production preflight report shape as
 `oxibeltctl doctor`: `ok`, `profile`, severity `summary`, `findings`, and
@@ -1816,9 +1851,19 @@ mode = "disabled" # disabled | grease | config_list
 mode = "enabled" # enabled | disabled
 session_cache_size = 1024
 tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tickets
+
+# Optional override for this direct upstream only. Omitted fields inherit their
+# own defaults, not partial values from [proxy.upstream_revocation].
+[upstreams.tls.upstream_revocation.ocsp]
+mode = "disabled" # disabled | live_fetch
+# failure_policy = "fail_closed" # fail_closed | degraded_allow
+
+[upstreams.tls.upstream_revocation.crlite]
+mode = "disabled" # disabled | enforce | managed
+# filter_file = "app-upstream-crlite.filter"
 ```
 
-Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. Upstream TLS resumption controls OxiBelt's client-side cache only; the upstream server still chooses whether its own tickets are stateful or stateless. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection.
+Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. Upstream TLS resumption controls OxiBelt's client-side cache only; the upstream server still chooses whether its own tickets are stateful or stateless. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection. `[upstreams.tls.upstream_revocation]` overrides the global runtime outbound revocation policy for that direct upstream; use `mode = "disabled"` in both nested tables to opt one upstream out of a global policy.
 
 `request_timeout_ms` is the compatibility upper bound for sending a request and receiving response headers. `first_byte_timeout_ms` separately controls the response-header/first-byte wait and is capped by `request_timeout_ms` when both are configured. `read_timeout_ms` is an upstream response body idle timeout. `send_timeout_ms` controls upstream request body send backpressure.
 
@@ -2231,7 +2276,7 @@ Configuration validation rejects:
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
 - `runtime.drain.graceful_timeout_ms = 0` or `runtime.drain.long_connection_close_delay_ms = 0`.
-- TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, unsafe OCSP responder URLs, CRLite enforcement without `filter_file`, or invalid CRLite filter limits/digests.
+- TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, unsafe OCSP responder URLs, CRLite enforcement without `filter_file`, invalid CRLite filter limits/digests, invalid upstream revocation limits, or upstream CRLite enforcement without `filter_file`.
 - Reserved sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
 - Invalid WebRTC TURN listener binds, missing proxy pools, open `edge_relay` auth, invalid TURN upstream schemes, or invalid relay port ranges.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.

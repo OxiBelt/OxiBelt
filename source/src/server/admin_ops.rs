@@ -309,9 +309,43 @@ pub(super) async fn admin_tls_response(
           .into_http(),
       )
     }
-    (_, "/admin/v1/tls/downstream") | (_, "/admin/v1/tls/downstream/reload") => Some(
-      text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
-    ),
+    (&::http::Method::GET, "/admin/v1/tls/upstream") => {
+      if !authorization.is_allowed("config:ReadUpstreamTls", "*") {
+        return Some(permission_denied(
+          authorization.actor,
+          "config:ReadUpstreamTls",
+        ));
+      }
+      Some(admin::json_response(
+        StatusCode::OK,
+        &json!({
+          "revocation": snapshot.outbound_revocation.status(),
+          "etag": admin_control.status().await["etag"].clone(),
+        }),
+      ))
+    }
+    (&::http::Method::POST, "/admin/v1/tls/upstream/refresh") => {
+      if !authorization.is_allowed("config:RefreshUpstreamTls", "*") {
+        return Some(permission_denied(
+          authorization.actor,
+          "config:RefreshUpstreamTls",
+        ));
+      }
+      snapshot.outbound_revocation.refresh().await;
+      Some(admin::json_response(
+        StatusCode::OK,
+        &json!({
+          "revocation": snapshot.outbound_revocation.status(),
+        }),
+      ))
+    }
+    (_, "/admin/v1/tls/downstream")
+    | (_, "/admin/v1/tls/downstream/reload")
+    | (_, "/admin/v1/tls/upstream")
+    | (_, "/admin/v1/tls/upstream/refresh") => Some(text_response(
+      StatusCode::METHOD_NOT_ALLOWED,
+      "method not allowed",
+    )),
     _ => None,
   }
 }

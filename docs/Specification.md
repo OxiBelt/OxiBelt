@@ -99,6 +99,7 @@ Supported downstream TLS features:
 - Client CA roots from configured cert-directory files.
 - Static file-based OCSP stapling and live OCSP fetch/refresh for downstream TLS.
 - Experimental CRLite filter enforcement for the configured downstream TLS certificate, including operator-supplied local filters and managed Mozilla CRLite cache downloads.
+- Opt-in outbound TLS revocation checks for runtime upstream clients using live OCSP fetch/cache and experimental CRLite local or managed filters.
 - Session tickets with configurable rotation interval.
 
 Remote private-key signing is intended to keep downstream and TURN TLS private keys outside the OxiBelt process memory. OxiBelt connects to `oxibelt-keysigner` over a Unix domain socket, authenticates with a base64 32-byte token, verifies that the signer-reported public key matches the configured certificate, and requests signatures through rustls' signing interface. The signer caps concurrently handled IPC connections and applies server-side request/response I/O deadlines before token validation, so local idle or trickled socket peers cannot hold signer tasks indefinitely. The signer defaults to TLS 1.3 server CertificateVerify inputs only; TLS 1.2 unstructured signing requires explicit opt-in on both OxiBelt and the signer sidecar.
@@ -107,6 +108,7 @@ Upstream TLS behavior:
 
 - OxiBelt validates upstream HTTPS using the default web PKI roots plus configured `proxy.trusted_ca_certs`.
 - Upstream TLS 1.3 ECH can be disabled, sent as GREASE, or sent from a configured TLS-encoded `ECHConfigList`.
+- `proxy.upstream_revocation` can add outbound OCSP and CRLite checks after normal WebPKI chain and hostname validation. The handshake verifier never performs network revocation I/O; stapled OCSP responses or local caches are checked synchronously, and missing OCSP cache entries schedule bounded background fetches. Revoked OCSP or CRLite results fail closed.
 - Downstream ECH termination is not configured by OxiBelt today; it depends on server-side ECH support in the TLS provider.
 
 Person proof challenges in OxiRule are anti-automation controls. They are not authentication, identity proof, proof of legal personhood, or proof of benign intent. Public behavior is selected with `person_proof_mode`: `built_in` uses OxiBelt built-in PoW plus the built-in frontend, `openapi` uses the same PoW API with a custom frontend, `third_party_provider` uses built-in Cloudflare Turnstile, hCaptcha, or Friendly Captcha v2 adapters, and `custom_provider` calls a configured JSON HTTP provider. Custom frontends are addressed by `custom_frontend_url`, an origin-relative URL routed by the same OxiBelt instance to either a static asset or proxied frontend backend. Clearance credentials can be carried by configured cookie keys, `Authorization: Bearer`, or configured request-header keys, with cookie, localStorage, and JSON issuance modes documented by the Person proof API metadata.
@@ -213,6 +215,8 @@ Lifecycle endpoints are:
 - `POST /admin/v1/files/sync`: writes explicit files under configured config/OxiRule roots and can apply `none`, `oxirule`, `full`, or `downstream_tls`. Config-root writes require `config:SyncFiles`; OxiRule and OxiRule group writes require the matching `waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, or `waf:DeleteOxiRuleGroup`. OxiRule file-sync roots are suffix-bound: `oxirule` accepts `.oxirule.toml` paths and `oxirule_group` accepts `.oxirule-group.toml` paths. `apply = "oxirule"` requires `waf:ReloadOxiRule`. Config-root writes and `apply = "full"` are prechecked so staged or disk-candidate `[admin]` and `[ipm]` changes require the protected config update actions before files are committed.
 - `GET /admin/v1/tls/downstream`: requires `config:ReadDownstreamTls`, returns downstream TLS material status.
 - `POST /admin/v1/tls/downstream/reload`: requires `config:ReloadDownstreamTls` and matching `If-Match`, reloads configured certificate, key, and static OCSP files from disk or rebuilds the live OCSP runtime.
+- `GET /admin/v1/tls/upstream`: requires `config:ReadUpstreamTls`, returns bounded outbound revocation runtime status.
+- `POST /admin/v1/tls/upstream/refresh`: requires `config:RefreshUpstreamTls`, refreshes known outbound OCSP cache contexts and returns bounded runtime status.
 - `GET /admin/v1/lifecycle`: requires `lifecycle:Get`, returns draining state and reason.
 - `POST /admin/v1/lifecycle/drain`: requires `lifecycle:Drain`, starts admin drain.
 - `POST /admin/v1/lifecycle/undrain`: requires `lifecycle:Undrain`, clears admin drain.
@@ -268,7 +272,6 @@ Security rationale: ACME account keys, DNS provider API tokens, and challenge cr
 
 The current implementation reserves or defers this work:
 
-- Upstream CRLite enforcement.
 - CRS stream-payload inspection for WebSocket and WebTransport traffic.
 - Downstream ECH configuration.
 - General-purpose UDP stream proxying outside the configured same-port QUIC SNI forwarding path.

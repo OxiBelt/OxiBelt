@@ -64,6 +64,7 @@ impl UpstreamH3Pools {
     upstreams: &[UpstreamConfig],
     config: &Config,
     tls_resumption: &tls::TlsResumptionState,
+    outbound_revocation: &tls::OutboundRevocationRuntime,
   ) -> anyhow::Result<Self> {
     if !config.quic.upstream_pool.enabled {
       return Ok(Self::default());
@@ -74,13 +75,17 @@ impl UpstreamH3Pools {
       if upstream.max_http_version != HttpVersion::H3 {
         continue;
       }
-      let quic_config = tls::build_upstream_quic_client_config_with_resumption(
+      let quic_config = tls::build_upstream_quic_client_config_with_resumption_and_revocation(
         &config.proxy.trusted_ca_certs,
         &upstream.tls.ech,
         &config.quic,
         &upstream.tls.resumption,
         Some(tls_resumption),
         &upstream.name,
+        Some((
+          outbound_revocation,
+          outbound_revocation.policy_for_upstream(upstream),
+        )),
       )
       .with_context(|| format!("failed to build upstream HTTP/3 pool for {}", upstream.name))?;
       by_upstream.insert(
@@ -423,13 +428,17 @@ pub(crate) async fn forward_one_shot_request(
   timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let uri = request.uri().clone();
-  let quic_config = tls::build_upstream_quic_client_config_with_resumption(
+  let quic_config = tls::build_upstream_quic_client_config_with_resumption_and_revocation(
     &state.config.proxy.trusted_ca_certs,
     &upstream.tls.ech,
     &state.config.quic,
     &upstream.tls.resumption,
     Some(&state.tls_resumption),
     &upstream.name,
+    Some((
+      &state.outbound_revocation,
+      state.outbound_revocation.policy_for_upstream(upstream),
+    )),
   )
   .with_context(|| format!("failed to build upstream QUIC client for {}", upstream.name))?;
   let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
@@ -819,13 +828,19 @@ async fn connect_upstream_webtransport(
   prepared: &http_proxy::PreparedWebTransport,
   state: &AppSnapshot,
 ) -> anyhow::Result<web_transport_quinn::Session> {
-  let quic_config = tls::build_upstream_quic_client_config_with_resumption(
+  let quic_config = tls::build_upstream_quic_client_config_with_resumption_and_revocation(
     &state.config.proxy.trusted_ca_certs,
     &prepared.upstream.tls.ech,
     &state.config.quic,
     &prepared.upstream.tls.resumption,
     Some(&state.tls_resumption),
     &prepared.upstream.name,
+    Some((
+      &state.outbound_revocation,
+      state
+        .outbound_revocation
+        .policy_for_upstream(&prepared.upstream),
+    )),
   )
   .with_context(|| {
     format!(

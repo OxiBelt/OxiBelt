@@ -17,11 +17,14 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{info, warn};
 use url::Url;
 
-use crate::config::{Config, TurnAuthMode, WebRtcTurnListenerConfig, WebRtcTurnListenerMode};
+use crate::config::{
+  TurnAuthMode, UpstreamEchConfig, UpstreamTlsResumptionConfig, WebRtcTurnListenerConfig,
+  WebRtcTurnListenerMode,
+};
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
-use crate::state::AppHandle;
+use crate::state::{AppHandle, AppSnapshot};
 use crate::tls;
 use crate::tls::TlsResumptionState;
 
@@ -466,7 +469,8 @@ async fn serve_proxy_stream(
       .snapshot()
       .turn_pools
       .select(pool, peer_addr.ip(), &peer_addr.to_string())?;
-  let mut upstream = connect_turn_stream(&selection.origin, &state.snapshot().config).await?;
+  let snapshot = state.snapshot();
+  let mut upstream = connect_turn_stream(&selection.origin, &snapshot).await?;
   upstream.write_all(&first).await?;
   copy_bidirectional_with_idle(
     downstream,
@@ -502,10 +506,7 @@ fn proxy_auth_allows(config: &WebRtcTurnListenerConfig, packet: &[u8]) -> anyhow
   }
 }
 
-async fn connect_turn_stream(
-  origin: &Url,
-  config: &crate::config::Config,
-) -> anyhow::Result<BoxedIo> {
+async fn connect_turn_stream(origin: &Url, snapshot: &AppSnapshot) -> anyhow::Result<BoxedIo> {
   let addr = resolve_turn_origin(origin).await?;
   let tcp = tokio::time::timeout(Duration::from_millis(3_000), TcpStream::connect(addr))
     .await
@@ -513,10 +514,17 @@ async fn connect_turn_stream(
   if origin.scheme() != "turns" {
     return Ok(Box::new(tcp));
   }
-  let roots = tls::load_upstream_root_store(&config.proxy.trusted_ca_certs)?;
-  let client_config = rustls::ClientConfig::builder()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+  let client_config = tls::build_upstream_client_config_with_resumption_and_revocation(
+    &snapshot.config.proxy.trusted_ca_certs,
+    &UpstreamEchConfig::default(),
+    &UpstreamTlsResumptionConfig::default(),
+    Some(&snapshot.tls_resumption),
+    "turn-upstream",
+    Some((
+      &snapshot.outbound_revocation,
+      snapshot.outbound_revocation.default_policy(),
+    )),
+  )?;
   let connector = TlsConnector::from(Arc::new(client_config));
   let host = origin
     .host_str()
@@ -637,8 +645,7 @@ fn spawn_health_task(state: AppHandle, mut shutdown: watch::Receiver<bool>) -> J
         .min()
         .unwrap_or_else(|| Duration::from_secs(10));
       for (pool, server, origin, _interval_ms, timeout_ms) in targets {
-        let result =
-          turn_health_check(&origin, Duration::from_millis(timeout_ms), &snapshot.config).await;
+        let result = turn_health_check(&origin, Duration::from_millis(timeout_ms), &snapshot).await;
         let snapshot = state.snapshot();
         if result.is_ok() {
           snapshot.turn_pools.report_success(&pool, &server);
@@ -654,7 +661,11 @@ fn spawn_health_task(state: AppHandle, mut shutdown: watch::Receiver<bool>) -> J
   })
 }
 
-async fn turn_health_check(origin: &Url, timeout: Duration, config: &Config) -> anyhow::Result<()> {
+async fn turn_health_check(
+  origin: &Url,
+  timeout: Duration,
+  snapshot: &AppSnapshot,
+) -> anyhow::Result<()> {
   let addr = resolve_turn_origin(origin).await?;
   let txid = random_transaction_id()?;
   let request = encode_binding_request(txid);
@@ -670,7 +681,7 @@ async fn turn_health_check(origin: &Url, timeout: Duration, config: &Config) -> 
     bail!("unexpected STUN health response");
   }
   let mut stream: BoxedIo = if origin.scheme() == "turns" {
-    tokio::time::timeout(timeout, connect_turn_stream(origin, config)).await??
+    tokio::time::timeout(timeout, connect_turn_stream(origin, snapshot)).await??
   } else {
     Box::new(tokio::time::timeout(timeout, TcpStream::connect(addr)).await??)
   };

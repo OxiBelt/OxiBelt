@@ -233,6 +233,58 @@ fn downstream_tls_status_documents_bounded_crlite_status() {
 }
 
 #[test]
+fn upstream_tls_status_documents_bounded_revocation_status() {
+    let spec = openapi();
+    let schema = &spec["paths"]["/admin/v1/tls/upstream"]["get"]["responses"]["200"]["content"]["application/json"]
+        ["schema"];
+    let required = json_string_set(&schema["required"], "/admin/v1/tls/upstream.required");
+    assert!(
+        required.contains("revocation"),
+        "upstream TLS status should document revocation status"
+    );
+
+    let revocation = &schema["properties"]["revocation"];
+    let revocation_required = json_string_set(
+        &revocation["required"],
+        "/admin/v1/tls/upstream.revocation.required",
+    );
+    for field in [
+        "enabled",
+        "ocsp_mode",
+        "crlite_mode",
+        "ocsp_cache_entries",
+        "ocsp_fetch_in_flight",
+        "last_ocsp_error_code",
+        "crlite_managed_filters",
+        "last_crlite_error_code",
+    ] {
+        assert!(
+            revocation_required.contains(field),
+            "upstream revocation status should require {field}"
+        );
+    }
+
+    let schema_text = serde_json::to_string(revocation).expect("schema should serialize");
+    for sensitive in [
+        "responder_url",
+        "server_name",
+        "sni",
+        "issuer",
+        "serial",
+        "fingerprint",
+        "filter_file",
+        "filter_sha256",
+        "cache_dir",
+        "tmpfs_dir",
+    ] {
+        assert!(
+            !schema_text.contains(sensitive),
+            "upstream revocation status must not document sensitive field {sensitive}"
+        );
+    }
+}
+
+#[test]
 fn operational_lists_document_pagination_filter_and_sort_parameters() {
     let spec = openapi();
     for path in [
@@ -335,6 +387,8 @@ fn expected_operations() -> BTreeSet<(String, String)> {
         ("post", "/admin/v1/config/rollback"),
         ("get", "/admin/v1/tls/downstream"),
         ("post", "/admin/v1/tls/downstream/reload"),
+        ("get", "/admin/v1/tls/upstream"),
+        ("post", "/admin/v1/tls/upstream/refresh"),
         ("post", "/admin/v1/files/sync"),
         ("post", "/admin/v1/cache/key-explain"),
         ("post", "/admin/v1/cache/warm"),

@@ -528,6 +528,8 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "SyncFiles",
       "ReadDownstreamTls",
       "ReloadDownstreamTls",
+      "ReadUpstreamTls",
+      "RefreshUpstreamTls",
     ],
     "cache" => &[
       "ExplainKey",

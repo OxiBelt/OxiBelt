@@ -189,6 +189,31 @@ max_lifetime_ms = 600000
 [proxy]
 trusted_ca_certs = []
 
+[proxy.upstream_revocation.ocsp]
+mode = "disabled" # disabled | live_fetch
+failure_policy = "fail_closed" # fail_closed | degraded_allow
+request_timeout_ms = 3000
+max_response_bytes = 16384
+refresh_jitter_pct = 10
+clock_skew_seconds = 300
+
+[proxy.upstream_revocation.crlite]
+mode = "disabled" # disabled | enforce | managed
+# filter_file = "upstream-crlite.filter"
+# filter_sha256 = ""
+max_filter_bytes = 33554432
+max_filter_age_seconds = 86400
+failure_policy = "fail_closed" # fail_closed | degraded_allow
+coverage_policy = "allow_unknown" # allow_unknown | require_good
+
+[proxy.upstream_revocation.crlite.managed]
+storage = "disk" # memory | tmpfs | disk
+cache_dir = "/var/lib/oxibelt/upstream-crlite"
+tmpfs_dir = "/dev/shm/oxibelt-upstream-crlite"
+max_cache_bytes = 67108864
+refresh_interval_seconds = 21600
+request_timeout_ms = 3000
+
 [proxy.forwarded_headers]
 mode = "overwrite"
 client_ip_source = "resolved"
@@ -912,6 +937,15 @@ mode = "disabled"
 mode = "enabled" # enabled | disabled
 session_cache_size = 1024
 tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tickets
+
+# Optional direct-upstream override for [proxy.upstream_revocation].
+# [upstreams.tls.upstream_revocation.ocsp]
+# mode = "disabled" # disabled | live_fetch
+# failure_policy = "fail_closed" # fail_closed | degraded_allow
+#
+# [upstreams.tls.upstream_revocation.crlite]
+# mode = "disabled" # disabled | enforce | managed
+# filter_file = "app-upstream-crlite.filter"
 
 #[[upstream_pools]]
 # name = "app-pool"

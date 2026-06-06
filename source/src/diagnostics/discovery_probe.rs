@@ -16,7 +16,26 @@ pub(super) async fn probe_discovery(
   options: &DoctorOptions,
   report: &mut DiagnosticReport,
 ) {
-  let client = match ControlHttpClient::new(&config.proxy.trusted_ca_certs) {
+  let metrics = crate::metrics::Metrics::new();
+  let revocation = match crate::tls::OutboundRevocationRuntime::new(config, metrics).await {
+    Ok(runtime) => runtime,
+    Err(error) => {
+      report.push(
+        DiagnosticSeverity::Error,
+        "probe.discovery_revocation_failed",
+        "probe",
+        "upstream_pools.discovery",
+        format!("failed to build discovery revocation runtime: {error:#}"),
+        "Fix proxy.upstream_revocation before running discovery probes.",
+      );
+      return;
+    }
+  };
+  let client = match ControlHttpClient::new_with_revocation(
+    &config.proxy.trusted_ca_certs,
+    &revocation,
+    revocation.default_policy(),
+  ) {
     Ok(client) => client,
     Err(error) => {
       report.push(

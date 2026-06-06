@@ -8,7 +8,7 @@ The current implementation is a production-oriented foundation: configuration is
 
 - Downstream HTTP/1.1 and HTTP/2 over TCP, with optional HTTP/3 over QUIC.
 - Upstream HTTP/1.1, HTTP/2, and HTTP/3 forwarding.
-- TLS termination with `rustls`, `aws-lc-rs`, TLS 1.3 defaults, client certificate authentication, static/live OCSP stapling, experimental CRLite enforcement with local or managed filters, and preferred post-quantum key exchange support.
+- TLS termination with `rustls`, `aws-lc-rs`, TLS 1.3 defaults, client certificate authentication, static/live OCSP stapling, opt-in upstream OCSP/CRLite revocation checks, experimental CRLite enforcement with local or managed filters, and preferred post-quantum key exchange support.
 - Upstream TLS 1.3 ECH in GREASE or configured `ECHConfigList` mode.
 - Host and path-prefix routing, prefix replacement, upstream pools, local load-balancing state, and passive or active health marking.
 - WebSocket tunneling, opt-in generic HTTP/1.1 Upgrade and CONNECT tunneling, gRPC-Web translation, and WebTransport forwarding over HTTP/3.
@@ -237,12 +237,11 @@ OxiBelt intentionally keeps ACME challenge handling, including HTTP-01 and DNS-0
 
 This keeps ACME account keys, DNS provider API tokens, challenge credentials, and optionally TLS private keys outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised process should not also contain the credentials needed to issue arbitrary new TLS certificates or export configured private keys, especially through DNS-01 provider tokens.
 
-Downstream ECH configuration, upstream CRLite enforcement, CRS stream-payload
-inspection for WebSocket/WebTransport, and
-general-purpose UDP stream proxying outside the configured same-port QUIC SNI
-forwarding path remain reserved or deferred.
+Downstream ECH configuration, CRS stream-payload inspection for
+WebSocket/WebTransport, and general-purpose UDP stream proxying outside the
+configured same-port QUIC SNI forwarding path remain reserved or deferred.
 SNI-based TCP TLS forwarding, same-port QUIC forwarding, live OCSP
-fetch/refresh, and sticky-cookie upstream pools are current features. See
+fetch/refresh, opt-in upstream OCSP/CRLite revocation checks, and sticky-cookie upstream pools are current features. See
 [docs/FeatureStatus.md](docs/FeatureStatus.md) for the canonical lifecycle
 matrix and [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work)
 for the design rationale behind reserved work.

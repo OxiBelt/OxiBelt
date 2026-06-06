@@ -27,8 +27,10 @@ use crate::control_http::{ControlHttpClient, full_body, uri_from_url};
 use crate::metrics::Metrics;
 
 mod cert_id;
+mod schedule;
 mod status;
 use cert_id::{build_sha1_cert_id, cert_ids_match};
+pub(super) use schedule::{classify_ocsp_error, failure_retry_time, next_refresh_time, unix_now};
 pub use status::OcspRuntimeStatus;
 use status::{OcspStatusState, system_time_to_unix};
 
@@ -261,14 +263,12 @@ impl rustls::server::ResolvesServerCert for LiveOcspResolver {
 struct LiveOcspContext {
   responder_url: Url,
   request_der: Vec<u8>,
-  expected_cert_id: CertId,
-  issuer_der: Vec<u8>,
+  verification: OcspVerificationContext,
   base_key: Arc<CertifiedKey>,
   control_http: ControlHttpClient,
   metrics: Arc<Metrics>,
   timeout: Duration,
   max_response_bytes: usize,
-  clock_skew: Duration,
   refresh_jitter_pct: u8,
 }
 
@@ -293,36 +293,70 @@ impl LiveOcspContext {
       })?
       .as_ref()
       .to_vec();
-    let leaf = Certificate::from_der(&leaf_der).context("failed to parse leaf certificate")?;
-    let issuer =
-      Certificate::from_der(&issuer_der).context("failed to parse issuer certificate")?;
-    let expected_cert_id = build_sha1_cert_id(&issuer, &leaf)
-      .map_err(|error| anyhow!("failed to build OCSP CertID: {error}"))?;
-    let request = Request::new(expected_cert_id.clone());
-    let request_der = OcspRequestBuilder::new(Version::V1)
-      .with_request(request)
-      .build()
-      .to_der()
-      .context("failed to encode OCSP request")?;
-    let responder_url = match tls.ocsp.responder_url.as_deref() {
-      Some(raw) => Url::parse(raw).context("invalid tls.ocsp.responder_url")?,
-      None => first_ocsp_aia_url(&leaf)?,
-    };
-    validate_responder_url(&responder_url)?;
+    let ocsp = build_ocsp_request_context(
+      &leaf_der,
+      &issuer_der,
+      tls.ocsp.responder_url.as_deref(),
+      Duration::from_secs(tls.ocsp.clock_skew_seconds),
+    )?;
     Ok(Self {
-      responder_url,
-      request_der,
-      expected_cert_id,
-      issuer_der,
+      responder_url: ocsp.responder_url,
+      request_der: ocsp.request_der,
+      verification: ocsp.verification,
       base_key: Arc::new(base_key),
       control_http,
       metrics,
       timeout: Duration::from_millis(tls.ocsp.request_timeout_ms),
       max_response_bytes: tls.ocsp.max_response_bytes,
-      clock_skew: Duration::from_secs(tls.ocsp.clock_skew_seconds),
       refresh_jitter_pct: tls.ocsp.refresh_jitter_pct,
     })
   }
+}
+
+#[derive(Clone)]
+pub(super) struct OcspRequestContext {
+  pub(super) responder_url: Url,
+  pub(super) request_der: Vec<u8>,
+  pub(super) verification: OcspVerificationContext,
+}
+
+#[derive(Clone)]
+pub(super) struct OcspVerificationContext {
+  expected_cert_id: CertId,
+  issuer_der: Vec<u8>,
+  clock_skew: Duration,
+}
+
+pub(super) fn build_ocsp_request_context(
+  leaf_der: &[u8],
+  issuer_der: &[u8],
+  responder_url: Option<&str>,
+  clock_skew: Duration,
+) -> anyhow::Result<OcspRequestContext> {
+  let leaf = Certificate::from_der(leaf_der).context("failed to parse leaf certificate")?;
+  let issuer = Certificate::from_der(issuer_der).context("failed to parse issuer certificate")?;
+  let expected_cert_id = build_sha1_cert_id(&issuer, &leaf)
+    .map_err(|error| anyhow!("failed to build OCSP CertID: {error}"))?;
+  let request = Request::new(expected_cert_id.clone());
+  let request_der = OcspRequestBuilder::new(Version::V1)
+    .with_request(request)
+    .build()
+    .to_der()
+    .context("failed to encode OCSP request")?;
+  let responder_url = match responder_url {
+    Some(raw) => Url::parse(raw).context("invalid tls.ocsp.responder_url")?,
+    None => first_ocsp_aia_url(&leaf)?,
+  };
+  validate_responder_url(&responder_url)?;
+  Ok(OcspRequestContext {
+    responder_url,
+    request_der,
+    verification: OcspVerificationContext {
+      expected_cert_id,
+      issuer_der: issuer_der.to_vec(),
+      clock_skew,
+    },
+  })
 }
 
 async fn refresh_worker(
@@ -400,18 +434,18 @@ async fn fetch_and_verify(context: &LiveOcspContext) -> anyhow::Result<VerifiedO
   if response.status != http::StatusCode::OK {
     bail!("ocsp_http_status");
   }
-  verify_ocsp_response(context, response.body.as_ref())
+  verify_ocsp_response(&context.verification, response.body.as_ref())
 }
 
 #[derive(Clone)]
-struct VerifiedOcspResponse {
-  response_der: Vec<u8>,
-  this_update: SystemTime,
-  next_update: SystemTime,
+pub(super) struct VerifiedOcspResponse {
+  pub(super) response_der: Vec<u8>,
+  pub(super) this_update: SystemTime,
+  pub(super) next_update: SystemTime,
 }
 
-fn verify_ocsp_response(
-  context: &LiveOcspContext,
+pub(super) fn verify_ocsp_response(
+  context: &OcspVerificationContext,
   response_der: &[u8],
 ) -> anyhow::Result<VerifiedOcspResponse> {
   let outer = OcspResponse::from_der(response_der).context("ocsp_parse")?;
@@ -466,7 +500,7 @@ fn verify_ocsp_response(
 }
 
 fn verify_ocsp_signature(
-  context: &LiveOcspContext,
+  context: &OcspVerificationContext,
   basic: &BasicOcspResponse,
 ) -> anyhow::Result<()> {
   let tbs_der = basic
@@ -611,7 +645,7 @@ fn first_ocsp_aia_url(leaf: &Certificate) -> anyhow::Result<Url> {
   bail!("tls leaf certificate does not include an HTTP OCSP AIA responder")
 }
 
-fn validate_responder_url(url: &Url) -> anyhow::Result<()> {
+pub(super) fn validate_responder_url(url: &Url) -> anyhow::Result<()> {
   if !matches!(url.scheme(), "http" | "https") {
     bail!("tls.ocsp.responder_url scheme must be http or https");
   }
@@ -625,80 +659,6 @@ fn validate_responder_url(url: &Url) -> anyhow::Result<()> {
     bail!("tls.ocsp.responder_url must not include a fragment");
   }
   Ok(())
-}
-
-fn next_refresh_time(
-  this_update: SystemTime,
-  next_update: SystemTime,
-  jitter_pct: u8,
-) -> SystemTime {
-  let lifetime = next_update
-    .duration_since(this_update)
-    .unwrap_or_else(|_| Duration::from_secs(FAILURE_RETRY_SECONDS));
-  let refresh_after = lifetime.mul_f64(0.70);
-  let jitter_window = lifetime.mul_f64(f64::from(jitter_pct) / 100.0);
-  let jitter = Duration::from_secs(stable_jitter_seconds(&next_update, jitter_window.as_secs()));
-  let candidate = this_update + refresh_after + jitter;
-  let latest = next_update
-    .checked_sub(Duration::from_secs(60))
-    .unwrap_or(this_update);
-  let refresh = if candidate < latest {
-    candidate
-  } else {
-    latest
-  };
-  let now = SystemTime::now();
-  let soonest = now + Duration::from_secs(1);
-  if refresh > soonest || next_update <= soonest {
-    refresh
-  } else {
-    soonest
-  }
-}
-
-fn stable_jitter_seconds(next_update: &SystemTime, window: u64) -> u64 {
-  if window == 0 {
-    return 0;
-  }
-  system_time_to_unix(*next_update) % window.saturating_add(1)
-}
-
-fn failure_retry_time(current_next_update: Option<SystemTime>) -> SystemTime {
-  let retry = SystemTime::now() + Duration::from_secs(FAILURE_RETRY_SECONDS);
-  if let Some(next_update) = current_next_update
-    && next_update < retry
-  {
-    return next_update;
-  }
-  retry
-}
-
-fn classify_ocsp_error(error: &anyhow::Error) -> &'static str {
-  let message = format!("{error:#}");
-  for code in [
-    "ocsp_stale_response",
-    "ocsp_missing_next_update",
-    "ocsp_invalid_update_window",
-    "ocsp_produced_at_future",
-    "ocsp_this_update_future",
-    "ocsp_cert_status",
-    "ocsp_cert_id_mismatch",
-    "ocsp_unauthorized_responder",
-    "ocsp_unsupported_signature_algorithm",
-    "ocsp_signature",
-    "ocsp_http_status",
-    "ocsp_fetch",
-    "ocsp_parse",
-  ] {
-    if message.contains(code) {
-      return code;
-    }
-  }
-  "ocsp_error"
-}
-
-fn unix_now() -> u64 {
-  system_time_to_unix(SystemTime::now())
 }
 
 #[cfg(test)]

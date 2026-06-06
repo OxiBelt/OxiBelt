@@ -2505,22 +2505,23 @@ async fn send_one_shot_with_proxy_protocol(
   )
   .await
   .context("failed to write upstream PROXY protocol egress header")?;
-
   if upstream.origin.scheme() == "https" {
-    let mut tls_config = crate::tls::build_upstream_client_config_with_resumption(
+    let revocation_policy = state.outbound_revocation.policy_for_upstream(upstream);
+    let revocation = Some((&state.outbound_revocation, revocation_policy));
+    let mut tls_config = crate::tls::build_upstream_client_config_with_resumption_and_revocation(
       &state.config.proxy.trusted_ca_certs,
       &upstream.tls.ech,
       &upstream.tls.resumption,
       Some(&state.tls_resumption),
       &upstream.name,
+      revocation,
     )
     .context("failed to build one-shot upstream TLS config")?;
     tls_config.alpn_protocols = vec![upstream_version.as_alpn().to_vec()];
-    let host = upstream
-      .origin
-      .host_str()
-      .ok_or_else(|| anyhow::anyhow!("upstream origin has no host: {}", upstream.origin))?
-      .to_string();
+    let Some(host) = upstream.origin.host_str() else {
+      anyhow::bail!("upstream origin has no host");
+    };
+    let host = host.to_string();
     let server_name = rustls::pki_types::ServerName::try_from(host)
       .map_err(|error| anyhow::anyhow!("invalid upstream TLS server name: {error}"))?;
     let tls = tokio::time::timeout(
@@ -2545,7 +2546,6 @@ async fn send_one_shot_with_proxy_protocol(
     .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
   }
 }
-
 #[derive(Clone, Copy)]
 enum TcpUpstreamHttpVersion {
   H1,

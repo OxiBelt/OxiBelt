@@ -24,6 +24,7 @@ mod http2;
 mod ipm;
 mod limits;
 mod loader;
+mod outbound_revocation;
 mod quic;
 mod retry;
 mod route;
@@ -51,6 +52,7 @@ use limits::{
 use loader::{
   absolute_config_path, load_toml_with_includes, load_toml_with_includes_and_overrides,
 };
+pub use outbound_revocation::*;
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
 pub use retry::*;
@@ -495,6 +497,12 @@ impl Config {
         Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .collect::<anyhow::Result<_>>()?;
+    outbound_revocation::resolve_outbound_crlite_filter_file(
+      &mut self.proxy.upstream_revocation,
+      &mut self.source_paths,
+      &path_roots.cert_dir,
+      "proxy.upstream_revocation.crlite.filter_file",
+    )?;
     self.quic.host_key_file = self
       .quic
       .host_key_file
@@ -516,6 +524,14 @@ impl Config {
     for upstream in &mut self.upstreams {
       for path in upstream.tls.resolve_relative_paths(&path_roots.cert_dir)? {
         self.source_paths.remember_runtime_file(path);
+      }
+      if let Some(revocation) = &mut upstream.tls.upstream_revocation {
+        outbound_revocation::resolve_outbound_crlite_filter_file(
+          revocation,
+          &mut self.source_paths,
+          &path_roots.cert_dir,
+          "upstreams.tls.upstream_revocation.crlite.filter_file",
+        )?;
       }
     }
     for path in self
@@ -1263,6 +1279,10 @@ impl Config {
     {
       bail!("proxy.http2 manual window and frame-size values require adaptive_window = false");
     }
+    self
+      .proxy
+      .upstream_revocation
+      .validate("proxy.upstream_revocation")?;
     const HTTP2_MAX_WINDOW_BYTES: u32 = (1 << 31) - 1;
     if self
       .proxy
@@ -2356,8 +2376,13 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "retry",
       "static_files",
       "trusted_ca_certs",
+      "upstream_revocation",
       "upgrades",
     ][..],
+    "proxy.upstream_revocation" => outbound_revocation::OUTBOUND_REVOCATION_CONFIG_KEYS,
+    "proxy.upstream_revocation.ocsp" => outbound_revocation::OUTBOUND_OCSP_CONFIG_KEYS,
+    "proxy.upstream_revocation.crlite" => crlite::CRLITE_CONFIG_KEYS,
+    "proxy.upstream_revocation.crlite.managed" => crlite::CRLITE_MANAGED_CONFIG_KEYS,
     "proxy.forwarded_headers" => &["client_ip_source", "mode"][..],
     "proxy.auto_upgrade" => &["enabled", "max_http_version"][..],
     "proxy.real_ip" => &[
@@ -2790,9 +2815,13 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "websocket",
       "webtransport",
     ][..],
-    "upstreams.tls" => &["ech", "resumption"][..],
+    "upstreams.tls" => &["ech", "resumption", "upstream_revocation"][..],
     "upstreams.tls.ech" => &["config_list_file", "mode"][..],
     "upstreams.tls.resumption" => &["mode", "session_cache_size", "tls12"][..],
+    "upstreams.tls.upstream_revocation" => outbound_revocation::OUTBOUND_REVOCATION_CONFIG_KEYS,
+    "upstreams.tls.upstream_revocation.ocsp" => outbound_revocation::OUTBOUND_OCSP_CONFIG_KEYS,
+    "upstreams.tls.upstream_revocation.crlite" => crlite::CRLITE_CONFIG_KEYS,
+    "upstreams.tls.upstream_revocation.crlite.managed" => crlite::CRLITE_MANAGED_CONFIG_KEYS,
     "upstream_pools" => &[
       "algorithm",
       "discovery",
@@ -3652,6 +3681,8 @@ pub struct ProxyConfig {
   pub static_files: ProxyStaticFilesConfig,
   #[serde(default)]
   pub trusted_ca_certs: Vec<PathBuf>,
+  #[serde(default)]
+  pub upstream_revocation: OutboundTlsRevocationConfig,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
@@ -5221,6 +5252,8 @@ pub struct UpstreamTlsConfig {
   pub ech: UpstreamEchConfig,
   #[serde(default)]
   pub resumption: UpstreamTlsResumptionConfig,
+  #[serde(default)]
+  pub upstream_revocation: Option<OutboundTlsRevocationConfig>,
 }
 
 impl UpstreamTlsConfig {
@@ -5269,6 +5302,9 @@ impl UpstreamTlsConfig {
           );
         }
       }
+    }
+    if let Some(revocation) = &self.upstream_revocation {
+      revocation.validate(&format!("upstream {upstream_name} tls.upstream_revocation"))?;
     }
 
     Ok(())

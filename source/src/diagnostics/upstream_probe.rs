@@ -16,7 +16,26 @@ use crate::control_http::{ControlHttpClient, empty_body, uri_from_url};
 use super::{DiagnosticReport, DiagnosticSeverity};
 
 pub(super) async fn probe_upstreams(config: &Config, report: &mut DiagnosticReport) {
-  let http_client = match ControlHttpClient::new(&config.proxy.trusted_ca_certs) {
+  let metrics = crate::metrics::Metrics::new();
+  let revocation = match crate::tls::OutboundRevocationRuntime::new(config, metrics).await {
+    Ok(runtime) => runtime,
+    Err(error) => {
+      report.push(
+        DiagnosticSeverity::Error,
+        "probe.upstream_revocation_failed",
+        "probe",
+        "upstream",
+        format!("failed to build upstream revocation runtime: {error:#}"),
+        "Fix proxy.upstream_revocation before running upstream probes.",
+      );
+      return;
+    }
+  };
+  let http_client = match ControlHttpClient::new_with_revocation(
+    &config.proxy.trusted_ca_certs,
+    &revocation,
+    revocation.default_policy(),
+  ) {
     Ok(client) => client,
     Err(error) => {
       report.push(
@@ -32,21 +51,22 @@ pub(super) async fn probe_upstreams(config: &Config, report: &mut DiagnosticRepo
   };
 
   for upstream in &config.upstreams {
-    probe_direct_upstream(config, &http_client, upstream, report).await;
+    probe_direct_upstream(config, &http_client, &revocation, upstream, report).await;
   }
   for pool in &config.upstream_pools {
-    probe_pool(config, &http_client, pool, report).await;
+    probe_pool(config, &http_client, &revocation, pool, report).await;
   }
 }
 
 async fn probe_direct_upstream(
   config: &Config,
   client: &ControlHttpClient,
+  revocation: &crate::tls::OutboundRevocationRuntime,
   upstream: &UpstreamConfig,
   report: &mut DiagnosticReport,
 ) {
   if upstream.max_http_version == HttpVersion::H3 {
-    match probe_h3_get(config, upstream, upstream.connect_timeout_ms).await {
+    match probe_h3_get(config, revocation, upstream, upstream.connect_timeout_ms).await {
       Ok(status) if status.is_success() => report.probe(
         "upstream",
         &upstream.name,
@@ -67,6 +87,29 @@ async fn probe_direct_upstream(
   url.set_path("/healthz");
   url.set_query(None);
   url.set_fragment(None);
+  let upstream_client;
+  let client = if upstream.origin.scheme() == "https" {
+    match ControlHttpClient::new_with_revocation(
+      &config.proxy.trusted_ca_certs,
+      revocation,
+      revocation.policy_for_upstream(upstream),
+    ) {
+      Ok(client) => {
+        upstream_client = client;
+        &upstream_client
+      }
+      Err(error) => {
+        push_probe_error(
+          report,
+          &upstream.name,
+          error.context("failed to build upstream-specific probe client"),
+        );
+        return;
+      }
+    }
+  } else {
+    client
+  };
   match probe_http_get(
     client,
     &url,
@@ -92,6 +135,7 @@ async fn probe_direct_upstream(
 async fn probe_pool(
   config: &Config,
   client: &ControlHttpClient,
+  revocation: &crate::tls::OutboundRevocationRuntime,
   pool: &UpstreamPoolConfig,
   report: &mut DiagnosticReport,
 ) {
@@ -149,7 +193,9 @@ async fn probe_pool(
         ),
         Err(error) => push_probe_error(report, &target, error),
       }
-    } else if let Err(error) = probe_connect(config, &server.origin, Duration::from_secs(3)).await {
+    } else if let Err(error) =
+      probe_connect(config, revocation, &server.origin, Duration::from_secs(3)).await
+    {
       push_probe_error(report, &target, error);
     } else {
       report.probe(
@@ -174,15 +220,24 @@ async fn probe_http_get(
   Ok(client.request(request, timeout, 64 * 1024).await?.status)
 }
 
-async fn probe_connect(config: &Config, url: &url::Url, timeout: Duration) -> anyhow::Result<()> {
+async fn probe_connect(
+  config: &Config,
+  revocation: &crate::tls::OutboundRevocationRuntime,
+  url: &url::Url,
+  timeout: Duration,
+) -> anyhow::Result<()> {
   let remote = resolve_url_addr(url).await?;
   let stream = tokio::time::timeout(timeout, TcpStream::connect(remote))
     .await
     .context("upstream connect timed out")??;
   if url.scheme() == "https" {
-    let tls_config = crate::tls::build_upstream_client_config(
+    let tls_config = crate::tls::build_upstream_client_config_with_resumption_and_revocation(
       &config.proxy.trusted_ca_certs,
       &crate::config::UpstreamEchConfig::default(),
+      &crate::config::UpstreamTlsResumptionConfig::default(),
+      None,
+      "diagnostics-probe",
+      Some((revocation, revocation.default_policy())),
     )?;
     let host = url
       .host_str()
@@ -203,15 +258,20 @@ async fn probe_connect(config: &Config, url: &url::Url, timeout: Duration) -> an
 
 async fn probe_h3_get(
   config: &Config,
+  revocation: &crate::tls::OutboundRevocationRuntime,
   upstream: &UpstreamConfig,
   timeout_ms: u64,
 ) -> anyhow::Result<http::StatusCode> {
   let url = &upstream.origin;
   let remote = resolve_url_addr(url).await?;
-  let quic_config = crate::tls::build_upstream_quic_client_config(
+  let quic_config = crate::tls::build_upstream_quic_client_config_with_resumption_and_revocation(
     &config.proxy.trusted_ca_certs,
     &upstream.tls.ech,
     &config.quic,
+    &upstream.tls.resumption,
+    None,
+    &upstream.name,
+    Some((revocation, revocation.policy_for_upstream(upstream))),
   )?;
   let endpoint = crate::quic::bind_client_endpoint(
     remote,

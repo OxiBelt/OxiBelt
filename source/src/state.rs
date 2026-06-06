@@ -9,16 +9,13 @@ use bytes::Bytes;
 use http::HeaderValue;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
-use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::{TokioExecutor, TokioTimer};
-use std::time::Duration;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
 use crate::cache::ResponseCache;
-use crate::config::{Config, HttpVersion, ProxyHttp2Config, UpstreamConfig};
+use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
@@ -46,9 +43,11 @@ use crate::webtransport_admin::WebTransportAdminRegistry;
 pub(crate) mod handle;
 mod http1_upgrade;
 mod request_path_features;
+mod upstream_clients;
 
 pub use handle::AppHandle;
 pub(crate) use request_path_features::RequestPathFeaturePlan;
+use upstream_clients::build_clients;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type UpstreamBody = BoxBody<Bytes, BoxError>;
@@ -140,6 +139,7 @@ pub struct AppSnapshot {
   pub clients: UpstreamClientPools,
   pub(crate) control_http: ControlHttpClient,
   pub(crate) h3_clients: UpstreamH3Pools,
+  pub(crate) outbound_revocation: tls::OutboundRevocationRuntime,
   pub upstream_pool_generation: u64,
   pub limits: Arc<LimitState>,
   pub pools: Arc<PoolState>,
@@ -203,17 +203,31 @@ impl AppSnapshot {
     let tls_resumption = previous
       .map(|snapshot| snapshot.tls_resumption.clone())
       .unwrap_or_default();
+    let metrics = previous
+      .map(|snapshot| snapshot.metrics.clone())
+      .unwrap_or_default();
+    let outbound_revocation = tls::OutboundRevocationRuntime::new(&config, metrics.clone())
+      .await
+      .context("failed to build outbound TLS revocation runtime")?;
     let clients = build_clients(
       &upstreams,
       &config.proxy.trusted_ca_certs,
       &tls_resumption,
       &config.proxy.http2,
+      &outbound_revocation,
     )
     .context("failed to build upstream HTTP clients")?;
-    let h3_clients = UpstreamH3Pools::new(&upstreams, &config, &tls_resumption)
-      .context("failed to build upstream HTTP/3 pools")?;
-    let control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
-      .context("failed to build control-plane HTTP client")?;
+    let h3_clients =
+      UpstreamH3Pools::new(&upstreams, &config, &tls_resumption, &outbound_revocation)
+        .context("failed to build upstream HTTP/3 pools")?;
+    let control_http = ControlHttpClient::new_with_revocation(
+      &config.proxy.trusted_ca_certs,
+      &outbound_revocation,
+      outbound_revocation.default_policy(),
+    )
+    .context("failed to build control-plane HTTP client")?;
+    let bootstrap_control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
+      .context("failed to build revocation bootstrap HTTP client")?;
     let shared_state = SharedState::new(&config)
       .await
       .context("failed to build shared state")?;
@@ -223,9 +237,6 @@ impl AppSnapshot {
       buffering::cleanup_stale_temp_files(temp_dir);
     }
     let limits = LimitState::new(shared_state.clone());
-    let metrics = previous
-      .map(|snapshot| snapshot.metrics.clone())
-      .unwrap_or_default();
     let pools = PoolState::new_with_previous_and_metrics(
       &config.upstream_pools,
       shared_state.clone(),
@@ -274,9 +285,10 @@ impl AppSnapshot {
     let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
-    let ocsp_staple = tls::OcspStapleRuntime::new(&config.tls, &control_http, metrics.clone())
-      .await
-      .context("failed to build OCSP staple runtime")?;
+    let ocsp_staple =
+      tls::OcspStapleRuntime::new(&config.tls, &bootstrap_control_http, metrics.clone())
+        .await
+        .context("failed to build OCSP staple runtime")?;
     let tls_server_config = tls::build_server_config_with_resumption_and_ocsp(
       &config.tls,
       &config.listeners,
@@ -361,6 +373,7 @@ impl AppSnapshot {
       clients,
       control_http,
       h3_clients,
+      outbound_revocation,
       upstream_pool_generation,
       limits,
       pools,
@@ -410,12 +423,22 @@ impl AppSnapshot {
       &config.proxy.trusted_ca_certs,
       &previous.tls_resumption,
       &config.proxy.http2,
+      &previous.outbound_revocation,
     )
     .context("failed to build upstream HTTP clients")?;
-    let h3_clients = UpstreamH3Pools::new(&upstreams, &config, &previous.tls_resumption)
-      .context("failed to build upstream HTTP/3 pools")?;
-    let control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
-      .context("failed to build control-plane HTTP client")?;
+    let h3_clients = UpstreamH3Pools::new(
+      &upstreams,
+      &config,
+      &previous.tls_resumption,
+      &previous.outbound_revocation,
+    )
+    .context("failed to build upstream HTTP/3 pools")?;
+    let control_http = ControlHttpClient::new_with_revocation(
+      &config.proxy.trusted_ca_certs,
+      &previous.outbound_revocation,
+      previous.outbound_revocation.default_policy(),
+    )
+    .context("failed to build control-plane HTTP client")?;
     let metrics = previous.metrics.clone();
     let pools = PoolState::new_with_previous_and_metrics(
       &config.upstream_pools,
@@ -455,6 +478,7 @@ impl AppSnapshot {
       clients,
       control_http: control_http.clone(),
       h3_clients,
+      outbound_revocation: previous.outbound_revocation.clone(),
       upstream_pool_generation,
       limits: previous.limits.clone(),
       pools,
@@ -535,102 +559,6 @@ fn build_alt_svc_header_value(config: &Config) -> anyhow::Result<Option<HeaderVa
   HeaderValue::from_str(&value)
     .map(Some)
     .context("invalid Alt-Svc header value")
-}
-
-fn build_clients(
-  upstreams: &[UpstreamConfig],
-  extra_root_certs: &[std::path::PathBuf],
-  tls_resumption: &tls::TlsResumptionState,
-  http2_config: &ProxyHttp2Config,
-) -> anyhow::Result<UpstreamClientPools> {
-  let mut by_upstream = HashMap::new();
-  let mut pools = Vec::with_capacity(upstreams.len());
-
-  for upstream in upstreams {
-    let index = pools.len();
-    let pool = build_client_pool(upstream, extra_root_certs, tls_resumption, http2_config)
-      .with_context(|| format!("failed to build clients for upstream {}", upstream.name))?;
-    by_upstream.insert(upstream.name.clone(), index);
-    pools.push(pool);
-  }
-
-  Ok(UpstreamClientPools { by_upstream, pools })
-}
-
-fn build_client_pool(
-  upstream: &UpstreamConfig,
-  extra_root_certs: &[std::path::PathBuf],
-  tls_resumption: &tls::TlsResumptionState,
-  http2_config: &ProxyHttp2Config,
-) -> anyhow::Result<ClientPool> {
-  let h1_tls_config = tls::build_upstream_client_config_with_resumption(
-    extra_root_certs,
-    &upstream.tls.ech,
-    &upstream.tls.resumption,
-    Some(tls_resumption),
-    &upstream.name,
-  )
-  .context("failed to build HTTP/1.1 upstream TLS client")?;
-  let negotiated_tls_config = tls::build_upstream_client_config_with_resumption(
-    extra_root_certs,
-    &upstream.tls.ech,
-    &upstream.tls.resumption,
-    Some(tls_resumption),
-    &upstream.name,
-  )
-  .context("failed to build negotiated upstream TLS client")?;
-
-  let mut h1_http = HttpConnector::new();
-  h1_http.enforce_http(false);
-  h1_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
-  h1_http.set_nodelay(true);
-  let h1_connector = HttpsConnectorBuilder::new()
-    .with_tls_config(h1_tls_config)
-    .https_or_http()
-    .enable_http1()
-    .wrap_connector(h1_http);
-  let mut h1_builder = Client::builder(TokioExecutor::new());
-  apply_client_pool_defaults(&mut h1_builder, upstream);
-  let h1_only = h1_builder.build(h1_connector);
-
-  let mut negotiated_http = HttpConnector::new();
-  negotiated_http.enforce_http(false);
-  negotiated_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
-  negotiated_http.set_nodelay(true);
-  let negotiated_connector = HttpsConnectorBuilder::new()
-    .with_tls_config(negotiated_tls_config)
-    .https_or_http()
-    .enable_http1()
-    .enable_http2()
-    .wrap_connector(negotiated_http);
-  let mut negotiated_builder = Client::builder(TokioExecutor::new());
-  crate::h2_tuning::apply_legacy_client_defaults(&mut negotiated_builder, http2_config);
-  apply_client_pool_defaults(&mut negotiated_builder, upstream);
-  let negotiated = negotiated_builder.build(negotiated_connector);
-
-  let mut h2c_builder = Client::builder(TokioExecutor::new());
-  h2c_builder.http2_only(true);
-  crate::h2_tuning::apply_legacy_client_defaults(&mut h2c_builder, http2_config);
-  apply_client_pool_defaults(&mut h2c_builder, upstream);
-  let mut h2c_http = HttpConnector::new();
-  h2c_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
-  h2c_http.set_nodelay(true);
-  let h2c = h2c_builder.build(h2c_http);
-
-  Ok(ClientPool {
-    h1_only,
-    negotiated,
-    h2c,
-  })
-}
-
-fn apply_client_pool_defaults(
-  builder: &mut hyper_util::client::legacy::Builder,
-  upstream: &UpstreamConfig,
-) {
-  builder.pool_timer(TokioTimer::new());
-  builder.pool_idle_timeout(Duration::from_millis(upstream.idle_timeout_ms));
-  builder.pool_max_idle_per_host(upstream.pool_max_idle_per_host);
 }
 
 #[cfg(test)]

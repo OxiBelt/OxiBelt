@@ -983,6 +983,122 @@
         }
       }
     },
+    "/admin/v1/tls/upstream": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "getUpstreamTlsStatus",
+        "summary": "Fetch upstream TLS revocation runtime status.",
+        "responses": {
+          "200": {
+            "description": "Bounded outbound OCSP and CRLite runtime status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "revocation",
+                    "etag"
+                  ],
+                  "properties": {
+                    "revocation": {
+                      "type": "object",
+                      "required": [
+                        "enabled",
+                        "ocsp_mode",
+                        "crlite_mode",
+                        "ocsp_cache_entries",
+                        "ocsp_fetch_in_flight",
+                        "last_ocsp_error_code",
+                        "crlite_managed_filters",
+                        "last_crlite_error_code"
+                      ],
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "ocsp_mode": {
+                          "type": "string",
+                          "enum": [
+                            "disabled",
+                            "live_fetch"
+                          ]
+                        },
+                        "crlite_mode": {
+                          "type": "string",
+                          "enum": [
+                            "disabled",
+                            "enforce",
+                            "managed"
+                          ]
+                        },
+                        "ocsp_cache_entries": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "ocsp_fetch_in_flight": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "last_ocsp_error_code": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "crlite_managed_filters": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "last_crlite_error_code": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "etag": {}
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/tls/upstream/refresh": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "refreshUpstreamTlsRevocation",
+        "summary": "Refresh cached upstream TLS revocation state.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/EmptyJson"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/files/sync": {
       "post": {
         "tags": [

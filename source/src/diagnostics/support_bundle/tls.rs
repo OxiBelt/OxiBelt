@@ -10,6 +10,7 @@ pub struct TlsRuntimeSnapshot {
   pub ocsp_mode: String,
   pub ocsp_response_file_configured: bool,
   pub ocsp: crate::tls::OcspRuntimeStatus,
+  pub upstream_revocation: crate::tls::OutboundRevocationRuntimeStatus,
   pub quic_host_key_configured: bool,
   pub remote_signer_enabled: bool,
   pub admin_tls_configured: bool,

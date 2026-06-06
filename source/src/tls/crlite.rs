@@ -11,7 +11,7 @@ use x509_cert::der::{
   asn1::{ObjectIdentifier, OctetString},
 };
 
-use crate::config::{CrliteCoveragePolicy, CrliteFailurePolicy, TlsConfig};
+use crate::config::{CrliteConfig, CrliteCoveragePolicy, CrliteFailurePolicy, TlsConfig};
 
 const CT_PRECERT_SCTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.2");
 
@@ -19,6 +19,12 @@ type IssuerSpkiHash = [u8; 32];
 type LogId = [u8; 32];
 type Serial = Vec<u8>;
 type SctEntries = Vec<(LogId, u64)>;
+
+pub(super) struct CrliteQueryMaterial {
+  issuer_spki_hash: IssuerSpkiHash,
+  serial: Serial,
+  scts: SctEntries,
+}
 
 pub(super) struct CrliteCheckOutcome {
   pub(super) status: &'static str,
@@ -35,8 +41,9 @@ pub(super) fn check_crlite(tls: &TlsConfig) -> anyhow::Result<CrliteCheckOutcome
     .filter_file
     .as_deref()
     .ok_or_else(|| anyhow!("crlite_missing_filter_file"))?;
-  let (filter, stale) = load_filter(tls, filter_path)?;
-  check_crlite_filter(tls, &filter, stale)
+  let (filter, stale) = load_filter(&tls.crlite, filter_path)?;
+  let material = crlite_query_material(tls)?;
+  check_crlite_filter(&tls.crlite, &material, &filter, stale)
 }
 
 pub(super) fn check_crlite_filter_bytes(
@@ -44,23 +51,48 @@ pub(super) fn check_crlite_filter_bytes(
   bytes: &[u8],
   stale: bool,
 ) -> anyhow::Result<CrliteCheckOutcome> {
-  if bytes.len() > tls.crlite.max_filter_bytes {
+  let material = crlite_query_material(tls)?;
+  check_crlite_filter_bytes_for_material(&tls.crlite, &material, bytes, stale)
+}
+
+pub(super) fn check_crlite_config(
+  config: &CrliteConfig,
+  material: &CrliteQueryMaterial,
+) -> anyhow::Result<CrliteCheckOutcome> {
+  let filter_path = config
+    .filter_file
+    .as_deref()
+    .ok_or_else(|| anyhow!("crlite_missing_filter_file"))?;
+  let (filter, stale) = load_filter(config, filter_path)?;
+  check_crlite_filter(config, material, &filter, stale)
+}
+
+pub(super) fn check_crlite_filter_bytes_for_material(
+  config: &CrliteConfig,
+  material: &CrliteQueryMaterial,
+  bytes: &[u8],
+  stale: bool,
+) -> anyhow::Result<CrliteCheckOutcome> {
+  if bytes.len() > config.max_filter_bytes {
     bail!("crlite_filter_too_large");
   }
   let filter = CRLiteClubcard::from_bytes(bytes).map_err(|_| anyhow!("crlite_filter_parse"))?;
-  check_crlite_filter(tls, &filter, stale)
+  check_crlite_filter(config, material, &filter, stale)
 }
 
 fn check_crlite_filter(
-  tls: &TlsConfig,
+  config: &CrliteConfig,
+  material: &CrliteQueryMaterial,
   filter: &CRLiteClubcard,
   stale: bool,
 ) -> anyhow::Result<CrliteCheckOutcome> {
-  let (issuer_spki_hash, serial, scts) = crlite_query_material(tls)?;
-  let key = CRLiteKey::new(&issuer_spki_hash, &serial);
+  let key = CRLiteKey::new(&material.issuer_spki_hash, &material.serial);
   let status = filter.contains(
     &key,
-    scts.iter().map(|(log_id, timestamp)| (log_id, *timestamp)),
+    material
+      .scts
+      .iter()
+      .map(|(log_id, timestamp)| (log_id, *timestamp)),
   );
   let result = crlite_result_name(&status);
   if status == CRLiteStatus::Revoked {
@@ -73,8 +105,7 @@ fn check_crlite_filter(
       certificate_rejected: true,
     });
   }
-  if tls.crlite.coverage_policy == CrliteCoveragePolicy::RequireGood && status != CRLiteStatus::Good
-  {
+  if config.coverage_policy == CrliteCoveragePolicy::RequireGood && status != CRLiteStatus::Good {
     return Ok(CrliteCheckOutcome {
       status: "degraded",
       result: Some(result),
@@ -94,14 +125,14 @@ fn check_crlite_filter(
   })
 }
 
-fn load_filter(tls: &TlsConfig, path: &Path) -> anyhow::Result<(CRLiteClubcard, bool)> {
+fn load_filter(config: &CrliteConfig, path: &Path) -> anyhow::Result<(CRLiteClubcard, bool)> {
   let metadata = fs::metadata(path).context("crlite_filter_metadata")?;
-  if metadata.len() > tls.crlite.max_filter_bytes as u64 {
+  if metadata.len() > config.max_filter_bytes as u64 {
     bail!("crlite_filter_too_large");
   }
-  let stale = filter_is_stale(&metadata, tls.crlite.max_filter_age_seconds)?;
+  let stale = filter_is_stale(&metadata, config.max_filter_age_seconds)?;
   let bytes = fs::read(path).context("crlite_filter_read")?;
-  if let Some(expected) = tls.crlite.filter_sha256.as_deref() {
+  if let Some(expected) = config.filter_sha256.as_deref() {
     verify_sha256(expected, &bytes)?;
   }
   let filter = CRLiteClubcard::from_bytes(&bytes).map_err(|_| anyhow!("crlite_filter_parse"))?;
@@ -145,7 +176,7 @@ fn verify_sha256(expected: &str, bytes: &[u8]) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn crlite_query_material(tls: &TlsConfig) -> anyhow::Result<(IssuerSpkiHash, Serial, SctEntries)> {
+fn crlite_query_material(tls: &TlsConfig) -> anyhow::Result<CrliteQueryMaterial> {
   let certs = super::load_certs(&tls.cert_chain).context("crlite_cert_chain_read")?;
   let leaf_der = certs
     .first()
@@ -155,6 +186,13 @@ fn crlite_query_material(tls: &TlsConfig) -> anyhow::Result<(IssuerSpkiHash, Ser
     .get(1)
     .ok_or_else(|| anyhow!("crlite_missing_issuer_certificate"))?
     .as_ref();
+  crlite_query_material_from_der(leaf_der, issuer_der)
+}
+
+pub(super) fn crlite_query_material_from_der(
+  leaf_der: &[u8],
+  issuer_der: &[u8],
+) -> anyhow::Result<CrliteQueryMaterial> {
   let leaf = Certificate::from_der(leaf_der).context("crlite_leaf_parse")?;
   let issuer = Certificate::from_der(issuer_der).context("crlite_issuer_parse")?;
   let issuer_spki_der = issuer
@@ -166,7 +204,11 @@ fn crlite_query_material(tls: &TlsConfig) -> anyhow::Result<(IssuerSpkiHash, Ser
   issuer_spki_hash.copy_from_slice(digest::digest(&digest::SHA256, &issuer_spki_der).as_ref());
   let serial = leaf.tbs_certificate.serial_number.as_bytes().to_vec();
   let scts = embedded_scts(&leaf)?;
-  Ok((issuer_spki_hash, serial, scts))
+  Ok(CrliteQueryMaterial {
+    issuer_spki_hash,
+    serial,
+    scts,
+  })
 }
 
 fn embedded_scts(leaf: &Certificate) -> anyhow::Result<SctEntries> {

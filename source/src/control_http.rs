@@ -15,7 +15,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
-use crate::config::UpstreamEchConfig;
+use crate::config::{OutboundTlsRevocationConfig, UpstreamEchConfig};
 use crate::tls;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -43,6 +43,23 @@ impl ControlHttpClient {
     let tls_config =
       tls::build_upstream_client_config(extra_root_certs, &UpstreamEchConfig::default())
         .context("failed to build control-plane TLS client config")?;
+    Ok(Self::from_tls_config(tls_config))
+  }
+
+  pub(crate) fn new_with_revocation(
+    extra_root_certs: &[std::path::PathBuf],
+    revocation: &tls::OutboundRevocationRuntime,
+    policy: std::sync::Arc<OutboundTlsRevocationConfig>,
+  ) -> anyhow::Result<Self> {
+    let tls_config = tls::build_upstream_client_config_with_resumption_and_revocation(
+      extra_root_certs,
+      &UpstreamEchConfig::default(),
+      &crate::config::UpstreamTlsResumptionConfig::default(),
+      None,
+      "control-plane",
+      Some((revocation, policy)),
+    )
+    .context("failed to build revocation-aware control-plane TLS client config")?;
     Ok(Self::from_tls_config(tls_config))
   }
 
