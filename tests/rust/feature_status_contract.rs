@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use oxibelt::config::{
+    CRLITE_COVERAGE_POLICY_WIRE_VALUES, CRLITE_FAILURE_POLICY_WIRE_VALUES, CRLITE_MODE_WIRE_VALUES,
     HTTP_POOL_LOAD_BALANCING_ALGORITHM_WIRE_VALUES, OCSP_MODE_WIRE_VALUES,
     SNI_FORWARD_PROTOCOL_WIRE_VALUES, STICKY_COOKIE_FALLBACK_ALGORITHM_WIRE_VALUES,
     UPSTREAM_DISCOVERY_PROVIDER_WIRE_VALUES, UPSTREAM_POOL_SERVER_STATE_WIRE_VALUES,
@@ -66,7 +67,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
         ("gateway-api-tlsroute", "experimental"),
         ("helm-gateway-controller", "experimental"),
         ("acme", "reserved"),
-        ("crlite", "reserved"),
+        ("crlite", "experimental"),
         ("downstream-ech", "reserved"),
         ("stream-proxy-udp", "reserved"),
         ("crs-stream-payload", "reserved"),
@@ -115,6 +116,9 @@ fn config_wire_values_are_documented_in_config_reference_and_feature_matrix() {
         HTTP_POOL_LOAD_BALANCING_ALGORITHM_WIRE_VALUES,
         STICKY_COOKIE_FALLBACK_ALGORITHM_WIRE_VALUES,
         OCSP_MODE_WIRE_VALUES,
+        CRLITE_MODE_WIRE_VALUES,
+        CRLITE_FAILURE_POLICY_WIRE_VALUES,
+        CRLITE_COVERAGE_POLICY_WIRE_VALUES,
         SNI_FORWARD_PROTOCOL_WIRE_VALUES,
         UPSTREAM_DISCOVERY_PROVIDER_WIRE_VALUES,
         UPSTREAM_POOL_SERVER_STATE_WIRE_VALUES,

@@ -157,6 +157,7 @@ pub struct AppSnapshot {
   pub lifecycle: Arc<LifecycleState>,
   pub admin_audit: AdminAuditRuntime,
   pub shared_state: Option<Arc<SharedState>>,
+  pub(crate) crlite: tls::CrliteRuntime,
   pub(crate) ocsp_staple: tls::OcspStapleRuntime,
   pub tls_server_config: Arc<rustls::ServerConfig>,
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
@@ -270,6 +271,8 @@ impl AppSnapshot {
     let admin_audit = AdminAuditRuntime::new(&config)
       .await
       .context("failed to build admin audit runtime")?;
+    let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
+      .context("failed to build CRLite runtime")?;
     let ocsp_staple = tls::OcspStapleRuntime::new(&config.tls, &control_http, metrics.clone())
       .await
       .context("failed to build OCSP staple runtime")?;
@@ -372,6 +375,7 @@ impl AppSnapshot {
       lifecycle,
       admin_audit,
       shared_state,
+      crlite,
       ocsp_staple,
       tls_server_config,
       admin_tls_server_config,
@@ -465,6 +469,7 @@ impl AppSnapshot {
       lifecycle: previous.lifecycle.clone(),
       admin_audit: previous.admin_audit.clone(),
       shared_state: previous.shared_state.clone(),
+      crlite: previous.crlite.clone(),
       ocsp_staple: previous.ocsp_staple.clone(),
       tls_server_config: previous.tls_server_config.clone(),
       admin_tls_server_config: previous.admin_tls_server_config.clone(),

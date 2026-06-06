@@ -16,8 +16,10 @@ use crate::tls::TlsServerSessionStorageStats;
 use super::{DiagnosticReport, DoctorOptions, diagnose_config};
 
 mod process;
+mod tls;
 pub use process::ProcessSnapshot;
 use process::process_snapshot;
+pub use tls::TlsRuntimeSnapshot;
 
 const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 1;
 const WAF_RULE_LIMIT: usize = 50;
@@ -114,18 +116,6 @@ pub struct HealthRuntimeSnapshot {
   pub bind: String,
   pub ready_path: String,
   pub live_path: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TlsRuntimeSnapshot {
-  pub downstream_cert_chain_configured: bool,
-  pub downstream_private_key_configured: bool,
-  pub ocsp_mode: String,
-  pub ocsp_response_file_configured: bool,
-  pub ocsp: crate::tls::OcspRuntimeStatus,
-  pub quic_host_key_configured: bool,
-  pub remote_signer_enabled: bool,
-  pub admin_tls_configured: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -358,6 +348,13 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
         .source_paths
         .downstream_tls_private_key
         .is_some(),
+      crlite_mode: snapshot.config.tls.crlite.mode.as_str().to_string(),
+      crlite_filter_file_configured: snapshot
+        .config
+        .source_paths
+        .downstream_tls_crlite_filter_file
+        .is_some(),
+      crlite: snapshot.crlite.status(),
       ocsp_mode: format!("{:?}", snapshot.config.tls.ocsp.mode),
       ocsp_response_file_configured: snapshot
         .config

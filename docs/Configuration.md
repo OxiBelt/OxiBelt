@@ -356,6 +356,15 @@ mode = "disabled" # disabled | static_file | live_fetch
 # max_response_bytes = 16384
 # refresh_jitter_pct = 10
 # clock_skew_seconds = 300
+
+[tls.crlite]
+mode = "disabled" # disabled | enforce
+# filter_file = "crlite.filter"
+# filter_sha256 = ""
+# max_filter_bytes = 33554432
+# max_filter_age_seconds = 86400
+# failure_policy = "fail_closed" # fail_closed | degraded_allow
+# coverage_policy = "allow_unknown" # allow_unknown | require_good
 ```
 
 `cert_chain` is always required. `private_key` is required unless `tls.remote_signer.enabled = true`; when remote signing is enabled, `private_key` must not be set. `key_exchange_groups` controls the downstream TCP TLS, HTTP/3 TLS, and TURN TLS groups exposed through the aws-lc-rs provider. The default keeps rustls' post-quantum hybrid first: `["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]`. For handshake-heavy deployments that prefer lower cold-handshake CPU cost over post-quantum hybrid negotiation, omit `x25519mlkem768`, for example `["x25519", "secp256r1", "secp384r1"]`. In TLS 1.3 server mode, rustls chooses from the client supported-group order, so moving `x25519mlkem768` later does not force classical ECDHE when clients offer the hybrid group first. The remote signer uses a Unix domain socket and a base64 32-byte token from `token_env`; `socket_path` must be absolute, and `key_id` selects the signer-held key. `pool_max_idle_connections` caps reusable idle signer sockets per remote signing key and defaults to `64`; set it to `0` to open a fresh Unix socket for each signing request. Idle pooled sockets older than `sign_timeout_ms` are discarded before reuse. By default, remote signing is limited to TLS 1.3 server CertificateVerify inputs. Set `allow_tls12_unstructured_signing = true` only when TLS 1.2 compatibility is required and the signer sidecar is started with the same opt-in.
@@ -383,7 +392,11 @@ With `tls.ocsp.mode = "live_fetch"`, OxiBelt builds and verifies an OCSP request
 
 Live OCSP fetches run at snapshot startup/reload and in a bounded background refresh worker. TLS handshakes, including TCP TLS and HTTP/3, never perform network OCSP I/O; both transports share the refreshed staple through snapshot runtime state. `request_timeout_ms` and `max_response_bytes` bound each fetch, redirects are not followed, and responder URLs may only use `http` or `https` without credentials or fragments. When `responder_url` is omitted, the responder source is certificate-provided AIA, so operators should treat certificate issuance policy as part of the egress trust boundary. Public Prometheus OCSP metrics use fixed series names only and do not expose responder URLs, SNI, issuer names, or certificate fingerprints.
 
-OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, certificate renewal, or CRLite distribution itself. OCSP live fetch is revocation-status stapling for already provisioned certificates; it does not change private key handling, remote signer isolation, or certificate renewal. Provision and renew TLS files with external automation such as Certbot or the `certbot/certbot` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
+`tls.crlite.mode = "enforce"` enables experimental local CRLite enforcement for the configured downstream TLS leaf certificate. It is separate from `tls.ocsp`: OCSP controls stapling for clients, while CRLite controls whether OxiBelt accepts its own configured serving certificate during startup or downstream TLS reload. `filter_file` is resolved under the cert directory, `max_filter_bytes` bounds local reads, and `filter_sha256` can pin the expected 64-character SHA-256 digest. `max_filter_age_seconds` treats older filter files as stale.
+
+With `failure_policy = "fail_closed"`, missing, oversized, stale, hash-mismatched, or unparseable CRLite filters reject startup or reload. With `failure_policy = "degraded_allow"`, those filter health failures are reported through Admin TLS status, support bundles, and public aggregate metrics while the existing TLS snapshot can continue. A `revoked` CRLite result always rejects the configured downstream certificate, even under `degraded_allow`. `coverage_policy = "allow_unknown"` permits CRLite `not_covered` and `not_enrolled` results; `require_good` rejects anything other than `good`.
+
+OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, certificate renewal, or automatic CRLite distribution itself. OCSP live fetch is revocation-status stapling for already provisioned certificates; local CRLite enforcement is a local filter check for already provisioned certificates. Neither changes private key handling, remote signer isolation, or certificate renewal. Provision and renew TLS files with external automation such as Certbot or the `certbot/certbot` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
 
 Keep ACME credentials, DNS-01 provider tokens, renewal state, and private signing keys out of the OxiBelt process/container when possible. This limits blast radius if a proxy vulnerability ever exposes process memory or permits remote code execution: the running proxy may have access to certificate chains and remote signing capability, but it should not also contain private keys or the DNS/ACME credentials needed to mint arbitrary new certificates. A compromised OxiBelt process that still has signer socket and token access may request signatures while that access remains valid, so socket permissions, peer UID/GID allowlists, token rotation, and process isolation remain important.
 
@@ -2208,7 +2221,7 @@ Configuration validation rejects:
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
 - `runtime.drain.graceful_timeout_ms = 0` or `runtime.drain.long_connection_close_delay_ms = 0`.
-- TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, or unsafe OCSP responder URLs.
+- TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, unsafe OCSP responder URLs, CRLite enforcement without `filter_file`, or invalid CRLite filter limits/digests.
 - Reserved sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
 - Invalid WebRTC TURN listener binds, missing proxy pools, open `edge_relay` auth, invalid TURN upstream schemes, or invalid relay port ranges.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.

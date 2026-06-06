@@ -21,11 +21,14 @@ use crate::config::{
 mod admin_quic;
 mod cert_metadata;
 mod client_auth;
+mod crlite;
 mod ocsp;
 mod resumption;
 pub(crate) use cert_metadata::client_certificate_metadata;
 
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
+pub(crate) use crlite::CrliteRuntime;
+pub use crlite::CrliteRuntimeStatus;
 pub use ocsp::OcspRuntimeStatus;
 pub(crate) use ocsp::OcspStapleRuntime;
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
@@ -580,7 +583,7 @@ fn load_ocsp_response(tls: &TlsConfig) -> anyhow::Result<Option<Vec<u8>>> {
       let bytes = read_existing_file("OCSP response file", path)?;
       Ok(Some(bytes))
     }
-    OcspMode::LiveFetch => Err(anyhow!("live OCSP fetch is not implemented yet")),
+    OcspMode::LiveFetch => Ok(None),
   }
 }
 

@@ -16,6 +16,7 @@ use crate::waf::{AccessLogFieldConfig, WafConfig};
 mod admin_legacy;
 mod admin_runtime;
 mod allowed_keys;
+mod crlite;
 mod database;
 mod dynamic_policy;
 mod external_auth;
@@ -28,6 +29,7 @@ mod retry;
 mod route;
 mod route_actions;
 mod sni_forward;
+mod source_paths;
 mod stream;
 mod telemetry;
 mod tls;
@@ -36,6 +38,7 @@ mod turn_queue;
 mod upstream_pool;
 mod workers;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
+pub use crlite::*;
 pub use database::*;
 pub use dynamic_policy::*;
 pub use external_auth::*;
@@ -54,6 +57,7 @@ pub use retry::*;
 pub use route::*;
 pub use route_actions::*;
 pub use sni_forward::*;
+pub use source_paths::ConfigSourcePaths;
 pub use stream::*;
 pub use telemetry::*;
 pub use tls::*;
@@ -216,67 +220,6 @@ impl<'de> Deserialize<'de> for Config {
     RawConfig::deserialize(deserializer)?
       .try_into()
       .map_err(serde::de::Error::custom)
-  }
-}
-
-/// Source-file metadata retained for diagnostics and reload-aware admin responses.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ConfigSourcePaths {
-  pub config_entry: Option<PathBuf>,
-  pub config_dir: Option<PathBuf>,
-  pub cert_dir: Option<PathBuf>,
-  pub oxirule_dir: Option<PathBuf>,
-  pub config_files: Vec<PathBuf>,
-  pub runtime_files: Vec<PathBuf>,
-  pub discovery_files: Vec<PathBuf>,
-  pub downstream_tls_files: Vec<PathBuf>,
-  pub downstream_tls_cert_chain: Option<PathBuf>,
-  pub downstream_tls_private_key: Option<PathBuf>,
-  pub downstream_tls_ocsp_response_file: Option<PathBuf>,
-  pub quic_host_key_file: Option<PathBuf>,
-  pub oxirule_files: Vec<PathBuf>,
-}
-
-impl ConfigSourcePaths {
-  pub fn all_reload_files(&self) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Some(path) = &self.config_entry {
-      files.push(path.clone());
-    }
-    files.extend(self.config_files.iter().cloned());
-    files.extend(self.runtime_files.iter().cloned());
-    files.extend(self.oxirule_files.iter().cloned());
-    dedup_paths(files)
-  }
-
-  pub fn oxirule_reload_files(&self) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Some(path) = &self.config_entry {
-      files.push(path.clone());
-    }
-    files.extend(self.config_files.iter().cloned());
-    files.extend(self.oxirule_files.iter().cloned());
-    dedup_paths(files)
-  }
-
-  pub fn downstream_tls_reload_files(&self) -> Vec<PathBuf> {
-    dedup_paths(self.downstream_tls_files.clone())
-  }
-
-  fn remember_runtime_file(&mut self, path: PathBuf) {
-    push_unique_path(&mut self.runtime_files, path);
-  }
-
-  fn remember_discovery_file(&mut self, path: PathBuf) {
-    push_unique_path(&mut self.discovery_files, path);
-  }
-
-  fn remember_downstream_tls_file(&mut self, path: PathBuf) {
-    push_unique_path(&mut self.downstream_tls_files, path);
-  }
-
-  fn remember_oxirule_file(&mut self, path: PathBuf) {
-    push_unique_path(&mut self.oxirule_files, path);
   }
 }
 
@@ -517,6 +460,11 @@ impl Config {
         Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
+    crlite::resolve_filter_file(
+      &mut self.tls.crlite,
+      &mut self.source_paths,
+      &path_roots.cert_dir,
+    )?;
     self.tls.client_auth.ca_certs = self
       .tls
       .client_auth
@@ -1079,6 +1027,7 @@ impl Config {
       }
     }
     self.tls.ocsp.validate_fetch_settings()?;
+    self.tls.crlite.validate()?;
     crate::waf::validate_config(self)?;
 
     Ok(())
@@ -2158,18 +2107,6 @@ fn route_waf_configs_are_equivalent(left: &[RouteConfig], right: &[RouteConfig])
       .all(|(left, right)| left.name == right.name && left.waf == right.waf)
 }
 
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-  if !paths.contains(&path) {
-    paths.push(path);
-  }
-}
-
-fn dedup_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
-  paths.sort();
-  paths.dedup();
-  paths
-}
-
 fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<()> {
   let strict = value
     .get("config")
@@ -2284,6 +2221,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "tls" => &[
       "cert_chain",
       "client_auth",
+      "crlite",
       "key_exchange_groups",
       "max_version",
       "min_version",
@@ -2311,6 +2249,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "token_env",
     ][..],
     "tls.ocsp" => tls::OCSP_CONFIG_KEYS,
+    "tls.crlite" => crlite::CRLITE_CONFIG_KEYS,
     "tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
     "quic" => &[
       "alt_svc",

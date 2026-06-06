@@ -152,6 +152,7 @@ impl ReloadManager {
       lifecycle: active.lifecycle.clone(),
       admin_audit: active.admin_audit.clone(),
       shared_state: active.shared_state.clone(),
+      crlite: active.crlite.clone(),
       ocsp_staple: active.ocsp_staple.clone(),
       tls_server_config: active.tls_server_config.clone(),
       admin_tls_server_config: active.admin_tls_server_config.clone(),
@@ -213,6 +214,8 @@ impl ReloadManager {
 
     let mut config = active.config.clone();
     reload_downstream_tls_paths(&mut config)?;
+    let crlite = tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
+      .context("failed to build CRLite runtime")?;
     let ocsp_staple =
       tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
         .await
@@ -282,6 +285,7 @@ impl ReloadManager {
       lifecycle: active.lifecycle.clone(),
       admin_audit: active.admin_audit.clone(),
       shared_state: active.shared_state.clone(),
+      crlite,
       ocsp_staple,
       tls_server_config,
       admin_tls_server_config: active.admin_tls_server_config.clone(),
@@ -348,6 +352,12 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     .as_ref()
     .map(|path| canonicalize_under_base("tls.ocsp.response_file", cert_dir, path))
     .transpose()?;
+  let crlite_filter = config
+    .source_paths
+    .downstream_tls_crlite_filter_file
+    .as_ref()
+    .map(|path| canonicalize_under_base("tls.crlite.filter_file", cert_dir, path))
+    .transpose()?;
   let quic_host_key_file = config
     .source_paths
     .quic_host_key_file
@@ -379,6 +389,15 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
       max_response_bytes: old_tls.ocsp.max_response_bytes,
       refresh_jitter_pct: old_tls.ocsp.refresh_jitter_pct,
       clock_skew_seconds: old_tls.ocsp.clock_skew_seconds,
+    },
+    crlite: crate::config::CrliteConfig {
+      mode: old_tls.crlite.mode,
+      filter_file: crlite_filter,
+      filter_sha256: old_tls.crlite.filter_sha256,
+      max_filter_bytes: old_tls.crlite.max_filter_bytes,
+      max_filter_age_seconds: old_tls.crlite.max_filter_age_seconds,
+      failure_policy: old_tls.crlite.failure_policy,
+      coverage_policy: old_tls.crlite.coverage_policy,
     },
   };
   config.quic = old_quic;

@@ -9,8 +9,9 @@ use serde::{Deserialize, Deserializer};
 use url::Url;
 
 use super::{
-  default_true, resolve_existing_local_config_file_path_with_logical, validate_admin_server_name,
-  validate_base64_32_byte_env, validate_optional_non_empty, validate_tls_server_resumption,
+  CrliteConfig, default_true, resolve_existing_local_config_file_path_with_logical,
+  validate_admin_server_name, validate_base64_32_byte_env, validate_optional_non_empty,
+  validate_tls_server_resumption,
 };
 
 pub(super) const OCSP_CONFIG_KEYS: &[&str] = &[
@@ -36,6 +37,7 @@ pub struct TlsConfig {
   pub resumption: TlsServerResumptionConfig,
   pub client_auth: TlsClientAuthConfig,
   pub ocsp: OcspConfig,
+  pub crlite: CrliteConfig,
 }
 
 impl<'de> Deserialize<'de> for TlsConfig {
@@ -66,6 +68,8 @@ impl<'de> Deserialize<'de> for TlsConfig {
       client_auth: TlsClientAuthConfig,
       #[serde(default)]
       ocsp: OcspConfig,
+      #[serde(default)]
+      crlite: CrliteConfig,
     }
 
     let raw = RawTlsConfig::deserialize(deserializer)?;
@@ -89,6 +93,7 @@ impl<'de> Deserialize<'de> for TlsConfig {
       resumption,
       client_auth: raw.client_auth,
       ocsp: raw.ocsp,
+      crlite: raw.crlite,
     })
   }
 }

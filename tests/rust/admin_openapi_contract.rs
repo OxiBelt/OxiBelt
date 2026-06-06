@@ -163,6 +163,65 @@ fn ipm_simulation_documents_non_secret_claim_key_response() {
 }
 
 #[test]
+fn downstream_tls_status_documents_bounded_crlite_status() {
+    let spec = openapi();
+    let schema = &spec["paths"]["/admin/v1/tls/downstream"]["get"]["responses"]["200"]["content"]["application/json"]
+        ["schema"];
+    let required = json_string_set(&schema["required"], "/admin/v1/tls/downstream.required");
+
+    assert!(
+        required.contains("crlite_mode"),
+        "downstream TLS status should document crlite_mode"
+    );
+    assert!(
+        required.contains("crlite"),
+        "downstream TLS status should document crlite status"
+    );
+
+    let crlite = &schema["properties"]["crlite"];
+    let crlite_required = json_string_set(
+        &crlite["required"],
+        "/admin/v1/tls/downstream.crlite.required",
+    );
+    for field in [
+        "status",
+        "enabled",
+        "filter_present",
+        "filter_loaded",
+        "filter_stale",
+        "last_checked_at",
+        "last_error_code",
+        "result",
+        "failure_policy",
+        "coverage_policy",
+    ] {
+        assert!(
+            crlite_required.contains(field),
+            "CRLite status should require {field}"
+        );
+    }
+
+    let properties = crlite["properties"]
+        .as_object()
+        .expect("CRLite status properties should be an object");
+    for sensitive in [
+        "sni",
+        "issuer",
+        "issuer_name",
+        "serial",
+        "fingerprint",
+        "filter_file",
+        "filter_sha256",
+        "filter_id",
+    ] {
+        assert!(
+            !properties.contains_key(sensitive),
+            "CRLite status must not document sensitive field {sensitive}"
+        );
+    }
+}
+
+#[test]
 fn operational_lists_document_pagination_filter_and_sort_parameters() {
     let spec = openapi();
     for path in [
@@ -188,6 +247,19 @@ fn operational_lists_document_pagination_filter_and_sort_parameters() {
             "{path} must document invalid list query responses"
         );
     }
+}
+
+fn json_string_set(value: &Value, label: &str) -> BTreeSet<String> {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} should be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("{label} entries should be strings"))
+                .to_string()
+        })
+        .collect()
 }
 
 fn documented_operations(spec: &Value) -> BTreeSet<(String, String)> {

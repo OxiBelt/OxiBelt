@@ -286,6 +286,8 @@ pub(super) async fn admin_tls_response(
           "cert_chain": snapshot.config.source_paths.downstream_tls_cert_chain,
           "private_key_configured": snapshot.config.source_paths.downstream_tls_private_key.is_some(),
           "remote_signer_enabled": snapshot.config.tls.remote_signer.enabled,
+          "crlite_mode": snapshot.config.tls.crlite.mode.as_str(),
+          "crlite": snapshot.crlite.status(),
           "ocsp_mode": format!("{:?}", snapshot.config.tls.ocsp.mode),
           "ocsp_response_file": snapshot.config.source_paths.downstream_tls_ocsp_response_file,
           "ocsp": snapshot.ocsp_staple.status(),

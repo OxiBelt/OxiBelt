@@ -566,6 +566,7 @@ fn downstream_tls_config(
         resumption: Default::default(),
         client_auth,
         ocsp: OcspConfig::default(),
+        crlite: oxibelt::config::CrliteConfig::default(),
     }
 }
 
@@ -597,6 +598,7 @@ fn remote_tls_config(
         resumption: Default::default(),
         client_auth: TlsClientAuthConfig::default(),
         ocsp: OcspConfig::default(),
+        crlite: oxibelt::config::CrliteConfig::default(),
     }
 }
 

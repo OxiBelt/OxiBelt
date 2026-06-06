@@ -6,15 +6,16 @@ use std::path::Path;
 use base64::Engine;
 use oxibelt::config::{
     AdminTransportMode, BufferingMode, CacheStore, CompressionConfig, Config,
-    ConnectionLimitIdentityMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
-    DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
-    ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
-    HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource, LoadBalancingAlgorithm,
-    MetricsDetail, MitigationFailurePolicy, OcspMode, PriorityMode, ProxyProtocolEgressMode,
-    ProxyProtocolVersion, QuicZeroRttMode, RateLimitKey, RetryCondition, RuntimeOverrides,
-    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
-    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
-    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteMode,
+    DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy,
+    EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ExternalAuthProvider,
+    ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode, HotReloadMode, IpmPolicyEffect,
+    KubernetesDiscoveryResource, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy,
+    OcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
+    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol,
+    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
+    UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::WafMode;
@@ -6537,6 +6538,176 @@ fn live_ocsp_rejects_unsafe_responder_urls_and_zero_limits() {
             "setting {setting} produced unexpected error: {error}"
         );
     }
+}
+
+#[test]
+fn crlite_defaults_to_disabled_policy() {
+    let temp_dir = common::TempDir::new("crlite-defaults");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "crlite-defaults");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config
+        .validate()
+        .expect("default CRLite config should validate");
+    assert_eq!(config.tls.crlite.mode, CrliteMode::Disabled);
+    assert_eq!(config.tls.crlite.filter_file, None);
+    assert_eq!(config.tls.crlite.filter_sha256, None);
+    assert_eq!(config.tls.crlite.max_filter_bytes, 33_554_432);
+    assert_eq!(config.tls.crlite.max_filter_age_seconds, 86_400);
+    assert_eq!(
+        config.tls.crlite.failure_policy,
+        CrliteFailurePolicy::FailClosed
+    );
+    assert_eq!(
+        config.tls.crlite.coverage_policy,
+        CrliteCoveragePolicy::AllowUnknown
+    );
+}
+
+#[test]
+fn crlite_enforce_requires_a_filter_file() {
+    let temp_dir = common::TempDir::new("crlite-requires-filter");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "crlite-requires-filter");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[tls.crlite]
+mode = "enforce"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("enforced CRLite without a filter should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tls.crlite.filter_file is required"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn crlite_enforce_config_coexists_with_live_ocsp() {
+    let temp_dir = common::TempDir::new("crlite-live-ocsp");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "crlite-live-ocsp");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "mode = \"disabled\"",
+        "mode = \"live_fetch\"\nresponder_url = \"https://ocsp.example.test/status\"",
+    ) + r#"
+
+[tls.crlite]
+mode = "enforce"
+filter_file = "crlite.filter"
+filter_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+max_filter_bytes = 65536
+max_filter_age_seconds = 3600
+failure_policy = "degraded_allow"
+coverage_policy = "require_good"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config
+        .validate()
+        .expect("CRLite and live OCSP config should validate together");
+    assert_eq!(config.tls.ocsp.mode, OcspMode::LiveFetch);
+    assert_eq!(config.tls.crlite.mode, CrliteMode::Enforce);
+    assert_eq!(
+        config.tls.crlite.filter_file.as_deref(),
+        Some(Path::new("crlite.filter"))
+    );
+    assert_eq!(
+        config.tls.crlite.failure_policy,
+        CrliteFailurePolicy::DegradedAllow
+    );
+    assert_eq!(
+        config.tls.crlite.coverage_policy,
+        CrliteCoveragePolicy::RequireGood
+    );
+}
+
+#[test]
+fn crlite_rejects_invalid_limits_and_filter_digest() {
+    let cases = [
+        (
+            "filter_sha256 = \"abc\"",
+            "filter_sha256 must be a 64-character hex",
+        ),
+        (
+            "filter_sha256 = \"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"",
+            "filter_sha256 must be a 64-character hex",
+        ),
+        (
+            "max_filter_bytes = 0",
+            "max_filter_bytes must be greater than 0",
+        ),
+        (
+            "max_filter_age_seconds = 0",
+            "max_filter_age_seconds must be greater than 0",
+        ),
+    ];
+
+    for (setting, expected) in cases {
+        let temp_dir = common::TempDir::new("crlite-invalid-config");
+        let (cert_path, key_path) =
+            common::create_self_signed_cert(temp_dir.path(), "crlite-invalid-config");
+        let raw = common::minimal_config_toml(&cert_path, &key_path)
+            + &format!(
+                r#"
+
+[tls.crlite]
+mode = "enforce"
+filter_file = "crlite.filter"
+{setting}
+"#
+            );
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config.validate().expect_err("CRLite setting should fail");
+
+        assert!(
+            error.to_string().contains(expected),
+            "setting {setting} produced unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn crlite_filter_file_is_tracked_for_downstream_tls_reload() {
+    let temp_dir = common::TempDir::new("crlite-reload-path");
+    let config_path = write_loadable_config(&temp_dir, "crlite-reload-path", |raw| {
+        raw + r#"
+
+[tls.crlite]
+mode = "enforce"
+filter_file = "crlite.filter"
+failure_policy = "degraded_allow"
+"#
+    });
+    let filter_path = temp_dir.path().join("cert").join("crlite.filter");
+    std::fs::write(&filter_path, b"test filter bytes").expect("failed to write CRLite filter");
+
+    let config = Config::load(&config_path).expect("config should load");
+
+    assert_eq!(
+        config
+            .source_paths
+            .downstream_tls_crlite_filter_file
+            .as_deref(),
+        Some(filter_path.as_path())
+    );
+    assert!(
+        config
+            .source_paths
+            .downstream_tls_reload_files()
+            .contains(&filter_path)
+    );
+    assert!(config.source_paths.runtime_files.contains(&filter_path));
 }
 
 #[test]

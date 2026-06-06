@@ -681,7 +681,7 @@
         "summary": "Fetch downstream TLS material status.",
         "responses": {
           "200": {
-            "description": "Downstream TLS material and bounded OCSP runtime status.",
+            "description": "Downstream TLS material and bounded CRLite/OCSP runtime status.",
             "content": {
               "application/json": {
                 "schema": {
@@ -690,6 +690,8 @@
                     "cert_chain",
                     "private_key_configured",
                     "remote_signer_enabled",
+                    "crlite_mode",
+                    "crlite",
                     "ocsp_mode",
                     "ocsp_response_file",
                     "ocsp",
@@ -707,6 +709,88 @@
                     },
                     "remote_signer_enabled": {
                       "type": "boolean"
+                    },
+                    "crlite_mode": {
+                      "type": "string"
+                    },
+                    "crlite": {
+                      "type": "object",
+                      "required": [
+                        "status",
+                        "enabled",
+                        "filter_present",
+                        "filter_loaded",
+                        "filter_stale",
+                        "last_checked_at",
+                        "last_error_code",
+                        "result",
+                        "failure_policy",
+                        "coverage_policy"
+                      ],
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "disabled",
+                            "fresh",
+                            "degraded",
+                            "revoked"
+                          ]
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "filter_present": {
+                          "type": "boolean"
+                        },
+                        "filter_loaded": {
+                          "type": "boolean"
+                        },
+                        "filter_stale": {
+                          "type": "boolean"
+                        },
+                        "last_checked_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0
+                        },
+                        "last_error_code": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "result": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "good",
+                            "revoked",
+                            "not_covered",
+                            "not_enrolled",
+                            null
+                          ]
+                        },
+                        "failure_policy": {
+                          "type": "string",
+                          "enum": [
+                            "fail_closed",
+                            "degraded_allow"
+                          ]
+                        },
+                        "coverage_policy": {
+                          "type": "string",
+                          "enum": [
+                            "allow_unknown",
+                            "require_good"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
                     },
                     "ocsp_mode": {
                       "type": "string"
@@ -815,7 +899,7 @@
           "config"
         ],
         "operationId": "reloadDownstreamTls",
-        "summary": "Reload downstream TLS certificate, key, and OCSP runtime.",
+        "summary": "Reload downstream TLS certificate, key, CRLite, and OCSP runtime.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"

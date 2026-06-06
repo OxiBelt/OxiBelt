@@ -485,7 +485,7 @@ async fn apply_downstream_tls_reload(
     .await;
     return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
   }
-  let (ocsp_staple, tls_server_config, quic_server_config) =
+  let (crlite, ocsp_staple, tls_server_config, quic_server_config) =
     match tls_reload::build_downstream_tls_reload_configs(&config, active.as_ref()).await {
       Ok(configs) => configs,
       Err(error) => {
@@ -501,6 +501,7 @@ async fn apply_downstream_tls_reload(
     };
   let mut snapshot = active.as_ref().clone();
   snapshot.config = config;
+  snapshot.crlite = crlite;
   snapshot.ocsp_staple = ocsp_staple;
   snapshot.tls_server_config = tls_server_config;
   snapshot.quic_server_config = quic_server_config;

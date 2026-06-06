@@ -92,6 +92,16 @@ mode = "disabled"
 # refresh_jitter_pct = 10
 # clock_skew_seconds = 300
 
+[tls.crlite]
+mode = "disabled"
+# mode = "enforce"
+# filter_file = "crlite.filter"
+# filter_sha256 = ""
+# max_filter_bytes = 33554432
+# max_filter_age_seconds = 86400
+# failure_policy = "fail_closed"
+# coverage_policy = "allow_unknown"
+
 [quic]
 retry = true
 zero_rtt = "off"

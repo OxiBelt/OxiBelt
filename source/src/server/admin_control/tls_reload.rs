@@ -9,10 +9,13 @@ pub(super) async fn build_downstream_tls_reload_configs(
   config: &Config,
   active: &AppSnapshot,
 ) -> anyhow::Result<(
+  crate::tls::CrliteRuntime,
   crate::tls::OcspStapleRuntime,
   Arc<rustls::ServerConfig>,
   Option<h3_quinn::quinn::ServerConfig>,
 )> {
+  let crlite = crate::tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
+    .context("failed to build CRLite runtime")?;
   let ocsp_staple =
     crate::tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
       .await
@@ -38,5 +41,5 @@ pub(super) async fn build_downstream_tls_reload_configs(
   } else {
     None
   };
-  Ok((ocsp_staple, tls_server_config, quic_server_config))
+  Ok((crlite, ocsp_staple, tls_server_config, quic_server_config))
 }

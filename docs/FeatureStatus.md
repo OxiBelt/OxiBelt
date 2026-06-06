@@ -30,6 +30,7 @@ Lifecycle states are intentionally limited:
 | `upstream-discovery` | `supported` | Config/runtime | Discovery providers: `dns`, `file`, `kubernetes`, `consul`, `etcd`, `nomad`. |
 | `upstream-pool-runtime-state` | `supported` | Config/Admin API | Server states: `ready`, `drain`, `down`, `maintenance`. |
 | `tls-ocsp` | `supported` | Config/TLS/Admin API | Downstream OCSP modes: `disabled`, `static_file`, `live_fetch`. Static file staples and live fetch/refresh are supported. |
+| `crlite` | `experimental` | TLS/revocation | Local downstream CRLite filter enforcement is implemented for operator-supplied filters. Modes: `disabled`, `enforce`; failure policies: `fail_closed`, `degraded_allow`; coverage policies: `allow_unknown`, `require_good`. Automatic CRLite distribution and upstream enforcement are planned separately. |
 | `tls-remote-signer` | `supported` | Config/TLS | Downstream certificate signing can use the `oxibelt-keysigner` Unix-socket sidecar. |
 | `tls-mtls-client-auth` | `supported` | Config/TLS/routing | Optional and required downstream client certificate authentication are supported for TCP TLS, with route matchers for available certificate metadata. |
 | `upstream-ech` | `supported` | Config/upstream TLS | Upstream ECH supports `disabled`, GREASE, and configured `ECHConfigList` modes. |
@@ -46,7 +47,6 @@ Lifecycle states are intentionally limited:
 | `gateway-api-tlsroute` | `experimental` | Kubernetes/controller | Gateway API `TLSRoute` passthrough translation emits `[[sni_forward.rules]]` for `tls.mode = "Passthrough"`. |
 | `helm-gateway-controller` | `experimental` | Deploy | The minimal Helm chart under `deploy/helm/oxibelt-gateway-controller` installs the controller deployment, service account, RBAC, Admin token secret reference, health probes, and examples. |
 | `acme` | `reserved` | TLS/certificate lifecycle | ACME issuance and HTTP-01/DNS-01 challenge handling stay outside OxiBelt. |
-| `crlite` | `reserved` | TLS/revocation | CRLite distribution and enforcement are reserved. |
 | `downstream-ech` | `reserved` | Downstream TLS | Downstream ECH configuration is reserved until server-side TLS provider support is available. |
 | `stream-proxy-udp` | `reserved` | L4 data plane | General-purpose UDP stream proxying outside same-port QUIC SNI forwarding and TURN-specific behavior is reserved. |
 | `crs-stream-payload` | `reserved` | WAF/data plane | CRS inspection for WebSocket and WebTransport stream payloads is reserved. |
