@@ -24,6 +24,7 @@ const DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO: f64 = 1.30;
 const BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT: f64 = -3.0;
 const BASELINE_P99_REGRESSION_TOLERANCE_PERCENT: f64 = 5.0;
 const BASELINE_MONITOR_P99_IMPROVEMENT_PERCENT: f64 = -5.0;
+const COMPARATOR_RPS_MATERIAL_IMPROVEMENT_PERCENT: f64 = 3.0;
 const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
@@ -4600,13 +4601,43 @@ fn statistical_shared_comparator_shift_reason(
     let p99_ratio_is_stable =
         p99_ratio_delta.ratio_delta_percent <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT;
 
-    if !comparator_rps_fell || !rps_ratio_is_stable || !p99_ratio_is_stable {
+    let comparator_name = comparator.as_str();
+    if comparator_rps_fell && rps_ratio_is_stable && p99_ratio_is_stable {
+        return Some(format!(
+            "statistical baseline band from `{}` saw shared {comparator_name} shift: RPS median {}, RPS p10 {}, p99 median {}, p99 p90 {}; {comparator_name} RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%, RPS ratio {:.4} -> {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%); comparator-driven threshold miss is advisory",
+            baseline.report,
+            format_percent(stat_band.rps_median_delta_percent),
+            format_percent(stat_band.rps_p10_delta_percent),
+            format_percent(stat_band.p99_median_delta_percent),
+            format_percent(stat_band.p99_p90_delta_percent),
+            throughput_ratio_delta.before_ratio,
+            throughput_ratio_delta.after_ratio,
+            throughput_ratio_delta.ratio_delta_percent,
+            p99_ratio_delta.before_ratio,
+            p99_ratio_delta.after_ratio,
+            p99_ratio_delta.ratio_delta_percent,
+        ));
+    }
+
+    let comparator_rps_rose_materially =
+        comparator_rps_delta >= COMPARATOR_RPS_MATERIAL_IMPROVEMENT_PERCENT;
+    let rps_ratio_fell = throughput_ratio_delta.ratio_delta_percent < 0.0;
+    let oxibelt_central_evidence_is_stable = stat_band
+        .rps_median_delta_percent
+        .is_some_and(|delta| delta >= BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT)
+        && stat_band
+            .rps_p10_delta_percent
+            .is_some_and(|delta| delta >= STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT)
+        && stat_band
+            .p99_median_delta_percent
+            .is_some_and(|delta| delta <= BASELINE_P99_REGRESSION_TOLERANCE_PERCENT);
+
+    if !comparator_rps_rose_materially || !rps_ratio_fell || !oxibelt_central_evidence_is_stable {
         return None;
     }
 
-    let comparator_name = comparator.as_str();
     Some(format!(
-        "statistical baseline band from `{}` saw shared {comparator_name} shift: RPS median {}, RPS p10 {}, p99 median {}, p99 p90 {}; {comparator_name} RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%, RPS ratio {:.4} -> {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%); comparator-driven threshold miss is advisory",
+        "statistical baseline band from `{}` saw {comparator_name} outpace stable OxiBelt: RPS median {}, RPS p10 {}, p99 median {}, p99 p90 {}; {comparator_name} RPS {comparator_rps_delta:+.1}% and p99 {comparator_p99_delta:+.1}%, RPS ratio {:.4} -> {:.4} ({:+.1}%), p99 ratio {:.4} -> {:.4} ({:+.1}%); comparator-driven threshold miss is advisory",
         baseline.report,
         format_percent(stat_band.rps_median_delta_percent),
         format_percent(stat_band.rps_p10_delta_percent),

@@ -472,6 +472,74 @@ fn write_required_quorum_evidence_with_h2_p99(
     }
 }
 
+fn write_required_quorum_h1_evidence_with_p99_distribution(
+    input_dir: &Path,
+    oxibelt_rps: f64,
+    nginx_rps: f64,
+    oxibelt_p99_by_shard: &[f64],
+    nginx_p99: f64,
+) {
+    assert!(
+        !oxibelt_p99_by_shard.is_empty(),
+        "at least one shard is required"
+    );
+    for (index, oxibelt_p99) in oxibelt_p99_by_shard.iter().copied().enumerate() {
+        let shard = index + 1;
+        let reverse_dir = input_dir.join(format!(
+            "oxibelt-docker-performance-smoke-reverse-proxy-shard-{shard}/run-1"
+        ));
+        write_results_array(
+            &reverse_dir,
+            vec![
+                load_row("oxibelt-h1-keepalive", "h1", oxibelt_rps, 1.0, oxibelt_p99),
+                load_row("nginx-h1-keepalive", "h1", nginx_rps, 1.0, nginx_p99),
+                load_row("oxibelt-h2", "h2", 100.0, 1.0, 4.0),
+                load_row("nginx-h2", "h2", 100.0, 1.0, 4.0),
+                load_row("oxibelt-h3", "h3", 100.0, 1.0, 4.0),
+                load_row("nginx-h3", "h3", 100.0, 1.0, 4.0),
+            ],
+        );
+        write_iteration_status(&reverse_dir, "reverse-proxy", shard, 1, 0, "ok");
+
+        write_results_array(
+            &input_dir.join(format!(
+                "oxibelt-docker-performance-smoke-static-files-shard-{shard}/run-1"
+            )),
+            vec![
+                load_row("oxibelt-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+                load_row("nginx-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+                load_row("caddy-static-16k-h1c", "h1c", 100.0, 1.0, 4.0),
+            ],
+        );
+        write_results_array(
+            &input_dir.join(format!(
+                "oxibelt-docker-performance-smoke-remote-signer-shard-{shard}/run-1"
+            )),
+            vec![
+                handshake_row("oxibelt-local-key-tls-handshake-h2", "h2", 100.0, 1.0, 4.0),
+                handshake_row(
+                    "oxibelt-remote-signer-tls-handshake-h2",
+                    "h2",
+                    100.0,
+                    1.0,
+                    4.0,
+                ),
+            ],
+        );
+        write_results_array(
+            &input_dir.join(format!(
+                "oxibelt-docker-performance-smoke-oxibelt-features-shard-{shard}/run-1"
+            )),
+            vec![
+                load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 4.0),
+                load_row("oxibelt-waf-enforcing", "h2", 13000.0, 1.0, 4.0),
+                load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 4.0),
+                load_row("oxibelt-crs-enforcing", "h2", 10000.0, 1.0, 4.0),
+            ],
+        );
+    }
+}
+
 fn write_iteration_status(
     dir: &Path,
     serving_type: &str,
@@ -1372,6 +1440,85 @@ fn schema_10_statistical_band_advises_shared_comparator_shift_ratio_miss() {
         .as_str()
         .expect("advisory message should be a string");
     assert!(message.contains("shared nginx shift"));
+    assert!(message.contains("comparator-driven threshold miss is advisory"));
+}
+
+#[test]
+fn schema_10_statistical_band_advises_comparator_outpaced_h1_ratio_miss() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+    let mut oxibelt_p99_by_shard = vec![1.771; 12];
+    oxibelt_p99_by_shard.extend(vec![2.050; 4]);
+    write_required_quorum_h1_evidence_with_p99_distribution(
+        &input_dir,
+        21078.875,
+        28699.875,
+        &oxibelt_p99_by_shard,
+        1.600,
+    );
+    fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 10,
+            "aggregates": [
+                aggregate_row_with_distribution("oxibelt", "h1-keepalive", "reverse-proxy", 20730.3125, 1.786, 16),
+                aggregate_row_with_distribution("nginx", "h1-keepalive", "reverse-proxy", 25800.375, 1.600, 16)
+            ]
+        }))
+        .expect("baseline should serialize"),
+    )
+    .expect("baseline should be written");
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    let advisory =
+        find_regression_advisory(&report, "h1_keepalive_min_nginx_ratio", "h1-keepalive");
+    assert_eq!(advisory["evaluation_mode"], "statistical_band");
+    assert_eq!(advisory["stat_band"]["status"], "regression");
+    assert_close(
+        advisory["observed"]
+            .as_f64()
+            .expect("advisory ratio should exist"),
+        21078.875 / 28699.875,
+    );
+    assert!(
+        advisory["stat_band"]["rps_median_delta_percent"]
+            .as_f64()
+            .expect("RPS median delta should exist")
+            > 0.0
+    );
+    assert!(
+        advisory["stat_band"]["rps_p10_delta_percent"]
+            .as_f64()
+            .expect("RPS p10 delta should exist")
+            > 0.0
+    );
+    assert!(
+        advisory["stat_band"]["p99_median_delta_percent"]
+            .as_f64()
+            .expect("p99 median delta should exist")
+            < 0.0
+    );
+    assert!(
+        advisory["stat_band"]["p99_p90_delta_percent"]
+            .as_f64()
+            .expect("p99 p90 delta should exist")
+            > 8.0
+    );
+    let message = advisory["message"]
+        .as_str()
+        .expect("advisory message should be a string");
+    assert!(message.contains("outpace stable OxiBelt"));
     assert!(message.contains("comparator-driven threshold miss is advisory"));
 }
 
