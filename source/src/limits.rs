@@ -11,10 +11,10 @@ use http::header::{AUTHORIZATION, HeaderName};
 use http::{HeaderMap, StatusCode};
 
 use crate::config::{
-  ConnectionLimitConfig, LimitMode, LimitsConfig, RateLimitConfig, RateLimitIdentityPart,
-  RateLimitKey,
+  AccessTokenRateLimitSource, ConnectionLimitConfig, LimitMode, LimitsConfig, RateLimitConfig,
+  RateLimitIdentityPart, RateLimitKey,
 };
-use crate::shared_state::{ConnectionScope, SharedState};
+use crate::shared_state::{ConnectionScope, SharedRateLimitOutcome, SharedState};
 use crate::waf::PersonProofTokenBinding;
 
 #[path = "limits/context.rs"]
@@ -137,6 +137,7 @@ pub struct RateLimitCheck<'a> {
   pub name: &'a str,
   pub key: RateLimitKey,
   pub token_header: Option<&'a str>,
+  pub access_token_source: Option<AccessTokenRateLimitSource>,
   pub ipv4_prefix_bits: u8,
   pub ipv6_prefix_bits: u8,
   pub identity_parts: &'a [RateLimitIdentityPart],
@@ -164,6 +165,7 @@ impl<'a> From<&'a RateLimitConfig> for RateLimitCheck<'a> {
       name: &limit.name,
       key: limit.key,
       token_header: limit.token_header.as_deref(),
+      access_token_source: limit.access_token_source,
       ipv4_prefix_bits: limit.ipv4_prefix_bits,
       ipv6_prefix_bits: limit.ipv6_prefix_bits,
       identity_parts: &limit.identity_parts,
@@ -480,11 +482,11 @@ impl LimitState {
       let result = if spec.key.is_empty() {
         shared.take_rate_token_bucket(spec.name, spec.rate, spec.burst)
       } else {
-        shared.take_rate_token(spec.name, spec.key, spec.rate, spec.burst)
+        shared.take_rate_token(spec.name, spec.key, spec.rate, spec.burst, spec.max_buckets)
       };
       match result {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(SharedRateLimitOutcome::Allowed) => {}
+        Ok(SharedRateLimitOutcome::RateLimited | SharedRateLimitOutcome::BucketCapExceeded) => {
           if spec.mode == LimitMode::Enforcing {
             return Some(
               StatusCode::from_u16(spec.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
@@ -645,16 +647,16 @@ fn rate_limit_key(context: RateLimitContext<'_>, check: &RateLimitCheck<'_>) -> 
     RateLimitKey::AccessToken => {
       format!(
         "access_token:{}",
-        access_token_bucket_identity(context, check.token_header)
+        access_token_bucket_identity(context, check.access_token_source, check.token_header)
       )
     }
     RateLimitKey::AccessTokenRoute => format!(
       "access_token_route:{}:{route}",
-      access_token_bucket_identity(context, check.token_header)
+      access_token_bucket_identity(context, check.access_token_source, check.token_header)
     ),
     RateLimitKey::AccessTokenPath => format!(
       "access_token_path:{}:{path}",
-      access_token_bucket_identity(context, check.token_header)
+      access_token_bucket_identity(context, check.access_token_source, check.token_header)
     ),
     RateLimitKey::ClientIpPrefix => format!(
       "client_ip_prefix:{}",
@@ -721,17 +723,28 @@ fn rate_limit_key(context: RateLimitContext<'_>, check: &RateLimitCheck<'_>) -> 
 
 fn access_token_bucket_identity(
   context: RateLimitContext<'_>,
+  access_token_source: Option<AccessTokenRateLimitSource>,
   token_header: Option<&str>,
 ) -> String {
   context
     .headers
-    .and_then(|headers| access_token(headers, token_header))
+    .and_then(|headers| access_token(headers, access_token_source, token_header))
     .map(|token| format!("token:{}", sybil_identity::sha256_hex(token.as_bytes())))
     .unwrap_or_else(|| format!("fallback_ip:{}", context.ip))
 }
 
-fn access_token(headers: &HeaderMap, token_header: Option<&str>) -> Option<String> {
-  bearer_token(headers).or_else(|| token_header.and_then(|name| named_header_token(headers, name)))
+fn access_token(
+  headers: &HeaderMap,
+  access_token_source: Option<AccessTokenRateLimitSource>,
+  token_header: Option<&str>,
+) -> Option<String> {
+  match access_token_source {
+    Some(AccessTokenRateLimitSource::TrustedAuthorizationBearer) => bearer_token(headers),
+    Some(AccessTokenRateLimitSource::TrustedHeader) => {
+      token_header.and_then(|name| named_header_token(headers, name))
+    }
+    None => None,
+  }
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {

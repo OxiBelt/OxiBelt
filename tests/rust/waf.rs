@@ -564,6 +564,7 @@ when = "Request.Http.Path.startsWith('/login')"
 type = "rate_limit"
 name = "login-token-limit"
 key = "access_token_route"
+access_token_source = "trusted_header"
 token_header = "X-Api-Token"
 rate = "1r/h"
 burst = 1
@@ -576,7 +577,8 @@ body = "slow down"
     config.validate().expect("config should validate");
     let engine = WafEngine::new(&config).expect("WAF should compile");
     let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("Bearer token-a"));
+    headers.insert("authorization", HeaderValue::from_static("Bearer ignored"));
+    headers.insert("x-api-token", HeaderValue::from_static("token-a"));
     let tags = HashMap::new();
     let method = Method::GET;
     let uri: Uri = "/login".parse().expect("URI should parse");
@@ -10344,6 +10346,45 @@ max_buckets = 0
         error
             .to_string()
             .contains("WAF rule zero-rate-buckets rate_limit max_buckets must be greater than 0"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn validation_rejects_rate_limit_action_missing_access_token_source() {
+    let temp_dir = common::TempDir::new("waf-rate-limit-missing-token-source");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-rate-limit-missing-token-source");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "missing-token-source"
+phase = "request"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "bad-token-limit"
+key = "access_token_route"
+token_header = "X-Api-Token"
+rate = "1r/s"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("WAF should reject missing access_token_source");
+    assert!(
+        error
+            .to_string()
+            .contains("access_token keys require access_token_source"),
         "unexpected error: {error}"
     );
 }

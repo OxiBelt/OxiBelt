@@ -12,6 +12,7 @@ fn rate_limit_config(name: &str, key: RateLimitKey) -> RateLimitConfig {
     token_bindings: Vec::new(),
     routes: Vec::new(),
     token_header: None,
+    access_token_source: None,
     rate: "1r/h".to_string(),
     burst: 1,
     max_buckets: default_rate_limit_max_buckets(),
@@ -25,6 +26,13 @@ fn rate_limit_check<'a>(key: RateLimitKey, token_header: Option<&'a str>) -> Rat
     name: "test",
     key,
     token_header,
+    access_token_source: key
+      .uses_access_token()
+      .then_some(if token_header.is_some() {
+        AccessTokenRateLimitSource::TrustedHeader
+      } else {
+        AccessTokenRateLimitSource::TrustedAuthorizationBearer
+      }),
     ipv4_prefix_bits: default_rate_limit_ipv4_prefix_bits(),
     ipv6_prefix_bits: default_rate_limit_ipv6_prefix_bits(),
     identity_parts: &[],
@@ -313,25 +321,34 @@ fn access_token_keys_hash_tokens_and_fallback_to_ip() {
   headers.insert("x-api-token", "header-secret".parse().unwrap());
   let context = RateLimitContext::route(ip, "app", "/tokens", &headers);
 
-  let bearer_key = rate_limit_key(
-    context,
-    &rate_limit_check(RateLimitKey::AccessToken, Some("X-Api-Token")),
-  );
+  let bearer_key = rate_limit_key(context, &rate_limit_check(RateLimitKey::AccessToken, None));
   assert!(bearer_key.starts_with("access_token:token:"));
   assert!(!bearer_key.contains("bearer-secret"));
   assert!(!bearer_key.contains("header-secret"));
 
-  let mut header_only = HeaderMap::new();
-  header_only.insert("x-api-token", "header-secret".parse().unwrap());
-  let header_context = RateLimitContext::route(ip, "app", "/tokens", &header_only);
   let header_key = rate_limit_key(
-    header_context,
+    context,
     &rate_limit_check(RateLimitKey::AccessTokenRoute, Some("X-Api-Token")),
   );
   assert!(header_key.starts_with("access_token_route:token:"));
   assert!(header_key.ends_with(":app"));
+  assert!(!header_key.contains("bearer-secret"));
   assert!(!header_key.contains("header-secret"));
   assert_ne!(bearer_key, header_key);
+
+  let mut changed_bearer = headers.clone();
+  changed_bearer.insert(
+    AUTHORIZATION,
+    "Bearer random-attacker-token".parse().unwrap(),
+  );
+  let changed_bearer_context = RateLimitContext::route(ip, "app", "/tokens", &changed_bearer);
+  assert_eq!(
+    header_key,
+    rate_limit_key(
+      changed_bearer_context,
+      &rate_limit_check(RateLimitKey::AccessTokenRoute, Some("X-Api-Token")),
+    )
+  );
 
   let empty_headers = HeaderMap::new();
   let fallback_context = RateLimitContext::route(ip, "app", "/tokens", &empty_headers);
@@ -353,6 +370,7 @@ fn access_token_rate_limits_are_isolated_by_token_and_fallback_ip() {
     key: RateLimitKey::AccessToken,
     routes: Vec::new(),
     token_header: None,
+    access_token_source: Some(AccessTokenRateLimitSource::TrustedAuthorizationBearer),
     rate: "1r/h".to_string(),
     burst: 1,
     max_buckets: default_rate_limit_max_buckets(),
@@ -396,6 +414,7 @@ fn local_rate_limit_rejects_new_bucket_when_max_buckets_exhausted() {
     key: RateLimitKey::AccessToken,
     routes: Vec::new(),
     token_header: None,
+    access_token_source: Some(AccessTokenRateLimitSource::TrustedAuthorizationBearer),
     rate: "1r/h".to_string(),
     burst: 1,
     max_buckets: 1,
@@ -435,6 +454,7 @@ fn local_rate_limit_monitor_mode_does_not_grow_after_bucket_cap() {
     key: RateLimitKey::AccessToken,
     routes: Vec::new(),
     token_header: None,
+    access_token_source: Some(AccessTokenRateLimitSource::TrustedAuthorizationBearer),
     rate: "1r/h".to_string(),
     burst: 1,
     max_buckets: 1,
@@ -462,6 +482,57 @@ fn local_rate_limit_monitor_mode_does_not_grow_after_bucket_cap() {
     None
   );
   assert_eq!(state.rates.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn shared_rate_limit_rejects_new_bucket_when_max_buckets_exhausted() {
+  let shared = SharedState::test_memory("shared-rate-bucket-cap");
+  let first = LimitState::new(Some(shared.clone()));
+  let second = LimitState::new(Some(shared));
+  let ip = "203.0.113.10".parse().unwrap();
+  let limit = [RateLimitConfig {
+    name: "per-token-shared".to_string(),
+    key: RateLimitKey::AccessToken,
+    routes: Vec::new(),
+    token_header: None,
+    access_token_source: Some(AccessTokenRateLimitSource::TrustedAuthorizationBearer),
+    rate: "1r/h".to_string(),
+    burst: 1,
+    max_buckets: 1,
+    mode: LimitMode::Enforcing,
+    status: 429,
+    ..rate_limit_config("per-token-shared", RateLimitKey::AccessToken)
+  }];
+  let mut token_a = HeaderMap::new();
+  token_a.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
+  let mut token_b = HeaderMap::new();
+  token_b.insert(AUTHORIZATION, "Bearer token-b".parse().unwrap());
+  let mut token_c = HeaderMap::new();
+  token_c.insert(AUTHORIZATION, "Bearer token-c".parse().unwrap());
+
+  assert_eq!(
+    first.check_route_rate_limits(
+      RateLimitContext::route(ip, "app", "/tokens", &token_a),
+      &limit
+    ),
+    None
+  );
+  assert_eq!(
+    second.check_route_rate_limits(
+      RateLimitContext::route(ip, "app", "/tokens", &token_b),
+      &limit
+    ),
+    Some(StatusCode::TOO_MANY_REQUESTS)
+  );
+
+  std::thread::sleep(Duration::from_millis(650));
+  assert_eq!(
+    second.check_route_rate_limits(
+      RateLimitContext::route(ip, "app", "/tokens", &token_c),
+      &limit
+    ),
+    Some(StatusCode::TOO_MANY_REQUESTS)
+  );
 }
 
 #[test]

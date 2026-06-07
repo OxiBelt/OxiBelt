@@ -5,19 +5,19 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-    AdminTransportMode, BufferingMode, CacheStore, ClientIdentityAsnFailurePolicy,
-    ClientIdentityAsnManagedStorage, ClientIdentityAsnMode, CompressionConfig, Config,
-    ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
-    CrliteMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
-    DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
-    ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
-    HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource, LoadBalancingAlgorithm,
-    MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode,
-    ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
-    RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol,
-    StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
-    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-    UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    AccessTokenRateLimitSource, AdminTransportMode, BufferingMode, CacheStore,
+    ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
+    CompressionConfig, Config, ConnectionLimitIdentityMode, CrliteCoveragePolicy,
+    CrliteFailurePolicy, CrliteManagedStorage, CrliteMode, DatabaseMitigationMode, DatabaseTlsMode,
+    DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
+    ExpectContinueMode, ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode,
+    GrpcRetryMode, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
+    LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode,
+    PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
+    RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
+    SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode,
+    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{PersonProofTokenBinding, WafMode};
@@ -2991,10 +2991,20 @@ fn rate_limit_config_parses_route_and_token_keys() {
 name = "route-token"
 key = "access-token-route"
 routes = ["app-root"]
+access_token_source = "trusted_header"
 token_header = "X-Api-Token"
 rate = "10r/m"
 burst = 10
 max_buckets = 256
+status = 429
+
+[[rate_limits]]
+name = "route-bearer"
+key = "access_token_route"
+routes = ["app-root"]
+access_token_source = "trusted_authorization_bearer"
+rate = "10r/m"
+burst = 10
 status = 429
 "#,
         common::minimal_config_toml(&cert_path, &key_path)
@@ -3008,7 +3018,17 @@ status = 429
         config.rate_limits[0].token_header.as_deref(),
         Some("X-Api-Token")
     );
+    assert_eq!(
+        config.rate_limits[0].access_token_source,
+        Some(AccessTokenRateLimitSource::TrustedHeader)
+    );
     assert_eq!(config.rate_limits[0].max_buckets, 256);
+    assert_eq!(config.rate_limits[1].key, RateLimitKey::AccessTokenRoute);
+    assert_eq!(
+        config.rate_limits[1].access_token_source,
+        Some(AccessTokenRateLimitSource::TrustedAuthorizationBearer)
+    );
+    assert_eq!(config.rate_limits[1].token_header.as_deref(), None);
 }
 
 #[test]
@@ -3220,6 +3240,79 @@ rate = "10r/m"
 }
 
 #[test]
+fn rate_limit_config_validates_access_token_source_trust_boundary() {
+    let cases = [
+        (
+            "missing-source",
+            r#"
+[[rate_limits]]
+name = "missing-source"
+key = "access_token_route"
+routes = ["app-root"]
+rate = "10r/m"
+"#,
+            "access_token keys require access_token_source",
+        ),
+        (
+            "header-without-token-header",
+            r#"
+[[rate_limits]]
+name = "header-without-token-header"
+key = "access_token_route"
+routes = ["app-root"]
+access_token_source = "trusted_header"
+rate = "10r/m"
+"#,
+            "trusted_header access_token_source requires token_header",
+        ),
+        (
+            "bearer-with-token-header",
+            r#"
+[[rate_limits]]
+name = "bearer-with-token-header"
+key = "access_token_route"
+routes = ["app-root"]
+access_token_source = "trusted_authorization_bearer"
+token_header = "X-Api-Token"
+rate = "10r/m"
+"#,
+            "trusted_authorization_bearer access_token_source must not set token_header",
+        ),
+        (
+            "source-on-client-ip",
+            r#"
+[[rate_limits]]
+name = "source-on-client-ip"
+key = "client_ip"
+access_token_source = "trusted_authorization_bearer"
+rate = "10r/m"
+"#,
+            "access_token_source requires an access_token key",
+        ),
+    ];
+
+    for (name, rate_limit, expected) in cases {
+        let temp_dir = common::TempDir::new(&format!("rate-limit-{name}"));
+        let (cert_path, key_path) =
+            common::create_self_signed_cert(temp_dir.path(), &format!("rate-limit-{name}"));
+        let raw = format!(
+            "{}\n{}",
+            common::minimal_config_toml(&cert_path, &key_path),
+            rate_limit
+        );
+
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid access token source should fail validation");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error for {name}: {error}"
+        );
+    }
+}
+
+#[test]
 fn rate_limit_config_rejects_unknown_route_filter() {
     let temp_dir = common::TempDir::new("rate-limit-unknown-route");
     let (cert_path, key_path) =
@@ -3356,6 +3449,7 @@ fn rate_limit_config_rejects_zero_max_buckets() {
 [[rate_limits]]
 name = "zero-buckets"
 key = "access_token"
+access_token_source = "trusted_authorization_bearer"
 rate = "10r/m"
 max_buckets = 0
 "#,

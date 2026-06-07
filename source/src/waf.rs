@@ -13,8 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 use crate::config::{
-  Config, LimitMode, MitigationFailurePolicy, RateLimitIdentityPart, RateLimitKey,
-  resolve_existing_local_config_file_path_with_logical,
+  AccessTokenRateLimitSource, Config, LimitMode, MitigationFailurePolicy, RateLimitIdentityPart,
+  RateLimitKey, resolve_existing_local_config_file_path_with_logical,
 };
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::limits::{LimitState, RateLimitCheck, RateLimitContext};
@@ -462,6 +462,8 @@ pub enum WafActionConfig {
     token_bindings: Vec<PersonProofTokenBinding>,
     #[serde(default)]
     token_header: Option<String>,
+    #[serde(default)]
+    access_token_source: Option<AccessTokenRateLimitSource>,
     rate: String,
     #[serde(default)]
     burst: u32,
@@ -1139,6 +1141,7 @@ fn validate_actions(
         identity_parts,
         token_bindings,
         token_header,
+        access_token_source,
         rate,
         max_buckets,
         status,
@@ -1158,12 +1161,6 @@ fn validate_actions(
         }
         validate_status(*status, &rule.name)?;
         if let Some(token_header) = token_header {
-          if !key.uses_access_token() {
-            bail!(
-              "WAF rule {} rate_limit token_header requires an access_token key",
-              rule.name
-            );
-          }
           validate_header_name(token_header)?;
         }
         crate::config::validate_rate_limit_identity_config(
@@ -1175,6 +1172,8 @@ fn validate_actions(
             ipv6_prefix_bits: *ipv6_prefix_bits,
             identity_parts,
             token_bindings,
+            token_header: token_header.as_deref(),
+            access_token_source: *access_token_source,
             waf_context: true,
           },
         )?;
@@ -2910,6 +2909,7 @@ fn apply_request_actions(
         identity_parts,
         token_bindings,
         token_header,
+        access_token_source,
         rate,
         burst,
         max_buckets,
@@ -2931,6 +2931,7 @@ fn apply_request_actions(
           name,
           key: *key,
           token_header: token_header.as_deref(),
+          access_token_source: *access_token_source,
           ipv4_prefix_bits: *ipv4_prefix_bits,
           ipv6_prefix_bits: *ipv6_prefix_bits,
           identity_parts,

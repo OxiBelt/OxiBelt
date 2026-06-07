@@ -121,6 +121,7 @@ when = "Request.Http.Path.endsWith('/waf-token-rate')"
 type = "rate_limit"
 name = "shared-waf-token-route"
 key = "access_token_route"
+access_token_source = "trusted_header"
 token_header = "X-Api-Token"
 rate = "1r/h"
 burst = 1
@@ -138,6 +139,10 @@ status = 429
 name = "shared-token-route"
 key = "access_token_route"
 routes = ["app-route"]
+# Fixture simulates a trusted auth layer injecting this header. Do not use arbitrary
+# public pre-auth bearer tokens as the only Sybil budget.
+access_token_source = "trusted_header"
+token_header = "X-Api-Token"
 rate = "1r/h"
 burst = 1
 status = 429

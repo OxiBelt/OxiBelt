@@ -586,6 +586,7 @@ const SHARED_STATE_REDIS_CHECKS: &str = r#"
 run_case_checks() {
   assert_redis_reload_generation
   assert_shared_rate_limit
+  assert_redis_shared_rate_limit_bucket_cap
   assert_shared_person_proof
   assert_shared_pool_health
   assert_shared_cache_uri_isolation
@@ -609,6 +610,15 @@ assert_shared_rate_limit() {
 
   second="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.10")"
   assert_response_jq "${second}" '.body == "rate limit exceeded"'
+}
+
+assert_redis_shared_rate_limit_bucket_cap() {
+  local first second
+  first="$(client_request_with_headers "example.test" "/app/redis-token-cap" 200 "GET" "" "X-Forwarded-For: 203.0.113.11" "X-Api-Token: redis-cap-token")"
+  assert_body_jq "${first}" '.path == "/origin/app/redis-token-cap"'
+
+  second="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/redis-token-cap" 429 "GET" "" "X-Forwarded-For: 203.0.113.12" "X-Api-Token: redis-cap-token-other")"
+  assert_response_jq "${second}" '.body == "redis waf token bucket cap exceeded"'
 }
 
 assert_shared_person_proof() {
@@ -765,18 +775,18 @@ assert_shared_rate_limit() {
 
 assert_shared_access_token_route_rate_limit() {
   local first second third count
-  first="$(client_request_with_headers "example.test" "/app/token-route-rate" 200 "GET" "" "X-Forwarded-For: 203.0.113.11" "Authorization: Bearer postgres-route-token")"
+  first="$(client_request_with_headers "example.test" "/app/token-route-rate" 200 "GET" "" "X-Forwarded-For: 203.0.113.11" "X-Api-Token: postgres-route-token")"
   assert_body_jq "${first}" '.path == "/origin/app/token-route-rate"'
 
-  second="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/token-route-rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.12" "Authorization: Bearer postgres-route-token")"
+  second="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/token-route-rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.12" "X-Api-Token: postgres-route-token")"
   assert_response_jq "${second}" '.body == "rate limit exceeded"'
 
-  third="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/token-route-rate" 200 "GET" "" "X-Forwarded-For: 203.0.113.13" "Authorization: Bearer postgres-route-token-other")"
-  assert_body_jq "${third}" '.path == "/origin/app/token-route-rate"'
+  third="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/token-route-rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.13" "X-Api-Token: postgres-route-token-other")"
+  assert_response_jq "${third}" '.body == "rate limit exceeded"'
 
   count="$(postgres_query "SELECT count(*) FROM oxibelt_shared_state WHERE key LIKE 'matrix-shared:rate:shared-token-route:access_token_route:token:%:app-route';")"
-  if (( count < 2 )); then
-    fail_with_diagnostics "expected PostgreSQL token route rate-limit rows, got ${count}"
+  if [[ "${count}" != "1" ]]; then
+    fail_with_diagnostics "expected one PostgreSQL token route rate-limit row after max_buckets cap, got ${count}"
   fi
 }
 
@@ -788,12 +798,12 @@ assert_shared_waf_access_token_rate_limit() {
   second="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/waf-token-rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.15" "X-Api-Token: postgres-waf-token")"
   assert_response_jq "${second}" '.body == "postgres waf rate limit exceeded"'
 
-  third="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/waf-token-rate" 200 "GET" "" "X-Forwarded-For: 203.0.113.16" "X-Api-Token: postgres-waf-token-other")"
-  assert_body_jq "${third}" '.path == "/origin/app/waf-token-rate"'
+  third="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/waf-token-rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.16" "X-Api-Token: postgres-waf-token-other")"
+  assert_response_jq "${third}" '.body == "postgres waf rate limit exceeded"'
 
   count="$(postgres_query "SELECT count(*) FROM oxibelt_shared_state WHERE key LIKE 'matrix-shared:rate:shared-waf-token-route:access_token_route:token:%:app-route';")"
-  if (( count < 2 )); then
-    fail_with_diagnostics "expected PostgreSQL WAF token rate-limit rows, got ${count}"
+  if [[ "${count}" != "1" ]]; then
+    fail_with_diagnostics "expected one PostgreSQL WAF token rate-limit row after max_buckets cap, got ${count}"
   fi
 }
 
@@ -3245,13 +3255,13 @@ run_case_checks() {
             r#"
 run_case_checks() {
   local first second repeated
-  first="$(client_request_with_headers "example.test" "/app/rate-a" 200 "GET" "" "Authorization: Bearer first-token")"
+  first="$(client_request_with_headers "example.test" "/app/rate-a" 200 "GET" "" "X-Api-Token: first-token")"
   assert_body_jq "${first}" '.path == "/origin/app/rate-a"'
 
-  second="$(client_request_with_headers "example.test" "/app/rate-b" 429 "GET" "" "Authorization: Bearer second-token")"
+  second="$(client_request_with_headers "example.test" "/app/rate-b" 429 "GET" "" "X-Api-Token: second-token")"
   assert_response_jq "${second}" '.body == "rate limit exceeded"'
 
-  repeated="$(client_request_with_headers "example.test" "/app/rate-a" 429 "GET" "" "Authorization: Bearer first-token")"
+  repeated="$(client_request_with_headers "example.test" "/app/rate-a" 429 "GET" "" "X-Api-Token: first-token")"
   assert_response_jq "${repeated}" '.body == "rate limit exceeded"'
 }
 "#,

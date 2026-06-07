@@ -1111,12 +1111,6 @@ impl Config {
       http::StatusCode::from_u16(rate_limit.status)
         .with_context(|| format!("rate limit {} has invalid status", rate_limit.name))?;
       if let Some(token_header) = &rate_limit.token_header {
-        if !rate_limit.key.uses_access_token() {
-          bail!(
-            "rate limit {} token_header requires an access_token key",
-            rate_limit.name
-          );
-        }
         http::header::HeaderName::from_bytes(token_header.as_bytes())
           .with_context(|| format!("rate limit {} has invalid token_header", rate_limit.name))?;
       }
@@ -1128,6 +1122,8 @@ impl Config {
         ipv6_prefix_bits: rate_limit.ipv6_prefix_bits,
         identity_parts: &rate_limit.identity_parts,
         token_bindings: &rate_limit.token_bindings,
+        token_header: rate_limit.token_header.as_deref(),
+        access_token_source: rate_limit.access_token_source,
         waf_context: false,
       })?;
       let mut route_filter_names = HashSet::new();
@@ -3083,6 +3079,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "tls13_ticket_count",
     ][..],
     "rate_limits" => &[
+      "access_token_source",
       "burst",
       "identity_parts",
       "ipv4_prefix_bits",

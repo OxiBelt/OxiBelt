@@ -103,6 +103,24 @@ clearance.cookie.key = "__matrix_person_proof"
 token_bindings = ["route"]
 single_use = true
 
+[[waf.rules]]
+name = "redis-waf-token-cap"
+phase = "request"
+priority = 20
+when = "Request.Http.Path.endsWith('/redis-token-cap')"
+
+[[waf.rules.actions]]
+type = "rate_limit"
+name = "redis-waf-token-cap"
+key = "access_token_route"
+access_token_source = "trusted_header"
+token_header = "X-Api-Token"
+rate = "10r/h"
+burst = 10
+max_buckets = 1
+status = 429
+body = "redis waf token bucket cap exceeded"
+
 [[rate_limits]]
 name = "shared-rate"
 key = "client_ip"

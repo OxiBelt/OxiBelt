@@ -26,6 +26,7 @@ use crate::limits::ParsedRate;
 
 mod cache_store;
 mod feature_flags;
+mod rate_limits;
 mod sticky_sessions;
 
 pub use cache_store::{SharedCacheLock, shared_header_values};
@@ -34,7 +35,6 @@ pub use cache_store::{SharedCacheLock, shared_header_values};
 pub struct SharedState {
   namespace: Arc<str>,
   instance_id: Arc<str>,
-  operation_timeout: Duration,
   connection_lease: Duration,
   cache_lock: Duration,
   cache_chunk_bytes: usize,
@@ -72,6 +72,7 @@ struct PostgresBackend {
 struct MemoryBackend {
   values: Arc<Mutex<HashMap<String, MemoryValue>>>,
   counters: Arc<Mutex<HashMap<String, MemoryCounter>>>,
+  rate_indexes: Arc<Mutex<HashMap<String, HashMap<String, i64>>>>,
 }
 
 #[cfg(test)]
@@ -93,6 +94,13 @@ pub struct ConnectionScope<'a> {
   pub key: &'a str,
   pub limit: usize,
   pub status: StatusCode,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SharedRateLimitOutcome {
+  Allowed,
+  RateLimited,
+  BucketCapExceeded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,7 +193,6 @@ impl SharedState {
     let state = Arc::new(Self {
       namespace: Arc::from(shared.namespace.as_str()),
       instance_id: Arc::from(instance_id),
-      operation_timeout: Duration::from_millis(shared.operation_timeout_ms),
       connection_lease: Duration::from_millis(shared.connection_lease_ms),
       cache_lock: Duration::from_millis(shared.cache_lock_ms),
       cache_chunk_bytes: config.cache.stream_chunk_bytes,
@@ -207,7 +214,6 @@ impl SharedState {
     Arc::new(Self {
       namespace: Arc::from(namespace),
       instance_id: Arc::from("test-instance"),
-      operation_timeout: Duration::from_millis(500),
       connection_lease: Duration::from_secs(30),
       cache_lock: Duration::from_secs(5),
       cache_chunk_bytes: 1_048_576,
@@ -251,16 +257,20 @@ impl SharedState {
     key: &str,
     rate: ParsedRate,
     burst: u32,
-  ) -> anyhow::Result<bool> {
+    max_buckets: usize,
+  ) -> anyhow::Result<SharedRateLimitOutcome> {
     let Some(backend) = &self.rate_limits else {
-      return Ok(true);
+      return Ok(SharedRateLimitOutcome::Allowed);
     };
-    let key = self.key(&format!("rate:{name}:{key}"));
+    let bucket_key = self.key(&format!("rate:{name}:{key}"));
+    let index_key = self.key(&format!("rate-index:{name}"));
     backend.rate_take(
-      &key,
+      &index_key,
+      &bucket_key,
       rate.per_second(),
       burst.max(1),
-      self.operation_timeout,
+      max_buckets.max(1),
+      rate_bucket_ttl(rate, burst),
     )
   }
 
@@ -269,16 +279,16 @@ impl SharedState {
     bucket: &str,
     rate: ParsedRate,
     burst: u32,
-  ) -> anyhow::Result<bool> {
+  ) -> anyhow::Result<SharedRateLimitOutcome> {
     let Some(backend) = &self.rate_limits else {
-      return Ok(true);
+      return Ok(SharedRateLimitOutcome::Allowed);
     };
     let key = self.key(&format!("rate:{bucket}"));
-    backend.rate_take(
+    backend.rate_take_bucket(
       &key,
       rate.per_second(),
       burst.max(1),
-      self.operation_timeout,
+      rate_bucket_ttl(rate, burst),
     )
   }
 
@@ -435,16 +445,54 @@ impl Backend {
 
   fn rate_take(
     &self,
+    limit_name: &str,
     key: &str,
     rate_per_second: f64,
     burst: u32,
-    timeout: Duration,
-  ) -> anyhow::Result<bool> {
+    max_buckets: usize,
+    bucket_ttl: Duration,
+  ) -> anyhow::Result<SharedRateLimitOutcome> {
     match self {
-      Self::Redis(redis) => redis.rate_take(key, rate_per_second, burst, timeout),
-      Self::Postgres(pg) => pg.rate_take(key, rate_per_second, burst),
+      Self::Redis(redis) => redis.rate_take(
+        limit_name,
+        key,
+        rate_per_second,
+        burst,
+        max_buckets,
+        bucket_ttl,
+      ),
+      Self::Postgres(pg) => pg.rate_take(
+        limit_name,
+        key,
+        rate_per_second,
+        burst,
+        max_buckets,
+        bucket_ttl,
+      ),
       #[cfg(test)]
-      Self::Memory(memory) => memory.rate_take(key, rate_per_second, burst, timeout),
+      Self::Memory(memory) => memory.rate_take(
+        limit_name,
+        key,
+        rate_per_second,
+        burst,
+        max_buckets,
+        bucket_ttl,
+      ),
+    }
+  }
+
+  fn rate_take_bucket(
+    &self,
+    key: &str,
+    rate_per_second: f64,
+    burst: u32,
+    bucket_ttl: Duration,
+  ) -> anyhow::Result<SharedRateLimitOutcome> {
+    match self {
+      Self::Redis(redis) => redis.rate_take_bucket(key, rate_per_second, burst, bucket_ttl),
+      Self::Postgres(pg) => pg.rate_take_bucket(key, rate_per_second, burst, bucket_ttl),
+      #[cfg(test)]
+      Self::Memory(memory) => memory.rate_take_bucket(key, rate_per_second, burst, bucket_ttl),
     }
   }
 
@@ -634,32 +682,6 @@ impl Backend {
 
 #[cfg(test)]
 impl MemoryBackend {
-  fn rate_take(&self, key: &str, rate: f64, burst: u32, timeout: Duration) -> anyhow::Result<bool> {
-    let mut values = self
-      .values
-      .lock()
-      .expect("memory shared state lock poisoned");
-    let now = now_unix_ms();
-    purge_expired_values(&mut values, now);
-    let (mut tokens, last) = values
-      .get(key)
-      .and_then(|value| parse_rate_bucket(&value.value))
-      .unwrap_or((f64::from(burst), now));
-    tokens = (tokens + ((now - last).max(0) as f64 / 1000.0) * rate).min(f64::from(burst));
-    let allowed = tokens >= 1.0;
-    if allowed {
-      tokens -= 1.0;
-    }
-    values.insert(
-      key.to_string(),
-      MemoryValue {
-        value: format!("{tokens}:{now}").into_bytes(),
-        expires_at_ms: Some(now + timeout.as_millis().min(i64::MAX as u128) as i64),
-      },
-    );
-    Ok(allowed)
-  }
-
   fn connection_acquire(
     &self,
     keys: &[String],
@@ -715,17 +737,19 @@ impl MemoryBackend {
     SystemRandom::new()
       .fill(&mut random)
       .map_err(|_| anyhow!("failed to generate shared state random bytes"))?;
-    let _ = self.put_if_absent(key, &random, ttl)?;
     let mut values = self
       .values
       .lock()
       .expect("memory shared state lock poisoned");
     let now = now_unix_ms();
     purge_expired_values(&mut values, now);
-    values
-      .get(key)
-      .map(|value| value.value.clone())
-      .ok_or_else(|| anyhow!("memory shared state key {key} did not contain bytes"))
+    let value = values
+      .entry(key.to_string())
+      .or_insert_with(|| MemoryValue {
+        value: random,
+        expires_at_ms: ttl.map(|ttl| now + ttl.as_millis().min(i64::MAX as u128) as i64),
+      });
+    Ok(value.value.clone())
   }
 
   fn put_if_absent(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> anyhow::Result<bool> {
@@ -759,7 +783,6 @@ impl MemoryBackend {
   }
 
   fn put(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> anyhow::Result<()> {
-    let now = now_unix_ms();
     self
       .values
       .lock()
@@ -768,7 +791,8 @@ impl MemoryBackend {
         key.to_string(),
         MemoryValue {
           value: value.to_vec(),
-          expires_at_ms: ttl.map(|ttl| now + ttl.as_millis().min(i64::MAX as u128) as i64),
+          expires_at_ms: ttl
+            .map(|ttl| now_unix_ms() + ttl.as_millis().min(i64::MAX as u128) as i64),
         },
       );
     Ok(())
@@ -799,54 +823,34 @@ impl MemoryBackend {
       .expect("memory shared state lock poisoned");
     if values
       .get(key)
-      .is_some_and(|value| value.value == token.as_bytes())
+      .map(|value| value.value == token.as_bytes())
+      .unwrap_or(false)
     {
       values.remove(key);
     }
     Ok(())
   }
 
-  fn health_get(&self, key: &str) -> anyhow::Result<Option<HealthRecord>> {
+  fn update_bytes<F>(&self, key: &str, ttl: Option<Duration>, update: F) -> anyhow::Result<Vec<u8>>
+  where
+    F: FnOnce(Option<&[u8]>) -> anyhow::Result<Vec<u8>>,
+  {
     let mut values = self
       .values
       .lock()
       .expect("memory shared state lock poisoned");
     let now = now_unix_ms();
     purge_expired_values(&mut values, now);
-    values
-      .get(key)
-      .map(|value| serde_json::from_slice(&value.value).map_err(Into::into))
-      .transpose()
-  }
-
-  fn health_report(
-    &self,
-    key: &str,
-    success: bool,
-    enabled: bool,
-    healthy_threshold: u32,
-    unhealthy_threshold: u32,
-  ) -> anyhow::Result<bool> {
-    let mut record = self.health_get(key)?.unwrap_or_default();
-    if success {
-      record.consecutive_failures = 0;
-      record.consecutive_successes = record.consecutive_successes.saturating_add(1);
-      if !enabled || record.consecutive_successes >= healthy_threshold {
-        record.healthy = true;
-      }
-    } else {
-      record.consecutive_successes = 0;
-      record.consecutive_failures = record.consecutive_failures.saturating_add(1);
-      if enabled && record.consecutive_failures >= unhealthy_threshold {
-        record.healthy = false;
-      }
-    }
-    self.put(
-      key,
-      &serde_json::to_vec(&record)?,
-      Some(Duration::from_secs(3600)),
-    )?;
-    Ok(record.healthy)
+    let current = values.get(key).map(|value| value.value.as_slice());
+    let next = update(current)?;
+    values.insert(
+      key.to_string(),
+      MemoryValue {
+        value: next.clone(),
+        expires_at_ms: ttl.map(|ttl| now + ttl.as_millis().min(i64::MAX as u128) as i64),
+      },
+    );
+    Ok(next)
   }
 
   fn counter_get(&self, key: &str) -> anyhow::Result<usize> {
@@ -858,9 +862,8 @@ impl MemoryBackend {
     Ok(
       counters
         .get(key)
-        .map(|item| item.counter)
-        .unwrap_or(0)
-        .max(0) as usize,
+        .map(|item| item.counter.max(0) as usize)
+        .unwrap_or(0),
     )
   }
 
@@ -880,6 +883,49 @@ impl MemoryBackend {
       entry.expires_at_ms = Some(now + ttl.as_millis().min(i64::MAX as u128) as i64);
     }
     Ok(entry.counter as usize)
+  }
+
+  fn health_get(&self, key: &str) -> anyhow::Result<Option<HealthRecord>> {
+    Ok(
+      self
+        .get(key)?
+        .and_then(|value| serde_json::from_slice(&value).ok()),
+    )
+  }
+
+  fn health_report(
+    &self,
+    key: &str,
+    success: bool,
+    enabled: bool,
+    healthy_threshold: u32,
+    unhealthy_threshold: u32,
+  ) -> anyhow::Result<bool> {
+    let value = self.update_bytes(key, None, |current| {
+      let mut record: HealthRecord = current
+        .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        .unwrap_or_default();
+      if !enabled {
+        record.healthy = true;
+        record.consecutive_successes = 0;
+        record.consecutive_failures = 0;
+      } else if success {
+        record.consecutive_successes = record.consecutive_successes.saturating_add(1);
+        record.consecutive_failures = 0;
+        if record.consecutive_successes >= healthy_threshold.max(1) {
+          record.healthy = true;
+        }
+      } else {
+        record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+        record.consecutive_successes = 0;
+        if record.consecutive_failures >= unhealthy_threshold.max(1) {
+          record.healthy = false;
+        }
+      }
+      serde_json::to_vec(&record).map_err(Into::into)
+    })?;
+    let record: HealthRecord = serde_json::from_slice(&value)?;
+    Ok(record.healthy)
   }
 
   fn cache_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, SharedCacheEntry)>> {
@@ -954,48 +1000,6 @@ impl RedisBackend {
 
     write_resp_command(&mut stream, args)?;
     read_resp(&mut BufReader::new(stream)).context("failed to read Redis response")
-  }
-
-  fn rate_take(&self, key: &str, rate: f64, burst: u32, timeout: Duration) -> anyhow::Result<bool> {
-    let script = r#"
-local raw = redis.call('GET', KEYS[1])
-local now = tonumber(ARGV[1])
-local rate = tonumber(ARGV[2])
-local burst = tonumber(ARGV[3])
-local ttl = tonumber(ARGV[4])
-local tokens = burst
-local last = now
-if raw then
-  local sep = string.find(raw, ':')
-  if sep then
-    tokens = tonumber(string.sub(raw, 1, sep - 1)) or burst
-    last = tonumber(string.sub(raw, sep + 1)) or now
-  end
-end
-tokens = math.min(burst, tokens + ((now - last) / 1000.0) * rate)
-if tokens < 1.0 then
-  redis.call('PSETEX', KEYS[1], ttl, tostring(tokens) .. ':' .. tostring(now))
-  return 0
-end
-tokens = tokens - 1.0
-redis.call('PSETEX', KEYS[1], ttl, tostring(tokens) .. ':' .. tostring(now))
-return 1
-"#;
-    let ttl = timeout
-      .max(Duration::from_secs(1))
-      .as_millis()
-      .min(i64::MAX as u128) as i64;
-    let resp = self.command(&[
-      b"EVAL".to_vec(),
-      script.as_bytes().to_vec(),
-      b"1".to_vec(),
-      key.as_bytes().to_vec(),
-      now_unix_ms().to_string().into_bytes(),
-      rate.to_string().into_bytes(),
-      burst.to_string().into_bytes(),
-      ttl.to_string().into_bytes(),
-    ])?;
-    Ok(resp.into_i64()? == 1)
   }
 
   fn connection_acquire(
@@ -1269,41 +1273,6 @@ return 1
 }
 
 impl PostgresBackend {
-  fn rate_take(&self, key: &str, rate: f64, burst: u32) -> anyhow::Result<bool> {
-    block_on_timeout(self.timeout, async {
-      let mut tx = self.pool.begin().await?;
-      let now = now_unix_ms();
-      let raw: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT value FROM oxibelt_shared_state WHERE key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2) FOR UPDATE",
-      )
-      .bind(key)
-      .bind(now)
-      .fetch_optional(&mut *tx)
-      .await?;
-      let (mut tokens, last) = raw
-        .as_deref()
-        .and_then(parse_rate_bucket)
-        .unwrap_or((f64::from(burst), now));
-      tokens = (tokens + ((now - last).max(0) as f64 / 1000.0) * rate).min(f64::from(burst));
-      let allowed = tokens >= 1.0;
-      if allowed {
-        tokens -= 1.0;
-      }
-      let value = format!("{tokens}:{now}").into_bytes();
-      sqlx::query(
-        "INSERT INTO oxibelt_shared_state (key, value, expires_at_ms) VALUES ($1, $2, $3)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at_ms = EXCLUDED.expires_at_ms",
-      )
-      .bind(key)
-      .bind(value)
-      .bind(now + 60_000)
-      .execute(&mut *tx)
-      .await?;
-      tx.commit().await?;
-      Ok(allowed)
-    })
-  }
-
   fn connection_acquire(
     &self,
     keys: &[String],
@@ -1621,6 +1590,29 @@ async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
   )
   .execute(pool)
   .await?;
+  sqlx::query(
+    "CREATE TABLE IF NOT EXISTS oxibelt_shared_rate_limit_locks (
+       limit_name text PRIMARY KEY
+     )",
+  )
+  .execute(pool)
+  .await?;
+  sqlx::query(
+    "CREATE TABLE IF NOT EXISTS oxibelt_shared_rate_buckets (
+       limit_name text NOT NULL,
+       bucket_key text NOT NULL,
+       expires_at_ms bigint NOT NULL,
+       PRIMARY KEY (limit_name, bucket_key)
+     )",
+  )
+  .execute(pool)
+  .await?;
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS oxibelt_shared_rate_buckets_expires
+     ON oxibelt_shared_rate_buckets (limit_name, expires_at_ms)",
+  )
+  .execute(pool)
+  .await?;
   Ok(())
 }
 
@@ -1742,6 +1734,17 @@ fn parse_rate_bucket(raw: &[u8]) -> Option<(f64, i64)> {
 fn ttl_from_expires_ms(expires_at_ms: i64) -> Option<Duration> {
   let now = now_unix_ms();
   (expires_at_ms > now).then_some(Duration::from_millis((expires_at_ms - now) as u64))
+}
+
+fn rate_bucket_ttl(rate: ParsedRate, burst: u32) -> Duration {
+  let seconds = f64::from(burst.max(1)) / rate.per_second();
+  let millis = (seconds * 1000.0).ceil().max(1000.0);
+  let millis = if millis.is_finite() && millis < i64::MAX as f64 {
+    millis as u64
+  } else {
+    i64::MAX as u64
+  };
+  Duration::from_millis(millis)
 }
 
 pub fn now_unix_ms() -> i64 {

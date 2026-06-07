@@ -38,6 +38,10 @@ max_http_version = "h2"
 name = "token-path-cap"
 key = "access_token_path"
 routes = ["main-route"]
+# Fixture simulates a trusted auth layer injecting this header. Do not use arbitrary
+# public pre-auth bearer tokens as the only Sybil budget.
+access_token_source = "trusted_header"
+token_header = "X-Api-Token"
 rate = "1r/h"
 burst = 1
 max_buckets = 1

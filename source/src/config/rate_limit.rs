@@ -23,6 +23,8 @@ pub struct RateLimitConfig {
   pub routes: Vec<String>,
   #[serde(default)]
   pub token_header: Option<String>,
+  #[serde(default)]
+  pub access_token_source: Option<AccessTokenRateLimitSource>,
   pub rate: String,
   #[serde(default)]
   pub burst: u32,
@@ -32,6 +34,13 @@ pub struct RateLimitConfig {
   pub mode: LimitMode,
   #[serde(default = "default_rate_limit_status")]
   pub status: u16,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessTokenRateLimitSource {
+  TrustedAuthorizationBearer,
+  TrustedHeader,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -130,6 +139,8 @@ pub(crate) struct RateLimitIdentityValidation<'a> {
   pub(crate) ipv6_prefix_bits: u8,
   pub(crate) identity_parts: &'a [RateLimitIdentityPart],
   pub(crate) token_bindings: &'a [PersonProofTokenBinding],
+  pub(crate) token_header: Option<&'a str>,
+  pub(crate) access_token_source: Option<AccessTokenRateLimitSource>,
   pub(crate) waf_context: bool,
 }
 
@@ -144,11 +155,14 @@ pub(crate) fn validate_rate_limit_identity_config(
     ipv6_prefix_bits,
     identity_parts,
     token_bindings,
+    token_header,
+    access_token_source,
     waf_context,
   } = request;
   if !waf_context && !key.supports_top_level() {
     bail!("{label} {name} key {key:?} is only valid in WAF rate_limit actions");
   }
+  validate_access_token_source(label, name, key, token_header, access_token_source)?;
   if ipv4_prefix_bits > 32 {
     bail!("{label} {name} ipv4_prefix_bits must be between 0 and 32");
   }
@@ -203,6 +217,40 @@ pub(crate) fn validate_rate_limit_identity_config(
         );
       }
     }
+  }
+  Ok(())
+}
+
+fn validate_access_token_source(
+  label: &str,
+  name: &str,
+  key: RateLimitKey,
+  token_header: Option<&str>,
+  access_token_source: Option<AccessTokenRateLimitSource>,
+) -> anyhow::Result<()> {
+  if !key.uses_access_token() {
+    if token_header.is_some() {
+      bail!("{label} {name} token_header requires an access_token key");
+    }
+    if access_token_source.is_some() {
+      bail!("{label} {name} access_token_source requires an access_token key");
+    }
+    return Ok(());
+  }
+  match access_token_source {
+    Some(AccessTokenRateLimitSource::TrustedAuthorizationBearer) => {
+      if token_header.is_some() {
+        bail!(
+          "{label} {name} trusted_authorization_bearer access_token_source must not set token_header"
+        );
+      }
+    }
+    Some(AccessTokenRateLimitSource::TrustedHeader) => {
+      if token_header.is_none() {
+        bail!("{label} {name} trusted_header access_token_source requires token_header");
+      }
+    }
+    None => bail!("{label} {name} access_token keys require access_token_source"),
   }
   Ok(())
 }
