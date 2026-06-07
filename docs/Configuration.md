@@ -691,7 +691,7 @@ source_urls = [
 ]
 ```
 
-ASN lookup is opt-in. `mode = "local"` loads an operator-supplied `prefix_asn_csv` file at startup; `mode = "managed"` downloads the same file shape from an HTTPS `source_url`, verifies size and optional SHA-256 pinning, writes disk/tmpfs cache entries atomically when configured, and refreshes in the background. `failure_policy = "fail_closed"` rejects startup or reload when the configured database cannot be loaded. `degraded_null` starts with null ASN lookups and reports degraded runtime status.
+ASN lookup is opt-in. `mode = "local"` loads an operator-supplied `prefix_asn_csv` file at startup; `mode = "managed"` downloads the same file shape from an HTTPS `source_url`, verifies size and optional SHA-256 pinning, writes disk/tmpfs cache entries atomically when configured, and refreshes in the background. When `database_sha256` is configured, OxiBelt verifies it before parsing local files, managed downloads, and managed disk/tmpfs cache entries. `failure_policy = "fail_closed"` rejects startup or reload when the configured database cannot be loaded. `degraded_null` starts with null ASN lookups and reports degraded runtime status.
 
 `prefix_asn_csv` accepts `prefix,asn` rows, optional `prefix,asn` header, blank lines, and `#` comments. `asn` may be `64500` or `AS64500`. Prefixes are canonicalized and longest-prefix match wins for both IPv4 and IPv6. `Request.Client.Asn` and ASN rate-limit keys use this runtime table; `Request.Client.GeoCountry` remains `null`.
 

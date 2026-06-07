@@ -422,6 +422,7 @@ fn load_cached_database(config: &ClientIdentityAsnConfig) -> anyhow::Result<Cach
     bail!("asn_managed_cache_size_mismatch");
   }
   verify_sha256(&metadata.sha256, &bytes).context("asn_managed_cache_hash_mismatch")?;
+  verify_config_sha256(config, &bytes)?;
   Ok(CachedDatabase {
     stale: cache_is_stale(metadata.fetched_at, config.max_database_age_seconds),
     bytes,
