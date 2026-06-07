@@ -43,6 +43,7 @@ mod person_proof_api;
 mod person_proof_config;
 mod person_proof_dynamic;
 mod person_proof_policy;
+mod person_proof_request;
 mod person_proof_v2;
 mod plan;
 mod request_header_mutation;
@@ -91,6 +92,7 @@ pub use person_proof_config::{
   WafPersonProofConfig,
 };
 use person_proof_policy::PersonProofPolicyState;
+pub use person_proof_request::EvaluatedPersonProofRequest;
 pub use person_proof_v2::PersonProofProviderChallenge;
 pub use plan::BodyNeed;
 use plan::{WafRoutePlan, phase_plan};
@@ -1683,30 +1685,6 @@ impl WafEngine {
     person_proof_api::openapi_document(&self.person_proof, openapi_path)
   }
 
-  pub fn evaluate_dynamic_person_proof_challenge(
-    &self,
-    input: WafRequestInput<'_>,
-    status: StatusCode,
-  ) -> anyhow::Result<RequestWafDecision> {
-    let mut decision = RequestWafDecision::default();
-    let person_proof = self.person_proof.evaluate_request(input);
-    if person_proof.rate_limited {
-      return Ok(person_proof_rate_limited_decision());
-    }
-    let policy = person_proof_dynamic::challenge_policy(&self.person_proof, status)?;
-    if person_proof.state == PersonProofState::Valid
-      && person_proof.policy_key.as_deref() == Some(policy.key.as_str())
-    {
-      let mutation = self
-        .person_proof
-        .clearance_response_mutation(&person_proof)?;
-      decision.response_header_mutations.extend(mutation);
-      return Ok(decision);
-    }
-    decision.terminal = Some(self.person_proof.issue_challenge(input, policy)?);
-    Ok(decision)
-  }
-
   pub fn begin_person_proof_session_challenge(
     &self,
     input: WafRequestInput<'_>,
@@ -1766,44 +1744,6 @@ impl WafEngine {
 
   pub fn requires_stream_inspection(&self, route_name: &str) -> bool {
     self.route_plan(route_name).stream().enabled()
-  }
-
-  pub fn evaluate_request(&self, input: WafRequestInput<'_>) -> RequestWafDecision {
-    if !self.enabled || !self.route_plan(input.route_name).request().enabled() {
-      return RequestWafDecision::default();
-    }
-
-    if self.duplicate_metadata_policy == WafDuplicateMetadataPolicy::RejectRequest
-      && request_metadata_has_duplicates(input)
-    {
-      return RequestWafDecision {
-        terminal: Some(WafTerminalResponse::new(
-          StatusCode::BAD_REQUEST,
-          "duplicate request metadata".to_string(),
-        )),
-        ..RequestWafDecision::default()
-      };
-    }
-
-    match self.evaluate_request_inner(input) {
-      Ok(decision) => decision,
-      Err(error) => match self.fail_policy {
-        WafFailPolicy::Open => {
-          warn!(error = %error, "WAF request evaluation failed open");
-          RequestWafDecision::default()
-        }
-        WafFailPolicy::Closed => {
-          warn!(error = %error, "WAF request evaluation failed closed");
-          RequestWafDecision {
-            terminal: Some(WafTerminalResponse::new(
-              StatusCode::FORBIDDEN,
-              "WAF evaluation failed".to_string(),
-            )),
-            ..RequestWafDecision::default()
-          }
-        }
-      },
-    }
   }
 
   pub fn evaluate_response(&self, input: WafResponseInput<'_>) -> ResponseWafDecision {
@@ -1893,10 +1833,14 @@ impl WafEngine {
   fn evaluate_request_inner(
     &self,
     input: WafRequestInput<'_>,
+    evaluated_person_proof: Option<&PersonProofRequestStatus>,
+    suppress_clearance_mutation: bool,
   ) -> anyhow::Result<RequestWafDecision> {
     let mut decision = RequestWafDecision::default();
     let mut active_tags = input.tags.to_owned();
-    let person_proof = self.person_proof.evaluate_request(input);
+    let person_proof = evaluated_person_proof
+      .cloned()
+      .unwrap_or_else(|| self.person_proof.evaluate_request(input));
     if person_proof.rate_limited {
       return Ok(person_proof_rate_limited_decision());
     }
@@ -1908,9 +1852,10 @@ impl WafEngine {
         "valid".to_string(),
       );
     }
-    if let Some(mutation) = self
-      .person_proof
-      .clearance_response_mutation(&person_proof)?
+    if !suppress_clearance_mutation
+      && let Some(mutation) = self
+        .person_proof
+        .clearance_response_mutation(&person_proof)?
     {
       decision.response_header_mutations.push(mutation);
     }

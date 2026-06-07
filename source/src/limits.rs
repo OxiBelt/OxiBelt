@@ -9,7 +9,6 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use http::header::{AUTHORIZATION, HeaderName};
 use http::{HeaderMap, StatusCode};
-use ring::digest;
 
 use crate::config::{
   ConnectionLimitConfig, LimitMode, LimitsConfig, RateLimitConfig, RateLimitIdentityPart,
@@ -20,9 +19,12 @@ use crate::waf::PersonProofTokenBinding;
 
 #[path = "limits/context.rs"]
 mod context;
+#[path = "limits/sybil_identity.rs"]
+pub(crate) mod sybil_identity;
 #[path = "limits/webtransport.rs"]
 mod webtransport;
 pub use context::ConnectionLimitContext;
+use sybil_identity::{SybilIdentityContext, SybilIdentitySpec};
 
 pub const DEFAULT_RATE_LIMIT_MAX_BUCKETS: usize = 16_384;
 
@@ -632,6 +634,8 @@ fn rate_limit_status(status: u16) -> StatusCode {
 fn rate_limit_key(context: RateLimitContext<'_>, check: &RateLimitCheck<'_>) -> String {
   let route = context.route_name.unwrap_or_default();
   let path = context.path.unwrap_or_default();
+  let identity_context = SybilIdentityContext::from(context);
+  let identity_spec = SybilIdentitySpec::from(check);
   match check.key {
     RateLimitKey::Global => String::new(),
     RateLimitKey::Route => format!("route:{route}"),
@@ -654,50 +658,64 @@ fn rate_limit_key(context: RateLimitContext<'_>, check: &RateLimitCheck<'_>) -> 
     ),
     RateLimitKey::ClientIpPrefix => format!(
       "client_ip_prefix:{}",
-      client_ip_prefix_bucket_identity(context, check)
+      sybil_identity::client_ip_prefix_identity(identity_context, identity_spec)
     ),
     RateLimitKey::ClientIpPrefixRoute => format!(
       "client_ip_prefix_route:{}:{route}",
-      client_ip_prefix_bucket_identity(context, check)
+      sybil_identity::client_ip_prefix_identity(identity_context, identity_spec)
     ),
     RateLimitKey::ClientIpPrefixPath => format!(
       "client_ip_prefix_path:{}:{path}",
-      client_ip_prefix_bucket_identity(context, check)
+      sybil_identity::client_ip_prefix_identity(identity_context, identity_spec)
     ),
     RateLimitKey::TlsFingerprint => format!(
       "tls_fingerprint:{}",
-      tls_fingerprint_bucket_identity(context)
+      sybil_identity::tls_fingerprint_identity(identity_context)
+        .unwrap_or_else(|| sybil_identity::fallback_ip_identity(identity_context))
     ),
     RateLimitKey::TlsFingerprintRoute => format!(
       "tls_fingerprint_route:{}:{route}",
-      tls_fingerprint_bucket_identity(context)
+      sybil_identity::tls_fingerprint_identity(identity_context)
+        .unwrap_or_else(|| sybil_identity::fallback_ip_identity(identity_context))
     ),
     RateLimitKey::TokenBindingHash => format!(
       "token_binding_hash:{}",
-      token_binding_hash_bucket_identity(context, check)
+      sybil_identity::token_binding_hash_identity(identity_context, identity_spec)
+        .unwrap_or_else(|| sybil_identity::fallback_ip_identity(identity_context))
     ),
     RateLimitKey::TokenBindingHashRoute => format!(
       "token_binding_hash_route:{}:{route}",
-      token_binding_hash_bucket_identity(context, check)
+      sybil_identity::token_binding_hash_identity(identity_context, identity_spec)
+        .unwrap_or_else(|| sybil_identity::fallback_ip_identity(identity_context))
     ),
     RateLimitKey::PersonProofClearance => format!(
       "person_proof_clearance:{}",
-      person_proof_clearance_bucket_identity(context)
+      sybil_identity::person_proof_clearance_identity(identity_context)
+        .unwrap_or_else(|| sybil_identity::fallback_ip_identity(identity_context))
     ),
     RateLimitKey::PersonProofClearanceRoute => format!(
       "person_proof_clearance_route:{}:{route}",
-      person_proof_clearance_bucket_identity(context)
+      sybil_identity::person_proof_clearance_identity(identity_context)
+        .unwrap_or_else(|| sybil_identity::fallback_ip_identity(identity_context))
     ),
     RateLimitKey::CompositeClient => format!(
       "composite_client:{}",
-      composite_client_bucket_identity(context, check)
+      sybil_identity::composite_client_rate_limit_identity(identity_context, identity_spec)
     ),
     RateLimitKey::CompositeClientRoute => format!(
       "composite_client_route:{}:{route}",
-      composite_client_bucket_identity(context, check)
+      sybil_identity::composite_client_rate_limit_identity(identity_context, identity_spec)
     ),
-    RateLimitKey::Asn => format!("asn:{}", asn_bucket_identity(context)),
-    RateLimitKey::AsnRoute => format!("asn_route:{}:{route}", asn_bucket_identity(context)),
+    RateLimitKey::Asn => format!(
+      "asn:{}",
+      sybil_identity::asn_identity(identity_context)
+        .unwrap_or_else(|| sybil_identity::fallback_ip_identity(identity_context))
+    ),
+    RateLimitKey::AsnRoute => format!(
+      "asn_route:{}:{route}",
+      sybil_identity::asn_identity(identity_context)
+        .unwrap_or_else(|| sybil_identity::fallback_ip_identity(identity_context))
+    ),
   }
 }
 
@@ -708,146 +726,8 @@ fn access_token_bucket_identity(
   context
     .headers
     .and_then(|headers| access_token(headers, token_header))
-    .map(|token| format!("token:{}", sha256_hex(token.as_bytes())))
+    .map(|token| format!("token:{}", sybil_identity::sha256_hex(token.as_bytes())))
     .unwrap_or_else(|| format!("fallback_ip:{}", context.ip))
-}
-
-fn client_ip_prefix_bucket_identity(
-  context: RateLimitContext<'_>,
-  check: &RateLimitCheck<'_>,
-) -> String {
-  client_ip_network_prefix(context.ip, check.ipv4_prefix_bits, check.ipv6_prefix_bits)
-}
-
-fn tls_fingerprint_bucket_identity(context: RateLimitContext<'_>) -> String {
-  context
-    .tls_fingerprint
-    .filter(|value| !value.is_empty())
-    .map(|value| format!("fingerprint:{}", sha256_hex(value.as_bytes())))
-    .unwrap_or_else(|| format!("fallback_ip:{}", context.ip))
-}
-
-fn token_binding_hash_bucket_identity(
-  context: RateLimitContext<'_>,
-  check: &RateLimitCheck<'_>,
-) -> String {
-  if check.token_bindings.is_empty() {
-    return format!("fallback_ip:{}", context.ip);
-  }
-  let payload = check
-    .token_bindings
-    .iter()
-    .map(|binding| {
-      format!(
-        "{}={}",
-        binding.as_str(),
-        token_binding_value(context, check, *binding)
-      )
-    })
-    .collect::<Vec<_>>()
-    .join("\n");
-  format!("binding:{}", sha256_hex(payload.as_bytes()))
-}
-
-fn token_binding_value(
-  context: RateLimitContext<'_>,
-  check: &RateLimitCheck<'_>,
-  binding: PersonProofTokenBinding,
-) -> String {
-  match binding {
-    PersonProofTokenBinding::UserAgent => user_agent_value(context).unwrap_or_default(),
-    PersonProofTokenBinding::TlsFingerprint => context
-      .tls_fingerprint
-      .filter(|value| !value.is_empty())
-      .unwrap_or("unavailable")
-      .to_string(),
-    PersonProofTokenBinding::Route => context.route_name.unwrap_or_default().to_string(),
-    PersonProofTokenBinding::DirectPeerIpNetworkPrefix => {
-      client_ip_network_prefix(context.ip, check.ipv4_prefix_bits, check.ipv6_prefix_bits)
-    }
-    PersonProofTokenBinding::TcpMaxHop => format!(
-      "configured=unconfigured;applied={}",
-      context
-        .tcp_max_hop
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unavailable".to_string())
-    ),
-  }
-}
-
-fn person_proof_clearance_bucket_identity(context: RateLimitContext<'_>) -> String {
-  context
-    .person_proof_clearance_hash
-    .filter(|value| !value.is_empty())
-    .map(|value| format!("clearance:{value}"))
-    .unwrap_or_else(|| format!("fallback_ip:{}", context.ip))
-}
-
-fn composite_client_bucket_identity(
-  context: RateLimitContext<'_>,
-  check: &RateLimitCheck<'_>,
-) -> String {
-  if check.identity_parts.is_empty() {
-    return format!("fallback_ip:{}", context.ip);
-  }
-  let payload = check
-    .identity_parts
-    .iter()
-    .map(|part| {
-      let value = match part {
-        RateLimitIdentityPart::ClientIpPrefix => client_ip_prefix_bucket_identity(context, check),
-        RateLimitIdentityPart::UserAgent => user_agent_value(context)
-          .map(|value| format!("ua:{}", sha256_hex(value.as_bytes())))
-          .unwrap_or_else(|| format!("fallback_ip:{}", context.ip)),
-        RateLimitIdentityPart::TlsFingerprint => tls_fingerprint_bucket_identity(context),
-        RateLimitIdentityPart::Asn => asn_bucket_identity(context),
-      };
-      format!("{part:?}={value}")
-    })
-    .collect::<Vec<_>>()
-    .join("\n");
-  format!("hash:{}", sha256_hex(payload.as_bytes()))
-}
-
-fn asn_bucket_identity(context: RateLimitContext<'_>) -> String {
-  context
-    .client_asn
-    .map(|asn| format!("AS{asn}"))
-    .unwrap_or_else(|| format!("fallback_ip:{}", context.ip))
-}
-
-fn user_agent_value(context: RateLimitContext<'_>) -> Option<String> {
-  context
-    .headers?
-    .get(http::header::USER_AGENT)?
-    .to_str()
-    .ok()
-    .map(str::to_string)
-}
-
-fn client_ip_network_prefix(ip: IpAddr, ipv4_prefix_bits: u8, ipv6_prefix_bits: u8) -> String {
-  match ip {
-    IpAddr::V4(addr) => {
-      let bits = ipv4_prefix_bits.min(32);
-      let value = u32::from(addr);
-      let mask = if bits == 0 {
-        0
-      } else {
-        u32::MAX << (32 - bits)
-      };
-      format!("ipv4:{}/{}", std::net::Ipv4Addr::from(value & mask), bits)
-    }
-    IpAddr::V6(addr) => {
-      let bits = ipv6_prefix_bits.min(128);
-      let value = u128::from(addr);
-      let mask = if bits == 0 {
-        0
-      } else {
-        u128::MAX << (128 - bits)
-      };
-      format!("ipv6:{}/{}", std::net::Ipv6Addr::from(value & mask), bits)
-    }
-  }
 }
 
 fn access_token(headers: &HeaderMap, token_header: Option<&str>) -> Option<String> {
@@ -874,16 +754,6 @@ fn named_header_token(headers: &HeaderMap, name: &str) -> Option<String> {
   Some(value.to_string())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-  let digest = digest::digest(&digest::SHA256, bytes);
-  let mut output = String::with_capacity(digest.as_ref().len() * 2);
-  for byte in digest.as_ref() {
-    use std::fmt::Write as _;
-    let _ = write!(&mut output, "{byte:02x}");
-  }
-  output
-}
-
 fn decrement_or_remove<K>(map: &mut HashMap<K, usize>, key: &K)
 where
   K: Eq + std::hash::Hash,
@@ -902,3 +772,28 @@ mod sybil_tests;
 #[cfg(test)]
 #[path = "limits/tests.rs"]
 mod tests;
+
+impl<'a> From<RateLimitContext<'a>> for SybilIdentityContext<'a> {
+  fn from(context: RateLimitContext<'a>) -> Self {
+    Self {
+      ip: context.ip,
+      route_name: context.route_name,
+      headers: context.headers,
+      tls_fingerprint: context.tls_fingerprint,
+      client_asn: context.client_asn,
+      tcp_max_hop: context.tcp_max_hop,
+      person_proof_clearance_hash: context.person_proof_clearance_hash,
+    }
+  }
+}
+
+impl<'a> From<&'a RateLimitCheck<'a>> for SybilIdentitySpec<'a> {
+  fn from(check: &'a RateLimitCheck<'a>) -> Self {
+    Self {
+      ipv4_prefix_bits: check.ipv4_prefix_bits,
+      ipv6_prefix_bits: check.ipv6_prefix_bits,
+      identity_parts: check.identity_parts,
+      token_bindings: check.token_bindings,
+    }
+  }
+}

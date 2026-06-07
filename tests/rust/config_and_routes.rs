@@ -20,7 +20,7 @@ use oxibelt::config::{
     UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
-use oxibelt::waf::WafMode;
+use oxibelt::waf::{PersonProofTokenBinding, WafMode};
 
 fn test_argon2id_hash(secret: &str, memory_kib: u32) -> String {
     use argon2::password_hash::SaltString;
@@ -2517,6 +2517,26 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
         DynamicPolicyFailPolicy::DisabledOnError
     );
     assert_eq!(config.dynamic_policy.default_status, 403);
+    assert_eq!(config.dynamic_policy.matching.ipv4_prefix_bits, 24);
+    assert_eq!(config.dynamic_policy.matching.ipv6_prefix_bits, 56);
+    assert_eq!(
+        config.dynamic_policy.matching.token_bindings,
+        vec![
+            PersonProofTokenBinding::UserAgent,
+            PersonProofTokenBinding::TlsFingerprint,
+            PersonProofTokenBinding::Route,
+            PersonProofTokenBinding::DirectPeerIpNetworkPrefix,
+        ]
+    );
+    assert_eq!(
+        config.dynamic_policy.matching.composite_identity_parts,
+        vec![
+            RateLimitIdentityPart::ClientIpPrefix,
+            RateLimitIdentityPart::UserAgent,
+            RateLimitIdentityPart::TlsFingerprint,
+            RateLimitIdentityPart::Asn,
+        ]
+    );
 }
 
 #[test]
@@ -2896,6 +2916,22 @@ fn dynamic_policy_rejects_invalid_values() {
             "default_status = 99",
             "dynamic_policy.default_status is not a valid HTTP status",
         ),
+        (
+            "\n[dynamic_policy.matching]\nipv4_prefix_bits = 33",
+            "dynamic_policy.matching.ipv4_prefix_bits must be between 0 and 32",
+        ),
+        (
+            "\n[dynamic_policy.matching]\nipv6_prefix_bits = 129",
+            "dynamic_policy.matching.ipv6_prefix_bits must be between 0 and 128",
+        ),
+        (
+            "\n[dynamic_policy.matching]\ntoken_bindings = [\"user_agent\", \"user_agent\"]",
+            "dynamic_policy.matching.token_bindings contains duplicate user_agent",
+        ),
+        (
+            "\n[dynamic_policy.matching]\ncomposite_identity_parts = [\"client_ip_prefix\", \"client_ip_prefix\"]",
+            "dynamic_policy.matching.composite_identity_parts contains duplicate ClientIpPrefix",
+        ),
     ] {
         let raw = format!(
             r#"
@@ -2912,6 +2948,34 @@ fn dynamic_policy_rejects_invalid_values() {
             "unexpected error for {setting}: {error}"
         );
     }
+}
+
+#[test]
+fn dynamic_policy_matching_unknown_fields_fail_strict_shape_validation() {
+    let temp_dir = common::TempDir::new("dynamic-policy-matching-unknown");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "dynamic-policy-matching-unknown");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        + r#"
+
+[dynamic_policy.matching]
+ipv4_prefix_bits = 24
+ipv6_prefix_bits = 56
+token_bindings = ["user_agent", "tls_fingerprint", "route", "direct_peer_ip_network_prefix"]
+composite_identity_parts = ["client_ip_prefix", "user_agent", "tls_fingerprint", "asn"]
+unexpected = true
+"#;
+    let config_path = temp_dir.path().join("oxibelt.toml");
+    std::fs::write(&config_path, raw).expect("config should write");
+
+    let error =
+        Config::load(&config_path).expect_err("unknown dynamic_policy.matching field should fail");
+    assert!(
+        error.to_string().contains(
+            "configuration contains unknown field(s): dynamic_policy.matching.unexpected"
+        ),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[test]

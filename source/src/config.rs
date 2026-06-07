@@ -2780,7 +2780,14 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "source_quotas",
     ][..],
     "dynamic_policy.automation_api.source_quotas" => &["max_active_policies", "source"][..],
-    "dynamic_policy.matching" => &["normalize_path", "trust_route_name"][..],
+    "dynamic_policy.matching" => &[
+      "composite_identity_parts",
+      "ipv4_prefix_bits",
+      "ipv6_prefix_bits",
+      "normalize_path",
+      "token_bindings",
+      "trust_route_name",
+    ][..],
     "external_auth" => &[
       "claim_headers",
       "client_id_env",

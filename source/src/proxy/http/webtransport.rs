@@ -8,7 +8,7 @@ use http::{Request, Response, StatusCode};
 use tracing::warn;
 
 use crate::config::{HttpVersion, UpstreamConfig};
-use crate::dynamic_policy::{DynamicPolicyRequest, DynamicPolicyTerminal};
+use crate::dynamic_policy::{DynamicPolicyContext, DynamicPolicyRequest, DynamicPolicyTerminal};
 use crate::external_auth::ExternalAuthOutcome;
 use crate::pools::PoolSelection;
 use crate::proxy::stream_waf::{StreamWafRequestContext, StreamWafRequestSeed};
@@ -116,8 +116,40 @@ pub(crate) async fn prepare_webtransport(
       "no matching route",
     )));
   };
-  let client_asn = state.client_identity.asn.lookup(peer_addr.ip());
+  let client_asn = state.client_identity.asn.lookup(client_addr.ip());
 
+  let mut evaluated_person_proof = None;
+  if state.request_path_features.dynamic_policy
+    && state.dynamic_policy.needs_person_proof_clearance()
+  {
+    let request_id = crate::waf::new_access_log_id();
+    let transaction_id = crate::waf::new_access_log_id();
+    evaluated_person_proof = Some(state.waf.evaluate_person_proof_request(WafRequestInput {
+      request_id: &request_id,
+      transaction_id: &transaction_id,
+      received_at_unix_ms,
+      method: &request_method,
+      uri: &request_uri,
+      version: http::Version::HTTP_3,
+      headers: request.headers(),
+      body: None,
+      peer_addr: client_addr,
+      client_asn,
+      downstream_host: &host,
+      downstream_scheme: "https",
+      route_name: &resolved.route.name,
+      tcp_max_hop: None,
+      tls,
+      protocol: WafProtocol::Webtransport,
+      transport_network: WafTransportNetwork::Udp,
+      transport_metadata,
+      tags: tags_ref(&tags),
+      dynamic_policy: &DynamicPolicyContext::default(),
+    }));
+  }
+  let person_proof_clearance_hash = evaluated_person_proof
+    .as_ref()
+    .and_then(|status| status.clearance_hash());
   let dynamic_policy = if state.request_path_features.dynamic_policy {
     state.dynamic_policy.evaluate(
       DynamicPolicyRequest {
@@ -125,6 +157,11 @@ pub(crate) async fn prepare_webtransport(
         route_name: &resolved.route.name,
         method: &request_method,
         path: request_uri.path(),
+        headers: Some(request.headers()),
+        tls_fingerprint: tls.fingerprint.as_deref(),
+        client_asn,
+        tcp_max_hop: None,
+        person_proof_clearance_hash,
       },
       &state.limits,
     )
@@ -133,6 +170,7 @@ pub(crate) async fn prepare_webtransport(
   };
   let dynamic_policy_context = dynamic_policy.context;
   let mut dynamic_challenge_response_mutations = Vec::new();
+  let mut dynamic_person_proof_mutation_added = false;
   if let Some(terminal) = dynamic_policy.terminal {
     match terminal {
       DynamicPolicyTerminal::Text { status, body } => {
@@ -146,7 +184,7 @@ pub(crate) async fn prepare_webtransport(
           let transaction_id = crate::waf::new_access_log_id();
           let decision = state
             .waf
-            .evaluate_dynamic_person_proof_challenge(
+            .evaluate_dynamic_person_proof_challenge_with_status(
               WafRequestInput {
                 request_id: &request_id,
                 transaction_id: &transaction_id,
@@ -156,7 +194,7 @@ pub(crate) async fn prepare_webtransport(
                 version: http::Version::HTTP_3,
                 headers: request.headers(),
                 body: None,
-                peer_addr,
+                peer_addr: client_addr,
                 client_asn,
                 downstream_host: &host,
                 downstream_scheme: "https",
@@ -170,6 +208,7 @@ pub(crate) async fn prepare_webtransport(
                 dynamic_policy: &dynamic_policy_context,
               },
               status,
+              &mut evaluated_person_proof,
             )
             .map_err(|error| {
               warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
@@ -184,6 +223,7 @@ pub(crate) async fn prepare_webtransport(
               &decision.response_header_mutations,
             )));
           }
+          dynamic_person_proof_mutation_added = !decision.response_header_mutations.is_empty();
           dynamic_challenge_response_mutations.extend(decision.response_header_mutations);
         }
       }
@@ -239,31 +279,43 @@ pub(crate) async fn prepare_webtransport(
   let mut request_waf = if resolved.execution_plan.waf.request.enabled() {
     let request_id = crate::waf::new_access_log_id();
     let transaction_id = crate::waf::new_access_log_id();
-    let decision = state.waf.evaluate_request(WafRequestInput {
-      request_id: &request_id,
-      transaction_id: &transaction_id,
-      received_at_unix_ms,
-      method: &request_method,
-      uri: &request_uri,
-      version: http::Version::HTTP_3,
-      headers: &request_headers,
-      body: None,
-      peer_addr,
-      client_asn,
-      downstream_host: &host,
-      downstream_scheme: "https",
-      route_name: &resolved.route.name,
-      tcp_max_hop: None,
-      tls,
-      protocol: WafProtocol::Webtransport,
-      transport_network: WafTransportNetwork::Udp,
-      transport_metadata,
-      tags: tags_ref(&tags),
-      dynamic_policy: &dynamic_policy_context,
-    });
+    let decision = state.waf.evaluate_request_with_person_proof(
+      WafRequestInput {
+        request_id: &request_id,
+        transaction_id: &transaction_id,
+        received_at_unix_ms,
+        method: &request_method,
+        uri: &request_uri,
+        version: http::Version::HTTP_3,
+        headers: &request_headers,
+        body: None,
+        peer_addr: client_addr,
+        client_asn,
+        downstream_host: &host,
+        downstream_scheme: "https",
+        route_name: &resolved.route.name,
+        tcp_max_hop: None,
+        tls,
+        protocol: WafProtocol::Webtransport,
+        transport_network: WafTransportNetwork::Udp,
+        transport_metadata,
+        tags: tags_ref(&tags),
+        dynamic_policy: &dynamic_policy_context,
+      },
+      evaluated_person_proof.as_ref(),
+      dynamic_person_proof_mutation_added,
+    );
     request_ids = Some((request_id, transaction_id));
     decision
   } else {
+    if !dynamic_person_proof_mutation_added
+      && let Some(evaluated) = evaluated_person_proof.as_ref()
+      && let Ok(Some(mutation)) = state
+        .waf
+        .person_proof_clearance_response_mutation(evaluated)
+    {
+      dynamic_challenge_response_mutations.push(mutation);
+    }
     Default::default()
   };
   request_waf

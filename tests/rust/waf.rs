@@ -6554,6 +6554,142 @@ connection_url = "postgres://oxibelt:oxibelt@127.0.0.1:5432/oxibelt"
 }
 
 #[test]
+fn dynamic_person_proof_status_is_reused_for_request_waf_single_use_clearance() {
+    let temp_dir = common::TempDir::new("waf-dynamic-person-proof-reuse");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-dynamic-person-proof-reuse");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[dynamic_policy]
+enabled = true
+backend = "dynamic-policy-test"
+
+[shared_state]
+enabled = true
+dynamic_policy_backend = "dynamic-policy-test"
+
+[[shared_state.backends]]
+name = "dynamic-policy-test"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@127.0.0.1:5432/oxibelt"
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "tag-valid-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State == 'valid'"
+
+[[waf.rules.actions]]
+type = "set_tag"
+key = "DynamicPersonProof"
+value = "valid"
+
+[[waf.rules]]
+name = "reject-invalid-person-proof"
+phase = "request"
+priority = 20
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "invalid person proof"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision = engine
+        .evaluate_dynamic_person_proof_challenge(
+            request_input(&method, &uri, &headers, &tags, client_addr),
+            StatusCode::FORBIDDEN,
+        )
+        .expect("dynamic challenge should evaluate");
+    let challenge = challenge_decision
+        .terminal
+        .as_ref()
+        .expect("dynamic challenge should issue Person proof");
+    let clearance_cookie = complete_pow_person_proof(
+        &engine,
+        request_input(&method, &uri, &headers, &tags, client_addr),
+        &challenge.body,
+        18,
+    );
+    let clearance_value = extract_cookie_value(&clearance_cookie);
+    let mut solved_headers = HeaderMap::new();
+    solved_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__oxibelt_person_proof={clearance_value}")).unwrap(),
+    );
+
+    let mut evaluated = Some(engine.evaluate_person_proof_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+    )));
+    assert!(
+        evaluated
+            .as_ref()
+            .and_then(|status| status.clearance_hash())
+            .is_some()
+    );
+
+    let dynamic_decision = engine
+        .evaluate_dynamic_person_proof_challenge_with_status(
+            request_input(&method, &uri, &solved_headers, &tags, client_addr),
+            StatusCode::FORBIDDEN,
+            &mut evaluated,
+        )
+        .expect("dynamic challenge should reuse evaluated Person proof status");
+    assert!(dynamic_decision.terminal.is_none());
+    let rotated_by_dynamic = extract_set_cookie(&dynamic_decision.response_header_mutations);
+    assert!(rotated_by_dynamic.contains("__oxibelt_person_proof=clearance.v2."));
+
+    let waf_decision = engine.evaluate_request_with_person_proof(
+        request_input(&method, &uri, &solved_headers, &tags, client_addr),
+        evaluated.as_ref(),
+        true,
+    );
+    assert!(waf_decision.terminal.is_none());
+    assert!(waf_decision.response_header_mutations.is_empty());
+    assert_eq!(
+        waf_decision.tags,
+        vec![("DynamicPersonProof".to_string(), "valid".to_string())]
+    );
+
+    let replay_without_reuse = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &solved_headers,
+        &tags,
+        client_addr,
+    ));
+    assert_eq!(
+        replay_without_reuse
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.body.as_str()),
+        Some("invalid person proof")
+    );
+}
+
+#[test]
 fn dynamic_person_proof_challenge_rejects_unrelated_configured_clearance() {
     let temp_dir = common::TempDir::new("waf-dynamic-person-proof-unrelated-clearance");
     let (cert_path, key_path) = common::create_self_signed_cert(

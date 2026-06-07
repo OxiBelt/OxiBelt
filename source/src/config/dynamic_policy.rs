@@ -1,11 +1,15 @@
 //! Dynamic policy configuration validation.
 //! Signature and refresh settings are checked before policy records are loaded.
 
+use std::collections::HashSet;
+
 use anyhow::{Context, bail};
 use base64::Engine;
 use serde::Deserialize;
 
+use super::RateLimitIdentityPart;
 use crate::dynamic_policy::MAX_DYNAMIC_POLICY_BODY_BYTES;
+use crate::waf::PersonProofTokenBinding;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DynamicPolicyConfig {
@@ -61,6 +65,7 @@ impl DynamicPolicyConfig {
         MAX_DYNAMIC_POLICY_BODY_BYTES
       );
     }
+    self.matching.validate()?;
     self.automation_api.validate(self.max_policies)
   }
 }
@@ -80,6 +85,14 @@ pub struct DynamicPolicyMatchingConfig {
   pub trust_route_name: bool,
   #[serde(default = "default_true")]
   pub normalize_path: bool,
+  #[serde(default = "crate::limits::default_rate_limit_ipv4_prefix_bits")]
+  pub ipv4_prefix_bits: u8,
+  #[serde(default = "crate::limits::default_rate_limit_ipv6_prefix_bits")]
+  pub ipv6_prefix_bits: u8,
+  #[serde(default = "default_dynamic_policy_token_bindings")]
+  pub token_bindings: Vec<PersonProofTokenBinding>,
+  #[serde(default = "default_dynamic_policy_composite_identity_parts")]
+  pub composite_identity_parts: Vec<RateLimitIdentityPart>,
 }
 
 impl Default for DynamicPolicyMatchingConfig {
@@ -87,7 +100,44 @@ impl Default for DynamicPolicyMatchingConfig {
     Self {
       trust_route_name: true,
       normalize_path: true,
+      ipv4_prefix_bits: crate::limits::default_rate_limit_ipv4_prefix_bits(),
+      ipv6_prefix_bits: crate::limits::default_rate_limit_ipv6_prefix_bits(),
+      token_bindings: default_dynamic_policy_token_bindings(),
+      composite_identity_parts: default_dynamic_policy_composite_identity_parts(),
     }
+  }
+}
+
+impl DynamicPolicyMatchingConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.ipv4_prefix_bits > 32 {
+      bail!("dynamic_policy.matching.ipv4_prefix_bits must be between 0 and 32");
+    }
+    if self.ipv6_prefix_bits > 128 {
+      bail!("dynamic_policy.matching.ipv6_prefix_bits must be between 0 and 128");
+    }
+    if self.token_bindings.is_empty() {
+      bail!("dynamic_policy.matching.token_bindings must not be empty");
+    }
+    let mut seen_bindings = HashSet::new();
+    for binding in &self.token_bindings {
+      if !seen_bindings.insert(*binding) {
+        bail!(
+          "dynamic_policy.matching.token_bindings contains duplicate {}",
+          binding.as_str()
+        );
+      }
+    }
+    if self.composite_identity_parts.is_empty() {
+      bail!("dynamic_policy.matching.composite_identity_parts must not be empty");
+    }
+    let mut seen_parts = HashSet::new();
+    for part in &self.composite_identity_parts {
+      if !seen_parts.insert(*part) {
+        bail!("dynamic_policy.matching.composite_identity_parts contains duplicate {part:?}");
+      }
+    }
+    Ok(())
   }
 }
 
@@ -190,6 +240,24 @@ pub struct DynamicPolicySourceQuotaConfig {
 
 fn default_true() -> bool {
   true
+}
+
+fn default_dynamic_policy_token_bindings() -> Vec<PersonProofTokenBinding> {
+  vec![
+    PersonProofTokenBinding::UserAgent,
+    PersonProofTokenBinding::TlsFingerprint,
+    PersonProofTokenBinding::Route,
+    PersonProofTokenBinding::DirectPeerIpNetworkPrefix,
+  ]
+}
+
+fn default_dynamic_policy_composite_identity_parts() -> Vec<RateLimitIdentityPart> {
+  vec![
+    RateLimitIdentityPart::ClientIpPrefix,
+    RateLimitIdentityPart::UserAgent,
+    RateLimitIdentityPart::TlsFingerprint,
+    RateLimitIdentityPart::Asn,
+  ]
 }
 
 fn default_dynamic_policy_refresh_interval_ms() -> u64 {

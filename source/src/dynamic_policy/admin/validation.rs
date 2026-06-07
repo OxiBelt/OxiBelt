@@ -164,13 +164,7 @@ pub(super) fn validate_policy_fields(
   if name.trim().is_empty() || source.trim().is_empty() {
     bail!("dynamic policy source and name must not be empty");
   }
-  let subject_type = match subject_type {
-    "client_ip" => crate::dynamic_policy::DynamicPolicySubjectType::Ip,
-    "client_ip_cidr" => crate::dynamic_policy::DynamicPolicySubjectType::IpCidr,
-    "client_ip_route" => crate::dynamic_policy::DynamicPolicySubjectType::IpRoute,
-    "client_ip_path" => crate::dynamic_policy::DynamicPolicySubjectType::IpPath,
-    _ => bail!("dynamic policy has unsupported subject_type {subject_type}"),
-  };
+  let subject_type = crate::dynamic_policy::parse_subject_type(subject_type)?;
   let route_name = route_name
     .map(|route| validate_route_name(0, route.to_string(), &inner.route_names))
     .transpose()?;

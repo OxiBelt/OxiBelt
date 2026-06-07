@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -17,8 +16,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::config::{
-  Config, ConnectionLimitIdentityMode, ErrorResponseMode, ForwardedClientIpSource, HttpVersion,
-  ProxyHttp2Config, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig,
+  Config, ConnectionLimitIdentityMode, ErrorResponseMode, HttpVersion, ProxyHttp2Config,
+  ProxyProtocolEgressMode, RouteConfig, UpstreamConfig,
 };
 use crate::dynamic_policy::{DynamicPolicyRequest, DynamicPolicyTerminal};
 use crate::external_auth::{ExternalAuthOutcome, ExternalAuthTerminal};
@@ -42,6 +41,7 @@ mod cache_status;
 mod cache_streaming;
 pub(crate) mod compression;
 pub(crate) mod fast_path;
+mod flow_helpers;
 pub(crate) mod grpc_web;
 pub(crate) mod headers;
 pub(crate) mod observability;
@@ -67,6 +67,10 @@ use self::body::{
   error_indicates_body_timeout, error_is_body_length_limit, error_is_timeout,
 };
 use self::cache_status::{CacheHeaderOutcome as CacheOutcome, CacheHeaderReason as CacheReason};
+use self::flow_helpers::{
+  elapsed_ms, emit_system_access_log, record_route_cache_event, record_route_cache_fill_stage,
+  select_forwarded_client_addr, tags_ref,
+};
 use self::headers::{
   add_forwarded_headers, extract_host_snapshot, is_upgrade_request, set_effective_host_header,
   strip_hop_by_hop_headers, validate_authority_host_consistency,
@@ -91,59 +95,6 @@ use self::upstream::{UpstreamSelectionError, select_request_upstream};
 use self::uri::validate_downstream_path;
 use self::version::select_upstream_http_version;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
-
-static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
-
-fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> {
-  tags.as_ref().unwrap_or(&EMPTY_TAGS)
-}
-
-fn select_forwarded_client_addr(
-  peer_addr: std::net::SocketAddr,
-  client_addr: std::net::SocketAddr,
-  source: ForwardedClientIpSource,
-) -> std::net::SocketAddr {
-  match source {
-    ForwardedClientIpSource::Resolved => client_addr,
-    ForwardedClientIpSource::DirectPeer => peer_addr,
-  }
-}
-
-fn record_route_cache_event(state: &AppSnapshot, route: &RouteConfig, outcome: &str, reason: &str) {
-  state
-    .metrics
-    .record_cache_event(&route.name, route.cache.as_deref(), outcome, reason);
-}
-
-fn record_route_cache_fill_stage(
-  state: &AppSnapshot,
-  route: &RouteConfig,
-  stage: &str,
-  outcome: &str,
-  started: Instant,
-) {
-  state.metrics.record_cache_fill_stage(
-    &state.config.metrics,
-    &route.name,
-    route.cache.as_deref(),
-    stage,
-    outcome,
-    elapsed_ms(started),
-  );
-}
-
-fn emit_system_access_log(
-  state: &AppSnapshot,
-  context: &mut SystemAccessLogContext<'_>,
-  response: &Response<ProxyBody>,
-) {
-  if !state.request_path_features.system_access_log {
-    return;
-  }
-  if let Some(input) = context.response_input(response) {
-    state.system_access_log.emit(&state.waf, input);
-  }
-}
 
 fn proxy_error_response(
   state: &AppSnapshot,
@@ -185,10 +136,6 @@ fn upstream_selection_error_response(error: UpstreamSelectionError) -> Response<
       text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server")
     }
   }
-}
-
-fn elapsed_ms(started_at: Instant) -> u64 {
-  started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Clone, Copy)]
@@ -650,6 +597,37 @@ where
       return text_response(status, "rate limit exceeded");
     }
   }
+  let mut evaluated_person_proof = None;
+  if state.request_path_features.dynamic_policy
+    && state.dynamic_policy.needs_person_proof_clearance()
+  {
+    access_log.ensure_request_ids();
+    evaluated_person_proof = Some(state.waf.evaluate_person_proof_request(WafRequestInput {
+      request_id: access_log.request_id(),
+      transaction_id: access_log.transaction_id(),
+      received_at_unix_ms: access_log.request_received_at_unix_ms,
+      method: &request_method,
+      uri: &request_uri,
+      version: request_version,
+      headers: request.headers(),
+      body: None,
+      peer_addr: client_addr,
+      client_asn,
+      downstream_host: host,
+      downstream_scheme,
+      route_name: &resolved.route.name,
+      tcp_max_hop,
+      tls: tls.as_ref(),
+      protocol,
+      transport_network,
+      transport_metadata,
+      tags: tags_ref(&tags),
+      dynamic_policy: &access_log.dynamic_policy,
+    }));
+  }
+  let person_proof_clearance_hash = evaluated_person_proof
+    .as_ref()
+    .and_then(|status| status.clearance_hash());
   let dynamic_policy = if state.request_path_features.dynamic_policy {
     state.dynamic_policy.evaluate(
       DynamicPolicyRequest {
@@ -657,6 +635,11 @@ where
         route_name: &resolved.route.name,
         method: &request_method,
         path: request_uri.path(),
+        headers: Some(request.headers()),
+        tls_fingerprint: tls.fingerprint.as_deref(),
+        client_asn,
+        tcp_max_hop,
+        person_proof_clearance_hash,
       },
       &state.limits,
     )
@@ -665,6 +648,7 @@ where
   };
   access_log.dynamic_policy = dynamic_policy.context;
   let mut dynamic_challenge_response_mutations = Vec::new();
+  let mut dynamic_person_proof_mutation_added = false;
   if let Some(terminal) = dynamic_policy.terminal {
     match terminal {
       DynamicPolicyTerminal::Text { status, body } => return text_response(status, &body),
@@ -673,31 +657,34 @@ where
           && state.waf.has_person_proof_api_path(request_uri.path());
         if !person_proof_api_path {
           access_log.ensure_request_ids();
-          let decision = match state.waf.evaluate_dynamic_person_proof_challenge(
-            WafRequestInput {
-              request_id: access_log.request_id(),
-              transaction_id: access_log.transaction_id(),
-              received_at_unix_ms: access_log.request_received_at_unix_ms,
-              method: &request_method,
-              uri: &request_uri,
-              version: request_version,
-              headers: request.headers(),
-              body: None,
-              peer_addr: client_addr,
-              client_asn,
-              downstream_host: host,
-              downstream_scheme,
-              route_name: &resolved.route.name,
-              tcp_max_hop,
-              tls: tls.as_ref(),
-              protocol,
-              transport_network,
-              transport_metadata,
-              tags: tags_ref(&tags),
-              dynamic_policy: &access_log.dynamic_policy,
-            },
-            status,
-          ) {
+          let decision = match state
+            .waf
+            .evaluate_dynamic_person_proof_challenge_with_status(
+              WafRequestInput {
+                request_id: access_log.request_id(),
+                transaction_id: access_log.transaction_id(),
+                received_at_unix_ms: access_log.request_received_at_unix_ms,
+                method: &request_method,
+                uri: &request_uri,
+                version: request_version,
+                headers: request.headers(),
+                body: None,
+                peer_addr: client_addr,
+                client_asn,
+                downstream_host: host,
+                downstream_scheme,
+                route_name: &resolved.route.name,
+                tcp_max_hop,
+                tls: tls.as_ref(),
+                protocol,
+                transport_network,
+                transport_metadata,
+                tags: tags_ref(&tags),
+                dynamic_policy: &access_log.dynamic_policy,
+              },
+              status,
+              &mut evaluated_person_proof,
+            ) {
             Ok(decision) => decision,
             Err(error) => {
               warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
@@ -707,6 +694,7 @@ where
           if let Some(terminal) = decision.terminal {
             return waf_terminal_response(terminal, &decision.response_header_mutations);
           }
+          dynamic_person_proof_mutation_added = !decision.response_header_mutations.is_empty();
           dynamic_challenge_response_mutations.extend(decision.response_header_mutations);
         }
       }
@@ -799,29 +787,41 @@ where
 
   let mut request_waf = if request_waf_enabled {
     access_log.ensure_request_ids();
-    state.waf.evaluate_request(WafRequestInput {
-      request_id: access_log.request_id(),
-      transaction_id: access_log.transaction_id(),
-      received_at_unix_ms: access_log.request_received_at_unix_ms,
-      method: &request_method,
-      uri: &request_uri,
-      version: request_version,
-      headers: request.headers(),
-      body: request_body,
-      peer_addr: client_addr,
-      client_asn,
-      downstream_host: host,
-      downstream_scheme,
-      route_name: &resolved.route.name,
-      tcp_max_hop,
-      tls: tls.as_ref(),
-      protocol,
-      transport_network,
-      transport_metadata,
-      tags: tags_ref(&tags),
-      dynamic_policy: &access_log.dynamic_policy,
-    })
+    state.waf.evaluate_request_with_person_proof(
+      WafRequestInput {
+        request_id: access_log.request_id(),
+        transaction_id: access_log.transaction_id(),
+        received_at_unix_ms: access_log.request_received_at_unix_ms,
+        method: &request_method,
+        uri: &request_uri,
+        version: request_version,
+        headers: request.headers(),
+        body: request_body,
+        peer_addr: client_addr,
+        client_asn,
+        downstream_host: host,
+        downstream_scheme,
+        route_name: &resolved.route.name,
+        tcp_max_hop,
+        tls: tls.as_ref(),
+        protocol,
+        transport_network,
+        transport_metadata,
+        tags: tags_ref(&tags),
+        dynamic_policy: &access_log.dynamic_policy,
+      },
+      evaluated_person_proof.as_ref(),
+      dynamic_person_proof_mutation_added,
+    )
   } else {
+    if !dynamic_person_proof_mutation_added
+      && let Some(evaluated) = evaluated_person_proof.as_ref()
+      && let Ok(Some(mutation)) = state
+        .waf
+        .person_proof_clearance_response_mutation(evaluated)
+    {
+      dynamic_challenge_response_mutations.push(mutation);
+    }
     Default::default()
   };
   request_waf

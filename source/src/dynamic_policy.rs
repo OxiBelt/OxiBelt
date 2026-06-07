@@ -3,24 +3,28 @@
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
-use std::str::FromStr;
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use http::{Method, StatusCode};
+use http::{HeaderMap, Method, StatusCode};
 use sqlx::{Pool, Postgres, Row};
 use tracing::{info, warn};
 
 use crate::config::{Config, DynamicPolicyConfig, DynamicPolicyFailPolicy};
 use crate::identity::Cidr;
 use crate::limits::LimitState;
+use crate::limits::sybil_identity::{self, SybilIdentityContext};
 use crate::metrics::Metrics;
 
 pub mod admin;
 pub mod signature;
 pub mod store;
 pub use admin::*;
+mod subject;
+mod sybil;
+use subject::{DynamicPolicySubjectType, parse_subject_type, validate_subject};
+use sybil::sybil_spec;
 
 pub const MAX_DYNAMIC_POLICY_NAME_BYTES: usize = 128;
 pub const MAX_DYNAMIC_POLICY_SUBJECT_BYTES: usize = 512;
@@ -94,25 +98,6 @@ impl DynamicPolicyAction {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum DynamicPolicySubjectType {
-  Ip,
-  IpCidr,
-  IpRoute,
-  IpPath,
-}
-
-impl DynamicPolicySubjectType {
-  fn as_str(self) -> &'static str {
-    match self {
-      Self::Ip => "client_ip",
-      Self::IpCidr => "client_ip_cidr",
-      Self::IpRoute => "client_ip_route",
-      Self::IpPath => "client_ip_path",
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum DynamicPolicyMode {
   Enforce,
   DryRun,
@@ -155,6 +140,11 @@ pub struct DynamicPolicyRequest<'a> {
   pub route_name: &'a str,
   pub method: &'a Method,
   pub path: &'a str,
+  pub headers: Option<&'a HeaderMap>,
+  pub tls_fingerprint: Option<&'a str>,
+  pub client_asn: Option<u32>,
+  pub tcp_max_hop: Option<u8>,
+  pub person_proof_clearance_hash: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +266,13 @@ impl DynamicPolicyRuntime {
 
   pub fn enabled(&self) -> bool {
     self.inner.is_some()
+  }
+
+  pub fn needs_person_proof_clearance(&self) -> bool {
+    self
+      .inner
+      .as_ref()
+      .is_some_and(|inner| inner.snapshot().needs_person_proof_clearance())
   }
 
   pub fn evaluate(
@@ -454,6 +451,13 @@ impl DynamicPolicySnapshot {
       policies: Arc::from([]),
     }
   }
+
+  fn needs_person_proof_clearance(&self) -> bool {
+    self
+      .policies
+      .iter()
+      .any(|policy| policy.subject_type == DynamicPolicySubjectType::PersonProofClearance)
+  }
 }
 
 impl DynamicPolicy {
@@ -486,13 +490,62 @@ impl DynamicPolicy {
         .cidr
         .as_ref()
         .is_some_and(|cidr| cidr.contains(request.client_ip)),
+      DynamicPolicySubjectType::IpPrefix => self
+        .cidr
+        .as_ref()
+        .is_some_and(|cidr| cidr.contains(request.client_ip)),
       DynamicPolicySubjectType::IpRoute => {
         self.subject == format!("{}|{}", request.client_ip, request.route_name)
+      }
+      DynamicPolicySubjectType::IpPrefixRoute => {
+        let Some(cidr) = self.cidr.as_ref() else {
+          return false;
+        };
+        cidr.contains(request.client_ip)
+          && self.subject == format!("{}|{}", cidr.canonical(), request.route_name)
       }
       DynamicPolicySubjectType::IpPath => self
         .path_prefix
         .as_deref()
         .is_some_and(|path| self.subject == format!("{}|{path}", request.client_ip)),
+      DynamicPolicySubjectType::TlsFingerprint => {
+        sybil_identity::tls_fingerprint_identity(self.sybil_context(request))
+          .is_some_and(|identity| self.subject == identity)
+      }
+      DynamicPolicySubjectType::TlsFingerprintRoute => {
+        sybil_identity::tls_fingerprint_identity(self.sybil_context(request))
+          .is_some_and(|identity| self.subject == format!("{identity}|{}", request.route_name))
+      }
+      DynamicPolicySubjectType::TokenBindingHash => {
+        sybil_identity::token_binding_hash_identity(self.sybil_context(request), sybil_spec(config))
+          .is_some_and(|identity| self.subject == identity)
+      }
+      DynamicPolicySubjectType::PersonProofClearance => {
+        sybil_identity::person_proof_clearance_identity(self.sybil_context(request))
+          .is_some_and(|identity| self.subject == identity)
+      }
+      DynamicPolicySubjectType::Asn => sybil_identity::asn_identity(self.sybil_context(request))
+        .is_some_and(|identity| self.subject == identity),
+      DynamicPolicySubjectType::AsnRoute => {
+        sybil_identity::asn_identity(self.sybil_context(request))
+          .is_some_and(|identity| self.subject == format!("{identity}|{}", request.route_name))
+      }
+      DynamicPolicySubjectType::CompositeClient => {
+        sybil_identity::composite_client_identity(self.sybil_context(request), sybil_spec(config))
+          .is_some_and(|identity| self.subject == identity)
+      }
+    }
+  }
+
+  fn sybil_context<'a>(&self, request: &'a DynamicPolicyRequest<'a>) -> SybilIdentityContext<'a> {
+    SybilIdentityContext {
+      ip: request.client_ip,
+      route_name: Some(request.route_name),
+      headers: request.headers,
+      tls_fingerprint: request.tls_fingerprint,
+      client_asn: request.client_asn,
+      tcp_max_hop: request.tcp_max_hop,
+      person_proof_clearance_hash: request.person_proof_clearance_hash,
     }
   }
 
@@ -539,12 +592,20 @@ impl DynamicPolicy {
     match self.subject_type {
       DynamicPolicySubjectType::Ip
       | DynamicPolicySubjectType::IpRoute
-      | DynamicPolicySubjectType::IpPath => 1_000,
-      DynamicPolicySubjectType::IpCidr => self
+      | DynamicPolicySubjectType::IpPath
+      | DynamicPolicySubjectType::TlsFingerprint
+      | DynamicPolicySubjectType::TlsFingerprintRoute
+      | DynamicPolicySubjectType::TokenBindingHash
+      | DynamicPolicySubjectType::PersonProofClearance
+      | DynamicPolicySubjectType::CompositeClient => 1_000,
+      DynamicPolicySubjectType::IpCidr
+      | DynamicPolicySubjectType::IpPrefix
+      | DynamicPolicySubjectType::IpPrefixRoute => self
         .cidr
         .as_ref()
         .map(|cidr| u16::from(cidr.prefix()))
         .unwrap_or(0),
+      DynamicPolicySubjectType::Asn | DynamicPolicySubjectType::AsnRoute => 900,
     }
   }
 }
@@ -804,13 +865,8 @@ fn validate_policy_row(
     "rate_limit" => DynamicPolicyAction::RateLimit,
     _ => bail!("dynamic policy {id} has unsupported action {action}"),
   };
-  let subject_type = match subject_type.as_str() {
-    "client_ip" => DynamicPolicySubjectType::Ip,
-    "client_ip_cidr" => DynamicPolicySubjectType::IpCidr,
-    "client_ip_route" => DynamicPolicySubjectType::IpRoute,
-    "client_ip_path" => DynamicPolicySubjectType::IpPath,
-    _ => bail!("dynamic policy {id} has unsupported subject_type {subject_type}"),
-  };
+  let subject_type = parse_subject_type(&subject_type)
+    .with_context(|| format!("dynamic policy {id} has unsupported subject_type {subject_type}"))?;
   let mode = match mode.as_str() {
     "enforce" => DynamicPolicyMode::Enforce,
     "dry_run" => DynamicPolicyMode::DryRun,
@@ -981,68 +1037,6 @@ fn validate_status(status: i32) -> anyhow::Result<StatusCode> {
   }
   let status = u16::try_from(status).context("status does not fit in u16")?;
   StatusCode::from_u16(status).map_err(Into::into)
-}
-
-fn validate_subject(
-  id: i64,
-  subject_type: DynamicPolicySubjectType,
-  subject: &str,
-  route_name: Option<&str>,
-  path_prefix: Option<&str>,
-) -> anyhow::Result<(String, Option<Cidr>)> {
-  let subject = match subject_type {
-    DynamicPolicySubjectType::Ip => {
-      let ip = IpAddr::from_str(subject)
-        .with_context(|| format!("dynamic policy {id} subject must be a valid IP address"))?;
-      (ip.to_string(), None)
-    }
-    DynamicPolicySubjectType::IpCidr => {
-      let cidr = Cidr::parse(subject)
-        .with_context(|| format!("dynamic policy {id} subject must be a valid CIDR"))?;
-      (cidr.canonical(), Some(cidr))
-    }
-    DynamicPolicySubjectType::IpRoute => {
-      let (ip, route) = split_composite_subject(id, subject, "client_ip_route")?;
-      let ip = IpAddr::from_str(ip).with_context(|| {
-        format!("dynamic policy {id} client_ip_route subject must start with a valid IP address")
-      })?;
-      let Some(route_name) = route_name else {
-        bail!("dynamic policy {id} client_ip_route requires route_name");
-      };
-      if route != route_name {
-        bail!("dynamic policy {id} client_ip_route subject route does not match route_name");
-      }
-      (format!("{ip}|{route_name}"), None)
-    }
-    DynamicPolicySubjectType::IpPath => {
-      let (ip, path) = split_composite_subject(id, subject, "client_ip_path")?;
-      let ip = IpAddr::from_str(ip).with_context(|| {
-        format!("dynamic policy {id} client_ip_path subject must start with a valid IP address")
-      })?;
-      let Some(path_prefix) = path_prefix else {
-        bail!("dynamic policy {id} client_ip_path requires path_prefix");
-      };
-      if path != path_prefix {
-        bail!("dynamic policy {id} client_ip_path subject path does not match path_prefix");
-      }
-      (format!("{ip}|{path_prefix}"), None)
-    }
-  };
-  Ok(subject)
-}
-
-fn split_composite_subject<'a>(
-  id: i64,
-  subject: &'a str,
-  subject_type: &str,
-) -> anyhow::Result<(&'a str, &'a str)> {
-  let Some((ip, value)) = subject.split_once('|') else {
-    bail!("dynamic policy {id} {subject_type} subject must use '<ip>|<value>' format");
-  };
-  if ip.is_empty() || value.is_empty() {
-    bail!("dynamic policy {id} {subject_type} subject must not contain empty parts");
-  }
-  Ok((ip, value))
 }
 
 #[cfg(test)]

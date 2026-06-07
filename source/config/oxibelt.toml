@@ -843,6 +843,10 @@ signature_key_env = "OXIBELT_DYNAMIC_POLICY_HMAC_KEY"
 [dynamic_policy.matching]
 trust_route_name = true
 normalize_path = true
+ipv4_prefix_bits = 24
+ipv6_prefix_bits = 56
+token_bindings = ["user_agent", "tls_fingerprint", "route", "direct_peer_ip_network_prefix"]
+composite_identity_parts = ["client_ip_prefix", "user_agent", "tls_fingerprint", "asn"]
 
 #[[external_auth]]
 # name = "edge-auth"

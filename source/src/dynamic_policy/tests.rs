@@ -1,5 +1,7 @@
 use super::*;
 
+mod sybil;
+
 fn test_config() -> DynamicPolicyConfig {
   DynamicPolicyConfig::default()
 }
@@ -115,6 +117,34 @@ fn terminal_status(terminal: &DynamicPolicyTerminal) -> StatusCode {
   }
 }
 
+fn request<'a>(client_ip: &str, route_name: &'a str, path: &'a str) -> DynamicPolicyRequest<'a> {
+  DynamicPolicyRequest {
+    client_ip: client_ip.parse().unwrap(),
+    route_name,
+    method: &Method::GET,
+    path,
+    headers: None,
+    tls_fingerprint: None,
+    client_asn: None,
+    tcp_max_hop: None,
+    person_proof_clearance_hash: None,
+  }
+}
+
+fn sybil_request<'a>(headers: &'a HeaderMap, clearance_hash: &'a str) -> DynamicPolicyRequest<'a> {
+  DynamicPolicyRequest {
+    client_ip: "203.0.113.10".parse().unwrap(),
+    route_name: "app-route",
+    method: &Method::GET,
+    path: "/",
+    headers: Some(headers),
+    tls_fingerprint: Some("tls-secret"),
+    client_asn: Some(64500),
+    tcp_max_hop: None,
+    person_proof_clearance_hash: Some(clearance_hash),
+  }
+}
+
 #[test]
 fn client_ip_subject_requires_valid_ip() {
   let error = validate_policy_row(
@@ -153,12 +183,7 @@ fn client_ip_cidr_subject_canonicalizes_and_matches() {
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot(vec![policy]),
-    DynamicPolicyRequest {
-      client_ip: "203.0.113.99".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/",
-    },
+    request("203.0.113.99", "app-route", "/"),
     LimitState::new(None).as_ref(),
   );
 
@@ -194,12 +219,7 @@ fn challenge_policy_returns_challenge_terminal() {
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot(vec![policy]),
-    DynamicPolicyRequest {
-      client_ip: "203.0.113.10".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/",
-    },
+    request("203.0.113.10", "app-route", "/"),
     LimitState::new(None).as_ref(),
   );
 
@@ -276,24 +296,14 @@ fn noncanonical_ipv6_client_ip_rate_limit_subject_canonicalizes_and_matches() {
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot,
-    DynamicPolicyRequest {
-      client_ip: "2001:db8::1".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/",
-    },
+    request("2001:db8::1", "app-route", "/"),
     limits.as_ref(),
   );
   let second = evaluate_snapshot(
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot,
-    DynamicPolicyRequest {
-      client_ip: "2001:db8::1".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/",
-    },
+    request("2001:db8::1", "app-route", "/"),
     limits.as_ref(),
   );
 
@@ -334,12 +344,7 @@ fn noncanonical_ipv6_composite_subjects_canonicalize_and_reject() {
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot(vec![route_policy]),
-    DynamicPolicyRequest {
-      client_ip: "2001:db8::2".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/",
-    },
+    request("2001:db8::2", "app-route", "/"),
     LimitState::new(None).as_ref(),
   );
   assert!(route_outcome.context.matched);
@@ -352,12 +357,7 @@ fn noncanonical_ipv6_composite_subjects_canonicalize_and_reject() {
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot(vec![path_policy]),
-    DynamicPolicyRequest {
-      client_ip: "2001:db8::3".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/identity/accounts/prelogin",
-    },
+    request("2001:db8::3", "app-route", "/identity/accounts/prelogin"),
     LimitState::new(None).as_ref(),
   );
   assert!(path_outcome.context.matched);
@@ -376,12 +376,7 @@ fn matching_client_ip_path_rejects_request() {
     "203.0.113.10|/identity",
   );
   policy.path_prefix = Some("/identity".to_string());
-  let request = DynamicPolicyRequest {
-    client_ip: "203.0.113.10".parse().unwrap(),
-    route_name: "app-route",
-    method: &Method::GET,
-    path: "/identity/accounts/prelogin",
-  };
+  let request = request("203.0.113.10", "app-route", "/identity/accounts/prelogin");
   let outcome = evaluate_snapshot(
     &test_config(),
     Metrics::new().as_ref(),
@@ -407,12 +402,7 @@ fn route_name_mismatch_passes() {
     "203.0.113.10|admin-route",
   );
   policy.route_name = Some("admin-route".to_string());
-  let request = DynamicPolicyRequest {
-    client_ip: "203.0.113.10".parse().unwrap(),
-    route_name: "app-route",
-    method: &Method::GET,
-    path: "/identity",
-  };
+  let request = request("203.0.113.10", "app-route", "/identity");
   let outcome = evaluate_snapshot(
     &test_config(),
     Metrics::new().as_ref(),
@@ -442,24 +432,14 @@ fn dynamic_rate_limit_denies_after_burst() {
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot,
-    DynamicPolicyRequest {
-      client_ip: "203.0.113.10".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/",
-    },
+    request("203.0.113.10", "app-route", "/"),
     limits.as_ref(),
   );
   let second = evaluate_snapshot(
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot,
-    DynamicPolicyRequest {
-      client_ip: "203.0.113.10".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/",
-    },
+    request("203.0.113.10", "app-route", "/"),
     limits.as_ref(),
   );
 
@@ -493,12 +473,7 @@ fn route_and_path_specific_allow_precedes_global_reject() {
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot(vec![reject, allow]),
-    DynamicPolicyRequest {
-      client_ip: "203.0.113.10".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/identity/login",
-    },
+    request("203.0.113.10", "app-route", "/identity/login"),
     LimitState::new(None).as_ref(),
   );
 
@@ -522,12 +497,7 @@ fn dry_run_reject_records_context_without_terminal_action() {
     &test_config(),
     Metrics::new().as_ref(),
     &snapshot(vec![policy]),
-    DynamicPolicyRequest {
-      client_ip: "203.0.113.10".parse().unwrap(),
-      route_name: "app-route",
-      method: &Method::GET,
-      path: "/",
-    },
+    request("203.0.113.10", "app-route", "/"),
     LimitState::new(None).as_ref(),
   );
 

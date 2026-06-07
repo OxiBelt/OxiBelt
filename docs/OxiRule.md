@@ -383,7 +383,7 @@ Forbidden constructs:
 - `await`, promises, external I/O, file access, environment access, network access, clock access, random access, or process execution.
 - Unbounded loops, comprehensions, and map construction in v1.
 
-Dynamic policy integration does not change this sandbox: OxiRule can only read `DynamicPolicy.*` values already computed from the current in-memory snapshot.
+Dynamic policy integration does not change this sandbox: OxiRule can only read `DynamicPolicy.*` values already computed from the current in-memory snapshot. Dynamic policies may match IP/CIDR, route/path, client IP prefix, hashed TLS fingerprint, hashed token-binding, verified Person proof clearance hash, ASN, ASN-route, or hashed composite-client subjects before OxiRule evaluation, but OxiRule expressions still see only the resulting read-only context.
 
 Nullable values must be checked before nested access:
 
@@ -841,7 +841,7 @@ DynamicPolicy.Mode: 'enforce' | 'dry_run' | Null
 DynamicPolicy.Source: String | Null
 ```
 
-`DynamicPolicy.*` is read-only request context from OxiBelt's in-memory dynamic policy snapshot. It does not perform SQL or any other external I/O while evaluating an OxiRule expression. Terminal dynamic policy rejects and Person proof challenges happen before request-phase OxiRule evaluation, so these fields are mainly useful for requests that matched an allowed dynamic `allow`, non-terminal `rate_limit`, valid-clearance `challenge`, or `dry_run` policy and for response/access-log expressions.
+`DynamicPolicy.*` is read-only request context from OxiBelt's in-memory dynamic policy snapshot. It does not perform SQL or any other external I/O while evaluating an OxiRule expression. Subject identities that contain sensitive material, such as TLS fingerprints, token-binding payloads, composite-client parts, and Person proof clearances, are compared as prefixed SHA-256 hashes before this context is populated. Terminal dynamic policy rejects and Person proof challenges happen before request-phase OxiRule evaluation, so these fields are mainly useful for requests that matched an allowed dynamic `allow`, non-terminal `rate_limit`, valid-clearance `challenge`, or `dry_run` policy and for response/access-log expressions.
 
 ```text
 Request.Id: String

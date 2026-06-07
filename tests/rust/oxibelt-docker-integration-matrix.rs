@@ -926,6 +926,7 @@ run_case_checks() {
   assert_dynamic_policy_rejects_path
   assert_expired_policy_passes
   assert_route_mismatch_passes
+  assert_dynamic_asn_route_policy
   assert_dynamic_rate_limit
   assert_noncanonical_ipv6_dynamic_policies
   assert_refresh_failure_keeps_last_good
@@ -967,6 +968,17 @@ assert_route_mismatch_passes() {
   wait_for_dynamic_policy_refresh
   response="$(client_request_with_headers "example.test" "/app/identity/login" 200 "GET" "" "X-Forwarded-For: 203.0.113.53")"
   assert_body_jq "${response}" '.path == "/origin/app/identity/login"'
+}
+
+assert_dynamic_asn_route_policy() {
+  local blocked passed
+  postgres_query "INSERT INTO oxibelt_dynamic_policies (namespace, priority, name, action, subject_type, subject, route_name, status, body) VALUES ('matrix-dynamic', 35, 'asn-route-block', 'reject', 'asn_route', 'AS64500|app-route', 'app-route', 429, 'asn route block');" >/dev/null
+  bump_dynamic_policy_generation
+  wait_for_dynamic_policy_refresh
+  blocked="$(client_request_with_headers "example.test" "/app/identity/login" 429 "GET" "" "X-Forwarded-For: 203.0.113.54")"
+  assert_response_jq "${blocked}" '.body == "asn route block"'
+  passed="$(client_request_with_headers "example.test" "/app/identity/login" 200 "GET" "" "X-Forwarded-For: 203.0.114.54")"
+  assert_body_jq "${passed}" '.path == "/origin/app/identity/login"'
 }
 
 assert_dynamic_rate_limit() {

@@ -4372,7 +4372,23 @@
                   "type": "string"
                 },
                 "subject_type": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Dynamic policy subject type. Hash subjects use canonical prefixes fingerprint:, binding:, clearance:, or hash: with a SHA-256 value; route variants store '<subject>|<route_name>'.",
+                  "enum": [
+                    "client_ip",
+                    "client_ip_cidr",
+                    "client_ip_route",
+                    "client_ip_path",
+                    "client_ip_prefix",
+                    "client_ip_prefix_route",
+                    "tls_fingerprint",
+                    "tls_fingerprint_route",
+                    "token_binding_hash",
+                    "person_proof_clearance",
+                    "asn",
+                    "asn_route",
+                    "composite_client"
+                  ]
                 },
                 "subject": {
                   "type": "string"
