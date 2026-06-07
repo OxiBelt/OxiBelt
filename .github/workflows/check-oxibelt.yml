@@ -368,6 +368,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
 
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
 
@@ -419,6 +422,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
 
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
 
@@ -452,6 +458,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
 
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
 
@@ -482,6 +491,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
+
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
@@ -527,6 +539,9 @@ jobs:
         with:
           platforms: ${{ matrix.qemu_platforms }}
 
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
 
@@ -563,6 +578,9 @@ jobs:
         with:
           platforms: riscv64
 
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
 
@@ -594,6 +612,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
+
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0

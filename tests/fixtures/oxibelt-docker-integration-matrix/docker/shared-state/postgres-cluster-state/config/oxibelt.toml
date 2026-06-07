@@ -127,6 +127,7 @@ body = "postgres waf rate limit exceeded"
 [[rate_limits]]
 name = "shared-rate"
 key = "client_ip"
+routes = ["rate-route"]
 rate = "1r/h"
 burst = 1
 max_buckets = 1
@@ -135,7 +136,7 @@ status = 429
 [[rate_limits]]
 name = "shared-token-route"
 key = "access_token_route"
-routes = ["app-route"]
+routes = ["token-route-rate-route"]
 # Fixture simulates a trusted auth layer injecting this header. Do not use arbitrary
 # public pre-auth bearer tokens as the only Sybil budget.
 access_token_source = "trusted_header"
@@ -191,6 +192,20 @@ name = "person-proof-api-route"
 hosts = ["example.test"]
 path_prefix = "/.oxibelt"
 upstream = "http-upstream"
+
+[[routes]]
+name = "rate-route"
+hosts = ["example.test"]
+path_prefix = "/app/rate"
+upstream = "http-upstream"
+cache = "default"
+
+[[routes]]
+name = "token-route-rate-route"
+hosts = ["example.test"]
+path_prefix = "/app/token-route-rate"
+upstream = "http-upstream"
+cache = "default"
 
 [[routes]]
 name = "app-route"

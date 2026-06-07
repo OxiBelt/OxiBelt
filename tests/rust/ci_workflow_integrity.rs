@@ -97,6 +97,11 @@ fn docker_integration_helper_build_script_text() -> String {
     .expect("Docker integration helper image build script should be readable")
 }
 
+fn docker_pull_retry_script_text() -> String {
+    fs::read_to_string(repo_root().join("tests/scripts/retry-docker-pull.sh"))
+        .expect("Docker pull retry script should be readable")
+}
+
 fn workspace_members() -> Vec<String> {
     let manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
         .expect("root Cargo.toml should be readable");
@@ -606,6 +611,49 @@ fn amd64_docker_image_job_builds_cpu_level_artifacts() {
         workflow.contains("\"${{ matrix.artifact_arch }}\""),
         "AMD64 Docker image build should pass the matrix artifact arch to the build script"
     );
+}
+
+#[test]
+fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
+    let workflow = workflow_text();
+    let script = docker_pull_retry_script_text();
+    let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0";
+    let prepull_step_name = "name: Pre-pull Docker BuildKit image";
+    let prepull_command = "tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1";
+    let setup_count = workflow.matches(setup_marker).count();
+
+    assert_eq!(
+        setup_count, 7,
+        "workflow should keep pre-pull coverage aligned with every Buildx setup"
+    );
+    assert_eq!(
+        workflow.matches(prepull_step_name).count(),
+        setup_count,
+        "each Buildx setup should have one BuildKit pre-pull step"
+    );
+    assert_eq!(
+        workflow.matches(prepull_command).count(),
+        setup_count,
+        "each BuildKit pre-pull step should use the shared retry helper"
+    );
+    assert!(
+        script.contains("retry_command 3 docker pull \"${image}\""),
+        "BuildKit pre-pull helper should retry Docker Hub pulls"
+    );
+
+    let mut search_start = 0;
+    while let Some(relative_position) = workflow[search_start..].find(setup_marker) {
+        let setup_position = search_start + relative_position;
+        let previous_step_start = workflow[..setup_position]
+            .rfind("\n      - name: ")
+            .expect("Buildx setup should have a previous workflow step");
+        let previous_step = &workflow[previous_step_start..setup_position];
+        assert!(
+            previous_step.contains(prepull_step_name) && previous_step.contains(prepull_command),
+            "Buildx setup at byte offset {setup_position} should be immediately preceded by the BuildKit pre-pull step"
+        );
+        search_start = setup_position + setup_marker.len();
+    }
 }
 
 #[test]

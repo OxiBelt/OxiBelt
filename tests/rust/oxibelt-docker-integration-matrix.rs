@@ -765,12 +765,20 @@ assert_postgres_reload_generation() {
 }
 
 assert_shared_rate_limit() {
-  local first second
+  local first second third count
   first="$(client_request_with_headers "example.test" "/app/rate" 200 "GET" "" "X-Forwarded-For: 203.0.113.10")"
   assert_body_jq "${first}" '.path == "/origin/app/rate"'
 
   second="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.10")"
   assert_response_jq "${second}" '.body == "rate limit exceeded"'
+
+  third="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.11")"
+  assert_response_jq "${third}" '.body == "rate limit exceeded"'
+
+  count="$(postgres_query "SELECT count(*) FROM oxibelt_shared_rate_buckets WHERE limit_name = 'matrix-shared:rate-index:shared-rate';")"
+  if [[ "${count}" != "1" ]]; then
+    fail_with_diagnostics "expected one PostgreSQL shared rate-limit bucket after max_buckets cap, got ${count}"
+  fi
 }
 
 assert_shared_access_token_route_rate_limit() {
@@ -784,7 +792,7 @@ assert_shared_access_token_route_rate_limit() {
   third="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/token-route-rate" 429 "GET" "" "X-Forwarded-For: 203.0.113.13" "X-Api-Token: postgres-route-token-other")"
   assert_response_jq "${third}" '.body == "rate limit exceeded"'
 
-  count="$(postgres_query "SELECT count(*) FROM oxibelt_shared_state WHERE key LIKE 'matrix-shared:rate:shared-token-route:access_token_route:token:%:app-route';")"
+  count="$(postgres_query "SELECT count(*) FROM oxibelt_shared_state WHERE key LIKE 'matrix-shared:rate:shared-token-route:access_token_route:token:%:token-route-rate-route';")"
   if [[ "${count}" != "1" ]]; then
     fail_with_diagnostics "expected one PostgreSQL token route rate-limit row after max_buckets cap, got ${count}"
   fi
