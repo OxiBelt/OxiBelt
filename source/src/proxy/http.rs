@@ -68,8 +68,8 @@ use self::body::{
 };
 use self::cache_status::{CacheHeaderOutcome as CacheOutcome, CacheHeaderReason as CacheReason};
 use self::headers::{
-  add_forwarded_headers, extract_downstream_port, extract_host, is_upgrade_request,
-  set_effective_host_header, strip_hop_by_hop_headers, validate_authority_host_consistency,
+  add_forwarded_headers, extract_host_snapshot, is_upgrade_request, set_effective_host_header,
+  strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
 use self::observability::{
   record_request_observability, record_websocket_session_end, request_observability_start,
@@ -445,9 +445,10 @@ where
     return text_response(StatusCode::BAD_REQUEST, "ambiguous host header");
   }
 
-  let host = extract_host(&request).unwrap_or_default();
-  let downstream_port = extract_downstream_port(&request, downstream_scheme);
-  access_log.set_downstream_host(&host);
+  let host_snapshot = extract_host_snapshot(&request);
+  let host = host_snapshot.as_str();
+  let downstream_port = host_snapshot.downstream_port(downstream_scheme);
+  access_log.set_downstream_host(host);
   let path = request.uri().path();
   if let Err((status, message)) = validate_request_limits(&request, &state.config.limits) {
     return text_response(status, message);
@@ -521,7 +522,7 @@ where
   }
 
   let Some(resolved) = state.route_table.resolve_normalized_host_with_context(
-    &host,
+    host,
     RouteMatchContext {
       path,
       method: Some(request.method()),
@@ -562,7 +563,6 @@ where
     }
   }
 
-  let host = host.into_owned();
   let cl0_guard_required =
     h2_or_h3_content_length_zero_guard_required(request_version, request.headers());
   let request = if !cl0_guard_required {
@@ -572,7 +572,7 @@ where
       &resolved,
       forwarded_client_addr,
       client_addr,
-      &host,
+      host,
       downstream_port,
       tcp_max_hop,
       tls.as_ref(),
@@ -605,7 +605,7 @@ where
       &resolved,
       forwarded_client_addr,
       client_addr,
-      &host,
+      host,
       downstream_port,
       tcp_max_hop,
       tls.as_ref(),
@@ -685,7 +685,7 @@ where
               body: None,
               peer_addr: client_addr,
               client_asn,
-              downstream_host: &host,
+              downstream_host: host,
               downstream_scheme,
               route_name: &resolved.route.name,
               tcp_max_hop,
@@ -724,7 +724,7 @@ where
       client_body_timeout,
       request_version,
       client_addr,
-      &host,
+      host,
       downstream_scheme,
       &resolved.route.name,
       tcp_max_hop,
@@ -740,7 +740,7 @@ where
     )
     .await;
   }
-  match route_actions::resolved_redirect_response(&resolved, downstream_scheme, &host, &request_uri)
+  match route_actions::resolved_redirect_response(&resolved, downstream_scheme, host, &request_uri)
   {
     Ok(Some(response)) => return response,
     Ok(None) => {}
@@ -758,7 +758,7 @@ where
         provider,
         &mut request,
         client_addr.ip(),
-        &host,
+        host,
         downstream_scheme,
         &resolved.route.name,
       )
@@ -810,7 +810,7 @@ where
       body: request_body,
       peer_addr: client_addr,
       client_asn,
-      downstream_host: &host,
+      downstream_host: host,
       downstream_scheme,
       route_name: &resolved.route.name,
       tcp_max_hop,
@@ -873,7 +873,7 @@ where
       request_version,
       request.headers(),
       client_addr,
-      &host,
+      host,
       tcp_max_hop,
       tls.as_ref(),
       protocol,
@@ -893,7 +893,7 @@ where
       state,
       &resolved,
       client_addr,
-      &host,
+      host,
       &request_waf,
       request_version,
       connection_limit_context.as_ref(),
@@ -943,7 +943,7 @@ where
       &resolved,
       forwarded_client_addr,
       client_addr,
-      &host,
+      host,
       downstream_scheme,
       downstream_port,
       &request_waf,
@@ -975,7 +975,7 @@ where
     state.as_ref(),
     &resolved,
     client_addr,
-    &host,
+    host,
     request.uri(),
     pool_cookie_header,
     &request_waf,
@@ -1070,7 +1070,7 @@ where
     upstream_uri,
     &resolved,
     downstream_scheme,
-    &host,
+    host,
     &request_uri,
   ) {
     Ok(uri) => uri,
@@ -1085,7 +1085,7 @@ where
     compression: &state.config.compression,
     forwarded_client_addr,
     downstream_scheme,
-    downstream_host: &host,
+    downstream_host: host,
     downstream_port,
     forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
     preserve_host: upstream.preserve_host,
@@ -1131,7 +1131,7 @@ where
   if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
     policy_name: resolved.route.cache.as_deref(),
     scheme: downstream_scheme,
-    host: &host,
+    host,
     method: &request_method,
     uri: &request_uri,
     request_headers: &request_headers,
@@ -1145,7 +1145,7 @@ where
       upstream_version,
       timeouts,
       downstream_scheme,
-      &host,
+      host,
       &request_method,
       &request_uri,
       &request_headers,
@@ -1169,7 +1169,7 @@ where
         .begin_fill_decision(crate::cache::CacheLookupContext {
           policy_name: resolved.route.cache.as_deref(),
           scheme: downstream_scheme,
-          host: &host,
+          host,
           method: &request_method,
           uri: &request_uri,
           request_headers: &request_headers,
@@ -1186,7 +1186,7 @@ where
             .lookup(crate::cache::CacheLookupContext {
               policy_name: resolved.route.cache.as_deref(),
               scheme: downstream_scheme,
-              host: &host,
+              host,
               method: &request_method,
               uri: &request_uri,
               request_headers: &request_headers,
@@ -1201,7 +1201,7 @@ where
                 upstream_version,
                 timeouts,
                 downstream_scheme,
-                &host,
+                host,
                 &request_method,
                 &request_uri,
                 &request_headers,
@@ -1249,7 +1249,7 @@ where
           if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
-            host: &host,
+            host,
             method: &request_method,
             uri: &request_uri,
             request_headers: &request_headers,
@@ -1263,7 +1263,7 @@ where
               upstream_version,
               timeouts,
               downstream_scheme,
-              &host,
+              host,
               &request_method,
               &request_uri,
               &request_headers,
@@ -1334,7 +1334,7 @@ where
           request_version,
           &request_headers,
           client_addr,
-          &host,
+          host,
           tcp_max_hop,
           tls.as_ref(),
           protocol,
@@ -1381,7 +1381,7 @@ where
           request_version,
           &request_headers,
           client_addr,
-          &host,
+          host,
           tcp_max_hop,
           tls.as_ref(),
           protocol,
@@ -1442,7 +1442,7 @@ where
           &request_uri,
           &resolved.path_captures,
           client_addr,
-          &host,
+          host,
           downstream_scheme,
           pool_retry_cookie.as_ref(),
           &request_waf,
@@ -1538,7 +1538,7 @@ where
           request_version,
           &request_headers,
           client_addr,
-          &host,
+          host,
           tcp_max_hop,
           tls.as_ref(),
           protocol,
@@ -1591,7 +1591,7 @@ where
         crate::cache::CacheInsertContext {
           policy_name: resolved.route.cache.as_deref(),
           scheme: downstream_scheme,
-          host: &host,
+          host,
           method: &request_method,
           uri: &request_uri,
           request_headers: &request_headers,
@@ -1680,7 +1680,7 @@ where
       body: request_body,
       peer_addr: client_addr,
       client_asn,
-      downstream_host: &host,
+      downstream_host: host,
       downstream_scheme,
       route_name: &resolved.route.name,
       tcp_max_hop,
@@ -1745,7 +1745,7 @@ where
     state,
     resolved.route.cache.as_deref(),
     downstream_scheme,
-    &host,
+    host,
     &request_method,
     &request_uri,
     &request_headers,

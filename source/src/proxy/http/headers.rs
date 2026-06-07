@@ -1,7 +1,6 @@
 //! Header normalization and forwarding helpers for HTTP proxying.
 //! Hop-by-hop and authority-sensitive headers are handled here before upstream dispatch.
 
-use std::borrow::Cow;
 use std::net::IpAddr;
 use std::str::FromStr;
 
@@ -13,7 +12,10 @@ use http::header::{
 use http::uri::Authority;
 
 use crate::config::ForwardedHeaderMode;
-use crate::routes::{normalize_host, normalize_host_cow};
+use crate::routes::normalize_host;
+
+mod host;
+pub(crate) use self::host::{extract_downstream_port, extract_host, extract_host_snapshot};
 
 const CLOSE_HEADER: HeaderName = HeaderName::from_static("close");
 const KEEP_ALIVE_HEADER: HeaderName = HeaderName::from_static("keep-alive");
@@ -21,33 +23,6 @@ const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
 const X_FORWARDED_PORT: HeaderName = HeaderName::from_static("x-forwarded-port");
 const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
-
-pub(crate) fn extract_host<B>(request: &Request<B>) -> Option<Cow<'_, str>> {
-  if let Some(authority) = request.uri().authority() {
-    return Some(normalize_host_cow(authority.host()));
-  }
-
-  request
-    .headers()
-    .get(HOST)
-    .and_then(|value| value.to_str().ok())
-    .map(normalize_host_cow)
-}
-
-pub(crate) fn extract_downstream_port<B>(request: &Request<B>, scheme: &str) -> u16 {
-  request
-    .uri()
-    .authority()
-    .and_then(|authority| authority.port_u16())
-    .or_else(|| {
-      request
-        .headers()
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(explicit_authority_port)
-    })
-    .unwrap_or_else(|| default_port_for_scheme(scheme))
-}
 
 pub(crate) fn validate_authority_host_consistency<B>(
   request: &Request<B>,
@@ -365,17 +340,6 @@ mod tests {
   use super::*;
 
   #[test]
-  fn extract_host_prefers_absolute_form_authority_over_host_header() {
-    let request = Request::builder()
-      .uri("http://absolute.example:8080/path?query=1")
-      .header(HOST, "header.example")
-      .body(())
-      .expect("request should build");
-
-    assert_eq!(extract_host(&request).as_deref(), Some("absolute.example"));
-  }
-
-  #[test]
   fn authority_host_consistency_rejects_absolute_form_mismatch() {
     let request = Request::builder()
       .uri("http://absolute.example/path")
@@ -423,69 +387,6 @@ mod tests {
       .expect("request should build");
 
     assert!(validate_authority_host_consistency(&request).is_ok());
-  }
-
-  #[test]
-  fn downstream_port_prefers_authority_then_host_then_scheme_default() {
-    let authority = Request::builder()
-      .uri("http://absolute.example:8080/path")
-      .header(HOST, "header.example:9443")
-      .body(())
-      .expect("request should build");
-    let host = Request::builder()
-      .uri("/path")
-      .header(HOST, "header.example:9443")
-      .body(())
-      .expect("request should build");
-    let default = Request::builder()
-      .uri("/path")
-      .header(HOST, "header.example")
-      .body(())
-      .expect("request should build");
-
-    assert_eq!(extract_downstream_port(&authority, "http"), 8080);
-    assert_eq!(extract_downstream_port(&host, "https"), 9443);
-    assert_eq!(extract_downstream_port(&default, "https"), 443);
-  }
-
-  #[test]
-  fn host_extraction_borrows_common_normalized_host() {
-    let request = Request::builder()
-      .uri("/path")
-      .header(HOST, "example.test")
-      .body(())
-      .expect("request should build");
-    assert!(matches!(
-      extract_host(&request),
-      Some(std::borrow::Cow::Borrowed("example.test"))
-    ));
-
-    let upper = Request::builder()
-      .uri("/path")
-      .header(HOST, "Example.Test:8443")
-      .body(())
-      .expect("request should build");
-    assert!(matches!(
-      extract_host(&upper),
-      Some(std::borrow::Cow::Owned(value)) if value == "example.test"
-    ));
-  }
-
-  #[test]
-  fn downstream_port_handles_ipv6_and_non_port_hosts() {
-    let bracketed = Request::builder()
-      .uri("/path")
-      .header(HOST, "[2001:db8::1]:9443")
-      .body(())
-      .expect("request should build");
-    let bare_ipv6 = Request::builder()
-      .uri("/path")
-      .header(HOST, "2001:db8::1")
-      .body(())
-      .expect("request should build");
-
-    assert_eq!(extract_downstream_port(&bracketed, "https"), 9443);
-    assert_eq!(extract_downstream_port(&bare_ipv6, "https"), 443);
   }
 
   #[test]
