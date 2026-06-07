@@ -21,6 +21,7 @@ pub mod admin;
 pub mod signature;
 pub mod store;
 pub use admin::*;
+mod person_proof_scope;
 mod subject;
 mod sybil;
 use subject::{DynamicPolicySubjectType, parse_subject_type, validate_subject};
@@ -268,11 +269,15 @@ impl DynamicPolicyRuntime {
     self.inner.is_some()
   }
 
-  pub fn needs_person_proof_clearance(&self) -> bool {
-    self
-      .inner
-      .as_ref()
-      .is_some_and(|inner| inner.snapshot().needs_person_proof_clearance())
+  pub fn needs_person_proof_clearance_for_request(
+    &self,
+    request: DynamicPolicyRequest<'_>,
+  ) -> bool {
+    self.inner.as_ref().is_some_and(|inner| {
+      inner
+        .snapshot()
+        .needs_person_proof_clearance_for_request(&inner.config, request)
+    })
   }
 
   pub fn evaluate(
@@ -451,13 +456,6 @@ impl DynamicPolicySnapshot {
       policies: Arc::from([]),
     }
   }
-
-  fn needs_person_proof_clearance(&self) -> bool {
-    self
-      .policies
-      .iter()
-      .any(|policy| policy.subject_type == DynamicPolicySubjectType::PersonProofClearance)
-  }
 }
 
 impl DynamicPolicy {
@@ -467,20 +465,7 @@ impl DynamicPolicy {
     request: &DynamicPolicyRequest<'_>,
     request_path: &str,
   ) -> bool {
-    if let Some(method) = &self.method
-      && method != request.method
-    {
-      return false;
-    }
-    if config.matching.trust_route_name
-      && let Some(route_name) = &self.route_name
-      && route_name != request.route_name
-    {
-      return false;
-    }
-    if let Some(path_prefix) = &self.path_prefix
-      && !crate::routes::path_prefix_matches(path_prefix, request_path)
-    {
+    if !self.matches_request_scope(config, request, request_path) {
       return false;
     }
 

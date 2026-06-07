@@ -188,6 +188,56 @@ fn person_proof_clearance_subject_requires_verified_hash() {
 }
 
 #[test]
+fn person_proof_clearance_precheck_uses_request_scope() {
+  let clearance_hash = sybil_identity::sha256_hex(b"clearance");
+  let mut row = row(1, "reject", "person_proof_clearance", &clearance_hash);
+  row.route_name = Some("app-route".to_string());
+  row.method = Some("POST".to_string());
+  row.path_prefix = Some("/login".to_string());
+  let policy = validate_policy_row(row, &test_config(), "test", &route_names(), None)
+    .expect("clearance policy should validate");
+  let snapshot = snapshot(vec![policy]);
+  let config = test_config();
+  let post = Method::POST;
+  let get = Method::GET;
+
+  fn scoped_request<'a>(
+    method: &'a Method,
+    route_name: &'a str,
+    path: &'a str,
+  ) -> DynamicPolicyRequest<'a> {
+    DynamicPolicyRequest {
+      client_ip: "203.0.113.10".parse().unwrap(),
+      route_name,
+      method,
+      path,
+      headers: None,
+      tls_fingerprint: None,
+      client_asn: None,
+      tcp_max_hop: None,
+      person_proof_clearance_hash: None,
+    }
+  }
+
+  assert!(snapshot.needs_person_proof_clearance_for_request(
+    &config,
+    scoped_request(&post, "app-route", "/login/session")
+  ));
+  assert!(!snapshot.needs_person_proof_clearance_for_request(
+    &config,
+    scoped_request(&get, "app-route", "/login/session")
+  ));
+  assert!(!snapshot.needs_person_proof_clearance_for_request(
+    &config,
+    scoped_request(&post, "other-route", "/login/session")
+  ));
+  assert!(!snapshot.needs_person_proof_clearance_for_request(
+    &config,
+    scoped_request(&post, "app-route", "/public")
+  ));
+}
+
+#[test]
 fn sybil_subject_rate_limits_deny_after_burst() {
   let config = test_config();
   let clearance_hash = sybil_identity::sha256_hex(b"clearance");

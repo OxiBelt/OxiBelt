@@ -16,11 +16,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::config::{
-  Config, ConnectionLimitIdentityMode, ErrorResponseMode, HttpVersion, ProxyHttp2Config,
-  ProxyProtocolEgressMode, RouteConfig, UpstreamConfig,
+  Config, ConnectionLimitIdentityMode, HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode,
+  RouteConfig, UpstreamConfig,
 };
 use crate::dynamic_policy::{DynamicPolicyRequest, DynamicPolicyTerminal};
-use crate::external_auth::{ExternalAuthOutcome, ExternalAuthTerminal};
+use crate::external_auth::ExternalAuthOutcome;
 use crate::ipm::{IpmDecision, IpmRequestContext, resource as ipm_resource};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit, RateLimitContext};
@@ -64,7 +64,7 @@ pub(crate) use warm::warm_cache_request;
 pub(crate) use self::access_log::SystemAccessLogContext;
 use self::body::{
   BodyTimeoutKind, CapturedBody, ProxyBody, boxed_error, capture_body_prefix, capture_prefix,
-  error_indicates_body_timeout, error_is_body_length_limit, error_is_timeout,
+  error_indicates_body_timeout, error_is_timeout,
 };
 use self::cache_status::{CacheHeaderOutcome as CacheOutcome, CacheHeaderReason as CacheReason};
 use self::flow_helpers::{
@@ -86,57 +86,17 @@ use self::request_framing::{
   positive_content_length, request_body_framing,
 };
 use self::response::{
-  apply_security_headers, apply_sticky_cookie, draining_response, text_response,
-  upstream_error_response, waf_terminal_response,
+  apply_security_headers, apply_sticky_cookie, draining_response, external_auth_response,
+  proxy_error_response, request_buffering_error_response, response_buffering_error_response,
+  text_response, upstream_error_response, upstream_selection_error_response, waf_terminal_response,
+  with_pending_dynamic_person_proof_response_mutations,
 };
 use self::retry::{EffectiveRetryPolicy, send_one_shot, send_pool_with_retry, send_with_retry};
-use self::semantics::{configured_error_response, filter_trailers};
-use self::upstream::{UpstreamSelectionError, select_request_upstream};
+use self::semantics::filter_trailers;
+use self::upstream::select_request_upstream;
 use self::uri::validate_downstream_path;
 use self::version::select_upstream_http_version;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
-
-fn proxy_error_response(
-  state: &AppSnapshot,
-  access_log: &mut SystemAccessLogContext<'_>,
-  status: StatusCode,
-  message: &str,
-  code: &str,
-) -> Response<ProxyBody> {
-  if state.config.proxy.http.errors.mode == ErrorResponseMode::Json {
-    access_log.ensure_request_id();
-    configured_error_response(
-      &state.config,
-      access_log.request_id(),
-      status,
-      message,
-      code,
-    )
-  } else {
-    configured_error_response(&state.config, "", status, message, code)
-  }
-}
-
-fn upstream_selection_error_response(error: UpstreamSelectionError) -> Response<ProxyBody> {
-  match error {
-    UpstreamSelectionError::UnknownWafUpstream(upstream) => {
-      warn!(upstream, "WAF selected an unknown upstream");
-      text_response(StatusCode::BAD_GATEWAY, "WAF selected an unknown upstream")
-    }
-    UpstreamSelectionError::PoolUnavailable { pool_name, message } => {
-      warn!(error = %message, pool = %pool_name, "failed to select upstream pool server");
-      text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server")
-    }
-    UpstreamSelectionError::MissingRouteUpstream => {
-      warn!("route resolved without an upstream");
-      text_response(StatusCode::BAD_GATEWAY, "upstream is not configured")
-    }
-    UpstreamSelectionError::MissingSyntheticUpstream(upstream) => {
-      warn!(upstream, "pool selected an unknown synthetic upstream");
-      text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server")
-    }
-  }
-}
 
 #[derive(Clone, Copy)]
 pub(crate) struct EffectiveTimeouts {
@@ -599,7 +559,19 @@ where
   }
   let mut evaluated_person_proof = None;
   if state.request_path_features.dynamic_policy
-    && state.dynamic_policy.needs_person_proof_clearance()
+    && state
+      .dynamic_policy
+      .needs_person_proof_clearance_for_request(DynamicPolicyRequest {
+        client_ip: client_addr.ip(),
+        route_name: &resolved.route.name,
+        method: &request_method,
+        path: request_uri.path(),
+        headers: Some(request.headers()),
+        tls_fingerprint: tls.fingerprint.as_deref(),
+        client_asn,
+        tcp_max_hop,
+        person_proof_clearance_hash: None,
+      })
   {
     access_log.ensure_request_ids();
     evaluated_person_proof = Some(state.waf.evaluate_person_proof_request(WafRequestInput {
@@ -651,7 +623,15 @@ where
   let mut dynamic_person_proof_mutation_added = false;
   if let Some(terminal) = dynamic_policy.terminal {
     match terminal {
-      DynamicPolicyTerminal::Text { status, body } => return text_response(status, &body),
+      DynamicPolicyTerminal::Text { status, body } => {
+        return with_pending_dynamic_person_proof_response_mutations(
+          text_response(status, &body),
+          state.as_ref(),
+          evaluated_person_proof.as_ref(),
+          dynamic_person_proof_mutation_added,
+          &dynamic_challenge_response_mutations,
+        );
+      }
       DynamicPolicyTerminal::Challenge { status } => {
         let person_proof_api_path = state.request_path_features.person_proof_api
           && state.waf.has_person_proof_api_path(request_uri.path());
@@ -688,7 +668,13 @@ where
             Ok(decision) => decision,
             Err(error) => {
               warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
-              return text_response(StatusCode::FORBIDDEN, "person proof challenge failed");
+              return with_pending_dynamic_person_proof_response_mutations(
+                text_response(StatusCode::FORBIDDEN, "person proof challenge failed"),
+                state.as_ref(),
+                evaluated_person_proof.as_ref(),
+                dynamic_person_proof_mutation_added,
+                &dynamic_challenge_response_mutations,
+              );
             }
           };
           if let Some(terminal) = decision.terminal {
@@ -704,7 +690,7 @@ where
     && state.waf.has_person_proof_api_path(request_uri.path());
   if person_proof_api_path {
     access_log.ensure_request_ids();
-    return handle_person_proof_api(
+    let response = handle_person_proof_api(
       request,
       state.as_ref(),
       request_method,
@@ -727,14 +713,35 @@ where
       access_log.request_received_at_unix_ms,
     )
     .await;
+    return with_pending_dynamic_person_proof_response_mutations(
+      response,
+      state.as_ref(),
+      evaluated_person_proof.as_ref(),
+      dynamic_person_proof_mutation_added,
+      &dynamic_challenge_response_mutations,
+    );
   }
   match route_actions::resolved_redirect_response(&resolved, downstream_scheme, host, &request_uri)
   {
-    Ok(Some(response)) => return response,
+    Ok(Some(response)) => {
+      return with_pending_dynamic_person_proof_response_mutations(
+        response,
+        state.as_ref(),
+        evaluated_person_proof.as_ref(),
+        dynamic_person_proof_mutation_added,
+        &dynamic_challenge_response_mutations,
+      );
+    }
     Ok(None) => {}
     Err(error) => {
       warn!(error = %error, route = %resolved.route.name, "failed to build route redirect response");
-      return text_response(StatusCode::BAD_REQUEST, "invalid route redirect");
+      return with_pending_dynamic_person_proof_response_mutations(
+        text_response(StatusCode::BAD_REQUEST, "invalid route redirect"),
+        state.as_ref(),
+        evaluated_person_proof.as_ref(),
+        dynamic_person_proof_mutation_added,
+        &dynamic_challenge_response_mutations,
+      );
     }
   }
   if resolved.execution_plan.features.external_auth
@@ -753,7 +760,15 @@ where
       .await
     {
       ExternalAuthOutcome::Allowed => {}
-      ExternalAuthOutcome::Denied(terminal) => return external_auth_response(terminal),
+      ExternalAuthOutcome::Denied(terminal) => {
+        return with_pending_dynamic_person_proof_response_mutations(
+          external_auth_response(terminal),
+          state.as_ref(),
+          evaluated_person_proof.as_ref(),
+          dynamic_person_proof_mutation_added,
+          &dynamic_challenge_response_mutations,
+        );
+      }
     }
   }
   let request = request.map(|body| {
@@ -775,9 +790,21 @@ where
       Err(error) => {
         warn!(error = %error, "failed to read request body for WAF inspection");
         if error_is_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
-          return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
+          return with_pending_dynamic_person_proof_response_mutations(
+            text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out"),
+            state.as_ref(),
+            evaluated_person_proof.as_ref(),
+            dynamic_person_proof_mutation_added,
+            &dynamic_challenge_response_mutations,
+          );
         }
-        return text_response(StatusCode::BAD_REQUEST, "failed to read request body");
+        return with_pending_dynamic_person_proof_response_mutations(
+          text_response(StatusCode::BAD_REQUEST, "failed to read request body"),
+          state.as_ref(),
+          evaluated_person_proof.as_ref(),
+          dynamic_person_proof_mutation_added,
+          &dynamic_challenge_response_mutations,
+        );
       }
     }
   } else {
@@ -1769,13 +1796,6 @@ where
   response
 }
 
-fn external_auth_response(terminal: ExternalAuthTerminal) -> Response<ProxyBody> {
-  let mut response = Response::new(full_body(terminal.body));
-  *response.status_mut() = terminal.status;
-  *response.headers_mut() = terminal.headers;
-  response
-}
-
 pub(super) fn apply_alt_svc_header(
   headers: &mut HeaderMap,
   status: StatusCode,
@@ -1852,78 +1872,6 @@ async fn buffer_request_body(
   let (parts, body) = request.into_parts();
   let body = buffering::buffer_body(body, effective.request, effective.temp_dir.as_deref()).await?;
   Ok(Request::from_parts(parts, body))
-}
-
-fn request_buffering_error_response(error: buffering::BufferingError) -> Response<ProxyBody> {
-  match error {
-    buffering::BufferingError::TooLarge => {
-      text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
-    }
-    buffering::BufferingError::Body(error)
-      if error_is_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) =>
-    {
-      text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out")
-    }
-    buffering::BufferingError::Body(error) if error_is_body_length_limit(&error) => {
-      text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
-    }
-    buffering::BufferingError::Body(error) => {
-      warn!(error = %error, "failed to buffer downstream request body");
-      text_response(StatusCode::BAD_REQUEST, "failed to read request body")
-    }
-    buffering::BufferingError::Io(error) => {
-      warn!(error = %error, "failed to spool downstream request body");
-      text_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "failed to buffer request body",
-      )
-    }
-    buffering::BufferingError::MissingTempDir => {
-      warn!("request buffering spool mode is missing temp_dir");
-      text_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "failed to buffer request body",
-      )
-    }
-  }
-}
-
-fn response_buffering_error_response(error: buffering::BufferingError) -> Response<ProxyBody> {
-  match error {
-    buffering::BufferingError::TooLarge => text_response(
-      StatusCode::BAD_GATEWAY,
-      "upstream response body is too large",
-    ),
-    buffering::BufferingError::Body(error)
-      if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) =>
-    {
-      text_response(
-        StatusCode::GATEWAY_TIMEOUT,
-        "upstream response body timed out",
-      )
-    }
-    buffering::BufferingError::Body(error) => {
-      warn!(error = %error, "failed to buffer upstream response body");
-      text_response(
-        StatusCode::BAD_GATEWAY,
-        "failed to read upstream response body",
-      )
-    }
-    buffering::BufferingError::Io(error) => {
-      warn!(error = %error, "failed to spool upstream response body");
-      text_response(
-        StatusCode::BAD_GATEWAY,
-        "failed to buffer upstream response body",
-      )
-    }
-    buffering::BufferingError::MissingTempDir => {
-      warn!("response buffering spool mode is missing temp_dir");
-      text_response(
-        StatusCode::BAD_GATEWAY,
-        "failed to buffer upstream response body",
-      )
-    }
-  }
 }
 
 fn with_connection_permit(

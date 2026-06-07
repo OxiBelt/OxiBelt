@@ -120,7 +120,19 @@ pub(crate) async fn prepare_webtransport(
 
   let mut evaluated_person_proof = None;
   if state.request_path_features.dynamic_policy
-    && state.dynamic_policy.needs_person_proof_clearance()
+    && state
+      .dynamic_policy
+      .needs_person_proof_clearance_for_request(DynamicPolicyRequest {
+        client_ip: client_addr.ip(),
+        route_name: &resolved.route.name,
+        method: &request_method,
+        path: request_uri.path(),
+        headers: Some(request.headers()),
+        tls_fingerprint: tls.fingerprint.as_deref(),
+        client_asn,
+        tcp_max_hop: None,
+        person_proof_clearance_hash: None,
+      })
   {
     let request_id = crate::waf::new_access_log_id();
     let transaction_id = crate::waf::new_access_log_id();
@@ -174,7 +186,15 @@ pub(crate) async fn prepare_webtransport(
   if let Some(terminal) = dynamic_policy.terminal {
     match terminal {
       DynamicPolicyTerminal::Text { status, body } => {
-        return Err(Box::new(text_response(status, &body)));
+        return Err(Box::new(
+          super::with_pending_dynamic_person_proof_response_mutations(
+            text_response(status, &body),
+            state,
+            evaluated_person_proof.as_ref(),
+            dynamic_person_proof_mutation_added,
+            &dynamic_challenge_response_mutations,
+          ),
+        ));
       }
       DynamicPolicyTerminal::Challenge { status } => {
         let person_proof_api_path = state.request_path_features.person_proof_api
@@ -182,7 +202,7 @@ pub(crate) async fn prepare_webtransport(
         if !person_proof_api_path {
           let request_id = crate::waf::new_access_log_id();
           let transaction_id = crate::waf::new_access_log_id();
-          let decision = state
+          let decision = match state
             .waf
             .evaluate_dynamic_person_proof_challenge_with_status(
               WafRequestInput {
@@ -209,14 +229,21 @@ pub(crate) async fn prepare_webtransport(
               },
               status,
               &mut evaluated_person_proof,
-            )
-            .map_err(|error| {
+            ) {
+            Ok(decision) => decision,
+            Err(error) => {
               warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
-              Box::new(text_response(
-                StatusCode::FORBIDDEN,
-                "person proof challenge failed",
-              ))
-            })?;
+              return Err(Box::new(
+                super::with_pending_dynamic_person_proof_response_mutations(
+                  text_response(StatusCode::FORBIDDEN, "person proof challenge failed"),
+                  state,
+                  evaluated_person_proof.as_ref(),
+                  dynamic_person_proof_mutation_added,
+                  &dynamic_challenge_response_mutations,
+                ),
+              ));
+            }
+          };
           if let Some(terminal) = decision.terminal {
             return Err(Box::new(waf_terminal_response(
               terminal,
@@ -240,14 +267,29 @@ pub(crate) async fn prepare_webtransport(
       downstream_uri: &request_uri,
     },
   ) {
-    Ok(Some(response)) => return Err(Box::new(response)),
+    Ok(Some(response)) => {
+      return Err(Box::new(
+        super::with_pending_dynamic_person_proof_response_mutations(
+          response,
+          state,
+          evaluated_person_proof.as_ref(),
+          dynamic_person_proof_mutation_added,
+          &dynamic_challenge_response_mutations,
+        ),
+      ));
+    }
     Ok(None) => {}
     Err(error) => {
       warn!(error = %error, route = %resolved.route.name, "failed to build route redirect response");
-      return Err(Box::new(text_response(
-        StatusCode::BAD_REQUEST,
-        "invalid route redirect",
-      )));
+      return Err(Box::new(
+        super::with_pending_dynamic_person_proof_response_mutations(
+          text_response(StatusCode::BAD_REQUEST, "invalid route redirect"),
+          state,
+          evaluated_person_proof.as_ref(),
+          dynamic_person_proof_mutation_added,
+          &dynamic_challenge_response_mutations,
+        ),
+      ));
     }
   }
 
@@ -269,7 +311,15 @@ pub(crate) async fn prepare_webtransport(
     {
       ExternalAuthOutcome::Allowed => {}
       ExternalAuthOutcome::Denied(terminal) => {
-        return Err(Box::new(super::external_auth_response(terminal)));
+        return Err(Box::new(
+          super::with_pending_dynamic_person_proof_response_mutations(
+            super::external_auth_response(terminal),
+            state,
+            evaluated_person_proof.as_ref(),
+            dynamic_person_proof_mutation_added,
+            &dynamic_challenge_response_mutations,
+          ),
+        ));
       }
     }
   }

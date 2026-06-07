@@ -5,21 +5,25 @@ use bytes::Bytes;
 use http::header::HeaderMap;
 use http::{HeaderValue, Method, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full};
+use tracing::warn;
 
 use crate::config::{ErrorResponseMode, SecurityHeadersConfig};
+use crate::external_auth::ExternalAuthTerminal;
 use crate::state::AppSnapshot;
 use crate::waf::{
-  HeaderMutation, WafBodyInput, WafRequestInput, WafResponseInput, WafTerminalResponse,
-  WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, WafUpstreamError,
-  apply_header_mutations,
+  EvaluatedPersonProofRequest, HeaderMutation, WafBodyInput, WafRequestInput, WafResponseInput,
+  WafTerminalResponse, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
+  WafUpstreamError, apply_header_mutations,
 };
 
 use super::SystemAccessLogContext;
 use super::body::{
-  BoxError, InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody,
-  is_known_small_response_body_len,
+  BodyTimeoutKind, BoxError, InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody,
+  error_is_body_length_limit, error_is_timeout, is_known_small_response_body_len,
 };
+use super::buffering;
 use super::semantics::{configured_error_response, grpc_upstream_error_response};
+use super::upstream::UpstreamSelectionError;
 
 pub(crate) fn text_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
   let body_len = message.len();
@@ -66,6 +70,165 @@ pub(crate) fn draining_response() -> Response<ProxyBody> {
     http::HeaderValue::from_static("close"),
   );
   response
+}
+
+pub(super) fn proxy_error_response(
+  state: &AppSnapshot,
+  access_log: &mut SystemAccessLogContext<'_>,
+  status: StatusCode,
+  message: &str,
+  code: &str,
+) -> Response<ProxyBody> {
+  if state.config.proxy.http.errors.mode == ErrorResponseMode::Json {
+    access_log.ensure_request_id();
+    configured_error_response(
+      &state.config,
+      access_log.request_id(),
+      status,
+      message,
+      code,
+    )
+  } else {
+    configured_error_response(&state.config, "", status, message, code)
+  }
+}
+
+pub(super) fn upstream_selection_error_response(
+  error: UpstreamSelectionError,
+) -> Response<ProxyBody> {
+  match error {
+    UpstreamSelectionError::UnknownWafUpstream(upstream) => {
+      warn!(upstream, "WAF selected an unknown upstream");
+      text_response(StatusCode::BAD_GATEWAY, "WAF selected an unknown upstream")
+    }
+    UpstreamSelectionError::PoolUnavailable { pool_name, message } => {
+      warn!(error = %message, pool = %pool_name, "failed to select upstream pool server");
+      text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server")
+    }
+    UpstreamSelectionError::MissingRouteUpstream => {
+      warn!("route resolved without an upstream");
+      text_response(StatusCode::BAD_GATEWAY, "upstream is not configured")
+    }
+    UpstreamSelectionError::MissingSyntheticUpstream(upstream) => {
+      warn!(upstream, "pool selected an unknown synthetic upstream");
+      text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server")
+    }
+  }
+}
+
+pub(super) fn external_auth_response(terminal: ExternalAuthTerminal) -> Response<ProxyBody> {
+  let body = Full::new(terminal.body)
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed();
+  let mut response = Response::new(body);
+  *response.status_mut() = terminal.status;
+  *response.headers_mut() = terminal.headers;
+  response
+}
+
+pub(super) fn with_pending_dynamic_person_proof_response_mutations(
+  mut response: Response<ProxyBody>,
+  state: &AppSnapshot,
+  evaluated_person_proof: Option<&EvaluatedPersonProofRequest>,
+  dynamic_person_proof_mutation_added: bool,
+  dynamic_challenge_response_mutations: &[HeaderMutation],
+) -> Response<ProxyBody> {
+  apply_header_mutations(response.headers_mut(), dynamic_challenge_response_mutations);
+  if dynamic_person_proof_mutation_added || !dynamic_challenge_response_mutations.is_empty() {
+    return response;
+  }
+  let Some(evaluated) = evaluated_person_proof else {
+    return response;
+  };
+  match state
+    .waf
+    .person_proof_clearance_response_mutation(evaluated)
+  {
+    Ok(Some(mutation)) => {
+      apply_header_mutations(response.headers_mut(), std::slice::from_ref(&mutation));
+    }
+    Ok(None) => {}
+    Err(error) => {
+      warn!(error = %error, "failed to attach dynamic Person proof clearance rotation");
+    }
+  }
+  response
+}
+
+pub(super) fn request_buffering_error_response(
+  error: buffering::BufferingError,
+) -> Response<ProxyBody> {
+  match error {
+    buffering::BufferingError::TooLarge => {
+      text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+    }
+    buffering::BufferingError::Body(error)
+      if error_is_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) =>
+    {
+      text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out")
+    }
+    buffering::BufferingError::Body(error) if error_is_body_length_limit(&error) => {
+      text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+    }
+    buffering::BufferingError::Body(error) => {
+      warn!(error = %error, "failed to buffer downstream request body");
+      text_response(StatusCode::BAD_REQUEST, "failed to read request body")
+    }
+    buffering::BufferingError::Io(error) => {
+      warn!(error = %error, "failed to spool downstream request body");
+      text_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "failed to buffer request body",
+      )
+    }
+    buffering::BufferingError::MissingTempDir => {
+      warn!("request buffering spool mode is missing temp_dir");
+      text_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "failed to buffer request body",
+      )
+    }
+  }
+}
+
+pub(super) fn response_buffering_error_response(
+  error: buffering::BufferingError,
+) -> Response<ProxyBody> {
+  match error {
+    buffering::BufferingError::TooLarge => text_response(
+      StatusCode::BAD_GATEWAY,
+      "upstream response body is too large",
+    ),
+    buffering::BufferingError::Body(error)
+      if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) =>
+    {
+      text_response(
+        StatusCode::GATEWAY_TIMEOUT,
+        "upstream response body timed out",
+      )
+    }
+    buffering::BufferingError::Body(error) => {
+      warn!(error = %error, "failed to buffer upstream response body");
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "failed to read upstream response body",
+      )
+    }
+    buffering::BufferingError::Io(error) => {
+      warn!(error = %error, "failed to spool upstream response body");
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "failed to buffer upstream response body",
+      )
+    }
+    buffering::BufferingError::MissingTempDir => {
+      warn!("response buffering spool mode is missing temp_dir");
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "failed to buffer upstream response body",
+      )
+    }
+  }
 }
 
 pub(crate) fn apply_security_headers(
