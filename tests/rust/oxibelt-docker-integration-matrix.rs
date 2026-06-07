@@ -6801,7 +6801,9 @@ print(query["session"][0], query["session_path"][0], query["verify_path"][0], qu
   session_doc="$(client_request "example.test" "${session_path}?session=${session}" 200)"
   assert_body_jq "${session_doc}" '.person_proof_mode == "custom_provider"'
   assert_body_jq "${session_doc}" '.provider == "matrix-provider"'
-  assert_body_jq "${session_doc}" '.challenge.kind == "custom_provider"'
+  assert_body_jq "${session_doc}" '.challenge.kind == "proof_of_knowledge_v1"'
+  assert_body_jq "${session_doc}" '.challenge.proof_kind == "knowledge"'
+  assert_body_jq "${session_doc}" '.challenge.label == "matrix-knowledge"'
   assert_body_jq "${session_doc}" '.challenge.provider == "matrix-provider"'
   assert_body_jq "${session_doc}" '.challenge.metadata.fixture == "provider-mock-verify"'
   assert_body_jq "${session_doc}" '.verify_path == "/.oxibelt/person-proof/verify"'
@@ -6814,6 +6816,7 @@ print(query["session"][0], query["session_path"][0], query["verify_path"][0], qu
   assert_response_jq "${openapi}" '.headers["cache-control"] == "no-store"'
   assert_response_jq "${openapi}" '.body | contains("/.oxibelt/person-proof/session")'
   assert_response_jq "${openapi}" '.body | contains("ClearanceMetadata")'
+  assert_response_jq "${openapi}" '.body | contains("proof_kind")'
 
   verify_body="$(printf '{"session":"%s","response":{"token":"mock-token","fields":{"fixture":"matrix"}}}' "${session}")"
   verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "Content-Type: application/json")"

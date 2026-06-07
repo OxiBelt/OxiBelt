@@ -590,9 +590,11 @@ Public Person proof behavior is selected with `person_proof_mode`:
 - `built_in`: OxiBelt built-in proof-of-work plus the built-in challenge frontend. This is the default and does not use `custom_frontend_url`.
 - `openapi`: OxiBelt built-in proof-of-work session/verify/OpenAPI endpoints plus a custom challenge frontend. This requires `custom_frontend_url`.
 - `third_party_provider`: OxiBelt built-in adapters for `third_party_provider = "turnstile" | "hcaptcha" | "friendly_captcha_v2"`. This requires `custom_frontend_url`, `third_party_provider`, `site_key`, and `secret_env`.
-- `custom_provider`: custom JSON HTTP provider verification. This preserves the former custom provider capability under the new mode name, requires `custom_frontend_url` and `provider_endpoint`, and keeps `provider` as the custom provider identifier.
+- `custom_provider`: custom JSON HTTP provider verification for external Proof of Something flows. This preserves the former custom provider capability under the new mode name, requires `custom_frontend_url` and `provider_endpoint`, and keeps `provider` as the custom provider identifier.
 
 The PoW modes compute a nonce such that `SHA-256(session || "." || nonce)` has the configured number of leading zero bits. Successful verification issues the same signed `clearance.v2` token through the configured clearance target. Later requests validate the configured clearance sources and, when `single_use = true`, rotate the signed clearance credential instead of recomputing proof.
+
+For `custom_provider`, operators may describe the external proof with `proof_kind`, `proof_challenge_kind`, `proof_label`, and arbitrary `provider_metadata`. OxiBelt does not implement those proof semantics. It signs the session, protects replay, calls the configured provider, and issues clearance when the provider returns `{ "success": true }`.
 
 `custom_frontend_url` is not a filesystem path. It is an origin-relative URL routed by the same OxiBelt instance as the protected request. It can point at a static route asset, such as a route whose `static_root` contains `/person-proof/index.html`, or at a separate challenge frontend backend proxied by OxiBelt. When set, OxiBelt redirects the protected request to that URL and exposes only the general Person proof API paths in the redirect query. Browser-visible challenge code should call OxiBelt's `session`, `verify`, and optional `openapi` endpoints, not provider-native server APIs.
 
@@ -677,7 +679,9 @@ request_header = "X-OxiBelt-Person-Proof"
 }
 ```
 
-PoW sessions for `built_in` and `openapi` use `challenge.kind = "pow_sha256_v1"` and include `difficulty` and `token`. The `token` is the signed session string that the client hashes with the nonce and submits to `verify_path`. Clearance delivery metadata is top-level `clearance`, not a token-internal field. `third_party_provider` sessions use `challenge.kind = "third_party_provider"` and include `third_party_provider`, `site_key`, and configured `provider_metadata`. `custom_provider` sessions use `challenge.kind = "custom_provider"` and return configured `provider_metadata`.
+PoW sessions for `built_in` and `openapi` use `challenge.kind = "pow_sha256_v1"` and include `difficulty` and `token`. The `token` is the signed session string that the client hashes with the nonce and submits to `verify_path`. Clearance delivery metadata is top-level `clearance`, not a token-internal field. `third_party_provider` sessions use `challenge.kind = "third_party_provider"` and include `third_party_provider`, `site_key`, and configured `provider_metadata`. `custom_provider` sessions return the custom provider identifier and configured `provider_metadata`.
+
+For `custom_provider`, `challenge.kind` is `proof_challenge_kind` when set, otherwise the legacy compatibility value `custom_provider`. The custom challenge also includes `proof_kind`, `provider`, `label`, and `metadata`. If `proof_kind` is omitted, OxiBelt returns `custom`.
 
 `POST verify_path` accepts `application/json`:
 
@@ -701,7 +705,37 @@ Default provider endpoints are:
 
 Use `provider_endpoint` to override the default endpoint for EU, private, or test deployments. OxiBelt sends the secret from `secret_env`, the browser token as `response`, the configured `site_key` where the provider supports it, and the direct remote IP when `send_remote_ip = true`. Provider transport errors, timeouts, invalid JSON, or non-success HTTP status codes fail closed with `503` by default; set `provider_fail_policy = "open"` only when availability is more important than this anti-automation control.
 
-`custom_provider` sends a JSON verification request to `provider_endpoint` and expects `{ "success": true }` or `{ "success": false, "error_codes": [] }`. The request includes the OxiBelt session, `person_proof_mode`, provider name, response token/fields, optional remote IP, optional site key, and configured metadata. Built-in Turnstile, hCaptcha, and Friendly Captcha HTTP shapes are adapter-internal and are not exposed to the browser-facing API.
+`custom_provider` sends a JSON verification request to `provider_endpoint` and expects `{ "success": true }` or `{ "success": false, "error_codes": [] }`. The request includes the OxiBelt session, `person_proof_mode`, `proof_kind`, `proof_challenge_kind`, `proof_label`, provider name, response token/fields, optional remote IP, optional site key, and configured metadata. Built-in Turnstile, hCaptcha, and Friendly Captcha HTTP shapes are adapter-internal and are not exposed to the browser-facing API.
+
+Proof of Knowledge via an external provider:
+
+```toml
+[[waf.rules.actions]]
+type = "require_person_proof"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/proof/pok.html"
+provider = "passkey-knowledge"
+proof_kind = "knowledge"
+proof_challenge_kind = "proof_of_knowledge_v1"
+proof_label = "passkey"
+provider_endpoint = "https://proofs.internal.example/verify"
+provider_metadata = { prompt = "login-passkey" }
+```
+
+Proof of Work via an external provider, distinct from OxiBelt built-in `pow_sha256_v1`:
+
+```toml
+[[waf.rules.actions]]
+type = "require_person_proof"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/proof/external-work.html"
+provider = "external-work-service"
+proof_kind = "work"
+proof_challenge_kind = "external_proof_of_work_v1"
+proof_label = "managed-work"
+provider_endpoint = "https://proofs.internal.example/work/verify"
+provider_metadata = { difficulty_profile = "interactive" }
+```
 
 Tokens are signed with a startup-local secret by default, or a shared cluster secret when `[shared_state].person_proof_backend` is configured. Session and clearance tokens bind the original host, mode, selected third-party or custom provider identity, request method, route, policy key, return path, API paths, clearance signing id, and token-binding hash.
 
@@ -778,6 +812,7 @@ Validation constraints:
 - `openapi` requires `custom_frontend_url` and forbids `third_party_provider`.
 - `third_party_provider` requires `custom_frontend_url`, `third_party_provider`, `site_key`, and `secret_env`, and forbids `provider`.
 - `custom_provider` requires `custom_frontend_url` and `provider_endpoint`.
+- `proof_kind`, `proof_challenge_kind`, and `proof_label` are valid only with `custom_provider` and must match `[A-Za-z0-9_.:-]{1,64}`.
 - `session_path`, `verify_path`, and `openapi_path` must be origin-relative paths without query strings or fragments.
 - `provider_endpoint`, when set, must use `http://` or `https://`.
 - `provider_timeout_ms` and `provider_max_response_body_bytes` must be greater than zero.

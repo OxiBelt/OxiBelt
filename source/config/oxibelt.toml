@@ -962,6 +962,16 @@ unsupported_directive_policy = "fail_closed"
 #[[waf.rules.actions.clearance.sources]]
 # type = "cookie"
 # key = "__oxibelt_person_proof"
+#
+# Alternative custom_provider proof metadata example; replace the third_party_provider fields above.
+# person_proof_mode = "custom_provider"
+# custom_frontend_url = "/proof/pok.html"
+# provider = "passkey-knowledge"
+# proof_kind = "knowledge"
+# proof_challenge_kind = "proof_of_knowledge_v1"
+# proof_label = "passkey"
+# provider_endpoint = "https://proofs.internal.example/verify"
+# provider_metadata = { prompt = "login-passkey" }
 
 [[upstreams]]
 name = "app"

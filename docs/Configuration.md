@@ -1861,7 +1861,7 @@ Response body CRS inspection uses the same bounded prefix behavior as OxiRule re
 
 Rule syntax, actions, helpers, and Person proof settings are documented in [OxiRule.md](OxiRule.md).
 
-Person proof uses `person_proof_mode` to select one of four public modes. `built_in` is OxiBelt built-in PoW plus the built-in challenge frontend. `openapi` uses OxiBelt built-in PoW session/verify/OpenAPI endpoints with a custom challenge frontend. `third_party_provider` uses OxiBelt's built-in Turnstile, hCaptcha, or Friendly Captcha v2 adapters. `custom_provider` calls a configured JSON HTTP provider that returns `{ "success": true|false }`.
+Person proof uses `person_proof_mode` to select one of four public modes. `built_in` is OxiBelt built-in PoW plus the built-in challenge frontend. `openapi` uses OxiBelt built-in PoW session/verify/OpenAPI endpoints with a custom challenge frontend. `third_party_provider` uses OxiBelt's built-in Turnstile, hCaptcha, or Friendly Captcha v2 adapters. `custom_provider` calls a configured JSON HTTP provider that returns `{ "success": true|false }` and may describe external Proof of Something flows with `proof_kind`, `proof_challenge_kind`, `proof_label`, and arbitrary `provider_metadata`.
 
 `custom_frontend_url` is not a filesystem path. It is an origin-relative URL routed by the same OxiBelt instance, either to a static route asset or to a proxied challenge frontend backend. Custom frontends call OxiBelt's `session_path` and `verify_path`; browser code should not call provider-native server APIs directly. Clearance tokens can be issued to a cookie, localStorage, or JSON response, and protected requests can read them from configured cookie keys, `Authorization: Bearer`, or configured header keys.
 
@@ -1885,6 +1885,36 @@ clearance.cookie.key = "__oxibelt_person_proof"
 [[waf.rules.actions.clearance.sources]]
 type = "cookie"
 key = "__oxibelt_person_proof"
+```
+
+Custom Proof of Knowledge through an external provider:
+
+```toml
+[[waf.rules.actions]]
+type = "require_person_proof"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/proof/pok.html"
+provider = "passkey-knowledge"
+proof_kind = "knowledge"
+proof_challenge_kind = "proof_of_knowledge_v1"
+proof_label = "passkey"
+provider_endpoint = "https://proofs.internal.example/verify"
+provider_metadata = { prompt = "login-passkey" }
+```
+
+Custom Proof of Work through an external provider, separate from OxiBelt built-in `pow_sha256_v1`:
+
+```toml
+[[waf.rules.actions]]
+type = "require_person_proof"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/proof/external-work.html"
+provider = "external-work-service"
+proof_kind = "work"
+proof_challenge_kind = "external_proof_of_work_v1"
+proof_label = "managed-work"
+provider_endpoint = "https://proofs.internal.example/work/verify"
+provider_metadata = { difficulty_profile = "interactive" }
 ```
 
 The built-in PoW page embeds a signed `session` and uses the same `session_path` and `verify_path` as custom frontends; the old direct `token.nonce` proof cookie flow is not used. A challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Challenge issuance does not reserve replay state. Provider-specific values such as `site_key` and clearance storage metadata are returned by `GET session_path?session=...`. Verification accepts only JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`. `single_use` defaults to `true`; with it enabled, the session is consumed before PoW/provider verification, including failed provider responses. In localStorage mode, the browser must send the stored token on later protected requests using `clearance.local_storage.request_header` because servers cannot read localStorage directly.

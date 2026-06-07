@@ -66,6 +66,9 @@ success_tag = "PersonProof"
 custom_frontend_url = "/person-proof/index.html"
 challenge_redirect_status = 303
 provider = "matrix-provider"
+proof_kind = "knowledge"
+proof_challenge_kind = "proof_of_knowledge_v1"
+proof_label = "matrix-knowledge"
 provider_metadata = { fixture = "provider-mock-verify" }
 provider_endpoint = "http://mock-http:18080/status/200?body=%7B%22success%22%3Atrue%7D&content_type=application/json"
 provider_timeout_ms = 1000

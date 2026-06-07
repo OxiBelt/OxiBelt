@@ -530,7 +530,13 @@ pub enum WafActionConfig {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
-    provider_metadata: serde_json::Value,
+    provider_metadata: Box<serde_json::Value>,
+    #[serde(default)]
+    proof_kind: Option<Box<str>>,
+    #[serde(default)]
+    proof_challenge_kind: Option<Box<str>>,
+    #[serde(default)]
+    proof_label: Option<Box<str>>,
     #[serde(default)]
     site_key: Option<String>,
     #[serde(default)]
@@ -1336,6 +1342,9 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     openapi_path,
     third_party_provider,
     provider,
+    proof_kind,
+    proof_challenge_kind,
+    proof_label,
     site_key,
     secret_env,
     provider_endpoint,
@@ -1421,6 +1430,9 @@ fn validate_person_proof_settings(rule_name: &str, action: &WafActionConfig) -> 
     openapi_path.as_deref(),
     *third_party_provider,
     provider.as_deref(),
+    proof_kind.as_deref(),
+    proof_challenge_kind.as_deref(),
+    proof_label.as_deref(),
     site_key.as_deref(),
     secret_env.as_deref(),
     provider_endpoint.as_deref(),

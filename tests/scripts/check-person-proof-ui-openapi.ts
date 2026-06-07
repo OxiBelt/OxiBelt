@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 
-type ChallengeKind = 'pow_sha256_v1' | 'third_party_provider'
+type ChallengeKind = 'pow_sha256_v1' | 'third_party_provider' | 'proof_of_knowledge_v1'
 
 type ChallengeOptions = {
   mode: string
@@ -297,4 +297,17 @@ Assert(
   'provider challenge unexpectedly submitted verification through the PoW UI',
 )
 
-console.log('person proof UI accepts built_in/openapi PoW and rejects provider challenges')
+const CustomProofResult = await RunChallenge({
+  mode: 'custom_provider',
+  kind: 'proof_of_knowledge_v1',
+})
+Assert(
+  CustomProofResult.status === 'Challenge failed: unsupported challenge kind proof_of_knowledge_v1',
+  `custom proof challenge failed with an unexpected status: ${CustomProofResult.status}`,
+)
+Assert(
+  !CustomProofResult.calls.some((Call) => Call.method === 'POST'),
+  'custom proof challenge unexpectedly submitted verification through the PoW UI',
+)
+
+console.log('person proof UI accepts built_in/openapi PoW and rejects provider/custom proof challenges')

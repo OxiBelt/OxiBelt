@@ -292,6 +292,9 @@ pub(super) fn validate_redirect_settings(
   openapi_path: Option<&str>,
   third_party_provider: Option<PersonProofThirdPartyProvider>,
   provider: Option<&str>,
+  proof_kind: Option<&str>,
+  proof_challenge_kind: Option<&str>,
+  proof_label: Option<&str>,
   site_key: Option<&str>,
   secret_env: Option<&str>,
   provider_endpoint: Option<&url::Url>,
@@ -328,6 +331,14 @@ pub(super) fn validate_redirect_settings(
   {
     bail!("WAF rule {rule_name} require_person_proof provider must not be empty");
   }
+  validate_custom_provider_proof_string(rule_name, person_proof_mode, "proof_kind", proof_kind)?;
+  validate_custom_provider_proof_string(
+    rule_name,
+    person_proof_mode,
+    "proof_challenge_kind",
+    proof_challenge_kind,
+  )?;
+  validate_custom_provider_proof_string(rule_name, person_proof_mode, "proof_label", proof_label)?;
   match person_proof_mode {
     PersonProofMode::BuiltIn => {
       if custom_frontend_url.is_some() {
@@ -415,6 +426,32 @@ pub(super) fn validate_redirect_settings(
     bail!(
       "WAF rule {rule_name} require_person_proof provider_max_response_body_bytes must be greater than 0"
     );
+  }
+  Ok(())
+}
+
+fn validate_custom_provider_proof_string(
+  rule_name: &str,
+  person_proof_mode: PersonProofMode,
+  field: &str,
+  value: Option<&str>,
+) -> anyhow::Result<()> {
+  let Some(value) = value else {
+    return Ok(());
+  };
+  if person_proof_mode != PersonProofMode::CustomProvider {
+    bail!(
+      "WAF rule {rule_name} require_person_proof {field} is only valid for custom_provider mode"
+    );
+  }
+  if value.is_empty()
+    || value.len() > 64
+    || value.trim() != value
+    || !value
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+  {
+    bail!("WAF rule {rule_name} require_person_proof {field} must match [A-Za-z0-9_.:-]{{1,64}}");
   }
   Ok(())
 }

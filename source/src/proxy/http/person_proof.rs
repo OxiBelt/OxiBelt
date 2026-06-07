@@ -237,6 +237,20 @@ struct PersonProofClientResponse {
   fields: Map<String, Value>,
 }
 
+struct CustomProviderVerifyPayloadInput<'a> {
+  session: &'a str,
+  mode: PersonProofMode,
+  proof_kind: Option<&'a str>,
+  proof_challenge_kind: Option<&'a str>,
+  proof_label: Option<&'a str>,
+  provider: &'a str,
+  response: &'a PersonProofClientResponse,
+  send_remote_ip: bool,
+  remote_ip: std::net::IpAddr,
+  site_key: Option<&'a str>,
+  metadata: &'a Value,
+}
+
 fn parse_person_proof_verify_payload(
   body: &[u8],
   content_type: Option<&str>,
@@ -346,18 +360,20 @@ async fn verify_person_proof_provider(
     },
     PersonProofMode::CustomProvider => {
       builder = builder.header(http::header::CONTENT_TYPE, "application/json");
-      bytes::Bytes::from(serde_json::to_vec(&serde_json::json!({
-        "session": challenge.session.clone(),
-        "person_proof_mode": challenge.mode.as_str(),
-        "provider": challenge.provider.clone(),
-        "response": {
-          "token": response.token.clone(),
-          "fields": response.fields.clone(),
-        },
-        "remote_ip": challenge.send_remote_ip.then(|| remote_ip.to_string()),
-        "site_key": challenge.site_key.clone(),
-        "metadata": challenge.metadata.clone(),
-      }))?)
+      let payload = custom_provider_verify_payload(CustomProviderVerifyPayloadInput {
+        session: &challenge.session,
+        mode: challenge.mode,
+        proof_kind: challenge.proof_kind.as_deref(),
+        proof_challenge_kind: challenge.proof_challenge_kind.as_deref(),
+        proof_label: challenge.proof_label.as_deref(),
+        provider: &challenge.provider,
+        response,
+        send_remote_ip: challenge.send_remote_ip,
+        remote_ip,
+        site_key: challenge.site_key.as_deref(),
+        metadata: &challenge.metadata,
+      });
+      bytes::Bytes::from(serde_json::to_vec(&payload)?)
     }
   };
   let request = builder
@@ -398,6 +414,24 @@ fn provider_site_key(challenge: &PersonProofProviderChallenge) -> anyhow::Result
     .site_key
     .as_deref()
     .context("person proof provider challenge requires site_key")
+}
+
+fn custom_provider_verify_payload(input: CustomProviderVerifyPayloadInput<'_>) -> Value {
+  serde_json::json!({
+    "session": input.session,
+    "person_proof_mode": input.mode.as_str(),
+    "proof_kind": input.proof_kind,
+    "proof_challenge_kind": input.proof_challenge_kind,
+    "proof_label": input.proof_label,
+    "provider": input.provider,
+    "response": {
+      "token": input.response.token.as_str(),
+      "fields": &input.response.fields,
+    },
+    "remote_ip": input.send_remote_ip.then(|| input.remote_ip.to_string()),
+    "site_key": input.site_key,
+    "metadata": input.metadata,
+  })
 }
 
 fn parse_provider_success(body: &[u8]) -> anyhow::Result<bool> {
@@ -544,6 +578,42 @@ mod tests {
     assert!(!parse_provider_success(br#"{"success":false}"#).unwrap());
     assert!(parse_provider_success(b"not-json").is_err());
     assert!(parse_provider_success(br#"{"ok":true}"#).is_err());
+  }
+
+  #[test]
+  fn custom_provider_verify_payload_includes_proof_metadata() {
+    let mut fields = Map::new();
+    fields.insert("fixture".to_string(), Value::String("matrix".to_string()));
+    let response = PersonProofClientResponse {
+      token: "provider-token".to_string(),
+      fields,
+    };
+    let metadata = serde_json::json!({ "prompt": "login-passkey" });
+    let payload = custom_provider_verify_payload(CustomProviderVerifyPayloadInput {
+      session: "session.v1.test",
+      mode: PersonProofMode::CustomProvider,
+      proof_kind: Some("knowledge"),
+      proof_challenge_kind: Some("proof_of_knowledge_v1"),
+      proof_label: Some("passkey"),
+      provider: "passkey-knowledge",
+      response: &response,
+      send_remote_ip: true,
+      remote_ip: "203.0.113.10".parse().unwrap(),
+      site_key: Some("site-test"),
+      metadata: &metadata,
+    });
+
+    assert_eq!(payload["session"], "session.v1.test");
+    assert_eq!(payload["person_proof_mode"], "custom_provider");
+    assert_eq!(payload["proof_kind"], "knowledge");
+    assert_eq!(payload["proof_challenge_kind"], "proof_of_knowledge_v1");
+    assert_eq!(payload["proof_label"], "passkey");
+    assert_eq!(payload["provider"], "passkey-knowledge");
+    assert_eq!(payload["response"]["token"], "provider-token");
+    assert_eq!(payload["response"]["fields"]["fixture"], "matrix");
+    assert_eq!(payload["remote_ip"], "203.0.113.10");
+    assert_eq!(payload["site_key"], "site-test");
+    assert_eq!(payload["metadata"]["prompt"], "login-passkey");
   }
 
   #[test]

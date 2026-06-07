@@ -7128,6 +7128,38 @@ site_key = "site-test"
             "secret_env is required",
         ),
         (
+            "waf-person-proof-proof-kind-wrong-mode",
+            r#"
+person_proof_mode = "third_party_provider"
+third_party_provider = "turnstile"
+custom_frontend_url = "/person-proof/index.html"
+site_key = "site-test"
+secret_env = "OXIBELT_TEST_CAPTCHA_SECRET"
+proof_kind = "knowledge"
+"#,
+            "proof_kind is only valid for custom_provider mode",
+        ),
+        (
+            "waf-person-proof-unsafe-proof-challenge-kind",
+            r#"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/person-proof/custom.html"
+provider_endpoint = "http://127.0.0.1/siteverify"
+proof_challenge_kind = "proof of knowledge"
+"#,
+            "proof_challenge_kind must match",
+        ),
+        (
+            "waf-person-proof-empty-proof-label",
+            r#"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/person-proof/custom.html"
+provider_endpoint = "http://127.0.0.1/siteverify"
+proof_label = ""
+"#,
+            "proof_label must match",
+        ),
+        (
             "waf-person-proof-flat-cookie",
             r#"
 cookie = "__legacy_person_proof"
@@ -7234,6 +7266,9 @@ session_path = "/custom/person-proof/session"
 verify_path = "/custom/person-proof/verify"
 openapi_path = "/custom/person-proof/openapi.json"
 provider = "my-provider"
+proof_kind = "knowledge"
+proof_challenge_kind = "proof_of_knowledge_v1"
+proof_label = "passkey"
 provider_endpoint = "http://127.0.0.1:18080/siteverify"
 provider_metadata = { widget = "passkey" }
 "#,
@@ -7287,7 +7322,28 @@ provider_metadata = { widget = "passkey" }
             .challenge
             .get("kind")
             .and_then(serde_json::Value::as_str),
-        Some("custom_provider")
+        Some("proof_of_knowledge_v1")
+    );
+    assert_eq!(
+        document
+            .challenge
+            .get("proof_kind")
+            .and_then(serde_json::Value::as_str),
+        Some("knowledge")
+    );
+    assert_eq!(
+        document
+            .challenge
+            .get("provider")
+            .and_then(serde_json::Value::as_str),
+        Some("my-provider")
+    );
+    assert_eq!(
+        document
+            .challenge
+            .get("label")
+            .and_then(serde_json::Value::as_str),
+        Some("passkey")
     );
     assert_eq!(
         document
@@ -7296,6 +7352,92 @@ provider_metadata = { widget = "passkey" }
             .and_then(|metadata| metadata.get("widget"))
             .and_then(serde_json::Value::as_str),
         Some("passkey")
+    );
+
+    let verify_method = Method::POST;
+    let verify_uri: Uri = "/custom/person-proof/verify"
+        .parse()
+        .expect("verify URI should parse");
+    let provider_challenge = engine
+        .begin_person_proof_provider_challenge(
+            request_input(&verify_method, &verify_uri, &headers, &tags, client_addr),
+            "/custom/person-proof/verify",
+            session,
+        )
+        .expect("provider challenge should validate")
+        .expect("verify_path should map to a provider challenge");
+    assert_eq!(provider_challenge.proof_kind.as_deref(), Some("knowledge"));
+    assert_eq!(
+        provider_challenge.proof_challenge_kind.as_deref(),
+        Some("proof_of_knowledge_v1")
+    );
+    assert_eq!(provider_challenge.proof_label.as_deref(), Some("passkey"));
+    assert_eq!(
+        provider_challenge
+            .metadata
+            .get("widget")
+            .and_then(serde_json::Value::as_str),
+        Some("passkey")
+    );
+}
+
+#[test]
+fn person_proof_custom_provider_defaults_to_legacy_challenge_kind() {
+    let (_temp_dir, config) = load_person_proof_provider_config(
+        "waf-person-proof-custom-provider-legacy-kind",
+        r#"
+person_proof_mode = "custom_provider"
+custom_frontend_url = "/person-proof/custom.html"
+provider = "legacy-provider"
+provider_endpoint = "http://127.0.0.1:18080/siteverify"
+"#,
+    );
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr = "203.0.113.10:49152".parse().unwrap();
+    let decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let location = extract_response_header(
+        &decision
+            .terminal
+            .expect("challenge should be issued")
+            .headers,
+        http::header::LOCATION,
+    );
+    let query = parse_origin_relative_location_query(&location);
+    let session = query.get("session").expect("session should exist");
+    let session_uri: Uri = format!("/.oxibelt/person-proof/session?session={session}")
+        .parse()
+        .expect("session URI should parse");
+    let document = engine
+        .person_proof_session_document(
+            request_input(&method, &session_uri, &headers, &tags, client_addr),
+            "/.oxibelt/person-proof/session",
+            session,
+        )
+        .expect("session should validate")
+        .expect("session document should exist");
+
+    assert_eq!(document.person_proof_mode, "custom_provider");
+    assert_eq!(document.provider, "legacy-provider");
+    assert_eq!(
+        document
+            .challenge
+            .get("kind")
+            .and_then(serde_json::Value::as_str),
+        Some("custom_provider")
+    );
+    assert_eq!(
+        document
+            .challenge
+            .get("proof_kind")
+            .and_then(serde_json::Value::as_str),
+        Some("custom")
     );
 }
 

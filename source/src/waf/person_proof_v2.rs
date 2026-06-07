@@ -13,8 +13,9 @@ use super::person_proof::{
   random_hex, remaining_seconds, token_binding_payload_for_route,
 };
 use super::person_proof_api::{
-  begin_session_challenge, provider_endpoint, provider_identity, provider_metadata, provider_name,
-  sign_session_token,
+  begin_session_challenge, custom_provider_challenge_kind, custom_provider_proof_kind,
+  custom_provider_proof_label, provider_endpoint, provider_identity, provider_metadata,
+  provider_name, sign_session_token,
 };
 use super::{
   HeaderMutation, PersonProofMode, PersonProofProviderFailPolicy, PersonProofThirdPartyProvider,
@@ -30,6 +31,9 @@ pub(super) struct PersonProofProviderConfig {
   pub openapi_path: String,
   pub provider: Option<String>,
   pub provider_metadata: serde_json::Value,
+  pub proof_kind: Option<Box<str>>,
+  pub proof_challenge_kind: Option<Box<str>>,
+  pub proof_label: Option<Box<str>>,
   pub site_key: Option<String>,
   pub secret_env: Option<String>,
   pub provider_endpoint: Option<url::Url>,
@@ -48,6 +52,9 @@ pub struct PersonProofProviderChallenge {
   pub secret_env: Option<String>,
   pub provider: String,
   pub metadata: serde_json::Value,
+  pub proof_kind: Option<String>,
+  pub proof_challenge_kind: Option<String>,
+  pub proof_label: Option<String>,
   pub session: String,
   pub return_path: String,
   pub difficulty: u8,
@@ -203,6 +210,11 @@ pub(super) fn begin_provider_challenge(
     secret_env: policy.provider.secret_env.clone(),
     provider: provider_name(&policy),
     metadata: provider_metadata(&policy),
+    proof_kind: (policy.mode == PersonProofMode::CustomProvider)
+      .then(|| custom_provider_proof_kind(&policy).to_string()),
+    proof_challenge_kind: (policy.mode == PersonProofMode::CustomProvider)
+      .then(|| custom_provider_challenge_kind(&policy).to_string()),
+    proof_label: custom_provider_proof_label(&policy).map(str::to_string),
     session: challenge.to_string(),
     return_path: fields.return_path.clone(),
     difficulty: policy.difficulty,

@@ -87,8 +87,10 @@ pub(super) fn session_document(
       "metadata": provider_metadata(&policy),
     }),
     PersonProofMode::CustomProvider => serde_json::json!({
-      "kind": "custom_provider",
+      "kind": custom_provider_challenge_kind(&policy),
+      "proof_kind": custom_provider_proof_kind(&policy),
       "provider": provider_name(&policy),
+      "label": custom_provider_proof_label(&policy),
       "metadata": provider_metadata(&policy),
     }),
   };
@@ -132,6 +134,11 @@ pub(super) fn begin_session_challenge(
     secret_env: policy.provider.secret_env.clone(),
     provider: provider_name(&policy),
     metadata: provider_metadata(&policy),
+    proof_kind: (policy.mode == PersonProofMode::CustomProvider)
+      .then(|| custom_provider_proof_kind(&policy).to_string()),
+    proof_challenge_kind: (policy.mode == PersonProofMode::CustomProvider)
+      .then(|| custom_provider_challenge_kind(&policy).to_string()),
+    proof_label: custom_provider_proof_label(&policy).map(str::to_string),
     session: session.to_string(),
     return_path: fields.return_path.clone(),
     difficulty: policy.difficulty,
@@ -288,7 +295,31 @@ pub(super) fn openapi_document(engine: &PersonProofEngine, openapi_path: &str) -
             "clearance": { "$ref": "#/components/schemas/ClearanceMetadata" },
             "challenge": {
               "type": "object",
-              "additionalProperties": true
+              "description": "Mode-specific challenge payload. built_in and openapi use kind pow_sha256_v1. third_party_provider uses kind third_party_provider. custom_provider may use a configured proof_challenge_kind, defaults to custom_provider for compatibility, and adds proof_kind, provider, label, and metadata.",
+              "additionalProperties": true,
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "description": "Frontend challenge kind. custom_provider can configure this with proof_challenge_kind."
+                },
+                "proof_kind": {
+                  "type": "string",
+                  "description": "Operator-facing custom_provider proof category such as work, knowledge, or possession."
+                },
+                "provider": { "type": "string" },
+                "label": { "type": ["string", "null"] },
+                "metadata": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "difficulty": { "type": "integer" },
+                "token": { "type": "string" },
+                "third_party_provider": {
+                  "type": "string",
+                  "enum": ["turnstile", "hcaptcha", "friendly_captcha_v2"]
+                },
+                "site_key": { "type": ["string", "null"] }
+              }
             }
           }
         },
@@ -431,6 +462,22 @@ pub(super) fn provider_metadata(policy: &PersonProofPolicy) -> serde_json::Value
   } else {
     policy.provider.provider_metadata.clone()
   }
+}
+
+pub(super) fn custom_provider_proof_kind(policy: &PersonProofPolicy) -> &str {
+  policy.provider.proof_kind.as_deref().unwrap_or("custom")
+}
+
+pub(super) fn custom_provider_challenge_kind(policy: &PersonProofPolicy) -> &str {
+  policy
+    .provider
+    .proof_challenge_kind
+    .as_deref()
+    .unwrap_or("custom_provider")
+}
+
+pub(super) fn custom_provider_proof_label(policy: &PersonProofPolicy) -> Option<&str> {
+  policy.provider.proof_label.as_deref()
 }
 
 fn validate_session_for_path(
