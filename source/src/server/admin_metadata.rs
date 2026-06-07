@@ -59,6 +59,7 @@ fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
     "waf_devtools": true,
     "runtime_introspection": true,
     "cache_admin": true,
+    "person_proof_admin": true,
     "upstream_pool_runtime_control": true,
     "admin_operations": snapshot.config.admin.operations.enabled,
     "admin_http3": snapshot.config.admin.http3.enabled,

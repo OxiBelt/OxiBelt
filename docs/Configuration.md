@@ -820,7 +820,7 @@ mode = "off" # off | verify_full, PostgreSQL only
 
 Shared state is opt-in. If it is disabled, features keep their local in-process behavior. When it is enabled, an omitted feature mapping uses `default_backend`, or the first configured backend when `default_backend` is not set. Backends are named, and each feature maps to one backend; OxiBelt does not mirror writes or fall back through backend chains. Exactly one of `connection_url` or `connection_url_env` is required per backend. Effective config dumps redact shared-state `connection_url` values.
 
-Redis backends target Redis-protocol compatible Redis, Valkey, and KeyDB single-endpoint deployments. PostgreSQL backends create OxiBelt-managed shared-state tables at startup. Security-sensitive operations such as rate limits, connection leases, and Person proof fail closed when the configured shared backend errors. Shared cache operations fall back to the local/no-shared-cache path for the current request.
+Redis backends target Redis-protocol compatible Redis, Valkey, and KeyDB single-endpoint deployments. PostgreSQL backends create OxiBelt-managed shared-state tables at startup. Security-sensitive operations such as rate limits, connection leases, and Person proof fail closed when the configured shared backend errors. Shared cache operations fall back to the local/no-shared-cache path for the current request. Person proof shared state stores the cluster HMAC secret and replay/revocation markers under OxiBelt-managed keys. Operators should use the Admin Person proof endpoints for hash-only status and revocation; direct backend inspection can expose implementation keys and has a different trust boundary than the Admin API.
 
 ```toml
 [dynamic_policy]
@@ -1609,6 +1609,9 @@ Admin WAF telemetry endpoint:
 - `GET /admin/v1/waf/rule-hits`
 - `GET /admin/v1/waf/rule-costs`
 - `GET /admin/v1/waf/crs/compatibility`
+- `GET /admin/v1/waf/person-proof/status`
+- `GET /admin/v1/waf/person-proof/clearances`
+- `POST /admin/v1/waf/person-proof/clearances/revoke`
 - `POST /admin/v1/waf/oxirule/check`
 - `POST /admin/v1/waf/oxirule/test`
 - `POST /admin/v1/waf/oxirule/explain`
@@ -1622,6 +1625,8 @@ Admin WAF telemetry endpoint:
 - `GET /admin/v1/waf/rulepacks`
 
 These endpoints require the matching `waf:*` IPM actions. Rule hits returns active rule hit counters with `scope`, `route`, `phase`, `name`, optional `id`, `effective_mode`, and `hits`. Rule costs returns OxiRule evaluation counters and total/average runtime in nanoseconds using the same authenticated rule metadata; CRS rule cost accounting is intentionally not exposed through the public metrics listener. CRS rule hit entries also include `tags`, `tuned_hits`, latest observed anomaly scores, and latest blocking scores when available. The CRS compatibility endpoint returns the OxiBelt-supported CRS release lines, supported directives/operators/transforms/variables/actions, accepted-but-ignored syntax, fail-closed policy, and known unsupported surfaces. Rulepacks returns active loaded manifest summaries, including name, version, default mode, rule and group-file counts, loaded files, and optional source commit metadata.
+
+Person proof Admin endpoints expose only aggregate state and canonical `clearance:<sha256>` identifiers. `status` reports policy counts, store scope, active hash-keyed clearance count, challenge replay-marker count, revocation tombstone count, and legacy raw-key count. `clearances` lists only hash-keyed active clearance entries and never lists legacy raw-key replay markers. `clearances/revoke` accepts a bare SHA-256 value or canonical `clearance:<sha256>`, writes an exact-match revocation tombstone, and removes a matching hash-keyed active clearance marker when present. Raw session credentials, raw clearance credentials, provider responses, token-binding payloads, MACs, and the Person proof HMAC secret are not returned by these endpoints.
 
 OxiRule development endpoints are synchronous and stateless: they never write rule files or install policy. `check`, `test`, `explain`, `cost`, and `replay` accept inline candidate rule content plus optional inline OxiRule group files, compile them against the active configuration context, and return JSON with `ok`, `diagnostics`, `matched_rules`, `actions`, `terminal`, `mutations`, `tags`, `stream_close`, `body_need`, `cost_warnings`, and `explain_steps` where relevant. `analyze` scores fixture URI, header, body, response-body, and stream-payload surfaces with deterministic local malicious-intelligence and malformed-payload heuristics and returns `risk` plus `bot` summaries. `hardening-plan` returns suggested OxiRule, group, or rulepack TOML for prompt-injection, malformed payload, and suspicious automation defenses without deploying it. Fixtures support request, response, and stream-phase inputs; stream fixtures evaluate `WafStreamInput` only and do not create live WebSocket or WebTransport sessions. Template endpoints expose built-in `vaultwarden`, `gitea`, `nextcloud`, `generic-login`, and `admin-path` templates. The false-positive endpoint returns suggested TOML changes for CRS allowlists/overrides or native OxiRule monitor/condition tuning; it does not mutate configuration.
 
@@ -1918,6 +1923,8 @@ provider_metadata = { difficulty_profile = "interactive" }
 ```
 
 The built-in PoW page embeds a signed `session` and uses the same `session_path` and `verify_path` as custom frontends; the old direct `token.nonce` proof cookie flow is not used. A challenge redirect includes `session`, `session_path`, `verify_path`, `openapi_path`, `return_path`, and `expires_unix_ms`. Challenge issuance does not reserve replay state. Provider-specific values such as `site_key` and clearance storage metadata are returned by `GET session_path?session=...`. Verification accepts only JSON `POST verify_path` with `{ "session": "...", "response": { "token": "...", "fields": {} } }`. `single_use` defaults to `true`; with it enabled, the session is consumed before PoW/provider verification, including failed provider responses. In localStorage mode, the browser must send the stored token on later protected requests using `clearance.local_storage.request_header` because servers cannot read localStorage directly.
+
+Admin Person proof status and revocation operate on exact SHA-256 clearance hashes, not user accounts or browser sessions. With process-local Person proof state, Admin revocation affects only the current process. With `[shared_state].person_proof_backend` configured, hash-keyed clearance markers and revocation tombstones are shared across workers using the configured backend. Older raw-key replay markers remain honored for replay prevention until they expire, but Admin output reports them only as aggregate legacy counts. Dynamic policy can match the existing Person proof object-model state and verified clearance-hash subjects, but it does not currently trigger a second staged proof profile or ask upstream applications to require a new proof step.
 
 ## Upstreams
 

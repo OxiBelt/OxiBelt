@@ -60,6 +60,9 @@ mod admin_operations;
 #[cfg(test)]
 mod admin_operations_tests;
 mod admin_ops;
+mod admin_person_proof;
+#[cfg(test)]
+mod admin_person_proof_scope_tests;
 mod admin_resource;
 #[cfg(test)]
 mod admin_resource_scope_tests;
@@ -83,6 +86,7 @@ pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "waf_devtools",
   "runtime_introspection",
   "cache_admin",
+  "person_proof_admin",
   "upstream_pool_runtime_control",
   "admin_operations",
   "admin_http3",
@@ -783,6 +787,18 @@ async fn admin_response_inner(
       peer_addr,
     )
     .await;
+  }
+
+  if path.starts_with("/admin/v1/waf/person-proof") {
+    return admin_person_proof::admin_person_proof_response(
+      request,
+      snapshot.as_ref(),
+      &authorization,
+      &method,
+      &path,
+    )
+    .await
+    .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
 
   if path.starts_with("/admin/v1/waf/oxirule/") {

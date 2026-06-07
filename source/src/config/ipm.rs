@@ -581,6 +581,9 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "ListOxiRuleTemplates",
       "RenderOxiRuleTemplate",
       "PlanOxiRuleFalsePositive",
+      "GetPersonProofStatus",
+      "ListPersonProofClearances",
+      "RevokePersonProofClearance",
     ],
     "lifecycle" => &["Get", "Drain", "Undrain"],
     "diagnostics" => &[

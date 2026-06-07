@@ -9,7 +9,7 @@ use url::form_urlencoded;
 
 use super::person_proof::{
   PersonProofEngine, PersonProofIssuedClearance, PersonProofPolicy, PersonProofRequestStatus,
-  PersonProofState, challenge_reuse_key, clearance_reuse_key, hex_decode, hex_encode, now_unix_ms,
+  PersonProofState, clearance_hash, clearance_reuse_key, hex_decode, hex_encode, now_unix_ms,
   random_hex, remaining_seconds, token_binding_payload_for_route,
 };
 use super::person_proof_api::{
@@ -258,11 +258,7 @@ pub(super) fn consume_provider_challenge_attempt(
     bail!("person proof challenge token expired");
   }
   if challenge.state.policy.single_use
-    && !engine.mark_reuse_token_used(
-      &challenge_reuse_key(&challenge.state.token),
-      challenge.state.expires,
-      now,
-    )?
+    && !engine.mark_challenge_token_used(&challenge.state.token, challenge.state.expires, now)?
   {
     bail!("person proof challenge token was already used");
   }
@@ -321,9 +317,13 @@ pub(super) fn verify_clearance(
   if status.state != PersonProofState::Valid {
     return Ok(status);
   }
-  status.clearance_hash = Some(clearance_hash(proof));
+  let hash = clearance_hash(proof);
+  status.clearance_hash = Some(hash.clone());
+  if engine.clearance_revoked(&hash, now)? {
+    bail!("person proof clearance token was revoked");
+  }
   if policy.single_use {
-    if !engine.consume_reuse_token(&clearance_reuse_key(proof), now)? {
+    if !engine.consume_clearance_token(proof, now)? {
       bail!("person proof clearance token was already used");
     }
     let state = ProviderChallengeState {
@@ -347,11 +347,6 @@ pub(super) fn verify_clearance(
     )?);
   }
   Ok(status)
-}
-
-fn clearance_hash(proof: &str) -> String {
-  let digest = digest::digest(&digest::SHA256, proof.as_bytes());
-  hex_encode(digest.as_ref())
 }
 
 fn issue_clearance(

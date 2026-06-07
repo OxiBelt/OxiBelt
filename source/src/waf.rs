@@ -39,11 +39,13 @@ pub(crate) mod normalization;
 mod object_model;
 mod pattern_set;
 mod person_proof;
+mod person_proof_admin;
 mod person_proof_api;
 mod person_proof_config;
 mod person_proof_dynamic;
 mod person_proof_policy;
 mod person_proof_request;
+mod person_proof_reuse;
 mod person_proof_v2;
 mod plan;
 mod request_header_mutation;
@@ -83,6 +85,9 @@ use pattern_set::{compile_pattern_sets, validate_pattern_sets};
 pub use person_proof::PersonProofIssuedClearance;
 use person_proof::{
   PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
+};
+pub use person_proof_admin::{
+  PersonProofAdminClearancePage, PersonProofAdminRevokeResult, PersonProofAdminStatus,
 };
 pub use person_proof_api::{PersonProofApiPathRole, PersonProofSessionDocument};
 pub use person_proof_config::{
@@ -1607,6 +1612,30 @@ impl WafEngine {
 
   pub fn person_proof_tcp_max_hop(&self) -> Option<u8> {
     self.person_proof_tcp_max_hop
+  }
+
+  pub fn person_proof_admin_status(&self) -> anyhow::Result<PersonProofAdminStatus> {
+    self.person_proof.admin_status()
+  }
+
+  pub fn person_proof_admin_clearances(
+    &self,
+    limit: usize,
+    cursor: Option<&str>,
+  ) -> anyhow::Result<PersonProofAdminClearancePage> {
+    self.person_proof.admin_list_clearances(limit, cursor)
+  }
+
+  pub fn person_proof_admin_revoke_clearance(
+    &self,
+    hash: &str,
+    ttl_seconds: Option<u64>,
+  ) -> anyhow::Result<PersonProofAdminRevokeResult> {
+    self.person_proof.admin_revoke_clearance(hash, ttl_seconds)
+  }
+
+  pub fn normalize_person_proof_admin_clearance_hash(hash: &str) -> anyhow::Result<String> {
+    PersonProofEngine::normalize_admin_clearance_hash(hash)
   }
 
   pub fn enabled(&self) -> bool {

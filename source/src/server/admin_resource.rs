@@ -21,6 +21,18 @@ pub(super) fn dynamic_policy_status() -> &'static str {
   "status/current"
 }
 
+pub(super) fn person_proof_status() -> &'static str {
+  "person-proof/status"
+}
+
+pub(super) fn person_proof_clearance_wildcard() -> &'static str {
+  "person-proof/clearance/*"
+}
+
+pub(super) fn person_proof_clearance(hash: &str) -> String {
+  format!("person-proof/clearance/{}", component(hash))
+}
+
 pub(super) fn upstream_pool_server(pool: &str, server_id: &str) -> String {
   format!("{}/server/{}", component(pool), component(server_id))
 }
@@ -122,6 +134,11 @@ mod tests {
       upstream_pool_server("app-pool", "primary/blue"),
       "app-pool/server/primary%2Fblue"
     );
+    assert_eq!(person_proof_status(), "person-proof/status");
+    assert_eq!(
+      person_proof_clearance("abc/123"),
+      "person-proof/clearance/abc%2F123"
+    );
     assert_eq!(ipm_principal("deployer"), "principal/deployer");
   }
 
@@ -144,6 +161,12 @@ mod tests {
         "oxibelt",
         "upstream-pool",
         &upstream_pool_server("app-pool", "primary/blue"),
+      ),
+      resource("oxibelt", "waf", person_proof_status()),
+      resource(
+        "oxibelt",
+        "waf",
+        &person_proof_clearance("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
       ),
       resource("oxibelt", "ipm", ipm_status()),
       resource("oxibelt", "ipm", &ipm_principal("deployer")),
@@ -184,6 +207,18 @@ mod tests {
       &actor,
       "upstream-pool:UpdateServer",
       &upstream_pool_server("app-pool", "primary/blue"),
+    );
+    assert_allowed(
+      &runtime,
+      &actor,
+      "waf:GetPersonProofStatus",
+      person_proof_status(),
+    );
+    assert_allowed(
+      &runtime,
+      &actor,
+      "waf:RevokePersonProofClearance",
+      &person_proof_clearance("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
     );
     assert_allowed(&runtime, &actor, "ipm:GetStatus", ipm_status());
     assert_allowed(
@@ -228,6 +263,7 @@ mod tests {
       resource("oxibelt", "cache", "host/*"),
       resource("oxibelt", "dynamic-policy", "source/oxibeltctl/name/*"),
       resource("oxibelt", "upstream-pool", "app-pool/server/*"),
+      resource("oxibelt", "waf", person_proof_clearance_wildcard()),
       resource("oxibelt", "ipm", "credential/*"),
     ]);
 
@@ -248,6 +284,12 @@ mod tests {
       &actor,
       "upstream-pool:RemoveServer",
       &upstream_pool_server("app-pool", "blue-1"),
+    );
+    assert_allowed(
+      &runtime,
+      &actor,
+      "waf:ListPersonProofClearances",
+      &person_proof_clearance("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
     );
     assert_allowed(
       &runtime,
@@ -278,6 +320,7 @@ mod tests {
             "cache:*".to_string(),
             "dynamic-policy:*".to_string(),
             "upstream-pool:*".to_string(),
+            "waf:*".to_string(),
             "ipm:*".to_string(),
           ],
           resources: resources.to_vec(),

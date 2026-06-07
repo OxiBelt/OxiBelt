@@ -490,6 +490,42 @@ resources = ["oxibelt:oxibelt:upstream-pool:status/current"]
   )
 }
 
+pub(super) fn person_proof_status_scope_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
+  parse_scoped_config(
+    cert_path,
+    key_path,
+    admin_bind,
+    r#"
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["waf:GetPersonProofStatus"]
+resources = ["oxibelt:oxibelt:waf:person-proof/status"]
+"#,
+  )
+}
+
+pub(super) fn person_proof_clearance_list_scope_config(
+  cert_path: &Path,
+  key_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
+  parse_scoped_config(
+    cert_path,
+    key_path,
+    admin_bind,
+    r#"
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["waf:ListPersonProofClearances"]
+resources = ["oxibelt:oxibelt:waf:person-proof/clearance/*"]
+"#,
+  )
+}
+
 fn ipm_credential_scope_config(
   cert_path: &Path,
   key_path: &Path,

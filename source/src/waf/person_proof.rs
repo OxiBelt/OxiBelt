@@ -6,8 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow, bail};
 use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE, VARY};
 use http::{HeaderName, HeaderValue, StatusCode};
+use ring::digest;
 use ring::rand::{SecureRandom, SystemRandom};
 
+use super::person_proof_reuse::is_reuse_capacity_error;
 use super::{
   HeaderMutation, PersonProofClearanceConfig, PersonProofClearanceIssueTarget,
   PersonProofClearanceSameSite, PersonProofClearanceSourceConfig, PersonProofMode,
@@ -19,9 +21,10 @@ use crate::shared_state::SharedState;
 pub(super) struct PersonProofEngine {
   pub(super) secret: [u8; 32],
   pub(super) policies: Vec<PersonProofPolicy>,
-  active_reuse_tokens: Arc<Mutex<HashMap<String, i64>>>,
-  max_reuse_tokens: usize,
-  shared_state: Option<Arc<SharedState>>,
+  pub(super) active_reuse_tokens: Arc<Mutex<HashMap<String, i64>>>,
+  pub(super) revoked_clearances: Arc<Mutex<HashMap<String, i64>>>,
+  pub(super) max_reuse_tokens: usize,
+  pub(super) shared_state: Option<Arc<SharedState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -370,14 +373,20 @@ impl PersonProofEngine {
     shared_state: Option<Arc<SharedState>>,
   ) -> anyhow::Result<Self> {
     let mut secret = [0u8; 32];
-    let active_reuse_tokens = if let Some(previous) = previous {
+    let (active_reuse_tokens, revoked_clearances) = if let Some(previous) = previous {
       secret = previous.secret;
-      previous.active_reuse_tokens.clone()
+      (
+        previous.active_reuse_tokens.clone(),
+        previous.revoked_clearances.clone(),
+      )
     } else {
       SystemRandom::new()
         .fill(&mut secret)
         .map_err(|_| anyhow!("failed to generate WAF person proof secret"))?;
-      Arc::new(Mutex::new(HashMap::new()))
+      (
+        Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(Mutex::new(HashMap::new())),
+      )
     };
     if let Some(shared) = &shared_state
       && let Some(shared_secret) = shared.person_proof_secret()?
@@ -389,6 +398,7 @@ impl PersonProofEngine {
       secret,
       policies,
       active_reuse_tokens,
+      revoked_clearances,
       max_reuse_tokens,
       shared_state,
     })
@@ -531,62 +541,6 @@ impl PersonProofEngine {
     }
     bail!("person proof credential must contain an API-issued clearance token")
   }
-
-  pub(super) fn remember_reuse_token(
-    &self,
-    key: &str,
-    expires: i64,
-    now: i64,
-  ) -> anyhow::Result<()> {
-    if !self.mark_reuse_token_used(key, expires, now)? {
-      bail!("person proof token is already active");
-    }
-    Ok(())
-  }
-
-  pub(super) fn mark_reuse_token_used(
-    &self,
-    key: &str,
-    expires: i64,
-    now: i64,
-  ) -> anyhow::Result<bool> {
-    if let Some(shared) = &self.shared_state {
-      return shared.person_proof_remember(key, expires);
-    }
-    let mut active = self
-      .active_reuse_tokens
-      .lock()
-      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
-    purge_expired_reuse_tokens(&mut active, now);
-    if active.contains_key(key) {
-      return Ok(false);
-    }
-    if active.len() >= self.max_reuse_tokens {
-      bail!("{PERSON_PROOF_REUSE_CAPACITY_ERROR}");
-    }
-    active.insert(key.to_string(), expires);
-    Ok(true)
-  }
-
-  pub(super) fn consume_reuse_token(&self, key: &str, now: i64) -> anyhow::Result<bool> {
-    if let Some(shared) = &self.shared_state {
-      return shared.person_proof_consume(key);
-    }
-    let mut active = self
-      .active_reuse_tokens
-      .lock()
-      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
-    purge_expired_reuse_tokens(&mut active, now);
-    Ok(active.remove(key).is_some())
-  }
-}
-
-const PERSON_PROOF_REUSE_CAPACITY_ERROR: &str = "person proof reuse token capacity exhausted";
-
-fn is_reuse_capacity_error(error: &anyhow::Error) -> bool {
-  error
-    .to_string()
-    .contains(PERSON_PROOF_REUSE_CAPACITY_ERROR)
 }
 
 pub(super) fn token_binding_payload_for_route(
@@ -681,14 +635,22 @@ pub(super) fn tcp_max_hop_binding_value(configured: Option<u8>, applied: Option<
 }
 
 pub(super) fn challenge_reuse_key(token: &str) -> String {
-  format!("challenge:{token}")
+  format!("challenge:{}", token_hash(token))
 }
 
 pub(super) fn clearance_reuse_key(token: &str) -> String {
-  format!("clearance:{token}")
+  format!("clearance:{}", clearance_hash(token))
 }
 
-fn purge_expired_reuse_tokens(active: &mut HashMap<String, i64>, now: i64) {
+pub(super) fn clearance_hash(proof: &str) -> String {
+  token_hash(proof)
+}
+
+pub(super) fn token_hash(value: &str) -> String {
+  hex_encode(digest::digest(&digest::SHA256, value.as_bytes()).as_ref())
+}
+
+pub(super) fn purge_expired_reuse_tokens(active: &mut HashMap<String, i64>, now: i64) {
   active.retain(|_, expires| *expires >= now);
 }
 

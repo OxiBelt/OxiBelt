@@ -116,6 +116,8 @@ Resource-specific Admin/IPM resources include:
 - runtime WebTransport: `webtransport/session/*`,
   `webtransport/session/<id>`, `webtransport/route/<route>`,
   `webtransport/upstream/<upstream>`, or `webtransport/client-ip/<ip>`
+- WAF Person proof: `person-proof/status`, `person-proof/clearance/*`,
+  and `person-proof/clearance/<sha256>`
 - dynamic policy: `status/current`, `source/<source>/name/<name>`, and
   `route/<route>`
 - upstream pool: `status/current`, `<pool>`, and `<pool>/server/<server_id>`
@@ -133,6 +135,9 @@ check the `source/<source>/name/<name>` target and, when present, the
 `<pool>/server/<server_id>`. IPM
 credential assignment checks both the credential and target principal; binding
 create checks the binding, target principal or group, and policy.
+Person proof status checks `person-proof/status`, clearance listing checks
+`person-proof/clearance/*`, and exact revocation checks the normalized
+`person-proof/clearance/<sha256>` resource before state lookup or mutation.
 `POST /admin/v1/ipm/simulate` uses the same `simulation/current` resource.
 Current-actor checks require `ipm:SimulateSelf`; target principal, credential,
 subject, or group overrides require `ipm:SimulatePrincipal` plus the referenced
@@ -148,6 +153,24 @@ and `POST /admin/v1/files/sync` endpoints. It fetches the active config ETag,
 writes only its managed config-root include file, and sends `apply = "full"` so
 OxiBelt validates and loads the replacement runtime view. The controller does
 not build candidates from redacted effective config output.
+
+## Person Proof Administration
+
+`GET /admin/v1/waf/person-proof/status` returns aggregate Person proof policy
+and replay-store state. `GET /admin/v1/waf/person-proof/clearances` lists only
+hash-keyed active clearance identifiers in canonical `clearance:<sha256>` form
+with expiry metadata. `POST /admin/v1/waf/person-proof/clearances/revoke`
+accepts only a bare SHA-256 value or canonical `clearance:<sha256>` value and
+creates an exact-match revocation tombstone.
+
+These endpoints never return raw session material, raw clearance credentials,
+provider responses, token-binding payloads, MACs, or the shared Person proof
+HMAC secret. Legacy raw-keyed replay markers created by older versions remain
+honored until expiry for replay protection, but Admin responses expose them
+only as aggregate legacy counts. In process-local mode the operation affects
+only the current snapshot; with a configured Person proof shared-state backend
+it applies through that shared backend. Revocation targets one exact clearance
+hash, not a browser, user, route, or future rotated clearance.
 
 ## IPM Administration
 

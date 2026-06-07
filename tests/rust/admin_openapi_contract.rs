@@ -163,6 +163,42 @@ fn ipm_simulation_documents_non_secret_claim_key_response() {
 }
 
 #[test]
+fn person_proof_admin_schemas_stay_hash_only() {
+    let spec = openapi();
+    let schemas = &spec["components"]["schemas"];
+    let schema_text = [
+        "PersonProofAdminStatus",
+        "PersonProofAdminClearance",
+        "PersonProofAdminClearanceList",
+        "PersonProofAdminRevokeRequest",
+        "PersonProofAdminRevokeResponse",
+    ]
+    .into_iter()
+    .map(|name| {
+        serde_json::to_string(&schemas[name])
+            .unwrap_or_else(|error| panic!("{name} schema should serialize: {error}"))
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
+    .to_ascii_lowercase();
+    for sensitive in [
+        r#""token""#,
+        r#""secret""#,
+        r#""session""#,
+        "clearance.v2",
+        "reuse_key",
+        r#""mac""#,
+        r#""cookie""#,
+        r#""authorization""#,
+    ] {
+        assert!(
+            !schema_text.contains(sensitive),
+            "Person proof Admin schemas must not expose sensitive field {sensitive}"
+        );
+    }
+}
+
+#[test]
 fn downstream_tls_status_documents_bounded_crlite_status() {
     let spec = openapi();
     let schema = &spec["paths"]["/admin/v1/tls/downstream"]["get"]["responses"]["200"]["content"]["application/json"]
@@ -397,6 +433,9 @@ fn expected_operations() -> BTreeSet<(String, String)> {
         ("get", "/admin/v1/waf/rule-costs"),
         ("get", "/admin/v1/waf/crs/compatibility"),
         ("get", "/admin/v1/waf/rulepacks"),
+        ("get", "/admin/v1/waf/person-proof/status"),
+        ("get", "/admin/v1/waf/person-proof/clearances"),
+        ("post", "/admin/v1/waf/person-proof/clearances/revoke"),
         ("post", "/admin/v1/waf/oxirule/check"),
         ("post", "/admin/v1/waf/oxirule/cost"),
         ("post", "/admin/v1/waf/oxirule/test"),

@@ -1295,6 +1295,111 @@
         }
       }
     },
+    "/admin/v1/waf/person-proof/status": {
+      "get": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "getWafPersonProofStatus",
+        "summary": "Fetch Person proof Admin status.",
+        "responses": {
+          "200": {
+            "description": "Person proof Admin status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonProofAdminStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/person-proof/clearances": {
+      "get": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "listWafPersonProofClearances",
+        "summary": "List hash-keyed active Person proof clearances.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminListLimit"
+          },
+          {
+            "$ref": "#/components/parameters/AdminListCursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hash-keyed active Person proof clearances.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonProofAdminClearanceList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/waf/person-proof/clearances/revoke": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "revokeWafPersonProofClearance",
+        "summary": "Revoke one Person proof clearance by hash.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonProofAdminRevokeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Person proof clearance revocation result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonProofAdminRevokeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/waf/oxirule/check": {
       "post": {
         "tags": [
@@ -5150,6 +5255,184 @@
         },
         "additionalProperties": false
       },
+      "PersonProofStoreScope": {
+        "type": "string",
+        "enum": [
+          "disabled",
+          "process_local",
+          "shared"
+        ]
+      },
+      "PersonProofAdminPolicyStatus": {
+        "type": "object",
+        "required": [
+          "total",
+          "single_use",
+          "multi_use"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "single_use": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "multi_use": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonProofAdminStatus": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "store_scope",
+          "policies",
+          "max_reuse_tokens",
+          "active_clearance_count",
+          "challenge_replay_marker_count",
+          "revoked_clearance_count",
+          "legacy_raw_key_count"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "store_scope": {
+            "$ref": "#/components/schemas/PersonProofStoreScope"
+          },
+          "policies": {
+            "$ref": "#/components/schemas/PersonProofAdminPolicyStatus"
+          },
+          "max_reuse_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "active_clearance_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "challenge_replay_marker_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "revoked_clearance_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "legacy_raw_key_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonProofAdminClearance": {
+        "type": "object",
+        "required": [
+          "clearance_hash",
+          "expires_at_unix_ms",
+          "store_scope"
+        ],
+        "properties": {
+          "clearance_hash": {
+            "type": "string",
+            "pattern": "^clearance:[0-9a-f]{64}$"
+          },
+          "expires_at_unix_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "store_scope": {
+            "$ref": "#/components/schemas/PersonProofStoreScope"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonProofAdminClearanceList": {
+        "type": "object",
+        "required": [
+          "clearances",
+          "pagination"
+        ],
+        "properties": {
+          "clearances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonProofAdminClearance"
+            }
+          },
+          "pagination": {
+            "type": "object",
+            "required": [
+              "next_cursor"
+            ],
+            "properties": {
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonProofAdminRevokeRequest": {
+        "type": "object",
+        "required": [
+          "clearance_hash"
+        ],
+        "properties": {
+          "clearance_hash": {
+            "type": "string",
+            "pattern": "^(clearance:)?[0-9a-fA-F]{64}$"
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 86400
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonProofAdminRevokeResponse": {
+        "type": "object",
+        "required": [
+          "clearance_hash",
+          "revoked",
+          "removed_active",
+          "store_scope",
+          "expires_at_unix_ms"
+        ],
+        "properties": {
+          "clearance_hash": {
+            "type": "string",
+            "pattern": "^clearance:[0-9a-f]{64}$"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "removed_active": {
+            "type": "boolean"
+          },
+          "store_scope": {
+            "$ref": "#/components/schemas/PersonProofStoreScope"
+          },
+          "expires_at_unix_ms": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
       "AdminCapabilities": {
         "type": "object",
         "required": [
@@ -5176,6 +5459,7 @@
               "waf_devtools",
               "runtime_introspection",
               "cache_admin",
+              "person_proof_admin",
               "upstream_pool_runtime_control",
               "admin_operations",
               "admin_http3",
@@ -5202,6 +5486,9 @@
                 "type": "boolean"
               },
               "cache_admin": {
+                "type": "boolean"
+              },
+              "person_proof_admin": {
                 "type": "boolean"
               },
               "upstream_pool_runtime_control": {

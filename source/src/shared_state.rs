@@ -26,10 +26,14 @@ use crate::limits::ParsedRate;
 
 mod cache_store;
 mod feature_flags;
+mod person_proof;
 mod rate_limits;
 mod sticky_sessions;
 
 pub use cache_store::{SharedCacheLock, shared_header_values};
+pub use person_proof::{
+  PersonProofSharedClearance, PersonProofSharedClearancePage, PersonProofSharedStatus,
+};
 
 #[derive(Clone, Debug)]
 pub struct SharedState {
@@ -319,34 +323,6 @@ impl SharedState {
     if let Err(error) = backend.connection_release(&keys) {
       warn!(error = %error, "failed to release shared connection limits");
     }
-  }
-
-  pub fn person_proof_secret(&self) -> anyhow::Result<Option<[u8; 32]>> {
-    let Some(backend) = &self.person_proof else {
-      return Ok(None);
-    };
-    let key = self.key("person-proof:secret:v1");
-    let secret = backend.get_or_init_bytes(&key, 32, None)?;
-    let bytes: [u8; 32] = secret
-      .as_slice()
-      .try_into()
-      .map_err(|_| anyhow!("shared person proof secret has invalid length"))?;
-    Ok(Some(bytes))
-  }
-
-  pub fn person_proof_remember(&self, key: &str, expires_at_ms: i64) -> anyhow::Result<bool> {
-    let Some(backend) = &self.person_proof else {
-      return Ok(true);
-    };
-    let ttl = ttl_from_expires_ms(expires_at_ms);
-    backend.put_if_absent(&self.key(&format!("person-proof:reuse:{key}")), b"1", ttl)
-  }
-
-  pub fn person_proof_consume(&self, key: &str) -> anyhow::Result<bool> {
-    let Some(backend) = &self.person_proof else {
-      return Ok(false);
-    };
-    backend.take_key(&self.key(&format!("person-proof:reuse:{key}")))
   }
 
   pub fn pool_health(&self, upstream_name: &str) -> anyhow::Result<Option<bool>> {
@@ -1269,6 +1245,55 @@ return 1
       }
     }
     Ok(entries)
+  }
+
+  fn scan_keys(
+    &self,
+    pattern: &str,
+    cursor: &str,
+    count: usize,
+  ) -> anyhow::Result<(Vec<String>, Option<String>)> {
+    let response = self.command(&[
+      b"SCAN".to_vec(),
+      cursor.as_bytes().to_vec(),
+      b"MATCH".to_vec(),
+      pattern.as_bytes().to_vec(),
+      b"COUNT".to_vec(),
+      count.max(1).to_string().into_bytes(),
+    ])?;
+    let Resp::Array(items) = response else {
+      bail!("unexpected Redis SCAN response");
+    };
+    if items.len() != 2 {
+      bail!("unexpected Redis SCAN item count");
+    }
+    let next_cursor = match &items[0] {
+      Resp::Bulk(Some(bytes)) => String::from_utf8(bytes.clone())?,
+      Resp::Simple(value) => value.clone(),
+      other => bail!("unexpected Redis SCAN cursor response: {other:?}"),
+    };
+    let keys = match &items[1] {
+      Resp::Array(keys) => keys
+        .iter()
+        .filter_map(|item| match item {
+          Resp::Bulk(Some(bytes)) => String::from_utf8(bytes.clone()).ok(),
+          Resp::Simple(value) => Some(value.clone()),
+          _ => None,
+        })
+        .collect::<Vec<_>>(),
+      other => bail!("unexpected Redis SCAN keys response: {other:?}"),
+    };
+    let next_cursor = (next_cursor != "0").then_some(next_cursor);
+    Ok((keys, next_cursor))
+  }
+
+  fn expires_at_ms(&self, key: &str) -> anyhow::Result<Option<i64>> {
+    match self.command(&[b"PTTL".to_vec(), key.as_bytes().to_vec()])? {
+      Resp::Int(ttl) if ttl >= 0 => Ok(Some(now_unix_ms().saturating_add(ttl))),
+      Resp::Int(-1) => Ok(None),
+      Resp::Int(-2) => Ok(Some(0)),
+      other => bail!("unexpected Redis PTTL response: {other:?}"),
+    }
   }
 }
 

@@ -9265,6 +9265,187 @@ single_use = true
 }
 
 #[test]
+fn person_proof_admin_revoke_blocks_single_use_clearance_without_rotation() {
+    let temp_dir = common::TempDir::new("waf-person-proof-admin-revoke-single");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-admin-revoke-single");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+clearance.cookie.key = "__test_person_proof"
+single_use = true
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let challenge = challenge_decision
+        .terminal
+        .as_ref()
+        .expect("missing person proof challenge");
+    let clearance_cookie = complete_pow_person_proof(
+        &engine,
+        request_input(&method, &uri, &headers, &tags, client_addr),
+        &challenge.body,
+        4,
+    );
+    let clearance = extract_cookie_value(&clearance_cookie);
+    let hash = sha256_hex(&clearance);
+
+    let listed = engine
+        .person_proof_admin_clearances(10, None)
+        .expect("admin clearances should list");
+    assert_eq!(listed.clearances.len(), 1);
+    assert_eq!(
+        listed.clearances[0].clearance_hash,
+        format!("clearance:{hash}")
+    );
+
+    let revoked = engine
+        .person_proof_admin_revoke_clearance(&hash, None)
+        .expect("admin revoke should succeed");
+    assert!(revoked.revoked);
+    assert!(revoked.removed_active);
+
+    let mut clearance_headers = HeaderMap::new();
+    clearance_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={clearance}")).unwrap(),
+    );
+    let revoked_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert_eq!(
+        revoked_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+    assert!(
+        !has_set_cookie(&revoked_decision.response_header_mutations),
+        "revoked clearance should not rotate into a fresh clearance"
+    );
+}
+
+#[test]
+fn person_proof_admin_revoke_blocks_multi_use_clearance() {
+    let temp_dir = common::TempDir::new("waf-person-proof-admin-revoke-multi");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-person-proof-admin-revoke-multi");
+    let raw = format!(
+        "{}\n{}",
+        common::minimal_config_toml(&cert_path, &key_path),
+        r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-person-proof"
+phase = "request"
+priority = 10
+when = "Request.Client.PersonProof.State != 'valid'"
+
+[[waf.rules.actions]]
+type = "require_person_proof"
+difficulty = 4
+token_validity_seconds = 60
+clearance.cookie.key = "__test_person_proof"
+single_use = false
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let method = Method::GET;
+    let uri: Uri = "/protected".parse().expect("URI should parse");
+    let client_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
+    let challenge_decision =
+        engine.evaluate_request(request_input(&method, &uri, &headers, &tags, client_addr));
+    let challenge = challenge_decision
+        .terminal
+        .as_ref()
+        .expect("missing person proof challenge");
+    let clearance_cookie = complete_pow_person_proof(
+        &engine,
+        request_input(&method, &uri, &headers, &tags, client_addr),
+        &challenge.body,
+        4,
+    );
+    let clearance = extract_cookie_value(&clearance_cookie);
+
+    let mut clearance_headers = HeaderMap::new();
+    clearance_headers.insert(
+        http::header::COOKIE,
+        HeaderValue::from_str(&format!("__test_person_proof={clearance}")).unwrap(),
+    );
+    let allowed = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert!(allowed.terminal.is_none());
+
+    let revoked = engine
+        .person_proof_admin_revoke_clearance(&format!("clearance:{}", sha256_hex(&clearance)), None)
+        .expect("admin revoke should succeed");
+    assert!(revoked.revoked);
+    assert!(!revoked.removed_active);
+
+    let revoked_decision = engine.evaluate_request(request_input(
+        &method,
+        &uri,
+        &clearance_headers,
+        &tags,
+        client_addr,
+    ));
+    assert_eq!(
+        revoked_decision
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn person_proof_single_use_clearance_survives_waf_reload() {
     let temp_dir = common::TempDir::new("waf-person-proof-reload");
     let (cert_path, key_path) =
@@ -11093,12 +11274,32 @@ fn extract_set_cookie(mutations: &[HeaderMutation]) -> String {
         .expect("Set-Cookie mutation should exist")
 }
 
+fn has_set_cookie(mutations: &[HeaderMutation]) -> bool {
+    mutations.iter().any(|mutation| match mutation {
+        HeaderMutation::Append { name, .. } | HeaderMutation::Set { name, .. } => {
+            name == http::header::SET_COOKIE
+        }
+        _ => false,
+    })
+}
+
 fn extract_cookie_value(set_cookie: &str) -> String {
     set_cookie
         .split_once('=')
         .and_then(|(_, value)| value.split_once(';'))
         .map(|(value, _)| value.to_string())
         .expect("Set-Cookie header should contain a cookie value")
+}
+
+fn sha256_hex(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = digest::digest(&digest::SHA256, value.as_bytes());
+    let mut out = String::with_capacity(64);
+    for byte in digest.as_ref() {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn extract_response_header(
