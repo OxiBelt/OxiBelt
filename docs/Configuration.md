@@ -136,7 +136,7 @@ include = ["conf.d/*.toml"]
 Required routing inputs:
 
 - At least one `[[routes]]`, `[sni_forward]` rule/default target, `[[stream_listeners]]`, or `[[webrtc_turn_listeners]]`.
-- Each route must set exactly one of `upstream`, `upstream_pool`, or `static_root`.
+- Each route must set exactly one of `upstream`, `upstream_pool`, `static_root`, or terminal `actions.redirect`.
 
 ## Includes
 
@@ -2528,7 +2528,7 @@ Configuration validation rejects:
 - Missing all `[[routes]]`, `[sni_forward]` rule/default targets, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
 - Invalid SNI forwarding targets, duplicate SNI forwarding rule names or server-name patterns, unsupported wildcard placement, zero SNI forwarding timeouts, or QUIC SNI forwarding without downstream HTTP/3.
 - Invalid stream upstream-pool origins, unsupported stream pool algorithms, duplicate stream SNI rule names or server-name patterns, stream listener/SNI rule target conflicts, missing stream listener defaults without SNI rules, UDP stream listeners with PROXY protocol egress, or stream listeners that reference a pool without matching `tcp://` or `udp://` servers.
-- Routes that set zero or more than one of `upstream`, `upstream_pool`, or `static_root`.
+- Routes that set zero or more than one of `upstream`, `upstream_pool`, `static_root`, or `actions.redirect`.
 - Unsafe route paths.
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.

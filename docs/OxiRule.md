@@ -705,7 +705,7 @@ Default provider endpoints are:
 
 Use `provider_endpoint` to override the default endpoint for EU, private, or test deployments. OxiBelt sends the secret from `secret_env`, the browser token as `response`, the configured `site_key` where the provider supports it, and the direct remote IP when `send_remote_ip = true`. Provider transport errors, timeouts, invalid JSON, or non-success HTTP status codes fail closed with `503` by default; set `provider_fail_policy = "open"` only when availability is more important than this anti-automation control.
 
-`custom_provider` sends a JSON verification request to `provider_endpoint` and expects `{ "success": true }` or `{ "success": false, "error_codes": [] }`. The request includes the OxiBelt session, `person_proof_mode`, `proof_kind`, `proof_challenge_kind`, `proof_label`, provider name, response token/fields, optional remote IP, optional site key, and configured metadata. Built-in Turnstile, hCaptcha, and Friendly Captcha HTTP shapes are adapter-internal and are not exposed to the browser-facing API.
+`custom_provider` sends a JSON verification request to `provider_endpoint` and expects a JSON response with boolean `success`, such as `{ "success": true }` or `{ "success": false }`; providers may include an optional `error_codes` array for their own diagnostics. The request includes the OxiBelt session, `person_proof_mode`, `proof_kind`, `proof_challenge_kind`, `proof_label`, provider name, response token/fields, optional remote IP, optional site key, and configured metadata. Built-in Turnstile, hCaptcha, and Friendly Captcha HTTP shapes are adapter-internal and are not exposed to the browser-facing API.
 
 Proof of Knowledge via an external provider:
 

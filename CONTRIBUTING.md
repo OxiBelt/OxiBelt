@@ -25,6 +25,7 @@ be committed.
 | `source/src/tls.rs` and TLS-related modules | Downstream and upstream TLS behavior. | You are changing certificate, client root, remote signer, OCSP, ECH, or TLS policy behavior. |
 | `source/config/oxibelt.toml` | Example or default configuration. | User-visible configuration examples need to stay valid. |
 | `source/ops/Dockerfile.alpine` | Release Docker image. | Runtime image, package, build, or container layout changes. |
+| `deploy/` | Deployable Helm charts and observability assets. | Kubernetes deployment assets, Helm chart templates, dashboards, Prometheus, or collector starter assets change. |
 | `tests/rust/` | Rust integration tests and repository-level checks. | Behavior changes need regression coverage. |
 | `tests/docker/` | Docker-only mock upstreams, probes, PostgreSQL, DNS, and performance services. | Docker integration, protocol, or performance scenarios need fixtures. |
 | `tests/scripts/` | Build, integration, performance, WebDriver, and cleanup orchestration. | Local or CI test flows change. |
@@ -233,11 +234,12 @@ and Firefox WebDriver. Browser tests should run headless, run locally through
 Docker, run in GitHub Actions, avoid browser-specific timing assumptions, and
 use explicit waits instead of fixed sleeps where possible.
 
-The `devops/` directory is reserved for TypeScript-based DevOps and CI support
-code. Keep scripts deterministic, avoid hidden local dependencies, prefer
-explicit configuration, validate generated or modified GitHub Actions workflow
-files, and keep CI behavior compatible with Linux GitHub-hosted runners unless
-otherwise documented.
+Deployable Helm charts and observability assets live under `deploy/`. The
+`devops/` directory is reserved for TypeScript-based DevOps and CI support
+code when such tooling is present. Keep scripts deterministic, avoid hidden
+local dependencies, prefer explicit configuration, validate generated or
+modified GitHub Actions workflow files, and keep CI behavior compatible with
+Linux GitHub-hosted runners unless otherwise documented.
 
 If package manager files are added under `devops/`, document the expected
 commands. For example:

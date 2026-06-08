@@ -2,6 +2,7 @@
 //! Challenge and clearance responses are routed before generic upstream proxying.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -172,6 +173,12 @@ where
   };
   let payload = match parse_person_proof_verify_payload(&body, content_type) {
     Ok(payload) => payload,
+    Err(PersonProofVerifyPayloadError::UnsupportedMediaType) => {
+      return text_response(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "person proof verify payload must use application/json",
+      );
+    }
     Err(error) => {
       warn!(error = %error, "invalid person proof verify payload");
       return text_response(
@@ -254,21 +261,51 @@ struct CustomProviderVerifyPayloadInput<'a> {
 fn parse_person_proof_verify_payload(
   body: &[u8],
   content_type: Option<&str>,
-) -> anyhow::Result<PersonProofVerifyPayload> {
+) -> Result<PersonProofVerifyPayload, PersonProofVerifyPayloadError> {
   let is_json = content_type.map(|value| value.split(';').next().unwrap_or_default().trim())
     == Some("application/json");
   if !is_json {
-    anyhow::bail!("person proof verify payload must use application/json");
+    return Err(PersonProofVerifyPayloadError::UnsupportedMediaType);
   }
-  let (session, response) = parse_json_payload(body)?;
+  let (session, response) =
+    parse_json_payload(body).map_err(PersonProofVerifyPayloadError::Invalid)?;
   let session = session
     .filter(|value| !value.trim().is_empty())
-    .context("person proof verify payload is missing session")?;
+    .ok_or_else(|| {
+      PersonProofVerifyPayloadError::invalid("person proof verify payload is missing session")
+    })?;
   if response.token.trim().is_empty() {
-    anyhow::bail!("person proof verify payload is missing response token");
+    return Err(PersonProofVerifyPayloadError::invalid(
+      "person proof verify payload is missing response token",
+    ));
   }
   Ok(PersonProofVerifyPayload { session, response })
 }
+
+#[derive(Debug)]
+enum PersonProofVerifyPayloadError {
+  UnsupportedMediaType,
+  Invalid(anyhow::Error),
+}
+
+impl PersonProofVerifyPayloadError {
+  fn invalid(message: &'static str) -> Self {
+    Self::Invalid(anyhow::anyhow!(message))
+  }
+}
+
+impl fmt::Display for PersonProofVerifyPayloadError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::UnsupportedMediaType => {
+        formatter.write_str("person proof verify payload must use application/json")
+      }
+      Self::Invalid(error) => write!(formatter, "{error}"),
+    }
+  }
+}
+
+impl std::error::Error for PersonProofVerifyPayloadError {}
 
 fn parse_json_payload(body: &[u8]) -> anyhow::Result<(Option<String>, PersonProofClientResponse)> {
   let value: Value = serde_json::from_slice(body)?;
@@ -567,9 +604,18 @@ mod tests {
     assert!(parse_person_proof_verify_payload(json, Some("application/json")).is_err());
 
     let body = b"challenge=session.v1.test&h-captcha-response=provider-token&tenant=a";
-    assert!(
-      parse_person_proof_verify_payload(body, Some("application/x-www-form-urlencoded")).is_err()
-    );
+    assert!(matches!(
+      parse_person_proof_verify_payload(body, Some("application/x-www-form-urlencoded")),
+      Err(PersonProofVerifyPayloadError::UnsupportedMediaType)
+    ));
+    assert!(matches!(
+      parse_person_proof_verify_payload(json, None),
+      Err(PersonProofVerifyPayloadError::UnsupportedMediaType)
+    ));
+    assert!(matches!(
+      parse_person_proof_verify_payload(b"not-json", Some("application/json")),
+      Err(PersonProofVerifyPayloadError::Invalid(_))
+    ));
   }
 
   #[test]

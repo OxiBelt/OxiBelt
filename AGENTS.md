@@ -6,8 +6,9 @@ OxiBelt is a Rust-based reverse proxy and WAF project.
 
 This repository is organized as a monorepo. The main reverse proxy
 implementation lives under `source/`. Tests live under `tests/`. Technical
-specifications and configuration documentation live under `docs/`. DevOps and
-CI-related automation should live under `devops/`.
+specifications and configuration documentation live under `docs/`. Deployable
+Helm and observability assets live under `deploy/`. TypeScript-based DevOps and
+CI support code should live under `devops/` when present.
 
 The project should be testable locally and in CI using Docker-based
 environments.
@@ -40,8 +41,10 @@ environments.
   - Person proof challenge UI assets and build scripts.
 - `kernel-extension/`
   - Linux edge deployment tuning templates and verification helpers.
+- `deploy/`
+  - Deployable Helm charts and observability bundle assets.
 - `devops/`
-  - TypeScript-based DevOps and GitHub Actions support code.
+  - TypeScript-based DevOps and GitHub Actions support code when present.
 - `.github/workflows/`
   - GitHub Actions workflows.
 

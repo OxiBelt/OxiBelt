@@ -53,6 +53,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
         ("upstream-pool-runtime-state", "supported"),
         ("static-files", "supported"),
         ("tls-ocsp", "supported"),
+        ("tls-upstream-revocation", "experimental"),
         ("tls-remote-signer", "supported"),
         ("tls-mtls-client-auth", "supported"),
         ("upstream-ech", "supported"),
@@ -61,11 +62,14 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
         ("oxirule-request-response", "supported"),
         ("crs-request-response", "supported"),
         ("person-proof", "supported"),
+        ("client-identity-asn", "experimental"),
+        ("sybil-rate-limit-identities", "experimental"),
         ("cache", "supported"),
         ("admin-api-runtime-control", "supported"),
         ("observability", "supported"),
         ("gateway-controller", "experimental"),
         ("gateway-api-httproute", "experimental"),
+        ("gateway-api-grpcroute", "experimental"),
         ("gateway-api-tlsroute", "experimental"),
         ("helm-gateway-controller", "experimental"),
         ("acme", "reserved"),
@@ -129,6 +133,26 @@ fn config_wire_values_are_documented_in_config_reference_and_feature_matrix() {
         assert_values_appear("docs/Configuration.md", &configuration, values);
         assert_values_appear("docs/FeatureStatus.md", &feature_status, values);
     }
+}
+
+#[test]
+fn configuration_route_target_docs_include_redirect_target() {
+    let configuration = read_repo_file("docs/Configuration.md");
+    for value in [
+        "`upstream`",
+        "`upstream_pool`",
+        "`static_root`",
+        "`actions.redirect`",
+    ] {
+        assert!(
+            configuration.contains(value),
+            "docs/Configuration.md route target docs must mention {value}"
+        );
+    }
+    assert!(
+        configuration.contains("exactly one of `upstream`, `upstream_pool`, `static_root`, or"),
+        "docs/Configuration.md must document the route target exclusivity set"
+    );
 }
 
 #[test]

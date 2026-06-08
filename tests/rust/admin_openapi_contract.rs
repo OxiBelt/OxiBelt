@@ -148,6 +148,41 @@ fn dynamic_policy_and_upstream_mutations_declare_etag_preconditions() {
 }
 
 #[test]
+fn ipm_mutations_declare_etag_preconditions() {
+    let spec = openapi();
+    for (method, path) in [
+        ("post", "/admin/v1/ipm/principals"),
+        ("patch", "/admin/v1/ipm/principals/{id}"),
+        ("delete", "/admin/v1/ipm/principals/{id}"),
+        ("post", "/admin/v1/ipm/credentials"),
+        ("patch", "/admin/v1/ipm/credentials/{id}"),
+        ("delete", "/admin/v1/ipm/credentials/{id}"),
+        ("post", "/admin/v1/ipm/credentials/{id}/rotate"),
+        ("post", "/admin/v1/ipm/credentials/{id}/revoke"),
+        ("post", "/admin/v1/ipm/policies"),
+        ("patch", "/admin/v1/ipm/policies/{id}"),
+        ("delete", "/admin/v1/ipm/policies/{id}"),
+        ("post", "/admin/v1/ipm/bindings"),
+        ("delete", "/admin/v1/ipm/bindings/{id}"),
+    ] {
+        let names = operation_parameter_names(&spec, path, method);
+        assert!(
+            names.contains("If-Match"),
+            "{method} {path} must require If-Match"
+        );
+        let operation = &spec["paths"][path][method];
+        assert!(
+            operation["responses"].get("412").is_some(),
+            "{method} {path} must document stale If-Match"
+        );
+        assert!(
+            operation["responses"].get("428").is_some(),
+            "{method} {path} must document missing If-Match"
+        );
+    }
+}
+
+#[test]
 fn ipm_simulation_documents_non_secret_claim_key_response() {
     let spec = openapi();
     let response_ref = &spec["paths"]["/admin/v1/ipm/simulate"]["post"]["responses"]["200"]["content"]

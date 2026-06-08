@@ -115,6 +115,7 @@ ignored for downstream route IPM requests.
   Gateway, HTTPRoute, TLSRoute, ReferenceGrant, and Service translation.
 - [OxiRule WAF reference](docs/OxiRule.md): rule shape, expression language, actions, object model, helpers, and examples.
 - [OxiRule examples](docs/example/OxiRule.md): cookbook-style request, response, routing, Person proof, and access-log rules.
+- [Doc/source drift audit](docs/DocSourceDriftAudit.md): current HEAD documentation, spec, source, and guard-gap audit findings.
 - [Contributing guide](CONTRIBUTING.md): contributor workflow, security requirements, PR checklist, and commit-message format.
 
 The default example configuration is [source/config/oxibelt.toml](source/config/oxibelt.toml).
