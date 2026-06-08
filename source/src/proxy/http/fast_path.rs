@@ -8,15 +8,12 @@ use std::time::Instant;
 
 use http::header::COOKIE;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
-use http_body_util::BodyExt;
 use hyper::body::Body;
 use tracing::warn;
 
 use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
 use crate::proxy::http::SystemAccessLogContext;
-use crate::proxy::http::body::{
-  self, BodyTimeoutKind, ProxyBody, boxed_error, error_indicates_body_timeout,
-};
+use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, error_indicates_body_timeout};
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
 use crate::proxy::http::response::{
@@ -391,9 +388,7 @@ impl PlainProxyFastPath {
     if let Some(upstream_first_byte_time_ms) = upstream_first_byte_time_ms {
       access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
     }
-    let (mut parts, response_body) = upstream_response
-      .map(|body| body.map_err(boxed_error).boxed())
-      .into_parts();
+    let (mut parts, response_body) = upstream_response.into_parts();
     let (response_body, inlined_known_small_body, trailers_handled) =
       match try_inline_response_body(
         &parts.headers,

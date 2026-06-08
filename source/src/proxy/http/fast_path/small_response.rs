@@ -22,15 +22,19 @@ pub(super) enum SmallResponseDisposition {
   Error(Response<ProxyBody>),
 }
 
-pub(super) async fn try_inline_response_body(
+pub(super) async fn try_inline_response_body<B>(
   headers: &HeaderMap,
-  body: ProxyBody,
+  body: B,
   timeout: Duration,
   trailer_mode: TrailerMode,
   materialize_body: bool,
-) -> SmallResponseDisposition {
+) -> SmallResponseDisposition
+where
+  B: Body<Data = Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+{
   let Some(length) = exact_known_small_content_length(headers, &body) else {
-    return SmallResponseDisposition::Streaming(body);
+    return SmallResponseDisposition::Streaming(box_body(body));
   };
 
   let collected = match collect_exact_small_response_body(body, length, timeout).await {
@@ -80,11 +84,15 @@ enum SmallResponseReadError {
   Body(body::BoxError),
 }
 
-async fn collect_exact_small_response_body(
-  mut body: ProxyBody,
+async fn collect_exact_small_response_body<B>(
+  mut body: B,
   length: usize,
   timeout: Duration,
-) -> Result<CollectedSmallResponse, SmallResponseReadError> {
+) -> Result<CollectedSmallResponse, SmallResponseReadError>
+where
+  B: Body<Data = Bytes> + Unpin,
+  B::Error: Into<body::BoxError>,
+{
   let mut first_chunk = None;
   let mut buffered = BytesMut::new();
   let mut total = 0usize;
@@ -99,7 +107,8 @@ async fn collect_exact_small_response_body(
       Poll::Ready(frame) => frame,
       Poll::Pending => tokio::time::timeout(timeout, body.frame())
         .await
-        .map_err(|_| SmallResponseReadError::Timeout)?,
+        .map_err(|_| SmallResponseReadError::Timeout)?
+        .map(|frame| frame.map_err(Into::into)),
     };
     let Some(frame) = frame else {
       break;
@@ -149,14 +158,26 @@ async fn collect_exact_small_response_body(
   Ok(CollectedSmallResponse { bytes, trailers })
 }
 
-fn poll_response_body_once(
-  body: &mut ProxyBody,
-) -> Poll<Option<Result<hyper::body::Frame<Bytes>, body::BoxError>>> {
+fn poll_response_body_once<B>(
+  body: &mut B,
+) -> Poll<Option<Result<hyper::body::Frame<Bytes>, body::BoxError>>>
+where
+  B: Body<Data = Bytes> + Unpin,
+  B::Error: Into<body::BoxError>,
+{
   let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
-  Pin::new(body).poll_frame(&mut context)
+  match Pin::new(body).poll_frame(&mut context) {
+    Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
+    Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error.into()))),
+    Poll::Ready(None) => Poll::Ready(None),
+    Poll::Pending => Poll::Pending,
+  }
 }
 
-fn exact_known_small_content_length(headers: &HeaderMap, body: &ProxyBody) -> Option<usize> {
+fn exact_known_small_content_length<B>(headers: &HeaderMap, body: &B) -> Option<usize>
+where
+  B: Body,
+{
   let mut values = headers.get_all(CONTENT_LENGTH).iter();
   let value = values.next()?;
   if values.next().is_some() {
@@ -204,6 +225,16 @@ fn inline_body(inlined: &body::InlinedKnownSmallResponseBody) -> ProxyBody {
   }
 
   full_body(inlined.data.clone())
+}
+
+fn box_body<B>(body: B) -> ProxyBody
+where
+  B: Body<Data = Bytes> + Send + Sync + 'static,
+  B::Error: Into<body::BoxError> + 'static,
+{
+  body
+    .map_err(|error| -> body::BoxError { error.into() })
+    .boxed()
 }
 
 fn full_body(bytes: Bytes) -> ProxyBody {
@@ -392,6 +423,35 @@ mod tests {
   #[tokio::test]
   async fn exact_small_content_length_can_skip_materialized_body() {
     let body = full_body(Bytes::from_static(b"ok"));
+
+    let disposition = try_inline_response_body(
+      &headers(&["2"]),
+      body,
+      Duration::from_secs(1),
+      TrailerMode::Drop,
+      false,
+    )
+    .await;
+
+    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+      panic!("expected inline body");
+    };
+    assert_eq!(inlined.data.as_ref(), b"ok");
+    let bytes = body
+      .collect()
+      .await
+      .expect("placeholder body should collect")
+      .to_bytes();
+    assert!(bytes.is_empty());
+  }
+
+  #[tokio::test]
+  async fn exact_small_content_length_collects_unboxed_body_before_boxing() {
+    let body = FramesBody {
+      frames: vec![Frame::data(Bytes::from_static(b"ok"))].into(),
+      length: 2,
+      exact_size_hint: true,
+    };
 
     let disposition = try_inline_response_body(
       &headers(&["2"]),
@@ -610,6 +670,23 @@ mod tests {
       disposition,
       SmallResponseDisposition::Streaming(_)
     ));
+  }
+
+  #[tokio::test]
+  async fn ineligible_unboxed_body_is_boxed_without_polling() {
+    let disposition = try_inline_response_body(
+      &headers(&["2"]),
+      PanicBody { upper: Some(3) },
+      Duration::from_secs(1),
+      TrailerMode::Drop,
+      true,
+    )
+    .await;
+
+    let SmallResponseDisposition::Streaming(body) = disposition else {
+      panic!("expected streaming body");
+    };
+    assert_eq!(body.size_hint().upper(), Some(3));
   }
 
   #[tokio::test]
