@@ -14,7 +14,7 @@ use super::{
   CacheFileKind, CacheFillGuard, CacheInsertOutcome, CachePreparedInsert, PreparedBodyAdmission,
   ResponseCache, StoredBody, StoredEntry, add_size, admit_prepared_body, cache_file_path,
   detach_entry, extract_tags, index_entry, remove_entry, remove_replaced_entry_files, select_store,
-  total_size, variant_count_exceeded,
+  shared_cache_entry_metadata, total_size, variant_count_exceeded,
 };
 
 const STREAMING_FILL_CHANNEL_CAPACITY: usize = 64;
@@ -342,7 +342,7 @@ impl ResponseCache {
       uri: prepared.uri,
       status: prepared.status,
       headers: prepared.stored_headers,
-      body: StoredBody::Disk(body_path),
+      body: StoredBody::Disk(body_path.clone()),
       expires_at: prepared.metadata.expires_at,
       stale_if_error_until: prepared.metadata.stale_if_error_until,
       stale_while_revalidate_until: prepared.metadata.stale_while_revalidate_until,
@@ -352,32 +352,47 @@ impl ResponseCache {
       tags,
       size,
     };
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
-    if variant_count_exceeded(
-      &inner,
-      &prepared.policy,
-      &stored.partition,
-      &stored.base_key,
-      &variant_key,
-    ) {
+    let shared_entry = {
+      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      if variant_count_exceeded(
+        &inner,
+        &prepared.policy,
+        &stored.partition,
+        &stored.base_key,
+        &variant_key,
+      ) {
+        reservation.release_locked(&mut inner);
+        return CacheInsertOutcome::Rejected;
+      }
+      if let Err(error) = self.persist_metadata(&stored) {
+        warn!(error = %error, "failed to persist streaming cache metadata");
+        reservation.release_locked(&mut inner);
+        stored.remove_body_files();
+        return CacheInsertOutcome::StoreFailed;
+      }
+      if let Some(existing) = detach_entry(&mut inner, &variant_key) {
+        remove_replaced_entry_files(existing, &stored);
+      }
       reservation.release_locked(&mut inner);
-      return CacheInsertOutcome::Rejected;
+      add_size(&mut inner, &stored);
+      inner.order.push_back(variant_key.clone());
+      index_entry(&mut inner, &stored);
+      let shared_entry = self
+        .shared_state
+        .as_ref()
+        .filter(|shared| shared.has_cache())
+        .map(|_| shared_cache_entry_metadata(&stored, body_len));
+      inner.entries.insert(variant_key, stored);
+      self.evict_if_needed(&mut inner, &prepared.policy);
+      shared_entry
+    };
+    if let Some(shared) = &self.shared_state
+      && shared.has_cache()
+      && let Some(shared_entry) = shared_entry
+      && let Err(error) = shared.cache_put_file(&shared_entry, &body_path, body_len)
+    {
+      warn!(error = %error, "failed to write streaming cache entry to shared cache");
     }
-    if let Err(error) = self.persist_metadata(&stored) {
-      warn!(error = %error, "failed to persist streaming cache metadata");
-      reservation.release_locked(&mut inner);
-      stored.remove_body_files();
-      return CacheInsertOutcome::StoreFailed;
-    }
-    if let Some(existing) = detach_entry(&mut inner, &variant_key) {
-      remove_replaced_entry_files(existing, &stored);
-    }
-    reservation.release_locked(&mut inner);
-    add_size(&mut inner, &stored);
-    inner.order.push_back(variant_key.clone());
-    index_entry(&mut inner, &stored);
-    inner.entries.insert(variant_key, stored);
-    self.evict_if_needed(&mut inner, &prepared.policy);
     CacheInsertOutcome::Stored
   }
 }

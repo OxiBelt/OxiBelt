@@ -3,6 +3,9 @@
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
 use ring::digest;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -241,6 +244,63 @@ impl SharedState {
     }
   }
 
+  pub fn cache_put_file(
+    &self,
+    entry: &SharedCacheEntry,
+    body_path: &Path,
+    body_len: usize,
+  ) -> anyhow::Result<()> {
+    let Some(backend) = &self.cache else {
+      return Ok(());
+    };
+    let ttl = super::ttl_from_expires_ms(
+      entry
+        .stale_if_error_until_ms
+        .unwrap_or(entry.expires_at_ms)
+        .max(entry.expires_at_ms),
+    );
+    let mut file = File::open(body_path)?;
+    let stem = shared_cache_chunk_stem(&entry.variant_key);
+    let mut chunks = Vec::new();
+    let mut buffer = vec![0_u8; self.cache_chunk_bytes.max(1)];
+    let mut copied = 0_usize;
+    loop {
+      let read = file.read(&mut buffer)?;
+      if read == 0 {
+        break;
+      }
+      copied = copied
+        .checked_add(read)
+        .ok_or_else(|| anyhow::anyhow!("shared cache file body length overflow"))?;
+      let chunk_key = self.key(&format!("cache:chunk:{stem}:{}", chunks.len()));
+      if let Err(error) = backend.put(&chunk_key, &buffer[..read], ttl) {
+        delete_shared_chunks(backend, &chunks);
+        return Err(error);
+      }
+      chunks.push(chunk_key);
+    }
+    if copied != body_len {
+      delete_shared_chunks(backend, &chunks);
+      anyhow::bail!("shared cache file body length mismatch: expected {body_len}, copied {copied}");
+    }
+    let key = self.shared_cache_entry_key(&entry.variant_key);
+    let mut entry = entry.clone();
+    entry.body.clear();
+    entry.body_len = body_len;
+    entry.body_chunks = chunks;
+    match serde_json::to_vec(&entry)
+      .map_err(Into::into)
+      .and_then(|value| backend.put(&key, &value, ttl))
+    {
+      Ok(()) => self.cache_put_index(&entry),
+      Err(error) => {
+        delete_shared_chunks(backend, &entry.body_chunks);
+        return Err(error);
+      }
+    }
+    Ok(())
+  }
+
   fn cache_put_index(&self, entry: &SharedCacheEntry) {
     let Some(backend) = &self.cache else {
       return;
@@ -397,6 +457,12 @@ impl SharedState {
     let mut entry = entry.clone();
     entry.body = body;
     entry.to_cache_entry()
+  }
+}
+
+fn delete_shared_chunks(backend: &Backend, chunks: &[String]) {
+  for chunk_key in chunks {
+    let _ = backend.delete(chunk_key);
   }
 }
 

@@ -273,6 +273,87 @@ fn shared_cache_large_body_uses_retrievable_chunks() {
   );
 }
 
+#[tokio::test]
+async fn shared_cache_streaming_disk_fill_writes_chunked_l2_entry() {
+  let temp_dir = TestTempDir::new();
+  let shared = crate::shared_state::SharedState::test_memory("cache-streaming-l2");
+  let config = streaming_disk_cache_config(&temp_dir);
+  let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let second = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let uri = "/asset/streaming-shared.bin".parse::<Uri>().unwrap();
+  let headers = HeaderMap::new();
+  let body = Bytes::from(vec![b's'; 1_048_577]);
+
+  stream_disk_fill(&first, &uri, &headers, body.clone()).await;
+
+  let chunk_keys = shared.test_cache_raw_keys("cache:chunk:");
+  assert!(
+    chunk_keys.len() >= 2,
+    "streaming disk shared fill should write chunked L2 body"
+  );
+  match second.lookup(CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &headers,
+  }) {
+    Some(CacheLookup::Fresh(entry)) => {
+      assert_eq!(entry.body, body);
+      assert!(entry.body_file.is_none());
+    }
+    other => panic!("expected shared streaming disk L2 hit, got {other:?}"),
+  }
+}
+
+#[tokio::test]
+async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
+  let temp_dir = TestTempDir::new();
+  let shared = crate::shared_state::SharedState::test_memory("cache-streaming-missing-chunk");
+  let config = streaming_disk_cache_config(&temp_dir);
+  let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let second = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let uri = "/asset/streaming-shared-missing.bin"
+    .parse::<Uri>()
+    .unwrap();
+  let headers = HeaderMap::new();
+  let body = Bytes::from(vec![b'm'; 1_048_577]);
+
+  stream_disk_fill(&first, &uri, &headers, body.clone()).await;
+  let chunk_keys = shared.test_cache_raw_keys("cache:chunk:");
+  assert!(!chunk_keys.is_empty(), "expected shared body chunks");
+  shared.test_delete_raw_key(&chunk_keys[0]);
+
+  match first.lookup(CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &headers,
+  }) {
+    Some(CacheLookup::Fresh(entry)) => {
+      assert_eq!(entry.body_len(), body.len());
+      assert!(entry.body_file.is_some());
+    }
+    other => panic!("expected local L1 hit after shared chunk loss, got {other:?}"),
+  }
+  assert!(
+    second
+      .lookup(CacheLookupContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &headers,
+      })
+      .is_none(),
+    "missing shared chunks should produce a safe shared miss"
+  );
+}
+
 #[test]
 fn shared_cache_requires_exact_uri_when_cache_key_collides() {
   let shared = crate::shared_state::SharedState::test_memory("cache-uri-isolation");
@@ -327,4 +408,87 @@ fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     }
     other => panic!("expected exact URI shared cache hit, got {other:?}"),
   }
+}
+
+fn streaming_disk_cache_config(temp_dir: &TestTempDir) -> CacheConfig {
+  CacheConfig {
+    enabled: true,
+    store: CacheStore::Disk,
+    disk_dir: Some(temp_dir.path.clone()),
+    max_size_bytes: 2_500_000,
+    disk_max_size_bytes: Some(2_500_000),
+    default_ttl_seconds: 60,
+    stream_large_objects: true,
+    ..CacheConfig::default()
+  }
+}
+
+async fn stream_disk_fill(
+  cache: &std::sync::Arc<ResponseCache>,
+  uri: &Uri,
+  request_headers: &HeaderMap,
+  body: Bytes,
+) {
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(
+    http::header::CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+  response_headers.insert(
+    http::header::CONTENT_TYPE,
+    HeaderValue::from_static("application/octet-stream"),
+  );
+  response_headers.insert(
+    http::header::CONTENT_LENGTH,
+    HeaderValue::from_str(&body.len().to_string()).unwrap(),
+  );
+  let prepared = match cache.prepare_insert(
+    CacheInsertContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri,
+      request_headers,
+    },
+    StatusCode::OK,
+    &response_headers,
+    Some(body.len()),
+  ) {
+    CachePreparedInsertDecision::Cacheable(prepared) => prepared,
+    other => panic!("expected cacheable streaming insert, got {other:?}"),
+  };
+  let mut insert = match cache.begin_streaming_insert(*prepared, body.len(), None) {
+    CacheStreamingInsertDecision::Started(insert) => insert,
+    other => panic!("expected streaming insert to start, got {other:?}"),
+  };
+  for chunk in body.chunks(262_144) {
+    assert!(insert.write_data(Bytes::copy_from_slice(chunk)));
+  }
+  insert.finish();
+  wait_for_fresh(cache, uri, request_headers).await;
+}
+
+async fn wait_for_fresh(
+  cache: &std::sync::Arc<ResponseCache>,
+  uri: &Uri,
+  request_headers: &HeaderMap,
+) {
+  for _ in 0..100 {
+    if matches!(
+      cache.lookup(CacheLookupContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri,
+        request_headers,
+      }),
+      Some(CacheLookup::Fresh(_))
+    ) {
+      return;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+  panic!("expected fresh local cache entry");
 }

@@ -39,6 +39,7 @@ pub(crate) mod body;
 pub(crate) mod buffering;
 mod cache_status;
 mod cache_streaming;
+mod cache_wait;
 pub(crate) mod compression;
 pub(crate) mod fast_path;
 mod flow_helpers;
@@ -100,7 +101,6 @@ use self::upstream::select_request_upstream;
 use self::uri::validate_downstream_path;
 use self::version::select_upstream_http_version;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
-
 #[derive(Clone, Copy)]
 pub(crate) struct EffectiveTimeouts {
   pub(crate) response_send: Duration,
@@ -166,17 +166,14 @@ impl EffectiveTimeouts {
     )
   }
 }
-
 #[derive(Clone, Copy)]
 pub(crate) struct DownstreamResponseSendTimeout(pub(crate) Duration);
-
 pub(crate) fn downstream_response_send_timeout(response: &Response<ProxyBody>) -> Option<Duration> {
   response
     .extensions()
     .get::<DownstreamResponseSendTimeout>()
     .map(|timeout| timeout.0)
 }
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle(
   request: Request<Incoming>,
@@ -1336,8 +1333,27 @@ where
           }
         }
         crate::cache::CacheFillDecision::SharedConflict => {
-          state.metrics.record_cache_fill_lock_conflict();
-          record_route_cache_event(state, resolved.route, "miss", "shared_lock_conflict");
+          if let Some(response) = cache_wait::wait_for_shared_fill(
+            state,
+            &resolved,
+            &mut outbound,
+            upstream,
+            upstream_version,
+            timeouts,
+            downstream_scheme,
+            host,
+            &request_method,
+            &request_uri,
+            &request_headers,
+            request_version,
+            transport_network,
+            &mut stale_on_error,
+            &mut revalidation_entry,
+          )
+          .await
+          {
+            return response;
+          }
           break;
         }
         crate::cache::CacheFillDecision::Suppressed(reason) => {
@@ -1879,7 +1895,6 @@ pub(super) fn with_downstream_response_timeout(
   let body = body::with_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
   Response::from_parts(parts, body)
 }
-
 fn mark_downstream_response_timeout(
   response: Response<ProxyBody>,
   timeout: Duration,
@@ -1890,7 +1905,6 @@ fn mark_downstream_response_timeout(
     .insert(DownstreamResponseSendTimeout(timeout));
   Response::from_parts(parts, body)
 }
-
 async fn buffer_request_body(
   request: Request<ProxyBody>,
   effective: &buffering::EffectiveBuffering,
@@ -1902,7 +1916,6 @@ async fn buffer_request_body(
   let body = buffering::buffer_body(body, effective.request, effective.temp_dir.as_deref()).await?;
   Ok(Request::from_parts(parts, body))
 }
-
 fn with_connection_permit(
   response: Response<ProxyBody>,
   permit: ConnectionPermit,
@@ -1910,12 +1923,10 @@ fn with_connection_permit(
   let (parts, body) = response.into_parts();
   Response::from_parts(parts, body::with_drop_guard(body, permit))
 }
-
 struct TunnelConnectionLimitHold {
   _request_permit: Option<ConnectionPermit>,
   _first_request_context: Option<ConnectionLimitContext>,
 }
-
 impl TunnelConnectionLimitHold {
   fn capture(
     request_permit: &mut Option<ConnectionPermit>,
@@ -1927,7 +1938,6 @@ impl TunnelConnectionLimitHold {
     }
   }
 }
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_connect_request(
   mut request: Request<ProxyBody>,
@@ -1971,7 +1981,6 @@ async fn handle_connect_request(
   let sticky_cookie = selected.sticky_cookie();
   let pool_report = state.pools.clone();
   let pool_selection = selected.into_pool_selection();
-
   if request_version == http::Version::HTTP_11 || request_version == http::Version::HTTP_10 {
     let downstream_upgrade = hyper::upgrade::on(&mut request);
     let connection_limit_hold =
@@ -2024,7 +2033,6 @@ async fn handle_connect_request(
     }
   }
 }
-
 fn bridge_connect_body(
   mut downstream_body: ProxyBody,
   upstream: TcpStream,
@@ -2033,7 +2041,6 @@ fn bridge_connect_body(
 ) -> ProxyBody {
   let (body_sender, body) = body::channel_body(16);
   let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
-
   let mut downstream_to_upstream = tokio::spawn(async move {
     while let Some(frame) = downstream_body.frame().await {
       let frame = match frame {
@@ -2050,7 +2057,6 @@ fn bridge_connect_body(
     }
     let _ = upstream_writer.shutdown().await;
   });
-
   let mut upstream_to_downstream = tokio::spawn(async move {
     let mut buffer = vec![0u8; 16 * 1024];
     loop {

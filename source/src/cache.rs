@@ -2237,7 +2237,13 @@ fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
     StoredBody::Memory(body) => body.to_vec(),
     StoredBody::Tmpfs(path) | StoredBody::Disk(path) => std::fs::read(path).ok()?,
   };
-  Some(SharedCacheEntry {
+  let mut shared_entry = shared_cache_entry_metadata(entry, body.len());
+  shared_entry.body = body;
+  Some(shared_entry)
+}
+
+fn shared_cache_entry_metadata(entry: &StoredEntry, body_len: usize) -> SharedCacheEntry {
+  SharedCacheEntry {
     policy: entry.policy.clone(),
     partition: entry.partition.clone(),
     base_key: entry.base_key.clone(),
@@ -2251,9 +2257,9 @@ fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
       .iter()
       .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
       .collect(),
-    body_len: body.len(),
+    body_len,
     body_chunks: Vec::new(),
-    body,
+    body: Vec::new(),
     stored_at_ms: system_time_ms(entry.stored_at),
     expires_at_ms: system_time_ms(entry.expires_at),
     stale_if_error_until_ms: entry.stale_if_error_until.map(system_time_ms),
@@ -2268,7 +2274,7 @@ fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
       })
       .collect(),
     tags: entry.tags.clone(),
-  })
+  }
 }
 
 fn system_time_ms(time: SystemTime) -> i64 {
