@@ -1375,6 +1375,17 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should download only slim summary input artifacts and merge their preserved raw artifact directories"
     );
     assert!(
+        summary_job.contains(
+            "NEEDS_DOCKER_PERFORMANCE_RESULT: ${{ needs.docker-performance.result }}"
+        ) && summary_job.contains("no Docker performance summary input artifacts were downloaded because docker-performance was skipped; skipping aggregation and regression gates")
+            && summary_job.contains("no Docker performance summary input artifacts were downloaded after docker-performance result")
+            && summary_job.contains("steps.performance-artifacts.outputs.found == 'true'")
+            && summary_job.contains(
+                "if: always() && steps.performance-artifacts.outputs.found == 'true'"
+            ),
+        "summary job should skip aggregation only when docker-performance was skipped and keep missing inputs failing otherwise"
+    );
+    assert!(
         workflow.contains("actions: read"),
         "summary job should have permission to inspect prior workflow artifacts"
     );

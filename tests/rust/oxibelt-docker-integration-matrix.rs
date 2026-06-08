@@ -4791,12 +4791,12 @@ run_case_checks() {
             r#"
 run_case_checks() {
   local first_path second_path first_file second_file first second first_reason second_reason cached_path rejected_path cached miss
-  first_path="/app/reserve-a?body_repeat=131072&body_repeat_char=A&cache_control=public&content_type=text/plain&body_split_at=1&body_split_delay_ms=1000"
+  first_path="/app/reserve-a?body_repeat=131072&body_repeat_char=A&cache_control=public&content_type=text/plain&body_delay_ms=5000"
   second_path="/app/reserve-b?body_repeat=131072&body_repeat_char=B&cache_control=public&content_type=text/plain"
   first_file="${work_dir}/reserve-first.json"
   second_file="${work_dir}/reserve-second.json"
   client_request "example.test" "${first_path}" 200 >"${first_file}" &
-  sleep 0.1
+  sleep 1
   client_request "example.test" "${second_path}" 200 >"${second_file}" &
   wait
   first="$(cat "${first_file}")"

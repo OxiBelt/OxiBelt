@@ -1726,15 +1726,22 @@ jobs:
 
       - name: Check downloaded Docker performance summary input artifacts
         id: performance-artifacts
+        env:
+          NEEDS_DOCKER_PERFORMANCE_RESULT: ${{ needs.docker-performance.result }}
         run: |
           if find "${RUNNER_TEMP}/oxibelt-performance-artifacts" -type f -print -quit 2>/dev/null | grep -q .; then
             echo "found=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "::warning title=Docker performance summary::no Docker performance summary input artifacts were downloaded; skipping aggregation and regression gates"
+          elif [[ "${NEEDS_DOCKER_PERFORMANCE_RESULT}" == "skipped" ]]; then
+            echo "::warning title=Docker performance summary::no Docker performance summary input artifacts were downloaded because docker-performance was skipped; skipping aggregation and regression gates"
             echo "found=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::error title=Docker performance summary::no Docker performance summary input artifacts were downloaded after docker-performance result '${NEEDS_DOCKER_PERFORMANCE_RESULT}'" >&2
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            exit 1
           fi
 
       - name: Download previous Docker performance comparison
+        if: steps.performance-artifacts.outputs.found == 'true'
         id: download-performance-baseline
         continue-on-error: true
         env:
@@ -1840,6 +1847,7 @@ jobs:
           echo "::warning title=Docker performance delta::no reusable performance comparison baseline was found in same branch, PR base branch, or default branch"
 
       - name: Aggregate Docker performance comparison
+        if: steps.performance-artifacts.outputs.found == 'true'
         env:
           BASELINE_REPORT: ${{ steps.download-performance-baseline.outputs.baseline_report }}
           BASELINE_CONTEXT: ${{ steps.download-performance-baseline.outputs.baseline_context }}
@@ -1870,6 +1878,7 @@ jobs:
           cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate -- "${aggregate_args[@]}"
 
       - name: Append Docker performance comparison summary
+        if: steps.performance-artifacts.outputs.found == 'true'
         run: |
           cat "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.md" >> "${GITHUB_STEP_SUMMARY}"
           if [[ -f "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-delta.md" ]]; then
@@ -1878,7 +1887,7 @@ jobs:
           fi
 
       - name: Upload Docker performance comparison
-        if: always()
+        if: always() && steps.performance-artifacts.outputs.found == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
           name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-comparison
@@ -1887,6 +1896,7 @@ jobs:
           retention-days: 0
 
       - name: Evaluate Docker performance regression gates
+        if: steps.performance-artifacts.outputs.found == 'true'
         run: |
           results_files="$(jq -r '.artifact_discovery.results_files // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           unsupported_count="$(jq -r '.artifact_discovery.unsupported_cpu.count // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
