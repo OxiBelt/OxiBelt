@@ -190,6 +190,14 @@ remain protected by the existing upstream-pool IPM actions and include runtime
 server details such as `health_reason`, `last_health_check_ms`,
 `ejected_until_ms`, `ejection_count`, `slow_start_remaining_ms`, and
 `effective_weight_percent`.
+`GET /admin/v1/stream-pools/status` returns the stream-pool runtime generation
+and ETag required by TCP/UDP stream server mutations. `GET
+/admin/v1/stream-pools` and `GET /admin/v1/stream-pools/{pool}` are protected
+by `stream-pool:List` and `stream-pool:Get`; `POST`, `PATCH`, and `DELETE`
+under `/admin/v1/stream-pools/{pool}/servers...` require the matching
+`stream-pool:AddServer`, `stream-pool:UpdateServer`, or
+`stream-pool:RemoveServer` action on `<pool>/server/<server_id>` plus
+`If-Match` with the current stream-pool ETag.
 
 When `[ipm].backend` resolves to a PostgreSQL shared-state backend, OxiBelt
 loads a strict hybrid IPM snapshot from TOML plus `oxibelt_ipm_*` tables. TOML

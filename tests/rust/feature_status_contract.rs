@@ -70,7 +70,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
         ("acme", "reserved"),
         ("crlite", "experimental"),
         ("downstream-ech", "reserved"),
-        ("stream-proxy-udp", "reserved"),
+        ("stream-proxy-udp", "supported"),
         ("crs-stream-payload", "reserved"),
         ("general-scripting", "reserved"),
         ("legacy-admin-rbac", "removed"),

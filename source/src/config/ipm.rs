@@ -472,6 +472,7 @@ fn validate_ipm_service(field: &str, service: &str) -> anyhow::Result<()> {
       | "config"
       | "cache"
       | "upstream-pool"
+      | "stream-pool"
       | "dynamic-policy"
       | "waf"
       | "lifecycle"
@@ -539,6 +540,14 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "PurgeTag",
     ],
     "upstream-pool" => &[
+      "GetStatus",
+      "List",
+      "Get",
+      "AddServer",
+      "UpdateServer",
+      "RemoveServer",
+    ],
+    "stream-pool" => &[
       "GetStatus",
       "List",
       "Get",

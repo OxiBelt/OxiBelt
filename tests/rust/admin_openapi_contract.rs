@@ -100,6 +100,12 @@ fn dynamic_policy_and_upstream_mutations_declare_etag_preconditions() {
             "delete",
             "/admin/v1/upstream-pools/{pool}/servers/{server_id}",
         ),
+        ("post", "/admin/v1/stream-pools/{pool}/servers"),
+        ("patch", "/admin/v1/stream-pools/{pool}/servers/{server_id}"),
+        (
+            "delete",
+            "/admin/v1/stream-pools/{pool}/servers/{server_id}",
+        ),
     ] {
         let operation = &spec["paths"][path][method];
         assert!(
@@ -498,6 +504,15 @@ fn expected_operations() -> BTreeSet<(String, String)> {
         (
             "delete",
             "/admin/v1/upstream-pools/{pool}/servers/{server_id}",
+        ),
+        ("get", "/admin/v1/stream-pools"),
+        ("get", "/admin/v1/stream-pools/status"),
+        ("get", "/admin/v1/stream-pools/{pool}"),
+        ("post", "/admin/v1/stream-pools/{pool}/servers"),
+        ("patch", "/admin/v1/stream-pools/{pool}/servers/{server_id}"),
+        (
+            "delete",
+            "/admin/v1/stream-pools/{pool}/servers/{server_id}",
         ),
     ]
     .into_iter()

@@ -67,6 +67,9 @@ mod admin_resource;
 #[cfg(test)]
 mod admin_resource_scope_tests;
 mod admin_rulepacks;
+#[cfg(test)]
+mod admin_stream_pool_scope_tests;
+mod admin_stream_pools;
 mod admin_upstream_pools;
 mod connection_errors;
 mod file_sync_path;
@@ -76,6 +79,7 @@ mod reload_tests;
 use admin_auth::{AdminActor, AdminAuthorization, admin_actor, admin_request_context};
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 use admin_operations::AdminOperationRuntime;
+use admin_stream_pools::admin_stream_pools_response;
 use admin_upstream_pools::admin_upstream_pools_response;
 
 pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
@@ -88,6 +92,7 @@ pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "cache_admin",
   "person_proof_admin",
   "upstream_pool_runtime_control",
+  "stream_pool_runtime_control",
   "admin_operations",
   "admin_http3",
   "admin_operation_webtransport",
@@ -863,18 +868,38 @@ async fn admin_response_inner(
     return response.unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
 
-  if let Some(response) = admin_upstream_pools_response(
-    request,
-    state,
-    snapshot.as_ref(),
-    peer_addr,
-    &authorization,
-    &method,
-    &path,
-  )
-  .await
+  if path == "/admin/v1/upstream-pools"
+    || path == "/admin/v1/upstream-pools/status"
+    || path.starts_with("/admin/v1/upstream-pools/")
   {
-    return response;
+    return admin_upstream_pools_response(
+      request,
+      state,
+      snapshot.as_ref(),
+      peer_addr,
+      &authorization,
+      &method,
+      &path,
+    )
+    .await
+    .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
+  }
+
+  if path == "/admin/v1/stream-pools"
+    || path == "/admin/v1/stream-pools/status"
+    || path.starts_with("/admin/v1/stream-pools/")
+  {
+    return admin_stream_pools_response(
+      request,
+      state,
+      snapshot.as_ref(),
+      peer_addr,
+      &authorization,
+      &method,
+      &path,
+    )
+    .await
+    .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
 
   text_response(StatusCode::NOT_FOUND, "not found")
@@ -1261,18 +1286,14 @@ impl ListenerSupervisor {
       .config
       .stream_listeners
       .iter()
-      .map(|listener| (listener.name.clone(), listener.bind))
+      .map(|listener| (listener.clone(), tcp_options))
       .collect::<Vec<_>>();
     let current_streams = self
       .streams
       .iter()
-      .map(|listener| (listener.name.clone(), listener.bind, listener.options))
+      .map(|listener| (listener.config.clone(), listener.options))
       .collect::<Vec<_>>();
-    let desired_streams_with_options = desired_streams
-      .iter()
-      .map(|(name, bind)| (name.clone(), *bind, tcp_options))
-      .collect::<Vec<_>>();
-    let streams = if desired_streams_with_options != current_streams {
+    let streams = if desired_streams != current_streams {
       let mut bound = Vec::with_capacity(snapshot.config.stream_listeners.len());
       for listener in &snapshot.config.stream_listeners {
         bound.push(BoundStreamListener::bind(

@@ -41,6 +41,8 @@ fn service_for_path(path: &str) -> Option<&'static str> {
     Some("lifecycle")
   } else if path.starts_with("/admin/v1/upstream-pools") {
     Some("upstream-pool")
+  } else if path.starts_with("/admin/v1/stream-pools") {
+    Some("stream-pool")
   } else if path.starts_with("/admin/v1/diagnostics/") {
     Some("diagnostics")
   } else if path.starts_with("/admin/v1/runtime/") {
@@ -90,6 +92,11 @@ fn target_for_path(path: &str) -> (Option<String>, Option<String>) {
       Some(format!("{pool}/{server}")),
     ),
     ["upstream-pools", pool] => (Some("upstream-pool".to_string()), Some((*pool).to_string())),
+    ["stream-pools", pool, "servers", server] => (
+      Some("stream-pool-server".to_string()),
+      Some(format!("{pool}/{server}")),
+    ),
+    ["stream-pools", pool] => (Some("stream-pool".to_string()), Some((*pool).to_string())),
     _ => (None, None),
   }
 }
@@ -398,6 +405,19 @@ mod tests {
       Some("upstream-pool-server")
     );
     assert_eq!(descriptor.target_id.as_deref(), Some("app/blue"));
+
+    let descriptor = describe_request(&Method::PATCH, "/admin/v1/stream-pools/edge/servers/quic-a");
+
+    assert_eq!(descriptor.service.as_deref(), Some("stream-pool"));
+    assert_eq!(
+      descriptor.operation,
+      "patch.stream_pools.edge.servers.quic_a"
+    );
+    assert_eq!(
+      descriptor.target_kind.as_deref(),
+      Some("stream-pool-server")
+    );
+    assert_eq!(descriptor.target_id.as_deref(), Some("edge/quic-a"));
   }
 
   fn assert_no_control_text(value: &Value) {

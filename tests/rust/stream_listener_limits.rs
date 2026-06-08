@@ -11,7 +11,7 @@ use oxibelt::config::{Config, RuntimeOverrides};
 use oxibelt::server;
 use oxibelt::state::{AppHandle, AppSnapshot};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -85,6 +85,59 @@ idle_timeout_ms = 5000
     );
 
     drop(first_client);
+    server_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn udp_stream_listener_proxies_datagrams_to_default_target() {
+    let temp_dir = common::TempDir::new("udp-stream-echo");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "udp-stream-echo");
+    let https_port = unused_loopback_port().await;
+    let stream_port = unused_udp_loopback_port().await;
+    let stream_addr: SocketAddr = format!("127.0.0.1:{stream_port}")
+        .parse()
+        .expect("UDP stream listener address should parse");
+
+    let upstream_socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("UDP echo upstream should bind");
+    let upstream_addr = upstream_socket
+        .local_addr()
+        .expect("UDP upstream address should be available");
+    let upstream_task = udp_echo_upstream(upstream_socket);
+
+    let mut raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "https_bind = \"127.0.0.1:8443\"",
+        &format!("https_bind = \"127.0.0.1:{https_port}\""),
+    );
+    raw.push_str(&format!(
+        r#"
+
+[[stream_listeners]]
+name = "udp"
+network = "udp"
+bind = "{stream_addr}"
+target = "{upstream_addr}"
+connect_timeout_ms = 1000
+idle_timeout_ms = 1000
+max_udp_flows = 32
+"#
+    ));
+
+    let config = parse_config(&raw);
+    let snapshot = AppSnapshot::new(config)
+        .await
+        .expect("application snapshot should initialize");
+    let state = AppHandle::new(snapshot);
+    let server_task = tokio::spawn(server::serve(state, None, RuntimeOverrides::default()));
+
+    let client = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("UDP client should bind");
+    let response = udp_exchange_with_retry(&client, stream_addr, b"hello", &server_task).await;
+    assert_eq!(&response, b"hello");
+
     server_task.abort();
     upstream_task.abort();
 }
@@ -197,6 +250,16 @@ async fn unused_loopback_port() -> u16 {
     listener
         .local_addr()
         .expect("ephemeral listener address should be available")
+        .port()
+}
+
+async fn unused_udp_loopback_port() -> u16 {
+    let socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("ephemeral UDP port should bind");
+    socket
+        .local_addr()
+        .expect("ephemeral UDP listener address should be available")
         .port()
 }
 
@@ -372,6 +435,48 @@ fn hold_upstream_connections(
             notify.notify_waiters();
         }
     })
+}
+
+fn udp_echo_upstream(socket: UdpSocket) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut buffer = [0u8; 2048];
+        while let Ok((read, peer_addr)) = socket.recv_from(&mut buffer).await {
+            socket
+                .send_to(&buffer[..read], peer_addr)
+                .await
+                .expect("UDP echo response should send");
+        }
+    })
+}
+
+async fn udp_exchange_with_retry(
+    socket: &UdpSocket,
+    target: SocketAddr,
+    payload: &[u8],
+    server_task: &JoinHandle<anyhow::Result<()>>,
+) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut buffer = [0u8; 2048];
+    loop {
+        assert!(
+            !server_task.is_finished(),
+            "server exited before UDP stream listener responded"
+        );
+        socket
+            .send_to(payload, target)
+            .await
+            .expect("UDP client datagram should send");
+        match tokio::time::timeout(Duration::from_millis(100), socket.recv_from(&mut buffer)).await
+        {
+            Ok(Ok((read, _peer))) => return buffer[..read].to_vec(),
+            Ok(Err(error)) if Instant::now() < deadline => {
+                let _ = error;
+            }
+            Err(_) if Instant::now() < deadline => {}
+            Ok(Err(error)) => panic!("UDP stream listener receive failed: {error}"),
+            Err(_) => panic!("UDP stream listener did not respond before timeout"),
+        }
+    }
 }
 
 async fn connect_with_retry(

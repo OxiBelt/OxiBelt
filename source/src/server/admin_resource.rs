@@ -41,6 +41,14 @@ pub(super) fn upstream_pool_status() -> &'static str {
   "status/current"
 }
 
+pub(super) fn stream_pool_server(pool: &str, server_id: &str) -> String {
+  format!("{}/server/{}", component(pool), component(server_id))
+}
+
+pub(super) fn stream_pool_status() -> &'static str {
+  "status/current"
+}
+
 pub(super) fn ipm_status() -> &'static str {
   "status/current"
 }
@@ -134,6 +142,10 @@ mod tests {
       upstream_pool_server("app-pool", "primary/blue"),
       "app-pool/server/primary%2Fblue"
     );
+    assert_eq!(
+      stream_pool_server("edge-stream", "udp/blue"),
+      "edge-stream/server/udp%2Fblue"
+    );
     assert_eq!(person_proof_status(), "person-proof/status");
     assert_eq!(
       person_proof_clearance("abc/123"),
@@ -161,6 +173,11 @@ mod tests {
         "oxibelt",
         "upstream-pool",
         &upstream_pool_server("app-pool", "primary/blue"),
+      ),
+      resource(
+        "oxibelt",
+        "stream-pool",
+        &stream_pool_server("edge-stream", "udp/blue"),
       ),
       resource("oxibelt", "waf", person_proof_status()),
       resource(
@@ -207,6 +224,12 @@ mod tests {
       &actor,
       "upstream-pool:UpdateServer",
       &upstream_pool_server("app-pool", "primary/blue"),
+    );
+    assert_allowed(
+      &runtime,
+      &actor,
+      "stream-pool:UpdateServer",
+      &stream_pool_server("edge-stream", "udp/blue"),
     );
     assert_allowed(
       &runtime,
@@ -320,6 +343,7 @@ mod tests {
             "cache:*".to_string(),
             "dynamic-policy:*".to_string(),
             "upstream-pool:*".to_string(),
+            "stream-pool:*".to_string(),
             "waf:*".to_string(),
             "ipm:*".to_string(),
           ],

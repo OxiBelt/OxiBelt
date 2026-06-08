@@ -125,6 +125,12 @@ impl ReloadManager {
     } else {
       active.upstream_pool_generation.saturating_add(1)
     };
+    let stream_pool_generation =
+      if config.stream_upstream_pools == active.config.stream_upstream_pools {
+        active.stream_pool_generation
+      } else {
+        active.stream_pool_generation.saturating_add(1)
+      };
     let snapshot = AppSnapshot {
       route_table,
       sni_forward: active.sni_forward.clone(),
@@ -138,8 +144,10 @@ impl ReloadManager {
       h3_clients: active.h3_clients.clone(),
       outbound_revocation: active.outbound_revocation.clone(),
       upstream_pool_generation,
+      stream_pool_generation,
       limits: active.limits.clone(),
       pools: active.pools.clone(),
+      stream_pools: active.stream_pools.clone(),
       turn_pools: active.turn_pools.clone(),
       cache: active.cache.clone(),
       compression: active.compression.clone(),
@@ -264,6 +272,12 @@ impl ReloadManager {
     } else {
       active.upstream_pool_generation.saturating_add(1)
     };
+    let stream_pool_generation =
+      if config.stream_upstream_pools == active.config.stream_upstream_pools {
+        active.stream_pool_generation
+      } else {
+        active.stream_pool_generation.saturating_add(1)
+      };
     let snapshot = AppSnapshot {
       route_table: active.route_table.clone(),
       sni_forward: active.sni_forward.clone(),
@@ -277,8 +291,10 @@ impl ReloadManager {
       h3_clients: active.h3_clients.clone(),
       outbound_revocation: active.outbound_revocation.clone(),
       upstream_pool_generation,
+      stream_pool_generation,
       limits: active.limits.clone(),
       pools: active.pools.clone(),
+      stream_pools: active.stream_pools.clone(),
       turn_pools: active.turn_pools.clone(),
       cache: active.cache.clone(),
       compression: active.compression.clone(),

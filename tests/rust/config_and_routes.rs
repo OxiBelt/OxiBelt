@@ -16,7 +16,7 @@ use oxibelt::config::{
     MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode,
     ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
     RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
-    TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    StreamNetwork, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
     UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
     UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
@@ -5866,6 +5866,186 @@ target = "db.internal.example"
         error
             .to_string()
             .contains("target must be in host:port form"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn stream_pools_udp_and_sni_rules_validate() {
+    let temp_dir = common::TempDir::new("stream-pool-valid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "stream-pool-valid");
+    let raw = format!(
+        r#"
+{}
+
+[[stream_upstream_pools]]
+name = "tcp-pool"
+algorithm = "rendezvous_hash"
+
+[[stream_upstream_pools.servers]]
+id = "tcp-primary"
+origin = "tcp://tcp.internal.example:9443"
+weight = 2
+
+[[stream_upstream_pools]]
+name = "udp-pool"
+algorithm = "rendezvous_ip_hash"
+
+[[stream_upstream_pools.servers]]
+id = "udp-primary"
+origin = "udp://udp.internal.example:443"
+
+[[stream_listeners]]
+name = "tls-stream"
+bind = "127.0.0.1:15443"
+upstream_pool = "tcp-pool"
+
+[[stream_listeners.sni_rules]]
+name = "tenant-a"
+server_names = ["tenant-a.example.com", "*.tenant-a.example.com"]
+target = "tenant-a.internal.example:9443"
+
+[[stream_listeners]]
+name = "quic-stream"
+network = "udp"
+bind = "127.0.0.1:15444"
+upstream_pool = "udp-pool"
+max_udp_flows = 256
+udp_datagram_rate = "100r/s"
+udp_datagram_burst = 20
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("stream pools should validate");
+    assert_eq!(config.stream_upstream_pools.len(), 2);
+    assert_eq!(config.stream_listeners[1].network, StreamNetwork::Udp);
+    assert_eq!(
+        config.stream_listeners[0].sni_rules[0]
+            .upstream_pool
+            .as_deref(),
+        None
+    );
+}
+
+#[test]
+fn stream_pool_rejects_invalid_origin_scheme() {
+    let temp_dir = common::TempDir::new("stream-pool-invalid-scheme");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "stream-pool-invalid-scheme");
+    let raw = format!(
+        r#"
+{}
+
+[[stream_upstream_pools]]
+name = "bad-pool"
+
+[[stream_upstream_pools.servers]]
+origin = "http://app.internal.example:80"
+
+[[stream_listeners]]
+name = "stream"
+bind = "127.0.0.1:15443"
+upstream_pool = "bad-pool"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid stream pool origin should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("origin must use tcp:// or udp://"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn stream_listener_allows_sni_only_fail_closed_default() {
+    let temp_dir = common::TempDir::new("stream-sni-only");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "stream-sni-only");
+    let raw = format!(
+        r#"
+{}
+
+[[stream_listeners]]
+name = "sni-only"
+bind = "127.0.0.1:15443"
+
+[[stream_listeners.sni_rules]]
+name = "tenant"
+server_names = ["tenant.example.com"]
+target = "tenant.internal.example:9443"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("SNI-only listener without a default should validate");
+}
+
+#[test]
+fn stream_listener_without_default_or_sni_rule_is_rejected() {
+    let temp_dir = common::TempDir::new("stream-missing-default");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "stream-missing-default");
+    let raw = format!(
+        r#"
+{}
+
+[[stream_listeners]]
+name = "empty"
+bind = "127.0.0.1:15443"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("listener without any route target should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("stream listener empty must set target or upstream_pool"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn udp_stream_listener_rejects_proxy_protocol_egress() {
+    let temp_dir = common::TempDir::new("stream-udp-proxy-protocol");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "stream-udp-proxy-protocol");
+    let raw = format!(
+        r#"
+{}
+
+[[stream_listeners]]
+name = "udp"
+network = "udp"
+bind = "127.0.0.1:15443"
+target = "udp.internal.example:443"
+proxy_protocol_egress = "v1"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("UDP stream listener PROXY egress should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot enable proxy_protocol_egress for UDP"),
         "unexpected error: {error}"
     );
 }

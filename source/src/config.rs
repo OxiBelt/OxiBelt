@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, anyhow, bail};
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::waf::{AccessLogFieldConfig, WafConfig};
@@ -105,6 +105,7 @@ pub struct Config {
   pub upstreams: Vec<UpstreamConfig>,
   pub upstream_pools: Vec<UpstreamPoolConfig>,
   pub turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
+  pub stream_upstream_pools: Vec<StreamUpstreamPoolConfig>,
   pub sni_forward: SniForwardConfig,
   pub stream_listeners: Vec<StreamListenerConfig>,
   pub webrtc_turn_listeners: Vec<WebRtcTurnListenerConfig>,
@@ -166,6 +167,8 @@ struct RawConfig {
   #[serde(default)]
   turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
   #[serde(default)]
+  stream_upstream_pools: Vec<StreamUpstreamPoolConfig>,
+  #[serde(default)]
   sni_forward: SniForwardConfig,
   #[serde(default)]
   stream_listeners: Vec<StreamListenerConfig>,
@@ -216,6 +219,7 @@ impl TryFrom<RawConfig> for Config {
       upstreams: raw.upstreams,
       upstream_pools: raw.upstream_pools,
       turn_upstream_pools: raw.turn_upstream_pools,
+      stream_upstream_pools: raw.stream_upstream_pools,
       sni_forward: raw.sni_forward,
       stream_listeners: raw.stream_listeners,
       webrtc_turn_listeners,
@@ -439,6 +443,7 @@ impl Config {
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools
       && self.turn_upstream_pools == other.turn_upstream_pools
+      && self.stream_upstream_pools == other.stream_upstream_pools
       && self.sni_forward == other.sni_forward
       && self.stream_listeners == other.stream_listeners
       && self.webrtc_turn_listeners == other.webrtc_turn_listeners
@@ -1054,6 +1059,7 @@ impl Config {
     route::validate_route_match_conflicts(&self.routes)?;
 
     self.validate_dynamic_policy(&route_names)?;
+    self.validate_stream_upstream_pools()?;
     self.validate_stream_listeners()?;
     self.validate_webrtc_turn_listeners(&turn_pool_names)?;
 
@@ -3092,10 +3098,29 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "bind",
       "connect_timeout_ms",
       "idle_timeout_ms",
+      "max_udp_flows",
+      "name",
+      "network",
+      "proxy_protocol_egress",
+      "sni_rules",
+      "target",
+      "udp_datagram_burst",
+      "udp_datagram_rate",
+      "upstream_pool",
+    ][..],
+    "stream_listeners.sni_rules" => &[
+      "connect_timeout_ms",
+      "idle_timeout_ms",
       "name",
       "proxy_protocol_egress",
+      "server_names",
       "target",
+      "upstream_pool",
     ][..],
+    "stream_upstream_pools" => &["algorithm", "hash_key", "name", "servers"][..],
+    "stream_upstream_pools.servers" => {
+      &["backup", "id", "max_conns", "origin", "state", "weight"][..]
+    }
     "turn_upstream_pools" => &["algorithm", "hash_key", "health_check", "name", "servers"][..],
     "turn_upstream_pools.health_check" => &[
       "enabled",
@@ -3224,6 +3249,18 @@ fn redact_effective_toml(value: &mut toml::Value) {
   }
   if let Some(pools) = value
     .get_mut("upstream_pools")
+    .and_then(toml::Value::as_array_mut)
+  {
+    for pool in pools {
+      if let Some(servers) = pool.get_mut("servers").and_then(toml::Value::as_array_mut) {
+        for server in servers {
+          redact_toml_url_sensitive_parts(server, &["origin"]);
+        }
+      }
+    }
+  }
+  if let Some(pools) = value
+    .get_mut("stream_upstream_pools")
     .and_then(toml::Value::as_array_mut)
   {
     for pool in pools {
@@ -5136,7 +5173,7 @@ impl DiscoveryUpstreamScheme {
   }
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadBalancingAlgorithm {
   #[default]
@@ -5186,7 +5223,7 @@ pub struct UpstreamPoolServerConfig {
   pub source: UpstreamPoolServerSource,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamPoolServerState {
   #[default]

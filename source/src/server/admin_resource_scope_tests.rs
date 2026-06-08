@@ -654,7 +654,7 @@ policy = "scoped"
   config
 }
 
-fn parse_scoped_config(
+pub(super) fn parse_scoped_config(
   cert_path: &Path,
   key_path: &Path,
   admin_bind: SocketAddr,

@@ -1643,6 +1643,17 @@ Admin upstream-pool endpoints:
 `GET /admin/v1/upstream-pools/status` returns `{ "generation": n, "etag": "\"oxibelt-upstream-pools-n\"" }` and checks `upstream-pool:GetStatus` on `status/current`. Runtime server mutation accepts JSON fields `id`, `origin`, `state`, `weight`, `backup`, and `max_conns` where applicable. Pool list checks `upstream-pool:List` on `*`, pool get checks `upstream-pool:Get` on `<pool>`, and add, update, or remove server checks the matching action on `<pool>/server/<server_id>`. Server mutations require `If-Match` with the current upstream-pool status ETag; missing ETags return `428`, stale ETags return `412`. `DELETE` is limited to servers created by the admin API. Every admin mutation emits a structured audit log with actor, peer, operation, target, outcome, and validation error when rejected.
 `oxibeltctl pool` mutating commands fetch the current upstream-pool ETag automatically when `--etag` is omitted.
 
+Admin stream-pool endpoints:
+
+- `GET /admin/v1/stream-pools/status`
+- `GET /admin/v1/stream-pools`
+- `GET /admin/v1/stream-pools/{pool}`
+- `POST /admin/v1/stream-pools/{pool}/servers`
+- `PATCH /admin/v1/stream-pools/{pool}/servers/{server_id}`
+- `DELETE /admin/v1/stream-pools/{pool}/servers/{server_id}`
+
+`GET /admin/v1/stream-pools/status` returns `{ "generation": n, "etag": "\"oxibelt-stream-pools-n\"" }` and checks `stream-pool:GetStatus` on `status/current`. Runtime server mutation accepts JSON fields `id`, `origin`, `state`, `weight`, `backup`, and `max_conns`; `origin` must use `tcp://host:port` or `udp://host:port`. Pool list checks `stream-pool:List` on `*`, pool get checks `stream-pool:Get` on `<pool>`, and add, update, or remove server checks the matching action on `<pool>/server/<server_id>`. Server mutations require `If-Match` with the current stream-pool status ETag; missing ETags return `428`, stale ETags return `412`. Every stream-pool mutation emits the same structured Admin audit fields as upstream-pool mutations.
+
 Dynamic policy automation endpoints:
 
 - `GET /admin/v1/dynamic-policies/status`
@@ -2326,11 +2337,12 @@ TLS client-certificate route matchers can check `present`, `fingerprint_sha256`,
 
 Static routes are one supported deployment path for custom Person proof challenge pages. Place frontend files under a configured `static_root` and use the origin-relative asset URL as the WAF action's `custom_frontend_url`. `custom_frontend_url` may also point to a separate frontend backend proxied by the same OxiBelt instance.
 
-## TCP Stream Listeners
+## TCP/UDP Stream Listeners
 
 ```toml
 [[stream_listeners]]
 name = "postgres"
+network = "tcp" # tcp | udp, defaults to tcp for backward compatibility
 bind = "0.0.0.0:15432"
 target = "db.internal.example:5432"
 connect_timeout_ms = 3000
@@ -2338,7 +2350,55 @@ idle_timeout_ms = 75000
 proxy_protocol_egress = "off" # off | v1 | v2
 ```
 
-Stream listeners proxy raw TCP from a dedicated bind address to a single `host:port` target. They do not perform HTTP routing, TLS termination, HTTP rate limiting, or WAF inspection, but their downstream connections are counted by the global connection limits. Use `[sni_forward]` when TLS or QUIC traffic on `listeners.https_bind` must be selected by visible SNI before local HTTP termination.
+Stream listeners proxy raw L4 traffic from a dedicated bind address. Existing TCP configs that set only `target = "host:port"` continue to work. New listeners can set `network = "tcp"` or `network = "udp"`, choose either a direct `target` or a named `upstream_pool`, and add `[[stream_listeners.sni_rules]]` for visible TCP TLS ClientHello SNI or UDP QUIC Initial SNI. Stream listeners do not terminate TLS, perform HTTP routing, inspect WAF payloads, or add UDP PROXY protocol egress. TCP stream connections and pinned UDP flows are counted by the global connection limits.
+
+```toml
+[[stream_upstream_pools]]
+name = "edge-tls"
+algorithm = "power_of_two_choices" # power_of_two_choices | weighted_least_conn | rendezvous_hash | rendezvous_ip_hash
+
+[[stream_upstream_pools.servers]]
+id = "edge-a"
+origin = "tcp://edge-a.internal.example:9443"
+weight = 2
+
+[[stream_upstream_pools.servers]]
+id = "edge-b"
+origin = "tcp://edge-b.internal.example:9443"
+
+[[stream_upstream_pools]]
+name = "edge-quic"
+algorithm = "rendezvous_ip_hash"
+
+[[stream_upstream_pools.servers]]
+id = "quic-a"
+origin = "udp://quic-a.internal.example:443"
+
+[[stream_listeners]]
+name = "tls-passthrough"
+network = "tcp"
+bind = "0.0.0.0:10443"
+upstream_pool = "edge-tls"
+idle_timeout_ms = 120000
+
+[[stream_listeners.sni_rules]]
+name = "tenant-a"
+server_names = ["tenant-a.example.com", "*.tenant-a.example.com"]
+target = "tenant-a.internal.example:9443"
+
+[[stream_listeners]]
+name = "quic-passthrough"
+network = "udp"
+bind = "0.0.0.0:10443"
+upstream_pool = "edge-quic"
+max_udp_flows = 4096
+udp_datagram_rate = "200r/s"
+udp_datagram_burst = 400
+```
+
+Each `[[stream_upstream_pools.servers]]` origin must use `tcp://host:port` or `udp://host:port`. A stream listener or SNI rule must set exactly one of `target` or `upstream_pool`; a listener may omit its default only when it has SNI rules, in which case no-SNI or unparseable flows fail closed. UDP listeners reject `proxy_protocol_egress`, pin each downstream client flow to one selected upstream until idle expiry or capacity eviction, and use `max_udp_flows` to cap process-local flow state. `udp_datagram_rate` and `udp_datagram_burst` apply per pinned downstream UDP flow.
+
+Stream SNI routing is passthrough classification only. OxiBelt peeks bounded TCP TLS ClientHello bytes or QUIC Initial CRYPTO frames when rules are configured, selects the first matching exact or wildcard server name rule, and forwards the untouched stream/datagrams to the chosen target. Flows without visible TLS or QUIC SNI use the listener default if present. Use `[sni_forward]` instead when TLS or QUIC traffic on `listeners.https_bind` must be selected by visible SNI before local HTTP termination.
 
 ## WebRTC TURN Listeners
 
@@ -2444,6 +2504,7 @@ Configuration validation rejects:
 - Invalid hot reload mode, zero worker counts, non-positive worker multipliers, zero `poll_interval_ms`, zero accept backlog/backoff values, accept worker counts greater than one without `runtime.accept.reuse_port = true`, or HTTP/3 QUIC socket worker counts greater than one without `quic.socket.reuse_port = true`.
 - Missing all `[[routes]]`, `[sni_forward]` rule/default targets, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
 - Invalid SNI forwarding targets, duplicate SNI forwarding rule names or server-name patterns, unsupported wildcard placement, zero SNI forwarding timeouts, or QUIC SNI forwarding without downstream HTTP/3.
+- Invalid stream upstream-pool origins, unsupported stream pool algorithms, duplicate stream SNI rule names or server-name patterns, stream listener/SNI rule target conflicts, missing stream listener defaults without SNI rules, UDP stream listeners with PROXY protocol egress, or stream listeners that reference a pool without matching `tcp://` or `udp://` servers.
 - Routes that set zero or more than one of `upstream`, `upstream_pool`, or `static_root`.
 - Unsafe route paths.
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.

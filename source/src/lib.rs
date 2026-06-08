@@ -50,6 +50,7 @@ pub mod shared_state;
 pub(crate) mod sni_forward;
 pub mod state;
 pub mod stream;
+pub(crate) mod stream_control;
 mod tcp_hop;
 mod tcp_socket;
 pub mod telemetry;

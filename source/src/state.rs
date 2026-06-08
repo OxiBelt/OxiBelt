@@ -35,6 +35,7 @@ use crate::routes::RouteTable;
 use crate::runtime_introspection::RuntimeIntrospectionState;
 use crate::shared_state::SharedState;
 use crate::sni_forward::SniForwardTable;
+use crate::stream::pools::StreamPoolState;
 use crate::telemetry::TelemetryRuntime;
 use crate::tls;
 use crate::turn::TurnPoolState;
@@ -44,6 +45,7 @@ use crate::webtransport_admin::WebTransportAdminRegistry;
 pub(crate) mod handle;
 mod http1_upgrade;
 mod request_path_features;
+mod stream_pool_update;
 mod upstream_clients;
 
 pub use handle::AppHandle;
@@ -143,8 +145,10 @@ pub struct AppSnapshot {
   pub(crate) h3_clients: UpstreamH3Pools,
   pub(crate) outbound_revocation: tls::OutboundRevocationRuntime,
   pub upstream_pool_generation: u64,
+  pub stream_pool_generation: u64,
   pub limits: Arc<LimitState>,
   pub pools: Arc<PoolState>,
+  pub stream_pools: Arc<StreamPoolState>,
   pub turn_pools: Arc<TurnPoolState>,
   pub cache: Arc<ResponseCache>,
   pub(crate) compression: Arc<CompressionState>,
@@ -256,6 +260,7 @@ impl AppSnapshot {
       Some(metrics.clone()),
     );
     publish_upstream_pool_server_metrics(&pools);
+    let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let cache = ResponseCache::new(&config.cache, shared_state.clone())
       .context("failed to build response cache")?;
@@ -377,6 +382,7 @@ impl AppSnapshot {
       .context("failed to build precomputed Alt-Svc header value")?;
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
     let upstream_pool_generation = next_upstream_pool_generation(&config, previous);
+    let stream_pool_generation = next_stream_pool_generation(&config, previous);
 
     Ok(Self {
       config,
@@ -391,8 +397,10 @@ impl AppSnapshot {
       h3_clients,
       outbound_revocation,
       upstream_pool_generation,
+      stream_pool_generation,
       limits,
       pools,
+      stream_pools,
       turn_pools,
       cache,
       compression,
@@ -473,6 +481,7 @@ impl AppSnapshot {
       Some(metrics.clone()),
     );
     publish_upstream_pool_server_metrics(&pools);
+    let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let alt_svc_header_value = build_alt_svc_header_value(&config)
       .context("failed to build precomputed Alt-Svc header value")?;
@@ -487,6 +496,7 @@ impl AppSnapshot {
       .await
       .context("failed to build IPM runtime")?;
     let upstream_pool_generation = next_upstream_pool_generation(&config, Some(previous));
+    let stream_pool_generation = next_stream_pool_generation(&config, Some(previous));
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
     let request_path_features = RequestPathFeaturePlan::new(
       &config,
@@ -510,8 +520,10 @@ impl AppSnapshot {
       h3_clients,
       outbound_revocation: previous.outbound_revocation.clone(),
       upstream_pool_generation,
+      stream_pool_generation,
       limits: previous.limits.clone(),
       pools,
+      stream_pools,
       turn_pools,
       cache: previous.cache.clone(),
       compression: previous.compression.clone(),
@@ -553,6 +565,17 @@ fn next_upstream_pool_generation(config: &Config, previous: Option<&AppSnapshot>
     previous.upstream_pool_generation
   } else {
     previous.upstream_pool_generation.saturating_add(1)
+  }
+}
+
+fn next_stream_pool_generation(config: &Config, previous: Option<&AppSnapshot>) -> u64 {
+  let Some(previous) = previous else {
+    return 0;
+  };
+  if config.stream_upstream_pools == previous.config.stream_upstream_pools {
+    previous.stream_pool_generation
+  } else {
+    previous.stream_pool_generation.saturating_add(1)
   }
 }
 

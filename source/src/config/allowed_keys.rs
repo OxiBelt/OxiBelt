@@ -25,6 +25,7 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "security",
   "shared_state",
   "sni_forward",
+  "stream_upstream_pools",
   "stream_listeners",
   "telemetry",
   "tls",

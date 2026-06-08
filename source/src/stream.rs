@@ -6,23 +6,33 @@ use std::time::Duration;
 
 use anyhow::Context;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config::{StreamListenerConfig, parse_stream_target};
+use crate::config::{StreamListenerConfig, StreamNetwork};
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::ConnectionPermit;
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::proxy_protocol_egress;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
+use crate::sni_forward::client_hello::{ClientHelloSni, tls_record_client_hello_sni};
 use crate::state::AppHandle;
+use crate::stream::sni::select_stream_route;
+use crate::stream::target::resolve_stream_route_target;
+
+pub(crate) mod pools;
+mod sni;
+mod target;
+mod udp;
+
+const STREAM_TLS_CLIENT_HELLO_MAX_BYTES: usize = 64 * 1024;
+const STREAM_INCOMPLETE_CLIENT_HELLO_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 pub(crate) struct StreamListenerTask {
-  pub(crate) name: String,
-  pub(crate) bind: SocketAddr,
   pub(crate) options: TcpListenOptions,
+  pub(crate) config: StreamListenerConfig,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
   graceful_timeout: Duration,
@@ -33,7 +43,12 @@ pub(crate) struct BoundStreamListener {
   pub(crate) config: StreamListenerConfig,
   options: TcpListenOptions,
   accept_error_backoff: Duration,
-  listeners: Vec<TcpListener>,
+  transport: BoundStreamTransport,
+}
+
+enum BoundStreamTransport {
+  Tcp(Vec<TcpListener>),
+  Udp(std::net::UdpSocket),
 }
 
 impl StreamListenerTask {
@@ -71,17 +86,30 @@ impl BoundStreamListener {
     options: TcpListenOptions,
     accept_error_backoff: Duration,
   ) -> anyhow::Result<Self> {
-    let listeners = bind_tcp_listeners(config.bind, options, "stream").with_context(|| {
-      format!(
-        "failed to bind stream listener {} to {}",
-        config.name, config.bind
-      )
-    })?;
+    let transport = match config.network {
+      StreamNetwork::Tcp => {
+        let listeners = bind_tcp_listeners(config.bind, options, "stream").with_context(|| {
+          format!(
+            "failed to bind stream listener {} to {}",
+            config.name, config.bind
+          )
+        })?;
+        BoundStreamTransport::Tcp(listeners)
+      }
+      StreamNetwork::Udp => {
+        BoundStreamTransport::Udp(udp::bind_udp_socket(config.bind).with_context(|| {
+          format!(
+            "failed to bind UDP stream listener {} to {}",
+            config.name, config.bind
+          )
+        })?)
+      }
+    };
     Ok(Self {
       config,
       options,
       accept_error_backoff,
-      listeners,
+      transport,
     })
   }
 
@@ -92,10 +120,9 @@ impl BoundStreamListener {
   ) -> StreamListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let name = self.config.name.clone();
-    let bind = self.config.bind;
     let options = self.options;
     let config = self.config;
-    let listeners = self.listeners;
+    let transport = self.transport;
     let task_name = name.clone();
     let accept_error_backoff = self.accept_error_backoff;
     let snapshot = state.snapshot();
@@ -104,39 +131,69 @@ impl BoundStreamListener {
       Duration::from_millis(snapshot.config.runtime.drain.long_connection_close_delay_ms);
     drop(snapshot);
     let connections = TaskRegistry::default();
-    let tasks = listeners
-      .into_iter()
-      .enumerate()
-      .map(|(worker_index, listener)| {
+    let tasks = match transport {
+      BoundStreamTransport::Tcp(listeners) => listeners
+        .into_iter()
+        .enumerate()
+        .map(|(worker_index, listener)| {
+          let worker_shutdown = shutdown_rx.clone();
+          let worker_config = config.clone();
+          let worker_state = state.clone();
+          let worker_error_tx = error_tx.clone();
+          let worker_task_name = task_name.clone();
+          let worker_connections = connections.clone();
+          tokio::spawn(async move {
+            if let Err(error) = serve_stream_listener(
+              listener,
+              worker_config,
+              worker_state,
+              worker_shutdown,
+              worker_index,
+              accept_error_backoff,
+              worker_connections,
+              long_connection_close_delay,
+            )
+            .await
+            {
+              let _ = worker_error_tx
+                .send(error.context(format!("stream listener {worker_task_name} failed")));
+            }
+          })
+        })
+        .collect(),
+      BoundStreamTransport::Udp(socket) => {
         let worker_shutdown = shutdown_rx.clone();
         let worker_config = config.clone();
         let worker_state = state.clone();
         let worker_error_tx = error_tx.clone();
         let worker_task_name = task_name.clone();
         let worker_connections = connections.clone();
-        tokio::spawn(async move {
-          if let Err(error) = serve_stream_listener(
-            listener,
-            worker_config,
-            worker_state,
-            worker_shutdown,
-            worker_index,
-            accept_error_backoff,
-            worker_connections,
-            long_connection_close_delay,
-          )
-          .await
-          {
+        vec![tokio::spawn(async move {
+          let socket =
+            UdpSocket::from_std(socket).context("failed to register UDP stream listener socket");
+          let result = match socket {
+            Ok(socket) => {
+              udp::serve_udp_listener(
+                socket,
+                worker_config,
+                worker_state,
+                worker_shutdown,
+                worker_connections,
+              )
+              .await
+            }
+            Err(error) => Err(error),
+          };
+          if let Err(error) = result {
             let _ = worker_error_tx
-              .send(error.context(format!("stream listener {worker_task_name} failed")));
+              .send(error.context(format!("UDP stream listener {worker_task_name} failed")));
           }
-        })
-      })
-      .collect();
+        })]
+      }
+    };
     StreamListenerTask {
-      name,
-      bind,
       options,
+      config,
       shutdown,
       connections,
       graceful_timeout,
@@ -159,7 +216,13 @@ async fn serve_stream_listener(
   let bind = listener
     .local_addr()
     .context("failed to read stream listener address")?;
-  info!(name = %config.name, bind = %bind, target = %config.target, worker = worker_index, "stream listener started");
+  info!(
+    name = %config.name,
+    bind = %bind,
+    network = ?config.network,
+    worker = worker_index,
+    "stream listener started"
+  );
 
   loop {
     tokio::select! {
@@ -197,12 +260,14 @@ async fn serve_stream_listener(
         let introspection_guard = snapshot
           .runtime_introspection
           .guard(RuntimeCounter::StreamListenerConnection);
+        let task_state = state.clone();
         connections.spawn(async move {
           let _introspection_guard = introspection_guard;
           let result = proxy_stream_connection(
             downstream,
             peer_addr,
             connection_config,
+            task_state,
             permit,
             connection_drain,
           ).await;
@@ -219,35 +284,75 @@ async fn proxy_stream_connection(
   downstream: TcpStream,
   peer_addr: SocketAddr,
   config: StreamListenerConfig,
+  state: AppHandle,
   _permit: ConnectionPermit,
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
-  let (host, port) = parse_stream_target(&config.target)?;
-  let remote_addr = resolve_target_addr(&host, port).await?;
-  let mut upstream = tokio::time::timeout(
-    Duration::from_millis(config.connect_timeout_ms),
-    TcpStream::connect(remote_addr),
-  )
-  .await
-  .context("stream upstream connect timed out")?
-  .with_context(|| format!("failed to connect stream target {}", config.target))?;
+  let sni = peek_optional_tls_sni(&downstream, &config).await?;
+  let route = select_stream_route(&config, sni.as_deref()).ok_or_else(|| {
+    anyhow::anyhow!(
+      "stream listener {} has no matching SNI route and no default target",
+      config.name
+    )
+  })?;
+  let resolved =
+    resolve_stream_route_target(&state, StreamNetwork::Tcp, route.target, peer_addr).await?;
+  let mut upstream = tokio::time::timeout(route.connect_timeout, TcpStream::connect(resolved.addr))
+    .await
+    .context("stream upstream connect timed out")?
+    .with_context(|| format!("failed to connect stream target {}", resolved.label))?;
 
   proxy_protocol_egress::write_header(
     &mut upstream,
-    config.proxy_protocol_egress,
+    route.proxy_protocol_egress,
     peer_addr,
-    remote_addr,
+    resolved.addr,
   )
   .await
   .context("failed to write stream PROXY protocol egress header")?;
 
-  copy_bidirectional_with_idle(
-    downstream,
-    upstream,
-    Duration::from_millis(config.idle_timeout_ms),
-    drain,
-  )
+  let _selection = resolved.selection;
+  let result = copy_bidirectional_with_idle(downstream, upstream, route.idle_timeout, drain).await;
+  let snapshot = state.snapshot();
+  snapshot
+    .metrics
+    .record_stream_session_end("tcp", &config.name, route.name, result.is_ok());
+  result
+}
+
+async fn peek_optional_tls_sni(
+  stream: &TcpStream,
+  config: &StreamListenerConfig,
+) -> anyhow::Result<Option<String>> {
+  if config.sni_rules.is_empty() {
+    return Ok(None);
+  }
+  let timeout = Duration::from_millis(config.connect_timeout_ms.max(1));
+  let result: anyhow::Result<Option<String>> = tokio::time::timeout(timeout, async {
+    let mut buffer = vec![0u8; STREAM_TLS_CLIENT_HELLO_MAX_BYTES];
+    loop {
+      let read = stream
+        .peek(&mut buffer)
+        .await
+        .context("failed to peek stream TLS ClientHello")?;
+      if read == 0 {
+        return Ok::<Option<String>, anyhow::Error>(None);
+      }
+      match tls_record_client_hello_sni(&buffer[..read]) {
+        Ok(ClientHelloSni::Complete(sni)) => return Ok(sni),
+        Ok(ClientHelloSni::Incomplete) if read >= STREAM_TLS_CLIENT_HELLO_MAX_BYTES => {
+          return Ok(None);
+        }
+        Ok(ClientHelloSni::Incomplete) => {
+          tokio::time::sleep(STREAM_INCOMPLETE_CLIENT_HELLO_RETRY_DELAY).await;
+        }
+        Err(_) => return Ok(None),
+      }
+    }
+  })
   .await
+  .unwrap_or_else(|_| Ok(None));
+  result
 }
 
 fn acquire_connection_permit(

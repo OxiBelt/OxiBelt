@@ -1131,6 +1131,50 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # mode = "disabled" # disabled | live_fetch
 # failure_policy = "fail_closed" # fail_closed | degraded_allow
 
+#[[stream_upstream_pools]]
+# name = "edge-tls"
+# algorithm = "power_of_two_choices" # power_of_two_choices | weighted_least_conn | rendezvous_hash | rendezvous_ip_hash
+#
+#[[stream_upstream_pools.servers]]
+# id = "edge-tls-a"
+# origin = "tcp://edge-tls-a.internal.example:9443"
+# weight = 1
+# max_conns = 1024
+# backup = false
+# state = "ready"
+#
+#[[stream_upstream_pools]]
+# name = "edge-quic"
+# algorithm = "rendezvous_ip_hash"
+#
+#[[stream_upstream_pools.servers]]
+# id = "edge-quic-a"
+# origin = "udp://edge-quic-a.internal.example:443"
+# weight = 1
+#
+#[[stream_listeners]]
+# name = "tls-passthrough"
+# network = "tcp" # tcp | udp; defaults to tcp
+# bind = "0.0.0.0:10443"
+# upstream_pool = "edge-tls" # exactly one of target or upstream_pool
+# connect_timeout_ms = 3000
+# idle_timeout_ms = 120000
+# proxy_protocol_egress = "off" # TCP only: off | v1 | v2
+#
+#[[stream_listeners.sni_rules]]
+# name = "tenant-a"
+# server_names = ["tenant-a.example.com", "*.tenant-a.example.com"]
+# target = "tenant-a.internal.example:9443"
+#
+#[[stream_listeners]]
+# name = "quic-passthrough"
+# network = "udp"
+# bind = "0.0.0.0:10443"
+# upstream_pool = "edge-quic"
+# max_udp_flows = 4096
+# udp_datagram_rate = "200r/s"
+# udp_datagram_burst = 400
+
 #[[turn_upstream_pools]]
 # name = "turn-udp"
 # algorithm = "power_of_two_choices" # power_of_two_choices | weighted_least_conn | rendezvous_hash | rendezvous_ip_hash

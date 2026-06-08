@@ -25,6 +25,7 @@ pub struct RuntimeIntrospectionState {
   websocket_tunnels: AtomicUsize,
   webtransport_sessions: AtomicUsize,
   stream_listener_connections: AtomicUsize,
+  stream_listener_udp_flows: AtomicUsize,
   turn_tcp_connections: AtomicUsize,
   turn_tls_connections: AtomicUsize,
 }
@@ -63,6 +64,8 @@ impl RuntimeIntrospectionState {
       streams: StreamConnectionSnapshot {
         stream_listener_connections_active: self
           .load(RuntimeIntrospectionCounter::StreamListenerConnection),
+        stream_listener_udp_flows_active: self
+          .load(RuntimeIntrospectionCounter::StreamListenerUdpFlow),
       },
       turn: TurnConnectionSnapshot {
         tcp_connections_active: self.load(RuntimeIntrospectionCounter::TurnTcpConnection),
@@ -103,6 +106,7 @@ impl RuntimeIntrospectionState {
       RuntimeIntrospectionCounter::WebSocketTunnel => &self.websocket_tunnels,
       RuntimeIntrospectionCounter::WebTransportSession => &self.webtransport_sessions,
       RuntimeIntrospectionCounter::StreamListenerConnection => &self.stream_listener_connections,
+      RuntimeIntrospectionCounter::StreamListenerUdpFlow => &self.stream_listener_udp_flows,
       RuntimeIntrospectionCounter::TurnTcpConnection => &self.turn_tcp_connections,
       RuntimeIntrospectionCounter::TurnTlsConnection => &self.turn_tls_connections,
     }
@@ -127,6 +131,7 @@ pub enum RuntimeIntrospectionCounter {
   WebSocketTunnel,
   WebTransportSession,
   StreamListenerConnection,
+  StreamListenerUdpFlow,
   TurnTcpConnection,
   TurnTlsConnection,
 }
@@ -191,6 +196,7 @@ pub struct TunnelConnectionSnapshot {
 #[derive(Debug, Serialize)]
 pub struct StreamConnectionSnapshot {
   pub stream_listener_connections_active: usize,
+  pub stream_listener_udp_flows_active: usize,
 }
 
 #[derive(Debug, Serialize)]

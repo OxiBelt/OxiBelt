@@ -702,7 +702,7 @@ struct QuicForwardSession {
   _connection_permit: Option<ConnectionPermit>,
 }
 
-fn extract_initial_sni(datagram: &[u8]) -> anyhow::Result<(Option<String>, Vec<u8>)> {
+pub(crate) fn extract_initial_sni(datagram: &[u8]) -> anyhow::Result<(Option<String>, Vec<u8>)> {
   let header = quic_parser::parse_initial(datagram).context("invalid QUIC Initial header")?;
   let client_scid = header.scid.to_vec();
   let decrypted =

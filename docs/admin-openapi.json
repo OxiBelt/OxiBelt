@@ -3,7 +3,7 @@
   "info": {
     "title": "OxiBelt Admin API",
     "version": "v1",
-    "description": "Authenticated OxiBelt Admin API contract for control-plane automation. IPM authorization uses resource-specific Admin scopes such as cache policy/host, dynamic-policy source/name/route, upstream-pool server, and typed IPM resources."
+    "description": "Authenticated OxiBelt Admin API contract for control-plane automation. IPM authorization uses resource-specific Admin scopes such as cache policy/host, dynamic-policy source/name/route, upstream-pool server, stream-pool server, and typed IPM resources."
   },
   "servers": [
     {
@@ -68,6 +68,10 @@
     {
       "name": "upstream-pools",
       "description": "Runtime upstream-pool inspection and server control. Server snapshots include health reason, health-check time, outlier ejection, slow-start, and effective-weight fields. Server mutations check <pool>/server/<server_id> resources."
+    },
+    {
+      "name": "stream-pools",
+      "description": "Runtime TCP/UDP stream-pool inspection and server control. Server mutations check <pool>/server/<server_id> stream-pool resources and require tcp:// or udp:// origins."
     }
   ],
   "paths": {
@@ -3510,6 +3514,208 @@
           }
         }
       }
+    },
+    "/admin/v1/stream-pools": {
+      "get": {
+        "tags": [
+          "stream-pools"
+        ],
+        "operationId": "listStreamPools",
+        "summary": "List runtime TCP/UDP stream-pool snapshots.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/stream-pools/status": {
+      "get": {
+        "tags": [
+          "stream-pools"
+        ],
+        "operationId": "getStreamPoolStatus",
+        "summary": "Fetch the stream-pool runtime generation and ETag.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/stream-pools/{pool}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Pool"
+        }
+      ],
+      "get": {
+        "tags": [
+          "stream-pools"
+        ],
+        "operationId": "getStreamPool",
+        "summary": "Fetch one runtime TCP/UDP stream-pool snapshot.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/stream-pools/{pool}/servers": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Pool"
+        }
+      ],
+      "post": {
+        "tags": [
+          "stream-pools"
+        ],
+        "operationId": "addStreamPoolServer",
+        "summary": "Add a runtime stream-pool server.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/StreamPoolServerCreate"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/stream-pools/{pool}/servers/{server_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Pool"
+        },
+        {
+          "$ref": "#/components/parameters/ServerId"
+        }
+      ],
+      "patch": {
+        "tags": [
+          "stream-pools"
+        ],
+        "operationId": "updateStreamPoolServer",
+        "summary": "Update runtime state for a stream-pool server.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/StreamPoolServerPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "stream-pools"
+        ],
+        "operationId": "removeStreamPoolServer",
+        "summary": "Remove a runtime stream-pool server.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4595,6 +4801,71 @@
             }
           }
         }
+      },
+      "StreamPoolServerCreate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "id",
+                "origin"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string",
+                  "description": "Stream upstream origin. Must use tcp://host:port or udp://host:port."
+                },
+                "state": {
+                  "$ref": "#/components/schemas/StreamPoolServerState"
+                },
+                "weight": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_conns": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "backup": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "StreamPoolServerPatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "$ref": "#/components/schemas/StreamPoolServerState"
+                },
+                "weight": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_conns": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "backup": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
       }
     },
     "responses": {
@@ -5461,6 +5732,7 @@
               "cache_admin",
               "person_proof_admin",
               "upstream_pool_runtime_control",
+              "stream_pool_runtime_control",
               "admin_operations",
               "admin_http3",
               "admin_operation_webtransport",
@@ -5492,6 +5764,9 @@
                 "type": "boolean"
               },
               "upstream_pool_runtime_control": {
+                "type": "boolean"
+              },
+              "stream_pool_runtime_control": {
                 "type": "boolean"
               },
               "admin_operations": {
@@ -5558,6 +5833,15 @@
         "additionalProperties": false
       },
       "UpstreamPoolServerState": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "drain",
+          "down",
+          "maintenance"
+        ]
+      },
+      "StreamPoolServerState": {
         "type": "string",
         "enum": [
           "ready",

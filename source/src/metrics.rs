@@ -17,6 +17,7 @@ mod ocsp;
 mod outbound_revocation;
 mod pool;
 mod sni_forward;
+mod stream;
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -59,6 +60,7 @@ pub struct Metrics {
   ocsp: ocsp::OcspMetrics,
   outbound_revocation: outbound_revocation::OutboundRevocationMetrics,
   sni_forward: sni_forward::SniForwardMetrics,
+  stream: stream::StreamMetrics,
   pool: pool::PoolMetrics,
   detailed: Mutex<detail::DetailedMetrics>,
 }
@@ -505,6 +507,7 @@ impl Metrics {
     self.append_ocsp_prometheus(&mut output);
     self.append_outbound_revocation_prometheus(&mut output);
     self.append_sni_forward_prometheus(&mut output);
+    self.append_stream_prometheus(&mut output);
     self.append_upstream_pool_prometheus(&mut output);
     append_metric(
       &mut output,
