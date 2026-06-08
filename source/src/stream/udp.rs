@@ -108,19 +108,6 @@ async fn proxy_udp_datagram(
     &config.name,
   );
   if !flows.contains_key(&peer_addr) {
-    while flows.len() >= config.max_udp_flows {
-      let Some(oldest) = oldest_flow(flows) else {
-        break;
-      };
-      if let Some(session) = flows.remove(&oldest) {
-        state.snapshot().metrics.record_stream_session_end(
-          "udp",
-          &config.name,
-          &session.route_name,
-          false,
-        );
-      }
-    }
     let Some((route_name, resolved)) =
       classify_udp_flow(config, state, peer_addr, datagram).await?
     else {
@@ -156,6 +143,19 @@ async fn proxy_udp_datagram(
       target = %target_label,
       "UDP stream flow started"
     );
+    while flows.len() >= config.max_udp_flows {
+      let Some(oldest) = oldest_flow(flows) else {
+        break;
+      };
+      if let Some(session) = flows.remove(&oldest) {
+        state.snapshot().metrics.record_stream_session_end(
+          "udp",
+          &config.name,
+          &session.route_name,
+          false,
+        );
+      }
+    }
     flows.insert(
       peer_addr,
       UdpFlowSession {
@@ -292,5 +292,114 @@ fn client_bind_addr(remote: SocketAddr) -> SocketAddr {
   match remote {
     SocketAddr::V4(_) => "0.0.0.0:0".parse().expect("static IPv4 bind"),
     SocketAddr::V6(_) => "[::]:0".parse().expect("static IPv6 bind"),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  use crate::config::{Config, ProxyProtocolEgressMode, StreamSniRuleConfig};
+  use crate::state::{AppHandle, AppSnapshot};
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  fn parse_config(raw: &str) -> Config {
+    let config: Config = toml::from_str(raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    config
+  }
+
+  async fn app_handle() -> AppHandle {
+    let temp_dir = common::TempDir::new("udp-flow-eviction");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "udp-flow-eviction");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+    AppHandle::new(
+      AppSnapshot::new(parse_config(&raw))
+        .await
+        .expect("application snapshot should initialize"),
+    )
+  }
+
+  fn sni_only_udp_listener(max_udp_flows: usize) -> StreamListenerConfig {
+    StreamListenerConfig {
+      name: "udp-sni-only".to_string(),
+      network: StreamNetwork::Udp,
+      bind: "127.0.0.1:0".parse().expect("listener bind should parse"),
+      target: None,
+      upstream_pool: None,
+      connect_timeout_ms: 1000,
+      idle_timeout_ms: 60_000,
+      proxy_protocol_egress: ProxyProtocolEgressMode::Off,
+      max_udp_flows,
+      udp_datagram_rate: None,
+      udp_datagram_burst: 1,
+      sni_rules: vec![StreamSniRuleConfig {
+        name: "tenant-a".to_string(),
+        server_names: vec!["tenant-a.example.com".to_string()],
+        target: Some("127.0.0.1:443".to_string()),
+        upstream_pool: None,
+        connect_timeout_ms: 1000,
+        idle_timeout_ms: 60_000,
+        proxy_protocol_egress: ProxyProtocolEgressMode::Off,
+      }],
+    }
+  }
+
+  async fn seeded_udp_flow(state: &AppHandle, route_name: &str) -> anyhow::Result<UdpFlowSession> {
+    let upstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+    let upstream_task = tokio::spawn(async {
+      std::future::pending::<()>().await;
+    });
+    Ok(UdpFlowSession {
+      upstream,
+      upstream_task,
+      target_label: "127.0.0.1:443".to_string(),
+      route_name: route_name.to_string(),
+      last_activity: Instant::now(),
+      rate: None,
+      _selection: None,
+      _connection_permit: acquire_udp_flow_permit(state, "127.0.0.1:49152".parse()?)?,
+      _introspection_guard: state
+        .snapshot()
+        .runtime_introspection
+        .guard(RuntimeCounter::StreamListenerUdpFlow),
+    })
+  }
+
+  #[tokio::test]
+  async fn unroutable_udp_sni_datagram_preserves_existing_flow() -> anyhow::Result<()> {
+    let state = app_handle().await;
+    let config = sni_only_udp_listener(1);
+    let victim_peer: SocketAddr = "127.0.0.1:49152".parse()?;
+    let attacker_peer: SocketAddr = "127.0.0.1:49153".parse()?;
+    let downstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+    let mut flows = HashMap::from([(victim_peer, seeded_udp_flow(&state, "tenant-a").await?)]);
+
+    proxy_udp_datagram(
+      &downstream,
+      &mut flows,
+      &config,
+      &state,
+      attacker_peer,
+      b"not a QUIC Initial",
+    )
+    .await?;
+
+    assert!(
+      flows.contains_key(&victim_peer),
+      "unroutable new UDP peer must not evict an established flow"
+    );
+    assert!(
+      !flows.contains_key(&attacker_peer),
+      "unroutable new UDP peer must not create a replacement flow"
+    );
+    Ok(())
   }
 }
