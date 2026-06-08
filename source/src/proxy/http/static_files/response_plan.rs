@@ -11,8 +11,8 @@ use anyhow::{Context, bail};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::header::{
-  ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderValue, IF_MODIFIED_SINCE,
-  IF_NONE_MATCH, LAST_MODIFIED, RANGE,
+  ACCEPT_RANGES, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE,
+  ETAG, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RANGE, VARY,
 };
 use http::{HeaderMap, Method, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, StreamBody};
@@ -30,6 +30,26 @@ use crate::proxy::http::body::{
 use crate::proxy::http::response::text_response;
 
 const STATIC_BODY_CHANNEL_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct StaticResponseMetadata {
+  pub(crate) content_type: String,
+  pub(crate) content_encoding: Option<&'static str>,
+  pub(crate) cache_control: Option<String>,
+  pub(crate) vary_accept_encoding: bool,
+}
+
+impl StaticResponseMetadata {
+  #[cfg(test)]
+  pub(crate) fn for_path(path: &Path) -> Self {
+    Self {
+      content_type: content_type_for_path(path).to_string(),
+      content_encoding: None,
+      cache_control: None,
+      vary_accept_encoding: false,
+    }
+  }
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum RangeSelection {
@@ -103,7 +123,7 @@ pub(super) fn cached_object_plan(
 ) -> StaticResponsePlan {
   let len = cached.body.len() as u64;
   if conditional_not_modified(headers, &cached.etag, cached.modified) {
-    return not_modified_plan(&cached.etag, cached.modified);
+    return not_modified_plan(&cached.etag, cached.modified, &cached.response_metadata);
   }
 
   let range = match headers.get(RANGE) {
@@ -113,19 +133,24 @@ pub(super) fn cached_object_plan(
   match range {
     RangeSelection::NotSatisfiable => range_not_satisfiable_plan(len),
     RangeSelection::Full => cached_full_bytes_plan(method, cached),
-    RangeSelection::Partial { start, end } => bytes_plan(
-      method,
-      StatusCode::PARTIAL_CONTENT,
-      cached.path,
-      cached.body,
-      FileContentPlan {
-        offset: start,
-        body_len: end - start + 1,
-        content_range: Some((start, end, len)),
-      },
-      &cached.etag,
-      cached.modified,
-    ),
+    RangeSelection::Partial { start, end } => {
+      let etag = cached.etag.clone();
+      let response_metadata = cached.response_metadata.clone();
+      bytes_plan(
+        method,
+        StatusCode::PARTIAL_CONTENT,
+        cached.path,
+        cached.body,
+        FileContentPlan {
+          offset: start,
+          body_len: end - start + 1,
+          content_range: Some((start, end, len)),
+        },
+        &etag,
+        cached.modified,
+        &response_metadata,
+      )
+    }
   }
 }
 
@@ -150,6 +175,7 @@ pub(super) struct FileContentPlan {
   pub(super) content_range: Option<(u64, u64, u64)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn file_plan(
   method: &Method,
   status: StatusCode,
@@ -158,9 +184,16 @@ pub(super) fn file_plan(
   content: FileContentPlan,
   etag: &str,
   modified: Option<SystemTime>,
+  response_metadata: &StaticResponseMetadata,
 ) -> StaticResponsePlan {
   let mut headers = HeaderMap::new();
-  set_common_headers(&mut headers, &path, content.body_len, etag, modified);
+  set_common_headers(
+    &mut headers,
+    content.body_len,
+    etag,
+    modified,
+    response_metadata,
+  );
   if let Some((start, end, full_len)) = content.content_range
     && let Ok(value) = HeaderValue::from_str(&format!("bytes {start}-{end}/{full_len}"))
   {
@@ -183,17 +216,25 @@ pub(super) fn file_plan(
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bytes_plan(
   method: &Method,
   status: StatusCode,
-  path: PathBuf,
+  _path: PathBuf,
   bytes: Bytes,
   content: FileContentPlan,
   etag: &str,
   modified: Option<SystemTime>,
+  response_metadata: &StaticResponseMetadata,
 ) -> StaticResponsePlan {
   let mut headers = HeaderMap::new();
-  set_common_headers(&mut headers, &path, content.body_len, etag, modified);
+  set_common_headers(
+    &mut headers,
+    content.body_len,
+    etag,
+    modified,
+    response_metadata,
+  );
   if let Some((start, end, full_len)) = content.content_range
     && let Ok(value) = HeaderValue::from_str(&format!("bytes {start}-{end}/{full_len}"))
   {
@@ -312,10 +353,10 @@ where
 
 fn set_common_headers(
   headers: &mut http::HeaderMap,
-  path: &Path,
   body_len: u64,
   etag: &str,
   modified: Option<SystemTime>,
+  response_metadata: &StaticResponseMetadata,
 ) {
   headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
   if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
@@ -329,33 +370,30 @@ fn set_common_headers(
   {
     headers.insert(LAST_MODIFIED, value);
   }
-  headers.insert(
-    CONTENT_TYPE,
-    HeaderValue::from_static(content_type_for_path(path)),
-  );
+  apply_response_metadata(headers, response_metadata);
 }
 
 fn set_cached_common_headers(headers: &mut HeaderMap, cached: &CachedStaticObject, body_len: u64) {
   headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-  if body_len == cached.body.len() as u64 {
-    if let Some(value) = cached.full_content_length_header.clone() {
-      headers.insert(CONTENT_LENGTH, value);
-    } else if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
-      headers.insert(CONTENT_LENGTH, value);
-    }
-  } else if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
+  if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
     headers.insert(CONTENT_LENGTH, value);
   }
-  if let Some(value) = cached.etag_header.clone() {
+  if let Ok(value) = HeaderValue::from_str(&cached.etag) {
     headers.insert(ETAG, value);
   }
-  if let Some(value) = cached.last_modified_header.clone() {
+  if let Some(modified) = cached.modified
+    && let Ok(value) = HeaderValue::from_str(&httpdate::fmt_http_date(modified))
+  {
     headers.insert(LAST_MODIFIED, value);
   }
-  headers.insert(CONTENT_TYPE, cached.content_type_header.clone());
+  apply_response_metadata(headers, &cached.response_metadata);
 }
 
-pub(super) fn not_modified_plan(etag: &str, modified: Option<SystemTime>) -> StaticResponsePlan {
+pub(super) fn not_modified_plan(
+  etag: &str,
+  modified: Option<SystemTime>,
+  response_metadata: &StaticResponseMetadata,
+) -> StaticResponsePlan {
   let mut headers = HeaderMap::new();
   headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
   if let Ok(value) = HeaderValue::from_str(etag) {
@@ -366,10 +404,28 @@ pub(super) fn not_modified_plan(etag: &str, modified: Option<SystemTime>) -> Sta
   {
     headers.insert(LAST_MODIFIED, value);
   }
+  apply_response_metadata(&mut headers, response_metadata);
   StaticResponsePlan {
     status: StatusCode::NOT_MODIFIED,
     headers,
     body: StaticBodyPlan::Empty,
+  }
+}
+
+fn apply_response_metadata(headers: &mut HeaderMap, response_metadata: &StaticResponseMetadata) {
+  if let Ok(value) = HeaderValue::from_str(&response_metadata.content_type) {
+    headers.insert(CONTENT_TYPE, value);
+  }
+  if let Some(encoding) = response_metadata.content_encoding {
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding));
+  }
+  if let Some(cache_control) = &response_metadata.cache_control
+    && let Ok(value) = HeaderValue::from_str(cache_control)
+  {
+    headers.insert(CACHE_CONTROL, value);
+  }
+  if response_metadata.vary_accept_encoding {
+    headers.insert(VARY, HeaderValue::from_static("Accept-Encoding"));
   }
 }
 

@@ -257,7 +257,7 @@ fn negotiate_encoding(
     if !policy.allows_encoding(encoding) {
       continue;
     }
-    let q = accepted_quality(request_headers, encoding.content_encoding());
+    let q = accepted_encoding_quality(request_headers, encoding.content_encoding());
     if q > 0.0 && (q > best_q || best.is_none()) {
       best = Some(encoding);
       best_q = q;
@@ -266,7 +266,7 @@ fn negotiate_encoding(
   best
 }
 
-fn accepted_quality(headers: &HeaderMap, encoding: &str) -> f32 {
+pub(crate) fn accepted_encoding_quality(headers: &HeaderMap, encoding: &str) -> f32 {
   let mut exact = None;
   let mut wildcard = None;
 

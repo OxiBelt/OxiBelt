@@ -20,6 +20,7 @@ pub(crate) struct OpenedStaticFile {
 #[derive(Debug)]
 pub(crate) enum StaticOpenError {
   NotFound,
+  IsDirectory,
   Forbidden(anyhow::Error),
 }
 
@@ -67,6 +68,9 @@ async fn open_verified_file_with_procfs_fallback(
     .await
     .with_context(|| format!("failed to inspect opened static file {}", path.display()))
     .map_err(StaticOpenError::forbidden)?;
+  if metadata.is_dir() {
+    return Err(StaticOpenError::IsDirectory);
+  }
   if !metadata.is_file() {
     return Err(StaticOpenError::forbidden(anyhow!(
       "opened static file is not a regular file"
@@ -173,6 +177,9 @@ fn open_regular_file_beneath_root(
     .metadata()
     .with_context(|| format!("failed to inspect opened static file {}", path.display()))
     .map_err(StaticOpenError::forbidden)?;
+  if metadata.is_dir() {
+    return Err(StaticOpenError::IsDirectory);
+  }
   if !metadata.is_file() {
     return Err(StaticOpenError::forbidden(anyhow!(
       "opened static file is not a regular file"

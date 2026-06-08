@@ -1286,6 +1286,24 @@ grpc_web = false
 #generic_http_upgrade = false
 #connect_tunneling = false
 #grpc_web = false
+#
+#[routes.static_files]
+#directory_index = ["index.html"]
+#try_files = ["{path}.html", "/index.html"]
+#spa_fallback = "/index.html"
+#precompressed = ["br", "zstd", "gzip"]
+#cache_control = "public, max-age=3600"
+#
+#[routes.static_files.cache_control_by_extension]
+#html = "no-cache"
+#css = "public, max-age=31536000, immutable"
+#
+#[routes.static_files.mime_overrides]
+#wasm = "application/wasm"
+#
+#[routes.static_files.error_pages]
+#not_found = "/404.html"
+#server_error = "/50x.html"
 
 #[[routes]]
 #name = "person-proof-ui"

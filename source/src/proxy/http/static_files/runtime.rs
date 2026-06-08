@@ -12,11 +12,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use bytes::Bytes;
-use http::HeaderValue;
 
 use crate::config::{Config, ProxyStaticFilesConfig};
 
-use super::response_plan::content_type_for_path;
+use super::response_plan::StaticResponseMetadata;
 
 #[derive(Clone)]
 pub(crate) struct StaticFilesRuntime {
@@ -65,8 +64,13 @@ impl StaticFilesRuntime {
       .unwrap_or_else(|| StaticRootHandle::uncached(root))
   }
 
-  pub(crate) fn cached_object(&self, root: &Path, path: &Path) -> Option<CachedStaticObject> {
-    self.hot_objects.get(root, path)
+  pub(crate) fn cached_object(
+    &self,
+    root: &Path,
+    path: &Path,
+    response_metadata: &StaticResponseMetadata,
+  ) -> Option<CachedStaticObject> {
+    self.hot_objects.get(root, path, response_metadata)
   }
 
   pub(crate) fn object_cache_accepts(&self, len: u64) -> bool {
@@ -79,9 +83,12 @@ impl StaticFilesRuntime {
     path: PathBuf,
     etag: String,
     modified: Option<SystemTime>,
+    response_metadata: StaticResponseMetadata,
     body: Bytes,
   ) {
-    self.hot_objects.insert(root, path, etag, modified, body);
+    self
+      .hot_objects
+      .insert(root, path, etag, modified, response_metadata, body);
   }
 }
 
@@ -197,10 +204,7 @@ pub(crate) struct CachedStaticObject {
   pub(crate) path: PathBuf,
   pub(crate) etag: String,
   pub(crate) modified: Option<SystemTime>,
-  pub(crate) etag_header: Option<HeaderValue>,
-  pub(crate) last_modified_header: Option<HeaderValue>,
-  pub(crate) content_type_header: HeaderValue,
-  pub(crate) full_content_length_header: Option<HeaderValue>,
+  pub(crate) response_metadata: StaticResponseMetadata,
   pub(crate) body: Bytes,
 }
 
@@ -222,7 +226,9 @@ struct StaticHotObjectCacheInner {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StaticObjectCacheKey {
+  root: PathBuf,
   path: PathBuf,
+  response_metadata: StaticResponseMetadata,
 }
 
 #[derive(Clone, Debug)]
@@ -253,12 +259,19 @@ impl StaticHotObjectCache {
         .is_some_and(|len| len <= self.max_file_bytes && len <= self.max_bytes)
   }
 
-  fn get(&self, _root: &Path, path: &Path) -> Option<CachedStaticObject> {
+  fn get(
+    &self,
+    root: &Path,
+    path: &Path,
+    response_metadata: &StaticResponseMetadata,
+  ) -> Option<CachedStaticObject> {
     if !self.enabled() {
       return None;
     }
     let key = StaticObjectCacheKey {
+      root: root.to_path_buf(),
       path: path.to_path_buf(),
+      response_metadata: response_metadata.clone(),
     };
     let now = Instant::now();
     {
@@ -282,18 +295,23 @@ impl StaticHotObjectCache {
 
   fn insert(
     &self,
-    _root: &Path,
+    root: &Path,
     path: PathBuf,
     etag: String,
     modified: Option<SystemTime>,
+    response_metadata: StaticResponseMetadata,
     body: Bytes,
   ) {
     if !self.accepts(body.len() as u64) {
       return;
     }
-    let key = StaticObjectCacheKey { path: path.clone() };
+    let key = StaticObjectCacheKey {
+      root: root.to_path_buf(),
+      path: path.clone(),
+      response_metadata: response_metadata.clone(),
+    };
     let entry = StaticHotObjectCacheEntry {
-      object: CachedStaticObject::new(path, etag, modified, body),
+      object: CachedStaticObject::new(path, etag, modified, response_metadata, body),
       expires_at: Instant::now() + self.ttl,
     };
     let mut inner = self.inner.write().expect("static file cache lock poisoned");
@@ -310,22 +328,14 @@ impl CachedStaticObject {
     path: PathBuf,
     etag: String,
     modified: Option<SystemTime>,
+    response_metadata: StaticResponseMetadata,
     body: Bytes,
   ) -> Self {
-    let etag_header = HeaderValue::from_str(&etag).ok();
-    let last_modified_header = modified
-      .map(httpdate::fmt_http_date)
-      .and_then(|value| HeaderValue::from_str(&value).ok());
-    let full_content_length_header = HeaderValue::from_str(&body.len().to_string()).ok();
-    let content_type_header = HeaderValue::from_static(content_type_for_path(&path));
     Self {
       path,
       etag,
       modified,
-      etag_header,
-      last_modified_header,
-      content_type_header,
-      full_content_length_header,
+      response_metadata,
       body,
     }
   }

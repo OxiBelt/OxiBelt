@@ -11,7 +11,8 @@ use crate::waf::RouteWafConfig;
 
 use super::route_actions::RouteActionsConfig;
 use super::{
-  BufferingMode, HttpVersion, RetryCondition, RouteIpmConfig, default_hosts, default_path_prefix,
+  BufferingMode, HttpVersion, RetryCondition, RouteIpmConfig, RouteStaticFilesConfig,
+  default_hosts, default_path_prefix,
 };
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -33,6 +34,8 @@ pub struct RouteConfig {
   pub upstream_pool: Option<String>,
   #[serde(default)]
   pub static_root: Option<PathBuf>,
+  #[serde(default)]
+  pub static_files: RouteStaticFilesConfig,
   #[serde(default)]
   pub upstream_http_version: Option<HttpVersion>,
   #[serde(default)]

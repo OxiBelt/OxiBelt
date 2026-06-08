@@ -51,6 +51,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
         ("upstream-pool-algorithms", "supported"),
         ("upstream-discovery", "supported"),
         ("upstream-pool-runtime-state", "supported"),
+        ("static-files", "supported"),
         ("tls-ocsp", "supported"),
         ("tls-remote-signer", "supported"),
         ("tls-mtls-client-auth", "supported"),

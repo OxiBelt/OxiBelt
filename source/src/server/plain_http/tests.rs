@@ -250,6 +250,52 @@ permissions_policy = "geolocation=(), camera=()"
 }
 
 #[tokio::test]
+async fn route_static_options_apply_on_plain_static_sendfile_path() {
+  if !kernel_sendfile_available_or_skip() {
+    return;
+  }
+
+  let temp_dir = common::TempDir::new("plain-sendfile-route-static-options");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-route-static-options");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.css"), "body { color: black; }")
+    .await
+    .unwrap();
+  tokio::fs::write(root.join("app.css.br"), "compressed css")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+
+[routes.static_files]
+precompressed = ["br", "gzip"]
+cache_control = "public, max-age=60"
+
+[routes.static_files.mime_overrides]
+css = "text/custom-css"
+"#,
+  );
+
+  let response = run_static_sendfile_request(
+    &raw,
+    b"GET /static/app.css HTTP/1.1\r\nHost: example.com\r\nAccept-Encoding: gzip;q=1, br;q=1\r\nConnection: close\r\n\r\n",
+  )
+  .await;
+
+  assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+  assert!(response.contains("content-type: text/custom-css\r\n"));
+  assert!(response.contains("content-encoding: br\r\n"));
+  assert!(response.contains("cache-control: public, max-age=60\r\n"));
+  assert!(response.contains("vary: Accept-Encoding\r\n"));
+  assert!(response.ends_with("compressed css"));
+}
+
+#[tokio::test]
 async fn system_access_log_keeps_plain_static_sendfile_path() {
   if !kernel_sendfile_available_or_skip() {
     return;

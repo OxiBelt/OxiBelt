@@ -22,7 +22,7 @@ use super::{
   compression, empty_captured_body, positive_content_length, response_body_capture_decision,
   waf_body_input, with_downstream_response_timeout,
 };
-use crate::config::RouteConfig;
+use crate::config::{RouteConfig, RouteStaticFilesConfig};
 use crate::state::AppSnapshot;
 use crate::waf::{
   BodyNeed, RequestWafDecision, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput,
@@ -32,6 +32,7 @@ use crate::waf::{
 mod open;
 mod path;
 mod response_plan;
+mod route_options;
 mod runtime;
 #[cfg(all(test, target_os = "linux"))]
 use self::open::open_verified_file_with_openat2_for_tests;
@@ -43,7 +44,12 @@ use self::response_plan::{
   FileContentPlan, RangeSelection, cached_object_plan, conditional_not_modified, etag_for_metadata,
   file_plan, not_modified_plan, parse_range, range_not_satisfiable_plan, read_file_bytes_for_cache,
 };
-pub(crate) use self::response_plan::{response_from_plan, text_plan};
+pub(crate) use self::response_plan::{StaticResponseMetadata, response_from_plan, text_plan};
+use self::route_options::relative_slash_path;
+use self::route_options::{
+  render_try_file_path, response_metadata_for_path, root_relative_config_path,
+  select_precompressed_file, should_use_spa_fallback,
+};
 pub(crate) use self::runtime::{CachedStaticObject, StaticFilesRuntime, StaticRootPathStatus};
 
 #[derive(Debug)]
@@ -87,6 +93,7 @@ pub(crate) async fn serve<B>(
   route_name: &str,
   route_prefix: &str,
   static_root: &Path,
+  static_options: &RouteStaticFilesConfig,
   runtime: &StaticFilesRuntime,
   inline_max_bytes: usize,
 ) -> Response<ProxyBody>
@@ -100,12 +107,14 @@ where
     route_name,
     route_prefix,
     static_root,
+    static_options,
     runtime,
   )
   .await;
   response_from_plan(plan, inline_max_bytes).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_response(
   method: &Method,
   headers: &HeaderMap,
@@ -113,6 +122,7 @@ pub(crate) async fn plan_response(
   route_name: &str,
   route_prefix: &str,
   static_root: &Path,
+  static_options: &RouteStaticFilesConfig,
   runtime: &StaticFilesRuntime,
 ) -> StaticResponsePlan {
   if method != Method::GET && method != Method::HEAD {
@@ -124,34 +134,10 @@ pub(crate) async fn plan_response(
   }
 
   let root = static_root;
-  let path = match resolve_request_path(root, route_prefix, request_path) {
-    Ok(path) => path,
-    Err(StaticPathError::NotFound) => return text_plan(StatusCode::NOT_FOUND, "not found"),
-    Err(StaticPathError::Forbidden) => return text_plan(StatusCode::FORBIDDEN, "forbidden"),
-    Err(StaticPathError::Invalid) => {
-      return text_plan(StatusCode::BAD_REQUEST, "invalid static file path");
-    }
-  };
-
-  if let Some(cached) = runtime.cached_object(root, &path) {
-    match runtime.root_handle(root).path_status() {
-      StaticRootPathStatus::Replaced => {
-        warn!(route = %route_name, root = %root.display(), "static_root was replaced after validation");
-        return text_plan(StatusCode::FORBIDDEN, "forbidden");
-      }
-      StaticRootPathStatus::Unavailable => {
-        warn!(route = %route_name, root = %root.display(), "static_root is not usable");
-        return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
-      }
-      StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
-    }
-    return cached_object_plan(method, headers, cached);
-  }
-
   let root_handle = runtime.root_handle(root);
-  let opened = match open_verified_file(&root_handle, &path).await {
-    Ok(opened) => opened,
-    Err(StaticOpenError::NotFound) => {
+  let requested_path = match resolve_request_path(root, route_prefix, request_path) {
+    Ok(path) => path,
+    Err(StaticPathError::NotFound) => {
       match root_handle.path_status() {
         StaticRootPathStatus::Replaced => {
           warn!(route = %route_name, root = %root.display(), "static_root was replaced after validation");
@@ -159,44 +145,255 @@ pub(crate) async fn plan_response(
         }
         StaticRootPathStatus::Unavailable => {
           warn!(route = %route_name, root = %root.display(), "static_root is not usable");
-          return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
+          return plan_custom_error_page(
+            method,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "static root unavailable",
+            static_options.error_pages.server_error.as_deref(),
+            root,
+            runtime,
+            static_options,
+          )
+          .await;
         }
         StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
       }
-      if !root.is_dir() {
-        warn!(route = %route_name, root = %root.display(), "static_root is not usable");
-        return text_plan(StatusCode::INTERNAL_SERVER_ERROR, "static root unavailable");
-      }
-      return text_plan(StatusCode::NOT_FOUND, "not found");
+      return plan_custom_error_page(
+        method,
+        StatusCode::NOT_FOUND,
+        "not found",
+        static_options.error_pages.not_found.as_deref(),
+        root,
+        runtime,
+        static_options,
+      )
+      .await;
     }
-    Err(StaticOpenError::Forbidden(error)) => {
-      warn!(error = %error, route = %route_name, path = %path.display(), "failed to open static file");
-      return text_plan(StatusCode::FORBIDDEN, "forbidden");
+    Err(StaticPathError::Forbidden) => return text_plan(StatusCode::FORBIDDEN, "forbidden"),
+    Err(StaticPathError::Invalid) => {
+      return text_plan(StatusCode::BAD_REQUEST, "invalid static file path");
     }
   };
+
+  match root_handle.path_status() {
+    StaticRootPathStatus::Replaced => {
+      warn!(route = %route_name, root = %root.display(), "static_root was replaced after validation");
+      return text_plan(StatusCode::FORBIDDEN, "forbidden");
+    }
+    StaticRootPathStatus::Unavailable => {
+      warn!(route = %route_name, root = %root.display(), "static_root is not usable");
+      return plan_custom_error_page(
+        method,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "static root unavailable",
+        static_options.error_pages.server_error.as_deref(),
+        root,
+        runtime,
+        static_options,
+      )
+      .await;
+    }
+    StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
+  }
+
+  match open_verified_file(&root_handle, &requested_path).await {
+    Ok(opened) => {
+      return plan_opened_file(
+        method,
+        headers,
+        root,
+        runtime,
+        static_options,
+        opened,
+        requested_path,
+        StatusCode::OK,
+        true,
+        true,
+      )
+      .await;
+    }
+    Err(StaticOpenError::IsDirectory) => {
+      match plan_directory_index(
+        method,
+        headers,
+        root,
+        &requested_path,
+        runtime,
+        static_options,
+      )
+      .await
+      {
+        CandidatePlan::Found(plan) => return *plan,
+        CandidatePlan::Forbidden => return text_plan(StatusCode::FORBIDDEN, "forbidden"),
+        CandidatePlan::NotFound => return text_plan(StatusCode::FORBIDDEN, "forbidden"),
+      }
+    }
+    Err(StaticOpenError::NotFound) => {}
+    Err(StaticOpenError::Forbidden(error)) => {
+      warn!(error = %error, route = %route_name, path = %requested_path.display(), "failed to open static file");
+      return text_plan(StatusCode::FORBIDDEN, "forbidden");
+    }
+  }
+
+  match plan_try_files(
+    method,
+    headers,
+    root,
+    &requested_path,
+    runtime,
+    static_options,
+  )
+  .await
+  {
+    CandidatePlan::Found(plan) => return *plan,
+    CandidatePlan::Forbidden => return text_plan(StatusCode::FORBIDDEN, "forbidden"),
+    CandidatePlan::NotFound => {}
+  }
+
+  if should_use_spa_fallback(headers, root, &requested_path, request_path)
+    && let Some(fallback) = static_options.spa_fallback.as_deref()
+  {
+    let fallback_path = root_relative_config_path(root, fallback);
+    match plan_candidate_path(
+      method,
+      headers,
+      root,
+      fallback_path,
+      runtime,
+      static_options,
+      StatusCode::OK,
+      true,
+      true,
+    )
+    .await
+    {
+      CandidatePlan::Found(plan) => return *plan,
+      CandidatePlan::Forbidden => return text_plan(StatusCode::FORBIDDEN, "forbidden"),
+      CandidatePlan::NotFound => {}
+    }
+  }
+
+  match root_handle.path_status() {
+    StaticRootPathStatus::Replaced => {
+      warn!(route = %route_name, root = %root.display(), "static_root was replaced after validation");
+      return text_plan(StatusCode::FORBIDDEN, "forbidden");
+    }
+    StaticRootPathStatus::Unavailable => {
+      warn!(route = %route_name, root = %root.display(), "static_root is not usable");
+      return plan_custom_error_page(
+        method,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "static root unavailable",
+        static_options.error_pages.server_error.as_deref(),
+        root,
+        runtime,
+        static_options,
+      )
+      .await;
+    }
+    StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
+  }
+  if !root.is_dir() {
+    warn!(route = %route_name, root = %root.display(), "static_root is not usable");
+    return plan_custom_error_page(
+      method,
+      StatusCode::INTERNAL_SERVER_ERROR,
+      "static root unavailable",
+      static_options.error_pages.server_error.as_deref(),
+      root,
+      runtime,
+      static_options,
+    )
+    .await;
+  }
+
+  plan_custom_error_page(
+    method,
+    StatusCode::NOT_FOUND,
+    "not found",
+    static_options.error_pages.not_found.as_deref(),
+    root,
+    runtime,
+    static_options,
+  )
+  .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn plan_opened_file(
+  method: &Method,
+  headers: &HeaderMap,
+  root: &Path,
+  runtime: &StaticFilesRuntime,
+  static_options: &RouteStaticFilesConfig,
+  opened: OpenedStaticFile,
+  logical_path: PathBuf,
+  status: StatusCode,
+  allow_cache_control: bool,
+  allow_precompressed: bool,
+) -> StaticResponsePlan {
+  let selected = select_precompressed_file(
+    method,
+    headers,
+    runtime,
+    root,
+    opened,
+    &logical_path,
+    static_options,
+    allow_precompressed,
+  )
+  .await;
+  let (opened, content_encoding) = match selected {
+    Ok(selected) => selected,
+    Err(error) => return error,
+  };
+
   let OpenedStaticFile {
     mut file,
     path,
     metadata,
   } = opened;
+  let response_metadata = response_metadata_for_path(
+    method,
+    headers,
+    &logical_path,
+    static_options,
+    content_encoding,
+    allow_cache_control,
+    allow_precompressed,
+  );
+
+  if status.is_success()
+    && let Some(cached) = runtime.cached_object(root, &path, &response_metadata)
+  {
+    return cached_object_plan(method, headers, cached);
+  }
 
   let len = metadata.len();
   let modified = metadata.modified().ok();
   let etag = etag_for_metadata(&metadata);
   if conditional_not_modified(headers, &etag, modified) {
-    return not_modified_plan(&etag, modified);
+    return not_modified_plan(&etag, modified, &response_metadata);
   }
 
   if method == Method::GET
+    && status.is_success()
     && runtime.object_cache_accepts(len)
     && let Ok(bytes) = read_file_bytes_for_cache(&mut file, &path, len).await
   {
     let bytes = Bytes::from(bytes);
-    runtime.store_object(root, path.clone(), etag.clone(), modified, bytes.clone());
+    runtime.store_object(
+      root,
+      path.clone(),
+      etag.clone(),
+      modified,
+      response_metadata.clone(),
+      bytes.clone(),
+    );
     return cached_object_plan(
       method,
       headers,
-      CachedStaticObject::new(path, etag, modified, bytes),
+      CachedStaticObject::new(path, etag, modified, response_metadata, bytes),
     );
   }
 
@@ -208,7 +405,7 @@ pub(crate) async fn plan_response(
     RangeSelection::NotSatisfiable => range_not_satisfiable_plan(len),
     RangeSelection::Full => file_plan(
       method,
-      StatusCode::OK,
+      status,
       path,
       file,
       FileContentPlan {
@@ -218,6 +415,7 @@ pub(crate) async fn plan_response(
       },
       &etag,
       modified,
+      &response_metadata,
     ),
     RangeSelection::Partial { start, end } => {
       let body_len = end - start + 1;
@@ -233,8 +431,143 @@ pub(crate) async fn plan_response(
         },
         &etag,
         modified,
+        &response_metadata,
       )
     }
+  }
+}
+
+enum CandidatePlan {
+  Found(Box<StaticResponsePlan>),
+  NotFound,
+  Forbidden,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn plan_candidate_path(
+  method: &Method,
+  headers: &HeaderMap,
+  root: &Path,
+  path: PathBuf,
+  runtime: &StaticFilesRuntime,
+  static_options: &RouteStaticFilesConfig,
+  status: StatusCode,
+  allow_cache_control: bool,
+  allow_precompressed: bool,
+) -> CandidatePlan {
+  let root_handle = runtime.root_handle(root);
+  match open_verified_file(&root_handle, &path).await {
+    Ok(opened) => CandidatePlan::Found(Box::new(
+      plan_opened_file(
+        method,
+        headers,
+        root,
+        runtime,
+        static_options,
+        opened,
+        path,
+        status,
+        allow_cache_control,
+        allow_precompressed,
+      )
+      .await,
+    )),
+    Err(StaticOpenError::NotFound | StaticOpenError::IsDirectory) => CandidatePlan::NotFound,
+    Err(StaticOpenError::Forbidden(error)) => {
+      warn!(error = %error, path = %path.display(), "failed to open static file candidate");
+      CandidatePlan::Forbidden
+    }
+  }
+}
+
+async fn plan_directory_index(
+  method: &Method,
+  headers: &HeaderMap,
+  root: &Path,
+  requested_path: &Path,
+  runtime: &StaticFilesRuntime,
+  static_options: &RouteStaticFilesConfig,
+) -> CandidatePlan {
+  for index in &static_options.directory_index {
+    match plan_candidate_path(
+      method,
+      headers,
+      root,
+      requested_path.join(index),
+      runtime,
+      static_options,
+      StatusCode::OK,
+      true,
+      true,
+    )
+    .await
+    {
+      CandidatePlan::NotFound => {}
+      other => return other,
+    }
+  }
+  CandidatePlan::NotFound
+}
+
+async fn plan_try_files(
+  method: &Method,
+  headers: &HeaderMap,
+  root: &Path,
+  requested_path: &Path,
+  runtime: &StaticFilesRuntime,
+  static_options: &RouteStaticFilesConfig,
+) -> CandidatePlan {
+  let relative = relative_slash_path(root, requested_path);
+  for candidate in &static_options.try_files {
+    let path = render_try_file_path(root, &relative, candidate);
+    match plan_candidate_path(
+      method,
+      headers,
+      root,
+      path,
+      runtime,
+      static_options,
+      StatusCode::OK,
+      true,
+      true,
+    )
+    .await
+    {
+      CandidatePlan::NotFound => {}
+      other => return other,
+    }
+  }
+  CandidatePlan::NotFound
+}
+
+async fn plan_custom_error_page(
+  method: &Method,
+  status: StatusCode,
+  fallback_message: &str,
+  page: Option<&str>,
+  root: &Path,
+  runtime: &StaticFilesRuntime,
+  static_options: &RouteStaticFilesConfig,
+) -> StaticResponsePlan {
+  let Some(page) = page else {
+    return text_plan(status, fallback_message);
+  };
+  let empty_headers = HeaderMap::new();
+  match plan_candidate_path(
+    method,
+    &empty_headers,
+    root,
+    root_relative_config_path(root, page),
+    runtime,
+    static_options,
+    status,
+    false,
+    false,
+  )
+  .await
+  {
+    CandidatePlan::Found(plan) => *plan,
+    CandidatePlan::NotFound | CandidatePlan::Forbidden => text_plan(status, fallback_message),
   }
 }
 

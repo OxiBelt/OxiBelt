@@ -33,6 +33,7 @@ mod retry;
 mod route;
 mod route_actions;
 mod route_header_policy;
+mod route_static_files;
 mod sni_forward;
 mod source_paths;
 mod stream;
@@ -66,6 +67,7 @@ pub use retry::*;
 pub use route::*;
 pub use route_actions::*;
 pub use route_header_policy::*;
+pub use route_static_files::*;
 pub use sni_forward::*;
 pub use source_paths::ConfigSourcePaths;
 pub use stream::*;
@@ -884,6 +886,7 @@ impl Config {
         route::validate_route_path_value(&route.name, "replace_prefix_with", replacement)?;
       }
       route_actions::validate_route_actions_config(route)?;
+      route_static_files::validate_route_static_files_config(&route.name, &route.static_files)?;
       let target_count = usize::from(route.upstream.is_some())
         + usize::from(route.upstream_pool.is_some())
         + usize::from(route.static_root.is_some())
@@ -947,6 +950,12 @@ impl Config {
         }
         (None, None, None, Some(_)) => {}
         _ => {}
+      }
+      if route.static_root.is_none() && route.static_files.has_convenience_options() {
+        bail!(
+          "route {} cannot set static_files options without static_root",
+          route.name
+        );
       }
       if let Some(cache) = &route.cache
         && cache != "default"
@@ -2134,6 +2143,7 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.upstream == right.upstream
         && left.upstream_pool == right.upstream_pool
         && left.static_root == right.static_root
+        && left.static_files == right.static_files
         && left.upstream_http_version == right.upstream_http_version
         && left.generic_http_upgrade == right.generic_http_upgrade
         && left.connect_tunneling == right.connect_tunneling
@@ -2993,6 +3003,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "external_auth",
       "ipm",
       "static_root",
+      "static_files",
       "upstream",
       "upstream_http_version",
       "upstream_pool",
@@ -3024,6 +3035,17 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "routes.actions.response_headers.add" => &["name", "value"][..],
     "routes.actions.response_headers.set" => &["name", "value"][..],
     "routes.actions.rewrite" => &["path", "query"][..],
+    "routes.static_files" => &[
+      "cache_control",
+      "cache_control_by_extension",
+      "directory_index",
+      "error_pages",
+      "mime_overrides",
+      "precompressed",
+      "spa_fallback",
+      "try_files",
+    ][..],
+    "routes.static_files.error_pages" => &["not_found", "server_error"][..],
     "routes.match" => &[
       "headers",
       "methods",

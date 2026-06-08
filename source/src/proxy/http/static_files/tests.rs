@@ -17,7 +17,7 @@ use pretty_assertions::assert_eq;
 #[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
 
-use crate::config::ProxyStaticFilesConfig;
+use crate::config::{ProxyStaticFilesConfig, RouteStaticFilesConfig};
 
 use super::*;
 
@@ -36,13 +36,75 @@ async fn serve_test(
   static_root: &Path,
 ) -> Response<ProxyBody> {
   let runtime = runtime_for_root(static_root, ProxyStaticFilesConfig::default());
-  serve(
+  serve_with_runtime(
     request,
     route_name,
     route_prefix,
     static_root,
     &runtime,
     16 * 1024,
+  )
+  .await
+}
+
+async fn serve_with_runtime(
+  request: &Request<Empty<Bytes>>,
+  route_name: &str,
+  route_prefix: &str,
+  static_root: &Path,
+  runtime: &StaticFilesRuntime,
+  inline_max_bytes: usize,
+) -> Response<ProxyBody> {
+  let static_options = RouteStaticFilesConfig::default();
+  serve_with_runtime_and_options(
+    request,
+    route_name,
+    route_prefix,
+    static_root,
+    runtime,
+    &static_options,
+    inline_max_bytes,
+  )
+  .await
+}
+
+async fn serve_with_options(
+  request: &Request<Empty<Bytes>>,
+  route_name: &str,
+  route_prefix: &str,
+  static_root: &Path,
+  static_options: &RouteStaticFilesConfig,
+) -> Response<ProxyBody> {
+  let runtime = runtime_for_root(static_root, ProxyStaticFilesConfig::default());
+  serve_with_runtime_and_options(
+    request,
+    route_name,
+    route_prefix,
+    static_root,
+    &runtime,
+    static_options,
+    16 * 1024,
+  )
+  .await
+}
+
+async fn serve_with_runtime_and_options(
+  request: &Request<Empty<Bytes>>,
+  route_name: &str,
+  route_prefix: &str,
+  static_root: &Path,
+  runtime: &StaticFilesRuntime,
+  static_options: &RouteStaticFilesConfig,
+  inline_max_bytes: usize,
+) -> Response<ProxyBody> {
+  serve(
+    request,
+    route_name,
+    route_prefix,
+    static_root,
+    static_options,
+    runtime,
+    inline_max_bytes,
   )
   .await
 }
@@ -66,6 +128,7 @@ fn hot_object_cache_config(
   }
 }
 
+mod convenience;
 mod hot_object_cache;
 
 #[cfg(target_os = "linux")]
@@ -180,6 +243,7 @@ async fn linux_openat2_fifo_open_does_not_block_runtime_worker() {
     ),
     Ok(Some(_)) => panic!("FIFO should not be accepted as a static file"),
     Ok(None) => panic!("openat2 availability was already probed"),
+    Err(StaticOpenError::IsDirectory) => panic!("FIFO should not be classified as a directory"),
     Err(StaticOpenError::NotFound) => panic!("FIFO should exist beneath static_root"),
   }
 }
@@ -221,6 +285,7 @@ async fn linux_openat2_rejects_static_root_swap_after_validation() {
       );
     }
     Err(StaticOpenError::NotFound) => {}
+    Err(StaticOpenError::IsDirectory) => panic!("secret file should not be a directory"),
   }
 }
 
@@ -243,7 +308,7 @@ async fn serve_rejects_static_root_swap_after_validation() {
   tokio::fs::remove_dir_all(&configured_root).await.unwrap();
   std::os::unix::fs::symlink(&attacker_root, &configured_root).unwrap();
 
-  let response = serve(
+  let response = serve_with_runtime(
     &request("/assets/secret.txt"),
     "assets",
     "/assets",
@@ -257,6 +322,44 @@ async fn serve_rejects_static_root_swap_after_validation() {
   let body = response.into_body().collect().await.unwrap().to_bytes();
   assert_eq!(body, Bytes::from_static(b"forbidden"));
   assert_ne!(body, Bytes::from_static(b"OUTSIDE_VALIDATED_ROOT"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn serve_rejects_static_root_replacement_even_when_old_directory_remains() {
+  let temp_dir = common::TempDir::new("static-root-replaced-old-remains");
+  let configured_root = temp_dir.path().join("public");
+  let old_root = temp_dir.path().join("old-public");
+  tokio::fs::create_dir_all(&configured_root).await.unwrap();
+  tokio::fs::write(configured_root.join("secret.txt"), "INSIDE_OLD_ROOT")
+    .await
+    .unwrap();
+  let validated_root = validate_static_root(&configured_root).unwrap();
+  let runtime = runtime_for_root(&validated_root, ProxyStaticFilesConfig::default());
+
+  tokio::fs::rename(&configured_root, &old_root)
+    .await
+    .unwrap();
+  tokio::fs::create_dir_all(&configured_root).await.unwrap();
+  tokio::fs::write(configured_root.join("secret.txt"), "OUTSIDE_REPLACED_ROOT")
+    .await
+    .unwrap();
+
+  let response = serve_with_runtime(
+    &request("/assets/secret.txt"),
+    "assets",
+    "/assets",
+    &validated_root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+  let body = response.into_body().collect().await.unwrap().to_bytes();
+  assert_eq!(body, Bytes::from_static(b"forbidden"));
+  assert_ne!(body, Bytes::from_static(b"INSIDE_OLD_ROOT"));
+  assert_ne!(body, Bytes::from_static(b"OUTSIDE_REPLACED_ROOT"));
 }
 
 #[cfg(target_os = "linux")]
@@ -276,7 +379,7 @@ async fn serve_rejects_cached_static_root_swap_after_validation() {
   let validated_root = validate_static_root(&configured_root).unwrap();
   let runtime = runtime_for_root(&validated_root, hot_object_cache_config(4, 10_000, 1024));
 
-  let first = serve(
+  let first = serve_with_runtime(
     &request("/assets/secret.txt"),
     "assets",
     "/assets",
@@ -293,7 +396,7 @@ async fn serve_rejects_cached_static_root_swap_after_validation() {
 
   tokio::fs::remove_dir_all(&configured_root).await.unwrap();
   std::os::unix::fs::symlink(&attacker_root, &configured_root).unwrap();
-  let swapped = serve(
+  let swapped = serve_with_runtime(
     &request("/assets/secret.txt"),
     "assets",
     "/assets",
@@ -384,6 +487,7 @@ async fn planned_response_body_uses_original_verified_fd_after_path_swap() {
     .await
     .unwrap();
   let request = request("/assets/race.txt");
+  let static_options = RouteStaticFilesConfig::default();
 
   let plan = plan_response(
     request.method(),
@@ -392,6 +496,7 @@ async fn planned_response_body_uses_original_verified_fd_after_path_swap() {
     "assets",
     "/assets",
     &root,
+    &static_options,
     &runtime_for_root(&root, ProxyStaticFilesConfig::default()),
   )
   .await;
@@ -463,7 +568,7 @@ async fn small_file_inline_threshold_marks_known_small_body() {
     .unwrap();
 
   let runtime = runtime_for_root(&root, ProxyStaticFilesConfig::default());
-  let response = serve(
+  let response = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",
@@ -494,7 +599,7 @@ async fn zero_inline_threshold_uses_streaming_body() {
     .unwrap();
 
   let runtime = runtime_for_root(&root, ProxyStaticFilesConfig::default());
-  let response = serve(
+  let response = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",

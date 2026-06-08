@@ -14,16 +14,19 @@ fn hot_object_cache_hits_by_resolved_path() {
     path.clone(),
     "W/\"cache-hit\"".to_owned(),
     None,
+    StaticResponseMetadata::for_path(&path),
     Bytes::from_static(b"cached body"),
   );
   let cached = runtime
-    .cached_object(&root.join("unused-root-key"), &path)
-    .expect("object should be cached by resolved path");
+    .cached_object(&root, &path, &StaticResponseMetadata::for_path(&path))
+    .expect("object should be cached by resolved path and metadata");
 
   assert_eq!(cached.path, path);
   assert_eq!(cached.body, Bytes::from_static(b"cached body"));
-  assert_eq!(cached.full_content_length_header.unwrap(), "11");
-  assert_eq!(cached.content_type_header, "text/plain; charset=utf-8");
+  assert_eq!(
+    cached.response_metadata.content_type,
+    "text/plain; charset=utf-8"
+  );
 }
 
 #[test]
@@ -39,11 +42,16 @@ fn hot_object_cache_expires_entries() {
     path.clone(),
     "W/\"cache-expiry\"".to_owned(),
     None,
+    StaticResponseMetadata::for_path(&path),
     Bytes::from_static(b"cached body"),
   );
   std::thread::sleep(Duration::from_millis(10));
 
-  assert!(runtime.cached_object(&root, &path).is_none());
+  assert!(
+    runtime
+      .cached_object(&root, &path, &StaticResponseMetadata::for_path(&path))
+      .is_none()
+  );
 }
 
 #[test]
@@ -60,6 +68,7 @@ fn hot_object_cache_evicts_oldest_entry_when_full() {
     first.clone(),
     "W/\"first\"".to_owned(),
     None,
+    StaticResponseMetadata::for_path(&first),
     Bytes::from_static(b"first"),
   );
   runtime.store_object(
@@ -67,12 +76,20 @@ fn hot_object_cache_evicts_oldest_entry_when_full() {
     second.clone(),
     "W/\"second\"".to_owned(),
     None,
+    StaticResponseMetadata::for_path(&second),
     Bytes::from_static(b"second"),
   );
 
-  assert!(runtime.cached_object(&root, &first).is_none());
+  assert!(
+    runtime
+      .cached_object(&root, &first, &StaticResponseMetadata::for_path(&first))
+      .is_none()
+  );
   assert_eq!(
-    runtime.cached_object(&root, &second).unwrap().body,
+    runtime
+      .cached_object(&root, &second, &StaticResponseMetadata::for_path(&second))
+      .unwrap()
+      .body,
     Bytes::from_static(b"second")
   );
 }
@@ -91,7 +108,7 @@ async fn hot_object_cache_serves_cached_body_before_ttl() {
     .unwrap();
   let runtime = runtime_for_root(&root, hot_object_cache_config(4, 3_600_000, 1024));
 
-  let first = serve(
+  let first = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",
@@ -109,7 +126,7 @@ async fn hot_object_cache_serves_cached_body_before_ttl() {
   tokio::fs::write(root.join("app.txt"), "updated body")
     .await
     .unwrap();
-  let cached = serve(
+  let cached = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",
@@ -134,7 +151,7 @@ async fn hot_object_cache_revalidates_after_ttl() {
     .unwrap();
   let runtime = runtime_for_root(&root, hot_object_cache_config(4, 1, 1024));
 
-  let first = serve(
+  let first = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",
@@ -154,7 +171,7 @@ async fn hot_object_cache_revalidates_after_ttl() {
     .unwrap();
 
   tokio::time::sleep(Duration::from_millis(20)).await;
-  let refreshed = serve(
+  let refreshed = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",
@@ -181,7 +198,7 @@ async fn hot_object_cache_fails_closed_on_symlink_escape_after_ttl() {
   tokio::fs::write(&outside, "outside secret").await.unwrap();
   let runtime = runtime_for_root(&root, hot_object_cache_config(4, 1, 1024));
 
-  let first = serve(
+  let first = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",
@@ -199,7 +216,7 @@ async fn hot_object_cache_fails_closed_on_symlink_escape_after_ttl() {
   tokio::fs::remove_file(root.join("app.txt")).await.unwrap();
   std::os::unix::fs::symlink(&outside, root.join("app.txt")).unwrap();
   tokio::time::sleep(Duration::from_millis(20)).await;
-  let escaped = serve(
+  let escaped = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",

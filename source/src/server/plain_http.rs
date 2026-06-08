@@ -425,6 +425,7 @@ async fn eligible_static_plan(
     &resolved.route.name,
     resolved.route.effective_path_prefix(),
     static_root,
+    &resolved.route.static_files,
     &snapshot.static_files,
   )
   .await;

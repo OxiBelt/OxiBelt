@@ -16,9 +16,9 @@ use oxibelt::config::{
     MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode,
     ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
     RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
-    StreamNetwork, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
-    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-    UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    StaticPrecompressedEncoding, StreamNetwork, TlsKeyExchangeGroup, TlsServerResumptionMode,
+    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{PersonProofTokenBinding, WafMode};
@@ -9661,6 +9661,193 @@ static_root = "{static_root}"
     assert_eq!(
         config.routes[0].static_root.as_deref(),
         Some(static_root.as_path())
+    );
+}
+
+#[test]
+fn static_route_static_files_options_parse_and_validate() {
+    let temp_dir = common::TempDir::new("static-route-options");
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "static-options");
+    let static_root = temp_dir.path().join("public");
+    std::fs::create_dir_all(&static_root).expect("static root should be created");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        &format!(
+            r#"static_root = "{static_root}"
+
+[routes.static_files]
+directory_index = ["index.html"]
+try_files = ["{{path}}.html", "/index.html"]
+spa_fallback = "/index.html"
+precompressed = ["br", "zstd", "gzip"]
+cache_control = "public, max-age=60"
+
+[routes.static_files.cache_control_by_extension]
+js = "public, max-age=31536000"
+
+[routes.static_files.mime_overrides]
+wasm = "application/wasm"
+
+[routes.static_files.error_pages]
+not_found = "/404.html"
+server_error = "/50x.html""#,
+            static_root = static_root.display()
+        ),
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("static route options should validate");
+    let static_files = &config.routes[0].static_files;
+    assert_eq!(static_files.directory_index, ["index.html"]);
+    assert_eq!(static_files.try_files, ["{path}.html", "/index.html"]);
+    assert_eq!(static_files.spa_fallback.as_deref(), Some("/index.html"));
+    assert_eq!(
+        static_files.precompressed,
+        [
+            StaticPrecompressedEncoding::Br,
+            StaticPrecompressedEncoding::Zstd,
+            StaticPrecompressedEncoding::Gzip
+        ]
+    );
+    assert_eq!(
+        static_files.cache_control_by_extension["js"],
+        "public, max-age=31536000"
+    );
+    assert_eq!(static_files.mime_overrides["wasm"], "application/wasm");
+    assert_eq!(
+        static_files.error_pages.not_found.as_deref(),
+        Some("/404.html")
+    );
+    assert_eq!(
+        static_files.error_pages.server_error.as_deref(),
+        Some("/50x.html")
+    );
+}
+
+#[test]
+fn static_route_static_files_reject_invalid_options() {
+    let temp_dir = common::TempDir::new("static-route-options-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "static-options-invalid");
+    let static_root = temp_dir.path().join("public");
+    std::fs::create_dir_all(&static_root).expect("static root should be created");
+    let base = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        &format!(
+            r#"static_root = "{static_root}"
+
+[routes.static_files]
+"#,
+            static_root = static_root.display()
+        ),
+    );
+
+    for (settings, expected) in [
+        (
+            r#"directory_index = ["../index.html"]"#,
+            "must be a simple filename",
+        ),
+        (
+            r#"try_files = ["{host}.html"]"#,
+            "may only use the {path} placeholder",
+        ),
+        (r#"cache_control = "public\nbad""#, "invalid header value"),
+        (
+            r#"spa_fallback = "../index.html""#,
+            "must be an absolute path under static_root",
+        ),
+        (
+            r#"[routes.static_files.mime_overrides]
+".wasm" = "application/wasm""#,
+            "lowercase extension without a leading dot",
+        ),
+        (
+            r#"[routes.static_files.error_pages]
+server_error = "/../50x.html""#,
+            "contains an invalid path segment",
+        ),
+        (
+            r#"precompressed = ["gzip", "gzip"]"#,
+            "duplicate encoding gzip",
+        ),
+    ] {
+        let raw = format!("{base}{settings}");
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid static route option should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error:#}"
+        );
+    }
+}
+
+#[test]
+fn static_route_static_files_rejects_unknown_fields_and_non_static_routes() {
+    let temp_dir = common::TempDir::new("static-route-options-strict");
+    let config_path = write_loadable_config(&temp_dir, "static-route-options-strict", |raw| {
+        raw.replace(
+            "upstream = \"app\"",
+            r#"upstream = "app"
+
+[routes.static_files]
+directory_index = ["index.html"]
+unexpected = true"#,
+        )
+    });
+    let error = Config::load(&config_path).expect_err("unknown static file field should fail");
+    assert!(
+        error.to_string().contains("routes.static_files.unexpected"),
+        "unexpected error: {error:#}"
+    );
+
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "static-options-non-static");
+    let raw = format!(
+        r#"{}
+
+[routes.static_files]
+directory_index = ["index.html"]
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("static_files options without static_root should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot set static_files options without static_root"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn static_route_static_files_rejects_unknown_precompressed_encoding() {
+    let temp_dir = common::TempDir::new("static-route-options-precompressed");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "static-options-precompressed");
+    let static_root = temp_dir.path().join("public");
+    std::fs::create_dir_all(&static_root).expect("static root should be created");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        &format!(
+            r#"static_root = "{static_root}"
+
+[routes.static_files]
+precompressed = ["brotli"]"#,
+            static_root = static_root.display()
+        ),
+    );
+
+    let error = toml::from_str::<Config>(&raw).expect_err("unknown encoding should fail parse");
+    assert!(
+        error.to_string().contains("unknown variant") && error.to_string().contains("brotli"),
+        "unexpected error: {error}"
     );
 }
 

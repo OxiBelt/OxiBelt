@@ -893,6 +893,7 @@ where
       &resolved.route.name,
       resolved.route.effective_path_prefix(),
       static_root,
+      &resolved.route.static_files,
       &state.static_files,
       state.config.proxy.static_files.inline_max_bytes,
     )

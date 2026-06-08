@@ -242,6 +242,7 @@ mod tests {
       upstream: Some("app".to_string()),
       upstream_pool: None,
       static_root: None,
+      static_files: Default::default(),
       upstream_http_version: None,
       generic_http_upgrade: false,
       connect_tunneling: false,
