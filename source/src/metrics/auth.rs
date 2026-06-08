@@ -78,3 +78,36 @@ pub(super) fn append_auth_and_mirror_metrics(output: &mut String, metrics: &Metr
     metrics.request_mirror_skips_total.load(Ordering::Relaxed),
   );
 }
+
+#[cfg(test)]
+mod tests {
+  use crate::cache::CacheStats;
+  use crate::config::MetricsConfig;
+  use crate::tls::TlsServerSessionStorageStats;
+
+  use super::*;
+
+  #[test]
+  fn prometheus_output_records_external_auth_and_request_mirror_outcomes() {
+    let metrics = Metrics::default();
+    metrics.record_external_auth_allowed();
+    metrics.record_external_auth_denied();
+    metrics.record_external_auth_error();
+    metrics.record_request_mirror_success();
+    metrics.record_request_mirror_error();
+    metrics.record_request_mirror_skip();
+
+    let output = metrics.prometheus(
+      &MetricsConfig::default(),
+      CacheStats::default(),
+      TlsServerSessionStorageStats::default(),
+    );
+
+    assert!(output.contains("oxibelt_external_auth_allowed_total 1\n"));
+    assert!(output.contains("oxibelt_external_auth_denied_total 1\n"));
+    assert!(output.contains("oxibelt_external_auth_errors_total 1\n"));
+    assert!(output.contains("oxibelt_request_mirror_success_total 1\n"));
+    assert!(output.contains("oxibelt_request_mirror_errors_total 1\n"));
+    assert!(output.contains("oxibelt_request_mirror_skips_total 1\n"));
+  }
+}

@@ -152,30 +152,7 @@ impl ExternalAuthRuntime {
       ExternalAuthProvider::OAuth2 => inner.check_oauth2(provider, context).await,
       ExternalAuthProvider::Oidc => inner.check_oidc(provider, context).await,
     };
-    match result {
-      Ok(AuthCheck::Allowed(identity)) => {
-        apply_identity_headers(request.headers_mut(), provider, identity);
-        inner.metrics.record_external_auth_allowed();
-        ExternalAuthOutcome::Allowed
-      }
-      Ok(AuthCheck::Denied(terminal)) => {
-        inner.metrics.record_external_auth_denied();
-        ExternalAuthOutcome::Denied(terminal)
-      }
-      Err(error) if provider.config.fail_policy == ExternalAuthFailPolicy::Open => {
-        warn!(provider = %provider.config.name, error = %error, "external auth failed open");
-        inner.metrics.record_external_auth_error();
-        ExternalAuthOutcome::Allowed
-      }
-      Err(error) => {
-        warn!(provider = %provider.config.name, error = %error, "external auth failed closed");
-        inner.metrics.record_external_auth_error();
-        fail_closed(
-          StatusCode::SERVICE_UNAVAILABLE,
-          "external authorization failed",
-        )
-      }
-    }
+    finish_auth_check(request, provider, inner.metrics.as_ref(), result)
   }
 }
 
@@ -554,6 +531,38 @@ fn fail_closed(status: StatusCode, message: &str) -> ExternalAuthOutcome {
   })
 }
 
+fn finish_auth_check<B>(
+  request: &mut Request<B>,
+  provider: &ExternalAuthProviderRuntime,
+  metrics: &Metrics,
+  result: anyhow::Result<AuthCheck>,
+) -> ExternalAuthOutcome {
+  match result {
+    Ok(AuthCheck::Allowed(identity)) => {
+      apply_identity_headers(request.headers_mut(), provider, identity);
+      metrics.record_external_auth_allowed();
+      ExternalAuthOutcome::Allowed
+    }
+    Ok(AuthCheck::Denied(terminal)) => {
+      metrics.record_external_auth_denied();
+      ExternalAuthOutcome::Denied(terminal)
+    }
+    Err(error) if provider.config.fail_policy == ExternalAuthFailPolicy::Open => {
+      warn!(provider = %provider.config.name, error = %error, "external auth failed open");
+      metrics.record_external_auth_error();
+      ExternalAuthOutcome::Allowed
+    }
+    Err(error) => {
+      warn!(provider = %provider.config.name, error = %error, "external auth failed closed");
+      metrics.record_external_auth_error();
+      fail_closed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "external authorization failed",
+      )
+    }
+  }
+}
+
 fn www_authenticate_header() -> HeaderMap {
   let mut headers = HeaderMap::new();
   headers.insert(
@@ -564,145 +573,4 @@ fn www_authenticate_header() -> HeaderMap {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn provider_with_headers(
-    identity_headers: &[&str],
-    terminal_headers: &[&str],
-  ) -> ExternalAuthProviderRuntime {
-    ExternalAuthProviderRuntime {
-      config: ExternalAuthConfig {
-        name: "edge-auth".to_string(),
-        provider: ExternalAuthProvider::Authelia,
-        endpoint: "http://127.0.0.1:9000/api/authz/forward-auth"
-          .parse()
-          .expect("valid auth endpoint"),
-        timeout_ms: 1_000,
-        fail_policy: ExternalAuthFailPolicy::Closed,
-        forward_headers: Vec::new(),
-        identity_headers: identity_headers
-          .iter()
-          .map(|header| header.to_string())
-          .collect(),
-        terminal_response_headers: terminal_headers
-          .iter()
-          .map(|header| header.to_string())
-          .collect(),
-        max_response_body_bytes: 4_096,
-        client_id_env: None,
-        client_secret_env: None,
-        required_scopes: Vec::new(),
-        required_claims: Vec::new(),
-        claim_headers: Vec::new(),
-      },
-      forward_headers: Vec::new(),
-      identity_headers: identity_headers
-        .iter()
-        .map(|header| HeaderName::from_bytes(header.as_bytes()).expect("valid header"))
-        .collect(),
-      terminal_response_headers: terminal_headers
-        .iter()
-        .map(|header| HeaderName::from_bytes(header.as_bytes()).expect("valid header"))
-        .collect(),
-      claim_headers: Vec::new(),
-      client_credentials: None,
-    }
-  }
-
-  #[test]
-  fn bearer_token_accepts_case_insensitive_scheme_and_rejects_ambiguous_values() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-      http::header::AUTHORIZATION,
-      HeaderValue::from_static("bearer token-123"),
-    );
-    assert_eq!(bearer_token(&headers), Some("token-123"));
-
-    headers.insert(
-      http::header::AUTHORIZATION,
-      HeaderValue::from_static("Bearer token extra"),
-    );
-    assert_eq!(bearer_token(&headers), None);
-
-    headers.insert(
-      http::header::AUTHORIZATION,
-      HeaderValue::from_static("Basic token-123"),
-    );
-    assert_eq!(bearer_token(&headers), None);
-  }
-
-  #[test]
-  fn required_scopes_must_all_be_present() {
-    let required = vec!["read".to_string(), "admin".to_string()];
-    assert!(required_scopes_match(Some("openid read admin"), &required));
-    assert!(!required_scopes_match(Some("openid read"), &required));
-    assert!(!required_scopes_match(None, &required));
-    assert!(required_scopes_match(None, &[]));
-  }
-
-  #[test]
-  fn identity_headers_are_stripped_then_reapplied_from_trusted_values() {
-    let provider = provider_with_headers(&["remote-user", "remote-email"], &[]);
-    let mut request = Request::builder()
-      .header("remote-user", "spoofed")
-      .header("remote-email", "spoofed@example.com")
-      .body(())
-      .expect("request builds");
-
-    strip_identity_headers(request.headers_mut(), &provider.identity_headers);
-    assert!(request.headers().get("remote-user").is_none());
-    assert!(request.headers().get("remote-email").is_none());
-
-    apply_identity_headers(
-      request.headers_mut(),
-      &provider,
-      HashMap::from([("remote-user".to_string(), "alice".to_string())]),
-    );
-    assert_eq!(request.headers().get("remote-user").unwrap(), "alice");
-    assert!(request.headers().get("remote-email").is_none());
-  }
-
-  #[test]
-  fn denied_forward_auth_response_only_preserves_allowlisted_headers() {
-    let provider = provider_with_headers(&[], &["location", "set-cookie"]);
-    let mut headers = HeaderMap::new();
-    headers.insert(http::header::LOCATION, HeaderValue::from_static("/login"));
-    headers.append(http::header::SET_COOKIE, HeaderValue::from_static("sid=1"));
-    headers.insert("x-internal-error", HeaderValue::from_static("secret"));
-
-    let terminal = filter_terminal_response(
-      StatusCode::FOUND,
-      headers,
-      Bytes::from_static(b"redirect"),
-      &provider,
-    );
-
-    assert_eq!(terminal.status, StatusCode::FOUND);
-    assert_eq!(
-      terminal.headers.get(http::header::LOCATION).unwrap(),
-      "/login"
-    );
-    assert_eq!(
-      terminal.headers.get(http::header::SET_COOKIE).unwrap(),
-      "sid=1"
-    );
-    assert!(terminal.headers.get("x-internal-error").is_none());
-  }
-
-  #[test]
-  fn claim_values_are_rendered_only_for_header_safe_scalars_and_string_arrays() {
-    assert_eq!(
-      claim_to_string(Some(&serde_json::json!(["dev", "ops"]))),
-      Some("dev,ops".to_string())
-    );
-    assert_eq!(
-      claim_to_string(Some(&serde_json::json!(true))),
-      Some("true".to_string())
-    );
-    assert_eq!(
-      claim_to_string(Some(&serde_json::json!({ "sub": "a" }))),
-      None
-    );
-  }
-}
+mod tests;

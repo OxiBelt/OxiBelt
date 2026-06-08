@@ -1,0 +1,244 @@
+use super::*;
+
+fn provider_with_headers(
+  identity_headers: &[&str],
+  terminal_headers: &[&str],
+) -> ExternalAuthProviderRuntime {
+  provider_with_kind_and_fail_policy(
+    ExternalAuthProvider::Authelia,
+    ExternalAuthFailPolicy::Closed,
+    identity_headers,
+    terminal_headers,
+  )
+}
+
+fn provider_with_kind_and_fail_policy(
+  provider: ExternalAuthProvider,
+  fail_policy: ExternalAuthFailPolicy,
+  identity_headers: &[&str],
+  terminal_headers: &[&str],
+) -> ExternalAuthProviderRuntime {
+  ExternalAuthProviderRuntime {
+    config: ExternalAuthConfig {
+      name: "edge-auth".to_string(),
+      provider,
+      endpoint: "http://127.0.0.1:9000/api/authz/forward-auth"
+        .parse()
+        .expect("valid auth endpoint"),
+      timeout_ms: 1_000,
+      fail_policy,
+      forward_headers: Vec::new(),
+      identity_headers: identity_headers
+        .iter()
+        .map(|header| header.to_string())
+        .collect(),
+      terminal_response_headers: terminal_headers
+        .iter()
+        .map(|header| header.to_string())
+        .collect(),
+      max_response_body_bytes: 4_096,
+      client_id_env: None,
+      client_secret_env: None,
+      required_scopes: Vec::new(),
+      required_claims: Vec::new(),
+      claim_headers: Vec::new(),
+    },
+    forward_headers: Vec::new(),
+    identity_headers: identity_headers
+      .iter()
+      .map(|header| HeaderName::from_bytes(header.as_bytes()).expect("valid header"))
+      .collect(),
+    terminal_response_headers: terminal_headers
+      .iter()
+      .map(|header| HeaderName::from_bytes(header.as_bytes()).expect("valid header"))
+      .collect(),
+    claim_headers: Vec::new(),
+    client_credentials: None,
+  }
+}
+
+fn prometheus_for(metrics: &Metrics) -> String {
+  metrics.prometheus(
+    &crate::config::MetricsConfig::default(),
+    crate::cache::CacheStats::default(),
+    crate::tls::TlsServerSessionStorageStats::default(),
+  )
+}
+
+fn assert_metric(output: &str, metric: &str, value: u64) {
+  assert!(
+    output.contains(&format!("{metric} {value}\n")),
+    "missing {metric} {value} in:\n{output}"
+  );
+}
+
+#[test]
+fn bearer_token_accepts_case_insensitive_scheme_and_rejects_ambiguous_values() {
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    http::header::AUTHORIZATION,
+    HeaderValue::from_static("bearer token-123"),
+  );
+  assert_eq!(bearer_token(&headers), Some("token-123"));
+
+  headers.insert(
+    http::header::AUTHORIZATION,
+    HeaderValue::from_static("Bearer token extra"),
+  );
+  assert_eq!(bearer_token(&headers), None);
+
+  headers.insert(
+    http::header::AUTHORIZATION,
+    HeaderValue::from_static("Basic token-123"),
+  );
+  assert_eq!(bearer_token(&headers), None);
+}
+
+#[test]
+fn required_scopes_must_all_be_present() {
+  let required = vec!["read".to_string(), "admin".to_string()];
+  assert!(required_scopes_match(Some("openid read admin"), &required));
+  assert!(!required_scopes_match(Some("openid read"), &required));
+  assert!(!required_scopes_match(None, &required));
+  assert!(required_scopes_match(None, &[]));
+}
+
+#[test]
+fn identity_headers_are_stripped_then_reapplied_from_trusted_values() {
+  let provider = provider_with_headers(&["remote-user", "remote-email"], &[]);
+  let mut request = Request::builder()
+    .header("remote-user", "spoofed")
+    .header("remote-email", "spoofed@example.com")
+    .body(())
+    .expect("request builds");
+
+  strip_identity_headers(request.headers_mut(), &provider.identity_headers);
+  assert!(request.headers().get("remote-user").is_none());
+  assert!(request.headers().get("remote-email").is_none());
+
+  apply_identity_headers(
+    request.headers_mut(),
+    &provider,
+    HashMap::from([("remote-user".to_string(), "alice".to_string())]),
+  );
+  assert_eq!(request.headers().get("remote-user").unwrap(), "alice");
+  assert!(request.headers().get("remote-email").is_none());
+}
+
+#[test]
+fn denied_forward_auth_response_only_preserves_allowlisted_headers() {
+  let provider = provider_with_headers(&[], &["location", "set-cookie"]);
+  let mut headers = HeaderMap::new();
+  headers.insert(http::header::LOCATION, HeaderValue::from_static("/login"));
+  headers.append(http::header::SET_COOKIE, HeaderValue::from_static("sid=1"));
+  headers.insert("x-internal-error", HeaderValue::from_static("secret"));
+
+  let terminal = filter_terminal_response(
+    StatusCode::FOUND,
+    headers,
+    Bytes::from_static(b"redirect"),
+    &provider,
+  );
+
+  assert_eq!(terminal.status, StatusCode::FOUND);
+  assert_eq!(
+    terminal.headers.get(http::header::LOCATION).unwrap(),
+    "/login"
+  );
+  assert_eq!(
+    terminal.headers.get(http::header::SET_COOKIE).unwrap(),
+    "sid=1"
+  );
+  assert!(terminal.headers.get("x-internal-error").is_none());
+}
+
+#[test]
+fn gateway_http_auth_outcomes_record_allow_deny_and_error_paths() {
+  let metrics = Metrics::default();
+  let provider = provider_with_kind_and_fail_policy(
+    ExternalAuthProvider::GatewayExtAuthHttp,
+    ExternalAuthFailPolicy::Closed,
+    &["x-auth-user"],
+    &[],
+  );
+  let mut request = Request::builder().body(()).expect("request should build");
+
+  let allowed = finish_auth_check(
+    &mut request,
+    &provider,
+    &metrics,
+    Ok(AuthCheck::Allowed(HashMap::from([(
+      "x-auth-user".to_string(),
+      "alice".to_string(),
+    )]))),
+  );
+  assert!(matches!(allowed, ExternalAuthOutcome::Allowed));
+  assert_eq!(request.headers().get("x-auth-user").unwrap(), "alice");
+
+  let denied = finish_auth_check(
+    &mut request,
+    &provider,
+    &metrics,
+    Ok(AuthCheck::Denied(ExternalAuthTerminal {
+      status: StatusCode::FORBIDDEN,
+      headers: HeaderMap::new(),
+      body: Bytes::from_static(b"denied"),
+    })),
+  );
+  assert!(matches!(
+    denied,
+    ExternalAuthOutcome::Denied(ExternalAuthTerminal {
+      status: StatusCode::FORBIDDEN,
+      ..
+    })
+  ));
+
+  let failed_closed = finish_auth_check(
+    &mut request,
+    &provider,
+    &metrics,
+    Err(anyhow::anyhow!("auth backend unavailable")),
+  );
+  assert!(matches!(
+    failed_closed,
+    ExternalAuthOutcome::Denied(ExternalAuthTerminal {
+      status: StatusCode::SERVICE_UNAVAILABLE,
+      ..
+    })
+  ));
+
+  let fail_open_provider = provider_with_kind_and_fail_policy(
+    ExternalAuthProvider::GatewayExtAuthHttp,
+    ExternalAuthFailPolicy::Open,
+    &[],
+    &[],
+  );
+  let fail_open = finish_auth_check(
+    &mut request,
+    &fail_open_provider,
+    &metrics,
+    Err(anyhow::anyhow!("temporary auth backend error")),
+  );
+  assert!(matches!(fail_open, ExternalAuthOutcome::Allowed));
+
+  let output = prometheus_for(&metrics);
+  assert_metric(&output, "oxibelt_external_auth_allowed_total", 1);
+  assert_metric(&output, "oxibelt_external_auth_denied_total", 1);
+  assert_metric(&output, "oxibelt_external_auth_errors_total", 2);
+}
+
+#[test]
+fn claim_values_are_rendered_only_for_header_safe_scalars_and_string_arrays() {
+  assert_eq!(
+    claim_to_string(Some(&serde_json::json!(["dev", "ops"]))),
+    Some("dev,ops".to_string())
+  );
+  assert_eq!(
+    claim_to_string(Some(&serde_json::json!(true))),
+    Some("true".to_string())
+  );
+  assert_eq!(
+    claim_to_string(Some(&serde_json::json!({ "sub": "a" }))),
+    None
+  );
+}
