@@ -47,6 +47,19 @@ fn write_test_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test file should be writable");
 }
 
+fn write_executable(path: &Path, contents: &str) {
+    write_test_file(path, contents);
+    let mut permissions = fs::metadata(path)
+        .expect("executable test file should have metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+    }
+    fs::set_permissions(path, permissions).expect("test executable permissions should be writable");
+}
+
 fn dockerfile_text() -> String {
     fs::read_to_string(repo_root().join("source/ops/Dockerfile.alpine"))
         .expect("Alpine Dockerfile should be readable")
@@ -653,6 +666,81 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
             "Buildx setup at byte offset {setup_position} should be immediately preceded by the BuildKit pre-pull step"
         );
         search_start = setup_position + setup_marker.len();
+    }
+}
+
+#[test]
+fn docker_retry_helpers_preserve_failed_command_status() {
+    let repo = repo_root();
+    let temp_dir = tempfile::Builder::new()
+        .prefix("oxibelt-docker-retry-")
+        .tempdir()
+        .expect("temporary directory should be creatable");
+    let bin_dir = temp_dir.path().join("bin");
+    write_executable(
+        &bin_dir.join("docker"),
+        "#!/usr/bin/env bash\nprintf 'fake docker called: %s\\n' \"$*\" >&2\nexit 42\n",
+    );
+    write_executable(
+        &bin_dir.join("sleep"),
+        "#!/usr/bin/env bash\nprintf 'fake sleep skipped: %s\\n' \"$*\" >&2\nexit 0\n",
+    );
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let shimmed_path = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+    let cases = [
+        (
+            "BuildKit pre-pull helper",
+            repo.join("tests/scripts/retry-docker-pull.sh"),
+            vec!["synthetic/image:fail".to_owned()],
+        ),
+        (
+            "performance probe image helper",
+            repo.join("tests/scripts/build-performance-probe-image-artifact.sh"),
+            vec![
+                "linux/amd64".to_owned(),
+                temp_dir
+                    .path()
+                    .join("performance-probe-output")
+                    .display()
+                    .to_string(),
+            ],
+        ),
+        (
+            "Docker integration helper image helper",
+            repo.join("tests/scripts/build-docker-integration-helper-images-artifact.sh"),
+            vec![
+                "linux/amd64".to_owned(),
+                temp_dir
+                    .path()
+                    .join("integration-helper-output")
+                    .display()
+                    .to_string(),
+            ],
+        ),
+    ];
+
+    for (label, script, args) in cases {
+        let output = Command::new("bash")
+            .arg(&script)
+            .args(&args)
+            .current_dir(&repo)
+            .env("PATH", &shimmed_path)
+            .output()
+            .unwrap_or_else(|error| panic!("{label} should execute: {error}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(42),
+            "{label} should propagate failed docker status: stderr={stderr}"
+        );
+        assert!(
+            stderr.contains("Command failed with status 42"),
+            "{label} should log the real failed docker status: stderr={stderr}"
+        );
+        assert!(
+            !stderr.contains("Command failed with status 0"),
+            "{label} should not mask failed docker status as success: stderr={stderr}"
+        );
     }
 }
 

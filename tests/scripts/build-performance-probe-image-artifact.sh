@@ -32,9 +32,7 @@ retry_command() {
   local attempt status
 
   for attempt in $(seq 1 "${attempts}"); do
-    if "$@"; then
-      return 0
-    fi
+    "$@" && return 0
     status=$?
     if [[ "${attempt}" == "${attempts}" ]]; then
       return "${status}"
