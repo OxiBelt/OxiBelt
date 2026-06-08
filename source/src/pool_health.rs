@@ -1,17 +1,24 @@
 //! Upstream health snapshot projection for admin and diagnostics.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::convert::Infallible;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Empty};
+use http::header::HOST;
+use http::{HeaderName, HeaderValue, StatusCode};
+use http_body_util::{BodyExt, Empty, Limited};
+use hyper::body::Incoming;
+use regex::Regex;
 use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use crate::config::{
   GrpcHealthServingStatus, HealthCheckMode, HealthCheckProtocol, HttpVersion, UpstreamPoolConfig,
+  UpstreamPoolHealthCheckConfig,
 };
 use crate::state::{AppHandle, AppSnapshot, UpstreamBody};
 
@@ -41,7 +48,7 @@ pub(crate) async fn run_pool_health_checks(state: AppHandle, mut shutdown: watch
           continue;
         }
 
-        *due = now + Duration::from_millis(pool.health_check.interval_ms);
+        *due = now + next_check_delay(&pool.health_check, &upstream_name);
         if check_pool_server(snapshot.clone(), pool, index, &upstream_name).await {
           snapshot.pools.report_active_success(&upstream_name);
         } else {
@@ -68,11 +75,13 @@ async fn check_pool_server(
     return check_grpc_pool_server(snapshot, pool, index, upstream_name).await;
   }
 
-  let mut url = server.origin.clone();
-  url.set_path(&pool.health_check.path);
-  url.set_query(None);
-  url.set_fragment(None);
-
+  let url = match health_check_url(&server.origin, &pool.health_check, false) {
+    Ok(url) => url,
+    Err(error) => {
+      warn!(error = %error, upstream = upstream_name, "active health check URL is invalid");
+      return false;
+    }
+  };
   let uri = match url.as_str().parse::<http::Uri>() {
     Ok(uri) => uri,
     Err(error) => {
@@ -81,11 +90,11 @@ async fn check_pool_server(
     }
   };
 
-  let Some(client) =
-    snapshot
-      .clients
-      .for_upstream_version(upstream_name, server.origin.scheme(), HttpVersion::H1)
-  else {
+  let Some(client) = snapshot.health_check_clients.for_upstream_version(
+    upstream_name,
+    server.origin.scheme(),
+    HttpVersion::H1,
+  ) else {
     warn!(
       upstream = upstream_name,
       "active health check upstream client is not configured"
@@ -93,11 +102,7 @@ async fn check_pool_server(
     return false;
   };
 
-  let request = match http::Request::builder()
-    .method(http::Method::GET)
-    .uri(uri)
-    .body(empty_body())
-  {
+  let request = match build_http_health_request(&pool.health_check, uri) {
     Ok(request) => request,
     Err(error) => {
       warn!(error = %error, upstream = upstream_name, "failed to build active health check request");
@@ -125,14 +130,16 @@ async fn check_pool_server(
     }
   };
 
-  let healthy = pool
-    .health_check
-    .expected_status
-    .iter()
-    .any(|status| *status == response.status().as_u16());
+  let status = response.status();
+  let status_matches = health_status_matches(&pool.health_check, status);
+  let healthy = if status_matches {
+    http_response_body_matches(response.into_body(), &pool.health_check, upstream_name).await
+  } else {
+    false
+  };
   debug!(
     upstream = upstream_name,
-    status = response.status().as_u16(),
+    status = status.as_u16(),
     healthy,
     "active health check completed"
   );
@@ -146,10 +153,13 @@ async fn check_grpc_pool_server(
   upstream_name: &str,
 ) -> bool {
   let server = &pool.servers[index];
-  let mut url = server.origin.clone();
-  url.set_path("/grpc.health.v1.Health/Check");
-  url.set_query(None);
-  url.set_fragment(None);
+  let url = match health_check_url(&server.origin, &pool.health_check, true) {
+    Ok(url) => url,
+    Err(error) => {
+      warn!(error = %error, upstream = upstream_name, "gRPC active health check URL is invalid");
+      return false;
+    }
+  };
 
   let uri = match url.as_str().parse::<http::Uri>() {
     Ok(uri) => uri,
@@ -159,11 +169,11 @@ async fn check_grpc_pool_server(
     }
   };
 
-  let Some(client) =
-    snapshot
-      .clients
-      .for_upstream_version(upstream_name, server.origin.scheme(), HttpVersion::H2)
-  else {
+  let Some(client) = snapshot.health_check_clients.for_upstream_version(
+    upstream_name,
+    server.origin.scheme(),
+    HttpVersion::H2,
+  ) else {
     warn!(
       upstream = upstream_name,
       "gRPC active health check upstream client is not configured"
@@ -171,14 +181,7 @@ async fn check_grpc_pool_server(
     return false;
   };
 
-  let request = match http::Request::builder()
-    .method(http::Method::POST)
-    .uri(uri)
-    .header(http::header::CONTENT_TYPE, "application/grpc")
-    .header(http::header::TE, "trailers")
-    .body(full_body(encode_grpc_health_request(
-      &pool.health_check.grpc_service,
-    ))) {
+  let request = match build_grpc_health_request(&pool.health_check, uri) {
     Ok(request) => request,
     Err(error) => {
       warn!(error = %error, upstream = upstream_name, "failed to build gRPC active health check request");
@@ -216,7 +219,10 @@ async fn check_grpc_pool_server(
   }
 
   let (parts, body) = response.into_parts();
-  let collected = match body.collect().await {
+  let collected = match Limited::new(body, pool.health_check.body_match_max_bytes)
+    .collect()
+    .await
+  {
     Ok(collected) => collected,
     Err(error) => {
       debug!(error = %error, upstream = upstream_name, "failed to read gRPC active health check response");
@@ -255,6 +261,151 @@ async fn check_grpc_pool_server(
     "gRPC active health check completed"
   );
   healthy
+}
+
+fn next_check_delay(health_check: &UpstreamPoolHealthCheckConfig, upstream_name: &str) -> Duration {
+  Duration::from_millis(health_check.interval_ms)
+    + jitter_duration(upstream_name, health_check.jitter_ms)
+}
+
+fn jitter_duration(upstream_name: &str, jitter_ms: u64) -> Duration {
+  if jitter_ms == 0 {
+    return Duration::ZERO;
+  }
+  let seed = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|duration| duration.as_nanos() as u64)
+    .unwrap_or_default();
+  let mut hasher = DefaultHasher::new();
+  upstream_name.hash(&mut hasher);
+  seed.hash(&mut hasher);
+  Duration::from_millis(bounded_jitter_ms(hasher.finish(), jitter_ms))
+}
+
+fn bounded_jitter_ms(seed: u64, jitter_ms: u64) -> u64 {
+  if jitter_ms == 0 {
+    return 0;
+  }
+  seed % (jitter_ms + 1)
+}
+
+pub(crate) fn health_check_url(
+  origin: &url::Url,
+  health_check: &UpstreamPoolHealthCheckConfig,
+  grpc: bool,
+) -> anyhow::Result<url::Url> {
+  let mut url = origin.clone();
+  if let Some(port) = health_check.health_port {
+    url
+      .set_port(Some(port))
+      .map_err(|()| anyhow::anyhow!("failed to apply health_check.health_port"))?;
+  }
+  url.set_path(if grpc {
+    "/grpc.health.v1.Health/Check"
+  } else {
+    &health_check.path
+  });
+  url.set_query(None);
+  url.set_fragment(None);
+  Ok(url)
+}
+
+pub(crate) fn build_http_health_request(
+  health_check: &UpstreamPoolHealthCheckConfig,
+  uri: http::Uri,
+) -> anyhow::Result<http::Request<UpstreamBody>> {
+  let method = http::Method::from_bytes(health_check.method.as_bytes())?;
+  let body = if health_check.body.is_empty() {
+    empty_body()
+  } else {
+    full_body(Bytes::from(health_check.body.clone()))
+  };
+  let mut request = http::Request::builder()
+    .method(method)
+    .uri(uri)
+    .body(body)?;
+  apply_configured_health_headers(&mut request, health_check)?;
+  Ok(request)
+}
+
+fn build_grpc_health_request(
+  health_check: &UpstreamPoolHealthCheckConfig,
+  uri: http::Uri,
+) -> anyhow::Result<http::Request<UpstreamBody>> {
+  let mut request = http::Request::builder()
+    .method(http::Method::POST)
+    .uri(uri)
+    .header(http::header::CONTENT_TYPE, "application/grpc")
+    .header(http::header::TE, "trailers")
+    .body(full_body(encode_grpc_health_request(
+      &health_check.grpc_service,
+    )))?;
+  apply_configured_health_headers(&mut request, health_check)?;
+  Ok(request)
+}
+
+fn apply_configured_health_headers(
+  request: &mut http::Request<UpstreamBody>,
+  health_check: &UpstreamPoolHealthCheckConfig,
+) -> anyhow::Result<()> {
+  if let Some(host) = health_check.health_host.as_deref() {
+    request
+      .headers_mut()
+      .insert(HOST, HeaderValue::from_str(host)?);
+  }
+  for header in &health_check.headers {
+    request.headers_mut().append(
+      HeaderName::from_bytes(header.name.as_bytes())?,
+      HeaderValue::from_str(&header.value)?,
+    );
+  }
+  Ok(())
+}
+
+pub(crate) fn health_status_matches(
+  health_check: &UpstreamPoolHealthCheckConfig,
+  status: StatusCode,
+) -> bool {
+  let status = status.as_u16();
+  health_check.expected_status.contains(&status)
+    || health_check
+      .expected_status_ranges
+      .iter()
+      .any(|range| status >= range.start && status <= range.end)
+}
+
+async fn http_response_body_matches(
+  body: Incoming,
+  health_check: &UpstreamPoolHealthCheckConfig,
+  upstream_name: &str,
+) -> bool {
+  let Some(pattern) = health_check.expected_body_regex.as_deref() else {
+    return true;
+  };
+  let regex = match Regex::new(pattern) {
+    Ok(regex) => regex,
+    Err(error) => {
+      debug!(
+        error = %error,
+        upstream = upstream_name,
+        "active health check body regex is invalid"
+      );
+      return false;
+    }
+  };
+  let collected = match Limited::new(body, health_check.body_match_max_bytes)
+    .collect()
+    .await
+  {
+    Ok(collected) => collected,
+    Err(error) => {
+      debug!(error = %error, upstream = upstream_name, "failed to read active health check response body");
+      return false;
+    }
+  };
+  let body_bytes = collected.to_bytes();
+  let body = String::from_utf8_lossy(&body_bytes);
+  regex.is_match(&body)
 }
 
 fn empty_body() -> UpstreamBody {
@@ -371,6 +522,9 @@ fn skip_protobuf_field(wire: u64, input: &[u8], index: &mut usize) -> Option<()>
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config::{
+    UpstreamPoolHealthCheckHeaderConfig, UpstreamPoolHealthCheckStatusRangeConfig,
+  };
 
   #[test]
   fn encodes_grpc_health_request() {
@@ -385,5 +539,101 @@ mod tests {
       decode_grpc_health_response(&frame),
       Some(GrpcHealthServingStatus::Serving)
     );
+  }
+
+  #[tokio::test]
+  async fn builds_http_health_check_request_with_method_headers_body_and_host() {
+    let mut health_check = UpstreamPoolHealthCheckConfig {
+      method: "POST".to_string(),
+      health_host: Some("health.internal.example".to_string()),
+      body: "{\"probe\":\"ok\"}".to_string(),
+      headers: vec![UpstreamPoolHealthCheckHeaderConfig {
+        name: "X-OxiBelt-Health".to_string(),
+        value: "active".to_string(),
+      }],
+      ..UpstreamPoolHealthCheckConfig::default()
+    };
+    health_check.expected_status = vec![204];
+
+    let request = build_http_health_request(
+      &health_check,
+      "http://backend.internal:18081/health".parse().unwrap(),
+    )
+    .expect("health request should build");
+    assert_eq!(request.method(), http::Method::POST);
+    assert_eq!(request.headers()[HOST], "health.internal.example");
+    assert_eq!(request.headers()["x-oxibelt-health"], "active");
+
+    let body = request
+      .into_body()
+      .collect()
+      .await
+      .expect("body should collect")
+      .to_bytes();
+    assert_eq!(body.as_ref(), br#"{"probe":"ok"}"#);
+  }
+
+  #[test]
+  fn matches_exact_status_or_status_range() {
+    let health_check = UpstreamPoolHealthCheckConfig {
+      expected_status: vec![204],
+      expected_status_ranges: vec![UpstreamPoolHealthCheckStatusRangeConfig {
+        start: 200,
+        end: 202,
+      }],
+      ..UpstreamPoolHealthCheckConfig::default()
+    };
+
+    assert!(health_status_matches(&health_check, StatusCode::OK));
+    assert!(health_status_matches(&health_check, StatusCode::NO_CONTENT));
+    assert!(!health_status_matches(
+      &health_check,
+      StatusCode::INTERNAL_SERVER_ERROR
+    ));
+  }
+
+  #[test]
+  fn bounded_jitter_stays_within_limit() {
+    assert_eq!(bounded_jitter_ms(42, 0), 0);
+    for seed in [0, 1, 42, u64::MAX] {
+      assert!(bounded_jitter_ms(seed, 250) <= 250);
+    }
+  }
+
+  #[tokio::test]
+  async fn grpc_health_request_preserves_protocol_shape_and_custom_headers() {
+    let health_check = UpstreamPoolHealthCheckConfig {
+      protocol: HealthCheckProtocol::Grpc,
+      health_host: Some("grpc-health.internal.example".to_string()),
+      headers: vec![UpstreamPoolHealthCheckHeaderConfig {
+        name: "X-OxiBelt-Health".to_string(),
+        value: "grpc".to_string(),
+      }],
+      grpc_service: "svc".to_string(),
+      ..UpstreamPoolHealthCheckConfig::default()
+    };
+
+    let request = build_grpc_health_request(
+      &health_check,
+      "http://backend.internal/grpc.health.v1.Health/Check"
+        .parse()
+        .unwrap(),
+    )
+    .expect("gRPC health request should build");
+    assert_eq!(request.method(), http::Method::POST);
+    assert_eq!(
+      request.headers()[http::header::CONTENT_TYPE],
+      "application/grpc"
+    );
+    assert_eq!(request.headers()[HOST], "grpc-health.internal.example");
+    assert_eq!(request.headers()["x-oxibelt-health"], "grpc");
+
+    let body = request
+      .into_body()
+      .collect()
+      .await
+      .expect("body should collect")
+      .to_bytes();
+    assert_eq!(body.as_ref(), &[0, 0, 0, 0, 5, 0x0a, 3, b's', b'v', b'c']);
   }
 }

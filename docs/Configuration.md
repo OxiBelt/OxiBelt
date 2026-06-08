@@ -435,7 +435,7 @@ With `failure_policy = "fail_closed"`, missing, oversized, stale, hash-mismatche
 
 Managed CRLite storage defaults to `disk` at `/var/lib/oxibelt/crlite`, which should be a writable persistent volume in production. Use `tmpfs` with `tmpfs_dir = "/dev/shm/oxibelt-crlite"` for read-only root filesystems that still provide writable tmpfs. Use `memory` only for ephemeral deployments that accept refetching on every restart and possible fail-closed startup if the managed filter cannot be fetched. The cache contains public revocation data, but it is integrity-sensitive; keep the directory owned by the OxiBelt runtime user and avoid sharing write access with unrelated processes.
 
-`proxy.upstream_revocation` enables opt-in revocation checks for runtime outbound TLS clients. It applies to HTTPS upstream clients, upstream-pool generated HTTPS clients, HTTP/3 and WebTransport upstream QUIC clients, external auth and discovery HTTP clients, `turns://` TURN upstreams, and diagnostics probes. The default is disabled for compatibility. When enabled globally, each direct `[[upstreams]]` entry can override the policy under `[upstreams.tls.upstream_revocation]`; upstream-pool discovery, external auth, discovery, TURN, and diagnostics clients use the global policy. Standalone helper clients such as `oxibeltctl` fetches are outside this runtime policy.
+`proxy.upstream_revocation` enables opt-in revocation checks for runtime outbound TLS clients. It applies to HTTPS upstream clients, upstream-pool generated HTTPS clients, HTTP/3 and WebTransport upstream QUIC clients, external auth and discovery HTTP clients, `turns://` TURN upstreams, and diagnostics probes. The default is disabled for compatibility. When enabled globally, each direct `[[upstreams]]` entry can override the policy under `[upstreams.tls.upstream_revocation]`; upstream-pool forwarding, upstream-pool discovery, external auth, discovery, TURN, and diagnostics clients use the global policy. Active upstream-pool health checks can override only their health-check HTTPS client policy under `[upstream_pools.health_check.tls.upstream_revocation]`; that override does not affect forwarding clients. Standalone helper clients such as `oxibeltctl` fetches are outside this runtime policy.
 
 `proxy.upstream_revocation.ocsp.mode = "live_fetch"` verifies a stapled upstream OCSP response when the server provides one. Without a staple, OxiBelt builds a request from the upstream certificate AIA, uses a bounded background fetch/cache, and applies `failure_policy` to the current handshake when the cache is missing, stale, or invalid. The TLS handshake verifier never performs network I/O; it only validates the WebPKI chain/hostname, checks the supplied staple or local cache, and schedules a bounded fetch on the runtime. `fail_closed` rejects missing or invalid revocation state; `degraded_allow` permits rollout while reporting the bounded error code. Revoked responses always reject.
 
@@ -2100,17 +2100,49 @@ refresh_interval_ms = 30000
 enabled = true
 mode = "passive" # passive | active
 protocol = "http" # http | grpc
+method = "POST"
 path = "/health"
+health_port = 18081
+health_host = "health.internal.example"
+body = "{\"probe\":\"ok\"}"
 interval_ms = 10000
 timeout_ms = 2000
 healthy_threshold = 2
 unhealthy_threshold = 3
-expected_status = [200]
+rise = 2 # alias for healthy_threshold; do not configure both
+fall = 3 # alias for unhealthy_threshold; do not configure both
+expected_status = [204]
+expected_body_regex = "ready"
+body_match_max_bytes = 65536
+jitter_ms = 250
 grpc_service = ""
 grpc_expected_statuses = ["SERVING"]
+
+[[upstream_pools.health_check.headers]]
+name = "X-OxiBelt-Health"
+value = "active"
+
+[[upstream_pools.health_check.expected_status_ranges]]
+start = 200
+end = 299
+
+[upstream_pools.health_check.tls]
+trusted_ca_certs = ["upstream-health-ca.pem"]
+
+[upstream_pools.health_check.tls.upstream_revocation.ocsp]
+mode = "live_fetch"
+failure_policy = "fail_closed"
 ```
 
 Pool names and upstream names are separate namespaces. `algorithm` defaults to `power_of_two_choices`. HTTP pools support `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, `rendezvous_ip_hash`, `ewma`, `least_time`, and `sticky_cookie`. `algorithm = "sticky_cookie"` selects an upstream by a signed affinity cookie when present, otherwise it uses `sticky_cookie.fallback_algorithm` and emits `Set-Cookie`; the fallback must be one of the non-sticky modern algorithms. Legacy names such as `round_robin`, `least_conn`, `random`, `hash`, and `ip_hash` are rejected during parsing or validation and must be migrated explicitly. The cookie HMAC secret comes from `sticky_cookie.secret_env` when set, from `[shared_state].sticky_sessions_backend` when configured, or from a process-local generated secret. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
+
+`upstream_pools.health_check` defaults remain compatible with existing configs: HTTP active checks use `GET /healthz`, `expected_status = [200, 204]`, `interval_ms = 5000`, `timeout_ms = 1000`, and thresholds `healthy_threshold = 2` / `unhealthy_threshold = 3`. `mode = "passive"` records passive request results only; `mode = "active"` schedules background probes when `enabled = true`. For HTTP probes, `method`, `path`, `health_port`, `health_host`, `headers`, and `body` build the probe request. `health_port` changes only the TCP connect port. `health_host` changes only the HTTP `Host` header; TLS SNI and hostname verification still use the probe URI host from the pool server origin. Header names and values must be valid HTTP fields, and OxiBelt rejects reserved hop-by-hop, forwarding identity, and `Host` headers in `headers`; use `health_host` for Host.
+
+HTTP health success is `(expected_status OR expected_status_ranges) AND expected_body_regex when configured`. Status codes and inclusive status ranges must be valid HTTP statuses, and ranges require `start <= end`. `expected_body_regex` is compiled during config validation and matches only the first `body_match_max_bytes` bytes collected from the response. `body_match_max_bytes`, `interval_ms`, `timeout_ms`, and nonzero thresholds must be greater than zero. `jitter_ms` adds up to that many milliseconds to each active schedule interval to avoid synchronized probes. `rise` and `fall` are TOML aliases for `healthy_threshold` and `unhealthy_threshold`; configuring an alias and its canonical field together is invalid.
+
+`protocol = "grpc"` preserves the gRPC health checking wire format: OxiBelt sends `POST /grpc.health.v1.Health/Check` over HTTP/2 with the configured `grpc_service` and checks `grpc_expected_statuses`. `health_port`, `health_host`, custom non-reserved headers, timeout, interval, thresholds, jitter, and health-check TLS policy still apply. HTTP body regex matching is not supported for gRPC health checks.
+
+`upstream_pools.health_check.tls.trusted_ca_certs` is health-check only. These roots are resolved under the cert directory, appended to `proxy.trusted_ca_certs` for active health and diagnostics probes, and tracked as runtime reload files. They do not change normal upstream-pool forwarding trust. `upstream_pools.health_check.tls.upstream_revocation` can override outbound OCSP/CRLite policy for health-check HTTPS clients only. OxiBelt does not expose an insecure skip-verify mode for health checks.
 
 Pool server `state` controls new request selection. `ready` accepts traffic. `drain`, `down`, and `maintenance` stop new selection while already selected in-flight requests finish naturally. `slow_start` and `outlier_ejection` are opt-in and disabled by default. When slow start is enabled, newly added, discovered, or recovered servers ramp from `min_weight_percent` to full effective weight over `duration_ms` across all pool algorithms, including sticky fallback, rendezvous, EWMA, and least-time scoring. When outlier ejection is enabled, passive retry/health failures can temporarily exclude a server after `consecutive_failures`; the ejection duration starts at `base_ejection_ms`, backs off per ejection count, and is capped by `max_ejection_ms`. If no ready, healthy, non-ejected server remains, OxiBelt preserves the existing fail-closed upstream-pool response.
 

@@ -573,6 +573,11 @@ fn outbound_revocation_enabled(config: &Config) -> bool {
       .iter()
       .filter_map(|upstream| upstream.tls.upstream_revocation.as_ref())
       .any(OutboundTlsRevocationConfig::enabled)
+    || config
+      .upstream_pools
+      .iter()
+      .filter_map(|pool| pool.health_check.tls.upstream_revocation.as_ref())
+      .any(OutboundTlsRevocationConfig::enabled)
 }
 
 async fn load_managed_crlite_filters(
@@ -584,6 +589,11 @@ async fn load_managed_crlite_filters(
   collect_managed_crlite_policy(&mut policies, &config.proxy.upstream_revocation);
   for upstream in &config.upstreams {
     if let Some(policy) = &upstream.tls.upstream_revocation {
+      collect_managed_crlite_policy(&mut policies, policy);
+    }
+  }
+  for pool in &config.upstream_pools {
+    if let Some(policy) = &pool.health_check.tls.upstream_revocation {
       collect_managed_crlite_policy(&mut policies, policy);
     }
   }

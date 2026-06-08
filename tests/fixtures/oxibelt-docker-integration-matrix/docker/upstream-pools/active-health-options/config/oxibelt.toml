@@ -1,0 +1,80 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "plaintext_allowlist"
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "power_of_two_choices"
+
+[[upstream_pools.servers]]
+id = "good"
+origin = "http://mock-http:18080/origin"
+
+[upstream_pools.health_check]
+enabled = true
+mode = "active"
+protocol = "http"
+method = "POST"
+path = "/health/options"
+health_port = 18080
+health_host = "health.internal.example"
+body = "{\"probe\":\"ok\"}"
+expected_body_regex = "ready"
+interval_ms = 200
+timeout_ms = 1000
+rise = 1
+fall = 1
+jitter_ms = 50
+
+[[upstream_pools.health_check.headers]]
+name = "X-OxiBelt-Health"
+value = "active"
+
+[[upstream_pools.health_check.expected_status_ranges]]
+start = 200
+end = 299
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream_pool = "app-pool"

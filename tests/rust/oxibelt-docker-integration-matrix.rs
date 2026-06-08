@@ -3773,6 +3773,28 @@ run_case_checks() {
         ),
         docker_case(
             "upstream-pools",
+            "active-health-options",
+            "active HTTP health checks honor method, Host, headers, body, ranges, regex, and jitter",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  sleep 1
+  local response state
+  state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${state}" '.body | fromjson | ([.servers[] | select(.id == "good" and .healthy == true and .last_health_check_ms != null and .health_reason == "active_success")] | length) == 1'
+
+  response="$(client_request "example.test" "/app/health-options" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "upstream-pools",
             "retry-failover",
             "pool retry reselects a healthy backend and reports passive health",
             ExpectStart::Success,
@@ -6185,6 +6207,28 @@ run_case_checks() {
             r#"
 run_case_checks() {
   local response
+  response="$(client_request "secure.example.test" "/secure/tls" 502)"
+  assert_response_jq "${response}" '.body == "upstream request failed"'
+}
+"#,
+            None,
+        ),
+        docker_case(
+            "proxy-upstream-tls",
+            "health-check-tls-policy",
+            "health-check-only CA roots do not weaken forwarding TLS verification",
+            ExpectStart::Success,
+            Needs {
+                https_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  sleep 1
+  local response state
+  state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/secure-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${state}" '.body | fromjson | ([.servers[] | select(.id == "secure" and .healthy == true and .last_health_check_ms != null and .health_reason == "active_success")] | length) == 1'
+
   response="$(client_request "secure.example.test" "/secure/tls" 502)"
   assert_response_jq "${response}" '.body == "upstream request failed"'
 }

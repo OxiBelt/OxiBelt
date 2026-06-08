@@ -11,12 +11,12 @@ use oxibelt::config::{
     CrliteFailurePolicy, CrliteManagedStorage, CrliteMode, DatabaseMitigationMode, DatabaseTlsMode,
     DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
     ExpectContinueMode, ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode,
-    GrpcRetryMode, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
-    LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode,
-    PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-    RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-    SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup, TlsServerResumptionMode,
-    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    GrpcRetryMode, HealthCheckProtocol, HotReloadMode, IpmPolicyEffect,
+    KubernetesDiscoveryResource, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy,
+    OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
+    QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides,
+    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
+    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
     UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
@@ -158,6 +158,179 @@ refresh_interval_ms = 1000
     assert_eq!(discovery.token_env.as_deref(), Some("NOMAD_TOKEN"));
     assert!(discovery.watch);
     assert_eq!(discovery.watch_timeout_seconds, 45);
+}
+
+#[test]
+fn upstream_pool_health_check_http_options_parse_and_validate() {
+    let temp_dir = common::TempDir::new("pool-health-options");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "pool-health-options");
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "https://app-a.example"
+
+[upstream_pools.health_check]
+enabled = true
+mode = "active"
+protocol = "http"
+method = "POST"
+path = "/health"
+health_port = 18081
+health_host = "health.internal.example"
+body = "{{\"probe\":\"ok\"}}"
+expected_status = [204]
+expected_body_regex = "ready"
+body_match_max_bytes = 65536
+jitter_ms = 250
+rise = 4
+fall = 5
+
+[[upstream_pools.health_check.headers]]
+name = "X-OxiBelt-Health"
+value = "active"
+
+[[upstream_pools.health_check.expected_status_ranges]]
+start = 200
+end = 299
+
+[upstream_pools.health_check.tls]
+trusted_ca_certs = ["upstream-health-ca.pem"]
+
+[upstream_pools.health_check.tls.upstream_revocation.ocsp]
+mode = "live_fetch"
+failure_policy = "fail_closed"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    let health_check = &config.upstream_pools[0].health_check;
+    assert_eq!(health_check.protocol, HealthCheckProtocol::Http);
+    assert_eq!(health_check.method, "POST");
+    assert_eq!(health_check.health_port, Some(18081));
+    assert_eq!(
+        health_check.health_host.as_deref(),
+        Some("health.internal.example")
+    );
+    assert_eq!(health_check.headers[0].name, "X-OxiBelt-Health");
+    assert_eq!(health_check.expected_status, vec![204]);
+    assert_eq!(health_check.expected_status_ranges[0].start, 200);
+    assert_eq!(health_check.healthy_threshold, 4);
+    assert_eq!(health_check.unhealthy_threshold, 5);
+    assert_eq!(
+        health_check.tls.trusted_ca_certs[0],
+        std::path::PathBuf::from("upstream-health-ca.pem")
+    );
+    assert!(
+        health_check
+            .tls
+            .upstream_revocation
+            .as_ref()
+            .expect("revocation policy should parse")
+            .enabled()
+    );
+}
+
+#[test]
+fn upstream_pool_health_check_rejects_alias_and_canonical_thresholds_together() {
+    let temp_dir = common::TempDir::new("pool-health-alias-conflict");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "pool-health-alias-conflict");
+    let raw = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+
+[upstream_pools.health_check]
+healthy_threshold = 2
+rise = 3
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    toml::from_str::<Config>(&raw)
+        .expect_err("canonical threshold and alias should not both parse");
+}
+
+#[test]
+fn upstream_pool_health_check_validation_rejects_invalid_http_options() {
+    let temp_dir = common::TempDir::new("pool-health-invalid-options");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "pool-health-invalid-options");
+    let base = format!(
+        r#"
+{}
+
+[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+
+[upstream_pools.health_check]
+enabled = true
+mode = "active"
+path = "/health"
+
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    for (suffix, expected) in [
+        (
+            r#"
+[[upstream_pools.health_check.expected_status_ranges]]
+start = 299
+end = 200
+"#,
+            "expected_status_ranges",
+        ),
+        (
+            r#"
+expected_body_regex = "["
+"#,
+            "expected_body_regex",
+        ),
+        (
+            r#"
+body_match_max_bytes = 0
+"#,
+            "body_match_max_bytes",
+        ),
+        (
+            r#"
+[[upstream_pools.health_check.headers]]
+name = "Host"
+value = "example.com"
+"#,
+            "reserved",
+        ),
+    ] {
+        let config: Config =
+            toml::from_str(&format!("{base}{suffix}")).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid health option should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?} in error, got {error:#}"
+        );
+    }
 }
 
 #[test]
@@ -6018,6 +6191,91 @@ upstream = "app"
 }
 
 #[test]
+fn config_load_resolves_upstream_pool_health_check_tls_paths_against_cert_directory() {
+    let temp_dir = common::TempDir::new("relative-health-check-tls");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "relative-health-check-tls");
+    let ca_path = cert_dir.join("health-ca.pem");
+    std::fs::copy(&cert_path, &ca_path).expect("failed to copy health CA certificate");
+    let filter_path = cert_dir.join("health-crlite.filter");
+    std::fs::write(&filter_path, b"filter").expect("failed to write CRLite filter");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    let cert_file = cert_path.file_name().unwrap().to_string_lossy();
+    let key_file = key_path.file_name().unwrap().to_string_lossy();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+{}
+
+[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "https://app-a.example"
+
+[upstream_pools.health_check]
+enabled = true
+mode = "active"
+path = "/health"
+
+[upstream_pools.health_check.tls]
+trusted_ca_certs = ["health-ca.pem"]
+
+[upstream_pools.health_check.tls.upstream_revocation.crlite]
+mode = "enforce"
+filter_file = "health-crlite.filter"
+"#,
+            common::minimal_config_toml_with_paths(&cert_file, &key_file)
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load");
+    let expected_ca_path = ca_path.canonicalize().unwrap();
+    let expected_filter_path = filter_path.canonicalize().unwrap();
+    let health_check = &config.upstream_pools[0].health_check;
+
+    assert_eq!(
+        health_check.tls.trusted_ca_certs,
+        vec![expected_ca_path.clone()]
+    );
+    assert_eq!(
+        health_check
+            .tls
+            .upstream_revocation
+            .as_ref()
+            .and_then(|policy| policy.crlite.filter_file.as_deref()),
+        Some(expected_filter_path.as_path())
+    );
+    assert!(
+        config
+            .source_paths
+            .runtime_files
+            .contains(&expected_ca_path)
+    );
+    assert!(
+        config
+            .source_paths
+            .runtime_files
+            .contains(&expected_filter_path)
+    );
+    assert!(
+        !config
+            .source_paths
+            .downstream_tls_files
+            .contains(&expected_ca_path)
+    );
+}
+
+#[test]
 fn config_load_rejects_unknown_fields_by_default() {
     let temp_dir = common::TempDir::new("strict-unknown");
     let config_path = write_loadable_config(&temp_dir, "strict-unknown", |raw| {
@@ -6055,6 +6313,45 @@ unexpected = true"#,
         error
             .to_string()
             .contains("routes.actions.rewrite.unexpected"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn config_load_rejects_unknown_upstream_pool_health_check_fields_by_default() {
+    let temp_dir = common::TempDir::new("strict-health-check-unknown");
+    let config_path = write_loadable_config(&temp_dir, "strict-health-check-unknown", |mut raw| {
+        raw.push_str(
+            r#"
+
+[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+
+[upstream_pools.health_check]
+enabled = true
+mode = "active"
+path = "/health"
+
+[[upstream_pools.health_check.headers]]
+name = "X-OxiBelt-Health"
+value = "active"
+unexpected = true
+"#,
+        );
+        raw
+    });
+
+    let error =
+        Config::load(&config_path).expect_err("unknown health-check header field should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("upstream_pools.health_check.headers.unexpected"),
         "unexpected error: {error:#}"
     );
 }

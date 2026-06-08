@@ -410,6 +410,7 @@ mod tests {
       webtransport: true,
       proxy_protocol_egress: ProxyProtocolEgressMode::Off,
       tls: Default::default(),
+      extra_trusted_ca_certs: Vec::new(),
     }
   }
 

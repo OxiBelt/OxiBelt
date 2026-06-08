@@ -13,6 +13,14 @@ use super::{
   validate_optional_non_empty,
 };
 
+mod health_check;
+pub(in crate::config) use health_check::validate_pool_health_check;
+pub use health_check::*;
+pub(crate) use health_check::{
+  default_health_check_healthy_threshold, default_health_check_interval_ms,
+  default_health_check_timeout_ms, default_health_check_unhealthy_threshold,
+};
+
 pub const HTTP_POOL_LOAD_BALANCING_ALGORITHM_WIRE_VALUES: &[&str] = &[
   "power_of_two_choices",
   "weighted_least_conn",

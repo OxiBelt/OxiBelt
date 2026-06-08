@@ -1094,6 +1094,41 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # watch = true
 # watch_timeout_seconds = 45
 # refresh_interval_ms = 30000
+#
+#[upstream_pools.health_check]
+# enabled = true
+# mode = "active" # passive | active
+# protocol = "http" # http | grpc
+# method = "POST"
+# path = "/health"
+# health_port = 18081
+# health_host = "health.internal.example"
+# body = "{\"probe\":\"ok\"}"
+# expected_status = [204]
+# expected_body_regex = "ready"
+# body_match_max_bytes = 65536
+# interval_ms = 5000
+# timeout_ms = 1000
+# jitter_ms = 250
+# rise = 2 # alias for healthy_threshold
+# fall = 3 # alias for unhealthy_threshold
+# grpc_service = ""
+# grpc_expected_statuses = ["SERVING"]
+#
+#[[upstream_pools.health_check.headers]]
+# name = "X-OxiBelt-Health"
+# value = "active"
+#
+#[[upstream_pools.health_check.expected_status_ranges]]
+# start = 200
+# end = 299
+#
+#[upstream_pools.health_check.tls]
+# trusted_ca_certs = ["upstream-health-ca.pem"]
+#
+#[upstream_pools.health_check.tls.upstream_revocation.ocsp]
+# mode = "disabled" # disabled | live_fetch
+# failure_policy = "fail_closed" # fail_closed | degraded_allow
 
 #[[turn_upstream_pools]]
 # name = "turn-udp"

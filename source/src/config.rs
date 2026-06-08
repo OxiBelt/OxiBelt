@@ -584,6 +584,7 @@ impl Config {
       for path in pool.resolve_discovery_paths(&path_roots.config_dir)? {
         self.source_paths.remember_discovery_file(path);
       }
+      pool.resolve_health_check_paths(&path_roots.cert_dir, &mut self.source_paths)?;
     }
     for listener in &mut self.webrtc_turn_listeners {
       for path in listener.tls.resolve_relative_paths(&path_roots.cert_dir)? {
@@ -803,48 +804,7 @@ impl Config {
         }
       }
       upstream_pool::validate_pool_discovery(pool)?;
-      if !pool.health_check.path.starts_with('/') {
-        bail!(
-          "upstream pool {} health_check.path must start with '/'",
-          pool.name
-        );
-      }
-      if pool.health_check.enabled {
-        if pool.health_check.interval_ms == 0 {
-          bail!(
-            "upstream pool {} health_check.interval_ms must be greater than 0",
-            pool.name
-          );
-        }
-        if pool.health_check.timeout_ms == 0 {
-          bail!(
-            "upstream pool {} health_check.timeout_ms must be greater than 0",
-            pool.name
-          );
-        }
-        if pool.health_check.healthy_threshold == 0 || pool.health_check.unhealthy_threshold == 0 {
-          bail!(
-            "upstream pool {} health_check thresholds must be greater than 0",
-            pool.name
-          );
-        }
-      }
-      for status in &pool.health_check.expected_status {
-        http::StatusCode::from_u16(*status).with_context(|| {
-          format!(
-            "upstream pool {} has invalid expected_status {status}",
-            pool.name
-          )
-        })?;
-      }
-      if pool.health_check.protocol == HealthCheckProtocol::Grpc
-        && pool.health_check.grpc_expected_statuses.is_empty()
-      {
-        bail!(
-          "upstream pool {} health_check.grpc_expected_statuses must not be empty",
-          pool.name
-        );
-      }
+      upstream_pool::validate_pool_health_check(pool)?;
     }
 
     let turn_pool_names = self.validate_turn_forwarding()?;
@@ -2917,18 +2877,43 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_ejection_ms",
     ][..],
     "upstream_pools.health_check" => &[
+      "body",
+      "body_match_max_bytes",
       "enabled",
+      "expected_body_regex",
       "expected_status",
-      "healthy_threshold",
-      "interval_ms",
-      "mode",
-      "path",
-      "timeout_ms",
-      "unhealthy_threshold",
-      "protocol",
+      "expected_status_ranges",
+      "fall",
       "grpc_expected_statuses",
       "grpc_service",
+      "health_host",
+      "health_port",
+      "headers",
+      "healthy_threshold",
+      "interval_ms",
+      "jitter_ms",
+      "method",
+      "mode",
+      "path",
+      "protocol",
+      "rise",
+      "timeout_ms",
+      "tls",
+      "unhealthy_threshold",
     ][..],
+    "upstream_pools.health_check.headers" => &["name", "value"][..],
+    "upstream_pools.health_check.expected_status_ranges" => &["end", "start"][..],
+    "upstream_pools.health_check.tls" => &["trusted_ca_certs", "upstream_revocation"][..],
+    "upstream_pools.health_check.tls.upstream_revocation" => {
+      outbound_revocation::OUTBOUND_REVOCATION_CONFIG_KEYS
+    }
+    "upstream_pools.health_check.tls.upstream_revocation.ocsp" => {
+      outbound_revocation::OUTBOUND_OCSP_CONFIG_KEYS
+    }
+    "upstream_pools.health_check.tls.upstream_revocation.crlite" => crlite::CRLITE_CONFIG_KEYS,
+    "upstream_pools.health_check.tls.upstream_revocation.crlite.managed" => {
+      crlite::CRLITE_MANAGED_CONFIG_KEYS
+    }
     "upstream_pools.servers" => &["backup", "id", "max_conns", "origin", "state", "weight"][..],
     "routes" => &[
       "actions",
@@ -5000,6 +4985,8 @@ pub struct UpstreamConfig {
   pub proxy_protocol_egress: ProxyProtocolEgressMode,
   #[serde(default)]
   pub tls: UpstreamTlsConfig,
+  #[serde(skip)]
+  pub extra_trusted_ca_certs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -5195,75 +5182,6 @@ impl UpstreamPoolServerSource {
       Self::Admin => "admin",
     }
   }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct UpstreamPoolHealthCheckConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default)]
-  pub mode: HealthCheckMode,
-  #[serde(default = "default_health_check_path")]
-  pub path: String,
-  #[serde(default = "default_health_check_interval_ms")]
-  pub interval_ms: u64,
-  #[serde(default = "default_health_check_timeout_ms")]
-  pub timeout_ms: u64,
-  #[serde(default = "default_health_check_healthy_threshold")]
-  pub healthy_threshold: u32,
-  #[serde(default = "default_health_check_unhealthy_threshold")]
-  pub unhealthy_threshold: u32,
-  #[serde(default = "default_health_check_expected_status")]
-  pub expected_status: Vec<u16>,
-  #[serde(default)]
-  pub protocol: HealthCheckProtocol,
-  #[serde(default)]
-  pub grpc_service: String,
-  #[serde(default = "default_grpc_health_expected_statuses")]
-  pub grpc_expected_statuses: Vec<GrpcHealthServingStatus>,
-}
-
-impl Default for UpstreamPoolHealthCheckConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      mode: HealthCheckMode::Passive,
-      path: default_health_check_path(),
-      interval_ms: default_health_check_interval_ms(),
-      timeout_ms: default_health_check_timeout_ms(),
-      healthy_threshold: default_health_check_healthy_threshold(),
-      unhealthy_threshold: default_health_check_unhealthy_threshold(),
-      expected_status: default_health_check_expected_status(),
-      protocol: HealthCheckProtocol::Http,
-      grpc_service: String::new(),
-      grpc_expected_statuses: default_grpc_health_expected_statuses(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum HealthCheckProtocol {
-  #[default]
-  Http,
-  Grpc,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum GrpcHealthServingStatus {
-  Unknown,
-  Serving,
-  NotServing,
-  ServiceUnknown,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum HealthCheckMode {
-  #[default]
-  Passive,
-  Active,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -5699,34 +5617,6 @@ fn default_discovery_refresh_interval_ms() -> u64 {
 
 fn default_discovery_min_ttl_ms() -> u64 {
   1_000
-}
-
-fn default_health_check_path() -> String {
-  "/healthz".to_string()
-}
-
-fn default_health_check_interval_ms() -> u64 {
-  5_000
-}
-
-fn default_health_check_timeout_ms() -> u64 {
-  1_000
-}
-
-fn default_health_check_healthy_threshold() -> u32 {
-  2
-}
-
-fn default_health_check_unhealthy_threshold() -> u32 {
-  3
-}
-
-fn default_health_check_expected_status() -> Vec<u16> {
-  vec![200, 204]
-}
-
-fn default_grpc_health_expected_statuses() -> Vec<GrpcHealthServingStatus> {
-  vec![GrpcHealthServingStatus::Serving]
 }
 
 fn default_database_access_log_max_connections() -> u32 {

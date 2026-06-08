@@ -292,6 +292,50 @@ impl PoolState {
             webtransport: true,
             proxy_protocol_egress: ProxyProtocolEgressMode::Off,
             tls: UpstreamTlsConfig::default(),
+            extra_trusted_ca_certs: Vec::new(),
+          })
+      })
+      .collect()
+  }
+
+  pub fn health_check_upstreams(configs: &[UpstreamPoolConfig]) -> Vec<UpstreamConfig> {
+    configs
+      .iter()
+      .flat_map(|pool| {
+        pool
+          .servers
+          .iter()
+          .enumerate()
+          .map(|(index, server)| UpstreamConfig {
+            name: synthetic_upstream_name_for_id(
+              &pool.name,
+              &upstream_pool_server_id(index, server),
+            ),
+            origin: server.origin.clone(),
+            max_http_version: if server.origin.scheme() == "http"
+              && pool.health_check.protocol != HealthCheckProtocol::Grpc
+            {
+              HttpVersion::H1
+            } else {
+              HttpVersion::H2
+            },
+            connect_timeout_ms: 3_000,
+            request_timeout_ms: 30_000,
+            first_byte_timeout_ms: 30_000,
+            read_timeout_ms: 30_000,
+            send_timeout_ms: 30_000,
+            idle_timeout_ms: pool.keepalive.idle_timeout_ms,
+            pool_max_idle_per_host: pool.keepalive.max_idle,
+            preserve_host: false,
+            websocket: true,
+            webrtc: true,
+            webtransport: true,
+            proxy_protocol_egress: ProxyProtocolEgressMode::Off,
+            tls: UpstreamTlsConfig {
+              upstream_revocation: pool.health_check.tls.upstream_revocation.clone(),
+              ..UpstreamTlsConfig::default()
+            },
+            extra_trusted_ca_certs: pool.health_check.tls.trusted_ca_certs.clone(),
           })
       })
       .collect()

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -47,6 +48,17 @@ fn build_client_pool(
   outbound_revocation: &tls::OutboundRevocationRuntime,
 ) -> anyhow::Result<ClientPool> {
   let revocation_policy = outbound_revocation.policy_for_upstream(upstream);
+  let root_certs;
+  let extra_root_certs = if upstream.extra_trusted_ca_certs.is_empty() {
+    extra_root_certs
+  } else {
+    root_certs = extra_root_certs
+      .iter()
+      .chain(upstream.extra_trusted_ca_certs.iter())
+      .cloned()
+      .collect::<Vec<PathBuf>>();
+    &root_certs
+  };
   let h1_tls_config = tls::build_upstream_client_config_with_resumption_and_revocation(
     extra_root_certs,
     &upstream.tls.ech,

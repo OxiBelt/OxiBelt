@@ -138,6 +138,7 @@ pub struct AppSnapshot {
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub(crate) upstream_uri_parts_by_index: Vec<UpstreamUriParts>,
   pub clients: UpstreamClientPools,
+  pub health_check_clients: UpstreamClientPools,
   pub(crate) control_http: ControlHttpClient,
   pub(crate) h3_clients: UpstreamH3Pools,
   pub(crate) outbound_revocation: tls::OutboundRevocationRuntime,
@@ -219,6 +220,15 @@ impl AppSnapshot {
       &outbound_revocation,
     )
     .context("failed to build upstream HTTP clients")?;
+    let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
+    let health_check_clients = build_clients(
+      &health_check_upstreams,
+      &config.proxy.trusted_ca_certs,
+      &tls_resumption,
+      &config.proxy.http2,
+      &outbound_revocation,
+    )
+    .context("failed to build upstream health-check HTTP clients")?;
     let h3_clients =
       UpstreamH3Pools::new(&upstreams, &config, &tls_resumption, &outbound_revocation)
         .context("failed to build upstream HTTP/3 pools")?;
@@ -376,6 +386,7 @@ impl AppSnapshot {
       upstream_uri_parts,
       upstream_uri_parts_by_index,
       clients,
+      health_check_clients,
       control_http,
       h3_clients,
       outbound_revocation,
@@ -432,6 +443,15 @@ impl AppSnapshot {
       &previous.outbound_revocation,
     )
     .context("failed to build upstream HTTP clients")?;
+    let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
+    let health_check_clients = build_clients(
+      &health_check_upstreams,
+      &config.proxy.trusted_ca_certs,
+      &previous.tls_resumption,
+      &config.proxy.http2,
+      &previous.outbound_revocation,
+    )
+    .context("failed to build upstream health-check HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(
       &upstreams,
       &config,
@@ -485,6 +505,7 @@ impl AppSnapshot {
       upstream_uri_parts,
       upstream_uri_parts_by_index,
       clients,
+      health_check_clients,
       control_http: control_http.clone(),
       h3_clients,
       outbound_revocation: previous.outbound_revocation.clone(),

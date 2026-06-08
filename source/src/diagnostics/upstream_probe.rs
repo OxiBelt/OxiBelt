@@ -8,10 +8,15 @@ use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use futures_util::future::poll_fn;
 use http::Request;
+use http::header::HOST;
+use regex::Regex;
 use tokio::net::TcpStream;
 
-use crate::config::{Config, HealthCheckProtocol, HttpVersion, UpstreamConfig, UpstreamPoolConfig};
-use crate::control_http::{ControlHttpClient, empty_body, uri_from_url};
+use crate::config::{
+  Config, HealthCheckProtocol, HttpVersion, UpstreamConfig, UpstreamPoolConfig,
+  UpstreamPoolHealthCheckConfig,
+};
+use crate::control_http::{ControlBody, ControlHttpClient, empty_body, full_body, uri_from_url};
 
 use super::{DiagnosticReport, DiagnosticSeverity};
 
@@ -155,42 +160,45 @@ async fn probe_pool(
         );
         continue;
       }
-      let mut url = server.origin.clone();
-      url.set_path(&pool.health_check.path);
-      url.set_query(None);
-      url.set_fragment(None);
-      match probe_http_get(
-        client,
-        &url,
-        Duration::from_millis(pool.health_check.timeout_ms),
-      )
-      .await
-      {
-        Ok(status)
-          if pool
-            .health_check
-            .expected_status
-            .iter()
-            .any(|expected| *expected == status.as_u16()) =>
-        {
+      let url =
+        match crate::pool_health::health_check_url(&server.origin, &pool.health_check, false) {
+          Ok(url) => url,
+          Err(error) => {
+            push_probe_error(report, &target, error);
+            continue;
+          }
+        };
+      let health_client;
+      let probe_client = if server.origin.scheme() == "https" {
+        match build_pool_health_probe_client(config, revocation, pool) {
+          Ok(client) => {
+            health_client = client;
+            &health_client
+          }
+          Err(error) => {
+            push_probe_error(
+              report,
+              &target,
+              error.context("failed to build health-check probe client"),
+            );
+            continue;
+          }
+        }
+      } else {
+        client
+      };
+      match probe_http_health(probe_client, &url, &pool.health_check).await {
+        Ok(status) => {
           report.probe(
             "upstream",
             &target,
             "ok",
             format!(
-              "health_check GET {} returned {status}",
-              pool.health_check.path
+              "health_check {} {} returned {status}",
+              pool.health_check.method, pool.health_check.path
             ),
           );
         }
-        Ok(status) => push_probe_error(
-          report,
-          &target,
-          anyhow!(
-            "health_check GET {} returned unexpected status {status}",
-            pool.health_check.path
-          ),
-        ),
         Err(error) => push_probe_error(report, &target, error),
       }
     } else if let Err(error) =
@@ -218,6 +226,90 @@ async fn probe_http_get(
     .uri(uri_from_url(url)?)
     .body(empty_body())?;
   Ok(client.request(request, timeout, 64 * 1024).await?.status)
+}
+
+fn build_pool_health_probe_client(
+  config: &Config,
+  revocation: &crate::tls::OutboundRevocationRuntime,
+  pool: &UpstreamPoolConfig,
+) -> anyhow::Result<ControlHttpClient> {
+  let roots = config
+    .proxy
+    .trusted_ca_certs
+    .iter()
+    .chain(pool.health_check.tls.trusted_ca_certs.iter())
+    .cloned()
+    .collect::<Vec<_>>();
+  let policy = pool
+    .health_check
+    .tls
+    .upstream_revocation
+    .as_ref()
+    .map(|policy| Arc::new(policy.clone()))
+    .unwrap_or_else(|| revocation.default_policy());
+  ControlHttpClient::new_with_revocation(&roots, revocation, policy)
+}
+
+async fn probe_http_health(
+  client: &ControlHttpClient,
+  url: &url::Url,
+  health_check: &UpstreamPoolHealthCheckConfig,
+) -> anyhow::Result<http::StatusCode> {
+  let request = build_control_health_request(health_check, uri_from_url(url)?)?;
+  let response = client
+    .request(
+      request,
+      Duration::from_millis(health_check.timeout_ms),
+      health_check.body_match_max_bytes,
+    )
+    .await?;
+  if !crate::pool_health::health_status_matches(health_check, response.status) {
+    return Err(anyhow!(
+      "health_check {} {} returned unexpected status {}",
+      health_check.method,
+      health_check.path,
+      response.status
+    ));
+  }
+  if let Some(pattern) = health_check.expected_body_regex.as_deref() {
+    let regex = Regex::new(pattern).context("health_check.expected_body_regex is invalid")?;
+    let body = String::from_utf8_lossy(&response.body);
+    if !regex.is_match(&body) {
+      return Err(anyhow!(
+        "health_check {} {} body did not match expected_body_regex",
+        health_check.method,
+        health_check.path
+      ));
+    }
+  }
+  Ok(response.status)
+}
+
+fn build_control_health_request(
+  health_check: &UpstreamPoolHealthCheckConfig,
+  uri: http::Uri,
+) -> anyhow::Result<Request<ControlBody>> {
+  let body = if health_check.body.is_empty() {
+    empty_body()
+  } else {
+    full_body(Bytes::from(health_check.body.clone()))
+  };
+  let mut request = Request::builder()
+    .method(http::Method::from_bytes(health_check.method.as_bytes())?)
+    .uri(uri)
+    .body(body)?;
+  if let Some(host) = health_check.health_host.as_deref() {
+    request
+      .headers_mut()
+      .insert(HOST, http::HeaderValue::from_str(host)?);
+  }
+  for header in &health_check.headers {
+    request.headers_mut().append(
+      http::HeaderName::from_bytes(header.name.as_bytes())?,
+      http::HeaderValue::from_str(&header.value)?,
+    );
+  }
+  Ok(request)
 }
 
 async fn probe_connect(

@@ -13,11 +13,13 @@ use super::turn_queue::{
   DEFAULT_TURN_STREAM_OUTBOUND_QUEUE_CAPACITY, TurnStreamOutboundQueueCapacitySetting,
   default_turn_stream_outbound_queue_capacity,
 };
+use super::upstream_pool::{
+  default_health_check_healthy_threshold, default_health_check_interval_ms,
+  default_health_check_timeout_ms, default_health_check_unhealthy_threshold,
+};
 use super::{
   Config, LoadBalancingAlgorithm, TlsServerResumptionConfig, UpstreamPoolServerState,
-  default_client_idle_timeout_ms, default_health_check_healthy_threshold,
-  default_health_check_interval_ms, default_health_check_timeout_ms,
-  default_health_check_unhealthy_threshold, default_pool_server_weight, default_true,
+  default_client_idle_timeout_ms, default_pool_server_weight, default_true,
   resolve_existing_local_config_file_path_with_logical, turn_upstream_pool_server_id,
   validate_runtime_identifier,
 };

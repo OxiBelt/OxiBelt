@@ -72,6 +72,9 @@ class EchoHandler(BaseHTTPRequestHandler):
       status = int(status)
     except (TypeError, ValueError):
       status = 500
+    if parsed.path == "/health/options":
+      self._handle_health_options(body)
+      return
     cache_control = {
       "private": "private",
       "no-store": "no-store",
@@ -177,6 +180,31 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.wfile.write(encoded[body_split_at:])
     else:
       self.wfile.write(encoded)
+
+  def _handle_health_options(self, body):
+    errors = []
+    if self.command != "POST":
+      errors.append(f"method={self.command}")
+    if self.headers.get("host") != "health.internal.example":
+      errors.append(f"host={self.headers.get('host')}")
+    if self.headers.get("x-oxibelt-health") != "active":
+      errors.append(f"x-oxibelt-health={self.headers.get('x-oxibelt-health')}")
+    if body != '{"probe":"ok"}':
+      errors.append(f"body={body}")
+    if errors:
+      encoded = json.dumps({"errors": errors}, sort_keys=True).encode("utf-8")
+      self.send_response(428)
+      self.send_header("content-type", "application/json")
+      self.send_header("content-length", str(len(encoded)))
+      self.end_headers()
+      self.wfile.write(encoded)
+      return
+    encoded = b"ready"
+    self.send_response(200)
+    self.send_header("content-type", "text/plain")
+    self.send_header("content-length", str(len(encoded)))
+    self.end_headers()
+    self.wfile.write(encoded)
 
   def _write_chunked_body(self, encoded, body_split_at, body_split_delay_ms):
     if 0 <= body_split_at < len(encoded):
