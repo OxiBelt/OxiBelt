@@ -31,6 +31,7 @@ mod rate_limit;
 mod retry;
 mod route;
 mod route_actions;
+mod route_header_policy;
 mod sni_forward;
 mod source_paths;
 mod stream;
@@ -62,6 +63,7 @@ pub use rate_limit::*;
 pub use retry::*;
 pub use route::*;
 pub use route_actions::*;
+pub use route_header_policy::*;
 pub use sni_forward::*;
 pub use source_paths::ConfigSourcePaths;
 pub use stream::*;
@@ -956,17 +958,22 @@ impl Config {
           compression
         );
       }
-      if let Some(external_auth) = &route.external_auth
-        && !self
+      if let Some(external_auth) = &route.external_auth {
+        let Some(auth_config) = self
           .external_auth
           .iter()
-          .any(|config| config.name == *external_auth)
-      {
-        bail!(
-          "route {} references unknown external_auth {}",
-          route.name,
-          external_auth
-        );
+          .find(|config| config.name == *external_auth)
+        else {
+          bail!(
+            "route {} references unknown external_auth {}",
+            route.name,
+            external_auth
+          );
+        };
+        route_actions::validate_route_external_auth_identity_header_conflicts(
+          route,
+          &auth_config.identity_headers,
+        )?;
       }
       if route.grpc_web && !self.proxy.grpc_web.enabled {
         bail!(

@@ -8572,6 +8572,134 @@ path = "/edge{unknown}""#,
 }
 
 #[test]
+fn route_actions_reject_reserved_request_identity_headers() {
+    let temp_dir = common::TempDir::new("route-actions-reserved-headers");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-actions-reserved-headers");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (raw, expected) in [
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[[routes.actions.request_headers.set]]
+name = "Host"
+value = "attacker.example.com""#,
+            ),
+            "cannot mutate header host",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[[routes.actions.request_headers.add]]
+name = "X-Forwarded-For"
+value = "127.0.0.1""#,
+            ),
+            "cannot mutate header x-forwarded-for",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.actions.request_headers]
+remove = ["Forwarded"]"#,
+            ),
+            "cannot mutate header forwarded",
+        ),
+    ] {
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("reserved request header mutation should be rejected");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+
+    let response_header = base.replace(
+        "upstream = \"app\"",
+        r#"upstream = "app"
+
+[[routes.actions.response_headers.set]]
+name = "Host"
+value = "backend.example.com""#,
+    );
+    let config: Config = toml::from_str(&response_header).expect("config should parse");
+    config
+        .validate()
+        .expect("response header actions should keep existing header policy");
+}
+
+#[test]
+fn route_actions_reject_external_auth_identity_header_mutations() {
+    let temp_dir = common::TempDir::new("route-actions-auth-identity");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-actions-auth-identity");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for raw in [
+        base.replace(
+            "upstream = \"app\"",
+            r#"upstream = "app"
+external_auth = "edge-auth"
+
+[[routes.actions.request_headers.set]]
+name = "x-auth-user"
+value = "admin@example.com"
+
+[[external_auth]]
+name = "edge-auth"
+endpoint = "http://127.0.0.1:19090"
+identity_headers = ["X-Auth-User"]"#,
+        ),
+        base.replace(
+            "upstream = \"app\"",
+            r#"upstream = "app"
+external_auth = "edge-auth"
+
+[[routes.actions.request_headers.add]]
+name = "X-Auth-User"
+value = "admin@example.com"
+
+[[external_auth]]
+name = "edge-auth"
+endpoint = "http://127.0.0.1:19090"
+identity_headers = ["x-auth-user"]"#,
+        ),
+        base.replace(
+            "upstream = \"app\"",
+            r#"upstream = "app"
+external_auth = "edge-auth"
+
+[routes.actions.request_headers]
+remove = ["x-auth-user"]
+
+[[external_auth]]
+name = "edge-auth"
+endpoint = "http://127.0.0.1:19090"
+identity_headers = ["x-auth-user"]"#,
+        ),
+    ] {
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("external auth identity header mutation should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mutate external_auth identity header x-auth-user"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn route_match_config_parses_and_validates() {
     let temp_dir = common::TempDir::new("route-match-parse");
     let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "route-match");

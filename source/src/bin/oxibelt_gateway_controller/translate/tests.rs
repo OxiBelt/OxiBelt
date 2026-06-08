@@ -2,7 +2,7 @@ use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::translate_objects;
+use super::{RenderedConfig, translate_objects};
 use crate::cli::SharedArgs;
 use crate::model::{DiagnosticSeverity, KubernetesObject};
 use oxibelt::config::Config;
@@ -45,6 +45,12 @@ fn objects(raw: &str) -> Vec<KubernetesObject> {
     objects.extend(KubernetesObject::from_value(value).expect("object should parse"));
   }
   objects
+}
+
+fn has_error_containing(rendered: &RenderedConfig, needle: &str) -> bool {
+  rendered.diagnostics.iter().any(|diagnostic| {
+    diagnostic.severity == DiagnosticSeverity::Error && diagnostic.message.contains(needle)
+  })
 }
 
 #[test]
@@ -216,6 +222,45 @@ fn http_route_filters_generate_native_actions() {
       .contains("external_auth = \"gwapi-http-default-app-0-0-ext-auth\"")
   );
   generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn gateway_request_header_modifier_rejects_reserved_identity_headers() {
+  let http = HTTP_FILTER_FIXTURE.replace("name: x-gateway-route", "name: Host");
+  let rendered = translate_objects(&objects(&http), &args()).expect("translate");
+
+  assert!(
+    has_error_containing(&rendered, "cannot mutate header host"),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(!rendered.toml.contains("[[routes]]"));
+
+  let grpc = GRPC_FIXTURE.replace("name: x-grpc-route", "name: X-Forwarded-For");
+  let rendered = translate_objects(&objects(&grpc), &args()).expect("translate");
+
+  assert!(
+    has_error_containing(&rendered, "cannot mutate header x-forwarded-for"),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(!rendered.toml.contains("[[routes]]"));
+}
+
+#[test]
+fn gateway_external_auth_rejects_identity_header_modifier_conflicts() {
+  let raw = HTTP_FILTER_FIXTURE.replace("name: x-gateway-route", "name: x-auth-user");
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
+
+  assert!(
+    has_error_containing(
+      &rendered,
+      "cannot mutate ExternalAuth identity header x-auth-user"
+    ),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(!rendered.toml.contains("[[routes]]"));
 }
 
 #[test]

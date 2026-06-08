@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, bail};
 use serde_json::Value;
 
@@ -99,6 +101,7 @@ pub(super) fn parse_route_filters(
       other => bail!("{route_kind} filter type {other} is unsupported"),
     }
   }
+  validate_request_header_modifier(&parsed.request_headers, parsed.external_auth.as_ref())?;
   Ok(parsed)
 }
 
@@ -202,6 +205,56 @@ fn merge_header_modifier(target: &mut HeaderModifierAction, value: &Value) -> an
   target.set.extend(header_value_actions(value, "set")?);
   target.add.extend(header_value_actions(value, "add")?);
   target.remove.extend(string_array_at(value, &["remove"]));
+  Ok(())
+}
+
+fn validate_request_header_modifier(
+  modifier: &HeaderModifierAction,
+  external_auth: Option<&ParsedExternalAuth>,
+) -> anyhow::Result<()> {
+  let identity_headers = external_auth
+    .map(|auth| normalized_identity_headers(&auth.identity_headers))
+    .transpose()?
+    .unwrap_or_default();
+  for entry in &modifier.set {
+    validate_request_header_modifier_name("set", &entry.name, &identity_headers)?;
+  }
+  for entry in &modifier.add {
+    validate_request_header_modifier_name("add", &entry.name, &identity_headers)?;
+  }
+  for name in &modifier.remove {
+    validate_request_header_modifier_name("remove", name, &identity_headers)?;
+  }
+  Ok(())
+}
+
+fn normalized_identity_headers(headers: &[String]) -> anyhow::Result<HashSet<String>> {
+  headers
+    .iter()
+    .map(|name| {
+      oxibelt::config::normalize_route_action_header_name(name)
+        .with_context(|| format!("ExternalAuth headersToBackend contains invalid header {name}"))
+    })
+    .collect()
+}
+
+fn validate_request_header_modifier_name(
+  field_name: &str,
+  name: &str,
+  identity_headers: &HashSet<String>,
+) -> anyhow::Result<()> {
+  let normalized =
+    oxibelt::config::normalize_route_action_header_name(name).with_context(|| {
+      format!("RequestHeaderModifier {field_name} contains invalid header {name}")
+    })?;
+  if oxibelt::config::is_reserved_route_request_header(&normalized) {
+    bail!("RequestHeaderModifier {field_name} cannot mutate header {normalized}");
+  }
+  if identity_headers.contains(&normalized) {
+    bail!(
+      "RequestHeaderModifier {field_name} cannot mutate ExternalAuth identity header {normalized}"
+    );
+  }
   Ok(())
 }
 

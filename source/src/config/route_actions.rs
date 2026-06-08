@@ -4,10 +4,14 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, bail};
-use http::{HeaderName, HeaderValue, Method};
+use http::{HeaderValue, Method};
 use serde::Deserialize;
 
 use super::route::{RouteBufferingConfig, RouteConfig};
+use super::route_header_policy::{
+  is_forbidden_route_action_header, is_reserved_route_request_header,
+  normalize_route_action_header_name,
+};
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteActionsConfig {
@@ -142,11 +146,13 @@ pub(crate) fn validate_route_actions_config(route: &RouteConfig) -> anyhow::Resu
     route_name,
     "actions.request_headers",
     &route.actions.request_headers,
+    HeaderActionScope::Request,
   )?;
   validate_header_modifier(
     route_name,
     "actions.response_headers",
     &route.actions.response_headers,
+    HeaderActionScope::Response,
   )?;
   if let Some(cors) = &route.actions.cors {
     validate_cors_action(route_name, cors)?;
@@ -154,6 +160,53 @@ pub(crate) fn validate_route_actions_config(route: &RouteConfig) -> anyhow::Resu
   validate_request_mirrors(route_name, &route.actions.request_mirrors)?;
 
   Ok(())
+}
+
+pub(crate) fn validate_route_external_auth_identity_header_conflicts(
+  route: &RouteConfig,
+  identity_headers: &[String],
+) -> anyhow::Result<()> {
+  if identity_headers.is_empty() || !route.actions.request_headers.has_actions() {
+    return Ok(());
+  }
+
+  let identity_headers = identity_headers
+    .iter()
+    .map(|name| normalize_route_action_header_name(name))
+    .collect::<anyhow::Result<HashSet<_>>>()?;
+  validate_request_header_identity_conflict(
+    &route.name,
+    "actions.request_headers.set",
+    route
+      .actions
+      .request_headers
+      .set
+      .iter()
+      .map(|entry| entry.name.as_str()),
+    &identity_headers,
+  )?;
+  validate_request_header_identity_conflict(
+    &route.name,
+    "actions.request_headers.add",
+    route
+      .actions
+      .request_headers
+      .add
+      .iter()
+      .map(|entry| entry.name.as_str()),
+    &identity_headers,
+  )?;
+  validate_request_header_identity_conflict(
+    &route.name,
+    "actions.request_headers.remove",
+    route
+      .actions
+      .request_headers
+      .remove
+      .iter()
+      .map(String::as_str),
+    &identity_headers,
+  )
 }
 
 pub(crate) fn validate_redirect_route_features(route: &RouteConfig) -> anyhow::Result<()> {
@@ -286,6 +339,7 @@ fn validate_header_modifier(
   route_name: &str,
   field_name: &str,
   modifier: &RouteHeaderModifierConfig,
+  scope: HeaderActionScope,
 ) -> anyhow::Result<()> {
   let mut seen = HashSet::new();
   for entry in &modifier.set {
@@ -294,8 +348,9 @@ fn validate_header_modifier(
       &format!("{field_name}.set"),
       &entry.name,
       &entry.value,
+      scope,
     )?;
-    let normalized = normalized_header_name(&entry.name)?;
+    let normalized = normalize_route_action_header_name(&entry.name)?;
     if !seen.insert(("set", normalized.clone())) {
       bail!("route {route_name} {field_name}.set contains duplicate header {normalized}");
     }
@@ -306,16 +361,17 @@ fn validate_header_modifier(
       &format!("{field_name}.add"),
       &entry.name,
       &entry.value,
+      scope,
     )?;
-    let normalized = normalized_header_name(&entry.name)?;
+    let normalized = normalize_route_action_header_name(&entry.name)?;
     if !seen.insert(("add", normalized.clone())) {
       bail!("route {route_name} {field_name}.add contains duplicate header {normalized}");
     }
   }
   let mut removes = HashSet::new();
   for name in &modifier.remove {
-    validate_header_name(route_name, &format!("{field_name}.remove"), name)?;
-    let normalized = normalized_header_name(name)?;
+    validate_header_name(route_name, &format!("{field_name}.remove"), name, scope)?;
+    let normalized = normalize_route_action_header_name(name)?;
     if !removes.insert(normalized.clone()) {
       bail!("route {route_name} {field_name}.remove contains duplicate header {normalized}");
     }
@@ -328,45 +384,55 @@ fn validate_header_value(
   field_name: &str,
   name: &str,
   value: &str,
+  scope: HeaderActionScope,
 ) -> anyhow::Result<()> {
-  validate_header_name(route_name, field_name, name)?;
+  validate_header_name(route_name, field_name, name, scope)?;
   HeaderValue::from_str(value)
     .with_context(|| format!("route {route_name} {field_name} has invalid value for {name}"))?;
   Ok(())
 }
 
-fn validate_header_name(route_name: &str, field_name: &str, name: &str) -> anyhow::Result<()> {
+#[derive(Clone, Copy)]
+enum HeaderActionScope {
+  Request,
+  Response,
+}
+
+fn validate_header_name(
+  route_name: &str,
+  field_name: &str,
+  name: &str,
+  scope: HeaderActionScope,
+) -> anyhow::Result<()> {
   if name.trim() != name || name.is_empty() {
     bail!("route {route_name} {field_name} contains an empty or padded header name");
   }
-  let normalized = normalized_header_name(name)?;
-  if is_forbidden_route_action_header(&normalized) {
+  let normalized = normalize_route_action_header_name(name)?;
+  let forbidden = match scope {
+    HeaderActionScope::Request => is_reserved_route_request_header(&normalized),
+    HeaderActionScope::Response => is_forbidden_route_action_header(&normalized),
+  };
+  if forbidden {
     bail!("route {route_name} {field_name} cannot mutate header {normalized}");
   }
   Ok(())
 }
 
-fn normalized_header_name(name: &str) -> anyhow::Result<String> {
-  Ok(
-    HeaderName::from_bytes(name.as_bytes())?
-      .as_str()
-      .to_ascii_lowercase(),
-  )
-}
-
-fn is_forbidden_route_action_header(name: &str) -> bool {
-  matches!(
-    name,
-    "connection"
-      | "content-length"
-      | "keep-alive"
-      | "proxy-authenticate"
-      | "proxy-authorization"
-      | "te"
-      | "trailer"
-      | "transfer-encoding"
-      | "upgrade"
-  )
+fn validate_request_header_identity_conflict<'a>(
+  route_name: &str,
+  field_name: &str,
+  names: impl Iterator<Item = &'a str>,
+  identity_headers: &HashSet<String>,
+) -> anyhow::Result<()> {
+  for name in names {
+    let normalized = normalize_route_action_header_name(name)?;
+    if identity_headers.contains(&normalized) {
+      bail!(
+        "route {route_name} {field_name} cannot mutate external_auth identity header {normalized}"
+      );
+    }
+  }
+  Ok(())
 }
 
 fn validate_cors_action(route_name: &str, cors: &RouteCorsActionConfig) -> anyhow::Result<()> {
@@ -429,7 +495,7 @@ fn validate_cors_header_list(
     if header.trim() != header || header.is_empty() {
       bail!("route {route_name} {field_name} contains an empty or padded header name");
     }
-    let normalized = normalized_header_name(header)?;
+    let normalized = normalize_route_action_header_name(header)?;
     if !names.insert(normalized.clone()) {
       bail!("route {route_name} {field_name} contains duplicate header {normalized}");
     }

@@ -77,6 +77,12 @@ Supported filters:
 
 Unsupported filters include extension refs, hostname rewrite, port rewrite,
 scheme rewrite, gRPC ext-authz, and `ExternalAuth.forwardBody.maxSize > 0`.
+`RequestHeaderModifier` follows OxiBelt route request-header hardening: route
+authors cannot mutate OxiBelt-managed proxy identity or authority headers such
+as `Host`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, or `CF-Connecting-IP`,
+and cannot mutate the same rule's `ExternalAuth.headersToBackend` identity
+headers. The controller reports these as blocking diagnostics and omits the
+affected generated route.
 Gateway HTTP external auth uses explicit header allowlists; omitted allowlists
 render as empty arrays instead of inheriting OxiBelt's non-Gateway defaults.
 

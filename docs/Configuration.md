@@ -2264,7 +2264,7 @@ Fields:
 - `replace_prefix_with`: optional upstream path prefix replacement.
 - `actions.rewrite`: optional upstream request URI rewrite for proxy routes. It can set `path`, `query`, or both. Omitted `query` preserves the original query; `query = ""` removes it.
 - `actions.redirect`: terminal redirect target with required `status` and `location_template`.
-- `actions.request_headers` and `actions.response_headers`: optional route-level header modifiers with `set`, `add`, and `remove`.
+- `actions.request_headers` and `actions.response_headers`: optional route-level header modifiers with `set`, `add`, and `remove`. Request header actions cannot mutate OxiBelt-managed proxy identity or authority headers: `Host`, `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, `X-Real-IP`, or `CF-Connecting-IP`. Routes that use `external_auth` also cannot mutate that provider's configured `identity_headers`; those headers remain owned by the trusted auth result. This is a breaking hardening for configurations that previously used route actions to override proxy identity metadata.
 - `actions.cors`: optional route-level CORS policy with allowed origins, methods, headers, exposed headers, credentials, and max-age controls.
 - `actions.request_mirrors`: optional best-effort request mirroring to one or more upstream pools.
 - `upstream`, `upstream_pool`, `static_root`, or `actions.redirect`: exactly one target.
