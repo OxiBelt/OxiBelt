@@ -23,6 +23,7 @@ mod dynamic_policy;
 mod external_auth;
 mod http2;
 mod ipm;
+mod lb_policy_compat;
 mod limits;
 mod loader;
 mod outbound_revocation;
@@ -49,6 +50,7 @@ pub use dynamic_policy::*;
 pub use external_auth::*;
 pub use http2::*;
 pub use ipm::*;
+pub use lb_policy_compat::*;
 use limits::{
   default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
   default_max_webtransport_sessions_per_connection,
@@ -229,7 +231,12 @@ impl<'de> Deserialize<'de> for Config {
   where
     D: serde::Deserializer<'de>,
   {
-    RawConfig::deserialize(deserializer)?
+    let mut value = toml::Value::deserialize(deserializer)?;
+    let diagnostics =
+      lb_policy_compat::normalize_toml_from_config(&mut value).map_err(serde::de::Error::custom)?;
+    lb_policy_compat::ensure_supported(&diagnostics).map_err(serde::de::Error::custom)?;
+    RawConfig::deserialize(value)
+      .map_err(serde::de::Error::custom)?
       .try_into()
       .map_err(serde::de::Error::custom)
   }
@@ -247,6 +254,8 @@ pub struct ConfigBehaviorConfig {
   pub strict_unknown_fields: bool,
   #[serde(default = "default_true")]
   pub warn_on_deprecated_fields: bool,
+  #[serde(default)]
+  pub lb_policy_compat_profile: LbPolicyCompatProfile,
 }
 
 impl Default for ConfigBehaviorConfig {
@@ -254,6 +263,7 @@ impl Default for ConfigBehaviorConfig {
     Self {
       strict_unknown_fields: true,
       warn_on_deprecated_fields: true,
+      lb_policy_compat_profile: LbPolicyCompatProfile::Strict,
     }
   }
 }
@@ -261,7 +271,8 @@ impl Default for ConfigBehaviorConfig {
 impl Config {
   pub fn load(path: &Path) -> anyhow::Result<Self> {
     let path_roots = config_path_roots(path)?;
-    let loaded = load_toml_with_includes(path)?;
+    let mut loaded = load_toml_with_includes(path)?;
+    normalize_merged_lb_policy_compat(&mut loaded.value)?;
     validate_merged_toml_shape(&loaded.value)?;
     let mut config: Self = loaded
       .value
@@ -271,6 +282,7 @@ impl Config {
     config.source_paths.config_files = loaded.files;
     config.resolve_relative_paths(&path_roots)?;
     config.load_external_waf_rules()?;
+    config.normalize_loaded_waf_lb_policy_compat()?;
     config.collect_loaded_waf_rule_paths();
     Ok(config)
   }
@@ -280,7 +292,8 @@ impl Config {
     overrides: &HashMap<PathBuf, Option<String>>,
   ) -> anyhow::Result<Self> {
     let path_roots = config_path_roots(path)?;
-    let loaded = load_toml_with_includes_and_overrides(path, overrides)?;
+    let mut loaded = load_toml_with_includes_and_overrides(path, overrides)?;
+    normalize_merged_lb_policy_compat(&mut loaded.value)?;
     validate_merged_toml_shape(&loaded.value)?;
     let mut config: Self = loaded
       .value
@@ -290,19 +303,37 @@ impl Config {
     config.source_paths.config_files = loaded.files;
     config.resolve_relative_paths(&path_roots)?;
     config.load_external_waf_rules()?;
+    config.normalize_loaded_waf_lb_policy_compat()?;
     config.collect_loaded_waf_rule_paths();
     Ok(config)
   }
 
   pub fn load_effective_toml_redacted(path: &Path) -> anyhow::Result<toml::Value> {
     let loaded = load_toml_with_includes(path)?;
-    validate_merged_toml_shape(&loaded.value)?;
     let mut value = loaded.value;
+    normalize_merged_lb_policy_compat(&mut value)?;
+    validate_merged_toml_shape(&value)?;
     let config = Self::load(path)?;
     config.validate()?;
     config.write_resolved_workers_to_toml(&mut value)?;
     redact_effective_toml(&mut value);
     Ok(value)
+  }
+
+  pub fn load_lb_policy_compat_report(
+    path: &Path,
+    profile: LbPolicyCompatProfile,
+  ) -> anyhow::Result<LbPolicyCompatReport> {
+    let loaded = load_toml_with_includes(path)?;
+    let mut value = loaded.value;
+    let diagnostics = lb_policy_compat::normalize_toml_with_profile(&mut value, profile);
+    let converted_toml = toml::to_string_pretty(&value)
+      .with_context(|| format!("failed to render converted TOML from {}", path.display()))?;
+    Ok(LbPolicyCompatReport {
+      profile: profile.as_str(),
+      converted_toml,
+      diagnostics,
+    })
   }
 
   pub fn log_worker_resolution(&self) {
@@ -623,6 +654,21 @@ impl Config {
       route.waf.load_external_rules()?;
     }
     Ok(())
+  }
+
+  fn normalize_loaded_waf_lb_policy_compat(&mut self) -> anyhow::Result<()> {
+    let profile = self.config.lb_policy_compat_profile;
+    let mut diagnostics = self
+      .waf
+      .normalize_lb_policy_compat(profile, "waf".to_string());
+    for (route_index, route) in self.routes.iter_mut().enumerate() {
+      diagnostics.extend(
+        route
+          .waf
+          .normalize_lb_policy_compat(profile, format!("routes[{route_index}].waf")),
+      );
+    }
+    lb_policy_compat::ensure_supported(&diagnostics)
   }
 
   fn collect_loaded_waf_rule_paths(&mut self) {
@@ -2116,6 +2162,11 @@ fn route_waf_configs_are_equivalent(left: &[RouteConfig], right: &[RouteConfig])
       .all(|(left, right)| left.name == right.name && left.waf == right.waf)
 }
 
+fn normalize_merged_lb_policy_compat(value: &mut toml::Value) -> anyhow::Result<()> {
+  let diagnostics = lb_policy_compat::normalize_toml_from_config(value)?;
+  lb_policy_compat::ensure_supported(&diagnostics)
+}
+
 fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<()> {
   let strict = value
     .get("config")
@@ -2176,7 +2227,11 @@ fn join_key_path(parent: &str, key: &str) -> String {
 fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
   let keys = match path {
     "" => allowed_keys::ROOT_CONFIG_KEYS,
-    "config" => &["strict_unknown_fields", "warn_on_deprecated_fields"][..],
+    "config" => &[
+      "lb_policy_compat_profile",
+      "strict_unknown_fields",
+      "warn_on_deprecated_fields",
+    ][..],
     "logging" => &["access_log", "level"][..],
     "logging.access_log" => &["database", "enabled", "fields", "stdout"][..],
     "logging.access_log.fields" => &["expression", "name", "value"][..],

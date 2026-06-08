@@ -56,4 +56,4 @@ Lifecycle states are intentionally limited:
 | `crs-stream-payload` | `reserved` | WAF/data plane | CRS inspection for WebSocket and WebTransport stream payloads is reserved. |
 | `general-scripting` | `reserved` | WAF/config extension | General-purpose scripting, imports, loops, callbacks, and unbounded comprehensions are reserved by design. |
 | `legacy-admin-rbac` | `removed` | Config/Admin API | Legacy Admin RBAC `roles`, `permissions`, and `deny_permissions` are rejected in favor of IPM. |
-| `legacy-pool-algorithm-aliases` | `removed` | Config | Legacy pool algorithm aliases such as `round_robin`, `least_conn`, `least_connections`, `random`, `hash`, and `ip_hash` are rejected rather than treated as aliases. |
+| `legacy-pool-algorithm-aliases` | `removed` | Config | Legacy pool algorithm aliases such as `round_robin`, `least_conn`, `least_connections`, `random`, `hash`, and `ip_hash` are rejected by default rather than treated as aliases. Explicit migration UX is available through `[config] lb_policy_compat_profile = "nginx"` or `"caddy"` and `oxibeltctl config lb-policy-compat`; only `least_conn`/`least_connections` and `ip_hash` are converted. |

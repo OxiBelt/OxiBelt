@@ -1331,6 +1331,39 @@ policy = "{policy}"
 }
 
 #[test]
+fn set_load_balancing_policy_compat_profile_normalizes_safe_aliases() {
+    let temp_dir = common::TempDir::new("waf-lb-policy-compat");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-lb-policy-compat");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let raw = format!(
+        r#"{base}
+
+[config]
+lb_policy_compat_profile = "nginx"
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "lb-policy"
+phase = "request"
+priority = 10
+when = "true"
+
+[[waf.rules.actions]]
+type = "set_load_balancing_policy"
+policy = "least_conn"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("safe compatibility policy should validate");
+}
+
+#[test]
 fn external_rule_files_cannot_define_udfs() {
     let temp_dir = common::TempDir::new("external-rule-udf-reject");
     let config_dir = temp_dir.path().join("config");

@@ -3,6 +3,7 @@ include = ["conf.d/*.toml"]
 [config]
 strict_unknown_fields = true
 warn_on_deprecated_fields = true
+lb_policy_compat_profile = "strict" # strict | nginx | caddy
 
 [logging]
 level = "info"

@@ -221,6 +221,7 @@ upstream = "app"
 [config]
 strict_unknown_fields = true
 warn_on_deprecated_fields = true
+lb_policy_compat_profile = "strict" # strict | nginx | caddy
 
 [logging]
 level = "info"
@@ -230,7 +231,7 @@ enabled = false
 stdout = true
 ```
 
-`strict_unknown_fields` defaults to `true`; unknown keys fail startup after includes are merged. `level` is passed to the tracing filter and defaults to `info`.
+`strict_unknown_fields` defaults to `true`; unknown keys fail startup after includes are merged. `lb_policy_compat_profile` defaults to `strict`, which accepts only canonical OxiBelt load-balancing policy names. Set it to `nginx` or `caddy` only while migrating legacy pool-policy names; the profile converts exact safe aliases and rejects names that do not have an exact OxiBelt equivalent. `level` is passed to the tracing filter and defaults to `info`.
 
 `logging.access_log` enables request-wide structured access logs without requiring an OxiRule `emit_access_log` action. When enabled, OxiBelt emits one newline-delimited JSON record for each finalized HTTP response with `event = "oxibelt.access"` and `scope = "system"`. The default fields include request/response IDs, transaction ID, method, URI, client IP, route, status, upstream name, upstream timing fields, and a duplicate-safe `user_agent` collection from `Request.Headers.getAll('User-Agent')`.
 
@@ -2134,7 +2135,7 @@ mode = "live_fetch"
 failure_policy = "fail_closed"
 ```
 
-Pool names and upstream names are separate namespaces. `algorithm` defaults to `power_of_two_choices`. HTTP pools support `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, `rendezvous_ip_hash`, `ewma`, `least_time`, and `sticky_cookie`. `algorithm = "sticky_cookie"` selects an upstream by a signed affinity cookie when present, otherwise it uses `sticky_cookie.fallback_algorithm` and emits `Set-Cookie`; the fallback must be one of the non-sticky modern algorithms. Legacy names such as `round_robin`, `least_conn`, `random`, `hash`, and `ip_hash` are rejected during parsing or validation and must be migrated explicitly. The cookie HMAC secret comes from `sticky_cookie.secret_env` when set, from `[shared_state].sticky_sessions_backend` when configured, or from a process-local generated secret. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
+Pool names and upstream names are separate namespaces. `algorithm` defaults to `power_of_two_choices`. HTTP pools support `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, `rendezvous_ip_hash`, `ewma`, `least_time`, and `sticky_cookie`. `algorithm = "sticky_cookie"` selects an upstream by a signed affinity cookie when present, otherwise it uses `sticky_cookie.fallback_algorithm` and emits `Set-Cookie`; the fallback must be one of the non-sticky modern algorithms. Legacy names such as `round_robin`, `least_conn`, `least_connections`, `random`, `hash`, and `ip_hash` are rejected by default and must be migrated explicitly. With `[config] lb_policy_compat_profile = "nginx"` or `"caddy"`, OxiBelt converts `least_conn` and `least_connections` to `weighted_least_conn`, and `ip_hash` to `rendezvous_ip_hash`, across HTTP pools, sticky-cookie fallbacks, TURN pools, and WAF `set_load_balancing_policy` actions. The profile does not convert `round_robin`, `random`, or `hash`; those names fail with diagnostics because they do not have exact OxiBelt equivalents. Prefer running `oxibeltctl config lb-policy-compat source/config/oxibelt.toml --profile nginx --format text` or `--format json`, updating the TOML to canonical policy names, and then returning `lb_policy_compat_profile` to `strict`. The cookie HMAC secret comes from `sticky_cookie.secret_env` when set, from `[shared_state].sticky_sessions_backend` when configured, or from a process-local generated secret. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
 
 `upstream_pools.health_check` defaults remain compatible with existing configs: HTTP active checks use `GET /healthz`, `expected_status = [200, 204]`, `interval_ms = 5000`, `timeout_ms = 1000`, and thresholds `healthy_threshold = 2` / `unhealthy_threshold = 3`. `mode = "passive"` records passive request results only; `mode = "active"` schedules background probes when `enabled = true`. For HTTP probes, `method`, `path`, `health_port`, `health_host`, `headers`, and `body` build the probe request. `health_port` changes only the TCP connect port. `health_host` changes only the HTTP `Host` header; TLS SNI and hostname verification still use the probe URI host from the pool server origin. Header names and values must be valid HTTP fields, and OxiBelt rejects reserved hop-by-hop, forwarding identity, and `Host` headers in `headers`; use `health_host` for Host.
 

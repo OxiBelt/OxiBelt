@@ -6,6 +6,8 @@ use oxibelt::admin_client::{AdminClient, AdminClientOptions, read_token};
 
 #[path = "oxibeltctl/cli.rs"]
 mod cli;
+#[path = "oxibeltctl/config_compat.rs"]
+mod config_compat;
 #[path = "oxibeltctl/doctor.rs"]
 mod doctor;
 #[path = "oxibeltctl/doctor_plan.rs"]
@@ -46,6 +48,9 @@ async fn run() -> anyhow::Result<()> {
     return Ok(());
   }
   if rulepack::run_local_if_requested(&cli.command).await? {
+    return Ok(());
+  }
+  if config_compat::run_local_if_requested(&cli.command)? {
     return Ok(());
   }
   let client = build_client(&cli.admin)?;

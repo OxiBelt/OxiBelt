@@ -224,6 +224,9 @@ async fn plan_config(client: &AdminClient, command: &ConfigCommand) -> anyhow::R
         etag,
       )
     }
+    ConfigSubcommand::LbPolicyCompat(_) => {
+      bail!("config lb-policy-compat is a local-only command")
+    }
   }
 }
 

@@ -32,6 +32,7 @@ mod devtools;
 mod expression;
 mod external_files;
 mod functions;
+mod lb_policy_compat;
 mod malicious_intelligence_score;
 pub mod metadata;
 mod mitigation_action;

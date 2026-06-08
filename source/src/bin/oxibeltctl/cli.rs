@@ -7,11 +7,14 @@ use url::Url;
 
 #[path = "auth_cli.rs"]
 mod auth_cli;
+#[path = "config_compat_cli.rs"]
+mod config_compat_cli;
 #[path = "ipm_cli.rs"]
 mod ipm_cli;
 #[path = "rulepack_cli.rs"]
 mod rulepack_cli;
 pub(crate) use auth_cli::*;
+pub(crate) use config_compat_cli::*;
 pub(crate) use ipm_cli::*;
 pub(crate) use rulepack_cli::*;
 
@@ -155,6 +158,8 @@ pub(crate) enum ConfigSubcommand {
   Diff(FileArg),
   Apply(ConfigApplyArgs),
   Rollback(EtagsArgs),
+  #[command(name = "lb-policy-compat")]
+  LbPolicyCompat(ConfigLbPolicyCompatArgs),
 }
 
 #[derive(Debug, Args)]

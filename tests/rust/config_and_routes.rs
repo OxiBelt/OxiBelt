@@ -12,12 +12,13 @@ use oxibelt::config::{
     DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
     ExpectContinueMode, ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode,
     GrpcRetryMode, HealthCheckProtocol, HotReloadMode, IpmPolicyEffect,
-    KubernetesDiscoveryResource, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy,
-    OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
-    QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides,
-    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode, TlsKeyExchangeGroup,
-    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
-    UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+    KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail,
+    MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode,
+    ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
+    RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
+    TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode,
+    UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
+    UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{PersonProofTokenBinding, WafMode};
@@ -102,6 +103,135 @@ origin = "http://app-a.example"
     assert_eq!(
         config.upstream_pools[0].algorithm,
         LoadBalancingAlgorithm::PowerOfTwoChoices
+    );
+}
+
+#[test]
+fn lb_policy_compat_profile_normalizes_safe_aliases() {
+    let temp_dir = common::TempDir::new("lb-policy-compat");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "lb-policy-compat");
+    let raw = format!(
+        r#"
+{}
+
+[config]
+lb_policy_compat_profile = "nginx"
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "least_conn"
+
+[upstream_pools.sticky_cookie]
+fallback_algorithm = "ip_hash"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+
+[[turn_upstream_pools]]
+name = "turn-pool"
+algorithm = "ip_hash"
+
+[[turn_upstream_pools.servers]]
+id = "turn-a"
+origin = "turn://turn-a.example:3478"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("compat aliases should parse");
+
+    assert_eq!(
+        config.config.lb_policy_compat_profile,
+        LbPolicyCompatProfile::Nginx
+    );
+    assert_eq!(
+        config.upstream_pools[0].algorithm,
+        LoadBalancingAlgorithm::WeightedLeastConn
+    );
+    assert_eq!(
+        LoadBalancingAlgorithm::from(config.upstream_pools[0].sticky_cookie.fallback_algorithm),
+        LoadBalancingAlgorithm::RendezvousIpHash
+    );
+    assert_eq!(
+        config.turn_upstream_pools[0].algorithm,
+        LoadBalancingAlgorithm::RendezvousIpHash
+    );
+}
+
+#[test]
+fn lb_policy_compat_profile_rejects_unsafe_aliases_with_guidance() {
+    let temp_dir = common::TempDir::new("lb-policy-compat-unsupported");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "lb-policy-compat-unsupported");
+    let raw = format!(
+        r#"
+{}
+
+[config]
+lb_policy_compat_profile = "caddy"
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "random"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let error = toml::from_str::<Config>(&raw)
+        .expect_err("unsafe compatibility alias should fail with guidance");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("unsupported load-balancing compatibility policy")
+            && rendered.contains("choose an OxiBelt canonical policy")
+            && rendered.contains("upstream_pools[0].algorithm"),
+        "unexpected error: {rendered}"
+    );
+}
+
+#[test]
+fn lb_policy_compat_profile_renders_canonical_effective_toml() {
+    let temp_dir = common::TempDir::new("lb-policy-compat-effective");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+    std::fs::create_dir_all(&cert_dir).expect("cert dir should be created");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "lb-policy-compat-effective");
+    let config_path = config_dir.join("oxibelt.toml");
+    let raw = format!(
+        r#"
+{}
+
+[config]
+lb_policy_compat_profile = "nginx"
+
+[[upstream_pools]]
+name = "app-pool"
+algorithm = "least_connections"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "http://app-a.example"
+"#,
+        common::minimal_config_toml_with_paths(
+            cert_path.file_name().unwrap().to_str().unwrap(),
+            key_path.file_name().unwrap().to_str().unwrap(),
+        )
+    );
+    std::fs::write(&config_path, raw).expect("config fixture should be written");
+
+    let value = Config::load_effective_toml_redacted(&config_path)
+        .expect("effective TOML should load with canonicalized policy");
+
+    assert_eq!(
+        value["upstream_pools"][0]["algorithm"].as_str(),
+        Some("weighted_least_conn")
     );
 }
 
