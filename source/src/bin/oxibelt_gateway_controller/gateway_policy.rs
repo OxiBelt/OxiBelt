@@ -109,11 +109,14 @@ pub fn parse_listener_policy(listener: &Value) -> ListenerPolicy {
   ListenerPolicy { namespaces, kinds }
 }
 
-pub fn listener_default_route_kind(protocol: &str, tls_mode: Option<&str>) -> Option<&'static str> {
+pub fn listener_default_route_kinds(
+  protocol: &str,
+  tls_mode: Option<&str>,
+) -> &'static [&'static str] {
   match protocol {
-    "HTTP" | "HTTPS" => Some("HTTPRoute"),
-    "TLS" if tls_mode == Some("Passthrough") => Some("TLSRoute"),
-    _ => None,
+    "HTTP" | "HTTPS" => &["HTTPRoute", "GRPCRoute"],
+    "TLS" if tls_mode == Some("Passthrough") => &["TLSRoute"],
+    _ => &[],
   }
 }
 
@@ -218,7 +221,7 @@ pub fn reference_allowed(
 impl ListenerPolicy {
   fn allows_kind(&self, route_kind: &str, listener_protocol: &str, tls_mode: Option<&str>) -> bool {
     if self.kinds.is_empty() {
-      return listener_default_route_kind(listener_protocol, tls_mode) == Some(route_kind);
+      return listener_default_route_kinds(listener_protocol, tls_mode).contains(&route_kind);
     }
     self
       .kinds

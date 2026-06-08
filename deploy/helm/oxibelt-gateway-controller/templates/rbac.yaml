@@ -4,10 +4,10 @@ metadata:
   name: {{ include "oxibelt-gateway-controller.name" . }}
 rules:
 - apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gatewayclasses", "gateways", "httproutes", "tlsroutes", "referencegrants"]
+  resources: ["gatewayclasses", "gateways", "httproutes", "grpcroutes", "tlsroutes", "referencegrants"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gatewayclasses/status", "gateways/status", "httproutes/status", "tlsroutes/status"]
+  resources: ["gatewayclasses/status", "gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status"]
   verbs: ["get", "patch", "update"]
 - apiGroups: ["gateway.networking.k8s.io"]
   resources: ["tcproutes"]

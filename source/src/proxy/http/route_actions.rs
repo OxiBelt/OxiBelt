@@ -335,6 +335,7 @@ mod tests {
           query: query.map(str::to_string),
         }),
         redirect: None,
+        ..Default::default()
       },
       upstream: Some("app".to_string()),
       upstream_pool: None,
@@ -466,6 +467,7 @@ mod tests {
         status: Some(308),
         location_template: Some("/new{path_suffix}?{query}".to_string()),
       }),
+      ..Default::default()
     };
     let uri = Uri::from_static("/api/orders?id=42");
 
@@ -486,6 +488,7 @@ mod tests {
         status: Some(302),
         location_template: Some("/{path}".to_string()),
       }),
+      ..Default::default()
     };
     let uri = Uri::from_static("/api/orders");
 

@@ -278,6 +278,7 @@ impl PlainProxyFastPath {
       preserve_host: upstream.preserve_host,
       upstream_version,
       waf_mutations: &request_waf.request_header_mutations,
+      route_mutations: &[],
     };
     rebuild_request_parts(&mut parts, rebuild);
     semantics::strip_accepted_expect(&mut parts.headers);

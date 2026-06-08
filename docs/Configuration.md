@@ -1997,7 +1997,7 @@ claim = "sub"
 header = "remote-user"
 ```
 
-`[[external_auth]]` defines authorization checks that routes can reference with `external_auth = "edge-auth"`. OxiBelt does not implement the browser login flow. For `provider = "authelia"`, it performs a forward-auth GET to `endpoint`, forwarding the configured request headers plus `X-Forwarded-*` context; 2xx allows the request and non-2xx becomes the downstream terminal response with only allowlisted response headers. For `provider = "oauth2"`, it requires an inbound `Authorization: Bearer` token and POSTs to an OAuth2 token introspection endpoint; `required_scopes` must all be present when configured. For `provider = "oidc"`, it calls an OIDC UserInfo endpoint with the bearer token and enforces `required_claims`.
+`[[external_auth]]` defines authorization checks that routes can reference with `external_auth = "edge-auth"`. OxiBelt does not implement the browser login flow. For `provider = "authelia"`, it performs a forward-auth GET to `endpoint`, forwarding the configured request headers plus `X-Forwarded-*` context; 2xx allows the request and non-2xx becomes the downstream terminal response with only allowlisted response headers. `provider = "gateway_ext_auth_http"` uses the same HTTP forward-auth runtime for Gateway API `ExternalAuth.protocol = "HTTP"` translations, but controller-generated entries render explicit `forward_headers`, `identity_headers`, and `terminal_response_headers` arrays so no non-Gateway defaults are inherited. For `provider = "oauth2"`, it requires an inbound `Authorization: Bearer` token and POSTs to an OAuth2 token introspection endpoint; `required_scopes` must all be present when configured. For `provider = "oidc"`, it calls an OIDC UserInfo endpoint with the bearer token and enforces `required_claims`.
 
 Before forwarding upstream, OxiBelt strips configured `identity_headers` from the client request and injects identity headers only from the trusted auth response/token claims. Routes with `external_auth` use the general proxy path so fast paths cannot bypass the check. `timeout_ms` is a wall-clock deadline for the full auth exchange, including request send, response headers, and response body collection. `max_response_body_bytes` caps the auth response body size but is not a time limit. `fail_policy = "closed"` returns `503` on auth-service errors; `open` allows the request and records an auth error metric.
 
@@ -2181,6 +2181,34 @@ upstream = "app"
 # status = 308
 # location_template = "/new{path_suffix}?{query}"
 
+#[[routes.actions.request_headers.set]]
+# name = "x-route"
+# value = "api-v1"
+
+#[[routes.actions.request_headers.add]]
+# name = "x-forwarded-tags"
+# value = "edge"
+
+#[routes.actions.response_headers]
+# remove = ["server"]
+
+#[[routes.actions.response_headers.set]]
+# name = "x-served-by"
+# value = "oxibelt"
+
+#[routes.actions.cors]
+# allow_origins = ["https://app.example.com"]
+# allow_methods = ["GET", "POST"]
+# allow_headers = ["authorization", "content-type"]
+# expose_headers = ["x-served-by"]
+# allow_credentials = true
+# max_age_seconds = 600
+
+#[[routes.actions.request_mirrors]]
+# upstream_pool = "shadow-pool"
+# sample_percent = 10
+# max_body_bytes = 0
+
 #[routes.match.tls.client_cert]
 # present = true
 
@@ -2236,6 +2264,9 @@ Fields:
 - `replace_prefix_with`: optional upstream path prefix replacement.
 - `actions.rewrite`: optional upstream request URI rewrite for proxy routes. It can set `path`, `query`, or both. Omitted `query` preserves the original query; `query = ""` removes it.
 - `actions.redirect`: terminal redirect target with required `status` and `location_template`.
+- `actions.request_headers` and `actions.response_headers`: optional route-level header modifiers with `set`, `add`, and `remove`.
+- `actions.cors`: optional route-level CORS policy with allowed origins, methods, headers, exposed headers, credentials, and max-age controls.
+- `actions.request_mirrors`: optional best-effort request mirroring to one or more upstream pools.
 - `upstream`, `upstream_pool`, `static_root`, or `actions.redirect`: exactly one target.
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
@@ -2245,6 +2276,12 @@ Route path values must start with `/` and must not contain control characters, b
 Route action templates support `{scheme}`, `{host}`, `{path}`, `{path_suffix}`, `{query}`, `{query:name}`, and `{capture:N}`. Capture references require `match.path.regex` and must refer to a valid regex capture index; `{capture:0}` is the full regex match. `actions.rewrite` is mutually exclusive with `replace_prefix_with`, `static_root`, and `actions.redirect`, and requires `upstream` or `upstream_pool`. Rendered rewrite paths must remain origin-form paths beginning with one `/`. When rendering `actions.rewrite.query`, token output is percent-encoded as a query component so request-derived values cannot add extra parameters; omit `query` to preserve the original downstream query string unchanged.
 
 `actions.redirect.status` must be `301`, `302`, `303`, `307`, or `308`. Redirect locations are origin-relative only: the rendered `location_template` must start with `/` and not `//`; absolute redirects are intentionally out of scope. Redirect routes run after route matching, route IPM, route rate limits, dynamic policy, and built-in Person proof API handling, then return before external auth, request WAF, static files, cache, body capture, or upstream selection. Redirect routes therefore reject `external_auth`, route-level WAF config, cache, buffering, retry, upstream HTTP version overrides, upgrades, CONNECT, and gRPC-Web.
+
+Route header modifiers are validated with the same framing safety boundary as WAF header mutations. They cannot mutate hop-by-hop or request framing headers such as `connection`, `content-length`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `proxy-authenticate`, or `proxy-authorization`. Request header modifiers run after forwarded-header normalization and WAF request mutations, before upstream dispatch. Response header modifiers run after security headers and WAF response mutations, before downstream response finalization and cache status headers.
+
+`actions.cors` handles valid preflight requests immediately after route matching and before route IPM, redirects, external auth, WAF, static files, cache, or upstream selection. Successful preflight responses return `204` with CORS response headers and no backend data. Credentialed CORS must not use wildcard origins. Non-preflight responses receive CORS response headers only when the request carries an allowed `Origin`.
+
+`actions.request_mirrors` selects the configured `upstream_pool` independently from the primary upstream and sends a bodyless best-effort mirror for `GET` and `HEAD` requests after outbound request construction. Mirror failures, unavailable pools, unsupported HTTP/3/proxy-protocol egress targets, and sampled-out requests never affect the primary response; they update `oxibelt_request_mirror_success_total`, `oxibelt_request_mirror_errors_total`, or `oxibelt_request_mirror_skips_total`.
 
 Extended route matching keeps existing `hosts` and `path_prefix` behavior by default. `match.path.prefix` is an alias for the effective route prefix; when `path_prefix` is also set to a non-root value, both prefixes must be identical. `match.path.exact` and `match.path.regex` add extra path constraints without changing the prefix used for upstream rewrite or static-file stripping.
 

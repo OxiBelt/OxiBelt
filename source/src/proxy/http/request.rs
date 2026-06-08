@@ -24,6 +24,7 @@ pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) preserve_host: bool,
   pub(crate) upstream_version: HttpVersion,
   pub(crate) waf_mutations: &'a [HeaderMutation],
+  pub(crate) route_mutations: &'a [HeaderMutation],
 }
 
 pub(crate) fn rebuild_request<B>(
@@ -67,6 +68,7 @@ pub(crate) fn rebuild_request_parts(
   }
 
   apply_header_mutations(&mut parts.headers, options.waf_mutations);
+  apply_header_mutations(&mut parts.headers, options.route_mutations);
 }
 
 pub(crate) fn proxy_body<B>(body: B) -> ProxyBody
@@ -108,6 +110,7 @@ mod tests {
       preserve_host,
       upstream_version: HttpVersion::H1,
       waf_mutations: &[],
+      route_mutations: &[],
     }
   }
 

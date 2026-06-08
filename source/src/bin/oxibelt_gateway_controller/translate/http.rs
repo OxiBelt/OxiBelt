@@ -2,9 +2,9 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 
 use super::{
-  GeneratedPool, GeneratedRoute, GeneratedServer, NamedExactMatch, ObjectKey, RedirectAction,
-  RewriteAction, TranslationState, backend_port, backend_ref_is_service, intersect_hosts,
-  sanitize_name, string_at, u16_at, u32_at,
+  GeneratedExternalAuth, GeneratedPool, GeneratedRoute, GeneratedServer, NamedExactMatch,
+  ObjectKey, TranslationState, backend_port, backend_ref_is_service, filters::ParsedRouteFilters,
+  filters::parse_route_filters, intersect_hosts, sanitize_name, string_at, u32_at,
 };
 use crate::model::{KubernetesObject, object_ref as model_object_ref};
 
@@ -49,7 +49,7 @@ impl TranslationState {
             attachment.gateway.name,
           );
           let object_label = model_object_ref(route);
-          let Ok(mut generated) = http_match_route(
+          let Ok((mut generated, filters)) = http_match_route(
             route,
             rule,
             route_match,
@@ -67,6 +67,10 @@ impl TranslationState {
             continue;
           };
 
+          if !self.apply_parsed_route_filters(route, "HTTPRoute", &mut generated, filters, &source)
+          {
+            continue;
+          }
           if let Some(pool) = self.backend_pool(
             route,
             "HTTPRoute",
@@ -85,7 +89,7 @@ impl TranslationState {
     }
   }
 
-  fn backend_pool(
+  pub(super) fn backend_pool(
     &mut self,
     route: &KubernetesObject,
     from_kind: &str,
@@ -126,7 +130,7 @@ impl TranslationState {
     })
   }
 
-  fn backend_server(
+  pub(super) fn backend_server(
     &mut self,
     route: &KubernetesObject,
     from_kind: &str,
@@ -180,6 +184,53 @@ impl TranslationState {
       weight,
     })
   }
+
+  pub(super) fn apply_parsed_route_filters(
+    &mut self,
+    route: &KubernetesObject,
+    from_kind: &str,
+    generated: &mut GeneratedRoute,
+    filters: ParsedRouteFilters,
+    source: &str,
+  ) -> bool {
+    generated.request_headers = filters.request_headers;
+    generated.response_headers = filters.response_headers;
+    generated.cors = filters.cors;
+    generated.rewrite = filters.rewrite;
+    generated.redirect = filters.redirect;
+    for (index, mirror) in filters.request_mirrors.into_iter().enumerate() {
+      let backend_refs = vec![mirror.backend_ref];
+      let route_name = sanitize_name(&format!("{}-mirror-{index}", generated.name));
+      let Some(pool) =
+        self.backend_pool(route, from_kind, Some(&backend_refs), &route_name, source)
+      else {
+        return false;
+      };
+      let mut action = mirror.action;
+      action.upstream_pool = pool.name.clone();
+      generated.request_mirrors.push(action);
+      self.pools.insert(pool.name.clone(), pool);
+    }
+    if let Some(auth) = filters.external_auth {
+      let Some(server) = self.backend_server(route, from_kind, &auth.backend_ref, 0, 1) else {
+        return false;
+      };
+      let name = sanitize_name(&format!("{}-ext-auth", generated.name));
+      self.external_auth.insert(
+        name.clone(),
+        GeneratedExternalAuth {
+          source: source.to_string(),
+          name: name.clone(),
+          endpoint: server.origin,
+          forward_headers: auth.forward_headers,
+          identity_headers: auth.identity_headers,
+          terminal_response_headers: auth.terminal_response_headers,
+        },
+      );
+      generated.external_auth = Some(name);
+    }
+    true
+  }
 }
 
 fn http_match_route(
@@ -190,7 +241,7 @@ fn http_match_route(
   rule_index: usize,
   match_index: usize,
   source: &str,
-) -> anyhow::Result<GeneratedRoute> {
+) -> anyhow::Result<(GeneratedRoute, ParsedRouteFilters)> {
   let path = route_match.get("path");
   let path_type = path
     .and_then(|path| string_at(path, &["type"]))
@@ -218,133 +269,39 @@ fn http_match_route(
   }
   let headers = exact_named_matches(route_match, &["headers"], "header")?;
   let queries = exact_named_matches(route_match, &["queryParams"], "query")?;
-  let (rewrite, redirect) = route_actions(rule, &path_prefix)?;
-  Ok(GeneratedRoute {
-    source: source.to_string(),
-    name: sanitize_name(&format!(
-      "gwapi-http-{}-{}-{}-{}",
-      route.namespace(),
-      route.name(),
-      rule_index,
-      match_index
-    )),
-    hosts: if hosts.is_empty() {
-      vec!["*".to_string()]
-    } else {
-      hosts.to_vec()
-    },
-    path_prefix,
-    path_exact,
-    methods,
-    headers,
-    queries,
-    priority: 10_000 - (rule_index as i32 * 100) - match_index as i32,
-    upstream_pool: None,
-    rewrite,
-    redirect,
-  })
-}
-
-fn route_actions(
-  rule: &Value,
-  path_prefix: &str,
-) -> anyhow::Result<(Option<RewriteAction>, Option<RedirectAction>)> {
-  let mut rewrite = None;
-  let mut redirect = None;
-  for filter in rule
-    .get("filters")
-    .and_then(Value::as_array)
-    .cloned()
-    .unwrap_or_default()
-  {
-    match string_at(&filter, &["type"]).unwrap_or("") {
-      "URLRewrite" => {
-        if rewrite.is_some() {
-          bail!("only one URLRewrite filter is supported per rule");
-        }
-        if redirect.is_some() {
-          bail!("URLRewrite and RequestRedirect filters cannot be combined");
-        }
-        rewrite = Some(parse_rewrite(&filter, path_prefix)?);
-      }
-      "RequestRedirect" => {
-        if redirect.is_some() {
-          bail!("only one RequestRedirect filter is supported per rule");
-        }
-        if rewrite.is_some() {
-          bail!("URLRewrite and RequestRedirect filters cannot be combined");
-        }
-        redirect = Some(parse_redirect(&filter, path_prefix)?);
-      }
-      "RequestHeaderModifier"
-      | "ResponseHeaderModifier"
-      | "RequestMirror"
-      | "CORS"
-      | "ExtensionRef"
-      | "ExternalAuth" => bail!("HTTPRoute filter is unsupported in v1"),
-      "" => bail!("HTTPRoute filter type is required"),
-      other => bail!("HTTPRoute filter type {other} is unsupported in v1"),
-    }
-  }
-  Ok((rewrite, redirect))
-}
-
-fn parse_rewrite(filter: &Value, path_prefix: &str) -> anyhow::Result<RewriteAction> {
-  if string_at(filter, &["urlRewrite", "hostname"]).is_some() {
-    bail!("URLRewrite hostname is unsupported in v1");
-  }
-  let path = match filter
-    .get("urlRewrite")
-    .and_then(|rewrite| rewrite.get("path"))
-  {
-    Some(path) => Some(path_modifier_template(path, path_prefix)?),
-    None => None,
-  };
-  Ok(RewriteAction { path, query: None })
-}
-
-fn parse_redirect(filter: &Value, path_prefix: &str) -> anyhow::Result<RedirectAction> {
-  let redirect = filter
-    .get("requestRedirect")
-    .context("RequestRedirect filter requires requestRedirect")?;
-  if string_at(redirect, &["scheme"]).is_some()
-    || string_at(redirect, &["hostname"]).is_some()
-    || u16_at(redirect, &["port"]).is_some()
-  {
-    bail!("RequestRedirect scheme, hostname, and port are unsupported in v1");
-  }
-  let status = u16_at(redirect, &["statusCode"]).unwrap_or(302);
-  if !matches!(status, 301 | 302 | 303 | 307 | 308) {
-    bail!("RequestRedirect statusCode must be one of 301, 302, 303, 307, or 308");
-  }
-  let location_template = match redirect.get("path") {
-    Some(path) => path_modifier_template(path, path_prefix)?,
-    None => "{path}".to_string(),
-  };
-  Ok(RedirectAction {
-    status,
-    location_template,
-  })
-}
-
-fn path_modifier_template(path: &Value, path_prefix: &str) -> anyhow::Result<String> {
-  match string_at(path, &["type"]).unwrap_or("") {
-    "ReplaceFullPath" => string_at(path, &["replaceFullPath"])
-      .map(str::to_string)
-      .context("ReplaceFullPath requires replaceFullPath"),
-    "ReplacePrefixMatch" => {
-      let replacement = string_at(path, &["replacePrefixMatch"])
-        .context("ReplacePrefixMatch requires replacePrefixMatch")?;
-      if path_prefix == "/" {
-        Ok(format!("{replacement}{{path_suffix}}"))
-      } else if replacement == "/" {
-        Ok("/{path_suffix}".to_string())
+  let filters = parse_route_filters(rule, &path_prefix, "HTTPRoute")?;
+  Ok((
+    GeneratedRoute {
+      source: source.to_string(),
+      name: sanitize_name(&format!(
+        "gwapi-http-{}-{}-{}-{}",
+        route.namespace(),
+        route.name(),
+        rule_index,
+        match_index
+      )),
+      hosts: if hosts.is_empty() {
+        vec!["*".to_string()]
       } else {
-        Ok(format!("{replacement}{{path_suffix}}"))
-      }
-    }
-    other => bail!("unsupported path modifier type {other}"),
-  }
+        hosts.to_vec()
+      },
+      path_prefix,
+      path_exact,
+      methods,
+      headers,
+      queries,
+      priority: 10_000 - (rule_index as i32 * 100) - match_index as i32,
+      upstream_pool: None,
+      rewrite: None,
+      redirect: None,
+      request_headers: Default::default(),
+      response_headers: Default::default(),
+      cors: None,
+      request_mirrors: Vec::new(),
+      external_auth: None,
+    },
+    filters,
+  ))
 }
 
 fn exact_named_matches(

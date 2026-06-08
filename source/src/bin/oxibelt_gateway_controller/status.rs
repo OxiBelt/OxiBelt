@@ -78,7 +78,7 @@ pub fn build_status_patches(
           &now,
         ));
       }
-      "HTTPRoute" | "TLSRoute" | "TCPRoute" => {
+      "GRPCRoute" | "HTTPRoute" | "TLSRoute" | "TCPRoute" => {
         if let Some(patch) = route_patch(
           object,
           args,
@@ -199,21 +199,23 @@ fn listener_status(
   generation: Option<i64>,
   now: &str,
 ) -> Value {
-  let supported_kind = listener_supported_kind(listener);
+  let supported_kinds = listener_supported_kinds(listener);
   let conflict_key = (
     listener.port,
     listener.protocol.clone(),
     listener.hostname.clone(),
   );
   let conflicted = conflicts.contains(&conflict_key);
-  let accepted = supported_kind.is_some() && !conflicted;
-  let mut supported_kinds = Vec::new();
-  if let Some(kind) = supported_kind {
-    supported_kinds.push(json!({
+  let accepted = !supported_kinds.is_empty() && !conflicted;
+  let supported_kinds = supported_kinds
+    .iter()
+    .map(|kind| {
+      json!({
       "group": gateway_policy::GATEWAY_GROUP,
       "kind": kind,
-    }));
-  }
+      })
+    })
+    .collect::<Vec<_>>();
   json!({
     "name": listener.name,
     "supportedKinds": supported_kinds,
@@ -345,6 +347,7 @@ fn route_parent_status(
   let has_error = object_errors
     .iter()
     .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
+  let error_reason = route_error_reason(&object_errors);
   let resolved_refs = !object_errors.iter().any(|diagnostic| {
     diagnostic.message.contains("ReferenceGrant")
       || diagnostic.message.contains("was not found")
@@ -359,7 +362,13 @@ fn route_parent_status(
       condition(
         "Accepted",
         bool_status(accepted),
-        if accepted { "Accepted" } else if !listener_matches { "NoMatchingListener" } else { "InvalidRoute" },
+        if accepted {
+          "Accepted"
+        } else if !listener_matches {
+          "NoMatchingListener"
+        } else {
+          error_reason
+        },
         if accepted {
           "Route is accepted by OxiBelt"
         } else if !listener_matches {
@@ -396,6 +405,29 @@ fn route_parent_status(
       )
     ]
   })
+}
+
+fn route_error_reason(errors: &[&Diagnostic]) -> &'static str {
+  if errors.iter().any(|diagnostic| {
+    diagnostic.message.contains("ReferenceGrant")
+      || diagnostic.message.contains("was not found")
+      || diagnostic.message.contains("does not expose")
+  }) {
+    return "RefNotPermitted";
+  }
+  if errors
+    .iter()
+    .any(|diagnostic| diagnostic.message.contains("filter"))
+  {
+    return "IncompatibleFilters";
+  }
+  if errors
+    .iter()
+    .any(|diagnostic| diagnostic.message.contains("unsupported"))
+  {
+    return "UnsupportedValue";
+  }
+  "InvalidRoute"
 }
 
 fn accepted_gateway_classes(objects: &[KubernetesObject], args: &SharedArgs) -> HashSet<String> {
@@ -446,8 +478,8 @@ fn gateway_summaries(
   gateways
 }
 
-fn listener_supported_kind(listener: &ListenerSummary) -> Option<&'static str> {
-  gateway_policy::listener_default_route_kind(&listener.protocol, listener.tls_mode.as_deref())
+fn listener_supported_kinds(listener: &ListenerSummary) -> &'static [&'static str] {
+  gateway_policy::listener_default_route_kinds(&listener.protocol, listener.tls_mode.as_deref())
 }
 
 fn route_has_matching_listener(
@@ -462,7 +494,7 @@ fn route_has_matching_listener(
       return false;
     }
     (match route.kind.as_str() {
-      "HTTPRoute" => matches!(listener.protocol.as_str(), "HTTP" | "HTTPS"),
+      "GRPCRoute" | "HTTPRoute" => matches!(listener.protocol.as_str(), "HTTP" | "HTTPS"),
       "TLSRoute" => {
         listener.protocol == "TLS" && listener.tls_mode.as_deref() == Some("Passthrough")
       }
@@ -597,6 +629,7 @@ fn api_prefix_for_route(object: &KubernetesObject) -> &'static str {
 fn resource_for_route(object: &KubernetesObject) -> &'static str {
   match object.kind.as_str() {
     "HTTPRoute" => "httproutes",
+    "GRPCRoute" => "grpcroutes",
     "TLSRoute" => "tlsroutes",
     "TCPRoute" => "tcproutes",
     _ => "routes",

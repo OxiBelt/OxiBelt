@@ -10,6 +10,7 @@ use crate::cache::CacheStats;
 use crate::config::{MetricsConfig, MetricsDetail};
 use crate::tls::TlsServerSessionStorageStats;
 
+mod auth;
 mod crlite;
 mod detail;
 mod ocsp;
@@ -45,6 +46,9 @@ pub struct Metrics {
   external_auth_allowed_total: AtomicU64,
   external_auth_denied_total: AtomicU64,
   external_auth_errors_total: AtomicU64,
+  request_mirror_success_total: AtomicU64,
+  request_mirror_errors_total: AtomicU64,
+  request_mirror_skips_total: AtomicU64,
   mitigation_queued_total: AtomicU64,
   mitigation_dropped_total: AtomicU64,
   mitigation_write_errors_total: AtomicU64,
@@ -233,24 +237,6 @@ impl Metrics {
     self
       .dynamic_policy_active_policies
       .store(count, Ordering::Relaxed);
-  }
-
-  pub fn record_external_auth_allowed(&self) {
-    self
-      .external_auth_allowed_total
-      .fetch_add(1, Ordering::Relaxed);
-  }
-
-  pub fn record_external_auth_denied(&self) {
-    self
-      .external_auth_denied_total
-      .fetch_add(1, Ordering::Relaxed);
-  }
-
-  pub fn record_external_auth_error(&self) {
-    self
-      .external_auth_errors_total
-      .fetch_add(1, Ordering::Relaxed);
   }
 
   pub fn record_mitigation_queued(&self) {
@@ -478,24 +464,7 @@ impl Metrics {
       "gauge",
       self.dynamic_policy_active_policies.load(Ordering::Relaxed),
     );
-    append_metric(
-      &mut output,
-      "oxibelt_external_auth_allowed_total",
-      "counter",
-      self.external_auth_allowed_total.load(Ordering::Relaxed),
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_external_auth_denied_total",
-      "counter",
-      self.external_auth_denied_total.load(Ordering::Relaxed),
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_external_auth_errors_total",
-      "counter",
-      self.external_auth_errors_total.load(Ordering::Relaxed),
-    );
+    auth::append_auth_and_mirror_metrics(&mut output, self);
     append_metric(
       &mut output,
       "oxibelt_mitigation_queued_total",

@@ -14,8 +14,12 @@ mod common {
   ));
 }
 
+#[path = "fixtures.rs"]
+mod fixtures;
 #[path = "policy_tests.rs"]
 mod policy_tests;
+
+use fixtures::*;
 
 fn args() -> SharedArgs {
   SharedArgs {
@@ -158,294 +162,124 @@ fn tcproute_is_status_only_warning() {
 }
 
 #[test]
+fn http_route_filters_generate_native_actions() {
+  let rendered = translate_objects(&objects(HTTP_FILTER_FIXTURE), &args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(rendered.toml.contains("[[external_auth]]"));
+  assert!(
+    rendered
+      .toml
+      .contains("provider = \"gateway_ext_auth_http\"")
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("endpoint = \"http://auth.default.svc.cluster.local:9000\"")
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("forward_headers = [\"authorization\"]")
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("identity_headers = [\"x-auth-user\"]")
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("[[routes.actions.request_headers.set]]")
+  );
+  assert!(rendered.toml.contains("name = \"x-gateway-route\""));
+  assert!(
+    rendered
+      .toml
+      .contains("[[routes.actions.response_headers.add]]")
+  );
+  assert!(rendered.toml.contains("[routes.actions.cors]"));
+  assert!(
+    rendered
+      .toml
+      .contains("allow_origins = [\"https://app.example.com\"]")
+  );
+  assert!(rendered.toml.contains("[[routes.actions.request_mirrors]]"));
+  assert!(rendered.toml.contains("sample_percent = 25"));
+  assert!(
+    rendered
+      .toml
+      .contains("external_auth = \"gwapi-http-default-app-0-0-ext-auth\"")
+  );
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn grpc_route_generates_service_method_route_and_shared_filters() {
+  let rendered = translate_objects(&objects(GRPC_FIXTURE), &args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(rendered.toml.contains("name = \"gwapi-grpc-rpc-echo-0-0\""));
+  assert!(rendered.toml.contains("path_prefix = \"/pkg.Echo/Say\""));
+  assert!(
+    rendered
+      .toml
+      .contains("[routes.match.path]\nexact = \"/pkg.Echo/Say\"")
+  );
+  assert!(rendered.toml.contains("methods = [\"POST\"]"));
+  assert!(rendered.toml.contains("name = \"x-tenant\""));
+  assert!(rendered.toml.contains("exact = \"acme\""));
+  assert!(
+    rendered
+      .toml
+      .contains("[[routes.actions.request_headers.add]]")
+  );
+  assert!(rendered.toml.contains("[[routes.actions.request_mirrors]]"));
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn grpc_external_auth_protocol_is_blocking_diagnostic() {
+  let rendered =
+    translate_objects(&objects(UNSUPPORTED_GRPC_EXTERNAL_AUTH), &args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.iter().any(
+      |diagnostic| diagnostic.severity == DiagnosticSeverity::Error
+        && diagnostic
+          .message
+          .contains("Gateway ExternalAuth protocol GRPC is unsupported")
+    ),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(!rendered.toml.contains("[[routes]]"));
+}
+
+#[test]
 fn generated_http_toml_validates_with_oxibelt_config() {
   let rendered = translate_objects(&objects(HTTP_FIXTURE), &args()).expect("translate");
+  generated_toml_validates(&rendered.toml);
+}
+
+fn generated_toml_validates(rendered_toml: &str) {
   let temp_dir = common::TempDir::new("gateway-api-generated-config");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "gateway-api-generated-config");
   let raw = format!(
     "{}\n{}",
     common::minimal_config_toml(&cert_path, &key_path),
-    rendered.toml
+    rendered_toml
   );
 
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("generated config should validate");
 }
-
-const HTTP_FIXTURE: &str = r#"
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: oxibelt
-spec:
-  controllerName: oxibelt.dev/gateway-controller
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: edge
-  namespace: default
-spec:
-  gatewayClassName: oxibelt
-  listeners:
-  - name: https
-    protocol: HTTPS
-    port: 443
-    hostname: api.example.com
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: app
-  namespace: default
-spec:
-  ports:
-  - name: http
-    port: 8080
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: canary
-  namespace: default
-spec:
-  ports:
-  - name: http
-    port: 8080
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: app
-  namespace: default
-spec:
-  parentRefs:
-  - name: edge
-    sectionName: https
-  hostnames:
-  - api.example.com
-  rules:
-  - matches:
-    - path:
-        type: PathPrefix
-        value: /api
-      method: GET
-    backendRefs:
-    - name: app
-      port: 8080
-      weight: 80
-    - name: canary
-      port: 8080
-      weight: 20
-"#;
-
-const CROSS_NAMESPACE_WITHOUT_GRANT: &str = r#"
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: oxibelt
-spec:
-  controllerName: oxibelt.dev/gateway-controller
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: edge
-  namespace: frontend
-spec:
-  gatewayClassName: oxibelt
-  listeners:
-  - name: http
-    protocol: HTTP
-    port: 80
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: app
-  namespace: backend
-spec:
-  ports:
-  - port: 8080
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: app
-  namespace: frontend
-spec:
-  parentRefs:
-  - name: edge
-  rules:
-  - backendRefs:
-    - name: app
-      namespace: backend
-      port: 8080
-"#;
-
-const CROSS_NAMESPACE_WITH_GRANT: &str = r#"
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: oxibelt
-spec:
-  controllerName: oxibelt.dev/gateway-controller
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: edge
-  namespace: frontend
-spec:
-  gatewayClassName: oxibelt
-  listeners:
-  - name: http
-    protocol: HTTP
-    port: 80
----
-apiVersion: gateway.networking.k8s.io/v1beta1
-kind: ReferenceGrant
-metadata:
-  name: allow-frontend
-  namespace: backend
-spec:
-  from:
-  - group: gateway.networking.k8s.io
-    kind: HTTPRoute
-    namespace: frontend
-  to:
-  - group: ""
-    kind: Service
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: app
-  namespace: backend
-spec:
-  ports:
-  - port: 8080
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: app
-  namespace: frontend
-spec:
-  parentRefs:
-  - name: edge
-  rules:
-  - backendRefs:
-    - name: app
-      namespace: backend
-      port: 8080
-"#;
-
-const UNSUPPORTED_HEADER_REGEX: &str = r#"
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: oxibelt
-spec:
-  controllerName: oxibelt.dev/gateway-controller
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: edge
-  namespace: default
-spec:
-  gatewayClassName: oxibelt
-  listeners:
-  - name: http
-    protocol: HTTP
-    port: 80
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: app
-  namespace: default
-spec:
-  ports:
-  - port: 8080
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: app
-  namespace: default
-spec:
-  parentRefs:
-  - name: edge
-  rules:
-  - matches:
-    - headers:
-      - name: x-env
-        type: RegularExpression
-        value: prod|stage
-    backendRefs:
-    - name: app
-      port: 8080
-"#;
-
-const TLS_FIXTURE: &str = r#"
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: oxibelt
-spec:
-  controllerName: oxibelt.dev/gateway-controller
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: edge
-  namespace: default
-spec:
-  gatewayClassName: oxibelt
-  listeners:
-  - name: tls
-    protocol: TLS
-    port: 443
-    hostname: db.example.com
-    tls:
-      mode: Passthrough
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: db
-  namespace: default
-spec:
-  ports:
-  - port: 5432
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: TLSRoute
-metadata:
-  name: db
-  namespace: default
-spec:
-  parentRefs:
-  - name: edge
-    sectionName: tls
-  hostnames:
-  - db.example.com
-  rules:
-  - backendRefs:
-    - name: db
-      port: 5432
-"#;
-
-const TCP_ROUTE_FIXTURE: &str = r#"
-apiVersion: gateway.networking.k8s.io/v1alpha2
-kind: TCPRoute
-metadata:
-  name: tcp
-  namespace: default
-spec:
-  rules:
-  - backendRefs: []
-"#;

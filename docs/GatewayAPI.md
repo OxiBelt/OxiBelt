@@ -17,6 +17,7 @@ The controller watches:
 - `GatewayClass`
 - `Gateway`
 - `HTTPRoute`
+- `GRPCRoute`
 - `TLSRoute`
 - `ReferenceGrant`
 - `Service`
@@ -25,7 +26,7 @@ The controller watches:
 Only `GatewayClass.spec.controllerName = "oxibelt.dev/gateway-controller"` is
 in scope by default. Use `--controller-name` to change that value.
 
-`HTTPRoute` rules generate deterministic `[[routes]]` and
+`HTTPRoute` and `GRPCRoute` rules generate deterministic `[[routes]]` and
 `[[upstream_pools]]` entries. Service backends become static cluster DNS
 origins such as:
 
@@ -35,7 +36,7 @@ origin = "http://app.default.svc.cluster.local:8080"
 
 Weighted `backendRefs` become OxiBelt upstream-pool server weights. The
 controller reads `oxibelt.dev/upstream-scheme = "http" | "https"` from a
-`Service` or `HTTPRoute`; the default is `http`.
+`Service`; the default is `http`.
 
 `TLSRoute` is supported only for Gateway listeners with
 `tls.mode = "Passthrough"`. It generates `[[sni_forward.rules]]` with
@@ -67,17 +68,50 @@ Supported filters:
 - `URLRewrite` path rewrite when it maps to OxiBelt `actions.rewrite.path`
 - `RequestRedirect` path-only redirect when it maps to origin-relative
   `actions.redirect.location_template`
+- `RequestHeaderModifier` and `ResponseHeaderModifier`, mapped to
+  `routes.actions.request_headers` and `routes.actions.response_headers`
+- `RequestMirror`, mapped to a generated mirror `upstream_pool`
+- `CORS`, mapped to `routes.actions.cors`
+- `ExternalAuth` with `protocol: HTTP`, mapped to generated
+  `[[external_auth]] provider = "gateway_ext_auth_http"`
 
-Unsupported filters include header modifiers, mirroring, CORS, external auth,
-extension refs, hostname rewrite, port rewrite, and scheme rewrite. Use native
-OxiBelt TOML and OxiRule policy for those behaviors until a later controller
-version adds explicit bounded mappings.
+Unsupported filters include extension refs, hostname rewrite, port rewrite,
+scheme rewrite, gRPC ext-authz, and `ExternalAuth.forwardBody.maxSize > 0`.
+Gateway HTTP external auth uses explicit header allowlists; omitted allowlists
+render as empty arrays instead of inheriting OxiBelt's non-Gateway defaults.
+
+## GRPCRoute Mapping
+
+`GRPCRoute` attaches to in-scope `HTTP` and `HTTPS` listeners. Supported
+matches are host intersection, exact headers, exact service+method matches, and
+service-only matches. Exact service+method lowers to an exact gRPC path such as
+`/pkg.Service/Method`; service-only lowers to a prefix such as
+`/pkg.Service/`. Method-only and regular-expression method matches are rejected
+with a blocking diagnostic.
+
+Supported `GRPCRoute` filters share the same bounded implementation as
+`HTTPRoute` where applicable: request/response header modifiers,
+`RequestMirror`, and HTTP `ExternalAuth`. CORS, redirects, and URL rewrites are
+not applicable to `GRPCRoute`.
+
+## Conformance Support
+
+| Gateway API feature | Status | Notes |
+| --- | --- | --- |
+| `HTTPRoute` host/path/method/exact header/exact query matches | Supported | Regex and wildcard method matches are rejected. |
+| `HTTPRoute` weighted Service backendRefs | Supported | Cross-namespace refs require `ReferenceGrant`. |
+| `HTTPRoute` `URLRewrite` and `RequestRedirect` | Partial | Path-only bounded mappings; host/scheme/port rewrites are rejected. |
+| `HTTPRoute` header modifiers, CORS, `RequestMirror` | Partial | Mapped to native route actions; mirrors are best-effort and bodyless in v1. |
+| `HTTPRoute`/`GRPCRoute` HTTP `ExternalAuth` | Partial | HTTP subset only, explicit header allowlists, no body forwarding. |
+| `GRPCRoute` service/method/header matches | Partial | Exact service+method and service-only matches only. |
+| `TLSRoute` passthrough | Partial | Requires `tls.mode = Passthrough`; emits `sni_forward` rules. |
+| `TCPRoute` | Unsupported/status-only | Watched for status diagnostics; no TOML is emitted. |
 
 Cross-namespace `Service` references require a `ReferenceGrant` in the target
 namespace. Without the grant, the controller emits a blocking diagnostic and
 does not apply the generated config.
 
-Gateway listener `allowedRoutes` is enforced for `HTTPRoute` and `TLSRoute`
+Gateway listener `allowedRoutes` is enforced for `HTTPRoute`, `GRPCRoute`, and `TLSRoute`
 attachment. Omitted `allowedRoutes.namespaces` defaults to `Same`, so routes in
 other namespaces must be explicitly allowed with `All` or a matching
 `Selector`. Namespace selectors are evaluated from the Kubernetes `Namespace`
@@ -87,7 +121,8 @@ route is not attached.
 `allowedRoutes.kinds` may further restrict which Gateway API route kinds bind
 to a listener. When omitted or empty, the controller uses the listener protocol
 default: `HTTPRoute` for `HTTP` and `HTTPS`, and `TLSRoute` for passthrough
-`TLS`.
+`TLS`. HTTP and HTTPS listeners accept both `HTTPRoute` and `GRPCRoute` by
+default.
 
 `ReferenceGrant.spec.to[].name` narrows a cross-namespace `Service` grant to the
 named Service. When `name` is omitted, the grant allows all Services of that
@@ -102,7 +137,7 @@ resources owned by its configured `--controller-name`.
 - `Gateway`: sets `Accepted`, `Programmed`, listener `SupportedKinds`,
   `ResolvedRefs`, and listener conflict conditions. `--status-address` values
   are published as Gateway addresses.
-- `HTTPRoute` and `TLSRoute`: replaces only this controller's entries in
+- `HTTPRoute`, `GRPCRoute`, and `TLSRoute`: replaces only this controller's entries in
   `status.parents`, preserving entries for other controllers from the observed
   object snapshot. Blocking translation diagnostics are reflected as
   `Accepted=False` or `ResolvedRefs=False`.

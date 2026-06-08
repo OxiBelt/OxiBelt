@@ -148,6 +148,7 @@ impl ExternalAuthRuntime {
     };
     let result = match provider.config.provider {
       ExternalAuthProvider::Authelia => inner.check_forward_auth(provider, context).await,
+      ExternalAuthProvider::GatewayExtAuthHttp => inner.check_forward_auth(provider, context).await,
       ExternalAuthProvider::OAuth2 => inner.check_oauth2(provider, context).await,
       ExternalAuthProvider::Oidc => inner.check_oidc(provider, context).await,
     };

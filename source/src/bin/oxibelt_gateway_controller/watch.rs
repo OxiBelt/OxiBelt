@@ -75,6 +75,11 @@ impl KubernetesPoller {
     );
     objects.extend(
       self
+        .list_namespaced("/apis/gateway.networking.k8s.io/v1", "grpcroutes")
+        .await?,
+    );
+    objects.extend(
+      self
         .list_namespaced("/apis/gateway.networking.k8s.io/v1", "tlsroutes")
         .await?,
     );

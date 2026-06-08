@@ -28,6 +28,26 @@ spec:
   - name: http
     port: 8080
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mirror
+  namespace: default
+spec:
+  ports:
+  - name: http
+    port: 8081
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: default
+spec:
+  ports:
+  - name: http
+    port: 9000
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -44,6 +64,75 @@ spec:
     - path:
         type: PathPrefix
         value: /
+    filters:
+    - type: RequestHeaderModifier
+      requestHeaderModifier:
+        set:
+        - name: x-gateway-route
+          value: app
+    - type: ResponseHeaderModifier
+      responseHeaderModifier:
+        set:
+        - name: x-served-by
+          value: oxibelt
+    - type: CORS
+      cors:
+        allowOrigins:
+        - https://app.example.com
+        allowMethods:
+        - GET
+        - POST
+        allowHeaders:
+        - authorization
+        - content-type
+        exposeHeaders:
+        - x-served-by
+        allowCredentials: true
+        maxAgeSeconds: 600
+    - type: RequestMirror
+      requestMirror:
+        backendRef:
+          name: mirror
+          port: 8081
+        percent: 10
+    - type: ExternalAuth
+      externalAuth:
+        protocol: HTTP
+        backendRef:
+          name: auth
+          port: 9000
+        headersToExtAuth:
+        - authorization
+        headersToBackend:
+        - x-auth-user
+        headersToDownstreamOnDeny:
+        - www-authenticate
+    backendRefs:
+    - name: app
+      port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: app-grpc
+  namespace: default
+spec:
+  parentRefs:
+  - name: edge
+    sectionName: http
+  hostnames:
+  - app.example.com
+  rules:
+  - matches:
+    - method:
+        service: example.Echo
+        method: Say
+    filters:
+    - type: RequestHeaderModifier
+      requestHeaderModifier:
+        add:
+        - name: x-grpc-route
+          value: app-grpc
     backendRefs:
     - name: app
       port: 8080

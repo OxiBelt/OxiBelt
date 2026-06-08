@@ -7,8 +7,14 @@ use super::cli::SharedArgs;
 use super::gateway_policy::{self, ListenerPolicy, ReferenceGrantInfo, RoutePolicyDecision};
 use super::model::{Diagnostic, KubernetesObject, ObjectKey, object_ref as model_object_ref};
 
+#[path = "translate/filters.rs"]
+mod filters;
+#[path = "translate/grpc.rs"]
+mod grpc;
 #[path = "translate/http.rs"]
 mod http;
+#[path = "translate/render.rs"]
+mod render;
 
 #[cfg(test)]
 #[path = "translate/tests.rs"]
@@ -68,6 +74,11 @@ struct GeneratedRoute {
   upstream_pool: Option<String>,
   rewrite: Option<RewriteAction>,
   redirect: Option<RedirectAction>,
+  request_headers: HeaderModifierAction,
+  response_headers: HeaderModifierAction,
+  cors: Option<CorsAction>,
+  request_mirrors: Vec<RequestMirrorAction>,
+  external_auth: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +104,16 @@ struct GeneratedSniRule {
 }
 
 #[derive(Debug, Clone)]
+struct GeneratedExternalAuth {
+  source: String,
+  name: String,
+  endpoint: String,
+  forward_headers: Vec<String>,
+  identity_headers: Vec<String>,
+  terminal_response_headers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 struct NamedExactMatch {
   name: String,
   value: String,
@@ -110,6 +131,42 @@ struct RedirectAction {
   location_template: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct HeaderModifierAction {
+  set: Vec<HeaderValueAction>,
+  add: Vec<HeaderValueAction>,
+  remove: Vec<String>,
+}
+
+impl HeaderModifierAction {
+  fn is_empty(&self) -> bool {
+    self.set.is_empty() && self.add.is_empty() && self.remove.is_empty()
+  }
+}
+
+#[derive(Debug, Clone)]
+struct HeaderValueAction {
+  name: String,
+  value: String,
+}
+
+#[derive(Debug, Clone)]
+struct CorsAction {
+  allow_origins: Vec<String>,
+  allow_methods: Vec<String>,
+  allow_headers: Vec<String>,
+  expose_headers: Vec<String>,
+  allow_credentials: bool,
+  max_age_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct RequestMirrorAction {
+  upstream_pool: String,
+  sample_percent: Option<f64>,
+  max_body_bytes: usize,
+}
+
 #[derive(Default)]
 struct TranslationState {
   services: HashMap<ObjectKey, ServiceInfo>,
@@ -118,6 +175,7 @@ struct TranslationState {
   gateways: HashMap<ObjectKey, GatewayInfo>,
   reference_grants: Vec<ReferenceGrantInfo>,
   pools: BTreeMap<String, GeneratedPool>,
+  external_auth: BTreeMap<String, GeneratedExternalAuth>,
   routes: Vec<GeneratedRoute>,
   sni_rules: Vec<GeneratedSniRule>,
   diagnostics: Vec<Diagnostic>,
@@ -134,6 +192,7 @@ pub fn translate_objects(
   state.index_supporting_objects(objects, args)?;
   for object in objects {
     match object.kind.as_str() {
+      "GRPCRoute" => state.translate_grpc_route(object),
       "HTTPRoute" => state.translate_http_route(object),
       "TLSRoute" => state.translate_tls_route(object),
       "TCPRoute" => state.diagnostics.push(Diagnostic::warning(
@@ -144,7 +203,7 @@ pub fn translate_objects(
     }
   }
   Ok(RenderedConfig {
-    toml: render_toml(&state, args),
+    toml: render::render_toml(&state, args),
     diagnostics: state.diagnostics,
   })
 }
@@ -534,151 +593,6 @@ fn host_matches(pattern: &str, host: &str) -> bool {
     return host.ends_with(&format!(".{suffix}")) && host != suffix;
   }
   pattern == host
-}
-
-fn render_toml(state: &TranslationState, args: &SharedArgs) -> String {
-  let mut out = String::from(GENERATED_HEADER);
-  out.push_str("# controller_name = ");
-  out.push_str(&toml_string(&args.controller_name));
-  out.push('\n');
-  out.push_str("# managed_config_path = ");
-  out.push_str(&toml_string(&args.managed_config_path));
-  out.push_str("\n\n");
-
-  for pool in state.pools.values() {
-    out.push_str("# Source: ");
-    out.push_str(&pool.source);
-    out.push('\n');
-    out.push_str("[[upstream_pools]]\n");
-    out.push_str("name = ");
-    out.push_str(&toml_string(&pool.name));
-    out.push('\n');
-    for server in &pool.servers {
-      out.push_str("\n[[upstream_pools.servers]]\n");
-      out.push_str("id = ");
-      out.push_str(&toml_string(&server.id));
-      out.push('\n');
-      out.push_str("origin = ");
-      out.push_str(&toml_string(&server.origin));
-      out.push('\n');
-      out.push_str("weight = ");
-      out.push_str(&server.weight.to_string());
-      out.push('\n');
-    }
-    out.push('\n');
-  }
-
-  for route in &state.routes {
-    out.push_str("# Source: ");
-    out.push_str(&route.source);
-    out.push('\n');
-    out.push_str("[[routes]]\n");
-    out.push_str("name = ");
-    out.push_str(&toml_string(&route.name));
-    out.push('\n');
-    out.push_str("hosts = ");
-    out.push_str(&toml_string_array(&route.hosts));
-    out.push('\n');
-    out.push_str("path_prefix = ");
-    out.push_str(&toml_string(&route.path_prefix));
-    out.push('\n');
-    if let Some(upstream_pool) = &route.upstream_pool {
-      out.push_str("upstream_pool = ");
-      out.push_str(&toml_string(upstream_pool));
-      out.push('\n');
-    }
-    out.push_str("[routes.match]\n");
-    out.push_str("priority = ");
-    out.push_str(&route.priority.to_string());
-    out.push('\n');
-    if !route.methods.is_empty() {
-      out.push_str("methods = ");
-      out.push_str(&toml_string_array(&route.methods));
-      out.push('\n');
-    }
-    if let Some(exact) = &route.path_exact {
-      out.push_str("[routes.match.path]\n");
-      out.push_str("exact = ");
-      out.push_str(&toml_string(exact));
-      out.push('\n');
-    }
-    for header in &route.headers {
-      out.push_str("\n[[routes.match.headers]]\n");
-      out.push_str("name = ");
-      out.push_str(&toml_string(&header.name));
-      out.push('\n');
-      out.push_str("exact = ");
-      out.push_str(&toml_string(&header.value));
-      out.push('\n');
-    }
-    for query in &route.queries {
-      out.push_str("\n[[routes.match.queries]]\n");
-      out.push_str("name = ");
-      out.push_str(&toml_string(&query.name));
-      out.push('\n');
-      out.push_str("exact = ");
-      out.push_str(&toml_string(&query.value));
-      out.push('\n');
-    }
-    if let Some(rewrite) = &route.rewrite {
-      out.push_str("\n[routes.actions.rewrite]\n");
-      if let Some(path) = &rewrite.path {
-        out.push_str("path = ");
-        out.push_str(&toml_string(path));
-        out.push('\n');
-      }
-      if let Some(query) = &rewrite.query {
-        out.push_str("query = ");
-        out.push_str(&toml_string(query));
-        out.push('\n');
-      }
-    }
-    if let Some(redirect) = &route.redirect {
-      out.push_str("\n[routes.actions.redirect]\n");
-      out.push_str("status = ");
-      out.push_str(&redirect.status.to_string());
-      out.push('\n');
-      out.push_str("location_template = ");
-      out.push_str(&toml_string(&redirect.location_template));
-      out.push('\n');
-    }
-    out.push('\n');
-  }
-
-  for rule in &state.sni_rules {
-    out.push_str("# Source: ");
-    out.push_str(&rule.source);
-    out.push('\n');
-    out.push_str("[[sni_forward.rules]]\n");
-    out.push_str("name = ");
-    out.push_str(&toml_string(&rule.name));
-    out.push('\n');
-    out.push_str("server_names = ");
-    out.push_str(&toml_string_array(&rule.server_names));
-    out.push('\n');
-    out.push_str("target = ");
-    out.push_str(&toml_string(&rule.target));
-    out.push('\n');
-    out.push_str("protocols = [\"tcp_tls\"]\n\n");
-  }
-
-  out
-}
-
-fn toml_string(value: &str) -> String {
-  toml::Value::String(value.to_string()).to_string()
-}
-
-fn toml_string_array(values: &[String]) -> String {
-  let mut text = String::from("[");
-  for (index, value) in values.iter().enumerate() {
-    if index > 0 {
-      text.push_str(", ");
-    }
-    text.push_str(&toml_string(value));
-  }
-  text.push(']');
-  text
 }
 
 fn sanitize_name(value: &str) -> String {

@@ -48,8 +48,10 @@ pub(crate) mod observability;
 pub(crate) mod person_proof;
 pub(crate) mod request;
 pub(crate) mod request_framing;
+mod request_mirror;
 pub(crate) mod response;
 mod retry;
+mod route_action_runtime;
 mod route_actions;
 pub(crate) mod semantics;
 pub(crate) mod static_files;
@@ -92,6 +94,7 @@ use self::response::{
   with_pending_dynamic_person_proof_response_mutations,
 };
 use self::retry::{EffectiveRetryPolicy, send_one_shot, send_pool_with_retry, send_with_retry};
+use self::route_action_runtime as route_runtime;
 use self::semantics::filter_trailers;
 use self::upstream::select_request_upstream;
 use self::uri::validate_downstream_path;
@@ -444,6 +447,12 @@ where
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.set_route_name(&resolved.route.name);
+
+  if let Some(response) =
+    route_runtime::cors_preflight_response(resolved.route, request.method(), request.headers())
+  {
+    return response;
+  }
 
   if resolved.execution_plan.features.ipm {
     let Some(actor) = state.ipm.actor_from_headers(request.headers()) else {
@@ -1081,7 +1090,13 @@ where
     && state
       .cache
       .policy_enabled(resolved.route.cache.as_deref(), &request_method);
-  let request_headers = if cache_enabled_for_route || response_waf_enabled || native_grpc_request {
+  let response_actions_need_request_headers =
+    resolved.route.actions.response_headers.has_actions() || resolved.route.actions.cors.is_some();
+  let request_headers = if cache_enabled_for_route
+    || response_waf_enabled
+    || native_grpc_request
+    || response_actions_need_request_headers
+  {
     request.headers().clone()
   } else if resolved.execution_plan.features.compression {
     compression::request_header_subset(request.headers())
@@ -1106,6 +1121,7 @@ where
       return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
     }
   };
+  let route_request_mutations = route_runtime::request_header_mutations(resolved.route);
 
   let rebuild = RebuildRequestOptions {
     target_uri,
@@ -1118,6 +1134,7 @@ where
     preserve_host: upstream.preserve_host,
     upstream_version,
     waf_mutations: &request_waf.request_header_mutations,
+    route_mutations: &route_request_mutations,
   };
   let mut outbound = rebuild_request(request, rebuild);
   semantics::strip_accepted_expect(outbound.headers_mut());
@@ -1150,6 +1167,15 @@ where
   state
     .telemetry
     .inject_trace_context(outbound.headers_mut(), trace_context);
+  request_mirror::spawn_request_mirrors(
+    state.clone(),
+    resolved.route,
+    &outbound,
+    &request_uri,
+    client_addr,
+    host,
+    downstream_scheme,
+  );
 
   let mut revalidation_entry = None;
   let mut stale_on_error = None;
@@ -1634,6 +1660,7 @@ where
     state.metrics.record_cache_hit();
     let mut response =
       cache_status::cached_entry_response(cached_entry, &request_method, &request_headers);
+    route_runtime::apply_response_actions(response.headers_mut(), resolved.route, &request_headers);
     cache_status::apply(
       &mut response,
       CacheOutcome::Revalidated,
@@ -1743,6 +1770,7 @@ where
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
+  route_runtime::apply_response_actions(&mut parts.headers, resolved.route, &request_headers);
   cache_status::strip_headers(&mut parts.headers);
   apply_alt_svc_header(
     &mut parts.headers,
@@ -2774,7 +2802,7 @@ fn handle_cache_lookup_result(
       if record_events {
         record_route_cache_event(state, resolved.route, "hit", "fresh");
       }
-      Some(cache_status::cached_downstream_response(
+      let mut response = cache_status::cached_downstream_response(
         state,
         resolved.route,
         entry,
@@ -2784,7 +2812,13 @@ fn handle_cache_lookup_result(
         transport_network,
         CacheOutcome::Hit,
         CacheReason::Fresh,
-      ))
+      );
+      route_runtime::apply_response_actions(
+        response.headers_mut(),
+        resolved.route,
+        request_headers,
+      );
+      Some(response)
     }
     crate::cache::CacheLookup::Stale(stale) => {
       if stale.background_refresh
@@ -2809,7 +2843,7 @@ fn handle_cache_lookup_result(
         if record_events {
           record_route_cache_event(state, resolved.route, "stale", "background_refresh");
         }
-        return Some(cache_status::cached_downstream_response(
+        let mut response = cache_status::cached_downstream_response(
           state,
           resolved.route,
           stale.entry,
@@ -2819,7 +2853,13 @@ fn handle_cache_lookup_result(
           transport_network,
           CacheOutcome::Stale,
           CacheReason::BackgroundRefresh,
-        ));
+        );
+        route_runtime::apply_response_actions(
+          response.headers_mut(),
+          resolved.route,
+          request_headers,
+        );
+        return Some(response);
       }
       if !stale.request_headers.is_empty() {
         state.metrics.record_cache_revalidation();
@@ -2839,7 +2879,7 @@ fn handle_cache_lookup_result(
         if record_events {
           record_route_cache_event(state, resolved.route, "hit", "stale_without_validators");
         }
-        Some(cache_status::cached_downstream_response(
+        let mut response = cache_status::cached_downstream_response(
           state,
           resolved.route,
           stale.entry,
@@ -2849,7 +2889,13 @@ fn handle_cache_lookup_result(
           transport_network,
           CacheOutcome::Stale,
           CacheReason::StaleWithoutValidators,
-        ))
+        );
+        route_runtime::apply_response_actions(
+          response.headers_mut(),
+          resolved.route,
+          request_headers,
+        );
+        Some(response)
       }
     }
     crate::cache::CacheLookup::Revalidate(revalidation) => {

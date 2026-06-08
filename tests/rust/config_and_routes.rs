@@ -8324,6 +8324,77 @@ location_template = "/new{path_suffix}?{query}""#,
 }
 
 #[test]
+fn route_actions_parse_header_cors_mirror_and_gateway_auth_blocks() {
+    let temp_dir = common::TempDir::new("route-actions-parity-valid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "route-actions-parity-valid");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        r#"upstream_pool = "edge-pool"
+external_auth = "gw-auth"
+
+[[upstream_pools]]
+name = "edge-pool"
+[[upstream_pools.servers]]
+id = "app"
+origin = "http://127.0.0.1:18080"
+
+[[external_auth]]
+name = "gw-auth"
+provider = "gateway_ext_auth_http"
+endpoint = "http://127.0.0.1:19090"
+forward_headers = ["authorization"]
+identity_headers = ["x-auth-user"]
+terminal_response_headers = ["www-authenticate"]
+
+[[routes.actions.request_headers.set]]
+name = "x-route"
+value = "edge"
+
+[[routes.actions.request_headers.add]]
+name = "x-added"
+value = "yes"
+
+[routes.actions.response_headers]
+remove = ["server"]
+
+[[routes.actions.response_headers.set]]
+name = "x-response"
+value = "ok"
+
+[routes.actions.cors]
+allow_origins = ["https://app.example.com"]
+allow_methods = ["GET", "POST"]
+allow_headers = ["authorization"]
+expose_headers = ["x-response"]
+allow_credentials = true
+max_age_seconds = 600
+
+[[routes.actions.request_mirrors]]
+upstream_pool = "edge-pool"
+sample_percent = 50
+max_body_bytes = 0"#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("route actions should validate");
+    let route = &config.routes[0];
+    assert_eq!(route.external_auth.as_deref(), Some("gw-auth"));
+    assert_eq!(route.actions.request_headers.set[0].name, "x-route");
+    assert_eq!(route.actions.response_headers.remove, vec!["server"]);
+    assert_eq!(
+        route
+            .actions
+            .cors
+            .as_ref()
+            .expect("CORS action should parse")
+            .allow_methods,
+        vec!["GET", "POST"]
+    );
+    assert_eq!(route.actions.request_mirrors[0].upstream_pool, "edge-pool");
+}
+
+#[test]
 fn route_actions_reject_invalid_shapes_and_combinations() {
     let temp_dir = common::TempDir::new("route-actions-invalid");
     let (cert_path, key_path) =
@@ -8331,6 +8402,40 @@ fn route_actions_reject_invalid_shapes_and_combinations() {
     let base = common::minimal_config_toml(&cert_path, &key_path);
 
     for (raw, expected) in [
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[[routes.actions.request_headers.set]]
+name = "content-length"
+value = "10""#,
+            ),
+            "cannot mutate header content-length",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[routes.actions.cors]
+allow_origins = ["*"]
+allow_methods = ["GET"]
+allow_credentials = true"#,
+            ),
+            "allow_credentials cannot be true when allow_origins contains '*'",
+        ),
+        (
+            base.replace(
+                "upstream = \"app\"",
+                r#"upstream = "app"
+
+[[routes.actions.request_mirrors]]
+upstream_pool = "missing"
+sample_percent = 10"#,
+            ),
+            "actions.request_mirrors references unknown upstream_pool missing",
+        ),
         (
             base.replace(
                 "upstream = \"app\"",

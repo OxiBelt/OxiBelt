@@ -46,6 +46,7 @@ pub enum ExternalAuthProvider {
   Authelia,
   OAuth2,
   Oidc,
+  GatewayExtAuthHttp,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]

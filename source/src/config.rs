@@ -882,6 +882,7 @@ impl Config {
         );
       }
       route_actions::validate_route_action_target_compatibility(route)?;
+      route_actions::validate_route_action_pool_references(route, &pool_names)?;
       match (
         &route.upstream,
         &route.upstream_pool,
@@ -2945,8 +2946,30 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "timeouts",
       "waf",
     ][..],
-    "routes.actions" => &["redirect", "rewrite"][..],
+    "routes.actions" => &[
+      "cors",
+      "redirect",
+      "request_headers",
+      "request_mirrors",
+      "response_headers",
+      "rewrite",
+    ][..],
+    "routes.actions.cors" => &[
+      "allow_credentials",
+      "allow_headers",
+      "allow_methods",
+      "allow_origins",
+      "expose_headers",
+      "max_age_seconds",
+    ][..],
     "routes.actions.redirect" => &["location_template", "status"][..],
+    "routes.actions.request_headers" => &["add", "remove", "set"][..],
+    "routes.actions.request_headers.add" => &["name", "value"][..],
+    "routes.actions.request_headers.set" => &["name", "value"][..],
+    "routes.actions.request_mirrors" => &["max_body_bytes", "sample_percent", "upstream_pool"][..],
+    "routes.actions.response_headers" => &["add", "remove", "set"][..],
+    "routes.actions.response_headers.add" => &["name", "value"][..],
+    "routes.actions.response_headers.set" => &["name", "value"][..],
     "routes.actions.rewrite" => &["path", "query"][..],
     "routes.match" => &[
       "headers",
