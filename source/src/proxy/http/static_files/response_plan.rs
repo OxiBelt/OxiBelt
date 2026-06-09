@@ -49,13 +49,6 @@ impl StaticResponseMetadata {
       vary_accept_encoding: false,
     }
   }
-
-  pub(crate) fn is_default_direct_file_metadata(&self, path: &Path) -> bool {
-    self.content_type == content_type_for_path(path)
-      && self.content_encoding.is_none()
-      && self.cache_control.is_none()
-      && !self.vary_accept_encoding
-  }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

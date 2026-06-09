@@ -192,7 +192,7 @@ async fn precompressed_variant_uses_accept_encoding_quality_and_preserves_logica
 }
 
 #[tokio::test]
-async fn precompressed_request_bypasses_early_hot_object_cache_lookup() {
+async fn precompressed_request_uses_negotiated_variant_after_plain_cache_fill() {
   let temp_dir = common::TempDir::new("static-precompressed-cache-bypass");
   let root = temp_dir.path().join("public");
   tokio::fs::create_dir_all(&root).await.unwrap();

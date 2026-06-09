@@ -29,13 +29,11 @@ use crate::waf::{
   WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
 };
 
-mod hot_object;
 mod open;
 mod path;
 mod response_plan;
 mod route_options;
 mod runtime;
-use self::hot_object::plan_cached_direct_file;
 #[cfg(all(test, target_os = "linux"))]
 use self::open::open_verified_file_with_openat2_for_tests;
 #[cfg(test)]
@@ -196,17 +194,6 @@ pub(crate) async fn plan_response(
       .await;
     }
     StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
-  }
-
-  if let Some(plan) = plan_cached_direct_file(
-    method,
-    headers,
-    root,
-    &requested_path,
-    runtime,
-    static_options,
-  ) {
-    return plan;
   }
 
   match open_verified_file(&root_handle, &requested_path).await {
@@ -376,15 +363,17 @@ async fn plan_opened_file(
     allow_precompressed,
   );
 
+  let len = metadata.len();
+  let modified = metadata.modified().ok();
+  let etag = etag_for_metadata(&metadata);
   if status.is_success()
     && let Some(cached) = runtime.cached_object(root, &path, &response_metadata)
+    && cached.etag == etag
+    && cached.modified == modified
   {
     return cached_object_plan(method, headers, cached);
   }
 
-  let len = metadata.len();
-  let modified = metadata.modified().ok();
-  let etag = etag_for_metadata(&metadata);
   if conditional_not_modified(headers, &etag, modified) {
     return not_modified_plan(&etag, modified, &response_metadata);
   }

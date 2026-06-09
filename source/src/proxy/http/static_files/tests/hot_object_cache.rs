@@ -20,13 +20,9 @@ fn hot_object_cache_hits_by_resolved_path() {
   let cached = runtime
     .cached_object(&root, &path, &StaticResponseMetadata::for_path(&path))
     .expect("object should be cached by resolved path and metadata");
-  let direct = runtime
-    .cached_direct_object(&root, &path)
-    .expect("default metadata object should be cached by direct path");
 
   assert_eq!(cached.path, path);
   assert_eq!(cached.body, Bytes::from_static(b"cached body"));
-  assert_eq!(direct.body, Bytes::from_static(b"cached body"));
   assert_eq!(
     cached.response_metadata.content_type,
     "text/plain; charset=utf-8"
@@ -56,7 +52,6 @@ fn hot_object_cache_expires_entries() {
       .cached_object(&root, &path, &StaticResponseMetadata::for_path(&path))
       .is_none()
   );
-  assert!(runtime.cached_direct_object(&root, &path).is_none());
 }
 
 #[test]
@@ -90,7 +85,6 @@ fn hot_object_cache_evicts_oldest_entry_when_full() {
       .cached_object(&root, &first, &StaticResponseMetadata::for_path(&first))
       .is_none()
   );
-  assert!(runtime.cached_direct_object(&root, &first).is_none());
   assert_eq!(
     runtime
       .cached_object(&root, &second, &StaticResponseMetadata::for_path(&second))
@@ -98,36 +92,6 @@ fn hot_object_cache_evicts_oldest_entry_when_full() {
       .body,
     Bytes::from_static(b"second")
   );
-  assert_eq!(
-    runtime.cached_direct_object(&root, &second).unwrap().body,
-    Bytes::from_static(b"second")
-  );
-}
-
-#[test]
-fn hot_object_direct_cache_ignores_metadata_specific_entries() {
-  let temp_dir = common::TempDir::new("static-hot-object-cache-direct-metadata");
-  let root = temp_dir.path().join("public");
-  std::fs::create_dir_all(&root).unwrap();
-  let path = root.join("asset.bin");
-  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 10_000, 1024));
-  let metadata = StaticResponseMetadata {
-    content_type: "text/plain".to_owned(),
-    content_encoding: None,
-    cache_control: None,
-    vary_accept_encoding: false,
-  };
-
-  runtime.store_object(
-    &root,
-    path.clone(),
-    "W/\"metadata-specific\"".to_owned(),
-    None,
-    metadata,
-    Bytes::from_static(b"cached body"),
-  );
-
-  assert!(runtime.cached_direct_object(&root, &path).is_none());
 }
 
 async fn collect_response_body(response: Response<ProxyBody>) -> Bytes {
@@ -135,51 +99,8 @@ async fn collect_response_body(response: Response<ProxyBody>) -> Bytes {
 }
 
 #[tokio::test]
-async fn hot_object_cache_serves_cached_body_before_ttl() {
-  let temp_dir = common::TempDir::new("static-hot-object-cache-hit");
-  let root = temp_dir.path().join("public");
-  tokio::fs::create_dir_all(&root).await.unwrap();
-  tokio::fs::write(root.join("app.txt"), "safe body")
-    .await
-    .unwrap();
-  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 3_600_000, 1024));
-
-  let first = serve_with_runtime(
-    &request("/assets/app.txt"),
-    "assets",
-    "/assets",
-    &root,
-    &runtime,
-    16 * 1024,
-  )
-  .await;
-  assert_eq!(first.status(), StatusCode::OK);
-  assert_eq!(
-    collect_response_body(first).await,
-    Bytes::from_static(b"safe body")
-  );
-
-  tokio::fs::write(root.join("app.txt"), "updated body")
-    .await
-    .unwrap();
-  let cached = serve_with_runtime(
-    &request("/assets/app.txt"),
-    "assets",
-    "/assets",
-    &root,
-    &runtime,
-    16 * 1024,
-  )
-  .await;
-  assert_eq!(
-    collect_response_body(cached).await,
-    Bytes::from_static(b"safe body")
-  );
-}
-
-#[tokio::test]
-async fn hot_object_cache_serves_cached_body_without_reopening_file_before_ttl() {
-  let temp_dir = common::TempDir::new("static-hot-object-cache-no-reopen");
+async fn hot_object_cache_refreshes_replaced_file_before_ttl() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache-refresh-replaced");
   let root = temp_dir.path().join("public");
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(root.join("app.txt"), "safe body")
@@ -203,7 +124,10 @@ async fn hot_object_cache_serves_cached_body_without_reopening_file_before_ttl()
   );
 
   tokio::fs::remove_file(root.join("app.txt")).await.unwrap();
-  let cached = serve_with_runtime(
+  tokio::fs::write(root.join("app.txt"), "updated body")
+    .await
+    .unwrap();
+  let refreshed = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
     "/assets",
@@ -212,11 +136,52 @@ async fn hot_object_cache_serves_cached_body_without_reopening_file_before_ttl()
     16 * 1024,
   )
   .await;
-  assert_eq!(cached.status(), StatusCode::OK);
+  assert_eq!(refreshed.status(), StatusCode::OK);
   assert_eq!(
-    collect_response_body(cached).await,
+    collect_response_body(refreshed).await,
+    Bytes::from_static(b"updated body")
+  );
+}
+
+#[tokio::test]
+async fn hot_object_cache_revalidates_deleted_file_before_ttl() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache-deleted-revalidate");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "safe body")
+    .await
+    .unwrap();
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 3_600_000, 1024));
+
+  let first = serve_with_runtime(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(first.status(), StatusCode::OK);
+  assert_eq!(
+    collect_response_body(first).await,
     Bytes::from_static(b"safe body")
   );
+
+  tokio::fs::remove_file(root.join("app.txt")).await.unwrap();
+  let revalidated = serve_with_runtime(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(revalidated.status(), StatusCode::NOT_FOUND);
+  let body = collect_response_body(revalidated).await;
+  assert_eq!(body, Bytes::from_static(b"not found"));
+  assert_ne!(body, Bytes::from_static(b"safe body"));
 }
 
 #[tokio::test]
@@ -265,7 +230,7 @@ async fn hot_object_cache_revalidates_after_ttl() {
 }
 
 #[tokio::test]
-async fn hot_object_cache_fails_closed_on_symlink_escape_after_ttl() {
+async fn hot_object_cache_fails_closed_on_symlink_escape_before_ttl() {
   let temp_dir = common::TempDir::new("static-hot-object-cache-symlink");
   let root = temp_dir.path().join("public");
   let outside = temp_dir.path().join("outside-secret.txt");
@@ -274,7 +239,7 @@ async fn hot_object_cache_fails_closed_on_symlink_escape_after_ttl() {
     .await
     .unwrap();
   tokio::fs::write(&outside, "outside secret").await.unwrap();
-  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 1, 1024));
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 3_600_000, 1024));
 
   let first = serve_with_runtime(
     &request("/assets/app.txt"),
@@ -293,7 +258,6 @@ async fn hot_object_cache_fails_closed_on_symlink_escape_after_ttl() {
 
   tokio::fs::remove_file(root.join("app.txt")).await.unwrap();
   std::os::unix::fs::symlink(&outside, root.join("app.txt")).unwrap();
-  tokio::time::sleep(Duration::from_millis(20)).await;
   let escaped = serve_with_runtime(
     &request("/assets/app.txt"),
     "assets",
