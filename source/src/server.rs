@@ -1789,7 +1789,7 @@ fn bind_tcp_listener(
   accept_error_backoff_ms: u64,
   kind: TcpListenerKind,
 ) -> anyhow::Result<BoundTcpListener> {
-  let listeners = bind_tcp_listeners(bind, options, "downstream")
+  let listeners = bind_tcp_listeners(bind, options, kind.bind_purpose())
     .with_context(|| format!("failed to bind downstream listener to {bind}"))?;
   Ok(BoundTcpListener {
     bind,
@@ -1798,6 +1798,15 @@ fn bind_tcp_listener(
     kind,
     listeners,
   })
+}
+
+impl TcpListenerKind {
+  fn bind_purpose(self) -> &'static str {
+    match self {
+      Self::Https => "downstream HTTPS",
+      Self::PlainHttp => "downstream plain HTTP",
+    }
+  }
 }
 
 async fn bind_admin_listener(bind: SocketAddr) -> anyhow::Result<BoundAdminListener> {

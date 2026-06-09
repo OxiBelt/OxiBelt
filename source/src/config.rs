@@ -698,15 +698,15 @@ impl Config {
       bail!("at least one downstream HTTP version or SNI forwarding protocol must be enabled");
     }
 
-    if self.runtime.unprivileged_mode && self.listeners.https_bind.port() < 1024 {
+    if self.rejects_privileged_data_plane_bind(self.listeners.https_bind) {
       bail!(
         "https_bind {} requires a privileged port but unprivileged_mode=true",
         self.listeners.https_bind
       );
     }
-    if self.runtime.unprivileged_mode
+    if self.rejects_privileged_data_plane_ports()
       && let Some(http_bind) = self.listeners.http_bind
-      && http_bind.port() < 1024
+      && self.rejects_privileged_data_plane_bind(http_bind)
     {
       bail!(
         "http_bind {} requires a privileged port but unprivileged_mode=true",
@@ -1726,6 +1726,7 @@ impl Config {
       }
       return Ok(());
     }
+    self.validate_admin_privileged_ports()?;
     if self.admin.audit.enabled {
       let Some(backend_name) = self.admin.audit.backend.as_deref() else {
         bail!("admin.audit.enabled requires admin.audit.backend");
@@ -1825,6 +1826,7 @@ impl Config {
   }
 
   fn validate_metrics_and_health(&self) -> anyhow::Result<()> {
+    self.validate_ops_privileged_ports()?;
     if self.metrics.histogram_buckets_ms.is_empty() {
       bail!("metrics.histogram_buckets_ms must not be empty");
     }
@@ -2268,6 +2270,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "hot_reload",
       "linux_only",
       "memory_only_state",
+      "netport_switcher",
       "read_only_rootfs_compatible",
       "unprivileged_mode",
       "worker_multipliers",
@@ -2286,6 +2289,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "shutdown_delay_ms",
     ][..],
     "runtime.hot_reload" => &["mode", "poll_interval_ms"][..],
+    "runtime.netport_switcher" => workers::NETPORT_SWITCHER_CONFIG_KEYS,
     "listeners" => &[
       "http1",
       "http2",

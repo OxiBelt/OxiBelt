@@ -1,16 +1,81 @@
 //! Worker-count and CPU-affinity configuration validation.
 //! Runtime sizing stays explicit so deployment choices are reproducible.
 
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use super::{
-  HotReloadConfig, QuicAltSvcConfig, QuicEndpointConfig, QuicTransportConfig,
+  Config, HotReloadConfig, QuicAltSvcConfig, QuicEndpointConfig, QuicTransportConfig,
   QuicUpstreamPoolConfig, QuicZeroRttMode, RawQuicTransportConfig, RuntimeDrainConfig,
   default_accept_error_backoff_ms, default_runtime_accept_backlog, default_true,
 };
+
+pub(super) const NETPORT_SWITCHER_CONFIG_KEYS: &[&str] = &[
+  "enabled",
+  "io_timeout_ms",
+  "main_gid",
+  "main_uid",
+  "socket_dir",
+];
+
+impl Config {
+  pub(crate) fn rejects_privileged_data_plane_bind(&self, bind: SocketAddr) -> bool {
+    self.rejects_privileged_data_plane_ports() && is_privileged_bind(bind)
+  }
+
+  pub(crate) fn rejects_privileged_data_plane_ports(&self) -> bool {
+    self.runtime.unprivileged_mode && !self.runtime.netport_switcher.enabled
+  }
+
+  pub(super) fn validate_admin_privileged_ports(&self) -> anyhow::Result<()> {
+    if !self.admin.enabled {
+      return Ok(());
+    }
+    if self.runtime.unprivileged_mode && is_privileged_bind(self.admin.bind) {
+      bail!(
+        "admin.bind {} requires a privileged port but unprivileged_mode=true; runtime.netport_switcher does not broker control listeners",
+        self.admin.bind
+      );
+    }
+    if self.admin.http3.enabled
+      && let Some(bind) = self.admin.http3.bind
+      && self.runtime.unprivileged_mode
+      && is_privileged_bind(bind)
+    {
+      bail!(
+        "admin.http3.bind {} requires a privileged port but unprivileged_mode=true; runtime.netport_switcher does not broker control listeners",
+        bind
+      );
+    }
+    Ok(())
+  }
+
+  pub(super) fn validate_ops_privileged_ports(&self) -> anyhow::Result<()> {
+    if self.metrics.enabled
+      && self.runtime.unprivileged_mode
+      && is_privileged_bind(self.metrics.bind)
+    {
+      bail!(
+        "metrics.bind {} requires a privileged port but unprivileged_mode=true; runtime.netport_switcher does not broker control listeners",
+        self.metrics.bind
+      );
+    }
+    if self.health.enabled && self.runtime.unprivileged_mode && is_privileged_bind(self.health.bind)
+    {
+      bail!(
+        "health.bind {} requires a privileged port but unprivileged_mode=true; runtime.netport_switcher does not broker control listeners",
+        self.health.bind
+      );
+    }
+    Ok(())
+  }
+}
+
+pub(crate) fn is_privileged_bind(bind: SocketAddr) -> bool {
+  (1..1024).contains(&bind.port())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct WorkerParallelism {
@@ -157,6 +222,8 @@ pub(super) struct RawRuntimeConfig {
   drain: RuntimeDrainConfig,
   #[serde(default)]
   hot_reload: HotReloadConfig,
+  #[serde(default)]
+  netport_switcher: NetportSwitcherConfig,
 }
 
 impl Default for RawRuntimeConfig {
@@ -171,6 +238,7 @@ impl Default for RawRuntimeConfig {
       accept: RawRuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
       hot_reload: HotReloadConfig::default(),
+      netport_switcher: NetportSwitcherConfig::default(),
     }
   }
 }
@@ -186,6 +254,7 @@ pub struct RuntimeConfig {
   pub accept: RuntimeAcceptConfig,
   pub drain: RuntimeDrainConfig,
   pub hot_reload: HotReloadConfig,
+  pub netport_switcher: NetportSwitcherConfig,
   #[serde(skip)]
   pub worker_resolution: WorkerResolutionConfig,
 }
@@ -202,6 +271,7 @@ impl Default for RuntimeConfig {
       accept: RuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
       hot_reload: HotReloadConfig::default(),
+      netport_switcher: NetportSwitcherConfig::default(),
       worker_resolution: WorkerResolutionConfig::default(),
     }
   }
@@ -234,6 +304,7 @@ impl RuntimeConfig {
       accept,
       drain: raw.drain,
       hot_reload: raw.hot_reload,
+      netport_switcher: raw.netport_switcher,
       worker_resolution: WorkerResolutionConfig {
         available_parallelism: parallelism.available,
         fallback_error: parallelism.fallback_error,
@@ -251,7 +322,46 @@ impl RuntimeConfig {
     }
     self.accept.validate()?;
     self.drain.validate()?;
-    self.hot_reload.validate()
+    self.hot_reload.validate()?;
+    self.netport_switcher.validate()
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct NetportSwitcherConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "default_netport_switcher_socket_dir")]
+  pub socket_dir: PathBuf,
+  #[serde(default = "default_netport_switcher_main_uid")]
+  pub main_uid: u32,
+  #[serde(default = "default_netport_switcher_main_gid")]
+  pub main_gid: u32,
+  #[serde(default = "default_netport_switcher_io_timeout_ms")]
+  pub io_timeout_ms: u64,
+}
+
+impl Default for NetportSwitcherConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      socket_dir: default_netport_switcher_socket_dir(),
+      main_uid: default_netport_switcher_main_uid(),
+      main_gid: default_netport_switcher_main_gid(),
+      io_timeout_ms: default_netport_switcher_io_timeout_ms(),
+    }
+  }
+}
+
+impl NetportSwitcherConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if !self.socket_dir.is_absolute() {
+      bail!("runtime.netport_switcher.socket_dir must be absolute");
+    }
+    if self.io_timeout_ms == 0 {
+      bail!("runtime.netport_switcher.io_timeout_ms must be greater than 0");
+    }
+    Ok(())
   }
 }
 
@@ -546,6 +656,22 @@ fn default_accept_worker_multiplier() -> f64 {
 
 fn default_quic_socket_worker_multiplier() -> f64 {
   1.0
+}
+
+fn default_netport_switcher_socket_dir() -> PathBuf {
+  PathBuf::from("/run/oxibelt-netport-switcher")
+}
+
+fn default_netport_switcher_main_uid() -> u32 {
+  10001
+}
+
+fn default_netport_switcher_main_gid() -> u32 {
+  10001
+}
+
+fn default_netport_switcher_io_timeout_ms() -> u64 {
+  5_000
 }
 
 fn validate_worker_multiplier(field_name: &str, value: f64) -> anyhow::Result<()> {

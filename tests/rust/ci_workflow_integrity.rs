@@ -305,12 +305,16 @@ fn alpine_dockerfile_builder_copies_workspace_members() {
 }
 
 #[test]
-fn alpine_dockerfile_bundles_oxibeltctl() {
+fn alpine_dockerfile_bundles_operations_binaries() {
     let dockerfile = dockerfile_text();
 
     assert!(
         dockerfile.contains("--bin oxibeltctl"),
         "source/ops/Dockerfile.alpine should build the oxibeltctl operations CLI"
+    );
+    assert!(
+        dockerfile.contains("--bin oxibelt-netport-switcher"),
+        "source/ops/Dockerfile.alpine should build the privileged netport switcher"
     );
     assert!(
         dockerfile
@@ -319,12 +323,29 @@ fn alpine_dockerfile_bundles_oxibeltctl() {
         "source/ops/Dockerfile.alpine should stage oxibeltctl for target and host builds"
     );
     assert!(
+        dockerfile.contains(
+            "cp \"target/${OXIBELT_RUST_TARGET}/release/oxibelt-netport-switcher\" /tmp/oxibelt-netport-switcher"
+        ) && dockerfile
+            .contains("cp target/release/oxibelt-netport-switcher /tmp/oxibelt-netport-switcher"),
+        "source/ops/Dockerfile.alpine should stage oxibelt-netport-switcher for target and host builds"
+    );
+    assert!(
         dockerfile.contains("COPY --from=builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl"),
         "source/ops/Dockerfile.alpine should copy oxibeltctl into the runtime image"
     );
     assert!(
+        dockerfile.contains(
+            "COPY --from=builder /tmp/oxibelt-netport-switcher /usr/local/bin/oxibelt-netport-switcher"
+        ),
+        "source/ops/Dockerfile.alpine should copy oxibelt-netport-switcher into the runtime image"
+    );
+    assert!(
         dockerfile.contains("chmod 0755 /usr/local/bin/oxibeltctl"),
         "source/ops/Dockerfile.alpine should make oxibeltctl executable"
+    );
+    assert!(
+        dockerfile.contains("chmod 0755 /usr/local/bin/oxibelt-netport-switcher"),
+        "source/ops/Dockerfile.alpine should make oxibelt-netport-switcher executable"
     );
     assert!(
         dockerfile.contains(

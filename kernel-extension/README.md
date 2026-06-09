@@ -71,4 +71,4 @@ Docker only permits a subset of sysctls from container launch, and availability 
 
 Host systemd drop-ins such as `LimitNOFILE` for a native `oxibelt.service` do not automatically apply to processes started by Docker. Use Docker `--ulimit`, Compose `ulimits`, Kubernetes `securityContext` and runtime-specific settings, or an equivalent supervisor-level limit for container deployments.
 
-If OxiBelt must bind privileged ports such as `:443`, either map host ports to unprivileged container ports or grant only the narrow capability needed for that use case, for example `CAP_NET_BIND_SERVICE`, instead of running the container privileged.
+If OxiBelt must bind privileged ports such as `:443`, either map host ports to unprivileged container ports or enable `[runtime.netport_switcher]` and start `/usr/local/bin/oxibelt-netport-switcher` as root with `CAP_NET_BIND_SERVICE`, `CAP_SETUID`, and `CAP_SETGID`. The wrapper brokers startup-allowed data-plane binds and launches the main OxiBelt process as UID/GID `10001:10001`; do not run the container privileged for this use case.

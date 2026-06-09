@@ -55,6 +55,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
         ("tls-ocsp", "supported"),
         ("tls-upstream-revocation", "experimental"),
         ("tls-remote-signer", "supported"),
+        ("root-netport-switcher", "experimental"),
         ("tls-mtls-client-auth", "supported"),
         ("upstream-ech", "supported"),
         ("stream-listener-tcp", "supported"),

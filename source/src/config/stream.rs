@@ -78,6 +78,15 @@ impl Config {
           listener.name
         );
       }
+      if self.rejects_privileged_data_plane_ports()
+        && super::workers::is_privileged_bind(listener.bind)
+      {
+        bail!(
+          "stream listener {} bind {} requires a privileged port but unprivileged_mode=true",
+          listener.name,
+          listener.bind
+        );
+      }
       if listener.connect_timeout_ms == 0 || listener.idle_timeout_ms == 0 {
         bail!(
           "stream listener {} timeout values must be greater than 0",

@@ -39,6 +39,13 @@ shutdown_delay_ms = 0
 mode = "off"
 poll_interval_ms = 2000
 
+[runtime.netport_switcher]
+enabled = false
+socket_dir = "/run/oxibelt-netport-switcher"
+main_uid = 10001
+main_gid = 10001
+io_timeout_ms = 5000
+
 [listeners]
 https_bind = "0.0.0.0:8443"
 http_bind = "0.0.0.0:8080"

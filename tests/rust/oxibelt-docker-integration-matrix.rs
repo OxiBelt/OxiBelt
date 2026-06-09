@@ -11,6 +11,7 @@ struct DockerCase {
     description: &'static str,
     expect_start: ExpectStart,
     needs: Needs,
+    root_netport_switcher: bool,
     checks: &'static str,
     failure_contains: Option<&'static str>,
 }
@@ -382,6 +383,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     manifest.push_str(&format!(
         "CASE_NEED_SECOND_PROXY={}\n",
         bool_env(case.needs.second_proxy)
+    ));
+    manifest.push_str(&format!(
+        "CASE_ROOT_NETPORT_SWITCHER={}\n",
+        bool_env(case.root_netport_switcher)
     ));
     manifest.push_str(&format!(
         "CASE_EXPECT_FAILURE_CONTAINS={}\n",
@@ -1326,6 +1331,37 @@ run_case_checks() {
 "#,
             None,
         ),
+        root_netport_switcher_case(docker_case(
+            "config-valid",
+            "root-netport-switcher-https-443",
+            "root netport switcher starts unprivileged OxiBelt and serves HTTPS on port 443",
+            ExpectStart::Success,
+            Needs {
+                http_upstream: true,
+                ..Needs::default()
+            },
+            r#"
+run_case_checks() {
+  local response uid
+  uid="$(docker exec --user 0 "${proxy_container}" sh -ceu '
+for status in /proc/[0-9]*/status; do
+  name="$(awk "/^Name:/ { print \$2 }" "${status}")"
+  if [ "${name}" = "oxibelt" ]; then
+    awk "/^Uid:/ { print \$2 }" "${status}"
+    exit 0
+  fi
+done
+exit 1
+')"
+  if [[ "${uid}" != "10001" ]]; then
+    fail_with_diagnostics "expected child oxibelt process to run as UID 10001, got ${uid}"
+  fi
+  response="$(client_request_on_port 443 "example.test" "/app/netport-switcher" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/netport-switcher"'
+}
+"#,
+            None,
+        )),
         docker_case(
             "config-valid",
             "static-ocsp-compression-off",
@@ -7696,9 +7732,15 @@ fn docker_case(
         description,
         expect_start,
         needs,
+        root_netport_switcher: false,
         checks,
         failure_contains,
     }
+}
+
+fn root_netport_switcher_case(mut case: DockerCase) -> DockerCase {
+    case.root_netport_switcher = true;
+    case
 }
 
 #[cfg(test)]

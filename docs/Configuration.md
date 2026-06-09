@@ -84,6 +84,7 @@ include = ["conf.d/*.toml"]
 [runtime.accept]
 [runtime.drain]
 [runtime.hot_reload]
+[runtime.netport_switcher]
 [listeners]
 [listeners.proxy_protocol]
 [sni_forward]
@@ -280,15 +281,40 @@ shutdown_delay_ms = 0
 [runtime.hot_reload]
 mode = "off" # off | oxirule | downstream_tls | full
 poll_interval_ms = 2000
+
+[runtime.netport_switcher]
+enabled = false
+socket_dir = "/run/oxibelt-netport-switcher"
+main_uid = 10001
+main_gid = 10001
+io_timeout_ms = 5000
 ```
 
-`unprivileged_mode = true` rejects listener ports below `1024`. `worker_threads` accepts a positive integer or `"auto"`; omitted values default to `"auto"`. Auto worker sizing uses Rust `std::thread::available_parallelism()`, falls back to `1` when detection fails, multiplies by `[runtime.worker_multipliers].runtime`, and rounds up. `[runtime.worker_multipliers]` defaults to `runtime = 1.0`, `accept = 0.5`, and `quic_socket = 1.0`; the lower accept default keeps TCP accept loops more conservative while runtime and HTTP/3 socket worker counts continue to track available parallelism. Existing configurations that set `runtime.worker_multipliers.accept = 1.0` keep the previous CPU-count accept-worker behavior. Full hot reload rejects changes to the resolved `runtime.worker_threads` value because the Tokio runtime cannot be resized in-process.
+`unprivileged_mode = true` rejects listener ports `1..1023` unless `[runtime.netport_switcher] enabled = true` is set for data-plane listeners and OxiBelt is started through `/usr/local/bin/oxibelt-netport-switcher`. `worker_threads` accepts a positive integer or `"auto"`; omitted values default to `"auto"`. Auto worker sizing uses Rust `std::thread::available_parallelism()`, falls back to `1` when detection fails, multiplies by `[runtime.worker_multipliers].runtime`, and rounds up. `[runtime.worker_multipliers]` defaults to `runtime = 1.0`, `accept = 0.5`, and `quic_socket = 1.0`; the lower accept default keeps TCP accept loops more conservative while runtime and HTTP/3 socket worker counts continue to track available parallelism. Existing configurations that set `runtime.worker_multipliers.accept = 1.0` keep the previous CPU-count accept-worker behavior. Full hot reload rejects changes to the resolved `runtime.worker_threads` value because the Tokio runtime cannot be resized in-process.
 
 `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].accept`. Set `reuse_port = true` whenever the resolved worker count can be greater than one; OxiBelt fails startup instead of silently enabling `SO_REUSEPORT`. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
 
 `[runtime.drain]` controls reload and shutdown draining. `graceful_timeout_ms` is the maximum time a stopped listener generation waits for active HTTP/1.1 and HTTP/2 requests to finish before force-closing remaining connection tasks. Successful reloads also drain existing HTTP connections that captured the previous data-plane snapshot, even when listener binds do not change, so new requests use the replacement snapshot on new connections. `long_connection_close_delay_ms` protects upgraded WebSocket/generic Upgrade, CONNECT, WebTransport, and TCP stream bridges after a drain signal before they are closed; drained WebTransport bridges keep existing sessions for that grace window but reject new request streams immediately. `shutdown_delay_ms` marks the instance draining and waits before listener drain begins; `0` is allowed. `graceful_timeout_ms` and `long_connection_close_delay_ms` must be greater than zero.
 
 `poll_interval_ms` must be greater than zero. CLI flags `--hot-reload-mode` and `--hot-reload-poll-interval-ms` override TOML values and emit warnings when they differ.
+
+`[runtime.netport_switcher]` is an opt-in Linux root wrapper for privileged data-plane ports. When enabled, the wrapper creates a Unix control socket under `socket_dir`, starts the main OxiBelt process as `main_uid:main_gid`, and brokers only startup-allowed privileged binds for HTTPS TCP, HTTP/3 UDP, plain HTTP, stream TCP/UDP, and WebRTC TURN UDP/TCP/TLS. The wrapper needs `CAP_NET_BIND_SERVICE` to bind low ports and `CAP_SETUID`/`CAP_SETGID` to launch the child as `main_uid:main_gid`. The broker validates protocol, bind address, purpose, worker count, `SO_REUSEPORT`, TCP backlog, and UDP buffer options before passing a socket FD over `SCM_RIGHTS`. Admin, metrics, and health listeners are control/ops surfaces and are never brokered. `--check` and `--dump-effective-config` remain offline validation commands and do not require the wrapper socket.
+
+Example Docker activation for container port `443`:
+
+```sh
+docker run --rm \
+  --user 0:0 \
+  --cap-drop=ALL \
+  --cap-add=NET_BIND_SERVICE \
+  --cap-add=SETUID \
+  --cap-add=SETGID \
+  --security-opt no-new-privileges \
+  -p 443:443/tcp \
+  -p 443:443/udp \
+  --entrypoint /usr/local/bin/oxibelt-netport-switcher \
+  oxibelt --config /etc/oxibelt/config/oxibelt.toml
+```
 
 Reload modes:
 
@@ -2522,7 +2548,7 @@ Configuration validation rejects:
 - Duplicate scalar keys or incompatible value types across included TOML files.
 - Unknown keys when `config.strict_unknown_fields = true`.
 - No enabled downstream HTTP versions or SNI forwarding protocols.
-- Privileged listener ports when `runtime.unprivileged_mode = true`.
+- Privileged listener ports when `runtime.unprivileged_mode = true`, except configured data-plane listener ports `1..1023` when `runtime.netport_switcher.enabled = true`.
 - Non-Linux runtime when `runtime.linux_only = true`.
 - Invalid hot reload mode, zero worker counts, non-positive worker multipliers, zero `poll_interval_ms`, zero accept backlog/backoff values, accept worker counts greater than one without `runtime.accept.reuse_port = true`, or HTTP/3 QUIC socket worker counts greater than one without `quic.socket.reuse_port = true`.
 - Missing all `[[routes]]`, `[sni_forward]` rule/default targets, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
@@ -2557,6 +2583,13 @@ unprivileged_mode = true
 [runtime.hot_reload]
 mode = "off"
 poll_interval_ms = 2000
+
+[runtime.netport_switcher]
+enabled = false
+socket_dir = "/run/oxibelt-netport-switcher"
+main_uid = 10001
+main_gid = 10001
+io_timeout_ms = 5000
 
 [listeners]
 https_bind = "0.0.0.0:8443"

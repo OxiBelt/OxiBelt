@@ -148,7 +148,7 @@ docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 
 The Docker build rebuilds `ui/person-proof` and embeds the generated challenge page in the release binary.
 
-The Alpine image runs as UID/GID `10001:10001`, exposes `8443/tcp`, and expects its default entry configuration at:
+The Alpine image runs as UID/GID `10001:10001`, exposes `8443/tcp` and `8443/udp`, and expects its default entry configuration at:
 
 ```text
 /etc/oxibelt/config/oxibelt.toml
@@ -162,9 +162,11 @@ The standard container layout is:
 /etc/oxibelt/oxirule  External .oxirule.toml rule files
 ```
 
-The image also bundles `/usr/local/bin/oxibeltctl` for Admin API operations and
-`/usr/local/bin/oxibelt-gateway-controller` for Kubernetes Gateway API
-automation while keeping the container entrypoint on `oxibelt`. For example:
+The image also bundles `/usr/local/bin/oxibeltctl` for Admin API operations,
+`/usr/local/bin/oxibelt-netport-switcher` for opt-in privileged data-plane
+port brokerage, and `/usr/local/bin/oxibelt-gateway-controller` for Kubernetes
+Gateway API automation while keeping the container entrypoint on `oxibelt`.
+For example:
 
 ```sh
 docker exec -it oxibelt oxibeltctl status
@@ -193,6 +195,25 @@ docker run --rm -p 8443:8443 \
   --mount type=bind,src=/mnt/user0/oxibelt/cert,dst=/etc/oxibelt/cert,readonly \
   --mount type=bind,src=/mnt/user0/oxibelt/oxirule,dst=/etc/oxibelt/oxirule,readonly \
   oxibelt
+```
+
+To bind container port `443` while keeping the normal OxiBelt process
+unprivileged, set `[runtime.netport_switcher] enabled = true` and start the
+bundled wrapper as root with only the bind and setuid/setgid capabilities it
+needs:
+
+```sh
+docker run --rm \
+  --user 0:0 \
+  --cap-drop=ALL \
+  --cap-add=NET_BIND_SERVICE \
+  --cap-add=SETUID \
+  --cap-add=SETGID \
+  --security-opt no-new-privileges \
+  -p 443:443/tcp \
+  -p 443:443/udp \
+  --entrypoint /usr/local/bin/oxibelt-netport-switcher \
+  oxibelt --config /etc/oxibelt/config/oxibelt.toml
 ```
 
 Mounted files must be readable by UID `10001`. For private keys, prefer ownership or group permissions over broad world-readable permissions. For stronger isolation, enable `[tls.remote_signer]` and run `oxibelt-keysigner` as a separate UID that can read private keys while OxiBelt can only read certificate chains and connect to the signer Unix socket.

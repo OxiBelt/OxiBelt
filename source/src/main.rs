@@ -139,6 +139,9 @@ fn main() -> anyhow::Result<()> {
     println!("{}", toml::to_string_pretty(&value)?);
     return Ok(());
   }
+  if !cli.check {
+    oxibelt::netport_switcher::ensure_required_runtime_socket(&config)?;
+  }
 
   config.log_worker_resolution();
   let worker_threads = config.runtime.worker_threads;

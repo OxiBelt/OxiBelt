@@ -2300,6 +2300,21 @@ EOF
   fi
 fi
 
+proxy_runtime_args=()
+proxy_command_args=()
+if [[ "${CASE_ROOT_NETPORT_SWITCHER}" == "1" ]]; then
+  proxy_runtime_args=(
+    --user 0:0
+    --cap-drop=ALL
+    --cap-add=NET_BIND_SERVICE
+    --cap-add=SETUID
+    --cap-add=SETGID
+    --security-opt no-new-privileges
+    --entrypoint /usr/local/bin/oxibelt-netport-switcher
+  )
+  proxy_command_args=(--config /etc/oxibelt/config/oxibelt.toml)
+fi
+
 docker create \
   --name "${proxy_container}" \
   --label "${test_label}" \
@@ -2314,9 +2329,11 @@ docker create \
   -e OXIBELT_INSTANCE_ID=proxy-a \
   -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
   -e NOMAD_TOKEN=matrix-nomad-token \
+  "${proxy_runtime_args[@]}" \
   "${remote_signer_docker_args[@]}" \
   "${proxy_dns_args[@]}" \
-  "${proxy_image}" >/dev/null
+  "${proxy_image}" \
+  "${proxy_command_args[@]}" >/dev/null
 docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
 docker cp "${proxy_cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
 if [[ -d "${case_dir}/oxirule" ]]; then

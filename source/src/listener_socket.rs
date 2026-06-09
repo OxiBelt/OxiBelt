@@ -7,6 +7,7 @@ use anyhow::Context;
 use tokio::net::{TcpListener, TcpSocket};
 
 use crate::config::RuntimeAcceptConfig;
+use crate::netport_switcher::SwitcherTcpOptions;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct TcpListenOptions {
@@ -59,6 +60,18 @@ fn bind_tcp_listener(
   purpose: &str,
   worker_index: usize,
 ) -> anyhow::Result<TcpListener> {
+  if let Some(listener) = crate::netport_switcher::bind_tcp_listener(
+    bind,
+    SwitcherTcpOptions {
+      workers: options.workers,
+      reuse_port: options.reuse_port,
+      backlog: options.backlog,
+    },
+    purpose,
+    worker_index,
+  )? {
+    return Ok(listener);
+  }
   let socket = match bind {
     SocketAddr::V4(_) => TcpSocket::new_v4(),
     SocketAddr::V6(_) => TcpSocket::new_v6(),

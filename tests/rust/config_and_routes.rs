@@ -80,6 +80,181 @@ fn protocol_operations_defaults_are_disabled() {
 }
 
 #[test]
+fn netport_switcher_accepts_privileged_data_plane_ports() {
+    let temp_dir = common::TempDir::new("netport-switcher-data-plane");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "netport-switcher-data-plane");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+        .replace(
+            "unprivileged_mode = true",
+            r#"unprivileged_mode = true
+
+[runtime.netport_switcher]
+enabled = true"#,
+        )
+        .replace(
+            r#"https_bind = "127.0.0.1:8443""#,
+            r#"https_bind = "127.0.0.1:443""#,
+        )
+        .replace(
+            "http3 = false",
+            r#"http3 = true
+http_bind = "127.0.0.1:80"
+http_mode = "proxy""#,
+        );
+    let raw = format!(
+        r#"
+{raw}
+
+[quic.socket]
+reuse_port = true
+
+[[stream_listeners]]
+name = "stream-tcp-low"
+bind = "127.0.0.1:22"
+target = "127.0.0.1:9000"
+
+[[stream_listeners]]
+name = "stream-udp-low"
+network = "udp"
+bind = "127.0.0.1:53"
+target = "127.0.0.1:9001"
+
+[[webrtc_turn_listeners]]
+name = "turn-low"
+mode = "edge_relay"
+bind_udp = "127.0.0.1:347"
+bind_tcp = "127.0.0.1:348"
+bind_tls = "127.0.0.1:349"
+realm = "example.test"
+public_ip = "127.0.0.1"
+relay_bind_ip = "127.0.0.1"
+
+[webrtc_turn_listeners.relay_port_range]
+start = 49152
+end = 49160
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+rest_shared_secret = "turn-secret"
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+        .validate()
+        .expect("privileged data-plane ports should validate with netport switcher enabled");
+}
+
+#[test]
+fn privileged_https_port_requires_netport_switcher_in_unprivileged_mode() {
+    let temp_dir = common::TempDir::new("netport-switcher-required");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "netport-switcher-required");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        r#"https_bind = "127.0.0.1:8443""#,
+        r#"https_bind = "127.0.0.1:443""#,
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("direct unprivileged privileged HTTPS bind should fail");
+
+    assert!(
+        error.to_string().contains("https_bind")
+            && error.to_string().contains("requires a privileged port"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn privileged_stream_port_requires_netport_switcher_in_unprivileged_mode() {
+    let temp_dir = common::TempDir::new("netport-switcher-stream-required");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "netport-switcher-stream-required");
+    let raw = format!(
+        r#"
+{}
+
+[[stream_listeners]]
+name = "ssh"
+bind = "127.0.0.1:22"
+target = "127.0.0.1:9000"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("direct unprivileged privileged stream bind should fail");
+
+    assert!(
+        error.to_string().contains("stream listener ssh")
+            && error.to_string().contains("requires a privileged port"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn netport_switcher_does_not_allow_privileged_control_ports() {
+    let temp_dir = common::TempDir::new("netport-switcher-control");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "netport-switcher-control");
+    let base = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "unprivileged_mode = true",
+        r#"unprivileged_mode = true
+
+[runtime.netport_switcher]
+enabled = true"#,
+    );
+    for (label, section, expected) in [
+        (
+            "admin",
+            r#"
+[admin]
+enabled = true
+bind = "127.0.0.1:443"
+"#,
+            "admin.bind",
+        ),
+        (
+            "metrics",
+            r#"
+[metrics]
+enabled = true
+bind = "127.0.0.1:443"
+"#,
+            "metrics.bind",
+        ),
+        (
+            "health",
+            r#"
+[health]
+enabled = true
+bind = "127.0.0.1:443"
+"#,
+            "health.bind",
+        ),
+    ] {
+        let raw = format!("{base}\n{section}");
+        let config: Config = toml::from_str(&raw).expect("config should parse");
+        let error = config
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("{label} low control port should fail"));
+        assert!(
+            error.to_string().contains(expected)
+                && error
+                    .to_string()
+                    .contains("does not broker control listeners"),
+            "unexpected {label} error: {error:#}"
+        );
+    }
+}
+
+#[test]
 fn upstream_pool_default_algorithm_is_power_of_two_choices() {
     let temp_dir = common::TempDir::new("pool-default-algorithm");
     let (cert_path, key_path) =

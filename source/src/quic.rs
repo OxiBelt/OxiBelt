@@ -116,19 +116,7 @@ pub fn bind_server_endpoint(
   config: &QuicConfig,
   host_key_base_dir: Option<&Path>,
 ) -> anyhow::Result<Endpoint> {
-  let socket = bind_udp_socket(bind, &config.socket)?;
-  Endpoint::new(
-    endpoint_config(
-      config,
-      &config.downstream.transport,
-      "quic.downstream.transport",
-      host_key_base_dir,
-    )?,
-    Some(server_config),
-    socket,
-    Arc::new(TokioRuntime),
-  )
-  .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))
+  bind_server_endpoint_with_worker_index(bind, server_config, config, host_key_base_dir, 0)
 }
 
 pub fn bind_server_endpoints(
@@ -149,15 +137,38 @@ pub fn bind_server_endpoints(
   }
 
   let worker_bind = SocketAddr::new(bind.ip(), assigned.port());
-  for _ in 1..config.socket.workers {
-    endpoints.push(bind_server_endpoint(
+  for worker_index in 1..config.socket.workers {
+    endpoints.push(bind_server_endpoint_with_worker_index(
       worker_bind,
       server_config.clone(),
       config,
       host_key_base_dir,
+      worker_index,
     )?);
   }
   Ok(endpoints)
+}
+
+fn bind_server_endpoint_with_worker_index(
+  bind: SocketAddr,
+  server_config: ServerConfig,
+  config: &QuicConfig,
+  host_key_base_dir: Option<&Path>,
+  worker_index: usize,
+) -> anyhow::Result<Endpoint> {
+  let socket = bind_udp_socket_with_worker_index(bind, &config.socket, worker_index)?;
+  Endpoint::new(
+    endpoint_config(
+      config,
+      &config.downstream.transport,
+      "quic.downstream.transport",
+      host_key_base_dir,
+    )?,
+    Some(server_config),
+    socket,
+    Arc::new(TokioRuntime),
+  )
+  .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))
 }
 
 pub fn bind_client_endpoint(
@@ -226,6 +237,22 @@ pub(crate) fn bind_udp_socket(
   bind: SocketAddr,
   config: &QuicSocketConfig,
 ) -> anyhow::Result<UdpSocket> {
+  bind_udp_socket_with_worker_index(bind, config, 0)
+}
+
+fn bind_udp_socket_with_worker_index(
+  bind: SocketAddr,
+  config: &QuicSocketConfig,
+  worker_index: usize,
+) -> anyhow::Result<UdpSocket> {
+  if let Some(socket) = crate::netport_switcher::bind_udp_socket(
+    bind,
+    crate::netport_switcher::SwitcherUdpOptions::quic(config),
+    "downstream HTTP/3",
+    worker_index,
+  )? {
+    return Ok(socket);
+  }
   let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))
     .with_context(|| format!("failed to create UDP socket for {bind}"))?;
   if config.receive_buffer_bytes > 0 {

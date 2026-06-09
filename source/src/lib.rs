@@ -34,6 +34,7 @@ pub mod limits;
 mod listener_socket;
 pub mod metrics;
 pub mod mitigation;
+pub mod netport_switcher;
 mod pool_health;
 pub mod pools;
 pub mod proxy;
@@ -81,6 +82,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
   let observability = runtime::init_observability(&config)?;
   config.validate()?;
+  netport_switcher::ensure_required_runtime_socket(&config)?;
   config.log_worker_resolution();
   tls::install_default_provider()?;
 

@@ -25,6 +25,14 @@ use crate::stream::target::{ResolvedStreamTarget, resolve_stream_route_target};
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
 
 pub(super) fn bind_udp_socket(bind: SocketAddr) -> anyhow::Result<std::net::UdpSocket> {
+  if let Some(socket) = crate::netport_switcher::bind_udp_socket(
+    bind,
+    crate::netport_switcher::SwitcherUdpOptions::simple(),
+    "stream UDP",
+    0,
+  )? {
+    return Ok(socket);
+  }
   let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))?;
   socket.set_reuse_address(true)?;
   socket.bind(&bind.into())?;
