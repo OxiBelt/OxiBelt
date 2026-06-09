@@ -1956,27 +1956,20 @@ run_case_checks() {
             Needs::default(),
             r#"
 run_case_checks() {
-  local first cached refreshed escaped body
+  local first revalidated escaped body
 
   first="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
   assert_response_jq "${first}" '.body == "hot cache v1\n"'
 
   docker exec --user 0 "${proxy_container}" /bin/sh -ceu \
     'printf "hot cache v2\n" > /etc/oxibelt/config/public/hot.txt'
-  cached="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
-  assert_response_jq "${cached}" '.body == "hot cache v1\n"'
-
-  # Keep this longer than the fixture's open_file_cache_ttl_ms to absorb
-  # hosted-runner Docker scheduling latency before revalidating the file.
-  sleep 6
-  refreshed="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
-  assert_response_jq "${refreshed}" '.body == "hot cache v2\n"'
+  revalidated="$(client_request "static-hot-cache.example.test" "/static/hot.txt" 200)"
+  assert_response_jq "${revalidated}" '.body == "hot cache v2\n"'
 
   docker exec --user 0 "${proxy_container}" /bin/sh -ceu '
     rm -f /etc/oxibelt/config/public/hot.txt
     ln -s /etc/oxibelt/config/outside-secret.txt /etc/oxibelt/config/public/hot.txt
   '
-  sleep 6
   escaped="$(client_request_with_headers_to_target "proxy" 8443 "static-hot-cache.example.test" "/static/hot.txt" "403,404" "GET" "")"
   body="$(jq -r '.body' <<<"${escaped}")"
   if grep -F "STATIC_HOT_CACHE_SECRET" <<<"${body}" >/dev/null; then
