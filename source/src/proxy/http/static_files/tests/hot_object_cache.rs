@@ -142,6 +142,48 @@ async fn hot_object_cache_serves_cached_body_before_ttl() {
 }
 
 #[tokio::test]
+async fn hot_object_cache_serves_cached_body_without_reopening_file_before_ttl() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache-no-reopen");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "safe body")
+    .await
+    .unwrap();
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 3_600_000, 1024));
+
+  let first = serve_with_runtime(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(first.status(), StatusCode::OK);
+  assert_eq!(
+    collect_response_body(first).await,
+    Bytes::from_static(b"safe body")
+  );
+
+  tokio::fs::remove_file(root.join("app.txt")).await.unwrap();
+  let cached = serve_with_runtime(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(cached.status(), StatusCode::OK);
+  assert_eq!(
+    collect_response_body(cached).await,
+    Bytes::from_static(b"safe body")
+  );
+}
+
+#[tokio::test]
 async fn hot_object_cache_revalidates_after_ttl() {
   let temp_dir = common::TempDir::new("static-hot-object-cache-revalidate");
   let root = temp_dir.path().join("public");

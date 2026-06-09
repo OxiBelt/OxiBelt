@@ -389,31 +389,25 @@ impl PlainProxyFastPath {
       access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
     }
     let (mut parts, response_body) = upstream_response.into_parts();
-    let (response_body, inlined_known_small_body, trailers_handled) =
-      match try_inline_response_body(
-        &parts.headers,
-        response_body,
-        timeouts.upstream_read,
-        state.config.proxy.http.trailers,
-        request_version != http::Version::HTTP_3,
-      )
-      .await
-      {
-        SmallResponseDisposition::Inlined { body, inlined } => (body, Some(inlined), true),
-        SmallResponseDisposition::Streaming(body) => (
-          body::with_read_timeout(
-            body,
-            timeouts.upstream_read,
-            BodyTimeoutKind::UpstreamResponseRead,
-          ),
-          None,
-          false,
-        ),
-        SmallResponseDisposition::Error(response) => {
-          state.metrics.record_response(response.status());
-          return response;
-        }
-      };
+    let FastPathResponseBody {
+      body: response_body,
+      inlined_known_small_body,
+      trailers_handled,
+    } = match fast_path_response_body(
+      &parts.headers,
+      response_body,
+      timeouts.upstream_read,
+      state.config.proxy.http.trailers,
+      request_version,
+    )
+    .await
+    {
+      Ok(response_body) => response_body,
+      Err(response) => {
+        state.metrics.record_response(response.status());
+        return response;
+      }
+    };
     strip_hop_by_hop_headers(&mut parts.headers);
     apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
     apply_security_headers(&mut parts.headers, &state.config.security.headers);
@@ -623,6 +617,62 @@ fn fast_path_outbound_request_body(
     return body;
   }
   body::with_send_timeout(body, timeout, BodyTimeoutKind::UpstreamRequestSend)
+}
+
+struct FastPathResponseBody {
+  body: ProxyBody,
+  inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
+  trailers_handled: bool,
+}
+
+async fn fast_path_response_body<B>(
+  headers: &HeaderMap,
+  response_body: B,
+  upstream_read_timeout: std::time::Duration,
+  trailer_mode: TrailerMode,
+  request_version: http::Version,
+) -> Result<FastPathResponseBody, Response<ProxyBody>>
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+{
+  if request_version != http::Version::HTTP_3 {
+    return Ok(FastPathResponseBody {
+      body: body::with_read_timeout(
+        response_body,
+        upstream_read_timeout,
+        BodyTimeoutKind::UpstreamResponseRead,
+      ),
+      inlined_known_small_body: None,
+      trailers_handled: false,
+    });
+  }
+
+  match try_inline_response_body(
+    headers,
+    response_body,
+    upstream_read_timeout,
+    trailer_mode,
+    false,
+  )
+  .await
+  {
+    SmallResponseDisposition::Inlined { body, inlined } => Ok(FastPathResponseBody {
+      body,
+      inlined_known_small_body: Some(inlined),
+      trailers_handled: true,
+    }),
+    SmallResponseDisposition::Streaming(body) => Ok(FastPathResponseBody {
+      body: body::with_read_timeout(
+        body,
+        upstream_read_timeout,
+        BodyTimeoutKind::UpstreamResponseRead,
+      ),
+      inlined_known_small_body: None,
+      trailers_handled: false,
+    }),
+    SmallResponseDisposition::Error(response) => Err(response),
+  }
 }
 
 fn fast_path_filter_trailers(body: ProxyBody, mode: TrailerMode) -> ProxyBody {

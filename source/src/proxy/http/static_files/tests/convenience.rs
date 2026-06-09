@@ -192,6 +192,76 @@ async fn precompressed_variant_uses_accept_encoding_quality_and_preserves_logica
 }
 
 #[tokio::test]
+async fn precompressed_request_bypasses_early_hot_object_cache_lookup() {
+  let temp_dir = common::TempDir::new("static-precompressed-cache-bypass");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.js"), "plain javascript")
+    .await
+    .unwrap();
+  tokio::fs::write(root.join("app.js.br"), "brotli bytes")
+    .await
+    .unwrap();
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 3_600_000, 1024));
+  let static_options = RouteStaticFilesConfig {
+    precompressed: vec![StaticPrecompressedEncoding::Br],
+    ..RouteStaticFilesConfig::default()
+  };
+
+  let plain_response = serve_with_runtime_and_options(
+    &request("/assets/app.js"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    &static_options,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(plain_response.status(), StatusCode::OK);
+  assert!(!plain_response.headers().contains_key(CONTENT_ENCODING));
+  assert_eq!(
+    plain_response
+      .into_body()
+      .collect()
+      .await
+      .unwrap()
+      .to_bytes(),
+    Bytes::from_static(b"plain javascript")
+  );
+
+  let mut brotli_request = request("/assets/app.js");
+  brotli_request
+    .headers_mut()
+    .insert(ACCEPT_ENCODING, HeaderValue::from_static("br"));
+  let brotli_response = serve_with_runtime_and_options(
+    &brotli_request,
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    &static_options,
+    16 * 1024,
+  )
+  .await;
+
+  assert_eq!(brotli_response.status(), StatusCode::OK);
+  assert_eq!(
+    brotli_response.headers().get(CONTENT_ENCODING).unwrap(),
+    "br"
+  );
+  assert_eq!(
+    brotli_response
+      .into_body()
+      .collect()
+      .await
+      .unwrap()
+      .to_bytes(),
+    Bytes::from_static(b"brotli bytes")
+  );
+}
+
+#[tokio::test]
 async fn range_requests_bypass_precompressed_variants() {
   let temp_dir = common::TempDir::new("static-precompressed-range");
   let root = temp_dir.path().join("public");

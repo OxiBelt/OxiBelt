@@ -15,6 +15,7 @@ use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTran
 mod body_shortcuts;
 mod direct_selection;
 mod h3;
+mod response_body;
 
 mod common {
   include!(concat!(
