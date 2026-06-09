@@ -464,6 +464,10 @@ pub struct TlsRemoteSignerConfig {
   pub token_env: String,
   #[serde(default)]
   pub token_file: Option<PathBuf>,
+  #[serde(skip)]
+  pub token_file_reload_path: Option<PathBuf>,
+  #[serde(skip)]
+  pub token_file_reload_base_dir: Option<PathBuf>,
   #[serde(default = "default_tls_remote_signer_token_reload_interval_ms")]
   pub token_reload_interval_ms: u64,
   #[serde(default = "default_tls_remote_signer_connect_timeout_ms")]
@@ -484,6 +488,8 @@ impl Default for TlsRemoteSignerConfig {
       key_id: String::new(),
       token_env: default_tls_remote_signer_token_env(),
       token_file: None,
+      token_file_reload_path: None,
+      token_file_reload_base_dir: None,
       token_reload_interval_ms: default_tls_remote_signer_token_reload_interval_ms(),
       connect_timeout_ms: default_tls_remote_signer_connect_timeout_ms(),
       sign_timeout_ms: default_tls_remote_signer_sign_timeout_ms(),

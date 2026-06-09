@@ -503,6 +503,8 @@ impl Config {
           &path_roots.cert_dir,
           &path,
         )?;
+        self.tls.remote_signer.token_file_reload_path = Some(logical.clone());
+        self.tls.remote_signer.token_file_reload_base_dir = Some(path_roots.cert_dir.clone());
         self.source_paths.remember_runtime_file(logical.clone());
         self
           .source_paths

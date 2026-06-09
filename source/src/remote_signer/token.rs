@@ -24,8 +24,13 @@ struct RemoteSignerTokenState {
 
 #[derive(Debug)]
 enum RemoteSignerTokenSource {
-  Env { name: String },
-  File { path: PathBuf },
+  Env {
+    name: String,
+  },
+  File {
+    path: PathBuf,
+    reload_base_dir: Option<PathBuf>,
+  },
 }
 
 impl RemoteSignerTokenProvider {
@@ -45,6 +50,7 @@ impl RemoteSignerTokenProvider {
 
   pub(super) fn from_sources(
     token_file: Option<PathBuf>,
+    token_file_reload_base_dir: Option<PathBuf>,
     token_env: &str,
     reload_interval: Duration,
   ) -> anyhow::Result<Self> {
@@ -55,9 +61,12 @@ impl RemoteSignerTokenProvider {
     let now = Instant::now();
     let (source, token, next_reload) = match token_file {
       Some(path) => {
-        let token = load_token_from_file(&path)?;
+        let token = load_token_from_file(&path, token_file_reload_base_dir.as_deref())?;
         (
-          RemoteSignerTokenSource::File { path },
+          RemoteSignerTokenSource::File {
+            path,
+            reload_base_dir: token_file_reload_base_dir,
+          },
           token,
           Some(next_reload_after(now, reload_interval)),
         )
@@ -102,7 +111,7 @@ impl RemoteSignerTokenProvider {
   pub(super) fn source_label(&self) -> String {
     match &self.lock_state().source {
       RemoteSignerTokenSource::Env { name } => format!("env:{name}"),
-      RemoteSignerTokenSource::File { path } => format!("file:{}", path.display()),
+      RemoteSignerTokenSource::File { path, .. } => format!("file:{}", path.display()),
     }
   }
 
@@ -125,11 +134,15 @@ impl RemoteSignerTokenState {
   }
 
   fn refresh_file_token(&mut self, forced: bool) {
-    let RemoteSignerTokenSource::File { path } = &self.source else {
+    let RemoteSignerTokenSource::File {
+      path,
+      reload_base_dir,
+    } = &self.source
+    else {
       return;
     };
     let now = Instant::now();
-    match load_token_from_file(path) {
+    match load_token_from_file(path, reload_base_dir.as_deref()) {
       Ok(token) => {
         self.token = token;
         self.next_reload = Some(next_reload_after(now, self.reload_interval));
@@ -163,10 +176,45 @@ fn load_token_from_env(env_name: &str) -> anyhow::Result<[u8; 32]> {
   parse_token_value(env_name, raw.trim())
 }
 
-fn load_token_from_file(path: &Path) -> anyhow::Result<[u8; 32]> {
-  let raw =
-    std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+fn load_token_from_file(path: &Path, reload_base_dir: Option<&Path>) -> anyhow::Result<[u8; 32]> {
+  let read_path = resolve_token_file_read_path(path, reload_base_dir)?;
+  let raw = std::fs::read_to_string(&read_path)
+    .with_context(|| format!("failed to read {}", path.display()))?;
   parse_token_value(&path.display().to_string(), raw.trim())
+}
+
+fn resolve_token_file_read_path(
+  path: &Path,
+  reload_base_dir: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+  let Some(base_dir) = reload_base_dir else {
+    return Ok(path.to_path_buf());
+  };
+  let canonical_base_dir = base_dir.canonicalize().with_context(|| {
+    format!(
+      "failed to resolve remote signer token base directory {}",
+      base_dir.display()
+    )
+  })?;
+  let canonical_path = path.canonicalize().with_context(|| {
+    format!(
+      "failed to resolve remote signer token file {}",
+      path.display()
+    )
+  })?;
+  if !canonical_path.starts_with(&canonical_base_dir) {
+    bail!("remote signer token file must stay within the configured directory");
+  }
+  let metadata = canonical_path.metadata().with_context(|| {
+    format!(
+      "failed to inspect remote signer token file {}",
+      path.display()
+    )
+  })?;
+  if !metadata.is_file() {
+    bail!("remote signer token file must point to a regular file");
+  }
+  Ok(canonical_path)
 }
 
 fn parse_token_value(field: &str, raw: &str) -> anyhow::Result<[u8; 32]> {

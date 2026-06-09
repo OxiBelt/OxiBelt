@@ -2389,6 +2389,70 @@ token_reload_interval_ms = 250
 }
 
 #[test]
+fn remote_tls_signer_token_file_retains_logical_symlink_reload_path() {
+    let temp_dir = common::TempDir::new("remote-tls-signer-token-file-symlink");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("config dir should create");
+    std::fs::create_dir_all(&cert_dir).expect("cert dir should create");
+    let (cert_path, _key_path) =
+        common::create_self_signed_cert(&cert_dir, "remote-tls-signer-token-file-symlink");
+    let first_target = cert_dir.join("keysigner-token-a.b64");
+    let token_file = cert_dir.join("keysigner-token.b64");
+    std::fs::write(
+        &first_target,
+        base64::engine::general_purpose::STANDARD.encode([17u8; 32]),
+    )
+    .expect("token file should write");
+    std::os::unix::fs::symlink("keysigner-token-a.b64", &token_file)
+        .expect("token symlink should create");
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+{}
+
+[tls.remote_signer]
+enabled = true
+socket_path = "/run/oxibelt-keysigner/sign.sock"
+key_id = "edge-default"
+token_file = "keysigner-token.b64"
+"#,
+            common::minimal_config_toml_with_paths(
+                cert_path.file_name().unwrap().to_str().unwrap(),
+                "unused-local-key.pem",
+            )
+            .replace("private_key = \"unused-local-key.pem\"\n", "")
+        ),
+    )
+    .expect("config file should write");
+
+    let config = Config::load(&config_path).expect("config should load with symlinked token_file");
+    assert_eq!(
+        config.tls.remote_signer.token_file,
+        Some(first_target.clone())
+    );
+    assert_eq!(
+        config.tls.remote_signer.token_file_reload_path,
+        Some(token_file.clone())
+    );
+    assert_eq!(
+        config.tls.remote_signer.token_file_reload_base_dir,
+        Some(cert_dir.clone())
+    );
+    assert!(
+        config
+            .source_paths
+            .downstream_tls_reload_files()
+            .contains(&token_file)
+    );
+    config
+        .validate()
+        .expect("symlinked token_file target should validate");
+}
+
+#[test]
 fn remote_tls_signer_token_file_rejects_missing_and_invalid_files() {
     let token_env = "OXIBELT_KEYSIGNER_TOKEN_FILE_REJECTS_ENV";
     let temp_dir = common::TempDir::new("remote-tls-signer-token-file-invalid");

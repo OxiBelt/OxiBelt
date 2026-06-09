@@ -399,6 +399,14 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
   let old_tls = config.tls.clone();
   let mut remote_signer = old_tls.remote_signer;
   remote_signer.token_file = remote_signer_token_file;
+  remote_signer.token_file_reload_path = config
+    .source_paths
+    .downstream_tls_remote_signer_token_file
+    .clone();
+  remote_signer.token_file_reload_base_dir = remote_signer
+    .token_file_reload_path
+    .as_ref()
+    .map(|_| cert_dir.clone());
   let mut old_quic = config.quic.clone();
   old_quic.host_key_file = quic_host_key_file;
   config.tls = TlsConfig {

@@ -586,6 +586,8 @@ fn remote_tls_config(
             key_id: key_id.to_string(),
             token_env: token_env.to_string(),
             token_file: None,
+            token_file_reload_path: None,
+            token_file_reload_base_dir: None,
             token_reload_interval_ms: 1000,
             connect_timeout_ms: 5000,
             sign_timeout_ms: 5000,

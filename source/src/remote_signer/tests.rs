@@ -129,6 +129,7 @@ fn token_file_provider_reloads_and_preserves_last_good_token() {
   write_token_file(&token_file, &TEST_TOKEN);
   let provider = RemoteSignerTokenProvider::from_sources(
     Some(token_file.clone()),
+    None,
     "UNUSED_TOKEN_ENV",
     Duration::from_millis(1),
   )
@@ -150,12 +151,77 @@ fn token_file_provider_reloads_and_preserves_last_good_token() {
 }
 
 #[test]
+fn token_file_provider_follows_symlink_retargets_with_base_guard() {
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let token_file = temp_dir.path().join("keysigner-token.b64");
+  let first_target = temp_dir.path().join("token-a.b64");
+  let rotated_target = temp_dir.path().join("token-b.b64");
+  write_token_file(&first_target, &TEST_TOKEN);
+  write_token_file(&rotated_target, &ROTATED_TEST_TOKEN);
+  replace_symlink("token-a.b64", &token_file);
+  let provider = RemoteSignerTokenProvider::from_sources(
+    Some(token_file.clone()),
+    Some(temp_dir.path().to_path_buf()),
+    "UNUSED_TOKEN_ENV",
+    Duration::from_millis(1),
+  )
+  .expect("initial symlinked token file should load");
+
+  assert_eq!(provider.current_token(), TEST_TOKEN);
+
+  replace_symlink("token-b.b64", &token_file);
+  std::thread::sleep(Duration::from_millis(2));
+  assert_eq!(provider.current_token(), ROTATED_TEST_TOKEN);
+}
+
+#[test]
+fn token_file_provider_preserves_last_good_token_for_unsafe_symlink_retargets() {
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let token_dir = temp_dir.path().join("tokens");
+  let outside_dir = temp_dir.path().join("outside");
+  std::fs::create_dir_all(&token_dir).expect("token dir should create");
+  std::fs::create_dir_all(&outside_dir).expect("outside dir should create");
+  let token_file = token_dir.join("keysigner-token.b64");
+  let first_target = token_dir.join("token-a.b64");
+  let invalid_target = token_dir.join("token-invalid.b64");
+  let outside_target = outside_dir.join("token-outside.b64");
+  write_token_file(&first_target, &TEST_TOKEN);
+  std::fs::write(&invalid_target, b"not-base64").expect("invalid token should write");
+  write_token_file(&outside_target, &ROTATED_TEST_TOKEN);
+  replace_symlink("token-a.b64", &token_file);
+  let provider = RemoteSignerTokenProvider::from_sources(
+    Some(token_file.clone()),
+    Some(token_dir.clone()),
+    "UNUSED_TOKEN_ENV",
+    Duration::from_millis(1),
+  )
+  .expect("initial symlinked token file should load");
+
+  replace_symlink("token-invalid.b64", &token_file);
+  std::thread::sleep(Duration::from_millis(2));
+  assert_eq!(
+    provider.current_token(),
+    TEST_TOKEN,
+    "invalid symlink retargets should preserve the last good token"
+  );
+
+  replace_symlink(&outside_target, &token_file);
+  std::thread::sleep(Duration::from_millis(2));
+  assert_eq!(
+    provider.current_token(),
+    TEST_TOKEN,
+    "outside-base symlink retargets should preserve the last good token"
+  );
+}
+
+#[test]
 fn client_retries_once_after_token_file_rotation_unauthorized() {
   let temp_dir = tempfile::tempdir().expect("temp dir should create");
   let token_file = temp_dir.path().join("keysigner-token.b64");
   write_token_file(&token_file, &TEST_TOKEN);
   let token_provider = RemoteSignerTokenProvider::from_sources(
     Some(token_file.clone()),
+    None,
     "UNUSED_TOKEN_ENV",
     Duration::from_secs(60),
   )
@@ -208,9 +274,13 @@ fn client_retries_once_after_token_file_rotation_unauthorized() {
 fn token_file_startup_rejects_missing_or_invalid_files() {
   let temp_dir = tempfile::tempdir().expect("temp dir should create");
   let missing = temp_dir.path().join("missing.b64");
-  let error =
-    RemoteSignerTokenProvider::from_sources(Some(missing), "UNUSED", Duration::from_millis(1))
-      .expect_err("missing token file should fail startup");
+  let error = RemoteSignerTokenProvider::from_sources(
+    Some(missing),
+    None,
+    "UNUSED",
+    Duration::from_millis(1),
+  )
+  .expect_err("missing token file should fail startup");
   assert!(
     error.to_string().contains("failed to read"),
     "unexpected error: {error}"
@@ -218,9 +288,13 @@ fn token_file_startup_rejects_missing_or_invalid_files() {
 
   let invalid = temp_dir.path().join("invalid.b64");
   std::fs::write(&invalid, b"short").expect("invalid token should write");
-  let error =
-    RemoteSignerTokenProvider::from_sources(Some(invalid), "UNUSED", Duration::from_millis(1))
-      .expect_err("invalid token file should fail startup");
+  let error = RemoteSignerTokenProvider::from_sources(
+    Some(invalid),
+    None,
+    "UNUSED",
+    Duration::from_millis(1),
+  )
+  .expect_err("invalid token file should fail startup");
   assert!(
     error.to_string().contains("exactly 32 bytes") || error.to_string().contains("base64"),
     "unexpected error: {error}"
@@ -234,6 +308,7 @@ fn process_request_uses_latest_token_file_value() {
   write_token_file(&token_file, &TEST_TOKEN);
   let provider = RemoteSignerTokenProvider::from_sources(
     Some(token_file.clone()),
+    None,
     "UNUSED_TOKEN_ENV",
     Duration::from_millis(1),
   )
@@ -337,6 +412,11 @@ fn ok_response() -> RemoteSignerResponse {
 
 fn write_token_file(path: &std::path::Path, token: &[u8; 32]) {
   std::fs::write(path, token_to_wire(token)).expect("token file should write");
+}
+
+fn replace_symlink<P: AsRef<std::path::Path>>(target: P, link: &std::path::Path) {
+  let _ = std::fs::remove_file(link);
+  std::os::unix::fs::symlink(target, link).expect("token symlink should create");
 }
 
 fn decode_wire_token(raw: &str) -> [u8; 32] {

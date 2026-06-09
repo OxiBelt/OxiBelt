@@ -128,7 +128,11 @@ impl RemoteSignerClient {
     Ok(Self {
       socket_path: config.socket_path.clone(),
       token_provider: RemoteSignerTokenProvider::from_sources(
-        config.token_file.clone(),
+        config
+          .token_file_reload_path
+          .clone()
+          .or_else(|| config.token_file.clone()),
+        config.token_file_reload_base_dir.clone(),
         &config.token_env,
         Duration::from_millis(config.token_reload_interval_ms),
       )?,
@@ -365,6 +369,7 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
 
   let token_provider = RemoteSignerTokenProvider::from_sources(
     config.token_file,
+    None,
     &config.token_env,
     config.token_reload_interval,
   )?;
