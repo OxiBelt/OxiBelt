@@ -590,6 +590,9 @@ impl ResponseCache {
       CacheLookup::Stale(stale) => stale.entry.clone(),
       CacheLookup::Revalidate(revalidation) => revalidation.entry.clone(),
     };
+    if entry.body_file.is_some() {
+      return;
+    }
     self.insert(
       CacheInsertContext {
         policy_name: ctx.policy_name,

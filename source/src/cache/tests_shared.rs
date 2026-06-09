@@ -264,12 +264,16 @@ fn shared_cache_large_body_uses_retrievable_chunks() {
     uri: &uri,
     request_headers: &headers,
   }) {
-    Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body.len(), body.len()),
+    Some(CacheLookup::Fresh(entry)) => {
+      assert_eq!(entry.body_len(), body.len());
+      assert_eq!(read_cache_entry_body(&entry), body);
+      assert!(entry.body_file.is_some());
+    }
     other => panic!("expected chunked shared cache hit, got {other:?}"),
   }
   assert_eq!(
     second.purge_exact("default", "https", "example.test", "/asset/large.bin"),
-    2
+    1
   );
 }
 
@@ -300,8 +304,9 @@ async fn shared_cache_streaming_disk_fill_writes_chunked_l2_entry() {
     request_headers: &headers,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
-      assert_eq!(entry.body, body);
-      assert!(entry.body_file.is_none());
+      assert_eq!(entry.body_len(), body.len());
+      assert_eq!(read_cache_entry_body(&entry), body);
+      assert!(entry.body_file.is_some());
     }
     other => panic!("expected shared streaming disk L2 hit, got {other:?}"),
   }
@@ -408,6 +413,16 @@ fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     }
     other => panic!("expected exact URI shared cache hit, got {other:?}"),
   }
+}
+
+fn read_cache_entry_body(entry: &CacheEntry) -> Bytes {
+  if let Some(file) = &entry.body_file {
+    let body = std::fs::read(&file.path).unwrap();
+    let start: usize = file.offset.try_into().unwrap();
+    let end = start.checked_add(file.len).unwrap();
+    return Bytes::from(body[start..end].to_vec());
+  }
+  entry.body.clone()
 }
 
 fn streaming_disk_cache_config(temp_dir: &TestTempDir) -> CacheConfig {

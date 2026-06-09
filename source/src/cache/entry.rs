@@ -1,6 +1,7 @@
 //! Cache entry body references used by local and shared cache lookups.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -19,6 +20,7 @@ pub struct CacheEntry {
   pub headers: HeaderMap,
   pub body: Bytes,
   pub body_file: Option<CacheBodyFile>,
+  pub(crate) _body_file_guard: Option<Arc<tempfile::NamedTempFile>>,
   pub body_len: usize,
   pub stored_at: SystemTime,
 }
@@ -31,6 +33,7 @@ impl CacheEntry {
       headers,
       body,
       body_file: None,
+      _body_file_guard: None,
       body_len,
       stored_at: SystemTime::now(),
     }
@@ -57,6 +60,30 @@ impl CacheEntry {
         offset: 0,
         len: body_len,
       }),
+      _body_file_guard: None,
+      body_len,
+      stored_at,
+    }
+  }
+
+  pub(crate) fn temporary_file(
+    status: StatusCode,
+    headers: HeaderMap,
+    file: tempfile::NamedTempFile,
+    body_len: usize,
+    stored_at: SystemTime,
+  ) -> Self {
+    let path = file.path().to_path_buf();
+    Self {
+      status,
+      headers,
+      body: Bytes::new(),
+      body_file: Some(CacheBodyFile {
+        path,
+        offset: 0,
+        len: body_len,
+      }),
+      _body_file_guard: Some(Arc::new(file)),
       body_len,
       stored_at,
     }
@@ -73,6 +100,7 @@ impl CacheEntry {
   pub(crate) fn with_body(self, body: Bytes) -> Self {
     Self {
       body_file: None,
+      _body_file_guard: None,
       body_len: body.len(),
       body,
       ..self

@@ -4,7 +4,7 @@
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
 use ring::digest;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
@@ -449,14 +449,31 @@ impl SharedState {
       return entry.to_cache_entry();
     }
     let backend = self.cache.as_ref()?;
-    let mut body = Vec::with_capacity(entry.body_len);
+    let headers = shared_entry_headers(entry)?;
+    let stored_at = shared_entry_stored_at(entry);
+    let mut file = tempfile::Builder::new()
+      .prefix("oxibelt-shared-cache-")
+      .tempfile()
+      .ok()?;
+    let mut copied = 0_usize;
     for chunk_key in &entry.body_chunks {
       let chunk = backend.get(chunk_key).ok().flatten()?;
-      body.extend_from_slice(&chunk);
+      copied = copied.checked_add(chunk.len())?;
+      if copied > entry.body_len {
+        return None;
+      }
+      file.write_all(&chunk).ok()?;
     }
-    let mut entry = entry.clone();
-    entry.body = body;
-    entry.to_cache_entry()
+    if copied != entry.body_len || file.flush().is_err() {
+      return None;
+    }
+    Some(CacheEntry::temporary_file(
+      http::StatusCode::from_u16(entry.status).ok()?,
+      headers,
+      file,
+      entry.body_len,
+      stored_at,
+    ))
   }
 }
 
@@ -483,23 +500,29 @@ impl Drop for SharedCacheLock {
 
 impl SharedCacheEntry {
   pub fn to_cache_entry(&self) -> Option<CacheEntry> {
-    let mut headers = HeaderMap::new();
-    for (name, value) in &self.headers {
-      let name = HeaderName::from_bytes(name.as_bytes()).ok()?;
-      let value = HeaderValue::from_bytes(value).ok()?;
-      headers.append(name, value);
-    }
-    let stored_at =
-      std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.stored_at_ms.max(0) as u64);
     Some(
       CacheEntry::memory(
         http::StatusCode::from_u16(self.status).ok()?,
-        headers,
+        shared_entry_headers(self)?,
         bytes::Bytes::from(self.body.clone()),
       )
-      .with_stored_at(stored_at),
+      .with_stored_at(shared_entry_stored_at(self)),
     )
   }
+}
+
+fn shared_entry_headers(entry: &SharedCacheEntry) -> Option<HeaderMap> {
+  let mut headers = HeaderMap::new();
+  for (name, value) in &entry.headers {
+    let name = HeaderName::from_bytes(name.as_bytes()).ok()?;
+    let value = HeaderValue::from_bytes(value).ok()?;
+    headers.append(name, value);
+  }
+  Some(headers)
+}
+
+fn shared_entry_stored_at(entry: &SharedCacheEntry) -> std::time::SystemTime {
+  std::time::UNIX_EPOCH + std::time::Duration::from_millis(entry.stored_at_ms.max(0) as u64)
 }
 
 fn validator_headers(headers: &HeaderMap) -> HeaderMap {
