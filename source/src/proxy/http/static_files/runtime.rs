@@ -12,6 +12,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use bytes::Bytes;
+use http::HeaderMap;
+use http::header::{
+  ACCEPT_RANGES, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderValue,
+  LAST_MODIFIED, VARY,
+};
 
 use crate::config::{Config, ProxyStaticFilesConfig};
 
@@ -71,6 +76,14 @@ impl StaticFilesRuntime {
     response_metadata: &StaticResponseMetadata,
   ) -> Option<CachedStaticObject> {
     self.hot_objects.get(root, path, response_metadata)
+  }
+
+  pub(crate) fn cached_direct_object(
+    &self,
+    root: &Path,
+    path: &Path,
+  ) -> Option<CachedStaticObject> {
+    self.hot_objects.get_direct(root, path)
   }
 
   pub(crate) fn object_cache_accepts(&self, len: u64) -> bool {
@@ -205,6 +218,7 @@ pub(crate) struct CachedStaticObject {
   pub(crate) etag: String,
   pub(crate) modified: Option<SystemTime>,
   pub(crate) response_metadata: StaticResponseMetadata,
+  pub(crate) full_headers: HeaderMap,
   pub(crate) body: Bytes,
 }
 
@@ -221,6 +235,7 @@ struct StaticHotObjectCache {
 struct StaticHotObjectCacheInner {
   total_bytes: usize,
   entries: HashMap<StaticObjectCacheKey, StaticHotObjectCacheEntry>,
+  by_path: HashMap<StaticDirectObjectCacheKey, StaticDirectObjectCacheIndex>,
   order: VecDeque<StaticObjectCacheKey>,
 }
 
@@ -229,6 +244,17 @@ struct StaticObjectCacheKey {
   root: PathBuf,
   path: PathBuf,
   response_metadata: StaticResponseMetadata,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct StaticDirectObjectCacheKey {
+  root: PathBuf,
+  path: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct StaticDirectObjectCacheIndex {
+  keys: Vec<StaticObjectCacheKey>,
 }
 
 #[derive(Clone, Debug)]
@@ -293,6 +319,60 @@ impl StaticHotObjectCache {
     None
   }
 
+  fn get_direct(&self, root: &Path, path: &Path) -> Option<CachedStaticObject> {
+    if !self.enabled() {
+      return None;
+    }
+    let direct_key = StaticDirectObjectCacheKey {
+      root: root.to_path_buf(),
+      path: path.to_path_buf(),
+    };
+    let now = Instant::now();
+    let mut expired = Vec::new();
+    {
+      let inner = self.inner.read().expect("static file cache lock poisoned");
+      let index = inner.by_path.get(&direct_key)?;
+      let mut candidate = None;
+      for key in &index.keys {
+        let Some(entry) = inner.entries.get(key) else {
+          continue;
+        };
+        if entry.expires_at <= now {
+          expired.push(key.clone());
+          continue;
+        }
+        if !entry
+          .object
+          .response_metadata
+          .is_default_direct_file_metadata(&entry.object.path)
+        {
+          continue;
+        }
+        if candidate.is_some() {
+          return None;
+        }
+        candidate = Some(entry.object.clone());
+      }
+      if let Some(object) = candidate {
+        return Some(object);
+      }
+    }
+
+    if !expired.is_empty() {
+      let mut inner = self.inner.write().expect("static file cache lock poisoned");
+      for key in expired {
+        if inner
+          .entries
+          .get(&key)
+          .is_some_and(|entry| entry.expires_at <= now)
+        {
+          remove_entry(&mut inner, &key);
+        }
+      }
+    }
+    None
+  }
+
   fn insert(
     &self,
     root: &Path,
@@ -318,6 +398,7 @@ impl StaticHotObjectCache {
     remove_entry(&mut inner, &key);
     inner.total_bytes = inner.total_bytes.saturating_add(entry.object.body.len());
     inner.entries.insert(key.clone(), entry);
+    insert_path_index(&mut inner, &key);
     inner.order.push_back(key);
     evict_over_limits(&mut inner, self.max_entries, self.max_bytes);
   }
@@ -332,6 +413,7 @@ impl CachedStaticObject {
     body: Bytes,
   ) -> Self {
     Self {
+      full_headers: cached_full_headers(&etag, modified, &response_metadata, body.len() as u64),
       path,
       etag,
       modified,
@@ -345,6 +427,7 @@ fn remove_entry(inner: &mut StaticHotObjectCacheInner, key: &StaticObjectCacheKe
   if let Some(entry) = inner.entries.remove(key) {
     inner.total_bytes = inner.total_bytes.saturating_sub(entry.object.body.len());
   }
+  remove_path_index(inner, key);
   inner.order.retain(|queued| queued != key);
 }
 
@@ -353,8 +436,70 @@ fn evict_over_limits(inner: &mut StaticHotObjectCacheInner, max_entries: usize, 
     let Some(key) = inner.order.pop_front() else {
       break;
     };
-    if let Some(entry) = inner.entries.remove(&key) {
-      inner.total_bytes = inner.total_bytes.saturating_sub(entry.object.body.len());
-    }
+    remove_entry(inner, &key);
   }
+}
+
+fn insert_path_index(inner: &mut StaticHotObjectCacheInner, key: &StaticObjectCacheKey) {
+  let direct_key = direct_key_for(key);
+  let index = inner.by_path.entry(direct_key).or_default();
+  if !index.keys.iter().any(|candidate| candidate == key) {
+    index.keys.push(key.clone());
+  }
+}
+
+fn remove_path_index(inner: &mut StaticHotObjectCacheInner, key: &StaticObjectCacheKey) {
+  let direct_key = direct_key_for(key);
+  let should_remove = if let Some(index) = inner.by_path.get_mut(&direct_key) {
+    index.keys.retain(|candidate| candidate != key);
+    index.keys.is_empty()
+  } else {
+    false
+  };
+  if should_remove {
+    inner.by_path.remove(&direct_key);
+  }
+}
+
+fn direct_key_for(key: &StaticObjectCacheKey) -> StaticDirectObjectCacheKey {
+  StaticDirectObjectCacheKey {
+    root: key.root.clone(),
+    path: key.path.clone(),
+  }
+}
+
+fn cached_full_headers(
+  etag: &str,
+  modified: Option<SystemTime>,
+  response_metadata: &StaticResponseMetadata,
+  body_len: u64,
+) -> HeaderMap {
+  let mut headers = HeaderMap::new();
+  headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+  if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
+    headers.insert(CONTENT_LENGTH, value);
+  }
+  if let Ok(value) = HeaderValue::from_str(etag) {
+    headers.insert(ETAG, value);
+  }
+  if let Some(modified) = modified
+    && let Ok(value) = HeaderValue::from_str(&httpdate::fmt_http_date(modified))
+  {
+    headers.insert(LAST_MODIFIED, value);
+  }
+  if let Ok(value) = HeaderValue::from_str(&response_metadata.content_type) {
+    headers.insert(CONTENT_TYPE, value);
+  }
+  if let Some(encoding) = response_metadata.content_encoding {
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding));
+  }
+  if let Some(cache_control) = &response_metadata.cache_control
+    && let Ok(value) = HeaderValue::from_str(cache_control)
+  {
+    headers.insert(CACHE_CONTROL, value);
+  }
+  if response_metadata.vary_accept_encoding {
+    headers.insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+  }
+  headers
 }

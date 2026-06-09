@@ -4,10 +4,8 @@ use bytes::Bytes;
 use http::HeaderMap;
 use http::header::CONTENT_LENGTH;
 use http_body_util::{BodyExt, Full};
-use hyper::body::Body;
 
 use super::super::{body, fast_path_response_body};
-use super::PanicBody;
 use crate::config::TrailerMode;
 
 fn response_headers_with_content_length(length: &str) -> HeaderMap {
@@ -20,11 +18,14 @@ fn response_headers_with_content_length(length: &str) -> HeaderMap {
 }
 
 #[tokio::test]
-async fn non_h3_fast_path_response_body_streams_small_known_body_without_polling() {
+async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materialized_body() {
   for version in [http::Version::HTTP_11, http::Version::HTTP_2] {
+    let body =
+      Full::new(Bytes::from_static(b"ok")).map_err(|never| -> body::BoxError { match never {} });
+
     let prepared = match fast_path_response_body(
       &response_headers_with_content_length("2"),
-      PanicBody,
+      body,
       Duration::from_secs(1),
       TrailerMode::Drop,
       version,
@@ -35,9 +36,18 @@ async fn non_h3_fast_path_response_body_streams_small_known_body_without_polling
       Err(response) => panic!("unexpected response status {}", response.status()),
     };
 
-    assert!(prepared.inlined_known_small_body.is_none());
-    assert!(!prepared.trailers_handled);
-    assert_eq!(prepared.body.size_hint().upper(), None);
+    let inlined = prepared
+      .inlined_known_small_body
+      .expect("non-H3 small response should be inlined");
+    assert_eq!(inlined.data.as_ref(), b"ok");
+    assert!(prepared.trailers_handled);
+    let bytes = prepared
+      .body
+      .collect()
+      .await
+      .expect("materialized body should collect")
+      .to_bytes();
+    assert_eq!(bytes, Bytes::from_static(b"ok"));
   }
 }
 

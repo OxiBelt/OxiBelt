@@ -636,24 +636,12 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
 {
-  if request_version != http::Version::HTTP_3 {
-    return Ok(FastPathResponseBody {
-      body: body::with_read_timeout(
-        response_body,
-        upstream_read_timeout,
-        BodyTimeoutKind::UpstreamResponseRead,
-      ),
-      inlined_known_small_body: None,
-      trailers_handled: false,
-    });
-  }
-
   match try_inline_response_body(
     headers,
     response_body,
     upstream_read_timeout,
     trailer_mode,
-    false,
+    request_version != http::Version::HTTP_3,
   )
   .await
   {

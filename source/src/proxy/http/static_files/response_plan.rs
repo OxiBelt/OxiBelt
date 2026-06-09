@@ -49,6 +49,13 @@ impl StaticResponseMetadata {
       vary_accept_encoding: false,
     }
   }
+
+  pub(crate) fn is_default_direct_file_metadata(&self, path: &Path) -> bool {
+    self.content_type == content_type_for_path(path)
+      && self.content_encoding.is_none()
+      && self.cache_control.is_none()
+      && !self.vary_accept_encoding
+  }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -155,8 +162,7 @@ pub(super) fn cached_object_plan(
 }
 
 fn cached_full_bytes_plan(method: &Method, cached: CachedStaticObject) -> StaticResponsePlan {
-  let mut headers = HeaderMap::new();
-  set_cached_common_headers(&mut headers, &cached, cached.body.len() as u64);
+  let headers = cached.full_headers.clone();
   let body = if method == Method::HEAD || cached.body.is_empty() {
     StaticBodyPlan::Empty
   } else {
@@ -371,22 +377,6 @@ fn set_common_headers(
     headers.insert(LAST_MODIFIED, value);
   }
   apply_response_metadata(headers, response_metadata);
-}
-
-fn set_cached_common_headers(headers: &mut HeaderMap, cached: &CachedStaticObject, body_len: u64) {
-  headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-  if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
-    headers.insert(CONTENT_LENGTH, value);
-  }
-  if let Ok(value) = HeaderValue::from_str(&cached.etag) {
-    headers.insert(ETAG, value);
-  }
-  if let Some(modified) = cached.modified
-    && let Ok(value) = HeaderValue::from_str(&httpdate::fmt_http_date(modified))
-  {
-    headers.insert(LAST_MODIFIED, value);
-  }
-  apply_response_metadata(headers, &cached.response_metadata);
 }
 
 pub(super) fn not_modified_plan(

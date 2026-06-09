@@ -20,9 +20,13 @@ fn hot_object_cache_hits_by_resolved_path() {
   let cached = runtime
     .cached_object(&root, &path, &StaticResponseMetadata::for_path(&path))
     .expect("object should be cached by resolved path and metadata");
+  let direct = runtime
+    .cached_direct_object(&root, &path)
+    .expect("default metadata object should be cached by direct path");
 
   assert_eq!(cached.path, path);
   assert_eq!(cached.body, Bytes::from_static(b"cached body"));
+  assert_eq!(direct.body, Bytes::from_static(b"cached body"));
   assert_eq!(
     cached.response_metadata.content_type,
     "text/plain; charset=utf-8"
@@ -52,6 +56,7 @@ fn hot_object_cache_expires_entries() {
       .cached_object(&root, &path, &StaticResponseMetadata::for_path(&path))
       .is_none()
   );
+  assert!(runtime.cached_direct_object(&root, &path).is_none());
 }
 
 #[test]
@@ -85,6 +90,7 @@ fn hot_object_cache_evicts_oldest_entry_when_full() {
       .cached_object(&root, &first, &StaticResponseMetadata::for_path(&first))
       .is_none()
   );
+  assert!(runtime.cached_direct_object(&root, &first).is_none());
   assert_eq!(
     runtime
       .cached_object(&root, &second, &StaticResponseMetadata::for_path(&second))
@@ -92,6 +98,36 @@ fn hot_object_cache_evicts_oldest_entry_when_full() {
       .body,
     Bytes::from_static(b"second")
   );
+  assert_eq!(
+    runtime.cached_direct_object(&root, &second).unwrap().body,
+    Bytes::from_static(b"second")
+  );
+}
+
+#[test]
+fn hot_object_direct_cache_ignores_metadata_specific_entries() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache-direct-metadata");
+  let root = temp_dir.path().join("public");
+  std::fs::create_dir_all(&root).unwrap();
+  let path = root.join("asset.bin");
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 10_000, 1024));
+  let metadata = StaticResponseMetadata {
+    content_type: "text/plain".to_owned(),
+    content_encoding: None,
+    cache_control: None,
+    vary_accept_encoding: false,
+  };
+
+  runtime.store_object(
+    &root,
+    path.clone(),
+    "W/\"metadata-specific\"".to_owned(),
+    None,
+    metadata,
+    Bytes::from_static(b"cached body"),
+  );
+
+  assert!(runtime.cached_direct_object(&root, &path).is_none());
 }
 
 async fn collect_response_body(response: Response<ProxyBody>) -> Bytes {
