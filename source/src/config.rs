@@ -492,6 +492,26 @@ impl Config {
       self.source_paths.downstream_tls_private_key = Some(tls_private_key_logical);
     }
 
+    self.tls.remote_signer.token_file = self
+      .tls
+      .remote_signer
+      .token_file
+      .take()
+      .map(|path| {
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          "tls.remote_signer.token_file",
+          &path_roots.cert_dir,
+          &path,
+        )?;
+        self.source_paths.remember_runtime_file(logical.clone());
+        self
+          .source_paths
+          .remember_downstream_tls_file(logical.clone());
+        self.source_paths.downstream_tls_remote_signer_token_file = Some(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
+      })
+      .transpose()?;
+
     self.tls.ocsp.response_file = self
       .tls
       .ocsp
@@ -2308,40 +2328,13 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     }
     "sni_forward" => sni_forward::SNI_FORWARD_CONFIG_KEYS,
     "sni_forward.rules" => sni_forward::SNI_FORWARD_RULE_KEYS,
-    "tls" => &[
-      "cert_chain",
-      "client_auth",
-      "crlite",
-      "key_exchange_groups",
-      "max_version",
-      "min_version",
-      "ocsp",
-      "private_key",
-      "remote_signer",
-      "resumption",
-      "session_ticket_rotation_seconds",
-      "session_tickets",
-    ][..],
-    "tls.resumption" => &[
-      "mode",
-      "rotation_seconds",
-      "session_cache_size",
-      "tls13_ticket_count",
-    ][..],
-    "tls.remote_signer" => &[
-      "allow_tls12_unstructured_signing",
-      "connect_timeout_ms",
-      "enabled",
-      "key_id",
-      "pool_max_idle_connections",
-      "sign_timeout_ms",
-      "socket_path",
-      "token_env",
-    ][..],
+    "tls" => allowed_keys::TLS_CONFIG_KEYS,
+    "tls.resumption" => allowed_keys::TLS_RESUMPTION_CONFIG_KEYS,
+    "tls.remote_signer" => allowed_keys::TLS_REMOTE_SIGNER_CONFIG_KEYS,
     "tls.ocsp" => tls::OCSP_CONFIG_KEYS,
     "tls.crlite" => crlite::CRLITE_CONFIG_KEYS,
     "tls.crlite.managed" => crlite::CRLITE_MANAGED_CONFIG_KEYS,
-    "tls.client_auth" => &["ca_certs", "mode", "verify_depth"][..],
+    "tls.client_auth" => allowed_keys::TLS_CLIENT_AUTH_CONFIG_KEYS,
     "quic" => &[
       "alt_svc",
       "downstream",

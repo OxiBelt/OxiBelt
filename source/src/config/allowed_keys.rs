@@ -35,3 +35,40 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "waf",
   "webrtc_turn_listeners",
 ];
+
+pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
+  "cert_chain",
+  "client_auth",
+  "crlite",
+  "key_exchange_groups",
+  "max_version",
+  "min_version",
+  "ocsp",
+  "private_key",
+  "remote_signer",
+  "resumption",
+  "session_ticket_rotation_seconds",
+  "session_tickets",
+];
+
+pub(super) const TLS_RESUMPTION_CONFIG_KEYS: &[&str] = &[
+  "mode",
+  "rotation_seconds",
+  "session_cache_size",
+  "tls13_ticket_count",
+];
+
+pub(super) const TLS_REMOTE_SIGNER_CONFIG_KEYS: &[&str] = &[
+  "allow_tls12_unstructured_signing",
+  "connect_timeout_ms",
+  "enabled",
+  "key_id",
+  "pool_max_idle_connections",
+  "sign_timeout_ms",
+  "socket_path",
+  "token_env",
+  "token_file",
+  "token_reload_interval_ms",
+];
+
+pub(super) const TLS_CLIENT_AUTH_CONFIG_KEYS: &[&str] = &["ca_certs", "mode", "verify_depth"];

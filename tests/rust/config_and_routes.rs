@@ -2334,6 +2334,107 @@ token_env = "{token_env}"
 }
 
 #[test]
+fn remote_tls_signer_token_file_resolves_and_replaces_env_token() {
+    let temp_dir = common::TempDir::new("remote-tls-signer-token-file");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    std::fs::create_dir_all(&config_dir).expect("config dir should create");
+    std::fs::create_dir_all(&cert_dir).expect("cert dir should create");
+    let (cert_path, _key_path) =
+        common::create_self_signed_cert(&cert_dir, "remote-tls-signer-token-file");
+    let token_file = cert_dir.join("keysigner-token.b64");
+    std::fs::write(
+        &token_file,
+        base64::engine::general_purpose::STANDARD.encode([17u8; 32]),
+    )
+    .expect("token file should write");
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+{}
+
+[tls.remote_signer]
+enabled = true
+socket_path = "/run/oxibelt-keysigner/sign.sock"
+key_id = "edge-default"
+token_file = "keysigner-token.b64"
+token_reload_interval_ms = 250
+"#,
+            common::minimal_config_toml_with_paths(
+                cert_path.file_name().unwrap().to_str().unwrap(),
+                "unused-local-key.pem",
+            )
+            .replace("private_key = \"unused-local-key.pem\"\n", "")
+        ),
+    )
+    .expect("config file should write");
+
+    let config = Config::load(&config_path).expect("config should load with token_file");
+    assert_eq!(
+        config.tls.remote_signer.token_file,
+        Some(token_file.clone())
+    );
+    assert_eq!(config.tls.remote_signer.token_reload_interval_ms, 250);
+    assert!(
+        config
+            .source_paths
+            .downstream_tls_reload_files()
+            .contains(&token_file)
+    );
+    config
+        .validate()
+        .expect("token_file should replace token_env validation");
+}
+
+#[test]
+fn remote_tls_signer_token_file_rejects_missing_and_invalid_files() {
+    let token_env = "OXIBELT_KEYSIGNER_TOKEN_FILE_REJECTS_ENV";
+    let temp_dir = common::TempDir::new("remote-tls-signer-token-file-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "remote-token-file-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+    let missing = temp_dir.path().join("missing-token.b64");
+    let remote_block = format!(
+        r#"[tls.remote_signer]
+enabled = true
+socket_path = "/run/oxibelt-keysigner/sign.sock"
+key_id = "edge-default"
+token_env = "{token_env}"
+token_file = "{}"
+"#,
+        missing.display()
+    );
+    let raw = base
+        .replace(&format!("private_key = \"{}\"\n", key_path.display()), "")
+        .replace("[tls.ocsp]", &format!("{remote_block}\n[tls.ocsp]"));
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("missing token file should reject remote signer");
+    assert!(
+        error.to_string().contains("failed to read"),
+        "unexpected error: {error}"
+    );
+
+    let invalid = temp_dir.path().join("keysigner-token.b64");
+    std::fs::write(&invalid, "short").expect("invalid token should write");
+    let raw = raw.replace(
+        &missing.display().to_string(),
+        &invalid.display().to_string(),
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("invalid token file should reject remote signer");
+    assert!(
+        error.to_string().contains("exactly 32 bytes") || error.to_string().contains("base64"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn turn_tls_remote_signer_override_requires_global_remote_signer() {
     let temp_dir = common::TempDir::new("turn-remote-signer-config");
     let (cert_path, key_path) =

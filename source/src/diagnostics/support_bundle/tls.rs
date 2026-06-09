@@ -13,5 +13,6 @@ pub struct TlsRuntimeSnapshot {
   pub upstream_revocation: crate::tls::OutboundRevocationRuntimeStatus,
   pub quic_host_key_configured: bool,
   pub remote_signer_enabled: bool,
+  pub remote_signer_token_file_configured: bool,
   pub admin_tls_configured: bool,
 }

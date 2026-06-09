@@ -7,7 +7,9 @@ run_id="$(date +%s)-$$"
 work_dir="${repo_root}/tests/.tmp/remote-signer-${run_id}"
 test_label="oxibelt.test.run=remote-signer-${run_id}"
 socket_volume="oxibelt-keysigner-sock-${run_id}"
+cert_volume="oxibelt-keysigner-cert-${run_id}"
 signer_container="oxibelt-keysigner-${run_id}"
+cert_seed_container="oxibelt-keysigner-cert-seed-${run_id}"
 probe_container="oxibelt-keysigner-probe-${run_id}"
 probe_image="oxibelt/keysigner-probe:${run_id}"
 own_oxibelt_image=0
@@ -19,8 +21,8 @@ if [[ -z "${oxibelt_image}" ]]; then
 fi
 
 cleanup() {
-  docker rm -f "${probe_container}" "${signer_container}" >/dev/null 2>&1 || true
-  docker volume rm "${socket_volume}" >/dev/null 2>&1 || true
+  docker rm -f "${probe_container}" "${signer_container}" "${cert_seed_container}" >/dev/null 2>&1 || true
+  docker volume rm "${socket_volume}" "${cert_volume}" >/dev/null 2>&1 || true
   docker rmi -f "${probe_image}" >/dev/null 2>&1 || true
   if [[ "${own_oxibelt_image}" == "1" ]]; then
     docker rmi -f "${oxibelt_image}" >/dev/null 2>&1 || true
@@ -35,10 +37,13 @@ mkdir -p "${work_dir}"
 
 token="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 key_path="${work_dir}/privkey.pem"
+token_path="${work_dir}/keysigner-token.b64"
 probe_path="${work_dir}/remote_signer_dos_probe.py"
 
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${key_path}" >/dev/null 2>&1
 chmod 0644 "${key_path}"
+printf '%s\n' "${token}" >"${token_path}"
+chmod 0644 "${token_path}"
 
 cat >"${probe_path}" <<'PY'
 import json
@@ -153,31 +158,48 @@ docker build \
   "${repo_root}/tests/docker/mock_upstream" >/dev/null
 
 docker volume create --label "${test_label}" "${socket_volume}" >/dev/null
+docker volume create --label "${test_label}" "${cert_volume}" >/dev/null
+docker create \
+  --name "${cert_seed_container}" \
+  --label "${test_label}" \
+  --user 0:0 \
+  --mount "type=volume,src=${cert_volume},dst=/cert" \
+  --entrypoint sh \
+  "${oxibelt_image}" \
+  -c 'chown 10002:10002 /cert /cert/privkey.pem /cert/keysigner-token.b64 && chmod 0550 /cert && chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64' >/dev/null
+docker cp "${key_path}" "${cert_seed_container}:/cert/privkey.pem"
+docker cp "${token_path}" "${cert_seed_container}:/cert/keysigner-token.b64"
+docker start -a "${cert_seed_container}" >/dev/null
+docker rm "${cert_seed_container}" >/dev/null
 docker run --rm \
   --label "${test_label}" \
   --user 0:0 \
   --mount "type=volume,src=${socket_volume},dst=/sock" \
   --entrypoint sh \
   "${oxibelt_image}" \
-  -c 'chown 10001:10001 /sock && chmod 0770 /sock'
+  -c 'chown 10002:10002 /sock && chmod 0770 /sock'
 
 docker create \
   --name "${signer_container}" \
   --label "${test_label}" \
-  --user 10001:10001 \
+  --user 10002:10002 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges \
   --ulimit nofile=64:64 \
   --mount "type=volume,src=${socket_volume},dst=/sock" \
-  --env "OXIBELT_KEYSIGNER_TOKEN=${token}" \
+  --mount "type=volume,src=${cert_volume},dst=/etc/oxibelt/cert,readonly" \
   --entrypoint /usr/local/bin/oxibelt-keysigner \
   "${oxibelt_image}" \
   --socket /sock/sign.sock \
-  --key edge-default=/tmp/privkey.pem \
-  --token-env OXIBELT_KEYSIGNER_TOKEN \
+  --key edge-default=/etc/oxibelt/cert/privkey.pem \
+  --token-file /etc/oxibelt/cert/keysigner-token.b64 \
+  --token-reload-interval-ms 1000 \
   --socket-mode 0660 \
+  --allow-peer-uid 10001 \
   --max-connections 4 \
   --io-timeout-ms 200 >/dev/null
 
-docker cp "${key_path}" "${signer_container}:/tmp/privkey.pem"
 docker start "${signer_container}" >/dev/null
 
 for _ in $(seq 1 100); do
@@ -202,6 +224,7 @@ docker create \
   --name "${probe_container}" \
   --label "${test_label}" \
   --user 10001:10001 \
+  --group-add 10002 \
   --mount "type=volume,src=${socket_volume},dst=/sock" \
   --env "OXIBELT_KEYSIGNER_TOKEN=${token}" \
   --env "SIGNER_SOCKET=/sock/sign.sock" \

@@ -389,8 +389,16 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     .as_ref()
     .map(|path| canonicalize_under_base("quic.host_key_file", cert_dir, path))
     .transpose()?;
+  let remote_signer_token_file = config
+    .source_paths
+    .downstream_tls_remote_signer_token_file
+    .as_ref()
+    .map(|path| canonicalize_under_base("tls.remote_signer.token_file", cert_dir, path))
+    .transpose()?;
 
   let old_tls = config.tls.clone();
+  let mut remote_signer = old_tls.remote_signer;
+  remote_signer.token_file = remote_signer_token_file;
   let mut old_quic = config.quic.clone();
   old_quic.host_key_file = quic_host_key_file;
   config.tls = TlsConfig {
@@ -398,7 +406,7 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     private_key: private_key
       .map(|path| canonicalize_under_base("tls.private_key", cert_dir, path))
       .transpose()?,
-    remote_signer: old_tls.remote_signer,
+    remote_signer,
     min_version: old_tls.min_version,
     max_version: old_tls.max_version,
     key_exchange_groups: old_tls.key_exchange_groups,

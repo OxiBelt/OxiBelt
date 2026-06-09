@@ -83,12 +83,14 @@ postgres_container="oxibelt-postgres-${run_id}"
 redis_container="oxibelt-redis-${run_id}"
 remote_signer_container="oxibelt-keysigner-${run_id}"
 remote_signer_socket_volume="oxibelt-keysigner-sock-${run_id}"
+remote_signer_cert_volume="oxibelt-keysigner-cert-${run_id}"
+remote_signer_cert_seed_container="oxibelt-keysigner-cert-seed-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker volume rm "${remote_signer_socket_volume}" >/dev/null 2>&1 || true
+  docker volume rm "${remote_signer_socket_volume}" "${remote_signer_cert_volume}" >/dev/null 2>&1 || true
   if [[ "${remove_mock_image}" == "1" ]]; then
     docker rmi -f "${mock_image}" >/dev/null 2>&1 || true
   fi
@@ -1957,31 +1959,51 @@ remote_signer_token=""
 remote_signer_docker_args=()
 if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
   remote_signer_token="$(openssl rand -base64 32)"
+  printf '%s\n' "${remote_signer_token}" >"${cert_dir}/keysigner-token.b64"
+  cp "${cert_dir}/keysigner-token.b64" "${proxy_cert_dir}/keysigner-token.b64"
+  chmod 0644 "${cert_dir}/keysigner-token.b64" "${proxy_cert_dir}/keysigner-token.b64"
   docker volume create --label "${test_label}" "${remote_signer_socket_volume}" >/dev/null
+  docker volume create --label "${test_label}" "${remote_signer_cert_volume}" >/dev/null
+  docker create \
+    --name "${remote_signer_cert_seed_container}" \
+    --label "${test_label}" \
+    --user 0:0 \
+    --mount "type=volume,src=${remote_signer_cert_volume},dst=/cert" \
+    --entrypoint sh \
+    "${proxy_image}" \
+    -c 'chown 10002:10002 /cert /cert/privkey.pem /cert/keysigner-token.b64 && chmod 0550 /cert && chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64' >/dev/null
+  docker cp "${cert_dir}/privkey.pem" "${remote_signer_cert_seed_container}:/cert/privkey.pem"
+  docker cp "${cert_dir}/keysigner-token.b64" "${remote_signer_cert_seed_container}:/cert/keysigner-token.b64"
+  docker start -a "${remote_signer_cert_seed_container}" >/dev/null
+  docker rm "${remote_signer_cert_seed_container}" >/dev/null
   docker run --rm \
     --label "${test_label}" \
     --user 0:0 \
     --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner" \
     --entrypoint sh \
     "${proxy_image}" \
-    -c 'chown 10001:10001 /run/oxibelt-keysigner && chmod 0770 /run/oxibelt-keysigner' >/dev/null
+    -c 'chown 10002:10002 /run/oxibelt-keysigner && chmod 0770 /run/oxibelt-keysigner' >/dev/null
 
   docker create \
     --name "${remote_signer_container}" \
     --label "${test_label}" \
-    --user 10001:10001 \
+    --user 10002:10002 \
+    --read-only \
+    --cap-drop=ALL \
+    --security-opt no-new-privileges \
     --network "${network_name}" \
     --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner" \
-    --env "OXIBELT_KEYSIGNER_TOKEN=${remote_signer_token}" \
+    --mount "type=volume,src=${remote_signer_cert_volume},dst=/etc/oxibelt/cert,readonly" \
     --entrypoint /usr/local/bin/oxibelt-keysigner \
     "${proxy_image}" \
     --socket /run/oxibelt-keysigner/sign.sock \
-    --key edge-default=/tmp/privkey.pem \
-    --token-env OXIBELT_KEYSIGNER_TOKEN \
+    --key edge-default=/etc/oxibelt/cert/privkey.pem \
+    --token-file /etc/oxibelt/cert/keysigner-token.b64 \
+    --token-reload-interval-ms 1000 \
     --socket-mode 0660 \
+    --allow-peer-uid 10001 \
     --max-connections 256 \
     --io-timeout-ms 5000 >/dev/null
-  docker cp "${cert_dir}/privkey.pem" "${remote_signer_container}:/tmp/privkey.pem"
   docker start "${remote_signer_container}" >/dev/null
   for _attempt in $(seq 1 100); do
     if docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
@@ -1996,8 +2018,8 @@ if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
     fail_with_diagnostics "remote signer socket was not created"
   fi
   remote_signer_docker_args+=(
+    --group-add 10002
     --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner"
-    -e "OXIBELT_KEYSIGNER_TOKEN=${remote_signer_token}"
   )
 fi
 

@@ -99,8 +99,10 @@ LABEL org.opencontainers.image.title="OxiBelt" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apk add --no-cache ca-certificates libgcc && \
-    addgroup -S oxibelt && \
+    addgroup -S -g 10001 oxibelt && \
     adduser -S -D -H -u 10001 -G oxibelt oxibelt && \
+    addgroup -S -g 10002 oxibelt-keysigner && \
+    adduser -S -D -H -u 10002 -G oxibelt-keysigner oxibelt-keysigner && \
     mkdir -p /etc/oxibelt/config /etc/oxibelt/cert /etc/oxibelt/oxirule /var/cache/oxibelt && \
     chown oxibelt:oxibelt /var/cache/oxibelt
 

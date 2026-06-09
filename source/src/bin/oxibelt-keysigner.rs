@@ -5,7 +5,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use oxibelt::remote_signer::{
   self, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
-  SignerServerConfig,
+  DEFAULT_REMOTE_SIGNER_TOKEN_RELOAD_INTERVAL_MS, SignerServerConfig,
 };
 
 #[derive(Debug, Parser)]
@@ -20,6 +20,12 @@ struct Cli {
 
   #[arg(long, default_value = "OXIBELT_KEYSIGNER_TOKEN")]
   token_env: String,
+
+  #[arg(long, value_name = "PATH")]
+  token_file: Option<PathBuf>,
+
+  #[arg(long, default_value_t = DEFAULT_REMOTE_SIGNER_TOKEN_RELOAD_INTERVAL_MS, value_parser = parse_nonzero_u64)]
+  token_reload_interval_ms: u64,
 
   #[arg(long, default_value = "0660", value_parser = parse_socket_mode)]
   socket_mode: u32,
@@ -49,6 +55,8 @@ async fn main() -> anyhow::Result<()> {
     socket_mode: cli.socket_mode,
     keys: cli.keys,
     token_env: cli.token_env,
+    token_file: cli.token_file,
+    token_reload_interval: Duration::from_millis(cli.token_reload_interval_ms),
     max_connections: cli.max_connections,
     io_timeout: Duration::from_millis(cli.io_timeout_ms),
     allow_peer_uids: cli.allow_peer_uids,

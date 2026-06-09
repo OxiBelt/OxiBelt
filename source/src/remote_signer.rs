@@ -12,10 +12,9 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use base64::Engine;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
+use rustls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer};
 use rustls::sign::{Signer, SigningKey};
 use rustls::{Error as RustlsError, SignatureAlgorithm, SignatureScheme};
-use subtle::ConstantTimeEq;
 use tokio::net::{UnixListener, UnixStream as TokioUnixStream};
 use tokio::sync::{Semaphore, TryAcquireError};
 use tracing::{info, warn};
@@ -27,27 +26,20 @@ use protocol::{
   read_sync_frame, write_async_frame_with_timeout, write_sync_frame,
 };
 
+mod keys;
 mod pool;
 mod protocol;
 #[cfg(test)]
 mod tests;
+mod token;
+
+use keys::{PREFERRED_SIGNATURE_SCHEMES, ServerKey, load_server_keys};
+use token::{RemoteSignerTokenProvider, request_token_is_valid, token_to_wire};
 
 pub const DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_REMOTE_SIGNER_TOKEN_RELOAD_INTERVAL_MS: u64 = 1_000;
 const TLS13_SERVER_CERT_VERIFY_CONTEXT: &[u8; 34] = b"TLS 1.3, server CertificateVerify\x00";
-
-static PREFERRED_SIGNATURE_SCHEMES: &[SignatureScheme] = &[
-  SignatureScheme::RSA_PSS_SHA512,
-  SignatureScheme::RSA_PSS_SHA384,
-  SignatureScheme::RSA_PSS_SHA256,
-  SignatureScheme::ECDSA_NISTP521_SHA512,
-  SignatureScheme::ECDSA_NISTP384_SHA384,
-  SignatureScheme::ECDSA_NISTP256_SHA256,
-  SignatureScheme::ED25519,
-  SignatureScheme::RSA_PKCS1_SHA512,
-  SignatureScheme::RSA_PKCS1_SHA384,
-  SignatureScheme::RSA_PKCS1_SHA256,
-];
 
 #[derive(Clone)]
 pub struct RemoteSigningKey {
@@ -122,7 +114,7 @@ impl fmt::Debug for RemoteSigningKey {
 #[derive(Clone)]
 struct RemoteSignerClient {
   socket_path: PathBuf,
-  token: [u8; 32],
+  token_provider: RemoteSignerTokenProvider,
   connect_timeout: Duration,
   sign_timeout: Duration,
   pool: Arc<RemoteSignerConnectionPool>,
@@ -135,7 +127,11 @@ impl RemoteSignerClient {
   fn from_config(config: &TlsRemoteSignerConfig) -> anyhow::Result<Self> {
     Ok(Self {
       socket_path: config.socket_path.clone(),
-      token: load_token_from_env(&config.token_env)?,
+      token_provider: RemoteSignerTokenProvider::from_sources(
+        config.token_file.clone(),
+        &config.token_env,
+        Duration::from_millis(config.token_reload_interval_ms),
+      )?,
       connect_timeout: Duration::from_millis(config.connect_timeout_ms),
       sign_timeout: Duration::from_millis(config.sign_timeout_ms),
       pool: Arc::new(RemoteSignerConnectionPool::new(
@@ -148,8 +144,8 @@ impl RemoteSignerClient {
   }
 
   fn describe_key(&self, key_id: &str) -> anyhow::Result<RemoteKeyDescription> {
-    match self.request(RemoteSignerRequest::DescribeKey {
-      token: token_to_wire(&self.token),
+    match self.request_authenticated(|token| RemoteSignerRequest::DescribeKey {
+      token: token_to_wire(&token),
       key_id: key_id.to_string(),
     })? {
       RemoteSignerResponse::DescribeKey {
@@ -184,8 +180,8 @@ impl RemoteSignerClient {
       ));
     };
 
-    let response = self.request(RemoteSignerRequest::Sign {
-      token: token_to_wire(&self.token),
+    let response = self.request_authenticated(|token| RemoteSignerRequest::Sign {
+      token: token_to_wire(&token),
       key_id: key_id.to_string(),
       scheme: u16::from(scheme),
       context,
@@ -208,10 +204,37 @@ impl RemoteSignerClient {
     }
   }
 
-  fn request(&self, request: RemoteSignerRequest) -> anyhow::Result<RemoteSignerResponse> {
-    self.request_with_transport(request, |stream, request| {
+  fn request_authenticated<F>(&self, make_request: F) -> anyhow::Result<RemoteSignerResponse>
+  where
+    F: Fn([u8; 32]) -> RemoteSignerRequest,
+  {
+    self.request_authenticated_with_transport(make_request, |stream, request| {
       self.request_on_stream(stream, request)
     })
+  }
+
+  fn request_authenticated_with_transport<F, T>(
+    &self,
+    make_request: F,
+    mut transport: T,
+  ) -> anyhow::Result<RemoteSignerResponse>
+  where
+    F: Fn([u8; 32]) -> RemoteSignerRequest,
+    T: FnMut(&mut UnixStream, &RemoteSignerRequest) -> anyhow::Result<RemoteSignerResponse>,
+  {
+    let response = self.request_with_transport(
+      make_request(self.token_provider.current_token()),
+      &mut transport,
+    )?;
+    if !is_unauthorized_response(&response) || !self.token_provider.reloadable() {
+      return Ok(response);
+    }
+
+    self.token_provider.force_refresh();
+    self.request_with_transport(
+      make_request(self.token_provider.current_token()),
+      &mut transport,
+    )
   }
 
   fn request_with_transport<F>(
@@ -296,6 +319,7 @@ impl fmt::Debug for RemoteSignerClient {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("RemoteSignerClient")
       .field("socket_path", &self.socket_path)
+      .field("token_source", &self.token_provider.source_label())
       .field("connect_timeout", &self.connect_timeout)
       .field("sign_timeout", &self.sign_timeout)
       .field("pool_max_idle_connections", &self.pool.max_idle)
@@ -313,6 +337,8 @@ pub struct SignerServerConfig {
   pub socket_mode: u32,
   pub keys: Vec<(String, PathBuf)>,
   pub token_env: String,
+  pub token_file: Option<PathBuf>,
+  pub token_reload_interval: Duration,
   pub max_connections: usize,
   pub io_timeout: Duration,
   pub allow_peer_uids: Vec<u32>,
@@ -327,8 +353,21 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
   if config.io_timeout.is_zero() {
     bail!("remote signer io_timeout must be greater than 0");
   }
+  if config.token_reload_interval.is_zero() {
+    bail!("remote signer token_reload_interval must be greater than 0");
+  }
+  validate_socket_mode(config.socket_mode)?;
+  if config.allow_peer_uids.is_empty() && config.allow_peer_gids.is_empty() {
+    warn!(
+      "remote signer peer UID/GID allowlists are empty; local peers with socket access are allowed"
+    );
+  }
 
-  let token = load_token_from_env(&config.token_env)?;
+  let token_provider = RemoteSignerTokenProvider::from_sources(
+    config.token_file,
+    &config.token_env,
+    config.token_reload_interval,
+  )?;
   let keys = Arc::new(load_server_keys(&config.keys)?);
   let listener = bind_listener(&config.socket_path, config.socket_mode)?;
   let max_connections = config.max_connections;
@@ -336,6 +375,7 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
   let allow_tls12_unstructured_signing = config.allow_tls12_unstructured_signing;
   info!(
     socket_path = %config.socket_path.display(),
+    token_source = %token_provider.source_label(),
     keys = keys.len(),
     max_connections,
     io_timeout_ms = io_timeout.as_millis(),
@@ -356,6 +396,7 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
       Err(TryAcquireError::Closed) => bail!("remote signer connection limiter closed"),
     };
     let keys = keys.clone();
+    let token_provider = token_provider.clone();
     let allow_peer_uids = allow_peer_uids.clone();
     let allow_peer_gids = allow_peer_gids.clone();
     tokio::spawn(async move {
@@ -363,7 +404,7 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
       if let Err(error) = handle_connection(
         stream,
         keys,
-        token,
+        token_provider,
         allow_peer_uids,
         allow_peer_gids,
         io_timeout,
@@ -380,7 +421,7 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
 async fn handle_connection(
   mut stream: TokioUnixStream,
   keys: Arc<HashMap<String, ServerKey>>,
-  token: [u8; 32],
+  token_provider: RemoteSignerTokenProvider,
   allow_peer_uids: Arc<Vec<u32>>,
   allow_peer_gids: Arc<Vec<u32>>,
   io_timeout: Duration,
@@ -406,7 +447,12 @@ async fn handle_connection(
         Err(error) if remote_signer_peer_closed(&error) => return Ok(()),
         Err(error) => return Err(error),
       };
-    let response = process_request(request, &keys, &token, allow_tls12_unstructured_signing);
+    let response = process_request(
+      request,
+      &keys,
+      &token_provider,
+      allow_tls12_unstructured_signing,
+    );
     match write_async_frame_with_timeout(&mut stream, &response, io_timeout).await {
       Ok(()) => {}
       Err(error) if remote_signer_peer_closed(&error) => return Ok(()),
@@ -432,10 +478,11 @@ fn remote_signer_peer_closed(error: &anyhow::Error) -> bool {
 fn process_request(
   request: RemoteSignerRequest,
   keys: &HashMap<String, ServerKey>,
-  token: &[u8; 32],
+  token_provider: &RemoteSignerTokenProvider,
   allow_tls12_unstructured_signing: bool,
 ) -> RemoteSignerResponse {
-  if !request_token_is_valid(request.token(), token) {
+  let token = token_provider.current_token();
+  if !request_token_is_valid(request.token(), &token) {
     return RemoteSignerResponse::Error {
       code: "unauthorized".to_string(),
       message: "invalid signer token".to_string(),
@@ -511,73 +558,8 @@ fn process_request(
   }
 }
 
-#[derive(Debug)]
-struct ServerKey {
-  key: Arc<dyn SigningKey>,
-  public_key: Vec<u8>,
-  algorithm: SignatureAlgorithm,
-  schemes: Vec<SignatureScheme>,
-}
-
-fn load_server_keys(keys: &[(String, PathBuf)]) -> anyhow::Result<HashMap<String, ServerKey>> {
-  let mut loaded = HashMap::new();
-  for (key_id, path) in keys {
-    if key_id.trim().is_empty() {
-      bail!("remote signer key id must not be empty");
-    }
-    if loaded.contains_key(key_id) {
-      bail!("duplicate remote signer key id {key_id}");
-    }
-    let key = load_signing_key(path)
-      .with_context(|| format!("failed to load remote signer key {key_id}"))?;
-    let public_key = key
-      .public_key()
-      .ok_or_else(|| anyhow!("key {key_id} does not expose a public key"))?
-      .as_ref()
-      .to_vec();
-    let schemes = supported_schemes(key.as_ref());
-    if schemes.is_empty() {
-      bail!("remote signer key {key_id} does not support any TLS signature schemes");
-    }
-    loaded.insert(
-      key_id.clone(),
-      ServerKey {
-        algorithm: key.algorithm(),
-        key,
-        public_key,
-        schemes,
-      },
-    );
-  }
-  if loaded.is_empty() {
-    bail!("remote signer requires at least one --key entry");
-  }
-  Ok(loaded)
-}
-
-fn load_signing_key(path: &Path) -> anyhow::Result<Arc<dyn SigningKey>> {
-  let bytes = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-  let mut cursor = bytes.as_slice();
-  let key = rustls_pemfile::private_key(&mut cursor)
-    .with_context(|| format!("failed to parse private key from {}", path.display()))?
-    .ok_or_else(|| anyhow!("no private key found in {}", path.display()))?;
-  rustls::crypto::aws_lc_rs::sign::any_supported_type(&private_key_to_static(key))
-    .map_err(|error| anyhow!("failed to load private key: {error}"))
-}
-
-fn private_key_to_static(key: PrivateKeyDer<'_>) -> PrivateKeyDer<'static> {
-  key.clone_key()
-}
-
-fn supported_schemes(key: &dyn SigningKey) -> Vec<SignatureScheme> {
-  PREFERRED_SIGNATURE_SCHEMES
-    .iter()
-    .copied()
-    .filter(|scheme| key.choose_scheme(&[*scheme]).is_some())
-    .collect()
-}
-
 fn bind_listener(path: &Path, mode: u32) -> anyhow::Result<UnixListener> {
+  validate_socket_mode(mode)?;
   if let Some(parent) = path.parent()
     && !parent.as_os_str().is_empty()
   {
@@ -603,6 +585,13 @@ fn bind_listener(path: &Path, mode: u32) -> anyhow::Result<UnixListener> {
   Ok(listener)
 }
 
+fn validate_socket_mode(mode: u32) -> anyhow::Result<()> {
+  if !matches!(mode, 0o600 | 0o660) {
+    bail!("remote signer socket mode must be 0600 or 0660");
+  }
+  Ok(())
+}
+
 fn peer_is_allowed(
   stream: &TokioUnixStream,
   allow_peer_uids: &[u32],
@@ -614,7 +603,21 @@ fn peer_is_allowed(
   let credentials = stream
     .peer_cred()
     .context("failed to read peer credentials")?;
-  Ok(allow_peer_uids.contains(&credentials.uid()) || allow_peer_gids.contains(&credentials.gid()))
+  Ok(peer_credentials_are_allowed(
+    credentials.uid(),
+    credentials.gid(),
+    allow_peer_uids,
+    allow_peer_gids,
+  ))
+}
+
+fn peer_credentials_are_allowed(
+  uid: u32,
+  gid: u32,
+  allow_peer_uids: &[u32],
+  allow_peer_gids: &[u32],
+) -> bool {
+  allow_peer_uids.contains(&uid) || allow_peer_gids.contains(&gid)
 }
 
 fn certificate_spki(certificate: &CertificateDer<'_>) -> anyhow::Result<Vec<u8>> {
@@ -649,28 +652,11 @@ fn connect_with_timeout(path: PathBuf, timeout: Duration) -> anyhow::Result<Unix
   }
 }
 
-fn load_token_from_env(env_name: &str) -> anyhow::Result<[u8; 32]> {
-  let raw = std::env::var(env_name).with_context(|| format!("failed to read {env_name}"))?;
-  let decoded = base64::engine::general_purpose::STANDARD
-    .decode(raw.trim())
-    .with_context(|| format!("{env_name} must contain base64"))?;
-  decoded
-    .try_into()
-    .map_err(|_| anyhow!("{env_name} must contain exactly 32 bytes"))
-}
-
-fn token_to_wire(token: &[u8; 32]) -> String {
-  base64::engine::general_purpose::STANDARD.encode(token)
-}
-
-fn request_token_is_valid(raw_token: &str, expected: &[u8; 32]) -> bool {
-  let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(raw_token.trim()) else {
-    return false;
-  };
-  let Ok(decoded) = <[u8; 32]>::try_from(decoded.as_slice()) else {
-    return false;
-  };
-  expected.ct_eq(&decoded).into()
+fn is_unauthorized_response(response: &RemoteSignerResponse) -> bool {
+  matches!(
+    response,
+    RemoteSignerResponse::Error { code, .. } if code == "unauthorized"
+  )
 }
 
 fn decode_base64(field: &str, value: &str) -> anyhow::Result<Vec<u8>> {

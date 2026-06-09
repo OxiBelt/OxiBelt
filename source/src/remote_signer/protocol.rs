@@ -126,7 +126,7 @@ pub(super) enum RemoteSignerResponse {
   },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum SignContext {
   Tls13ServerCertificateVerify,

@@ -13,6 +13,7 @@ pub struct ConfigSourcePaths {
   pub downstream_tls_files: Vec<PathBuf>,
   pub downstream_tls_cert_chain: Option<PathBuf>,
   pub downstream_tls_private_key: Option<PathBuf>,
+  pub downstream_tls_remote_signer_token_file: Option<PathBuf>,
   pub downstream_tls_ocsp_response_file: Option<PathBuf>,
   pub downstream_tls_crlite_filter_file: Option<PathBuf>,
   pub quic_host_key_file: Option<PathBuf>,

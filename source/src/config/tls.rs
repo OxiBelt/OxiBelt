@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use base64::Engine;
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
@@ -461,6 +462,10 @@ pub struct TlsRemoteSignerConfig {
   pub key_id: String,
   #[serde(default = "default_tls_remote_signer_token_env")]
   pub token_env: String,
+  #[serde(default)]
+  pub token_file: Option<PathBuf>,
+  #[serde(default = "default_tls_remote_signer_token_reload_interval_ms")]
+  pub token_reload_interval_ms: u64,
   #[serde(default = "default_tls_remote_signer_connect_timeout_ms")]
   pub connect_timeout_ms: u64,
   #[serde(default = "default_tls_remote_signer_sign_timeout_ms")]
@@ -478,6 +483,8 @@ impl Default for TlsRemoteSignerConfig {
       socket_path: PathBuf::new(),
       key_id: String::new(),
       token_env: default_tls_remote_signer_token_env(),
+      token_file: None,
+      token_reload_interval_ms: default_tls_remote_signer_token_reload_interval_ms(),
       connect_timeout_ms: default_tls_remote_signer_connect_timeout_ms(),
       sign_timeout_ms: default_tls_remote_signer_sign_timeout_ms(),
       pool_max_idle_connections: default_tls_remote_signer_pool_max_idle_connections(),
@@ -495,7 +502,17 @@ impl TlsRemoteSignerConfig {
       bail!("{prefix}.socket_path must be an absolute Unix socket path");
     }
     validate_optional_non_empty(&format!("{prefix}.key_id"), Some(&self.key_id))?;
-    validate_base64_32_byte_env(&format!("{prefix}.token_env"), &self.token_env)?;
+    if let Some(token_file) = &self.token_file {
+      if token_file.as_os_str().is_empty() {
+        bail!("{prefix}.token_file must not be empty");
+      }
+      validate_base64_32_byte_file(&format!("{prefix}.token_file"), token_file)?;
+    } else {
+      validate_base64_32_byte_env(&format!("{prefix}.token_env"), &self.token_env)?;
+    }
+    if self.token_reload_interval_ms == 0 {
+      bail!("{prefix}.token_reload_interval_ms must be greater than 0");
+    }
     if self.connect_timeout_ms == 0 {
       bail!("{prefix}.connect_timeout_ms must be greater than 0");
     }
@@ -688,6 +705,22 @@ fn default_tls_client_auth_verify_depth() -> u8 {
 
 fn default_tls_remote_signer_token_env() -> String {
   "OXIBELT_KEYSIGNER_TOKEN".to_string()
+}
+
+fn default_tls_remote_signer_token_reload_interval_ms() -> u64 {
+  1000
+}
+
+fn validate_base64_32_byte_file(field_name: &str, path: &Path) -> anyhow::Result<()> {
+  let raw = std::fs::read_to_string(path)
+    .with_context(|| format!("failed to read {field_name} {}", path.display()))?;
+  let bytes = base64::engine::general_purpose::STANDARD
+    .decode(raw.trim())
+    .with_context(|| format!("{field_name} must contain base64"))?;
+  if bytes.len() != 32 {
+    bail!("{field_name} must contain exactly 32 bytes");
+  }
+  Ok(())
 }
 
 fn default_tls_remote_signer_connect_timeout_ms() -> u64 {

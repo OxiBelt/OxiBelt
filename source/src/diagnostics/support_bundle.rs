@@ -365,6 +365,11 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
       upstream_revocation: snapshot.outbound_revocation.status(),
       quic_host_key_configured: snapshot.config.source_paths.quic_host_key_file.is_some(),
       remote_signer_enabled: snapshot.config.tls.remote_signer.enabled,
+      remote_signer_token_file_configured: snapshot
+        .config
+        .source_paths
+        .downstream_tls_remote_signer_token_file
+        .is_some(),
       admin_tls_configured: snapshot.admin_tls_server_config.is_some(),
     },
     inventory: InventorySnapshot {

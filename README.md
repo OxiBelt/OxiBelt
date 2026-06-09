@@ -216,7 +216,7 @@ docker run --rm \
   oxibelt --config /etc/oxibelt/config/oxibelt.toml
 ```
 
-Mounted files must be readable by UID `10001`. For private keys, prefer ownership or group permissions over broad world-readable permissions. For stronger isolation, enable `[tls.remote_signer]` and run `oxibelt-keysigner` as a separate UID that can read private keys while OxiBelt can only read certificate chains and connect to the signer Unix socket.
+Mounted files must be readable by UID `10001`. For private keys, prefer ownership or group permissions over broad world-readable permissions. For stronger isolation, enable `[tls.remote_signer]` and run `oxibelt-keysigner` as signer UID `10002` while OxiBelt runs as UID `10001`. OxiBelt should read certificate chains and `keysigner-token.b64`, and connect to the signer Unix socket through a supplemental signer socket group; it should not receive private key files.
 
 The default release configuration uses `worker_threads = "auto"`, `runtime.accept.workers = "auto"`, and `quic.socket.workers = "auto"`. Auto sizing uses Rust `std::thread::available_parallelism()` with configurable multipliers, so container CPU limits are reflected without adding cgroup-specific code. Multi-worker TCP and HTTP/3 listeners require explicit `reuse_port = true`. If HTTP/3 Retry/stateless reset tokens should remain stable across restarts, mount a deployment-local 64-byte base64 `quic.host_key_file` under `/etc/oxibelt/cert`; the image does not include shared key material.
 
@@ -226,7 +226,7 @@ When remote signing is used with `--read-only`, the signer socket directory must
 --tmpfs /run/oxibelt-keysigner:rw,noexec,nosuid,nodev,mode=0770
 ```
 
-In a sidecar deployment, mount the same socket directory into both the OxiBelt container and the signer container. Mount private keys read-only into the signer container only; OxiBelt should receive certificate chains and socket access, not private key files. Keep signer IPC bounded with the default `oxibelt-keysigner` connection cap and I/O deadline, and use peer UID/GID allowlists where possible.
+In a sidecar deployment, mount the same socket directory into both the OxiBelt container and the signer container, make it writable by signer UID/GID `10002:10002`, and run OxiBelt with supplemental group `10002` so it can connect to the default `0660` socket. Mount private keys and `keysigner-token.b64` read-only into the signer container; give OxiBelt a readable copy of `keysigner-token.b64` and certificate chains, not private key files. Start the signer with `--token-file /etc/oxibelt/cert/keysigner-token.b64 --allow-peer-uid 10001`; `--socket-mode` accepts only `0600` or `0660`. Rotate the token with an atomic replace, for example `openssl rand -base64 32 > keysigner-token.b64.tmp && mv keysigner-token.b64.tmp keysigner-token.b64`; rotation-capable deployments should mount the containing directory or a projected secret volume so the updated path is visible inside both containers. Single-file read-only binds are appropriate only for fixed-token test fixtures. Keep signer IPC bounded with the default `oxibelt-keysigner` connection cap and I/O deadline, and use peer UID/GID allowlists where possible.
 
 For certificate renewal workflows, mount stable certificate/key paths under `/etc/oxibelt/cert` and enable `runtime.hot_reload.mode = "downstream_tls"` or `full`. OxiBelt tracks symlink target changes so renewed certificate files can be imported without restarting the process.
 
