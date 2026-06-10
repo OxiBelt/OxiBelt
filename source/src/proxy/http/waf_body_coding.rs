@@ -1,5 +1,5 @@
 //! HTTP body content-coding transforms used only for opt-in WAF inspection.
-//! Bodies are attacker controlled, so decode work is bounded by byte, ratio, timeout, and concurrency limits.
+//! Bodies are attacker controlled, so transform work is bounded by byte, ratio, timeout, and concurrency limits.
 
 use std::fmt;
 use std::io::{self, Cursor, Read};
@@ -103,6 +103,7 @@ pub(crate) async fn transform_request_body_for_waf(
     return Ok(None);
   };
 
+  let permit = state.acquire().await;
   let (mut parts, body) = request.into_parts();
   let collected = collect_limited_body(
     body,
@@ -110,17 +111,17 @@ pub(crate) async fn transform_request_body_for_waf(
     BodyTimeoutKind::DownstreamRequestRead,
   )
   .await?;
-  let decoded = decode_body(
+  let (decoded, permit) = decode_body(
     collected.bytes,
     encoding,
     config.max_decoded_body_bytes,
     config.max_expansion_ratio,
     config.decode_timeout_ms,
-    state,
+    permit,
   )
   .await?;
   let captured = captured_decoded_body(&decoded, inspection_limit);
-  let reencoded = encode_body(decoded, encoding).await?;
+  let reencoded = encode_body(decoded, encoding, permit).await?;
   parts.headers.remove(CONTENT_LENGTH);
   let body = body_from_bytes_and_trailers(reencoded, collected.trailers);
   Ok(Some((Request::from_parts(parts, body), captured)))
@@ -138,19 +139,20 @@ pub(crate) async fn transform_response_body_for_waf(
   };
   ensure_response_transform_safe(headers)?;
 
+  let permit = state.acquire().await;
   let collected = collect_limited_body(
     body,
     config.max_decoded_body_bytes,
     BodyTimeoutKind::UpstreamResponseRead,
   )
   .await?;
-  let decoded = decode_body(
+  let (decoded, permit) = decode_body(
     collected.bytes,
     encoding,
     config.max_decoded_body_bytes,
     config.max_expansion_ratio,
     config.decode_timeout_ms,
-    state,
+    permit,
   )
   .await?;
   let captured = captured_decoded_body(&decoded, inspection_limit);
@@ -158,6 +160,7 @@ pub(crate) async fn transform_response_body_for_waf(
   headers.remove(CONTENT_LENGTH);
   weaken_strong_etag(headers);
   let body = body_from_bytes_and_trailers(decoded, collected.trailers);
+  drop(permit);
   Ok(Some((body, captured)))
 }
 
@@ -292,17 +295,15 @@ async fn decode_body(
   max_decoded_body_bytes: usize,
   max_expansion_ratio: usize,
   decode_timeout_ms: u64,
-  state: Arc<WafBodyCodingState>,
-) -> Result<Bytes, WafBodyCodingError> {
-  let permit = state.acquire().await;
+  permit: OwnedSemaphorePermit,
+) -> Result<(Bytes, OwnedSemaphorePermit), WafBodyCodingError> {
   let encoded_len = encoded.len();
   let max_bytes = max_decoded_body_bytes;
   let timeout = Duration::from_millis(decode_timeout_ms);
-  let decoded = tokio::time::timeout(
+  let (decoded, permit) = tokio::time::timeout(
     timeout,
     tokio::task::spawn_blocking(move || {
-      let _permit = permit;
-      decode_body_sync(encoded, encoding, max_bytes)
+      decode_body_sync(encoded, encoding, max_bytes).map(|decoded| (decoded, permit))
     }),
   )
   .await
@@ -324,21 +325,25 @@ async fn decode_body(
       "decoded body exceeds WAF body transform expansion ratio",
     ));
   }
-  Ok(decoded)
+  Ok((decoded, permit))
 }
 
 async fn encode_body(
   decoded: Bytes,
   encoding: WafHttpBodyEncoding,
+  permit: OwnedSemaphorePermit,
 ) -> Result<Bytes, WafBodyCodingError> {
-  tokio::task::spawn_blocking(move || encode_body_sync(decoded, encoding))
-    .await
-    .map_err(|error| {
-      WafBodyCodingError::new(
-        WafBodyCodingErrorKind::BodyRead,
-        format!("WAF body transform worker failed: {error}"),
-      )
-    })?
+  tokio::task::spawn_blocking(move || {
+    let _permit = permit;
+    encode_body_sync(decoded, encoding)
+  })
+  .await
+  .map_err(|error| {
+    WafBodyCodingError::new(
+      WafBodyCodingErrorKind::BodyRead,
+      format!("WAF body transform worker failed: {error}"),
+    )
+  })?
 }
 
 fn decode_body_sync(
@@ -474,7 +479,14 @@ fn weaken_strong_etag(headers: &mut HeaderMap) {
 
 #[cfg(test)]
 mod tests {
+  use std::pin::Pin;
+  use std::sync::Arc;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+  use std::task::{Context, Poll};
+  use std::time::Duration;
+
   use http_body_util::{BodyExt, Full};
+  use hyper::body::{Body, SizeHint};
   use pretty_assertions::assert_eq;
 
   use super::*;
@@ -495,11 +507,158 @@ mod tests {
       .boxed()
   }
 
+  struct PollCountingBody {
+    data: Option<Bytes>,
+    poll_count: Arc<AtomicUsize>,
+  }
+
+  impl Body for PollCountingBody {
+    type Data = Bytes;
+    type Error = body::BoxError;
+
+    fn poll_frame(
+      self: Pin<&mut Self>,
+      _context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+      let this = self.get_mut();
+      this.poll_count.fetch_add(1, Ordering::SeqCst);
+      Poll::Ready(this.data.take().map(|data| Ok(Frame::data(data))))
+    }
+
+    fn size_hint(&self) -> SizeHint {
+      let mut hint = SizeHint::new();
+      let len = self.data.as_ref().map(Bytes::len).unwrap_or(0);
+      hint.set_exact(len as u64);
+      hint
+    }
+  }
+
+  fn counted_body(bytes: Bytes, poll_count: Arc<AtomicUsize>) -> ProxyBody {
+    PollCountingBody {
+      data: Some(bytes),
+      poll_count,
+    }
+    .boxed()
+  }
+
+  fn single_permit_config() -> WafHttpBodyCompressionConfig {
+    WafHttpBodyCompressionConfig {
+      max_concurrent_bodies: 1,
+      ..config_for_tests()
+    }
+  }
+
   async fn encoded_bytes(
     bytes: &'static [u8],
     encoding: WafHttpBodyEncoding,
   ) -> Result<Bytes, WafBodyCodingError> {
-    encode_body(Bytes::from_static(bytes), encoding).await
+    encode_body_sync(Bytes::from_static(bytes), encoding)
+  }
+
+  #[tokio::test]
+  async fn request_transform_waits_for_permit_before_collecting_body() {
+    let config = single_permit_config();
+    let state = WafBodyCodingState::new(&config);
+    let held_permit = state.acquire().await;
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let encoded = encoded_bytes(b"bounded request body", WafHttpBodyEncoding::Gzip)
+      .await
+      .expect("gzip encode should succeed");
+    let request = Request::builder()
+      .header(CONTENT_ENCODING, "gzip")
+      .body(counted_body(encoded, poll_count.clone()))
+      .expect("request should build");
+
+    let transform = transform_request_body_for_waf(request, config.clone(), state.clone(), 8);
+    tokio::pin!(transform);
+
+    assert!(
+      tokio::time::timeout(Duration::from_millis(25), &mut transform)
+        .await
+        .is_err(),
+      "transform should wait for a body-coding permit"
+    );
+    assert_eq!(
+      poll_count.load(Ordering::SeqCst),
+      0,
+      "body must not be collected before the concurrency permit is acquired"
+    );
+
+    drop(held_permit);
+    let (request, captured) = transform
+      .await
+      .expect("request transform should succeed")
+      .expect("encoded request should transform");
+    assert!(
+      poll_count.load(Ordering::SeqCst) > 0,
+      "body should be collected after the permit is released"
+    );
+    assert_eq!(captured.bytes.as_ref(), b"bounded ");
+    assert!(captured.is_truncated);
+
+    let replayed = request
+      .into_body()
+      .collect()
+      .await
+      .expect("replayed body should collect")
+      .to_bytes();
+    let decoded =
+      decode_body_sync(replayed, WafHttpBodyEncoding::Gzip, 1024).expect("request should decode");
+    assert_eq!(decoded.as_ref(), b"bounded request body");
+  }
+
+  #[tokio::test]
+  async fn response_transform_waits_for_permit_before_collecting_body() {
+    let config = single_permit_config();
+    let state = WafBodyCodingState::new(&config);
+    let held_permit = state.acquire().await;
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let encoded = encoded_bytes(b"bounded response body", WafHttpBodyEncoding::Gzip)
+      .await
+      .expect("gzip encode should succeed");
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_ENCODING, http::HeaderValue::from_static("gzip"));
+    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("42"));
+    let body = counted_body(encoded, poll_count.clone());
+
+    let (body, captured) = {
+      let transform =
+        transform_response_body_for_waf(&mut headers, body, config.clone(), state.clone(), 8);
+      tokio::pin!(transform);
+
+      assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut transform)
+          .await
+          .is_err(),
+        "transform should wait for a body-coding permit"
+      );
+      assert_eq!(
+        poll_count.load(Ordering::SeqCst),
+        0,
+        "body must not be collected before the concurrency permit is acquired"
+      );
+
+      drop(held_permit);
+      transform
+        .await
+        .expect("response transform should succeed")
+        .expect("encoded response should transform")
+    };
+    assert!(
+      poll_count.load(Ordering::SeqCst) > 0,
+      "body should be collected after the permit is released"
+    );
+    assert_eq!(captured.bytes.as_ref(), b"bounded ");
+    assert!(captured.is_truncated);
+    assert!(!headers.contains_key(CONTENT_ENCODING));
+    assert!(!headers.contains_key(CONTENT_LENGTH));
+
+    let decoded = body
+      .collect()
+      .await
+      .expect("decoded response body should collect")
+      .to_bytes();
+    assert_eq!(decoded.as_ref(), b"bounded response body");
   }
 
   #[tokio::test]
