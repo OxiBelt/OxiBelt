@@ -52,6 +52,11 @@ on:
         required: false
         default: "256"
         type: string
+      submit_dependency_snapshots:
+        description: Submit Docker image dependency snapshots during manual runs
+        required: false
+        default: false
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -144,6 +149,32 @@ jobs:
 
       - name: Cargo test
         run: cargo test --all-features --locked
+
+  rust-advisory-checks:
+    name: Rust advisory checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+
+      - name: Install Rust advisory tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Cargo audit
+        run: cargo audit
+
+      - name: Cargo deny advisories
+        run: cargo deny check advisories
 
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_target }})
@@ -256,6 +287,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
     permissions:
@@ -314,6 +346,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
     permissions:
@@ -346,6 +379,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
     permissions:
@@ -393,6 +427,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
     permissions:
@@ -448,6 +483,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
     permissions:
@@ -482,6 +518,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
     permissions:
@@ -518,6 +555,7 @@ jobs:
       contents: read
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
     strategy:
@@ -566,6 +604,7 @@ jobs:
       contents: read
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
 
@@ -598,11 +637,191 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-riscv64.tar
           retention-days: 0
 
+  docker-image-trivy-scan:
+    name: Docker image Trivy scan (${{ matrix.artifact_arch }})
+    runs-on: ubuntu-latest
+    needs:
+      - docker-alpine-musl-image-amd64
+      - docker-alpine-musl-image-other
+      - docker-alpine-musl-image-riscv64
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_arch: amd64v2
+            artifact_name: oxibelt-alpine-musl-amd64v2-image
+            image_tar: oxibelt-alpine-musl-amd64v2.tar
+            image_tag: oxibelt:alpine-musl-amd64v2
+            scan_target: linux/amd64 x86-64-v2
+          - artifact_arch: amd64
+            artifact_name: oxibelt-alpine-musl-amd64-image
+            image_tar: oxibelt-alpine-musl-amd64.tar
+            image_tag: oxibelt:alpine-musl-amd64
+            scan_target: linux/amd64 x86-64-v3
+          - artifact_arch: amd64v4
+            artifact_name: oxibelt-alpine-musl-amd64v4-image
+            image_tar: oxibelt-alpine-musl-amd64v4.tar
+            image_tag: oxibelt:alpine-musl-amd64v4
+            scan_target: linux/amd64 x86-64-v4
+          - artifact_arch: arm64
+            artifact_name: oxibelt-alpine-musl-arm64-image
+            image_tar: oxibelt-alpine-musl-arm64.tar
+            image_tag: oxibelt:alpine-musl-arm64
+            scan_target: linux/arm64
+          - artifact_arch: riscv64
+            artifact_name: oxibelt-alpine-musl-riscv64-image
+            image_tar: oxibelt-alpine-musl-riscv64.tar
+            image_tag: oxibelt:alpine-musl-riscv64
+            scan_target: linux/riscv64
+
+    steps:
+      - name: Download OxiBelt Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.artifact_arch }}
+
+      - name: Load OxiBelt Docker image
+        env:
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+          OXIBELT_IMAGE_TAR: ${{ matrix.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image_tag }}
+          format: json
+          output: trivy-results-${{ matrix.artifact_arch }}.json
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+
+      - name: Append Trivy vulnerability table
+        env:
+          OXIBELT_IMAGE_TAG: ${{ matrix.image_tag }}
+          OXIBELT_SCAN_TARGET: ${{ matrix.scan_target }}
+          TRIVY_JSON: trivy-results-${{ matrix.artifact_arch }}.json
+        run: |
+          {
+            echo "### Trivy image scan: \`${OXIBELT_IMAGE_TAG}\`"
+            echo
+            echo "| Image | Target | Package | Installed | Fixed | Severity | Vulnerability | Title |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
+            rows="$(
+              jq -r --arg image "${OXIBELT_IMAGE_TAG}" --arg default_target "${OXIBELT_SCAN_TARGET}" '
+                def cell:
+                  tostring
+                  | gsub("\\|"; "\\|")
+                  | gsub("[\r\n]+"; " ");
+                .Results[]? as $result
+                | ($result.Target // $default_target) as $target
+                | $result.Vulnerabilities[]?
+                | [
+                    $image,
+                    $target,
+                    (.PkgName // ""),
+                    (.InstalledVersion // ""),
+                    (.FixedVersion // ""),
+                    (.Severity // ""),
+                    (.VulnerabilityID // ""),
+                    (.Title // "")
+                  ]
+                | map(cell)
+                | "| \(.[0]) | \(.[1]) | \(.[2]) | \(.[3]) | \(.[4]) | \(.[5]) | \(.[6]) | \(.[7]) |"
+              ' "${TRIVY_JSON}"
+            )"
+            if [[ -z "${rows}" ]]; then
+              echo "| ${OXIBELT_IMAGE_TAG} | ${OXIBELT_SCAN_TARGET} | none | - | - | - | - | No vulnerabilities reported |"
+            else
+              printf '%s\n' "${rows}"
+            fi
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload Trivy vulnerability report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: trivy-oxibelt-${{ matrix.artifact_arch }}-json
+          path: trivy-results-${{ matrix.artifact_arch }}.json
+          if-no-files-found: error
+          retention-days: 0
+
+  docker-image-dependency-snapshot:
+    name: Docker image dependency snapshot (${{ matrix.artifact_arch }})
+    runs-on: ubuntu-latest
+    needs:
+      - docker-alpine-musl-image-amd64
+      - docker-alpine-musl-image-other
+      - docker-alpine-musl-image-riscv64
+    if: >-
+      github.repository == 'OxiBelt/OxiBelt' &&
+      (
+        github.event_name == 'push' ||
+        github.event_name == 'schedule' ||
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'workflow_dispatch' && inputs.submit_dependency_snapshots)
+      )
+    permissions:
+      actions: read
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_arch: amd64v2
+            artifact_name: oxibelt-alpine-musl-amd64v2-image
+            image_tar: oxibelt-alpine-musl-amd64v2.tar
+            image_tag: oxibelt:alpine-musl-amd64v2
+          - artifact_arch: amd64
+            artifact_name: oxibelt-alpine-musl-amd64-image
+            image_tar: oxibelt-alpine-musl-amd64.tar
+            image_tag: oxibelt:alpine-musl-amd64
+          - artifact_arch: amd64v4
+            artifact_name: oxibelt-alpine-musl-amd64v4-image
+            image_tar: oxibelt-alpine-musl-amd64v4.tar
+            image_tag: oxibelt:alpine-musl-amd64v4
+          - artifact_arch: arm64
+            artifact_name: oxibelt-alpine-musl-arm64-image
+            image_tar: oxibelt-alpine-musl-arm64.tar
+            image_tag: oxibelt:alpine-musl-arm64
+          - artifact_arch: riscv64
+            artifact_name: oxibelt-alpine-musl-riscv64-image
+            image_tar: oxibelt-alpine-musl-riscv64.tar
+            image_tag: oxibelt:alpine-musl-riscv64
+
+    steps:
+      - name: Download OxiBelt Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.artifact_arch }}
+
+      - name: Load OxiBelt Docker image
+        env:
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+          OXIBELT_IMAGE_TAR: ${{ matrix.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}"
+
+      - name: Submit Trivy dependency snapshot
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image_tag }}
+          format: github
+          output: dependency-results-${{ matrix.artifact_arch }}.sbom.json
+          github-pat: ${{ secrets.GITHUB_TOKEN }}
+
   docker-integration-helper-images:
     name: Docker integration helper images
     runs-on: ubuntu-latest
     needs:
       - test
+      - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
     permissions:
@@ -1351,8 +1570,8 @@ jobs:
       PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile_label || 'none' }}
       PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}
       OXIBELT_PERF_REGRESSION_GATE_MODE: warn
-      OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars.OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE || 'warn' }}
-      OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars.OXIBELT_PERF_DIAGNOSTIC_GATE_MODE || 'warn' }}
+      OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE'] || 'warn' }}
+      OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE'] || 'warn' }}
 
     steps:
       - name: Checkout
@@ -1703,8 +1922,8 @@ jobs:
     env:
       PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
       PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
-      OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars.OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE || 'warn' }}
-      OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars.OXIBELT_PERF_DIAGNOSTIC_GATE_MODE || 'warn' }}
+      OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE'] || 'warn' }}
+      OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE'] || 'warn' }}
 
     steps:
       - name: Checkout

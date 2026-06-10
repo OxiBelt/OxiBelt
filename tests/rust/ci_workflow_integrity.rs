@@ -26,6 +26,50 @@ const DOCKER_INTEGRATION_JOBS: &[&str] = &[
     "docker-integration-security",
 ];
 
+const OXIBELT_IMAGE_ARTIFACTS: &[(&str, &str, &str, &str)] = &[
+    (
+        "amd64v2",
+        "oxibelt-alpine-musl-amd64v2-image",
+        "oxibelt-alpine-musl-amd64v2.tar",
+        "oxibelt:alpine-musl-amd64v2",
+    ),
+    (
+        "amd64",
+        "oxibelt-alpine-musl-amd64-image",
+        "oxibelt-alpine-musl-amd64.tar",
+        "oxibelt:alpine-musl-amd64",
+    ),
+    (
+        "amd64v4",
+        "oxibelt-alpine-musl-amd64v4-image",
+        "oxibelt-alpine-musl-amd64v4.tar",
+        "oxibelt:alpine-musl-amd64v4",
+    ),
+    (
+        "arm64",
+        "oxibelt-alpine-musl-arm64-image",
+        "oxibelt-alpine-musl-arm64.tar",
+        "oxibelt:alpine-musl-arm64",
+    ),
+    (
+        "riscv64",
+        "oxibelt-alpine-musl-riscv64-image",
+        "oxibelt-alpine-musl-riscv64.tar",
+        "oxibelt:alpine-musl-riscv64",
+    ),
+];
+
+const PRIMARY_RUST_GATE_NEEDS: &[&str] = &[
+    "test",
+    "rust-advisory-checks",
+    "test-riscv64-qemu",
+    "fuzz-smoke",
+];
+
+fn expected_needs(job_ids: &[&str]) -> Vec<String> {
+    job_ids.iter().map(|job_id| (*job_id).to_owned()).collect()
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -36,6 +80,31 @@ fn repo_root() -> PathBuf {
 fn workflow_text() -> String {
     fs::read_to_string(repo_root().join(".github/workflows/check-oxibelt.yml"))
         .expect("check-oxibelt workflow should be readable")
+}
+
+fn workflow_job_text(workflow: &str, job_id: &str) -> String {
+    let marker = format!("  {job_id}:");
+    let mut lines = Vec::new();
+    let mut in_job = false;
+
+    for line in workflow.lines() {
+        if line == marker {
+            in_job = true;
+        } else if in_job
+            && line.starts_with("  ")
+            && !line.starts_with("    ")
+            && line.ends_with(':')
+        {
+            break;
+        }
+
+        if in_job {
+            lines.push(line);
+        }
+    }
+
+    assert!(in_job, "workflow should define job {job_id}");
+    lines.join("\n")
 }
 
 fn write_test_file(path: &Path, contents: &str) {
@@ -379,6 +448,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     let jobs = parse_jobs(&workflow_text());
     let mut security_relevant_jobs = vec![
         "test",
+        "rust-advisory-checks",
         "test-riscv64-qemu",
         "generate-test-matrices",
         "linux-target-builds",
@@ -389,6 +459,8 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
         "docker-integration-helper-images",
         "docker-alpine-musl-image-other",
         "docker-alpine-musl-image-riscv64",
+        "docker-image-trivy-scan",
+        "docker-image-dependency-snapshot",
         "remote-signer-dos-docker",
         "browser-webdriver",
         "docker-performance",
@@ -411,6 +483,101 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
             simulate_source_structure_failure(&jobs, job_id),
             Outcome::Success,
             "{job_id} would be skipped if source-structure failed"
+        );
+    }
+}
+
+#[test]
+fn rust_advisory_checks_run_as_independent_primary_gate() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let test_job = workflow_job_text(&workflow, "test");
+    let advisory_job = jobs
+        .get("rust-advisory-checks")
+        .expect("workflow should define the Rust advisory check job");
+    let advisory_job_text = workflow_job_text(&workflow, "rust-advisory-checks");
+
+    assert!(
+        advisory_job.needs.is_empty(),
+        "Rust advisory checks should start with the primary Rust test gates, not after {:?}",
+        advisory_job.needs
+    );
+
+    for expected in [
+        "name: Rust advisory checks",
+        "runs-on: ubuntu-latest",
+        "contents: read",
+        "name: Install Rust toolchain",
+        "rustup toolchain install 1.95.0 --profile minimal",
+        "rustup default 1.95.0",
+        "name: Install Rust advisory tools",
+        "cargo install cargo-audit --locked",
+        "cargo install cargo-deny --locked",
+        "name: Cargo audit",
+        "run: cargo audit",
+        "name: Cargo deny advisories",
+        "run: cargo deny check advisories",
+    ] {
+        assert!(
+            advisory_job_text.contains(expected),
+            "Rust advisory check job should include {expected}"
+        );
+    }
+
+    for forbidden in [
+        "name: Install Rust advisory tools",
+        "run: cargo audit",
+        "run: cargo deny check advisories",
+    ] {
+        assert!(
+            !test_job.contains(forbidden),
+            "test job should leave {forbidden} to the independent Rust advisory job"
+        );
+    }
+
+    let install_rust = advisory_job_text
+        .find("name: Install Rust toolchain")
+        .expect("advisory job should install Rust before advisory checks");
+    let install_advisory = advisory_job_text
+        .find("name: Install Rust advisory tools")
+        .expect("advisory job should install advisory tools");
+    let cargo_audit = advisory_job_text
+        .find("name: Cargo audit")
+        .expect("advisory job should run cargo audit");
+    let cargo_deny = advisory_job_text
+        .find("name: Cargo deny advisories")
+        .expect("advisory job should run cargo deny advisories");
+
+    assert!(
+        install_rust < install_advisory
+            && install_advisory < cargo_audit
+            && cargo_audit < cargo_deny,
+        "advisory checks should run after Rust toolchain setup inside their independent job"
+    );
+}
+
+#[test]
+fn rust_advisory_checks_gate_downstream_build_jobs() {
+    let jobs = parse_jobs(&workflow_text());
+
+    for job_id in [
+        "generate-test-matrices",
+        "linux-target-builds",
+        "docker-alpine-musl-image-amd64",
+        "docker-alpine-comparator-musl-image-amd64",
+        "docker-performance-probe-image",
+        "docker-external-benchmark-image",
+        "docker-alpine-musl-image-other",
+        "docker-alpine-musl-image-riscv64",
+        "docker-integration-helper-images",
+    ] {
+        let job = jobs
+            .get(job_id)
+            .unwrap_or_else(|| panic!("workflow should define {job_id}"));
+        assert_eq!(
+            job.needs,
+            expected_needs(PRIMARY_RUST_GATE_NEEDS),
+            "{job_id} should wait for all primary Rust and advisory gates"
         );
     }
 }
@@ -487,11 +654,7 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
 
     assert_eq!(
         helper_job.needs,
-        vec![
-            "test".to_owned(),
-            "test-riscv64-qemu".to_owned(),
-            "fuzz-smoke".to_owned()
-        ],
+        expected_needs(PRIMARY_RUST_GATE_NEEDS),
         "Docker integration helper image builds should follow the normal test gates"
     );
     assert!(
@@ -590,11 +753,7 @@ fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
     );
     assert_eq!(
         riscv64_image_job.needs,
-        vec![
-            "test".to_owned(),
-            "test-riscv64-qemu".to_owned(),
-            "fuzz-smoke".to_owned()
-        ],
+        expected_needs(PRIMARY_RUST_GATE_NEEDS),
         "RISC-V Docker image builds should still wait for normal test gates"
     );
     assert!(
@@ -645,6 +804,141 @@ fn amd64_docker_image_job_builds_cpu_level_artifacts() {
         workflow.contains("\"${{ matrix.artifact_arch }}\""),
         "AMD64 Docker image build should pass the matrix artifact arch to the build script"
     );
+}
+
+#[test]
+fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let scan_job = jobs
+        .get("docker-image-trivy-scan")
+        .expect("workflow should define the Docker image Trivy scan job");
+    let scan_job_text = workflow_job_text(&workflow, "docker-image-trivy-scan");
+
+    assert_eq!(
+        scan_job.needs,
+        vec![
+            "docker-alpine-musl-image-amd64".to_owned(),
+            "docker-alpine-musl-image-other".to_owned(),
+            "docker-alpine-musl-image-riscv64".to_owned(),
+        ],
+        "Trivy scans should wait for every OxiBelt release image artifact"
+    );
+    assert!(
+        scan_job_text.contains("name: Docker image Trivy scan (${{ matrix.artifact_arch }})"),
+        "Trivy scan job should expose the scanned artifact arch"
+    );
+
+    for (artifact_arch, artifact_name, image_tar, image_tag) in OXIBELT_IMAGE_ARTIFACTS {
+        for expected in [
+            format!("artifact_arch: {artifact_arch}"),
+            format!("artifact_name: {artifact_name}"),
+            format!("image_tar: {image_tar}"),
+            format!("image_tag: {image_tag}"),
+        ] {
+            assert!(
+                scan_job_text.contains(&expected),
+                "Trivy scan matrix should include {expected}"
+            );
+        }
+    }
+
+    for expected in [
+        "actions: read",
+        "contents: read",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
+        "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}\"",
+        "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
+        "scan-type: image",
+        "image-ref: ${{ matrix.image_tag }}",
+        "format: json",
+        "vuln-type: os,library",
+        "severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
+        "exit-code: \"0\"",
+        "GITHUB_STEP_SUMMARY",
+        "Upload Trivy vulnerability report",
+    ] {
+        assert!(
+            scan_job_text.contains(expected),
+            "Trivy scan job should include {expected}"
+        );
+    }
+}
+
+#[test]
+fn docker_image_dependency_snapshot_submits_only_on_write_events() {
+    let workflow = workflow_text();
+    let jobs = parse_jobs(&workflow);
+    let snapshot_job = jobs
+        .get("docker-image-dependency-snapshot")
+        .expect("workflow should define the Docker image dependency snapshot job");
+    let snapshot_job_text = workflow_job_text(&workflow, "docker-image-dependency-snapshot");
+
+    assert_eq!(
+        snapshot_job.needs,
+        vec![
+            "docker-alpine-musl-image-amd64".to_owned(),
+            "docker-alpine-musl-image-other".to_owned(),
+            "docker-alpine-musl-image-riscv64".to_owned(),
+        ],
+        "dependency snapshots should wait for every OxiBelt release image artifact"
+    );
+    assert!(
+        workflow.contains("submit_dependency_snapshots:")
+            && workflow.contains(
+                "description: Submit Docker image dependency snapshots during manual runs"
+            )
+            && workflow.contains("default: false")
+            && workflow.contains("type: boolean"),
+        "workflow_dispatch should expose an opt-in dependency snapshot toggle that is disabled by default"
+    );
+    for expected in [
+        "github.repository == 'OxiBelt/OxiBelt'",
+        "github.event_name == 'push'",
+        "github.event_name == 'schedule'",
+        "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository",
+        "github.event_name == 'workflow_dispatch' && inputs.submit_dependency_snapshots",
+    ] {
+        assert!(
+            snapshot_job_text.contains(expected),
+            "dependency snapshot job condition should include {expected}"
+        );
+    }
+    assert!(
+        !snapshot_job_text.contains("github.event_name != 'pull_request'"),
+        "dependency snapshot job should not use a broad non-PR condition"
+    );
+
+    for (artifact_arch, artifact_name, image_tar, image_tag) in OXIBELT_IMAGE_ARTIFACTS {
+        for expected in [
+            format!("artifact_arch: {artifact_arch}"),
+            format!("artifact_name: {artifact_name}"),
+            format!("image_tar: {image_tar}"),
+            format!("image_tag: {image_tag}"),
+        ] {
+            assert!(
+                snapshot_job_text.contains(&expected),
+                "dependency snapshot matrix should include {expected}"
+            );
+        }
+    }
+
+    for expected in [
+        "actions: read",
+        "contents: write",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
+        "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}\"",
+        "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
+        "scan-type: image",
+        "image-ref: ${{ matrix.image_tag }}",
+        "format: github",
+        "github-pat: ${{ secrets.GITHUB_TOKEN }}",
+    ] {
+        assert!(
+            snapshot_job_text.contains(expected),
+            "dependency snapshot job should include {expected}"
+        );
+    }
 }
 
 #[test]
@@ -778,11 +1072,7 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
 
     assert_eq!(
         comparator_job.needs,
-        vec![
-            "test".to_owned(),
-            "test-riscv64-qemu".to_owned(),
-            "fuzz-smoke".to_owned()
-        ],
+        expected_needs(PRIMARY_RUST_GATE_NEEDS),
         "comparator image builds should run in parallel with OxiBelt AMD64 image builds"
     );
     assert!(
@@ -889,11 +1179,7 @@ fn docker_performance_probe_image_job_builds_reusable_artifact() {
 
     assert_eq!(
         probe_job.needs,
-        vec![
-            "test".to_owned(),
-            "test-riscv64-qemu".to_owned(),
-            "fuzz-smoke".to_owned()
-        ],
+        expected_needs(PRIMARY_RUST_GATE_NEEDS),
         "performance probe image builds should follow the normal test gates"
     );
     assert!(
@@ -930,11 +1216,7 @@ fn docker_external_benchmark_image_job_builds_reusable_artifact() {
 
     assert_eq!(
         external_job.needs,
-        vec![
-            "test".to_owned(),
-            "test-riscv64-qemu".to_owned(),
-            "fuzz-smoke".to_owned()
-        ],
+        expected_needs(PRIMARY_RUST_GATE_NEEDS),
         "external benchmark image builds should follow the normal test gates"
     );
     assert!(
@@ -1469,7 +1751,7 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     );
     assert!(
         workflow.contains(
-            "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars.OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE || 'warn' }}"
+            "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE'] || 'warn' }}"
         ) && workflow.contains(
             "external_failure_count=\"$(jq -r '[.external_benchmarks[]? | (.fail_count // 0)] | add // 0'"
         ) && workflow.contains("::warning title=External benchmark validation::")
@@ -1479,7 +1761,7 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     );
     assert!(
         workflow.contains(
-            "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars.OXIBELT_PERF_DIAGNOSTIC_GATE_MODE || 'warn' }}"
+            "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE'] || 'warn' }}"
         ) && workflow.contains(
             "profile_failure_count=\"$(jq -r '[.profiling[]? | (.fail_count // 0)] | add // 0'"
         ) && workflow.contains("::warning title=Docker performance diagnostic profiling::Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md")

@@ -147,6 +147,7 @@ docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
 The Docker build rebuilds `ui/person-proof` and embeds the generated challenge page in the release binary.
+CI scans each built OxiBelt release image artifact with Trivy, appends a Markdown vulnerability table to the job summary, and submits Dependency Snapshot data on canonical-repository push, scheduled, same-repository PR, and manually opted-in workflow runs.
 
 The Alpine image runs as UID/GID `10001:10001`, exposes `8443/tcp` and `8443/udp`, and expects its default entry configuration at:
 
@@ -236,6 +237,8 @@ Recommended Rust checks from the repository root:
 
 ```sh
 cargo fmt --check
+cargo audit
+cargo deny check advisories
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```

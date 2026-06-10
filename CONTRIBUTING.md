@@ -55,6 +55,8 @@ root:
 ```sh
 cargo fmt --check
 tests/scripts/check-rust-module-size.sh
+cargo audit
+cargo deny check advisories
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
@@ -259,6 +261,8 @@ GitHub Actions should run at least:
 ```sh
 cargo fmt --check
 tests/scripts/check-rust-module-size.sh
+cargo audit
+cargo deny check advisories
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
