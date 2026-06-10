@@ -37,6 +37,11 @@ on:
           - none
           - oxibelt-h2
           - oxibelt-h3
+      performance_accepted_regression_reason:
+        description: Accept current Docker performance regression gates and publish a new comparison baseline
+        required: false
+        default: ""
+        type: string
       aggressive_long_run:
         description: Run the scheduled aggressive long-run job after Docker performance
         required: false
@@ -2070,6 +2075,7 @@ jobs:
         env:
           BASELINE_REPORT: ${{ steps.download-performance-baseline.outputs.baseline_report }}
           BASELINE_CONTEXT: ${{ steps.download-performance-baseline.outputs.baseline_context }}
+          PERFORMANCE_ACCEPTED_REGRESSION_REASON: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_accepted_regression_reason || '' }}
         run: |
           mkdir -p "${RUNNER_TEMP}/oxibelt-performance-artifacts"
           aggregate_args=(
@@ -2092,6 +2098,9 @@ jobs:
             fi
           else
             echo "::warning title=Docker performance delta::baseline comparison artifact was not available; delta report will be skipped"
+          fi
+          if [[ -n "${PERFORMANCE_ACCEPTED_REGRESSION_REASON}" ]]; then
+            aggregate_args+=(--accepted-regression-reason "${PERFORMANCE_ACCEPTED_REGRESSION_REASON}")
           fi
 
           cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate -- "${aggregate_args[@]}"

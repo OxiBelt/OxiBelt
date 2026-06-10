@@ -1,9 +1,7 @@
 //! Static-file route handling for local content.
 //! Path resolution, range handling, WAF, and cache decisions stay explicit before file reads.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, bail};
 use bytes::Bytes;
@@ -16,23 +14,16 @@ use tracing::warn;
 #[cfg(test)]
 use super::body::KnownSmallResponseBody;
 use super::body::ProxyBody;
-use super::response::{apply_security_headers, text_response, waf_terminal_response};
-use super::{
-  SystemAccessLogContext, apply_alt_svc_header, capture_response_body_for_waf, compression,
-  response_body_capture_error_response, waf_body_input, with_downstream_response_timeout,
-};
-use crate::config::{RouteConfig, RouteStaticFilesConfig};
-use crate::state::AppSnapshot;
-use crate::waf::{
-  BodyNeed, RequestWafDecision, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput,
-  WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
-};
+use crate::config::RouteStaticFilesConfig;
 
+mod finalize;
 mod open;
 mod path;
 mod response_plan;
 mod route_options;
 mod runtime;
+pub(in crate::proxy::http) use self::finalize::finalize_response;
+pub(crate) use self::finalize::static_response_send_timeout;
 #[cfg(all(test, target_os = "linux"))]
 use self::open::open_verified_file_with_openat2_for_tests;
 #[cfg(test)]
@@ -72,6 +63,12 @@ pub(crate) struct StaticFileBodyPlan {
   pub(crate) path: PathBuf,
   pub(crate) offset: u64,
   pub(crate) len: u64,
+}
+
+struct StaticErrorPage<'a> {
+  status: StatusCode,
+  fallback_message: &'a str,
+  page: Option<&'a str>,
 }
 
 pub(crate) fn validate_static_root(path: &Path) -> anyhow::Result<PathBuf> {
@@ -124,6 +121,57 @@ pub(crate) async fn plan_response(
   static_options: &RouteStaticFilesConfig,
   runtime: &StaticFilesRuntime,
 ) -> StaticResponsePlan {
+  plan_response_inner(
+    method,
+    headers,
+    request_path,
+    route_name,
+    route_prefix,
+    static_root,
+    static_options,
+    runtime,
+    true,
+  )
+  .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn plan_response_without_hot_object_cache(
+  method: &Method,
+  headers: &HeaderMap,
+  request_path: &str,
+  route_name: &str,
+  route_prefix: &str,
+  static_root: &Path,
+  static_options: &RouteStaticFilesConfig,
+  runtime: &StaticFilesRuntime,
+) -> StaticResponsePlan {
+  plan_response_inner(
+    method,
+    headers,
+    request_path,
+    route_name,
+    route_prefix,
+    static_root,
+    static_options,
+    runtime,
+    false,
+  )
+  .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn plan_response_inner(
+  method: &Method,
+  headers: &HeaderMap,
+  request_path: &str,
+  route_name: &str,
+  route_prefix: &str,
+  static_root: &Path,
+  static_options: &RouteStaticFilesConfig,
+  runtime: &StaticFilesRuntime,
+  allow_hot_object_cache: bool,
+) -> StaticResponsePlan {
   if method != Method::GET && method != Method::HEAD {
     let mut plan = text_plan(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
     plan
@@ -146,12 +194,15 @@ pub(crate) async fn plan_response(
           warn!(route = %route_name, root = %root.display(), "static_root is not usable");
           return plan_custom_error_page(
             method,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "static root unavailable",
-            static_options.error_pages.server_error.as_deref(),
+            StaticErrorPage {
+              status: StatusCode::INTERNAL_SERVER_ERROR,
+              fallback_message: "static root unavailable",
+              page: static_options.error_pages.server_error.as_deref(),
+            },
             root,
             runtime,
             static_options,
+            allow_hot_object_cache,
           )
           .await;
         }
@@ -159,12 +210,15 @@ pub(crate) async fn plan_response(
       }
       return plan_custom_error_page(
         method,
-        StatusCode::NOT_FOUND,
-        "not found",
-        static_options.error_pages.not_found.as_deref(),
+        StaticErrorPage {
+          status: StatusCode::NOT_FOUND,
+          fallback_message: "not found",
+          page: static_options.error_pages.not_found.as_deref(),
+        },
         root,
         runtime,
         static_options,
+        allow_hot_object_cache,
       )
       .await;
     }
@@ -183,12 +237,15 @@ pub(crate) async fn plan_response(
       warn!(route = %route_name, root = %root.display(), "static_root is not usable");
       return plan_custom_error_page(
         method,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "static root unavailable",
-        static_options.error_pages.server_error.as_deref(),
+        StaticErrorPage {
+          status: StatusCode::INTERNAL_SERVER_ERROR,
+          fallback_message: "static root unavailable",
+          page: static_options.error_pages.server_error.as_deref(),
+        },
         root,
         runtime,
         static_options,
+        allow_hot_object_cache,
       )
       .await;
     }
@@ -208,6 +265,7 @@ pub(crate) async fn plan_response(
         StatusCode::OK,
         true,
         true,
+        allow_hot_object_cache,
       )
       .await;
     }
@@ -219,6 +277,7 @@ pub(crate) async fn plan_response(
         &requested_path,
         runtime,
         static_options,
+        allow_hot_object_cache,
       )
       .await
       {
@@ -241,6 +300,7 @@ pub(crate) async fn plan_response(
     &requested_path,
     runtime,
     static_options,
+    allow_hot_object_cache,
   )
   .await
   {
@@ -263,6 +323,7 @@ pub(crate) async fn plan_response(
       StatusCode::OK,
       true,
       true,
+      allow_hot_object_cache,
     )
     .await
     {
@@ -281,12 +342,15 @@ pub(crate) async fn plan_response(
       warn!(route = %route_name, root = %root.display(), "static_root is not usable");
       return plan_custom_error_page(
         method,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "static root unavailable",
-        static_options.error_pages.server_error.as_deref(),
+        StaticErrorPage {
+          status: StatusCode::INTERNAL_SERVER_ERROR,
+          fallback_message: "static root unavailable",
+          page: static_options.error_pages.server_error.as_deref(),
+        },
         root,
         runtime,
         static_options,
+        allow_hot_object_cache,
       )
       .await;
     }
@@ -296,24 +360,30 @@ pub(crate) async fn plan_response(
     warn!(route = %route_name, root = %root.display(), "static_root is not usable");
     return plan_custom_error_page(
       method,
-      StatusCode::INTERNAL_SERVER_ERROR,
-      "static root unavailable",
-      static_options.error_pages.server_error.as_deref(),
+      StaticErrorPage {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        fallback_message: "static root unavailable",
+        page: static_options.error_pages.server_error.as_deref(),
+      },
       root,
       runtime,
       static_options,
+      allow_hot_object_cache,
     )
     .await;
   }
 
   plan_custom_error_page(
     method,
-    StatusCode::NOT_FOUND,
-    "not found",
-    static_options.error_pages.not_found.as_deref(),
+    StaticErrorPage {
+      status: StatusCode::NOT_FOUND,
+      fallback_message: "not found",
+      page: static_options.error_pages.not_found.as_deref(),
+    },
     root,
     runtime,
     static_options,
+    allow_hot_object_cache,
   )
   .await
 }
@@ -330,6 +400,7 @@ async fn plan_opened_file(
   status: StatusCode,
   allow_cache_control: bool,
   allow_precompressed: bool,
+  allow_hot_object_cache: bool,
 ) -> StaticResponsePlan {
   let selected = select_precompressed_file(
     method,
@@ -366,6 +437,7 @@ async fn plan_opened_file(
   let modified = metadata.modified().ok();
   let etag = etag_for_metadata(&metadata);
   if status.is_success()
+    && allow_hot_object_cache
     && let Some(cached) = runtime.cached_object(root, &path, &response_metadata)
     && cached.etag == etag
     && cached.modified == modified
@@ -379,6 +451,7 @@ async fn plan_opened_file(
 
   if method == Method::GET
     && status.is_success()
+    && allow_hot_object_cache
     && runtime.object_cache_accepts(len)
     && let Ok(bytes) = read_file_bytes_for_cache(&mut file, &path, len).await
   {
@@ -455,6 +528,7 @@ async fn plan_candidate_path(
   status: StatusCode,
   allow_cache_control: bool,
   allow_precompressed: bool,
+  allow_hot_object_cache: bool,
 ) -> CandidatePlan {
   let root_handle = runtime.root_handle(root);
   match open_verified_file(&root_handle, &path).await {
@@ -470,6 +544,7 @@ async fn plan_candidate_path(
         status,
         allow_cache_control,
         allow_precompressed,
+        allow_hot_object_cache,
       )
       .await,
     )),
@@ -488,6 +563,7 @@ async fn plan_directory_index(
   requested_path: &Path,
   runtime: &StaticFilesRuntime,
   static_options: &RouteStaticFilesConfig,
+  allow_hot_object_cache: bool,
 ) -> CandidatePlan {
   for index in &static_options.directory_index {
     match plan_candidate_path(
@@ -500,6 +576,7 @@ async fn plan_directory_index(
       StatusCode::OK,
       true,
       true,
+      allow_hot_object_cache,
     )
     .await
     {
@@ -517,6 +594,7 @@ async fn plan_try_files(
   requested_path: &Path,
   runtime: &StaticFilesRuntime,
   static_options: &RouteStaticFilesConfig,
+  allow_hot_object_cache: bool,
 ) -> CandidatePlan {
   let relative = relative_slash_path(root, requested_path);
   for candidate in &static_options.try_files {
@@ -531,6 +609,7 @@ async fn plan_try_files(
       StatusCode::OK,
       true,
       true,
+      allow_hot_object_cache,
     )
     .await
     {
@@ -543,15 +622,14 @@ async fn plan_try_files(
 
 async fn plan_custom_error_page(
   method: &Method,
-  status: StatusCode,
-  fallback_message: &str,
-  page: Option<&str>,
+  error_page: StaticErrorPage<'_>,
   root: &Path,
   runtime: &StaticFilesRuntime,
   static_options: &RouteStaticFilesConfig,
+  allow_hot_object_cache: bool,
 ) -> StaticResponsePlan {
-  let Some(page) = page else {
-    return text_plan(status, fallback_message);
+  let Some(page) = error_page.page else {
+    return text_plan(error_page.status, error_page.fallback_message);
   };
   let empty_headers = HeaderMap::new();
   match plan_candidate_path(
@@ -561,152 +639,18 @@ async fn plan_custom_error_page(
     root_relative_config_path(root, page),
     runtime,
     static_options,
-    status,
+    error_page.status,
     false,
     false,
+    allow_hot_object_cache,
   )
   .await
   {
     CandidatePlan::Found(plan) => *plan,
-    CandidatePlan::NotFound | CandidatePlan::Forbidden => text_plan(status, fallback_message),
+    CandidatePlan::NotFound | CandidatePlan::Forbidden => {
+      text_plan(error_page.status, error_page.fallback_message)
+    }
   }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn finalize_response(
-  response: Response<ProxyBody>,
-  state: &AppSnapshot,
-  route: &RouteConfig,
-  request_waf: &RequestWafDecision,
-  response_waf_enabled: bool,
-  response_body_need: BodyNeed,
-  request_method: &Method,
-  request_uri: &http::Uri,
-  request_version: http::Version,
-  request_headers: &HeaderMap,
-  peer_addr: std::net::SocketAddr,
-  downstream_host: &str,
-  tcp_max_hop: Option<u8>,
-  tls: &WafTlsMetadata,
-  protocol: WafProtocol,
-  transport_network: WafTransportNetwork,
-  transport_metadata: WafTransportMetadataInput<'_>,
-  downstream_scheme: &'static str,
-  request_body: Option<WafBodyInput<'_>>,
-  tags: &HashMap<String, String>,
-  access_log: &mut SystemAccessLogContext<'_>,
-) -> Response<ProxyBody> {
-  let (mut parts, body) = response.into_parts();
-  apply_security_headers(&mut parts.headers, &state.config.security.headers);
-  apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
-
-  let response_waf_body_compression_transform =
-    crate::waf::route_http_body_compression_transform_enabled(&state.config, route)
-      && response_body_need != BodyNeed::None;
-  let (body, captured_response_body) = match capture_response_body_for_waf(
-    parts.version,
-    &mut parts.headers,
-    body,
-    response_body_need,
-    state.config.waf.limits.max_body_inspection_bytes,
-    response_waf_body_compression_transform,
-    state.config.waf.http_body_compression.clone(),
-    state.waf_body_coding.clone(),
-  )
-  .await
-  {
-    Ok(result) => result,
-    Err(error) => {
-      let (status, message) = response_body_capture_error_response(&error);
-      warn!(error = %error, route = %route.name, status = status.as_u16(), "failed to read static response body for WAF inspection");
-      return text_response(status, message);
-    }
-  };
-  let response_body = captured_response_body.as_ref().map(waf_body_input);
-
-  if response_waf_enabled {
-    access_log.ensure_response_ids();
-    access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
-    let request_input = WafRequestInput {
-      request_id: access_log.request_id(),
-      transaction_id: access_log.transaction_id(),
-      received_at_unix_ms: access_log.request_received_at_unix_ms,
-      method: request_method,
-      uri: request_uri,
-      version: request_version,
-      headers: request_headers,
-      body: request_body,
-      peer_addr,
-      client_asn: state.client_identity.asn.lookup(peer_addr.ip()),
-      downstream_host,
-      downstream_scheme,
-      route_name: &route.name,
-      tcp_max_hop,
-      tls,
-      protocol,
-      transport_network,
-      transport_metadata,
-      tags,
-      dynamic_policy: &access_log.dynamic_policy,
-    };
-    let response_waf = state.waf.evaluate_response(WafResponseInput {
-      request: request_input,
-      response_id: access_log.response_id(),
-      received_at_unix_ms: access_log.response_received_at_unix_ms,
-      version: parts.version,
-      status: parts.status,
-      headers: &parts.headers,
-      body: response_body,
-      upstream_name: "static",
-      upstream_pool: None,
-      upstream_scheme: "file",
-      upstream_connect_time_ms: None,
-      upstream_first_byte_time_ms: None,
-      upstream_error: None,
-    });
-    for access_log in &response_waf.access_logs {
-      state.access_logs.emit(access_log);
-    }
-    if let Some(terminal) = response_waf.terminal {
-      let mut mutations = request_waf.response_header_mutations.clone();
-      mutations.extend(response_waf.response_header_mutations);
-      return waf_terminal_response(terminal, &mutations);
-    }
-    apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
-  }
-
-  apply_alt_svc_header(
-    &mut parts.headers,
-    parts.status,
-    state,
-    downstream_scheme,
-    request_version,
-  );
-  let response = Response::from_parts(parts, body);
-  let response = compression::maybe_compress_response(
-    response,
-    request_method,
-    request_headers,
-    route.compression.as_deref(),
-    &state.config.compression,
-    &state.compression,
-  );
-  let response = with_downstream_response_timeout(
-    response,
-    static_response_send_timeout(state, route),
-    transport_network,
-  );
-  state.metrics.record_response(response.status());
-  response
-}
-
-pub(crate) fn static_response_send_timeout(state: &AppSnapshot, route: &RouteConfig) -> Duration {
-  Duration::from_millis(
-    route
-      .timeouts
-      .response_send_timeout_ms
-      .unwrap_or(state.config.limits.response_send_timeout_ms),
-  )
 }
 
 #[cfg(test)]

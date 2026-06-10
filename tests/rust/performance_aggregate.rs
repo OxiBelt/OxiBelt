@@ -841,7 +841,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 12);
+    assert_eq!(report["schema_version"], 13);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1035,7 +1035,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
         ],
     );
 
-    assert_eq!(report["schema_version"], 12);
+    assert_eq!(report["schema_version"], 13);
     assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
     assert_eq!(report["sample_quality"]["ok_iterations"], 16);
     assert_eq!(report["sample_quality"]["failed_iterations"], 0);
@@ -2775,6 +2775,131 @@ fn static_and_remote_signer_ratio_gates_become_advisories_when_baseline_gap_is_s
         "remote_signer_handshake_min_local_ratio",
         "tls-handshake-h2",
     );
+}
+
+#[test]
+fn accepted_regression_reason_records_and_downgrades_baseline_regression_gates() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let baseline_path = temp_dir.path().join("baseline-performance-comparison.json");
+    let reason = "reset Docker performance baseline after static fast-path retune";
+
+    write_reverse_proxy_h1_with_p99(&input_dir, 57.0, 100.0, 12.0, 10.0);
+    write_static_gate_rows(&input_dir, 57.0, 100.0, 100.0);
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+    write_baseline_report(
+        &baseline_path,
+        vec![
+            aggregate_row("oxibelt", "h1-keepalive", "reverse-proxy", 100.0, 10.0),
+            aggregate_row("nginx", "h1-keepalive", "reverse-proxy", 100.0, 10.0),
+            aggregate_row("oxibelt", "static-16k-h1c", "static-files", 100.0, 10.0),
+            aggregate_row("nginx", "static-16k-h1c", "static-files", 100.0, 10.0),
+            aggregate_row("caddy", "static-16k-h1c", "static-files", 100.0, 10.0),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--baseline-report".to_owned(),
+            baseline_path.display().to_string(),
+            "--accepted-regression-reason".to_owned(),
+            reason.to_owned(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "pass");
+    assert_eq!(
+        report["regression_gates"]["accepted_regression"]["status"],
+        "active"
+    );
+    assert_eq!(
+        report["regression_gates"]["accepted_regression"]["reason"],
+        reason
+    );
+    assert_eq!(
+        report["regression_gates"]["accepted_regression"]["accepted_violations"],
+        3
+    );
+    assert_eq!(
+        report["regression_gates"]["violations"]
+            .as_array()
+            .expect("blocking violations should be an array")
+            .len(),
+        0
+    );
+
+    for gate in [
+        "h1_keepalive_min_nginx_ratio",
+        "static_16k_h1c_min_caddy_ratio",
+        "static_16k_h1c_min_nginx_ratio",
+    ] {
+        let advisory = find_regression_advisory(
+            &report,
+            gate,
+            if gate.starts_with("h1_") {
+                "h1-keepalive"
+            } else {
+                "static-16k-h1c"
+            },
+        );
+        assert_eq!(advisory["disposition"], "advisory");
+        assert!(
+            advisory["message"]
+                .as_str()
+                .expect("advisory message should be present")
+                .contains(reason)
+        );
+    }
+
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains("Accepted regression reason"));
+    assert!(markdown.contains(reason));
+}
+
+#[test]
+fn accepted_regression_reason_does_not_accept_missing_evidence() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_reverse_proxy_h1_with_p99(&input_dir, 100.0, 100.0, 10.0, 10.0);
+    write_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-static-files-shard-1/run-1"),
+        vec![
+            load_row("oxibelt-static-16k-h1c", "h1c", 100.0, 1.0, 10.0),
+            load_row("nginx-static-16k-h1c", "h1c", 100.0, 1.0, 10.0),
+        ],
+    );
+    write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+    write_feature_gate_rows(&input_dir, 12000.0, 9200.0, 10.0, 10.0);
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--accepted-regression-reason".to_owned(),
+            "missing comparator should stay blocking".to_owned(),
+        ],
+    );
+
+    assert_eq!(report["regression_gates"]["status"], "fail");
+    assert_eq!(
+        report["regression_gates"]["accepted_regression"]["status"],
+        "active_no_matches"
+    );
+    assert_eq!(
+        report["regression_gates"]["accepted_regression"]["accepted_violations"],
+        0
+    );
+    let violation =
+        find_regression_violation(&report, "static_16k_h1c_min_caddy_ratio", "static-16k-h1c");
+    assert_eq!(violation["evaluation_mode"], "evidence");
+    assert_eq!(violation["comparator"], "caddy");
 }
 
 #[test]

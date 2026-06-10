@@ -139,6 +139,24 @@ fn parser_accepts_stack_sized_header_blocks() {
 }
 
 #[test]
+fn vectored_write_advance_tracks_head_and_body_progress() {
+  let mut head = &b"head"[..];
+  let mut body = &b"body"[..];
+
+  advance_vectored_write(&mut head, &mut body, 2);
+  assert_eq!(head, b"ad");
+  assert_eq!(body, b"body");
+
+  advance_vectored_write(&mut head, &mut body, 3);
+  assert!(head.is_empty());
+  assert_eq!(body, b"ody");
+
+  advance_vectored_write(&mut head, &mut body, 99);
+  assert!(head.is_empty());
+  assert!(body.is_empty());
+}
+
+#[test]
 fn header_token_matching_is_case_insensitive() {
   let request = parsed(
     b"GET /static/app.txt HTTP/1.1\r\nHost: example.test\r\nConnection: keep-alive, Upgrade\r\n\r\n",

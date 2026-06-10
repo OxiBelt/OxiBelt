@@ -33,8 +33,8 @@ pub(crate) async fn capture_request_body_for_waf(
   body_need: BodyNeed,
   limit: usize,
   transform_enabled: bool,
-  transform_config: crate::waf::WafHttpBodyCompressionConfig,
-  transform_state: Arc<WafBodyCodingState>,
+  transform_config: &crate::waf::WafHttpBodyCompressionConfig,
+  transform_state: &Arc<WafBodyCodingState>,
 ) -> Result<(Request<ProxyBody>, Option<CapturedBody>), WafBodyCaptureError> {
   let force_transform = transform_enabled
     && body_need != BodyNeed::None
@@ -49,8 +49,13 @@ pub(crate) async fn capture_request_body_for_waf(
     WafBodyCaptureDecision::Empty => Ok((request, Some(empty_captured_body()))),
     WafBodyCaptureDecision::Prefix => {
       if force_transform {
-        let Some((request, captured)) =
-          transform_request_body_for_waf(request, transform_config, transform_state, limit).await?
+        let Some((request, captured)) = transform_request_body_for_waf(
+          request,
+          transform_config.clone(),
+          Arc::clone(transform_state),
+          limit,
+        )
+        .await?
         else {
           return Err(WafBodyCaptureError::Coding(WafBodyCodingError::new(
             WafBodyCodingErrorKind::Unsupported,
@@ -75,8 +80,8 @@ pub(crate) async fn capture_response_body_for_waf(
   body_need: BodyNeed,
   limit: usize,
   transform_enabled: bool,
-  transform_config: crate::waf::WafHttpBodyCompressionConfig,
-  transform_state: Arc<WafBodyCodingState>,
+  transform_config: &crate::waf::WafHttpBodyCompressionConfig,
+  transform_state: &Arc<WafBodyCodingState>,
 ) -> Result<(ProxyBody, Option<CapturedBody>), WafBodyCaptureError> {
   let force_transform =
     transform_enabled && body_need != BodyNeed::None && has_non_identity_content_encoding(headers);
@@ -90,9 +95,14 @@ pub(crate) async fn capture_response_body_for_waf(
     WafBodyCaptureDecision::Empty => Ok((body, Some(empty_captured_body()))),
     WafBodyCaptureDecision::Prefix => {
       if force_transform {
-        let Some((body, captured)) =
-          transform_response_body_for_waf(headers, body, transform_config, transform_state, limit)
-            .await?
+        let Some((body, captured)) = transform_response_body_for_waf(
+          headers,
+          body,
+          transform_config.clone(),
+          Arc::clone(transform_state),
+          limit,
+        )
+        .await?
         else {
           return Err(WafBodyCaptureError::Coding(WafBodyCodingError::new(
             WafBodyCodingErrorKind::Unsupported,

@@ -1467,6 +1467,10 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "docker-performance should defer noisy per-iteration regression gates to the summary job"
     );
     assert!(
+        workflow.contains("performance_accepted_regression_reason"),
+        "workflow_dispatch should expose an explicit accepted-regression reason input"
+    );
+    assert!(
         jobs.get("docker-performance")
             .expect("workflow should define docker-performance")
             .needs
@@ -1740,6 +1744,14 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         workflow.contains("--baseline-context \"${BASELINE_CONTEXT}\""),
         "summary job should pass baseline selection metadata to the aggregate binary"
+    );
+    assert!(
+        summary_job.contains("PERFORMANCE_ACCEPTED_REGRESSION_REASON:")
+            && summary_job
+                .contains("inputs.performance_accepted_regression_reason")
+            && summary_job
+                .contains("aggregate_args+=(--accepted-regression-reason \"${PERFORMANCE_ACCEPTED_REGRESSION_REASON}\")"),
+        "summary job should pass explicit accepted-regression reasons to the aggregate binary"
     );
     assert!(
         workflow.contains("name: Evaluate Docker performance regression gates"),

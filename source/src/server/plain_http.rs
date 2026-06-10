@@ -3,7 +3,7 @@
 
 use std::convert::Infallible;
 use std::future::Future;
-use std::io;
+use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -418,7 +418,7 @@ async fn eligible_static_plan(
   if let Some(access_log) = access_log.as_mut() {
     access_log.client_addr = client_addr;
   }
-  let mut plan = static_files::plan_response(
+  let mut plan = static_files::plan_response_without_hot_object_cache(
     &request.method,
     &request.headers,
     request_path,
@@ -490,28 +490,41 @@ async fn write_static_plan(
     body,
   } = response;
   let response_send_timeout = *response_send_timeout;
-  write_response_head(stream, *status, headers, keep_alive, response_send_timeout).await?;
   match body {
-    StaticBodyPlan::Empty => {}
-    StaticBodyPlan::Text(message) => {
+    StaticBodyPlan::Empty => {
+      let head = response_head_bytes(*status, headers, keep_alive);
       write_all_tcp(
         stream,
+        &head,
+        response_send_timeout,
+        "static sendfile response head write failed",
+      )
+      .await?;
+    }
+    StaticBodyPlan::Text(message) => {
+      let head = response_head_bytes(*status, headers, keep_alive);
+      write_all_tcp_vectored(
+        stream,
+        &head,
         message.as_bytes(),
         response_send_timeout,
-        "static fast-path text response body write failed",
+        "static fast-path text response write failed",
       )
       .await?;
     }
     StaticBodyPlan::Bytes(bytes) => {
-      write_all_tcp(
+      let head = response_head_bytes(*status, headers, keep_alive);
+      write_all_tcp_vectored(
         stream,
+        &head,
         bytes.as_ref(),
         response_send_timeout,
-        "static fast-path bytes response body write failed",
+        "static fast-path bytes response write failed",
       )
       .await?;
     }
     StaticBodyPlan::File(file) => {
+      write_response_head(stream, *status, headers, keep_alive, response_send_timeout).await?;
       sendfile_all(
         stream,
         &file.file,
@@ -545,6 +558,17 @@ async fn write_response_head(
   keep_alive: bool,
   response_send_timeout: Duration,
 ) -> anyhow::Result<()> {
+  let head = response_head_bytes(status, headers, keep_alive);
+  write_all_tcp(
+    stream,
+    &head,
+    response_send_timeout,
+    "static sendfile response head write failed",
+  )
+  .await
+}
+
+fn response_head_bytes(status: StatusCode, headers: &HeaderMap, keep_alive: bool) -> Vec<u8> {
   let reason = status.canonical_reason().unwrap_or("");
   let mut head = Vec::with_capacity(256 + headers.len() * 48);
   head.extend_from_slice(format!("HTTP/1.1 {} {reason}\r\n", status.as_u16()).as_bytes());
@@ -560,13 +584,7 @@ async fn write_response_head(
     head.extend_from_slice(b"Connection: close\r\n");
   }
   head.extend_from_slice(b"\r\n");
-  write_all_tcp(
-    stream,
-    &head,
-    response_send_timeout,
-    "static sendfile response head write failed",
-  )
-  .await
+  head
 }
 
 #[cfg(target_os = "linux")]
@@ -636,6 +654,38 @@ async fn write_all_tcp(
     }
   }
   Ok(())
+}
+
+async fn write_all_tcp_vectored(
+  stream: &mut TcpStream,
+  mut head: &[u8],
+  mut body: &[u8],
+  response_send_timeout: Duration,
+  context: &'static str,
+) -> anyhow::Result<()> {
+  while !head.is_empty() || !body.is_empty() {
+    let written = match stream.try_write_vectored(&[IoSlice::new(head), IoSlice::new(body)]) {
+      Ok(0) => bail!("{context}"),
+      Ok(written) => written,
+      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+        downstream_send_timeout(response_send_timeout, stream.writable(), context).await?;
+        continue;
+      }
+      Err(error) => return Err(error).context(context),
+    };
+    advance_vectored_write(&mut head, &mut body, written);
+  }
+  Ok(())
+}
+
+fn advance_vectored_write<'a>(head: &mut &'a [u8], body: &mut &'a [u8], written: usize) {
+  if written < head.len() {
+    *head = &head[written..];
+    return;
+  }
+  let body_written = written.saturating_sub(head.len());
+  *head = &[];
+  *body = &body[body_written.min(body.len())..];
 }
 
 async fn downstream_send_timeout<T>(

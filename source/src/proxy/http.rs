@@ -796,33 +796,34 @@ where
       BodyTimeoutKind::DownstreamRequestRead,
     )
   });
-  let (request, captured_body) = if request_method != Method::CONNECT {
-    match capture_request_body_for_waf(
-      request,
-      request_body_need,
-      state.config.waf.limits.max_body_inspection_bytes,
-      request_waf_body_compression_transform,
-      state.config.waf.http_body_compression.clone(),
-      state.waf_body_coding.clone(),
-    )
-    .await
-    {
-      Ok(result) => result,
-      Err(error) => {
-        warn!(error = %error, "failed to read request body for WAF inspection");
-        let (status, message) = request_body_capture_error_response(&error);
-        return with_pending_dynamic_person_proof_response_mutations(
-          text_response(status, message),
-          state.as_ref(),
-          evaluated_person_proof.as_ref(),
-          dynamic_person_proof_mutation_added,
-          &dynamic_challenge_response_mutations,
-        );
+  let (request, captured_body) =
+    if request_method != Method::CONNECT && request_body_need != BodyNeed::None {
+      match capture_request_body_for_waf(
+        request,
+        request_body_need,
+        state.config.waf.limits.max_body_inspection_bytes,
+        request_waf_body_compression_transform,
+        &state.config.waf.http_body_compression,
+        &state.waf_body_coding,
+      )
+      .await
+      {
+        Ok(result) => result,
+        Err(error) => {
+          warn!(error = %error, "failed to read request body for WAF inspection");
+          let (status, message) = request_body_capture_error_response(&error);
+          return with_pending_dynamic_person_proof_response_mutations(
+            text_response(status, message),
+            state.as_ref(),
+            evaluated_person_proof.as_ref(),
+            dynamic_person_proof_mutation_added,
+            &dynamic_challenge_response_mutations,
+          );
+        }
       }
-    }
-  } else {
-    (request, None)
-  };
+    } else {
+      (request, None)
+    };
   let request_body = captured_body.as_ref().map(waf_body_input);
 
   let mut request_waf = if request_waf_enabled {
@@ -1714,24 +1715,28 @@ where
   apply_security_headers(&mut parts.headers, &state.config.security.headers);
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
-  let (body, captured_response_body) = match capture_response_body_for_waf(
-    parts.version,
-    &mut parts.headers,
-    body,
-    response_body_need,
-    state.config.waf.limits.max_body_inspection_bytes,
-    response_waf_body_compression_transform,
-    state.config.waf.http_body_compression.clone(),
-    state.waf_body_coding.clone(),
-  )
-  .await
-  {
-    Ok(result) => result,
-    Err(error) => {
-      let (status, message) = response_body_capture_error_response(&error);
-      warn!(error = %error, status = status.as_u16(), "failed to read upstream response body for WAF inspection");
-      return text_response(status, message);
+  let (body, captured_response_body) = if response_body_need != BodyNeed::None {
+    match capture_response_body_for_waf(
+      parts.version,
+      &mut parts.headers,
+      body,
+      response_body_need,
+      state.config.waf.limits.max_body_inspection_bytes,
+      response_waf_body_compression_transform,
+      &state.config.waf.http_body_compression,
+      &state.waf_body_coding,
+    )
+    .await
+    {
+      Ok(result) => result,
+      Err(error) => {
+        let (status, message) = response_body_capture_error_response(&error);
+        warn!(error = %error, status = status.as_u16(), "failed to read upstream response body for WAF inspection");
+        return text_response(status, message);
+      }
     }
+  } else {
+    (body, None)
   };
   let response_body = captured_response_body.as_ref().map(waf_body_input);
 

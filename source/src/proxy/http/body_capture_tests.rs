@@ -12,8 +12,8 @@ use pretty_assertions::assert_eq;
 
 use super::body::CapturedBody;
 use super::waf_body_capture::{
-  WafBodyCaptureError, capture_request_body_for_waf, request_body_is_definitely_empty,
-  response_body_is_definitely_empty,
+  WafBodyCaptureError, capture_request_body_for_waf, capture_response_body_for_waf,
+  request_body_is_definitely_empty, response_body_is_definitely_empty,
 };
 use super::*;
 
@@ -55,7 +55,7 @@ async fn capture_request_body_without_transform(
 ) -> Result<(Request<ProxyBody>, Option<CapturedBody>), WafBodyCaptureError> {
   let config = crate::waf::WafHttpBodyCompressionConfig::default();
   let state = waf_body_coding::WafBodyCodingState::new(&config);
-  capture_request_body_for_waf(request, body_need, limit, false, config, state).await
+  capture_request_body_for_waf(request, body_need, limit, false, &config, &state).await
 }
 
 #[tokio::test]
@@ -74,7 +74,7 @@ async fn size_only_transform_decodes_compressed_body_even_with_content_length() 
     .expect("request should build");
 
   let (request, captured) =
-    capture_request_body_for_waf(request, BodyNeed::SizeOnly, 8, true, config, state)
+    capture_request_body_for_waf(request, BodyNeed::SizeOnly, 8, true, &config, &state)
       .await
       .expect("compressed size-only body should transform");
   let captured = captured.expect("decoded size-only body should be captured");
@@ -83,6 +83,57 @@ async fn size_only_transform_decodes_compressed_body_even_with_content_length() 
   assert!(!captured.is_truncated);
   assert!(!request.headers().contains_key(http::header::CONTENT_LENGTH));
   assert_eq!(request.headers()[http::header::CONTENT_ENCODING], "gzip");
+}
+
+#[tokio::test]
+async fn none_request_body_capture_skips_compressed_body_without_polling() {
+  let config = crate::waf::WafHttpBodyCompressionConfig {
+    mode: crate::waf::WafHttpBodyCompressionMode::Transform,
+    ..crate::waf::WafHttpBodyCompressionConfig::default()
+  };
+  let state = waf_body_coding::WafBodyCodingState::new(&config);
+  let request = Request::builder()
+    .uri("https://example.com/upload")
+    .header(http::header::CONTENT_ENCODING, "gzip")
+    .body(panic_body())
+    .expect("request should build");
+
+  let (_request, captured) =
+    capture_request_body_for_waf(request, BodyNeed::None, 8, true, &config, &state)
+      .await
+      .expect("none body capture should skip");
+
+  assert!(captured.is_none());
+}
+
+#[tokio::test]
+async fn none_response_body_capture_skips_compressed_body_without_polling() {
+  let config = crate::waf::WafHttpBodyCompressionConfig {
+    mode: crate::waf::WafHttpBodyCompressionMode::Transform,
+    ..crate::waf::WafHttpBodyCompressionConfig::default()
+  };
+  let state = waf_body_coding::WafBodyCodingState::new(&config);
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    http::header::CONTENT_ENCODING,
+    http::HeaderValue::from_static("gzip"),
+  );
+
+  let (_body, captured) = capture_response_body_for_waf(
+    http::Version::HTTP_11,
+    &mut headers,
+    panic_body(),
+    BodyNeed::None,
+    8,
+    true,
+    &config,
+    &state,
+  )
+  .await
+  .expect("none response capture should skip");
+
+  assert!(captured.is_none());
+  assert_eq!(headers[http::header::CONTENT_ENCODING], "gzip");
 }
 
 #[test]

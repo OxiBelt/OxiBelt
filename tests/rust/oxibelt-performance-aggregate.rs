@@ -29,7 +29,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 12;
+const COMPARISON_SCHEMA_VERSION: u32 = 13;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
@@ -67,6 +67,8 @@ struct Args {
     baseline_report: Option<PathBuf>,
     #[arg(long)]
     baseline_context: Option<PathBuf>,
+    #[arg(long)]
+    accepted_regression_reason: Option<String>,
 }
 
 struct AggregateOptions<'a> {
@@ -77,6 +79,7 @@ struct AggregateOptions<'a> {
     primary_target_cpu: String,
     baseline_report: Option<&'a Path>,
     baseline_context: Option<&'a Path>,
+    accepted_regression_reason: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -499,6 +502,7 @@ struct RegressionGateViolation {
 struct RegressionGateReport {
     status: String,
     thresholds: RegressionGateThresholds,
+    accepted_regression: AcceptedRegressionReport,
     violations: Vec<RegressionGateViolation>,
     advisories: Vec<RegressionGateViolation>,
 }
@@ -506,6 +510,14 @@ struct RegressionGateReport {
 struct RegressionGateFindings {
     violations: Vec<RegressionGateViolation>,
     advisories: Vec<RegressionGateViolation>,
+}
+
+#[derive(Serialize)]
+struct AcceptedRegressionReport {
+    status: String,
+    reason: Option<String>,
+    accepted_violations: usize,
+    remaining_blocking_violations: usize,
 }
 
 struct BaselineGateContext {
@@ -1128,6 +1140,7 @@ fn main() -> Result<()> {
             primary_target_cpu: args.primary_target_cpu.clone(),
             baseline_report: args.baseline_report.as_deref(),
             baseline_context: args.baseline_context.as_deref(),
+            accepted_regression_reason: args.accepted_regression_reason.as_deref(),
         },
     );
     fs::create_dir_all(&args.output_dir)?;
@@ -1162,6 +1175,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
         primary_target_cpu,
         baseline_report,
         baseline_context,
+        accepted_regression_reason,
     } = options;
     let mut warnings = WarningBag::default();
     let expected_target_cpus = normalize_expected_target_cpus(expected_target_cpus, &mut warnings);
@@ -1328,6 +1342,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
         regression_gate_thresholds,
         baseline_gate_context.as_ref(),
         &primary_target_cpu,
+        normalize_accepted_regression_reason(accepted_regression_reason, &mut warnings).as_deref(),
     );
     let amd64_isa_comparisons =
         build_amd64_isa_comparisons(&aggregate_map, &expected_target_cpus, &primary_target_cpu);
@@ -3326,11 +3341,28 @@ fn env_threshold(name: &str, default: f64, kind: ThresholdKind, warnings: &mut W
     raw.parse::<f64>().unwrap_or(default)
 }
 
+fn normalize_accepted_regression_reason(
+    reason: Option<&str>,
+    warnings: &mut WarningBag,
+) -> Option<String> {
+    let reason = reason?;
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        warnings.push(
+            "--accepted-regression-reason was empty; regression gate violations remain blocking",
+        );
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
 fn build_regression_gate_report(
     aggregates: &PrimaryAggregateMap,
     thresholds: RegressionGateThresholds,
     baseline: Option<&BaselineGateContext>,
     primary_target_cpu: &str,
+    accepted_regression_reason: Option<&str>,
 ) -> RegressionGateReport {
     let mut findings = RegressionGateFindings {
         violations: Vec::new(),
@@ -3457,6 +3489,7 @@ fn build_regression_gate_report(
         &mut findings,
     );
 
+    let accepted_regression = apply_accepted_regression(&mut findings, accepted_regression_reason);
     let status = if findings.violations.is_empty() {
         "pass"
     } else {
@@ -3465,9 +3498,57 @@ fn build_regression_gate_report(
     RegressionGateReport {
         status: status.to_owned(),
         thresholds,
+        accepted_regression,
         violations: findings.violations,
         advisories: findings.advisories,
     }
+}
+
+fn apply_accepted_regression(
+    findings: &mut RegressionGateFindings,
+    reason: Option<&str>,
+) -> AcceptedRegressionReport {
+    let Some(reason) = reason else {
+        return AcceptedRegressionReport {
+            status: "inactive".to_owned(),
+            reason: None,
+            accepted_violations: 0,
+            remaining_blocking_violations: findings.violations.len(),
+        };
+    };
+
+    let mut accepted_violations = 0;
+    let mut remaining = Vec::new();
+    for mut violation in std::mem::take(&mut findings.violations) {
+        if accepted_regression_eligible(&violation) {
+            violation.disposition = "advisory".to_owned();
+            violation.message = format!(
+                "{}; accepted regression reason: {reason}",
+                violation.message
+            );
+            findings.advisories.push(violation);
+            accepted_violations += 1;
+        } else {
+            remaining.push(violation);
+        }
+    }
+    findings.violations = remaining;
+
+    AcceptedRegressionReport {
+        status: if accepted_violations == 0 {
+            "active_no_matches"
+        } else {
+            "active"
+        }
+        .to_owned(),
+        reason: Some(reason.to_owned()),
+        accepted_violations,
+        remaining_blocking_violations: findings.violations.len(),
+    }
+}
+
+fn accepted_regression_eligible(violation: &RegressionGateViolation) -> bool {
+    violation.observed.is_some() && violation.evaluation_mode != "evidence"
 }
 
 fn collect_static_regression_gate(
@@ -5854,6 +5935,20 @@ fn write_quorum_table(markdown: &mut String, quorum: &QuorumReport) {
 fn write_regression_gate_table(markdown: &mut String, gates: &RegressionGateReport) {
     writeln!(markdown, "## Regression gates\n").unwrap();
     writeln!(markdown, "Status: `{}`\n", gates.status).unwrap();
+    if gates.accepted_regression.status != "inactive" {
+        writeln!(
+            markdown,
+            "- Accepted regression: `{}` (accepted `{}`, remaining blocking `{}`)",
+            gates.accepted_regression.status,
+            gates.accepted_regression.accepted_violations,
+            gates.accepted_regression.remaining_blocking_violations
+        )
+        .unwrap();
+        if let Some(reason) = &gates.accepted_regression.reason {
+            writeln!(markdown, "- Accepted regression reason: {reason}").unwrap();
+        }
+        writeln!(markdown).unwrap();
+    }
     if gates.violations.is_empty() {
         writeln!(markdown, "Blocking violations: none.\n").unwrap();
     } else {
@@ -6156,6 +6251,7 @@ mod tests {
                 primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
                 baseline_report: None,
                 baseline_context: None,
+                accepted_regression_reason: None,
             },
         );
 
@@ -6226,6 +6322,7 @@ mod tests {
             },
             Some(&baseline),
             DEFAULT_AMD64_TARGET_CPU,
+            None,
         );
 
         assert!(
@@ -6299,6 +6396,7 @@ mod tests {
             },
             Some(&baseline),
             DEFAULT_AMD64_TARGET_CPU,
+            None,
         );
 
         assert!(
@@ -6373,6 +6471,7 @@ mod tests {
             },
             Some(&baseline),
             DEFAULT_AMD64_TARGET_CPU,
+            None,
         );
 
         assert!(
@@ -6433,6 +6532,7 @@ mod tests {
             },
             Some(&baseline),
             DEFAULT_AMD64_TARGET_CPU,
+            None,
         );
 
         assert!(
@@ -6497,6 +6597,7 @@ mod tests {
                 primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
                 baseline_report: None,
                 baseline_context: None,
+                accepted_regression_reason: None,
             },
         );
 
@@ -6555,6 +6656,7 @@ mod tests {
                 primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
                 baseline_report: None,
                 baseline_context: None,
+                accepted_regression_reason: None,
             },
         );
 
@@ -6601,6 +6703,7 @@ mod tests {
                 primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
                 baseline_report: None,
                 baseline_context: None,
+                accepted_regression_reason: None,
             },
         );
         let markdown = render_markdown(&report);
