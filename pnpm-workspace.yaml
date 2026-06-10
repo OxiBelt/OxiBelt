@@ -1,2 +1,4 @@
 packages:
   - "ui/*"
+allowBuilds:
+  esbuild: true
