@@ -2,12 +2,13 @@
 //! Probe output is structured so callers can distinguish configuration, network, and TLS failures.
 
 use std::collections::BTreeSet;
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
@@ -456,9 +457,9 @@ where
 }
 
 fn remote_signer_describe_key(config: &Config) -> anyhow::Result<()> {
-  let file = std::fs::File::open(&config.tls.cert_chain)
+  let bytes = std::fs::read(&config.tls.cert_chain)
     .with_context(|| format!("failed to read {}", config.tls.cert_chain.display()))?;
-  let certs = rustls_pemfile::certs(&mut BufReader::new(file))
+  let certs = CertificateDer::pem_slice_iter(&bytes)
     .collect::<Result<Vec<_>, _>>()
     .context("failed to parse configured TLS certificate chain")?;
   let cert = certs

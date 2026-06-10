@@ -29,7 +29,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use md5::{Digest, Md5};
 use ring::hmac;
 use rustls::client::Resumption;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, HandshakeKind, RootCertStore, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
@@ -2858,18 +2858,22 @@ fn version_label(version: Version) -> &'static str {
 
 fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut cursor = io::Cursor::new(bytes);
-    rustls_pemfile::certs(&mut cursor)
+    CertificateDer::pem_slice_iter(&bytes)
         .collect::<Result<Vec<CertificateDer<'static>>, _>>()
         .with_context(|| format!("failed to parse PEM certificates from {}", path.display()))
 }
 
 fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut cursor = io::Cursor::new(bytes);
-    rustls_pemfile::private_key(&mut cursor)
-        .with_context(|| format!("failed to parse private key from {}", path.display()))?
-        .ok_or_else(|| anyhow!("no private key found in {}", path.display()))
+    PrivateKeyDer::from_pem_slice(&bytes).map_err(|error| match error {
+        rustls::pki_types::pem::Error::NoItemsFound => {
+            anyhow!("no private key found in {}", path.display())
+        }
+        error => anyhow!(
+            "failed to parse private key from {}: {error}",
+            path.display()
+        ),
+    })
 }
 
 fn load_root_store(path: &Path) -> anyhow::Result<RootCertStore> {

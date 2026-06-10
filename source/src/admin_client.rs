@@ -15,7 +15,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 use url::Url;
 
@@ -237,8 +237,7 @@ fn load_root_store(extra_roots: &[PathBuf]) -> anyhow::Result<RootCertStore> {
 fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
   let bytes = std::fs::read(path)
     .with_context(|| format!("failed to read certificate PEM {}", path.display()))?;
-  let mut cursor = std::io::Cursor::new(bytes);
-  let certs = rustls_pemfile::certs(&mut cursor)
+  let certs = CertificateDer::pem_slice_iter(&bytes)
     .collect::<Result<Vec<_>, _>>()
     .with_context(|| format!("failed to parse certificate PEM {}", path.display()))?;
   if certs.is_empty() {
@@ -253,10 +252,15 @@ fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
 fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
   let bytes = std::fs::read(path)
     .with_context(|| format!("failed to read private key PEM {}", path.display()))?;
-  let mut cursor = std::io::Cursor::new(bytes);
-  rustls_pemfile::private_key(&mut cursor)
-    .with_context(|| format!("failed to parse private key PEM {}", path.display()))?
-    .with_context(|| format!("private key PEM {} did not contain a key", path.display()))
+  PrivateKeyDer::from_pem_slice(&bytes).map_err(|error| match error {
+    rustls::pki_types::pem::Error::NoItemsFound => {
+      anyhow::anyhow!("private key PEM {} did not contain a key", path.display())
+    }
+    error => anyhow::anyhow!(
+      "failed to parse private key PEM {}: {error}",
+      path.display()
+    ),
+  })
 }
 
 fn bearer_header(token: &str) -> anyhow::Result<http::HeaderValue> {

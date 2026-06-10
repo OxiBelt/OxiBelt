@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 
 use crate::config::{Config, OcspMode, TlsKeyExchangeGroup, TlsVersion};
 
@@ -271,8 +272,7 @@ fn read_first_cert(path: &Path) -> anyhow::Result<Vec<u8>> {
 fn read_certs(path: &Path) -> anyhow::Result<Vec<Vec<u8>>> {
   let bytes = std::fs::read(path)
     .with_context(|| format!("failed to read certificate {}", path.display()))?;
-  let mut cursor = bytes.as_slice();
-  rustls_pemfile::certs(&mut cursor)
+  CertificateDer::pem_slice_iter(&bytes)
     .map(|cert| cert.map(|cert| cert.as_ref().to_vec()))
     .collect::<Result<Vec<_>, _>>()
     .with_context(|| format!("failed to parse PEM certificates from {}", path.display()))

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow, bail};
 use h3_quinn::quinn::ServerConfig as QuinnServerConfig;
 use h3_quinn::quinn::crypto::rustls::QuicServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use rustls::{RootCertStore, ServerConfig, sign::CertifiedKey};
 
 use crate::config::{
@@ -465,18 +465,22 @@ fn admin_sni_matches(pattern: &str, server_name: &str) -> bool {
 
 pub(super) fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
   let bytes = read_existing_file("certificate file", path)?;
-  let mut cursor = bytes.as_slice();
-  rustls_pemfile::certs(&mut cursor)
+  CertificateDer::pem_slice_iter(&bytes)
     .collect::<Result<Vec<_>, _>>()
     .with_context(|| format!("failed to parse PEM certificates from {}", path.display()))
 }
 
 fn load_private_key(path: &std::path::Path) -> anyhow::Result<PrivateKeyDer<'static>> {
   let bytes = read_existing_file("private key file", path)?;
-  let mut cursor = bytes.as_slice();
-  rustls_pemfile::private_key(&mut cursor)
-    .with_context(|| format!("failed to parse private key from {}", path.display()))?
-    .ok_or_else(|| anyhow!("no private key found in {}", path.display()))
+  PrivateKeyDer::from_pem_slice(&bytes).map_err(|error| match error {
+    rustls::pki_types::pem::Error::NoItemsFound => {
+      anyhow!("no private key found in {}", path.display())
+    }
+    error => anyhow!(
+      "failed to parse private key from {}: {error}",
+      path.display()
+    ),
+  })
 }
 
 fn load_ocsp_response(tls: &TlsConfig) -> anyhow::Result<Option<Vec<u8>>> {

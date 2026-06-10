@@ -9,4 +9,3 @@ publish = false
 [dependencies]
 anyhow = "1.0.102"
 rustls = { version = "0.23.39", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
-rustls-pemfile = "2.2.0"

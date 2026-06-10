@@ -1,13 +1,12 @@
 use std::env;
 use std::fs;
-use std::io;
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use rustls::crypto::{CryptoProvider, SupportedKxGroup};
-use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
 #[derive(Clone, Copy)]
@@ -133,8 +132,7 @@ fn main() -> anyhow::Result<()> {
 
 fn load_root_store(path: &Path) -> anyhow::Result<RootCertStore> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut cursor = io::Cursor::new(bytes);
-    let certs = rustls_pemfile::certs(&mut cursor)
+    let certs = CertificateDer::pem_slice_iter(&bytes)
         .collect::<Result<Vec<CertificateDer<'static>>, _>>()
         .with_context(|| format!("failed to parse PEM certificates from {}", path.display()))?;
 

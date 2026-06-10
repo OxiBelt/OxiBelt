@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
-use rustls::pki_types::PrivateKeyDer;
+use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use rustls::sign::SigningKey;
 use rustls::{SignatureAlgorithm, SignatureScheme};
 
@@ -70,10 +70,15 @@ pub(super) fn load_server_keys(
 
 fn load_signing_key(path: &Path) -> anyhow::Result<Arc<dyn SigningKey>> {
   let bytes = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-  let mut cursor = bytes.as_slice();
-  let key = rustls_pemfile::private_key(&mut cursor)
-    .with_context(|| format!("failed to parse private key from {}", path.display()))?
-    .ok_or_else(|| anyhow!("no private key found in {}", path.display()))?;
+  let key = PrivateKeyDer::from_pem_slice(&bytes).map_err(|error| match error {
+    rustls::pki_types::pem::Error::NoItemsFound => {
+      anyhow!("no private key found in {}", path.display())
+    }
+    error => anyhow!(
+      "failed to parse private key from {}: {error}",
+      path.display()
+    ),
+  })?;
   rustls::crypto::aws_lc_rs::sign::any_supported_type(&private_key_to_static(key))
     .map_err(|error| anyhow!("failed to load private key: {error}"))
 }
