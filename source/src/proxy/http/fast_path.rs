@@ -276,6 +276,7 @@ impl PlainProxyFastPath {
       upstream_version,
       waf_mutations: &request_waf.request_header_mutations,
       route_mutations: &[],
+      remove_accept_encoding: false,
     };
     rebuild_request_parts(&mut parts, rebuild);
     semantics::strip_accepted_expect(&mut parts.headers);

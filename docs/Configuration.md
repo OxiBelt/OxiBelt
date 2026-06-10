@@ -1793,6 +1793,14 @@ mode = "enforcing"      # enforcing | monitor
 fail_policy = "closed"  # closed | open
 duplicate_metadata_policy = "fail_closed" # fail_closed | null_on_duplicate | reject_request
 
+[waf.http_body_compression]
+mode = "off" # off | transform
+encodings = ["gzip", "deflate", "br", "zstd"]
+max_decoded_body_bytes = 10485760
+max_expansion_ratio = 20
+decode_timeout_ms = 1000
+max_concurrent_bodies = 0
+
 [waf.limits]
 max_rule_runtime_ms = 5
 max_total_waf_runtime_ms = 20
@@ -1841,6 +1849,12 @@ reason = "editor intentionally submits HTML"
 ```
 
 `max_body_inspection_bytes` controls the request body, response body, and native stream payload prefix captured for OxiRule and CRS body inspection. The default is `1048576` bytes. Bytes after this prefix are forwarded or replayed without inspection and are reflected through `Body.IsTruncated` or `Stream.Payload.IsTruncated`. The same value also bounds WebSocket stream-WAF frame buffering: an individual WebSocket frame payload larger than this value is closed fail-closed instead of being buffered for prefix inspection.
+
+`[waf.http_body_compression]` is off by default and opt-in per effective route. Global `mode = "transform"` enables the transform for routes that inherit it; route-level `[routes.waf.http_body_compression] mode = "off"` disables it for a route, and `mode = "transform"` enables it even when the global mode is `off`. Supported single `Content-Encoding` values are controlled by `encodings`; `identity` is a no-op, while multiple codings or unsupported codings fail closed. `max_decoded_body_bytes` is the decoded transform cap, `max_expansion_ratio` bounds compression-bomb expansion relative to the encoded bytes, `decode_timeout_ms` bounds each decode, and `max_concurrent_bodies = 0` uses an automatic CPU-sized concurrency budget. `waf.limits.max_body_inspection_bytes` remains the OxiRule/CRS inspection prefix cap after any transform has produced a decoded view.
+
+On transform-enabled routes, route matching, route rate limits, dynamic policy, built-in Person proof precheck, redirects, and external auth run before body decoding. OxiRule, OxiRule Group, external OxiRule files, rulepacks, and CRS request/response body inspection then share the decoded body view. DynamicPolicy remains header/metadata-based for this feature and does not receive a decoded body subject. Request transform errors return `415` for unsupported or multiple codings, `400` for malformed coding, `413` for decoded cap or expansion-ratio rejection, and `408` for decode/read timeout. Response transforms strip upstream `Accept-Encoding` when response body WAF is needed; if a compressed response must be inspected but carries unsupported/multiple codings, `Cache-Control: no-transform`, `Content-Range`, malformed coding, or exceeds transform caps, OxiBelt fails closed with `502`, or `504` on timeout. After response WAF, cache, and route response actions, the normal downstream `[compression]` policy may re-compress the identity response.
+
+When any transform-enabled route can be selected, `Content-Encoding` ownership belongs to the WAF body transform layer. Configuration validation rejects route and WAF request/response header mutations that set, add, or remove `Content-Encoding` on transform routes, because those mutations would invalidate the decode/replay boundary.
 
 Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. Reusable rule groups are configured under `[[waf.rule_groups]]` or `[[routes.waf.rule_groups]]` and are referenced from rules with `groups = ["name"]`. Shared group files can be loaded with `[waf] rule_group_files = ["groups/*.oxirule-group.toml"]` and route-level `rule_group_files`. Rulepacks can be loaded with `[waf] rulepack_files = ["rulepacks/*.oxirule-rulepack.toml"]` and route-level `rulepack_files`. Each group file uses a top-level `[[rule_groups]]` array and the same fields as inline `WafRuleGroupConfig`. Each rulepack file uses a `[rulepack]` manifest plus `[[rules]]` and/or `[[group_files]]`, then expands into the same native OxiRule rule and group configuration. Exact file paths must exist; glob entries may match zero files and are loaded in sorted order. External rule, group, and rulepack paths resolve under the oxirule directory. A rule entry may use inline `when`, `groups`, or both; `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry.
 
@@ -2279,6 +2293,9 @@ upstream = "app"
 # allow_credentials = true
 # max_age_seconds = 600
 
+#[routes.waf.http_body_compression]
+# mode = "inherit" # inherit | off | transform
+
 #[[routes.actions.request_mirrors]]
 # upstream_pool = "shadow-pool"
 # sample_percent = 10
@@ -2364,6 +2381,7 @@ Fields:
 - `upstream`, `upstream_pool`, `static_root`, or `actions.redirect`: exactly one target.
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
+- `waf.http_body_compression`: optional route override for compressed HTTP request/response bodies before WAF body inspection. `inherit` uses the global setting, `off` disables the transform for the route, and `transform` enables it for that route.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.
 
@@ -2641,6 +2659,14 @@ enabled = false
 mode = "enforcing"
 fail_policy = "closed"
 duplicate_metadata_policy = "fail_closed"
+
+[waf.http_body_compression]
+mode = "off"
+encodings = ["gzip", "deflate", "br", "zstd"]
+max_decoded_body_bytes = 10485760
+max_expansion_ratio = 20
+decode_timeout_ms = 1000
+max_concurrent_bodies = 0
 
 [[upstreams]]
 name = "app"

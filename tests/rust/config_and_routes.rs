@@ -21,7 +21,10 @@ use oxibelt::config::{
     UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
-use oxibelt::waf::{PersonProofTokenBinding, WafMode};
+use oxibelt::waf::{
+    PersonProofTokenBinding, RouteWafHttpBodyCompressionMode, WafHttpBodyCompressionMode,
+    WafHttpBodyEncoding, WafMode,
+};
 
 fn test_argon2id_hash(secret: &str, memory_kib: u32) -> String {
     use argon2::password_hash::SaltString;
@@ -8434,6 +8437,130 @@ fn compression_defaults_enable_downstream_algorithms_and_policy_fields() {
     assert_eq!(config.compression.min_size_bytes, 1024);
     assert_eq!(config.compression.statuses, vec![200]);
     config.validate().expect("config should validate");
+}
+
+#[test]
+fn waf_http_body_compression_defaults_and_route_override_parse() {
+    let temp_dir = common::TempDir::new("waf-body-compression-defaults");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-body-compression-defaults");
+    let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    assert_eq!(
+        config.waf.http_body_compression.mode,
+        WafHttpBodyCompressionMode::Off
+    );
+    assert_eq!(
+        config.waf.http_body_compression.encodings,
+        vec![
+            WafHttpBodyEncoding::Gzip,
+            WafHttpBodyEncoding::Deflate,
+            WafHttpBodyEncoding::Br,
+            WafHttpBodyEncoding::Zstd
+        ]
+    );
+    assert_eq!(
+        config.waf.http_body_compression.max_decoded_body_bytes,
+        10 * 1024 * 1024
+    );
+    assert_eq!(config.waf.http_body_compression.max_expansion_ratio, 20);
+    assert_eq!(config.waf.http_body_compression.decode_timeout_ms, 1000);
+    assert_eq!(config.waf.http_body_compression.max_concurrent_bodies, 0);
+    assert_eq!(
+        config.routes[0].waf.http_body_compression.mode,
+        RouteWafHttpBodyCompressionMode::Inherit
+    );
+    config.validate().expect("default config should validate");
+
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        r#"upstream = "app"
+
+[routes.waf.http_body_compression]
+mode = "transform""#,
+    ) + r#"
+
+[waf.http_body_compression]
+mode = "off"
+"#;
+    let config: Config = toml::from_str(&raw).expect("route override should parse");
+    assert_eq!(
+        config.routes[0].waf.http_body_compression.mode,
+        RouteWafHttpBodyCompressionMode::Transform
+    );
+    config.validate().expect("route override should validate");
+}
+
+#[test]
+fn waf_http_body_compression_rejects_invalid_limits_and_encodings() {
+    let temp_dir = common::TempDir::new("waf-body-compression-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-body-compression-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (toml, expected) in [
+        (
+            "[waf.http_body_compression]\nencodings = []\n",
+            "encodings must not be empty",
+        ),
+        (
+            "[waf.http_body_compression]\nencodings = [\"gzip\", \"gzip\"]\n",
+            "duplicate encoding gzip",
+        ),
+        (
+            "[waf.http_body_compression]\nmax_decoded_body_bytes = 0\n",
+            "must be greater than 0",
+        ),
+        (
+            "[waf.http_body_compression]\nmax_expansion_ratio = 0\n",
+            "must be greater than 0",
+        ),
+        (
+            "[waf.http_body_compression]\ndecode_timeout_ms = 0\n",
+            "must be greater than 0",
+        ),
+    ] {
+        let config: Config = toml::from_str(&(base.clone() + toml)).expect("config should parse");
+        let error = config
+            .validate()
+            .expect_err("invalid WAF body compression config should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?} in {error}"
+        );
+    }
+}
+
+#[test]
+fn waf_http_body_compression_rejects_content_encoding_route_mutation() {
+    let temp_dir = common::TempDir::new("waf-body-compression-content-encoding");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "waf-body-compression-content-encoding");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+        "upstream = \"app\"",
+        r#"upstream = "app"
+
+[[routes.actions.response_headers.set]]
+name = "Content-Encoding"
+value = "gzip""#,
+    ) + r#"
+
+[waf.http_body_compression]
+mode = "transform"
+"#;
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+        .validate()
+        .expect_err("Content-Encoding mutation should fail on transform route");
+    assert!(
+        error.to_string().contains(
+            "cannot mutate Content-Encoding when WAF HTTP body compression transform is enabled"
+        ),
+        "{error}"
+    );
 }
 
 #[test]

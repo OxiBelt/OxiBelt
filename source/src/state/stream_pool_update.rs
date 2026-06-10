@@ -31,6 +31,7 @@ impl AppSnapshot {
       turn_pools: previous.turn_pools.clone(),
       cache: previous.cache.clone(),
       compression: previous.compression.clone(),
+      waf_body_coding: previous.waf_body_coding.clone(),
       static_files: previous.static_files.clone(),
       metrics: previous.metrics.clone(),
       telemetry: previous.telemetry.clone(),

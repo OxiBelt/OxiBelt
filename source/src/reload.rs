@@ -131,6 +131,9 @@ impl ReloadManager {
       } else {
         active.stream_pool_generation.saturating_add(1)
       };
+    let waf_body_coding = crate::proxy::http::waf_body_coding::WafBodyCodingState::new(
+      &config.waf.http_body_compression,
+    );
     let snapshot = AppSnapshot {
       route_table,
       sni_forward: active.sni_forward.clone(),
@@ -151,6 +154,7 @@ impl ReloadManager {
       turn_pools: active.turn_pools.clone(),
       cache: active.cache.clone(),
       compression: active.compression.clone(),
+      waf_body_coding,
       static_files: active.static_files.clone(),
       metrics: active.metrics.clone(),
       telemetry: active.telemetry.clone(),
@@ -278,6 +282,9 @@ impl ReloadManager {
       } else {
         active.stream_pool_generation.saturating_add(1)
       };
+    let waf_body_coding = crate::proxy::http::waf_body_coding::WafBodyCodingState::new(
+      &config.waf.http_body_compression,
+    );
     let snapshot = AppSnapshot {
       route_table: active.route_table.clone(),
       sni_forward: active.sni_forward.clone(),
@@ -298,6 +305,7 @@ impl ReloadManager {
       turn_pools: active.turn_pools.clone(),
       cache: active.cache.clone(),
       compression: active.compression.clone(),
+      waf_body_coding,
       static_files: active.static_files.clone(),
       metrics: active.metrics.clone(),
       telemetry: active.telemetry.clone(),

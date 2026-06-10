@@ -103,6 +103,7 @@ pub(super) fn route_execution_plan(
   let can_static_sendfile =
     can_static_sendfile_fast_path(config, route) && waf.static_sendfile_fast_path_safe;
   let can_static_small_object = route.static_root.is_some()
+    && !crate::waf::route_http_body_compression_transform_enabled(config, route)
     && !route.actions.has_actions()
     && route
       .compression
@@ -142,6 +143,7 @@ fn route_feature_plan(config: &Config, route: &RouteConfig) -> RouteFeaturePlan 
 fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
   config.rate_limits.is_empty()
     && !config.dynamic_policy.enabled
+    && !crate::waf::route_http_body_compression_transform_enabled(config, route)
     && route.external_auth.is_none()
     && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
     && route.static_root.is_none()
@@ -160,6 +162,7 @@ fn can_static_sendfile_fast_path(config: &Config, route: &RouteConfig) -> bool {
   config.proxy.static_files.sendfile == StaticFilesSendfileMode::Auto
     && config.rate_limits.is_empty()
     && !config.dynamic_policy.enabled
+    && !crate::waf::route_http_body_compression_transform_enabled(config, route)
     && route.external_auth.is_none()
     && !config.compression.enabled
     && route.static_root.is_some()
@@ -260,6 +263,23 @@ sendfile = "auto"
     assert_eq!(plan.features, RouteFeaturePlan::default());
     assert_eq!(plan.waf.request, WafExecutionPlan::None);
     assert_eq!(plan.waf.response, WafExecutionPlan::None);
+  }
+
+  #[test]
+  fn waf_body_compression_transform_disables_proxy_and_static_fast_paths() {
+    let transform = r#"
+
+[waf.http_body_compression]
+mode = "transform"
+"#;
+    let proxy = execution_plan(&minimal_proxy_config(transform));
+    let static_plan = execution_plan(&minimal_static_config(transform));
+
+    assert!(!proxy.fast_path.plain_proxy_h1);
+    assert!(!proxy.fast_path.plain_proxy_h2);
+    assert!(!proxy.fast_path.plain_proxy_h3);
+    assert!(!static_plan.fast_path.static_small_object);
+    assert!(!static_plan.fast_path.static_sendfile_like);
   }
 
   #[test]

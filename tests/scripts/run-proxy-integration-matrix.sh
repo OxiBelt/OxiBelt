@@ -363,6 +363,10 @@ client_request_with_headers() {
   client_request_with_headers_on_port 8443 "$@"
 }
 
+client_request_with_headers_body_base64() {
+  client_request_with_headers_body_base64_on_port 8443 "$@"
+}
+
 client_request_with_headers_to_target() {
   local target_host="$1"
   local proxy_port="$2"
@@ -435,6 +439,61 @@ client_request_with_headers_to_target() {
   echo "client request to ${target_host} failed after retries with status ${status}" >&2
   echo "${output}" >&2
   fail_with_diagnostics "client request to ${target_host} did not reach expected status ${expect_status}"
+}
+
+client_request_with_headers_body_base64_on_port() {
+  local proxy_port="$1"
+  shift
+  local host="$1"
+  local path="$2"
+  local expect_status="$3"
+  local method="$4"
+  local body_base64="$5"
+  shift 5
+  local header_args=()
+  local header=""
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
+
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 30); do
+    client_container="$(unique_docker_container_name "oxibelt-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --entrypoint python \
+      "${mock_image}" \
+      /opt/mock_upstream/client.py \
+      --path "${path}" \
+      --host "${host}" \
+      --port "${proxy_port}" \
+      --method "${method}" \
+      --body-base64 "${body_base64}" \
+      --ca-file /tmp/proxy-ca.pem \
+      --dump-response-json \
+      --expect-status "${expect_status}" \
+      "${header_args[@]}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "client request with base64 body failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "client request with base64 body did not reach expected status ${expect_status}"
 }
 
 client_request_with_headers_on_port() {

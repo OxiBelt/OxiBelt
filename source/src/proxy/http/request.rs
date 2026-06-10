@@ -25,6 +25,7 @@ pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) upstream_version: HttpVersion,
   pub(crate) waf_mutations: &'a [HeaderMutation],
   pub(crate) route_mutations: &'a [HeaderMutation],
+  pub(crate) remove_accept_encoding: bool,
 }
 
 pub(crate) fn rebuild_request<B>(
@@ -63,12 +64,15 @@ pub(crate) fn rebuild_request_parts(
     options.forwarded_header_mode,
   );
 
-  if options.compression.enabled {
+  if options.compression.enabled || options.remove_accept_encoding {
     parts.headers.remove(ACCEPT_ENCODING);
   }
 
   apply_header_mutations(&mut parts.headers, options.waf_mutations);
   apply_header_mutations(&mut parts.headers, options.route_mutations);
+  if options.remove_accept_encoding {
+    parts.headers.remove(ACCEPT_ENCODING);
+  }
 }
 
 pub(crate) fn proxy_body<B>(body: B) -> ProxyBody
@@ -111,6 +115,7 @@ mod tests {
       upstream_version: HttpVersion::H1,
       waf_mutations: &[],
       route_mutations: &[],
+      remove_accept_encoding: false,
     }
   }
 

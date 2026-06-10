@@ -2107,12 +2107,14 @@ dependencies = [
  "async-compression",
  "aws-lc-rs",
  "base64 0.22.1",
+ "brotli",
  "bytes",
  "clap",
  "clubcard",
  "clubcard-crlite",
  "der 0.8.0",
  "fastwebsockets",
+ "flate2",
  "futures-util",
  "gateway-api",
  "glob",
@@ -2160,6 +2162,7 @@ dependencies = [
  "webpki-roots",
  "x509-cert",
  "x509-ocsp",
+ "zstd",
 ]
 
 [[package]]

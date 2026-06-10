@@ -306,6 +306,7 @@ def main() -> int:
   parser.add_argument("--path")
   parser.add_argument("--method", default="GET")
   parser.add_argument("--body", default="")
+  parser.add_argument("--body-base64")
   parser.add_argument("--header", action="append", default=[])
   parser.add_argument("--host", required=True)
   parser.add_argument("--ca-file")
@@ -357,7 +358,10 @@ def main() -> int:
         return 2
       headers.append((name, value))
 
-    body = args.body.encode("utf-8")
+    if args.body_base64 is not None:
+      body = base64.b64decode(args.body_base64, validate=True)
+    else:
+      body = args.body.encode("utf-8")
     if args.connect_tunnel:
       response, response_body_bytes = perform_connect_tunnel(
         args,

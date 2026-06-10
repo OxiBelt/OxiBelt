@@ -18,9 +18,8 @@ use super::body::KnownSmallResponseBody;
 use super::body::ProxyBody;
 use super::response::{apply_security_headers, text_response, waf_terminal_response};
 use super::{
-  SystemAccessLogContext, WafBodyCaptureDecision, apply_alt_svc_header, capture_body_prefix,
-  compression, empty_captured_body, positive_content_length, response_body_capture_decision,
-  waf_body_input, with_downstream_response_timeout,
+  SystemAccessLogContext, apply_alt_svc_header, capture_response_body_for_waf, compression,
+  response_body_capture_error_response, waf_body_input, with_downstream_response_timeout,
 };
 use crate::config::{RouteConfig, RouteStaticFilesConfig};
 use crate::state::AppSnapshot;
@@ -601,27 +600,26 @@ pub(super) async fn finalize_response(
   apply_security_headers(&mut parts.headers, &state.config.security.headers);
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
-  let (body, captured_response_body) = match response_body_capture_decision(
+  let response_waf_body_compression_transform =
+    crate::waf::route_http_body_compression_transform_enabled(&state.config, route)
+      && response_body_need != BodyNeed::None;
+  let (body, captured_response_body) = match capture_response_body_for_waf(
     parts.version,
-    &parts.headers,
+    &mut parts.headers,
+    body,
     response_body_need,
-  ) {
-    WafBodyCaptureDecision::Skip => (body, None),
-    WafBodyCaptureDecision::Empty => (body, Some(empty_captured_body())),
-    WafBodyCaptureDecision::Prefix => {
-      match capture_body_prefix(
-        body,
-        state.config.waf.limits.max_body_inspection_bytes,
-        positive_content_length(&parts.headers),
-      )
-      .await
-      {
-        Ok((body, captured)) => (body, Some(captured)),
-        Err(error) => {
-          warn!(error = %error, route = %route.name, "failed to read static response body for WAF inspection");
-          return text_response(StatusCode::NOT_FOUND, "not found");
-        }
-      }
+    state.config.waf.limits.max_body_inspection_bytes,
+    response_waf_body_compression_transform,
+    state.config.waf.http_body_compression.clone(),
+    state.waf_body_coding.clone(),
+  )
+  .await
+  {
+    Ok(result) => result,
+    Err(error) => {
+      let (status, message) = response_body_capture_error_response(&error);
+      warn!(error = %error, route = %route.name, status = status.as_u16(), "failed to read static response body for WAF inspection");
+      return text_response(status, message);
     }
   };
   let response_body = captured_response_body.as_ref().map(waf_body_input);

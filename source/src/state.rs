@@ -30,6 +30,7 @@ use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
 use crate::proxy::http::static_files::StaticFilesRuntime;
 use crate::proxy::http::uri::UpstreamUriParts;
+use crate::proxy::http::waf_body_coding::WafBodyCodingState;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
 use crate::runtime_introspection::RuntimeIntrospectionState;
@@ -152,6 +153,7 @@ pub struct AppSnapshot {
   pub turn_pools: Arc<TurnPoolState>,
   pub cache: Arc<ResponseCache>,
   pub(crate) compression: Arc<CompressionState>,
+  pub(crate) waf_body_coding: Arc<WafBodyCodingState>,
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
   pub telemetry: TelemetryRuntime,
@@ -274,6 +276,7 @@ impl AppSnapshot {
       },
     };
     let compression = CompressionState::new(&config.compression);
+    let waf_body_coding = WafBodyCodingState::new(&config.waf.http_body_compression);
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
     let ipm = IpmRuntime::new(&config)
@@ -404,6 +407,7 @@ impl AppSnapshot {
       turn_pools,
       cache,
       compression,
+      waf_body_coding,
       static_files: Arc::new(static_files),
       metrics,
       telemetry,
@@ -487,6 +491,7 @@ impl AppSnapshot {
       .context("failed to build precomputed Alt-Svc header value")?;
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
+    let waf_body_coding = WafBodyCodingState::new(&config.waf.http_body_compression);
     let client_identity = ClientIdentityRuntime::new(&config, &control_http)
       .await
       .context("failed to build client identity runtime")?;
@@ -527,6 +532,7 @@ impl AppSnapshot {
       turn_pools,
       cache: previous.cache.clone(),
       compression: previous.compression.clone(),
+      waf_body_coding,
       static_files: Arc::new(static_files),
       metrics,
       telemetry: previous.telemetry.clone(),

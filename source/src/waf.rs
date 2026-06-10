@@ -32,6 +32,7 @@ mod devtools;
 mod expression;
 mod external_files;
 mod functions;
+mod http_body_compression;
 mod lb_policy_compat;
 mod malicious_intelligence_score;
 pub mod metadata;
@@ -68,6 +69,12 @@ pub use functions::WafFunctionConfig;
 use functions::{
   FunctionCallRef, FunctionKey, FunctionMap, compile_global_functions, compile_route_functions,
   function_body_route_functions, resolve_function, validate_function_arity,
+};
+pub(crate) use http_body_compression::route_http_body_compression_transform_enabled;
+use http_body_compression::validate_http_body_compression_config;
+pub use http_body_compression::{
+  RouteWafHttpBodyCompressionConfig, RouteWafHttpBodyCompressionMode, WafHttpBodyCompressionConfig,
+  WafHttpBodyCompressionMode, WafHttpBodyEncoding,
 };
 use malicious_intelligence_score as mi_score;
 pub use metadata::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
@@ -125,6 +132,8 @@ pub struct WafConfig {
   #[serde(default)]
   pub duplicate_metadata_policy: WafDuplicateMetadataPolicy,
   #[serde(default)]
+  pub http_body_compression: WafHttpBodyCompressionConfig,
+  #[serde(default)]
   pub limits: WafLimits,
   #[serde(default)]
   pub crs: WafCrsConfig,
@@ -163,6 +172,7 @@ impl Default for WafConfig {
       mode: WafMode::Enforcing,
       fail_policy: WafFailPolicy::Closed,
       duplicate_metadata_policy: WafDuplicateMetadataPolicy::FailClosed,
+      http_body_compression: WafHttpBodyCompressionConfig::default(),
       limits: WafLimits::default(),
       crs: WafCrsConfig::default(),
       person_proof: WafPersonProofConfig::default(),
@@ -184,6 +194,8 @@ impl Default for WafConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteWafConfig {
+  #[serde(default)]
+  pub http_body_compression: RouteWafHttpBodyCompressionConfig,
   #[serde(default)]
   pub functions: Vec<WafFunctionConfig>,
   #[serde(default)]
@@ -812,6 +824,7 @@ fn load_external_rule(rule: &mut WafRuleConfig) -> anyhow::Result<()> {
 }
 
 pub fn validate_config(config: &Config) -> anyhow::Result<()> {
+  validate_http_body_compression_config(config)?;
   if config.waf.limits.max_person_proof_reuse_tokens == 0 {
     bail!("waf.limits.max_person_proof_reuse_tokens must be greater than 0");
   }

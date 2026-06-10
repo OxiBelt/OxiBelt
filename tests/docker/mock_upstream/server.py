@@ -4,6 +4,7 @@ import re
 import ssl
 import threading
 import time
+import gzip
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -89,6 +90,7 @@ class EchoHandler(BaseHTTPRequestHandler):
       last_modified = _query_header(query, "last_modified")
       early_link = _query_header(query, "early_link", "</style.css>; rel=preload; as=style")
       content_type = _query_header(query, "content_type", "application/json")
+      content_encoding = _query_header(query, "content_encoding")
       cache_control = _safe_header_value(
         "cache_control_value",
         query.get("cache_control_value", [cache_control])[0],
@@ -134,6 +136,11 @@ class EchoHandler(BaseHTTPRequestHandler):
       repeat_char = query.get("body_repeat_char", ["x"])[0][:1] or "x"
       body_value = repeat_char * repeat_count
     encoded = body_value.encode("utf-8") or json.dumps(payload, sort_keys=True).encode("utf-8")
+    if content_encoding:
+      if content_encoding != "gzip":
+        self.send_error(400, f"unsupported test content_encoding {content_encoding}")
+        return
+      encoded = gzip.compress(encoded)
     if header_delay_ms > 0:
       time.sleep(header_delay_ms / 1000.0)
     if query.get("early_hints"):
@@ -143,6 +150,8 @@ class EchoHandler(BaseHTTPRequestHandler):
     self.send_response(status)
     self.send_header("content-type", content_type)
     self.send_header("x-upstream-marker", UPSTREAM_MARKER)
+    if content_encoding:
+      self.send_header("content-encoding", content_encoding)
     if any(key in query for key in ("sequence_key", "body_sequence", "status_sequence")):
       self.send_header("x-sequence-index", str(sequence_index))
     if query.get("set_cookie"):

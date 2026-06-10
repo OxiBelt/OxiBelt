@@ -1,12 +1,20 @@
+use std::io::Read;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use flate2::Compression as FlateCompression;
+use flate2::read::GzEncoder;
 use http::{HeaderMap, Request};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 use pretty_assertions::assert_eq;
 
+use super::body::CapturedBody;
+use super::waf_body_capture::{
+  WafBodyCaptureError, capture_request_body_for_waf, request_body_is_definitely_empty,
+  response_body_is_definitely_empty,
+};
 use super::*;
 
 struct PanicBody;
@@ -29,6 +37,52 @@ impl Body for PanicBody {
 
 fn panic_body() -> ProxyBody {
   PanicBody.boxed()
+}
+
+fn gzip_bytes(bytes: &'static [u8]) -> bytes::Bytes {
+  let mut encoder = GzEncoder::new(bytes, FlateCompression::default());
+  let mut encoded = Vec::new();
+  encoder
+    .read_to_end(&mut encoded)
+    .expect("gzip encoding should succeed");
+  bytes::Bytes::from(encoded)
+}
+
+async fn capture_request_body_without_transform(
+  request: Request<ProxyBody>,
+  body_need: BodyNeed,
+  limit: usize,
+) -> Result<(Request<ProxyBody>, Option<CapturedBody>), WafBodyCaptureError> {
+  let config = crate::waf::WafHttpBodyCompressionConfig::default();
+  let state = waf_body_coding::WafBodyCodingState::new(&config);
+  capture_request_body_for_waf(request, body_need, limit, false, config, state).await
+}
+
+#[tokio::test]
+async fn size_only_transform_decodes_compressed_body_even_with_content_length() {
+  let config = crate::waf::WafHttpBodyCompressionConfig {
+    mode: crate::waf::WafHttpBodyCompressionMode::Transform,
+    ..crate::waf::WafHttpBodyCompressionConfig::default()
+  };
+  let state = waf_body_coding::WafBodyCodingState::new(&config);
+  let encoded = gzip_bytes(b"abcdef");
+  let request = Request::builder()
+    .uri("https://example.com/upload")
+    .header(http::header::CONTENT_ENCODING, "gzip")
+    .header(http::header::CONTENT_LENGTH, encoded.len().to_string())
+    .body(full_body(encoded))
+    .expect("request should build");
+
+  let (request, captured) =
+    capture_request_body_for_waf(request, BodyNeed::SizeOnly, 8, true, config, state)
+      .await
+      .expect("compressed size-only body should transform");
+  let captured = captured.expect("decoded size-only body should be captured");
+
+  assert_eq!(captured.bytes.as_ref(), b"abcdef");
+  assert!(!captured.is_truncated);
+  assert!(!request.headers().contains_key(http::header::CONTENT_LENGTH));
+  assert_eq!(request.headers()[http::header::CONTENT_ENCODING], "gzip");
 }
 
 #[test]
@@ -61,7 +115,7 @@ async fn size_only_request_body_capture_uses_positive_content_length_without_pol
     .body(panic_body())
     .expect("request should build");
 
-  let (_request, captured) = capture_request_body_for_waf(request, BodyNeed::SizeOnly, 8)
+  let (_request, captured) = capture_request_body_without_transform(request, BodyNeed::SizeOnly, 8)
     .await
     .expect("size-only capture with known length should be skipped");
 
@@ -75,7 +129,7 @@ async fn size_only_request_body_capture_reads_unknown_length_body() {
     .body(full_body(bytes::Bytes::from_static(b"abcdef")))
     .expect("request should build");
 
-  let (request, captured) = capture_request_body_for_waf(request, BodyNeed::SizeOnly, 8)
+  let (request, captured) = capture_request_body_without_transform(request, BodyNeed::SizeOnly, 8)
     .await
     .expect("size-only capture should read unknown length body");
   let captured = captured.expect("unknown length body should be captured");
@@ -98,9 +152,10 @@ async fn prefix_request_body_capture_reads_body() {
     .body(full_body(bytes::Bytes::from_static(b"abc")))
     .expect("request should build");
 
-  let (_request, captured) = capture_request_body_for_waf(request, BodyNeed::PrefixBytes, 8)
-    .await
-    .expect("prefix capture should succeed");
+  let (_request, captured) =
+    capture_request_body_without_transform(request, BodyNeed::PrefixBytes, 8)
+      .await
+      .expect("prefix capture should succeed");
 
   assert_eq!(
     captured.expect("body should be captured").bytes.as_ref(),
@@ -116,9 +171,10 @@ async fn exact_empty_request_body_uses_empty_capture_without_polling() {
     .body(panic_body())
     .expect("request should build");
 
-  let (_request, captured) = capture_request_body_for_waf(request, BodyNeed::PrefixBytes, 8)
-    .await
-    .expect("empty capture should succeed");
+  let (_request, captured) =
+    capture_request_body_without_transform(request, BodyNeed::PrefixBytes, 8)
+      .await
+      .expect("empty capture should succeed");
   let captured = captured.expect("empty body should be captured");
 
   assert!(captured.bytes.is_empty());
@@ -133,7 +189,7 @@ async fn size_only_exact_empty_request_body_uses_empty_capture_without_polling()
     .body(panic_body())
     .expect("request should build");
 
-  let (_request, captured) = capture_request_body_for_waf(request, BodyNeed::SizeOnly, 8)
+  let (_request, captured) = capture_request_body_without_transform(request, BodyNeed::SizeOnly, 8)
     .await
     .expect("empty size-only capture should succeed");
   let captured = captured.expect("empty body should be captured");

@@ -30,12 +30,13 @@ use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::telemetry::{TelemetryRuntime, TraceContext};
 use crate::waf::{
-  BodyNeed, WafBodyInput, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
+  BodyNeed, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
   WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations, request_protocol,
 };
 
 pub(crate) mod access_log;
 pub(crate) mod body;
+mod body_capture;
 pub(crate) mod buffering;
 mod cache_status;
 mod cache_streaming;
@@ -59,6 +60,8 @@ pub(crate) mod static_files;
 pub(crate) mod upstream;
 pub(crate) mod uri;
 pub(crate) mod version;
+mod waf_body_capture;
+pub(crate) mod waf_body_coding;
 pub(crate) mod webtransport;
 
 pub(crate) mod warm;
@@ -66,8 +69,7 @@ pub(crate) use warm::warm_cache_request;
 
 pub(crate) use self::access_log::SystemAccessLogContext;
 use self::body::{
-  BodyTimeoutKind, CapturedBody, ProxyBody, boxed_error, capture_body_prefix, capture_prefix,
-  error_indicates_body_timeout, error_is_timeout,
+  BodyTimeoutKind, ProxyBody, boxed_error, error_indicates_body_timeout, error_is_timeout,
 };
 use self::cache_status::{CacheHeaderOutcome as CacheOutcome, CacheHeaderReason as CacheReason};
 use self::flow_helpers::{
@@ -84,9 +86,8 @@ use self::observability::{
 use self::person_proof::handle_person_proof_api;
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::request_framing::{
-  RequestBodyFraming, h2_or_h3_content_length_zero_guard_required,
-  http1_content_length_zero_body_is_definitely_empty, http1_response_body_is_definitely_empty,
-  positive_content_length, request_body_framing,
+  RequestBodyFraming, h2_or_h3_content_length_zero_guard_required, positive_content_length,
+  request_body_framing,
 };
 use self::response::{
   apply_security_headers, apply_sticky_cookie, draining_response, external_auth_response,
@@ -100,6 +101,11 @@ use self::semantics::filter_trailers;
 use self::upstream::select_request_upstream;
 use self::uri::validate_downstream_path;
 use self::version::select_upstream_http_version;
+pub(crate) use self::waf_body_capture::{
+  capture_request_body_for_waf, capture_response_body_for_waf, request_body_capture_error_response,
+  response_body_capture_error_response, waf_body_input,
+};
+use self::waf_body_coding::has_non_identity_content_encoding;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
 #[derive(Clone, Copy)]
 pub(crate) struct EffectiveTimeouts {
@@ -777,6 +783,12 @@ where
       }
     }
   }
+  let waf_body_compression_transform =
+    crate::waf::route_http_body_compression_transform_enabled(&state.config, resolved.route);
+  let request_waf_body_compression_transform =
+    waf_body_compression_transform && request_body_need != BodyNeed::None;
+  let response_waf_body_compression_transform =
+    waf_body_compression_transform && response_body_need != BodyNeed::None;
   let request = request.map(|body| {
     body::with_read_timeout(
       Limited::new(body, state.config.limits.max_request_body_bytes as usize).boxed(),
@@ -789,23 +801,18 @@ where
       request,
       request_body_need,
       state.config.waf.limits.max_body_inspection_bytes,
+      request_waf_body_compression_transform,
+      state.config.waf.http_body_compression.clone(),
+      state.waf_body_coding.clone(),
     )
     .await
     {
       Ok(result) => result,
       Err(error) => {
         warn!(error = %error, "failed to read request body for WAF inspection");
-        if error_is_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
-          return with_pending_dynamic_person_proof_response_mutations(
-            text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out"),
-            state.as_ref(),
-            evaluated_person_proof.as_ref(),
-            dynamic_person_proof_mutation_added,
-            &dynamic_challenge_response_mutations,
-          );
-        }
+        let (status, message) = request_body_capture_error_response(&error);
         return with_pending_dynamic_person_proof_response_mutations(
-          text_response(StatusCode::BAD_REQUEST, "failed to read request body"),
+          text_response(status, message),
           state.as_ref(),
           evaluated_person_proof.as_ref(),
           dynamic_person_proof_mutation_added,
@@ -1133,6 +1140,7 @@ where
     upstream_version,
     waf_mutations: &request_waf.request_header_mutations,
     route_mutations: &route_request_mutations,
+    remove_accept_encoding: response_waf_body_compression_transform,
   };
   let mut outbound = rebuild_request(request, rebuild);
   semantics::strip_accepted_expect(outbound.headers_mut());
@@ -1706,35 +1714,25 @@ where
   apply_security_headers(&mut parts.headers, &state.config.security.headers);
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
-  let (body, captured_response_body) =
-    match response_body_capture_decision(parts.version, &parts.headers, response_body_need) {
-      WafBodyCaptureDecision::Skip => (body, None),
-      WafBodyCaptureDecision::Empty => (body, Some(empty_captured_body())),
-      WafBodyCaptureDecision::Prefix => {
-        match capture_body_prefix(
-          body,
-          state.config.waf.limits.max_body_inspection_bytes,
-          positive_content_length(&parts.headers),
-        )
-        .await
-        {
-          Ok((body, captured)) => (body, Some(captured)),
-          Err(error) => {
-            if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) {
-              return text_response(
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream response body timed out",
-              );
-            }
-            warn!(error = %error, "failed to read upstream response body for WAF inspection");
-            return text_response(
-              StatusCode::BAD_GATEWAY,
-              "failed to read upstream response body",
-            );
-          }
-        }
-      }
-    };
+  let (body, captured_response_body) = match capture_response_body_for_waf(
+    parts.version,
+    &mut parts.headers,
+    body,
+    response_body_need,
+    state.config.waf.limits.max_body_inspection_bytes,
+    response_waf_body_compression_transform,
+    state.config.waf.http_body_compression.clone(),
+    state.waf_body_coding.clone(),
+  )
+  .await
+  {
+    Ok(result) => result,
+    Err(error) => {
+      let (status, message) = response_body_capture_error_response(&error);
+      warn!(error = %error, status = status.as_u16(), "failed to read upstream response body for WAF inspection");
+      return text_response(status, message);
+    }
+  };
   let response_body = captured_response_body.as_ref().map(waf_body_input);
 
   if response_waf_enabled {
@@ -2805,6 +2803,9 @@ fn handle_cache_lookup_result(
 ) -> Option<Response<ProxyBody>> {
   match lookup {
     crate::cache::CacheLookup::Fresh(entry) => {
+      if cache_entry_blocked_by_waf_body_transform(state.as_ref(), resolved, &entry) {
+        return None;
+      }
       state.metrics.record_cache_hit();
       if record_events {
         record_route_cache_event(state, resolved.route, "hit", "fresh");
@@ -2828,7 +2829,10 @@ fn handle_cache_lookup_result(
       Some(response)
     }
     crate::cache::CacheLookup::Stale(stale) => {
+      let stale_blocked_by_transform =
+        cache_entry_blocked_by_waf_body_transform(state.as_ref(), resolved, &stale.entry);
       if stale.background_refresh
+        && !stale_blocked_by_transform
         && can_background_refresh(resolved.execution_plan.waf, upstream, upstream_version)
         && spawn_background_refresh(
           state.clone(),
@@ -2876,12 +2880,17 @@ fn handle_cache_lookup_result(
         for (name, value) in &stale.request_headers {
           outbound.headers_mut().insert(name.clone(), value.clone());
         }
-        if stale.serve_stale_on_error {
-          *stale_on_error = Some(stale.entry.clone());
+        if !stale_blocked_by_transform {
+          if stale.serve_stale_on_error {
+            *stale_on_error = Some(stale.entry.clone());
+          }
+          *revalidation_entry = Some(stale.entry);
         }
-        *revalidation_entry = Some(stale.entry);
         None
       } else {
+        if stale_blocked_by_transform {
+          return None;
+        }
         state.metrics.record_cache_hit();
         if record_events {
           record_route_cache_event(state, resolved.route, "hit", "stale_without_validators");
@@ -2906,6 +2915,8 @@ fn handle_cache_lookup_result(
       }
     }
     crate::cache::CacheLookup::Revalidate(revalidation) => {
+      let revalidation_blocked_by_transform =
+        cache_entry_blocked_by_waf_body_transform(state.as_ref(), resolved, &revalidation.entry);
       state.metrics.record_cache_revalidation();
       if record_events {
         record_route_cache_event(state, resolved.route, "revalidate", "explicit");
@@ -2913,10 +2924,12 @@ fn handle_cache_lookup_result(
       for (name, value) in &revalidation.request_headers {
         outbound.headers_mut().insert(name.clone(), value.clone());
       }
-      if revalidation.serve_stale_on_error {
-        *stale_on_error = Some(revalidation.entry.clone());
+      if !revalidation_blocked_by_transform {
+        if revalidation.serve_stale_on_error {
+          *stale_on_error = Some(revalidation.entry.clone());
+        }
+        *revalidation_entry = Some(revalidation.entry);
       }
-      *revalidation_entry = Some(revalidation.entry);
       None
     }
   }
@@ -2930,6 +2943,16 @@ fn can_background_refresh(
   upstream_version != HttpVersion::H3
     && upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off
     && !waf.response.enabled()
+}
+
+fn cache_entry_blocked_by_waf_body_transform(
+  state: &AppSnapshot,
+  resolved: &crate::routes::ResolvedRoute<'_>,
+  entry: &crate::cache::CacheEntry,
+) -> bool {
+  crate::waf::route_http_body_compression_transform_enabled(&state.config, resolved.route)
+    && resolved.execution_plan.waf.response.body_need() != BodyNeed::None
+    && has_non_identity_content_encoding(&entry.headers)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3408,102 +3431,6 @@ fn full_body(bytes: bytes::Bytes) -> ProxyBody {
   Full::new(bytes)
     .map_err(|never| -> self::body::BoxError { match never {} })
     .boxed()
-}
-
-fn waf_body_input(body: &CapturedBody) -> WafBodyInput<'_> {
-  WafBodyInput {
-    bytes: body.bytes.as_ref(),
-    is_truncated: body.is_truncated,
-  }
-}
-
-async fn capture_request_body_for_waf(
-  request: Request<ProxyBody>,
-  body_need: BodyNeed,
-  limit: usize,
-) -> Result<(Request<ProxyBody>, Option<CapturedBody>), self::body::BoxError> {
-  match request_body_capture_decision(request.version(), request.headers(), body_need) {
-    WafBodyCaptureDecision::Skip => Ok((request, None)),
-    WafBodyCaptureDecision::Empty => Ok((request, Some(empty_captured_body()))),
-    WafBodyCaptureDecision::Prefix => capture_prefix(request, limit)
-      .await
-      .map(|(request, captured)| (request, Some(captured))),
-  }
-}
-
-fn empty_captured_body() -> CapturedBody {
-  CapturedBody {
-    bytes: bytes::Bytes::new(),
-    is_truncated: false,
-  }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WafBodyCaptureDecision {
-  Skip,
-  Empty,
-  Prefix,
-}
-
-fn request_body_capture_decision(
-  version: http::Version,
-  headers: &HeaderMap,
-  body_need: BodyNeed,
-) -> WafBodyCaptureDecision {
-  body_capture_decision(
-    version,
-    headers,
-    body_need,
-    request_body_is_definitely_empty,
-  )
-}
-
-fn response_body_capture_decision(
-  version: http::Version,
-  headers: &HeaderMap,
-  body_need: BodyNeed,
-) -> WafBodyCaptureDecision {
-  body_capture_decision(
-    version,
-    headers,
-    body_need,
-    response_body_is_definitely_empty,
-  )
-}
-
-fn body_capture_decision(
-  version: http::Version,
-  headers: &HeaderMap,
-  body_need: BodyNeed,
-  body_is_definitely_empty: fn(http::Version, &HeaderMap) -> bool,
-) -> WafBodyCaptureDecision {
-  match body_need {
-    BodyNeed::None => WafBodyCaptureDecision::Skip,
-    BodyNeed::SizeOnly => {
-      if body_is_definitely_empty(version, headers) {
-        WafBodyCaptureDecision::Empty
-      } else if positive_content_length(headers).is_some() {
-        WafBodyCaptureDecision::Skip
-      } else {
-        WafBodyCaptureDecision::Prefix
-      }
-    }
-    BodyNeed::PrefixBytes => {
-      if body_is_definitely_empty(version, headers) {
-        WafBodyCaptureDecision::Empty
-      } else {
-        WafBodyCaptureDecision::Prefix
-      }
-    }
-  }
-}
-
-fn request_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
-  http1_content_length_zero_body_is_definitely_empty(version, headers)
-}
-
-fn response_body_is_definitely_empty(version: http::Version, headers: &HeaderMap) -> bool {
-  http1_response_body_is_definitely_empty(version, headers)
 }
 
 #[cfg(test)]

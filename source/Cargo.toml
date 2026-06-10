@@ -17,6 +17,7 @@ arc-swap = "1"
 argon2 = { version = "0.5", features = ["std"] }
 async-compression = { version = "0.4", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 base64 = "0.22"
+brotli = "8.0.3"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 clubcard-crlite = { version = "0.3", features = ["builder"] }
@@ -28,6 +29,7 @@ httpdate = "1"
 http-body-util = "0.1"
 futures-util = "0.3"
 fastwebsockets = { version = "0.10", features = ["unstable-split"] }
+flate2 = "1.1.9"
 h3 = "0.0.8"
 h3-datagram = "0.0.2"
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
@@ -68,6 +70,7 @@ web-transport-quinn = { version = "0.11", default-features = false, features = [
 quic-parser = { version = "0.1.5", features = ["ring"] }
 x509-cert = "0.2"
 x509-ocsp = { version = "0.2", features = ["builder"] }
+zstd = "0.13.3"
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
 aws-lc-rs = { version = "1", default-features = false, features = ["bindgen"] }
