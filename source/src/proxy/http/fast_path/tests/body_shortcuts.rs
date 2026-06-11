@@ -11,7 +11,7 @@ use hyper::body::{Body, Frame, SizeHint};
 use crate::proxy::http::body;
 
 use super::super::{
-  fast_path_request_body, fast_path_request_body_empty_probe_allowed,
+  fast_path_empty_request_body, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
   fast_path_request_body_is_definitely_empty,
 };
 
@@ -258,6 +258,15 @@ impl Body for PendingThenErrorBody {
   fn size_hint(&self) -> SizeHint {
     SizeHint::new()
   }
+}
+
+#[tokio::test]
+async fn classified_empty_request_body_shortcut_collects_empty_body() {
+  let body = fast_path_empty_request_body()
+    .collect()
+    .await
+    .expect("classified empty fast-path body should collect");
+  assert!(body.to_bytes().is_empty());
 }
 
 #[tokio::test]

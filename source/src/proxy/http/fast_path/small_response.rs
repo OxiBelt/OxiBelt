@@ -16,7 +16,7 @@ use crate::proxy::http::response::text_response;
 pub(super) enum SmallResponseDisposition {
   Inlined {
     body: ProxyBody,
-    inlined: body::InlinedKnownSmallResponseBody,
+    inlined: Option<body::InlinedKnownSmallResponseBody>,
   },
   Streaming(ProxyBody),
   Error(Response<ProxyBody>),
@@ -64,13 +64,19 @@ where
   } else {
     None
   };
+  if materialize_body {
+    let body = inline_body(collected.bytes, trailers);
+    return SmallResponseDisposition::Inlined {
+      body,
+      inlined: None,
+    };
+  }
+
   let inlined = body::InlinedKnownSmallResponseBody::new(collected.bytes, trailers);
-  let body = if materialize_body {
-    inline_body(&inlined)
-  } else {
-    empty_body()
-  };
-  SmallResponseDisposition::Inlined { body, inlined }
+  SmallResponseDisposition::Inlined {
+    body: empty_body(),
+    inlined: Some(inlined),
+  }
 }
 
 struct CollectedSmallResponse {
@@ -216,15 +222,15 @@ fn parse_ascii_content_length(bytes: &[u8]) -> Option<usize> {
   (digits != 0).then_some(length)
 }
 
-fn inline_body(inlined: &body::InlinedKnownSmallResponseBody) -> ProxyBody {
-  if let Some(trailers) = inlined.trailers.clone() {
-    return Full::new(inlined.data.clone())
+fn inline_body(data: Bytes, trailers: Option<HeaderMap>) -> ProxyBody {
+  if let Some(trailers) = trailers {
+    return Full::new(data)
       .with_trailers(std::future::ready(Some(Ok::<_, Infallible>(trailers))))
       .map_err(|never| -> body::BoxError { match never {} })
       .boxed();
   }
 
-  full_body(inlined.data.clone())
+  full_body(data)
 }
 
 fn box_body<B>(body: B) -> ProxyBody
@@ -410,8 +416,7 @@ mod tests {
     let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
       panic!("expected inline body");
     };
-    assert_eq!(inlined.data.as_ref(), b"ok");
-    assert!(inlined.trailers.is_none());
+    assert!(inlined.is_none());
     let bytes = body
       .collect()
       .await
@@ -436,6 +441,7 @@ mod tests {
     let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
       panic!("expected inline body");
     };
+    let inlined = inlined.expect("skipped materialized body should preserve metadata");
     assert_eq!(inlined.data.as_ref(), b"ok");
     let bytes = body
       .collect()
@@ -465,6 +471,7 @@ mod tests {
     let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
       panic!("expected inline body");
     };
+    let inlined = inlined.expect("skipped materialized body should preserve metadata");
     assert_eq!(inlined.data.as_ref(), b"ok");
     let bytes = body
       .collect()
@@ -490,7 +497,7 @@ mod tests {
     let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
       panic!("expected inline body");
     };
-    assert_eq!(inlined.data.as_ref(), b"ok");
+    assert!(inlined.is_none());
     let bytes = body
       .collect()
       .await
@@ -515,7 +522,7 @@ mod tests {
     let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
       panic!("expected inline body");
     };
-    assert_eq!(inlined.data.as_ref(), b"ok");
+    assert!(inlined.is_none());
     let bytes = body
       .collect()
       .await
@@ -548,10 +555,7 @@ mod tests {
     let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
       panic!("expected inline body");
     };
-    assert_eq!(
-      inlined.trailers.expect("trailers should be marked")["x-trailer"],
-      "kept"
-    );
+    assert!(inlined.is_none());
     let collected = body.collect().await.expect("inline body should collect");
     assert_eq!(
       collected.trailers().expect("trailers should be preserved")["x-trailer"],
@@ -646,7 +650,7 @@ mod tests {
     let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
       panic!("expected inline body");
     };
-    assert_eq!(inlined.data.as_ref(), b"ok");
+    assert!(inlined.is_none());
     let bytes = body
       .collect()
       .await

@@ -220,6 +220,49 @@ async fn eligible_plain_static_get_uses_pre_hyper_sendfile_path() {
 }
 
 #[tokio::test]
+async fn eligible_plain_static_get_uses_hot_object_cache_when_enabled() {
+  let temp_dir = common::TempDir::new("plain-sendfile-hot-cache");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-hot-cache");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "cached sendfile")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+open_file_cache_max_entries = 8
+open_file_cache_ttl_ms = 10000
+hot_object_cache_max_bytes = 65536
+hot_object_cache_max_file_bytes = 65536
+"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let request = parsed(b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\n\r\n");
+
+  let plan = eligible_static_plan(
+    &request,
+    &snapshot,
+    "127.0.0.1:12345".parse().unwrap(),
+    WafTransportMetadataInput::default(),
+  )
+  .await
+  .expect("plain static request should be eligible");
+
+  match plan.response.body {
+    StaticBodyPlan::Bytes(bytes) => assert_eq!(bytes.as_ref(), b"cached sendfile"),
+    other => panic!("expected cached bytes body, got {other:?}"),
+  }
+}
+
+#[tokio::test]
 async fn security_headers_are_preserved_on_plain_static_sendfile_path() {
   if !kernel_sendfile_available_or_skip() {
     return;

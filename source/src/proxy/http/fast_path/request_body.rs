@@ -10,6 +10,10 @@ use crate::proxy::http::request_framing::{
   h2_or_h3_safe_method_empty_probe_allowed, http1_request_body_is_definitely_empty,
 };
 
+pub(super) fn fast_path_empty_request_body() -> ProxyBody {
+  empty_body()
+}
+
 #[allow(clippy::manual_async_fn)]
 pub(super) fn fast_path_request_body<B>(
   body: B,

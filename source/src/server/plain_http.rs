@@ -262,13 +262,11 @@ async fn try_sendfile_fast_path_inner(
       }
       ReadRequestOutcome::Request(request) => request,
     };
-    let next_buffer = request.remaining.clone();
-
     let Some(mut plan) =
       eligible_static_plan(&request, snapshot.as_ref(), peer_addr, transport_metadata).await
     else {
       let mut prefix = request.raw;
-      prefix.extend_from_slice(&next_buffer);
+      prefix.extend_from_slice(&request.remaining);
       trace!("plain HTTP static sendfile request fell back");
       return Ok(SendfilePreflight::Continue {
         io: PlainHttpIo::new(stream, prefix),
@@ -276,10 +274,10 @@ async fn try_sendfile_fast_path_inner(
       });
     };
     let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http1Request);
-    buffer = next_buffer;
 
     let close_after_response = header_has_token(&request.headers, CONNECTION, "close");
     emit_system_access_log(&request, snapshot.as_ref(), transport_metadata, &mut plan);
+    buffer = request.remaining;
     let status = plan.response.status;
     if let Err(error) = write_static_plan(&mut stream, &plan, !close_after_response).await {
       debug!(error = %error, peer = %peer_addr, "plain HTTP static sendfile response failed");
@@ -414,7 +412,7 @@ async fn eligible_static_plan(
   if let Some(access_log) = access_log.as_mut() {
     access_log.client_addr = client_addr;
   }
-  let mut plan = static_files::plan_response_without_hot_object_cache(
+  let mut plan = static_files::plan_response(
     &request.method,
     &request.headers,
     request_path,
@@ -567,7 +565,11 @@ async fn write_response_head(
 fn response_head_bytes(status: StatusCode, headers: &HeaderMap, keep_alive: bool) -> Vec<u8> {
   let reason = status.canonical_reason().unwrap_or("");
   let mut head = Vec::with_capacity(256 + headers.len() * 48);
-  head.extend_from_slice(format!("HTTP/1.1 {} {reason}\r\n", status.as_u16()).as_bytes());
+  head.extend_from_slice(b"HTTP/1.1 ");
+  append_u16_decimal(&mut head, status.as_u16());
+  head.push(b' ');
+  head.extend_from_slice(reason.as_bytes());
+  head.extend_from_slice(b"\r\n");
   for (name, value) in headers {
     head.extend_from_slice(name.as_str().as_bytes());
     head.extend_from_slice(b": ");
@@ -581,6 +583,21 @@ fn response_head_bytes(status: StatusCode, headers: &HeaderMap, keep_alive: bool
   }
   head.extend_from_slice(b"\r\n");
   head
+}
+
+fn append_u16_decimal(output: &mut Vec<u8>, value: u16) {
+  let mut buf = [0_u8; 5];
+  let mut value = value;
+  let mut index = buf.len();
+  loop {
+    index -= 1;
+    buf[index] = b'0' + (value % 10) as u8;
+    value /= 10;
+    if value == 0 {
+      break;
+    }
+  }
+  output.extend_from_slice(&buf[index..]);
 }
 
 #[cfg(target_os = "linux")]

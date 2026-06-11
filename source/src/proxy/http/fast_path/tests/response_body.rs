@@ -36,10 +36,7 @@ async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materializ
       Err(response) => panic!("unexpected response status {}", response.status()),
     };
 
-    let inlined = prepared
-      .inlined_known_small_body
-      .expect("non-H3 small response should be inlined");
-    assert_eq!(inlined.data.as_ref(), b"ok");
+    assert!(prepared.inlined_known_small_body.is_none());
     assert!(prepared.trailers_handled);
     let bytes = prepared
       .body

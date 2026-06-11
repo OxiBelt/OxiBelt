@@ -43,7 +43,7 @@ mod small_response;
 mod waf;
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 use self::request_body::{
-  fast_path_request_body, fast_path_request_body_empty_probe_allowed,
+  fast_path_empty_request_body, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
   fast_path_request_body_is_definitely_empty,
 };
 use self::small_response::{SmallResponseDisposition, try_inline_response_body};
@@ -260,7 +260,6 @@ impl PlainProxyFastPath {
     }
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
     let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
-    let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
     let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
     let request_context =
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
@@ -305,16 +304,21 @@ impl PlainProxyFastPath {
     state
       .telemetry
       .inject_trace_context(&mut parts.headers, trace_context);
-    let request_body_empty_probe_allowed =
-      fast_path_request_body_empty_probe_allowed(&parts.method, request_version, &parts.headers);
-    let body = fast_path_request_body(
-      body,
-      state.config.limits.max_request_body_bytes as usize,
-      client_body_timeout,
-      request_body_definitely_empty,
-      request_body_empty_probe_allowed,
-    )
-    .await;
+    let body = if request_body_definitely_empty {
+      fast_path_empty_request_body()
+    } else {
+      let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
+      let request_body_empty_probe_allowed =
+        fast_path_request_body_empty_probe_allowed(&parts.method, request_version, &parts.headers);
+      fast_path_request_body(
+        body,
+        state.config.limits.max_request_body_bytes as usize,
+        client_body_timeout,
+        false,
+        request_body_empty_probe_allowed,
+      )
+      .await
+    };
     let outbound = Request::from_parts(parts, body).map(|body| {
       fast_path_outbound_request_body(
         body,
@@ -669,7 +673,7 @@ where
   {
     SmallResponseDisposition::Inlined { body, inlined } => Ok(FastPathResponseBody {
       body,
-      inlined_known_small_body: Some(inlined),
+      inlined_known_small_body: inlined,
       trailers_handled: true,
     }),
     SmallResponseDisposition::Streaming(body) => Ok(FastPathResponseBody {

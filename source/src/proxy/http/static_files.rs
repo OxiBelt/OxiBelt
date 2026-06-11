@@ -136,6 +136,7 @@ pub(crate) async fn plan_response(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn plan_response_without_hot_object_cache(
   method: &Method,
   headers: &HeaderMap,
