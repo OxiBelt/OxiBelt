@@ -719,7 +719,7 @@ fn file_sync_payload_accepts_public_oxirule_names() {
           "op": "put",
           "root": "oxirule_rulepack",
           "path": "rulepacks/main.oxirule-rulepack.toml",
-          "content": "[rulepack]\nschema_version = 1\nname = \"main\"\nversion = \"0.1.0\"\n\n[[group_files]]\ncontent = '''\n[[rule_groups]]\nname = \"main\"\nwhen = \"true\"\n'''\n"
+          "content": "[rulepack]\nschema_version = 2\nname = \"main\"\nversion = \"0.1.0\"\n\n[[group_files]]\ncontent = '''\n[[rule_groups]]\nname = \"main\"\nwhen = \"true\"\n'''\n"
         }
       ]
     }"#,

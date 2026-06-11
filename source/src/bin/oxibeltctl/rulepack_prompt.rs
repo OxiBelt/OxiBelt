@@ -185,6 +185,12 @@ fn prompt_for_variable(
       prompt.write_line("value must be a valid CIDR")?;
       continue;
     }
+    if variable.value_type.as_deref() == Some("rate")
+      && oxibelt::limits::parse_rate(&answer).is_err()
+    {
+      prompt.write_line("value must be a valid rate, such as 10r/s or 600r/m")?;
+      continue;
+    }
     return Ok(answer);
   }
 }

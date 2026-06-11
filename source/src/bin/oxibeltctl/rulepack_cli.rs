@@ -46,6 +46,8 @@ pub(crate) struct RulepackRenderArgs {
   pub(crate) source: RulepackSourceArgs,
   #[arg(long = "var", value_name = "KEY=VALUE")]
   pub(crate) vars: Vec<String>,
+  #[arg(long = "bind", value_name = "KEY=VALUE")]
+  pub(crate) binds: Vec<String>,
   #[arg(long, value_enum)]
   pub(crate) mode: Option<RulepackModeArg>,
   #[arg(long)]
@@ -58,6 +60,8 @@ pub(crate) struct RulepackCheckArgs {
   pub(crate) source: RulepackSourceArgs,
   #[arg(long = "var", value_name = "KEY=VALUE")]
   pub(crate) vars: Vec<String>,
+  #[arg(long = "bind", value_name = "KEY=VALUE")]
+  pub(crate) binds: Vec<String>,
 }
 
 #[derive(Debug, Args)]

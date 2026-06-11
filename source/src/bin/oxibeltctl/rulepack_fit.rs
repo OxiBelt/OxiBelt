@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, bail};
 use http::Method;
 use oxibelt::admin_client::AdminClient;
+use oxibelt::identity::Cidr;
 use oxibelt::waf::{
   RulepackBinding, RulepackBindingKind, RulepackInputMetadata, inspect_rulepack_inputs,
 };
@@ -66,7 +67,7 @@ pub(crate) async fn evaluate_fit(
   force_mode: bool,
 ) -> anyhow::Result<RulepackFitEvaluation> {
   let inputs = inspect_rulepack_inputs(&loaded.manifest, &loaded.source_label)?;
-  validate_input_keys(&inputs, vars, binds)?;
+  let _ = resolve_render_variables_from_inputs(&inputs, vars, binds)?;
   let config = effective_config_toml(client).await?;
   let routes = route_inventory(&config);
   let default_tokens = default_discovery_tokens(&inputs);
@@ -140,22 +141,7 @@ pub(crate) fn resolve_render_variables(
   require_all: bool,
 ) -> anyhow::Result<BTreeMap<String, String>> {
   let inputs = inspect_rulepack_inputs(raw, source)?;
-  validate_input_keys(&inputs, vars, binds)?;
-  let mut render_vars = vars.clone();
-  for binding in &inputs.bindings {
-    if let Some(value) = binds.get(&binding.name) {
-      if let Some(existing) = render_vars.get(&binding.bind_as)
-        && existing != value
-      {
-        bail!(
-          "--bind {} conflicts with --var {}",
-          binding.name,
-          binding.bind_as
-        );
-      }
-      render_vars.insert(binding.bind_as.clone(), value.clone());
-    }
-  }
+  let render_vars = resolve_render_variables_from_inputs(&inputs, vars, binds)?;
   if require_all {
     let missing_bindings = missing_bindings(&inputs, vars, binds);
     if let Some(binding) = missing_bindings.first() {
@@ -171,6 +157,68 @@ pub(crate) fn resolve_render_variables(
     }
   }
   Ok(render_vars)
+}
+
+fn resolve_render_variables_from_inputs(
+  inputs: &RulepackInputMetadata,
+  vars: &BTreeMap<String, String>,
+  binds: &BTreeMap<String, String>,
+) -> anyhow::Result<BTreeMap<String, String>> {
+  validate_input_keys(inputs, vars, binds)?;
+  let mut render_vars = vars.clone();
+  for binding in &inputs.bindings {
+    if let Some(value) = binds.get(&binding.name) {
+      if let Some(existing) = render_vars.get(&binding.bind_as)
+        && existing != value
+      {
+        bail!(
+          "--bind {} conflicts with --var {}",
+          binding.name,
+          binding.bind_as
+        );
+      }
+      render_vars.insert(binding.bind_as.clone(), value.clone());
+    }
+  }
+  validate_render_values(inputs, &render_vars)?;
+  Ok(render_vars)
+}
+
+fn validate_render_values(
+  inputs: &RulepackInputMetadata,
+  render_vars: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+  for variable in &inputs.variables {
+    let Some(value) = render_vars.get(&variable.name) else {
+      continue;
+    };
+    match variable.value_type.as_deref() {
+      Some("cidr") => {
+        Cidr::parse(value).with_context(|| {
+          format!(
+            "rulepack {} variable {} must be a valid CIDR",
+            inputs.summary.name, variable.name
+          )
+        })?;
+      }
+      Some("rate") => {
+        oxibelt::limits::parse_rate(value).with_context(|| {
+          format!(
+            "rulepack {} variable {} must be a valid rate",
+            inputs.summary.name, variable.name
+          )
+        })?;
+      }
+      Some("route") | Some("string") | None => {}
+      Some(other) => bail!(
+        "rulepack {} variable {} uses unsupported type {}",
+        inputs.summary.name,
+        variable.name,
+        other
+      ),
+    }
+  }
+  Ok(())
 }
 
 fn validate_input_keys(

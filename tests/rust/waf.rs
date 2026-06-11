@@ -9833,7 +9833,7 @@ fn oxirule_rulepack_files_load_for_global_and_route_scopes() {
         rulepack_dir.join("global.oxirule-rulepack.toml"),
         r#"
 [rulepack]
-schema_version = 1
+schema_version = 2
 name = "global-pack"
 version = "0.1.0"
 default_mode = "enforcing"
@@ -9856,7 +9856,7 @@ status = 403
         rulepack_dir.join("route.oxirule-rulepack.toml"),
         r#"
 [rulepack]
-schema_version = 1
+schema_version = 2
 name = "route-pack"
 version = "0.1.0"
 default_mode = "enforcing"
@@ -9933,7 +9933,7 @@ fn duplicate_oxirule_rulepack_names_are_rejected() {
         common::create_self_signed_cert(&cert_dir, "waf-rulepack-duplicates");
     let pack = r#"
 [rulepack]
-schema_version = 1
+schema_version = 2
 name = "duplicate-pack"
 version = "0.1.0"
 

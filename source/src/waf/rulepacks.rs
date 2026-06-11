@@ -20,8 +20,7 @@ use super::{
 pub const RULEPACK_FILE_SUFFIX: &str = ".oxirule-rulepack.toml";
 const RULE_FILE_SUFFIX: &str = ".oxirule.toml";
 const GROUP_FILE_SUFFIX: &str = ".oxirule-group.toml";
-const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
-const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 2;
+const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct WafRulepackSummary {
@@ -196,10 +195,11 @@ pub fn inspect_rulepack_inputs(raw: &str, source: &str) -> anyhow::Result<Rulepa
     toml::from_str(raw).with_context(|| format!("failed to parse {source}"))?;
   let document = document_from_value(value, source)?;
   validate_document_shape(&document, source)?;
+  let bindings = input::effective_bindings(&document.variables, &document.bindings);
   Ok(RulepackInputMetadata {
     summary: summary_from_document(&document, Vec::new()),
     variables: document.variables,
-    bindings: document.bindings,
+    bindings,
   })
 }
 
@@ -406,11 +406,9 @@ fn document_from_value(value: toml::Value, source: &str) -> anyhow::Result<Rulep
 }
 
 fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow::Result<()> {
-  if document.rulepack.schema_version < MIN_SUPPORTED_SCHEMA_VERSION
-    || document.rulepack.schema_version > MAX_SUPPORTED_SCHEMA_VERSION
-  {
+  if document.rulepack.schema_version != SUPPORTED_SCHEMA_VERSION {
     bail!(
-      "{source} uses unsupported rulepack schema_version {}; supported versions are {MIN_SUPPORTED_SCHEMA_VERSION} through {MAX_SUPPORTED_SCHEMA_VERSION}",
+      "{source} uses unsupported rulepack schema_version {}; only schema_version {SUPPORTED_SCHEMA_VERSION} is supported",
       document.rulepack.schema_version
     );
   }
@@ -426,12 +424,7 @@ fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow:
     bail!("{source} must contain at least one [[rules]] or [[group_files]] entry");
   }
 
-  input::validate_rulepack_inputs(
-    document.rulepack.schema_version,
-    source,
-    &document.variables,
-    &document.bindings,
-  )?;
+  input::validate_rulepack_inputs(source, &document.variables, &document.bindings)?;
 
   let mut rule_names = HashSet::new();
   for rule in &document.rules {
@@ -489,6 +482,7 @@ fn resolve_variables(
       .or_else(|| variable.default.clone());
     match value {
       Some(value) => {
+        input::validate_variable_value(source, variable, &value)?;
         values.insert(variable.name.clone(), value);
       }
       None if variable.required => {

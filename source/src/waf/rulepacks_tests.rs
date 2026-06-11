@@ -3,7 +3,7 @@ use super::*;
 fn minimal_rulepack(body: &str) -> String {
   format!(
     r#"[rulepack]
-schema_version = 1
+schema_version = 2
 name = "demo"
 version = "0.1.0"
 
@@ -25,7 +25,7 @@ status = 403
 #[test]
 fn renders_variables_and_defaults_to_monitor() {
   let raw = r#"[rulepack]
-schema_version = 1
+schema_version = 2
 name = "demo"
 version = "0.1.0"
 
@@ -54,7 +54,7 @@ status = 403
 #[test]
 fn rejects_missing_required_variable() {
   let raw = r#"[rulepack]
-schema_version = 1
+schema_version = 2
 name = "demo"
 version = "0.1.0"
 
@@ -76,7 +76,7 @@ content = "when = \"true\"\n"
 #[test]
 fn rejects_invalid_reference_suffix() {
   let raw = r#"[rulepack]
-schema_version = 1
+schema_version = 2
 name = "demo"
 version = "0.1.0"
 
@@ -97,7 +97,7 @@ path = "rules/bad.toml"
 #[test]
 fn group_only_rulepack_is_valid() {
   let raw = r#"[rulepack]
-schema_version = 1
+schema_version = 2
 name = "groups"
 version = "0.1.0"
 
@@ -176,15 +176,53 @@ content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
 }
 
 #[test]
-fn schema_v1_rejects_v2_binding_metadata() {
+fn schema_v2_exposes_variable_discovery_as_route_binding() {
   let raw = r#"[rulepack]
-schema_version = 1
+schema_version = 2
+name = "vaultwarden-hardening"
+version = "0.1.0"
+targets = ["vaultwarden"]
+
+[[variables]]
+name = "route_name"
+type = "route"
+required = true
+prompt = "Select the Vaultwarden route."
+
+[variables.discovery]
+name_any = ["vault"]
+host_contains_any = ["vaultwarden"]
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
+"#;
+
+  let metadata = inspect_rulepack_inputs(raw, "test rulepack").expect("metadata");
+
+  assert_eq!(metadata.bindings.len(), 1);
+  assert_eq!(metadata.bindings[0].name, "route_name");
+  assert_eq!(metadata.bindings[0].bind_as, "route_name");
+  assert!(metadata.bindings[0].required);
+  assert_eq!(metadata.bindings[0].discovery.name_any, vec!["vault"]);
+}
+
+#[test]
+fn schema_v2_rejects_mixed_variable_discovery_and_explicit_binding() {
+  let raw = r#"[rulepack]
+schema_version = 2
 name = "demo"
 version = "0.1.0"
 
 [[variables]]
 name = "route_name"
+type = "route"
 required = true
+
+[variables.discovery]
+name_any = ["vault"]
 
 [[bindings]]
 name = "app_route"
@@ -199,9 +237,29 @@ content = "when = \"true\"\n"
 "#;
 
   let error =
-    inspect_rulepack_inputs(raw, "test rulepack").expect_err("schema v1 should reject bindings");
+    inspect_rulepack_inputs(raw, "test rulepack").expect_err("mixed discovery forms should fail");
 
-  assert!(error.to_string().contains("schema_version 1"));
+  assert!(error.to_string().contains("choose either"));
+}
+
+#[test]
+fn schema_v1_manifests_are_rejected() {
+  let raw = r#"[rulepack]
+schema_version = 1
+name = "demo"
+version = "0.1.0"
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+
+  let error =
+    inspect_rulepack_inputs(raw, "test rulepack").expect_err("schema v1 should be rejected");
+
+  assert!(error.to_string().contains("only schema_version 2"));
 }
 
 #[test]
@@ -227,4 +285,49 @@ content = "when = \"true\"\n"
     .expect_err("binding should require a declared render variable");
 
   assert!(error.to_string().contains("undeclared variable route_name"));
+}
+
+#[test]
+fn schema_v2_rejects_invalid_typed_defaults() {
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[variables]]
+name = "admin_cidr"
+type = "cidr"
+default = "not-a-cidr"
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+
+  let error = inspect_rulepack_inputs(raw, "test rulepack").expect_err("invalid CIDR should fail");
+
+  assert!(error.to_string().contains("valid CIDR"));
+
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[variables]]
+name = "login_rate"
+type = "rate"
+default = "5/min"
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+
+  let error = inspect_rulepack_inputs(raw, "test rulepack").expect_err("invalid rate should fail");
+
+  assert!(error.to_string().contains("valid rate"));
 }

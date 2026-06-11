@@ -193,7 +193,7 @@ async fn waf_rulepack_list_endpoint_requires_list_permission() {
     rulepack_dir.join("main.oxirule-rulepack.toml"),
     r#"
 [rulepack]
-schema_version = 1
+schema_version = 2
 name = "main"
 version = "0.1.0"
 

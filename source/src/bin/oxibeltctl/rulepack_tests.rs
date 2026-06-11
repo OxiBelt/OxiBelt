@@ -50,6 +50,45 @@ fn rulepack_cli_parses_fit_and_bind_options() {
 }
 
 #[test]
+fn rulepack_cli_parses_render_and_check_bind_options() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "render",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--bind",
+    "app_route=mmsecretvault",
+  ])
+  .expect("rulepack render should parse");
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Render(args) = command.command else {
+    panic!("expected rulepack render");
+  };
+  assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
+
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "check",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--bind",
+    "app_route=mmsecretvault",
+  ])
+  .expect("rulepack check should parse");
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Check(args) = command.command else {
+    panic!("expected rulepack check");
+  };
+  assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
+}
+
+#[test]
 fn rulepack_cli_parses_interactive_apply() {
   let parsed = Cli::try_parse_from([
     "oxibeltctl",

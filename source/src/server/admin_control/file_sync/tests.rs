@@ -519,7 +519,7 @@ fn file_sync_put_validates_oxirule_rulepack_files() {
     "rulepacks/main.oxirule-rulepack.toml",
     r#"
 [rulepack]
-schema_version = 1
+schema_version = 2
 name = "main"
 version = "0.1.0"
 
@@ -537,7 +537,7 @@ when = "true"
   let invalid = put_request(
     AdminFileRoot::OxiRuleRulepack,
     "rulepacks/bad.oxirule-rulepack.toml",
-    "[rulepack]\nschema_version = 1\nname = \"bad\"\nversion = \"0.1.0\"\n",
+    "[rulepack]\nschema_version = 2\nname = \"bad\"\nversion = \"0.1.0\"\n",
   );
   assert!(commit_file_sync(&invalid, &config).is_err());
 }

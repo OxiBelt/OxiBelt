@@ -43,11 +43,12 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
     RulepackSubcommand::Render(args) => {
       let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
       let vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+      let binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
       let render_vars = crate::rulepack_fit::resolve_render_variables(
         &loaded.manifest,
         &loaded.source_label,
         &vars,
-        &BTreeMap::new(),
+        &binds,
         true,
       )?;
       let rendered = render_rulepack_for_install(
@@ -66,11 +67,12 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
     RulepackSubcommand::Check(args) => {
       let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
       let vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+      let binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
       let render_vars = crate::rulepack_fit::resolve_render_variables(
         &loaded.manifest,
         &loaded.source_label,
         &vars,
-        &BTreeMap::new(),
+        &binds,
         true,
       )?;
       let options = render_options(render_vars, None, false, loaded.git_commit.clone());

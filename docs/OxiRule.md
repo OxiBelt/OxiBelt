@@ -172,11 +172,11 @@ Actions from referenced groups and the rule are collected, sorted by action `pri
 
 ## Rulepacks
 
-Rulepacks package OxiRule rules and shared group files into a manifest that can be loaded from `[waf] rulepack_files` or route-level `rulepack_files`. A rulepack manifest must end with `.oxirule-rulepack.toml`. Schema version `1` supports variables and rules; schema version `2` adds typed variable metadata and route bindings for `oxibeltctl rulepack fit` and `apply --interactive`.
+Rulepacks package OxiRule rules and shared group files into a manifest that can be loaded from `[waf] rulepack_files` or route-level `rulepack_files`. A rulepack manifest must end with `.oxirule-rulepack.toml`. OxiBelt supports rulepack schema version `2` only; older schema versions fail validation.
 
 ```toml
 [rulepack]
-schema_version = 1
+schema_version = 2
 name = "generic-login"
 version = "0.1.0"
 default_mode = "monitor"
@@ -185,7 +185,13 @@ requires = []
 
 [[variables]]
 name = "login_path"
+type = "string"
 default = "/login"
+
+[[variables]]
+name = "login_rate"
+type = "rate"
+default = "5r/m"
 
 [[rules]]
 name = "generic-login-rate-limit"
@@ -198,7 +204,7 @@ when = "Request.Http.Path == '{{login_path}}'"
 type = "rate_limit"
 name = "login"
 key = "client_ip_path"
-rate = "5/min"
+rate = "{{login_rate}}"
 burst = 5
 status = 429
 '''
@@ -208,7 +214,7 @@ Each `[[rules]]` entry declares the rule metadata and uses either inline `conten
 
 Use `oxibeltctl rulepack inspect`, `render`, `check`, `fit`, and `apply` to work with local files, directories, HTTPS bundles, or `git+https://` repositories. URL installs require `--sha256` unless `--allow-unpinned-rulepack` is set; `git+https://` installs require `--git-ref` and record the resolved commit in the installed manifest.
 
-Schema version `2` route bindings separate local OxiBelt objects from general render variables. A binding declares the object to discover and the variable it renders into:
+Route bindings separate local OxiBelt objects from general render variables. The preferred form is an explicit `[[bindings]]` entry that declares the object to discover and the variable it renders into:
 
 ```toml
 [rulepack]
@@ -244,10 +250,29 @@ upstream_contains_any = ["vaultwarden", "bitwarden"]
 path_prefix_any = ["/"]
 ```
 
-`oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying through `/admin/v1/files/sync`. Noninteractive apply can pass bindings explicitly:
+For single route variables, schema version `2` also supports `[variables.discovery]` as shorthand. It creates an implicit route binding with the same name as the variable:
+
+```toml
+[[variables]]
+name = "route_name"
+type = "route"
+required = true
+prompt = "Select the route that serves Vaultwarden."
+
+[variables.discovery]
+name_any = ["vaultwarden", "bitwarden", "vault", "secret"]
+host_contains_any = ["vaultwarden", "bitwarden", "vault"]
+upstream_contains_any = ["vaultwarden", "bitwarden"]
+path_prefix_any = ["/"]
+```
+
+Do not mix `[variables.discovery]` with a `[[bindings]]` entry that targets the same variable. The manifest must choose one binding shape for each rendered route variable.
+
+`oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying through `/admin/v1/files/sync`. Noninteractive `render`, `check`, and `apply` can pass bindings explicitly:
 
 ```sh
 oxibeltctl rulepack fit --file vaultwarden.oxirule-rulepack.toml
+oxibeltctl rulepack check --file vaultwarden.oxirule-rulepack.toml --bind app_route=mmsecretvault --var admin_cidr=10.0.0.0/8
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --bind app_route=mmsecretvault --var admin_cidr=10.0.0.0/8
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --interactive
 ```
