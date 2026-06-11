@@ -1288,7 +1288,14 @@
         "summary": "List active OxiRule rulepack summaries.",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "Active OxiRule rulepack summaries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WafRulepackList"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -5533,6 +5540,100 @@
           "process_local",
           "shared"
         ]
+      },
+      "WafRulepackList": {
+        "type": "object",
+        "required": [
+          "rulepacks"
+        ],
+        "properties": {
+          "rulepacks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WafRulepackSummary"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "WafRulepackSummary": {
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "targets",
+          "requires",
+          "default_mode",
+          "rules",
+          "group_files",
+          "loaded_files"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default_mode": {
+            "type": "string",
+            "enum": [
+              "monitor",
+              "enforcing"
+            ]
+          },
+          "rules": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "group_files": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "loaded_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source_commit": {
+            "type": "string"
+          },
+          "source_url": {
+            "type": "string",
+            "description": "Sanitized source URL recorded when oxibeltctl installed the rulepack from a URL."
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{64}$",
+            "description": "SHA-256 digest of the exact downloaded rulepack bytes."
+          },
+          "source_openpgp_signature_url": {
+            "type": "string",
+            "description": "Sanitized detached OpenPGP signature URL when the signature was downloaded separately."
+          },
+          "source_openpgp_signer_fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{40}([0-9A-Fa-f]{24})?$",
+            "description": "Full OpenPGP signer fingerprint that verified the downloaded rulepack."
+          }
+        },
+        "additionalProperties": false
       },
       "PersonProofAdminPolicyStatus": {
         "type": "object",

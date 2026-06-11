@@ -30,8 +30,12 @@ mod resource_hint;
 mod rulepack;
 #[path = "oxibeltctl/rulepack_fit.rs"]
 mod rulepack_fit;
+#[path = "oxibeltctl/rulepack_openpgp.rs"]
+mod rulepack_openpgp;
 #[path = "oxibeltctl/rulepack_prompt.rs"]
 mod rulepack_prompt;
+#[path = "oxibeltctl/rulepack_url.rs"]
+mod rulepack_url;
 
 use cli::{AdminArgs, Cli, Command, selected_token_env};
 use output::{print_permission_hint, print_response};

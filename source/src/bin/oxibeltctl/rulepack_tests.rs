@@ -25,6 +25,48 @@ fn rulepack_cli_parses_apply_url_safety_options() {
 }
 
 #[test]
+fn rulepack_cli_parses_openpgp_url_options() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "apply",
+    "--url",
+    "https://packs.example.test/vaultwarden.oxirule-rulepack.toml",
+    "--require-rulepack-openpgp-signature",
+    "--rulepack-openpgp-signature-url",
+    "https://packs.example.test/vaultwarden.oxirule-rulepack.toml.sig",
+    "--rulepack-openpgp-key",
+    "publisher.asc",
+    "--rulepack-openpgp-keyring",
+    "trusted-publishers",
+    "--rulepack-openpgp-fingerprint",
+    "0123456789abcdef0123456789abcdef01234567",
+  ])
+  .expect("rulepack apply should parse OpenPGP options");
+
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Apply(args) = command.command else {
+    panic!("expected rulepack apply");
+  };
+  assert!(args.source.require_openpgp_signature);
+  assert!(args.source.openpgp_signature_url.is_some());
+  assert_eq!(
+    args.source.openpgp_key_files,
+    vec![PathBuf::from("publisher.asc")]
+  );
+  assert_eq!(
+    args.source.openpgp_keyring_dirs,
+    vec![PathBuf::from("trusted-publishers")]
+  );
+  assert_eq!(
+    args.source.openpgp_fingerprints,
+    vec!["0123456789abcdef0123456789abcdef01234567"]
+  );
+}
+
+#[test]
 fn rulepack_cli_parses_fit_and_bind_options() {
   let parsed = Cli::try_parse_from([
     "oxibeltctl",
@@ -125,6 +167,12 @@ fn rulepack_url_apply_requires_pin() {
     sha256: None,
     allow_unpinned_rulepack: false,
     allow_insecure_rulepack_url: false,
+    require_openpgp_signature: false,
+    openpgp_signature_url: None,
+    openpgp_signature_file: None,
+    openpgp_key_files: Vec::new(),
+    openpgp_keyring_dirs: Vec::new(),
+    openpgp_fingerprints: Vec::new(),
     git_ref: None,
   };
   let runtime = tokio::runtime::Builder::new_current_thread()
@@ -135,6 +183,37 @@ fn rulepack_url_apply_requires_pin() {
     .block_on(load_rulepack_source(&args, Duration::from_millis(10), true))
     .expect_err("unpinned URL apply should fail before network");
   assert!(error.to_string().contains("--sha256"));
+}
+
+#[test]
+fn http_rulepack_requires_signature_even_with_sha256() {
+  let args = RulepackSourceArgs {
+    file: None,
+    dir: None,
+    url: Some(Url::parse("http://packs.example.test/pack.oxirule-rulepack.toml").expect("url")),
+    git: None,
+    manifest: PathBuf::from("rulepack.oxirule-rulepack.toml"),
+    ca_certs: Vec::new(),
+    token_env: None,
+    sha256: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
+    allow_unpinned_rulepack: true,
+    allow_insecure_rulepack_url: true,
+    require_openpgp_signature: false,
+    openpgp_signature_url: None,
+    openpgp_signature_file: None,
+    openpgp_key_files: Vec::new(),
+    openpgp_keyring_dirs: Vec::new(),
+    openpgp_fingerprints: Vec::new(),
+    git_ref: None,
+  };
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let error = runtime
+    .block_on(load_rulepack_source(&args, Duration::from_millis(10), true))
+    .expect_err("HTTP URL should require signature before network");
+  assert!(error.to_string().contains("HTTP rulepack URL requires"));
 }
 
 #[test]
@@ -152,6 +231,25 @@ fn rulepack_url_rejects_userinfo() {
   let url = Url::parse("https://user:secret@packs.example.test/pack.toml").expect("url");
   let error = validate_rulepack_url(&url, false).expect_err("userinfo should fail");
   assert!(error.to_string().contains("username"));
+}
+
+#[test]
+fn rulepack_signature_url_rejects_userinfo() {
+  let url = Url::parse("https://user:secret@packs.example.test/pack.sig").expect("url");
+  let error = validate_rulepack_signature_url(&url, false).expect_err("userinfo should fail");
+  assert!(error.to_string().contains("username"));
+}
+
+#[test]
+fn token_is_only_sent_to_same_signature_origin() {
+  let source = Url::parse("https://packs.example.test/pack.oxirule-rulepack.toml").expect("source");
+  let same = Url::parse("https://packs.example.test/pack.sig").expect("signature");
+  let different_scheme = Url::parse("http://packs.example.test/pack.sig").expect("signature");
+  let different_host = Url::parse("https://other.example.test/pack.sig").expect("signature");
+
+  assert!(same_origin(&source, &same));
+  assert!(!same_origin(&source, &different_scheme));
+  assert!(!same_origin(&source, &different_host));
 }
 
 #[test]

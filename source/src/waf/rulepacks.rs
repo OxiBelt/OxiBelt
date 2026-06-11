@@ -12,6 +12,12 @@ mod input;
 pub use input::{
   RulepackBinding, RulepackBindingKind, RulepackDiscovery, RulepackInputMetadata, RulepackVariable,
 };
+#[path = "rulepacks/provenance.rs"]
+mod provenance;
+use provenance::{
+  set_rulepack_provenance, validate_source_fingerprint, validate_source_sha256,
+  validate_source_text,
+};
 
 use super::{
   ExternalRuleFile, ExternalRuleGroupFile, WafMode, WafPhase, WafRuleConfig, WafRuleGroupConfig,
@@ -36,6 +42,14 @@ pub struct WafRulepackSummary {
   pub loaded_files: Vec<PathBuf>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub source_commit: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_url: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_sha256: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_openpgp_signature_url: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_openpgp_signer_fingerprint: Option<String>,
 }
 
 #[derive(Debug)]
@@ -56,7 +70,18 @@ pub struct RulepackRenderOptions {
   pub variables: BTreeMap<String, String>,
   pub mode_override: Option<RulepackModeOverride>,
   pub source_commit: Option<String>,
+  pub source_provenance: Option<RulepackSourceProvenance>,
   pub pin_variables: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct RulepackSourceProvenance {
+  pub source_url: String,
+  pub source_sha256: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_openpgp_signature_url: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_openpgp_signer_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,6 +133,14 @@ struct RulepackMetadata {
   default_mode: WafMode,
   #[serde(default)]
   source_commit: Option<String>,
+  #[serde(default)]
+  source_url: Option<String>,
+  #[serde(default)]
+  source_sha256: Option<String>,
+  #[serde(default)]
+  source_openpgp_signature_url: Option<String>,
+  #[serde(default)]
+  source_openpgp_signer_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -276,6 +309,9 @@ impl ParsedRulepack {
     if let Some(commit) = options.source_commit {
       set_rulepack_string(&mut value, "source_commit", commit)?;
     }
+    if let Some(provenance) = options.source_provenance {
+      set_rulepack_provenance(&mut value, provenance)?;
+    }
     let document = document_from_value(value.clone(), source)?;
     validate_document_shape(&document, source)?;
     let rendered =
@@ -396,6 +432,10 @@ fn summary_from_document(
     group_files: document.group_files.len(),
     loaded_files,
     source_commit: document.rulepack.source_commit.clone(),
+    source_url: document.rulepack.source_url.clone(),
+    source_sha256: document.rulepack.source_sha256.clone(),
+    source_openpgp_signature_url: document.rulepack.source_openpgp_signature_url.clone(),
+    source_openpgp_signer_fingerprint: document.rulepack.source_openpgp_signer_fingerprint.clone(),
   }
 }
 
@@ -419,6 +459,18 @@ fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow:
   }
   for requirement in &document.rulepack.requires {
     validate_label(source, "rulepack.requires", requirement)?;
+  }
+  if let Some(value) = &document.rulepack.source_url {
+    validate_source_text(source, "rulepack.source_url", value)?;
+  }
+  if let Some(value) = &document.rulepack.source_sha256 {
+    validate_source_sha256(source, "rulepack.source_sha256", value)?;
+  }
+  if let Some(value) = &document.rulepack.source_openpgp_signature_url {
+    validate_source_text(source, "rulepack.source_openpgp_signature_url", value)?;
+  }
+  if let Some(value) = &document.rulepack.source_openpgp_signer_fingerprint {
+    validate_source_fingerprint(source, "rulepack.source_openpgp_signer_fingerprint", value)?;
   }
   if document.rules.is_empty() && document.group_files.is_empty() {
     bail!("{source} must contain at least one [[rules]] or [[group_files]] entry");

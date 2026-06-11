@@ -362,6 +362,37 @@ fn upstream_tls_status_documents_bounded_revocation_status() {
 }
 
 #[test]
+fn waf_rulepack_list_documents_optional_provenance_fields() {
+    let spec = openapi();
+    let response_schema = &spec["paths"]["/admin/v1/waf/rulepacks"]["get"]["responses"]["200"]["content"]
+        ["application/json"]["schema"];
+    assert_eq!(
+        response_schema["$ref"], "#/components/schemas/WafRulepackList",
+        "rulepack list response should use an explicit schema"
+    );
+    let summary = &spec["components"]["schemas"]["WafRulepackSummary"];
+    let required = json_string_set(&summary["required"], "WafRulepackSummary.required");
+    let properties = summary["properties"]
+        .as_object()
+        .expect("WafRulepackSummary properties should be an object");
+    for field in [
+        "source_url",
+        "source_sha256",
+        "source_openpgp_signature_url",
+        "source_openpgp_signer_fingerprint",
+    ] {
+        assert!(
+            properties.contains_key(field),
+            "WafRulepackSummary should document optional {field}"
+        );
+        assert!(
+            !required.contains(field),
+            "WafRulepackSummary {field} must remain optional"
+        );
+    }
+}
+
+#[test]
 fn operational_lists_document_pagination_filter_and_sort_parameters() {
     let spec = openapi();
     for path in [

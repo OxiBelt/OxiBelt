@@ -144,6 +144,12 @@ upstream = "vaultwarden-origin"
     sha256: None,
     allow_unpinned_rulepack: false,
     allow_insecure_rulepack_url: false,
+    require_openpgp_signature: false,
+    openpgp_signature_url: None,
+    openpgp_signature_file: None,
+    openpgp_key_files: Vec::new(),
+    openpgp_keyring_dirs: Vec::new(),
+    openpgp_fingerprints: Vec::new(),
     git_ref: None,
   };
 
@@ -161,6 +167,47 @@ upstream = "vaultwarden-origin"
 
   assert_eq!(inputs.bindings[0].name, "route_name");
   assert!(command.contains("--bind route_name=mmsecretvault"));
+}
+
+#[test]
+fn source_command_parts_preserve_openpgp_url_options() {
+  let source_args = RulepackSourceArgs {
+    file: None,
+    dir: None,
+    url: Some(
+      "https://packs.example.test/pack.oxirule-rulepack.toml?token=secret"
+        .parse()
+        .expect("url"),
+    ),
+    git: None,
+    manifest: std::path::PathBuf::from("rulepack.oxirule-rulepack.toml"),
+    ca_certs: Vec::new(),
+    token_env: Some("RULEPACK_TOKEN".to_string()),
+    sha256: None,
+    allow_unpinned_rulepack: false,
+    allow_insecure_rulepack_url: false,
+    require_openpgp_signature: true,
+    openpgp_signature_url: Some(
+      "https://packs.example.test/pack.oxirule-rulepack.toml.sig?token=secret"
+        .parse()
+        .expect("signature url"),
+    ),
+    openpgp_signature_file: None,
+    openpgp_key_files: vec![std::path::PathBuf::from("publisher.asc")],
+    openpgp_keyring_dirs: vec![std::path::PathBuf::from("trusted-publishers")],
+    openpgp_fingerprints: vec!["0123456789abcdef0123456789abcdef01234567".to_string()],
+    git_ref: None,
+  };
+
+  let command = source_command_parts(&source_args).join(" ");
+
+  assert!(command.contains("--require-rulepack-openpgp-signature"));
+  assert!(command.contains("--rulepack-openpgp-signature-url"));
+  assert!(command.contains("https://packs.example.test/pack.oxirule-rulepack.toml.sig"));
+  assert!(!command.contains("token=secret"));
+  assert!(command.contains("--rulepack-openpgp-key publisher.asc"));
+  assert!(command.contains("--rulepack-openpgp-keyring trusted-publishers"));
+  assert!(command.contains("--rulepack-openpgp-fingerprint 0123456789abcdef"));
 }
 
 #[test]

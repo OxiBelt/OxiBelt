@@ -43,6 +43,7 @@ kube = { version = "3.1.0", default-features = false, features = ["client", "run
 libc = "0.2"
 md-5 = "0.11"
 nix = { version = "0.31", default-features = false, features = ["fs", "process", "signal", "socket", "zerocopy"] }
+pgp = { version = "0.19", default-features = false }
 regex = "1"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
@@ -77,6 +78,7 @@ aws-lc-rs = { version = "1", default-features = false, features = ["bindgen"] }
 [dev-dependencies]
 clubcard = { version = "0.3", features = ["builder"] }
 pretty_assertions = "1"
+rand = "0.8"
 
 [[bin]]
 name = "oxibelt-docker-integration-matrix"

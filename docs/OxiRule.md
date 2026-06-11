@@ -212,7 +212,34 @@ status = 429
 
 Each `[[rules]]` entry declares the rule metadata and uses either inline `content` or `path = "rules/name.oxirule.toml"`. Each `[[group_files]]` entry uses either inline `content` or `path = "groups/name.oxirule-group.toml"`. Referenced paths resolve under the OxiRule directory and must stay normalized relative paths. `default_mode` defaults to `monitor`; rule-level `mode` overrides it.
 
-Use `oxibeltctl rulepack inspect`, `render`, `check`, `fit`, and `apply` to work with local files, directories, HTTPS bundles, or `git+https://` repositories. URL installs require `--sha256` unless `--allow-unpinned-rulepack` is set; `git+https://` installs require `--git-ref` and record the resolved commit in the installed manifest.
+Use `oxibeltctl rulepack inspect`, `render`, `check`, `fit`, and `apply` to work with local files, directories, HTTPS bundles, or `git+https://` repositories. URL installs verify transport and trust before UTF-8/TOML parsing, rendering, route fitting, or apply. HTTPS rulepacks may be installed unsigned, but `apply` still requires `--sha256` unless `--allow-unpinned-rulepack` is set. A valid detached OpenPGP signature from a locally trusted public key also satisfies the apply pin. HTTP rulepacks additionally require `--allow-insecure-rulepack-url` and a valid detached OpenPGP signature; `--sha256` and `--allow-unpinned-rulepack` do not bypass that signature requirement. `git+https://` installs require `--git-ref` and record the resolved commit in the installed manifest.
+
+```bash
+oxibeltctl rulepack apply \
+  --url https://packs.example.test/vaultwarden.oxirule-rulepack.toml \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+oxibeltctl rulepack apply \
+  --url https://packs.example.test/vaultwarden.oxirule-rulepack.toml \
+  --rulepack-openpgp-signature-url https://packs.example.test/vaultwarden.oxirule-rulepack.toml.sig \
+  --rulepack-openpgp-keyring /etc/oxibelt/oxirule/trusted-rulepack-publishers
+
+oxibeltctl rulepack apply \
+  --url http://packs.internal/vaultwarden.oxirule-rulepack.toml \
+  --allow-insecure-rulepack-url \
+  --rulepack-openpgp-signature-url http://packs.internal/vaultwarden.oxirule-rulepack.toml.sig \
+  --rulepack-openpgp-keyring /etc/oxibelt/oxirule/trusted-rulepack-publishers
+
+oxibeltctl rulepack apply \
+  --url https://packs.example.test/vaultwarden.oxirule-rulepack.toml \
+  --rulepack-openpgp-signature-file vaultwarden.oxirule-rulepack.toml.sig \
+  --rulepack-openpgp-key publisher.asc \
+  --rulepack-openpgp-fingerprint 0123456789abcdef0123456789abcdef01234567
+```
+
+OpenPGP trust uses public keys only. `--rulepack-openpgp-key FILE` adds repeatable per-command trusted public keys. `--rulepack-openpgp-keyring DIR` adds repeatable trust-store directories. If no explicit trust material is supplied, `oxibeltctl` checks `OXIBELT_RULEPACK_OPENPGP_KEYRING_DIR`, then `/etc/oxibelt/oxirule/trusted-rulepack-publishers` when that directory exists. Fingerprint pins must be full 40- or 64-character hex OpenPGP fingerprints. Rulepack and signature URLs must not include usernames or passwords; use `--rulepack-token-env` for bearer auth. That token is sent to the signature URL only when it has the same scheme, host, and port as the rulepack URL.
+
+When a URL rulepack is rendered for install, OxiBelt records optional `[rulepack]` provenance fields in the installed manifest: `source_url`, `source_sha256`, `source_openpgp_signature_url`, and `source_openpgp_signer_fingerprint`. URLs are sanitized before recording.
 
 Route bindings separate local OxiBelt objects from general render variables. The preferred form is an explicit `[[bindings]]` entry that declares the object to discover and the variable it renders into:
 

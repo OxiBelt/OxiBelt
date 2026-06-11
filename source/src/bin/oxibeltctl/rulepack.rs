@@ -4,15 +4,13 @@ use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use http::{HeaderValue, Method, Request, StatusCode};
+use http::{Method, StatusCode};
 use oxibelt::admin_client::{AdminClient, AdminResponse};
-use oxibelt::control_http::{ControlHttpClient, empty_body};
 use oxibelt::waf::{
   RULEPACK_FILE_SUFFIX, RulepackModeOverride, RulepackReferencedFileKind, RulepackRenderOptions,
-  inspect_rulepack, referenced_rulepack_files, render_rulepack_for_install,
-  validate_rulepack_manifest,
+  RulepackSourceProvenance, inspect_rulepack, referenced_rulepack_files,
+  render_rulepack_for_install, validate_rulepack_manifest,
 };
-use ring::digest;
 use serde_json::{Value, json};
 use url::Url;
 
@@ -22,8 +20,11 @@ use crate::cli::{
 };
 use crate::output::{print_permission_hint, print_response};
 use crate::plan::{PermissionHint, RequestPlan};
-
-const MAX_RULEPACK_BYTES: usize = 1024 * 1024;
+use crate::rulepack_url::load_url_source;
+#[cfg(test)]
+use crate::rulepack_url::{
+  ensure_manifest_url_suffix, same_origin, validate_rulepack_signature_url, validate_rulepack_url,
+};
 
 pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<bool> {
   let Command::Rulepack(command) = command else {
@@ -59,6 +60,7 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
           args.mode,
           args.force_mode,
           loaded.git_commit.clone(),
+          loaded.source_provenance.clone(),
         ),
       )?;
       print!("{rendered}");
@@ -75,7 +77,13 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
         &binds,
         true,
       )?;
-      let options = render_options(render_vars, None, false, loaded.git_commit.clone());
+      let options = render_options(
+        render_vars,
+        None,
+        false,
+        loaded.git_commit.clone(),
+        loaded.source_provenance.clone(),
+      );
       let rendered_manifest =
         render_rulepack_for_install(&loaded.manifest, &loaded.source_label, options.clone())?;
       validate_rulepack_manifest(&rendered_manifest)?;
@@ -192,6 +200,7 @@ async fn plan_rulepack_apply(
     Some(args.mode),
     args.force_mode,
     loaded.git_commit.clone(),
+    loaded.source_provenance.clone(),
   );
   let rendered_manifest =
     render_rulepack_for_install(&loaded.manifest, &loaded.source_label, options.clone())?;
@@ -347,7 +356,25 @@ pub(crate) struct LoadedRulepackSource {
   pub(crate) base_dir: Option<PathBuf>,
   pub(crate) source_label: String,
   pub(crate) git_commit: Option<String>,
+  pub(crate) source_provenance: Option<RulepackSourceProvenance>,
   _temp_dir: Option<TempTree>,
+}
+
+impl LoadedRulepackSource {
+  pub(crate) fn from_url(
+    manifest: String,
+    source_label: String,
+    source_provenance: RulepackSourceProvenance,
+  ) -> anyhow::Result<Self> {
+    Ok(Self {
+      manifest,
+      base_dir: None,
+      source_label,
+      git_commit: None,
+      source_provenance: Some(source_provenance),
+      _temp_dir: None,
+    })
+  }
 }
 
 async fn load_rulepack_source(
@@ -373,6 +400,7 @@ fn load_file_source(path: &Path) -> anyhow::Result<LoadedRulepackSource> {
     base_dir: path.parent().map(Path::to_path_buf),
     source_label: format!("file {}", path.display()),
     git_commit: None,
+    source_provenance: None,
     _temp_dir: None,
   })
 }
@@ -391,31 +419,8 @@ fn load_dir_source(
     base_dir: Some(dir.to_path_buf()),
     source_label: format!("directory {}", dir.display()),
     git_commit: temp_dir.as_ref().and_then(|temp| temp.commit.clone()),
+    source_provenance: None,
     _temp_dir: temp_dir,
-  })
-}
-
-async fn load_url_source(
-  args: &RulepackSourceArgs,
-  url: &Url,
-  timeout: Duration,
-  require_pin: bool,
-) -> anyhow::Result<LoadedRulepackSource> {
-  validate_rulepack_url(url, args.allow_insecure_rulepack_url)?;
-  ensure_manifest_url_suffix(url)?;
-  if require_pin && args.sha256.is_none() && !args.allow_unpinned_rulepack {
-    bail!("rulepack apply from URL requires --sha256 unless --allow-unpinned-rulepack is set");
-  }
-  let bytes = download_rulepack(url, &args.ca_certs, args.token_env.as_deref(), timeout).await?;
-  if let Some(expected) = args.sha256.as_deref() {
-    verify_sha256(expected, &bytes)?;
-  }
-  Ok(LoadedRulepackSource {
-    manifest: String::from_utf8(bytes).context("rulepack URL body was not UTF-8")?,
-    base_dir: None,
-    source_label: format!("URL {}", diagnostic_url(url)),
-    git_commit: None,
-    _temp_dir: None,
   })
 }
 
@@ -432,38 +437,6 @@ fn load_git_source(
   let temp = clone_git_source(&clone_url, git_ref)?;
   let dir = temp.path().to_path_buf();
   load_dir_source(&dir, &args.manifest, Some(temp))
-}
-
-async fn download_rulepack(
-  url: &Url,
-  ca_certs: &[PathBuf],
-  token_env: Option<&str>,
-  timeout: Duration,
-) -> anyhow::Result<Vec<u8>> {
-  let client = ControlHttpClient::new(ca_certs).context("failed to build rulepack HTTP client")?;
-  let uri = oxibelt::control_http::uri_from_url(&request_url(url))?;
-  let mut builder = Request::builder()
-    .method(Method::GET)
-    .uri(uri)
-    .header(http::header::ACCEPT, "application/toml, text/plain");
-  if let Some(token_env) = token_env {
-    builder = builder.header(http::header::AUTHORIZATION, bearer_header(token_env)?);
-  }
-  let request = builder
-    .body(empty_body())
-    .context("failed to build rulepack request")?;
-  let response = client
-    .request(request, timeout, MAX_RULEPACK_BYTES)
-    .await
-    .with_context(|| format!("failed to download rulepack from {}", diagnostic_url(url)))?;
-  if !response.status.is_success() {
-    bail!(
-      "rulepack download from {} failed with {}",
-      diagnostic_url(url),
-      response.status
-    );
-  }
-  Ok(response.body.to_vec())
 }
 
 fn clone_git_source(clone_url: &str, git_ref: Option<&str>) -> anyhow::Result<TempTree> {
@@ -505,18 +478,6 @@ fn run_git_command(command: &mut ProcessCommand, label: &str) -> anyhow::Result<
   Ok(())
 }
 
-fn validate_rulepack_url(url: &Url, allow_insecure: bool) -> anyhow::Result<()> {
-  if !url.username().is_empty() || url.password().is_some() {
-    bail!("rulepack URL must not include username or password; use --rulepack-token-env");
-  }
-  match url.scheme() {
-    "https" => Ok(()),
-    "http" if allow_insecure => Ok(()),
-    "http" => bail!("rulepack URL requires https unless --allow-insecure-rulepack-url is set"),
-    scheme => bail!("rulepack URL must use http or https, got {scheme}"),
-  }
-}
-
 fn validate_git_url(git: &str) -> anyhow::Result<String> {
   let Some(clone_url) = git.strip_prefix("git+") else {
     bail!("--git must use git+https:// URLs");
@@ -536,6 +497,7 @@ fn render_options(
   mode: Option<RulepackModeArg>,
   force_mode: bool,
   source_commit: Option<String>,
+  source_provenance: Option<RulepackSourceProvenance>,
 ) -> RulepackRenderOptions {
   RulepackRenderOptions {
     variables,
@@ -544,6 +506,7 @@ fn render_options(
       force: force_mode,
     }),
     source_commit,
+    source_provenance,
     pin_variables: false,
   }
 }
@@ -599,13 +562,6 @@ fn ensure_manifest_suffix(path: &Path) -> anyhow::Result<()> {
   };
   if !value.ends_with(RULEPACK_FILE_SUFFIX) {
     bail!("rulepack manifest path must end with {RULEPACK_FILE_SUFFIX}");
-  }
-  Ok(())
-}
-
-fn ensure_manifest_url_suffix(url: &Url) -> anyhow::Result<()> {
-  if !url.path().ends_with(RULEPACK_FILE_SUFFIX) {
-    bail!("rulepack URL path must end with {RULEPACK_FILE_SUFFIX}");
   }
   Ok(())
 }
@@ -666,53 +622,6 @@ fn join_local_source_path(base_dir: &Path, relative: &Path) -> anyhow::Result<Pa
     path.push(part);
   }
   Ok(path)
-}
-
-fn verify_sha256(expected: &str, bytes: &[u8]) -> anyhow::Result<()> {
-  let expected = expected.trim();
-  if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-    bail!("--sha256 must be a 64-character hex SHA-256 digest");
-  }
-  let actual = hex_encode(digest::digest(&digest::SHA256, bytes).as_ref());
-  if !actual.eq_ignore_ascii_case(expected) {
-    bail!("rulepack SHA-256 mismatch: expected {expected}, got {actual}");
-  }
-  Ok(())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-  let mut out = String::with_capacity(bytes.len() * 2);
-  for byte in bytes {
-    use std::fmt::Write;
-    write!(&mut out, "{byte:02x}").expect("hex write should succeed");
-  }
-  out
-}
-
-fn bearer_header(token_env: &str) -> anyhow::Result<HeaderValue> {
-  let token = std::env::var(token_env)
-    .with_context(|| format!("rulepack token environment variable {token_env} is not set"))?;
-  let token = token.trim();
-  if token.is_empty() {
-    bail!("rulepack token environment variable {token_env} is empty");
-  }
-  HeaderValue::from_str(&format!("Bearer {token}"))
-    .context("rulepack bearer token is not header-safe")
-}
-
-fn request_url(url: &Url) -> Url {
-  let mut request_url = url.clone();
-  request_url.set_fragment(None);
-  request_url
-}
-
-fn diagnostic_url(url: &Url) -> String {
-  let mut diagnostic_url = url.clone();
-  let _ = diagnostic_url.set_username("");
-  let _ = diagnostic_url.set_password(None);
-  diagnostic_url.set_query(None);
-  diagnostic_url.set_fragment(None);
-  diagnostic_url.to_string()
 }
 
 fn permission(action: &str, resource: &str) -> PermissionHint {

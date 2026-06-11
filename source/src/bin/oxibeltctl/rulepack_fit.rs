@@ -661,6 +661,29 @@ fn source_command_parts(args: &RulepackSourceArgs) -> Vec<String> {
     if args.allow_insecure_rulepack_url {
       parts.push("--allow-insecure-rulepack-url".to_string());
     }
+    if args.require_openpgp_signature {
+      parts.push("--require-rulepack-openpgp-signature".to_string());
+    }
+    if let Some(signature_url) = &args.openpgp_signature_url {
+      parts.push("--rulepack-openpgp-signature-url".to_string());
+      parts.push(safe_command_url(signature_url));
+    }
+    if let Some(signature_file) = &args.openpgp_signature_file {
+      parts.push("--rulepack-openpgp-signature-file".to_string());
+      parts.push(signature_file.to_string_lossy().to_string());
+    }
+    for key_file in &args.openpgp_key_files {
+      parts.push("--rulepack-openpgp-key".to_string());
+      parts.push(key_file.to_string_lossy().to_string());
+    }
+    for keyring_dir in &args.openpgp_keyring_dirs {
+      parts.push("--rulepack-openpgp-keyring".to_string());
+      parts.push(keyring_dir.to_string_lossy().to_string());
+    }
+    for fingerprint in &args.openpgp_fingerprints {
+      parts.push("--rulepack-openpgp-fingerprint".to_string());
+      parts.push(fingerprint.clone());
+    }
   } else if let Some(git) = &args.git {
     parts.push("--git".to_string());
     parts.push(git.clone());

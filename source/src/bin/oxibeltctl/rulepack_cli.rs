@@ -113,6 +113,36 @@ pub(crate) struct RulepackSourceArgs {
   pub(crate) allow_unpinned_rulepack: bool,
   #[arg(long = "allow-insecure-rulepack-url", requires = "url")]
   pub(crate) allow_insecure_rulepack_url: bool,
+  #[arg(long = "require-rulepack-openpgp-signature", requires = "url")]
+  pub(crate) require_openpgp_signature: bool,
+  #[arg(
+    long = "rulepack-openpgp-signature-url",
+    value_name = "URL",
+    requires = "url",
+    conflicts_with = "openpgp_signature_file"
+  )]
+  pub(crate) openpgp_signature_url: Option<Url>,
+  #[arg(
+    long = "rulepack-openpgp-signature-file",
+    value_name = "FILE",
+    requires = "url",
+    conflicts_with = "openpgp_signature_url"
+  )]
+  pub(crate) openpgp_signature_file: Option<PathBuf>,
+  #[arg(long = "rulepack-openpgp-key", value_name = "FILE", requires = "url")]
+  pub(crate) openpgp_key_files: Vec<PathBuf>,
+  #[arg(
+    long = "rulepack-openpgp-keyring",
+    value_name = "DIR",
+    requires = "url"
+  )]
+  pub(crate) openpgp_keyring_dirs: Vec<PathBuf>,
+  #[arg(
+    long = "rulepack-openpgp-fingerprint",
+    value_name = "HEX",
+    requires = "url"
+  )]
+  pub(crate) openpgp_fingerprints: Vec<String>,
   #[arg(long = "git-ref", requires = "git")]
   pub(crate) git_ref: Option<String>,
 }

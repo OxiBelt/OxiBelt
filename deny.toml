@@ -5,4 +5,9 @@ ignore = [
   # No patched upstream release is available, and replacing the CRLite parser
   # is a larger revocation-format compatibility change tracked separately.
   "RUSTSEC-2025-0141",
+  # RUSTSEC-2023-0071 is currently transitive through pgp 0.19.0 for OpenPGP
+  # parsing and detached signature verification. OxiBelt does not use pgp for
+  # RSA private-key decryption or signing, and no patched pgp/rsa release is
+  # available for this dependency path.
+  "RUSTSEC-2023-0071",
 ]

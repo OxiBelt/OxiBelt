@@ -131,6 +131,51 @@ fn force_mode_sets_rule_modes() {
 }
 
 #[test]
+fn render_records_url_source_provenance() {
+  let raw = minimal_rulepack("true");
+  let rendered = render_rulepack_for_install(
+    &raw,
+    "test rulepack",
+    RulepackRenderOptions {
+      source_provenance: Some(RulepackSourceProvenance {
+        source_url: "https://packs.example.test/demo.oxirule-rulepack.toml".to_string(),
+        source_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          .to_string(),
+        source_openpgp_signature_url: Some(
+          "https://packs.example.test/demo.oxirule-rulepack.toml.sig".to_string(),
+        ),
+        source_openpgp_signer_fingerprint: Some(
+          "0123456789abcdef0123456789abcdef01234567".to_string(),
+        ),
+      }),
+      ..RulepackRenderOptions::default()
+    },
+  )
+  .expect("render");
+
+  assert!(
+    rendered.contains("source_url = \"https://packs.example.test/demo.oxirule-rulepack.toml\"")
+  );
+  assert!(rendered.contains(
+    "source_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\""
+  ));
+  assert!(rendered.contains("source_openpgp_signature_url"));
+  let inspection = inspect_rulepack(
+    &rendered,
+    "rendered rulepack",
+    RulepackRenderOptions::default(),
+  )
+  .expect("inspect");
+  assert_eq!(
+    inspection
+      .summary
+      .source_openpgp_signer_fingerprint
+      .as_deref(),
+    Some("0123456789abcdef0123456789abcdef01234567")
+  );
+}
+
+#[test]
 fn schema_v2_exposes_route_binding_metadata() {
   let raw = r#"[rulepack]
 schema_version = 2
