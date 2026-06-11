@@ -50,7 +50,6 @@ where
   B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
   async move {
-    let size_hint = body.size_hint();
     let mut body = body;
     let first = match fast_path_poll_request_body_once(Pin::new(&mut body)) {
       Poll::Ready(None) => return empty_body(),
@@ -76,7 +75,7 @@ where
         PeekedRequestBody {
           first,
           body,
-          size_hint,
+          size_hint: SizeHint::new(),
         },
         max_body_bytes,
       ),

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::future::poll_fn;
 use std::pin::Pin;
-use std::sync::{Mutex, TryLockError};
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use ::http::Request;
@@ -160,18 +160,11 @@ where
       return Poll::Ready(None);
     }
 
-    let poll = {
-      let mut stream = match this.stream.try_lock() {
-        Ok(stream) => stream,
-        Err(TryLockError::WouldBlock) => {
-          cx.waker().wake_by_ref();
-          return Poll::Pending;
-        }
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-      };
-      stream.poll_recv_data_bytes(cx)
+    let stream = match this.stream.get_mut() {
+      Ok(stream) => stream,
+      Err(poisoned) => poisoned.into_inner(),
     };
-    match poll {
+    match stream.poll_recv_data_bytes(cx) {
       Poll::Ready(Ok(Some(chunk))) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
       Poll::Ready(Ok(None)) => {
         this.ended = true;

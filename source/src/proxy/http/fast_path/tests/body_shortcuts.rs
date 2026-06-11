@@ -396,17 +396,19 @@ async fn h2_h3_empty_probe_preserves_data_and_trailers() {
     h2_content_length_zero.headers()
   ));
 
-  let data = fast_path_request_body(
+  let data_body = fast_path_request_body(
     ZeroSizeHintDataBody { yielded: false },
     1024,
     Duration::from_millis(100),
     false,
     true,
   )
-  .await
-  .collect()
-  .await
-  .expect("zero-size-hint data body should collect");
+  .await;
+  assert_ne!(data_body.size_hint().upper(), Some(0));
+  let data = data_body
+    .collect()
+    .await
+    .expect("zero-size-hint data body should collect");
   assert_eq!(data.to_bytes(), Bytes::from_static(b"data"));
 
   let trailers = fast_path_request_body(

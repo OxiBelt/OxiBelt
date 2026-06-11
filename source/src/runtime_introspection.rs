@@ -14,6 +14,7 @@ const RUNTIME_INTROSPECTION_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Default)]
 pub struct RuntimeIntrospectionState {
+  enabled: AtomicUsize,
   downstream_https_tcp_connections: AtomicUsize,
   plain_http_connections: AtomicUsize,
   http1_connections: AtomicUsize,
@@ -35,10 +36,20 @@ impl RuntimeIntrospectionState {
     Arc::new(Self::default())
   }
 
+  pub fn set_enabled(&self, enabled: bool) {
+    self.enabled.store(usize::from(enabled), Ordering::Relaxed);
+  }
+
   pub fn guard(self: &Arc<Self>, counter: RuntimeIntrospectionCounter) -> RuntimeCounterGuard {
+    if self.enabled.load(Ordering::Relaxed) == 0 {
+      return RuntimeCounterGuard {
+        state: None,
+        counter,
+      };
+    }
     self.increment(counter);
     RuntimeCounterGuard {
-      state: self.clone(),
+      state: Some(self.clone()),
       counter,
     }
   }
@@ -134,13 +145,15 @@ pub enum RuntimeIntrospectionCounter {
 }
 
 pub struct RuntimeCounterGuard {
-  state: Arc<RuntimeIntrospectionState>,
+  state: Option<Arc<RuntimeIntrospectionState>>,
   counter: RuntimeIntrospectionCounter,
 }
 
 impl Drop for RuntimeCounterGuard {
   fn drop(&mut self) {
-    self.state.decrement(self.counter);
+    if let Some(state) = &self.state {
+      state.decrement(self.counter);
+    }
   }
 }
 
@@ -230,6 +243,7 @@ mod tests {
   #[test]
   fn guards_increment_and_decrement_active_counters() {
     let state = RuntimeIntrospectionState::new();
+    state.set_enabled(true);
     {
       let _guard = state.guard(RuntimeIntrospectionCounter::Http2Stream);
       assert_eq!(state.connections().http.http2_streams_active, 1);
@@ -239,8 +253,20 @@ mod tests {
   }
 
   #[test]
+  fn disabled_guards_do_not_touch_active_counters() {
+    let state = RuntimeIntrospectionState::new();
+    {
+      let _guard = state.guard(RuntimeIntrospectionCounter::Http2Stream);
+      assert_eq!(state.connections().http.http2_streams_active, 0);
+    }
+
+    assert_eq!(state.connections().http.http2_streams_active, 0);
+  }
+
+  #[test]
   fn serialized_connections_include_grouped_fields() {
     let state = RuntimeIntrospectionState::new();
+    state.set_enabled(true);
     let _https = state.guard(RuntimeIntrospectionCounter::DownstreamHttpsTcpConnection);
     let _webtransport = state.guard(RuntimeIntrospectionCounter::WebTransportSession);
     let value = serde_json::to_value(state.connections()).expect("connections should serialize");

@@ -116,10 +116,12 @@ pub(super) async fn handle_connection(
   };
   let request_count = Arc::new(AtomicUsize::new(served_requests));
   let request_state = snapshot.clone();
+  let tls_metadata = Arc::new(WafTlsMetadata::default());
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = request_state.clone();
     let request_count = request_count.clone();
     let connection_limit_context = connection_limit_context.clone();
+    let tls_metadata = tls_metadata.clone();
     let drain = drain.clone();
     async move {
       let _request_guard = state
@@ -141,7 +143,7 @@ pub(super) async fn handle_connection(
               peer_addr,
               None,
               transport_metadata,
-              Arc::new(WafTlsMetadata::default()),
+              tls_metadata,
               connection_limit_context.clone(),
               state,
               "http",

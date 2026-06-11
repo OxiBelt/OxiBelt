@@ -82,12 +82,7 @@ pub(crate) fn select_request_upstream<'a>(
     .ok_or(UpstreamSelectionError::MissingRouteUpstream)?;
   let upstream_index = resolved
     .upstream_index
-    .or_else(|| {
-      state
-        .upstreams
-        .iter()
-        .position(|item| item.name == upstream.name)
-    })
+    .or_else(|| state.clients.upstream_index(&upstream.name))
     .ok_or(UpstreamSelectionError::MissingRouteUpstream)?;
   Ok(SelectedUpstream {
     upstream,
@@ -153,8 +148,20 @@ fn find_upstream_by_name<'a>(
   upstream_name: &str,
 ) -> Option<(usize, &'a UpstreamConfig)> {
   state
-    .upstreams
-    .iter()
-    .enumerate()
-    .find(|(_, upstream)| upstream.name == upstream_name)
+    .clients
+    .upstream_index(upstream_name)
+    .and_then(|upstream_index| {
+      state
+        .upstreams
+        .get(upstream_index)
+        .filter(|upstream| upstream.name == upstream_name)
+        .map(|upstream| (upstream_index, upstream))
+    })
+    .or_else(|| {
+      state
+        .upstreams
+        .iter()
+        .enumerate()
+        .find(|(_, upstream)| upstream.name == upstream_name)
+    })
 }
