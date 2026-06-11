@@ -420,19 +420,6 @@ async fn eligible_static_plan(
   if let Some(access_log) = access_log.as_mut() {
     access_log.client_addr = client_addr;
   }
-  #[cfg(target_os = "linux")]
-  let mut plan = static_files::plan_response_without_hot_object_cache_inline_openat2(
-    &request.method,
-    &request.headers,
-    request_path,
-    &resolved.route.name,
-    resolved.route.effective_path_prefix(),
-    static_root,
-    &resolved.route.static_files,
-    &snapshot.static_files,
-  )
-  .await;
-  #[cfg(not(target_os = "linux"))]
   let mut plan = static_files::plan_response_without_hot_object_cache(
     &request.method,
     &request.headers,

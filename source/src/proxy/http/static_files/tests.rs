@@ -249,6 +249,73 @@ async fn linux_openat2_fifo_open_does_not_block_runtime_worker() {
 }
 
 #[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn linux_no_hot_cache_plan_fifo_open_does_not_block_runtime_worker() {
+  use std::os::unix::fs::OpenOptionsExt;
+  use std::time::Instant;
+
+  let temp_dir = common::TempDir::new("static-plan-openat2-fifo");
+  let root = temp_dir.path().join("public");
+  let probe = root.join("probe.txt");
+  let fifo = root.join("blocked.fifo");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(&probe, "openat2 probe").await.unwrap();
+
+  let runtime = runtime_for_root(&root, ProxyStaticFilesConfig::default());
+  let root_handle = runtime.root_handle(&root);
+  let Some(_) = open_verified_file_with_openat2_for_tests(&root_handle, &probe)
+    .await
+    .expect("openat2 helper should not fail when the syscall is available")
+  else {
+    return;
+  };
+
+  make_fifo(&fifo);
+  let writer_fifo = fifo.clone();
+  let writer = std::thread::spawn(move || {
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = std::fs::OpenOptions::new()
+      .write(true)
+      .custom_flags(libc::O_NONBLOCK)
+      .open(&writer_fifo);
+  });
+  let plan_task = tokio::spawn({
+    let root = root.clone();
+    let runtime = runtime.clone();
+    async move {
+      let headers = HeaderMap::new();
+      let static_options = RouteStaticFilesConfig::default();
+      plan_response_without_hot_object_cache(
+        &Method::GET,
+        &headers,
+        "/assets/blocked.fifo",
+        "assets",
+        "/assets",
+        &root,
+        &static_options,
+        &runtime,
+      )
+      .await
+    }
+  });
+
+  let started = Instant::now();
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  let elapsed = started.elapsed();
+  assert!(
+    elapsed < Duration::from_millis(350),
+    "no-hot-cache FIFO planning delayed the single Tokio worker for {elapsed:?}"
+  );
+
+  let plan = tokio::time::timeout(Duration::from_secs(2), plan_task)
+    .await
+    .expect("FIFO plan task should finish after the writer opens")
+    .expect("FIFO plan task should not panic");
+  writer.join().expect("FIFO writer thread should not panic");
+  assert_eq!(plan.status, StatusCode::FORBIDDEN);
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn linux_openat2_rejects_static_root_swap_after_validation() {
   let temp_dir = common::TempDir::new("static-openat2-root-swap");

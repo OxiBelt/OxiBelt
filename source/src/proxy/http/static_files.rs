@@ -24,8 +24,6 @@ mod route_options;
 mod runtime;
 pub(in crate::proxy::http) use self::finalize::finalize_response;
 pub(crate) use self::finalize::static_response_send_timeout;
-#[cfg(target_os = "linux")]
-use self::open::open_verified_file_with_inline_openat2;
 #[cfg(all(test, target_os = "linux"))]
 use self::open::open_verified_file_with_openat2_for_tests;
 #[cfg(test)]
@@ -71,13 +69,6 @@ struct StaticErrorPage<'a> {
   status: StatusCode,
   fallback_message: &'a str,
   page: Option<&'a str>,
-}
-
-#[derive(Clone, Copy)]
-enum StaticOpenMode {
-  Default,
-  #[cfg(target_os = "linux")]
-  InlineOpenat2,
 }
 
 pub(crate) fn validate_static_root(path: &Path) -> anyhow::Result<PathBuf> {
@@ -140,12 +131,10 @@ pub(crate) async fn plan_response(
     static_options,
     runtime,
     true,
-    StaticOpenMode::Default,
   )
   .await
 }
 
-#[cfg(not(target_os = "linux"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_response_without_hot_object_cache(
   method: &Method,
@@ -167,34 +156,6 @@ pub(crate) async fn plan_response_without_hot_object_cache(
     static_options,
     runtime,
     false,
-    StaticOpenMode::Default,
-  )
-  .await
-}
-
-#[cfg(target_os = "linux")]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn plan_response_without_hot_object_cache_inline_openat2(
-  method: &Method,
-  headers: &HeaderMap,
-  request_path: &str,
-  route_name: &str,
-  route_prefix: &str,
-  static_root: &Path,
-  static_options: &RouteStaticFilesConfig,
-  runtime: &StaticFilesRuntime,
-) -> StaticResponsePlan {
-  plan_response_inner(
-    method,
-    headers,
-    request_path,
-    route_name,
-    route_prefix,
-    static_root,
-    static_options,
-    runtime,
-    false,
-    StaticOpenMode::InlineOpenat2,
   )
   .await
 }
@@ -210,7 +171,6 @@ async fn plan_response_inner(
   static_options: &RouteStaticFilesConfig,
   runtime: &StaticFilesRuntime,
   allow_hot_object_cache: bool,
-  open_mode: StaticOpenMode,
 ) -> StaticResponsePlan {
   if method != Method::GET && method != Method::HEAD {
     let mut plan = text_plan(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
@@ -243,7 +203,6 @@ async fn plan_response_inner(
             runtime,
             static_options,
             allow_hot_object_cache,
-            open_mode,
           )
           .await;
         }
@@ -260,7 +219,6 @@ async fn plan_response_inner(
         runtime,
         static_options,
         allow_hot_object_cache,
-        open_mode,
       )
       .await;
     }
@@ -288,14 +246,13 @@ async fn plan_response_inner(
         runtime,
         static_options,
         allow_hot_object_cache,
-        open_mode,
       )
       .await;
     }
     StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
   }
 
-  match open_verified_file_for_mode(&root_handle, &requested_path, open_mode).await {
+  match open_verified_file_for_mode(&root_handle, &requested_path).await {
     Ok(opened) => {
       return plan_opened_file(
         method,
@@ -321,7 +278,6 @@ async fn plan_response_inner(
         runtime,
         static_options,
         allow_hot_object_cache,
-        open_mode,
       )
       .await
       {
@@ -345,7 +301,6 @@ async fn plan_response_inner(
     runtime,
     static_options,
     allow_hot_object_cache,
-    open_mode,
   )
   .await
   {
@@ -369,7 +324,6 @@ async fn plan_response_inner(
       true,
       true,
       allow_hot_object_cache,
-      open_mode,
     )
     .await
     {
@@ -397,7 +351,6 @@ async fn plan_response_inner(
         runtime,
         static_options,
         allow_hot_object_cache,
-        open_mode,
       )
       .await;
     }
@@ -416,7 +369,6 @@ async fn plan_response_inner(
       runtime,
       static_options,
       allow_hot_object_cache,
-      open_mode,
     )
     .await;
   }
@@ -432,7 +384,6 @@ async fn plan_response_inner(
     runtime,
     static_options,
     allow_hot_object_cache,
-    open_mode,
   )
   .await
 }
@@ -569,15 +520,7 @@ enum CandidatePlan {
 async fn open_verified_file_for_mode(
   root: &runtime::StaticRootHandle,
   path: &Path,
-  mode: StaticOpenMode,
 ) -> Result<OpenedStaticFile, StaticOpenError> {
-  #[cfg(target_os = "linux")]
-  if matches!(mode, StaticOpenMode::InlineOpenat2)
-    && let Some(opened) = open_verified_file_with_inline_openat2(root, path)?
-  {
-    return Ok(opened);
-  }
-
   open_verified_file(root, path).await
 }
 
@@ -593,10 +536,9 @@ async fn plan_candidate_path(
   allow_cache_control: bool,
   allow_precompressed: bool,
   allow_hot_object_cache: bool,
-  open_mode: StaticOpenMode,
 ) -> CandidatePlan {
   let root_handle = runtime.root_handle(root);
-  match open_verified_file_for_mode(&root_handle, &path, open_mode).await {
+  match open_verified_file_for_mode(&root_handle, &path).await {
     Ok(opened) => CandidatePlan::Found(Box::new(
       plan_opened_file(
         method,
@@ -630,7 +572,6 @@ async fn plan_directory_index(
   runtime: &StaticFilesRuntime,
   static_options: &RouteStaticFilesConfig,
   allow_hot_object_cache: bool,
-  open_mode: StaticOpenMode,
 ) -> CandidatePlan {
   for index in &static_options.directory_index {
     match plan_candidate_path(
@@ -644,7 +585,6 @@ async fn plan_directory_index(
       true,
       true,
       allow_hot_object_cache,
-      open_mode,
     )
     .await
     {
@@ -664,7 +604,6 @@ async fn plan_try_files(
   runtime: &StaticFilesRuntime,
   static_options: &RouteStaticFilesConfig,
   allow_hot_object_cache: bool,
-  open_mode: StaticOpenMode,
 ) -> CandidatePlan {
   let relative = relative_slash_path(root, requested_path);
   for candidate in &static_options.try_files {
@@ -680,7 +619,6 @@ async fn plan_try_files(
       true,
       true,
       allow_hot_object_cache,
-      open_mode,
     )
     .await
     {
@@ -698,7 +636,6 @@ async fn plan_custom_error_page(
   runtime: &StaticFilesRuntime,
   static_options: &RouteStaticFilesConfig,
   allow_hot_object_cache: bool,
-  open_mode: StaticOpenMode,
 ) -> StaticResponsePlan {
   let Some(page) = error_page.page else {
     return text_plan(error_page.status, error_page.fallback_message);
@@ -715,7 +652,6 @@ async fn plan_custom_error_page(
     false,
     false,
     allow_hot_object_cache,
-    open_mode,
   )
   .await
   {
