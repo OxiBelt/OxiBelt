@@ -79,12 +79,14 @@ impl RuntimeIntrospectionState {
   }
 
   fn decrement(&self, counter: RuntimeIntrospectionCounter) {
-    self
-      .counter(counter)
-      .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_sub(1))
-      })
-      .ok();
+    let previous = self.counter(counter).fetch_sub(1, Ordering::Relaxed);
+    debug_assert!(
+      previous > 0,
+      "runtime introspection counter decremented below zero"
+    );
+    if previous == 0 {
+      self.counter(counter).fetch_add(1, Ordering::Relaxed);
+    }
   }
 
   fn load(&self, counter: RuntimeIntrospectionCounter) -> usize {
@@ -110,11 +112,6 @@ impl RuntimeIntrospectionState {
       RuntimeIntrospectionCounter::TurnTcpConnection => &self.turn_tcp_connections,
       RuntimeIntrospectionCounter::TurnTlsConnection => &self.turn_tls_connections,
     }
-  }
-
-  #[cfg(test)]
-  fn decrement_for_test(&self, counter: RuntimeIntrospectionCounter) {
-    self.decrement(counter);
   }
 }
 
@@ -239,14 +236,6 @@ mod tests {
     }
 
     assert_eq!(state.connections().http.http2_streams_active, 0);
-  }
-
-  #[test]
-  fn counter_decrement_saturates_at_zero() {
-    let state = RuntimeIntrospectionState::default();
-    state.decrement_for_test(RuntimeIntrospectionCounter::WebSocketTunnel);
-
-    assert_eq!(state.connections().tunnels.websocket_active, 0);
   }
 
   #[test]

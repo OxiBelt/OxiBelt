@@ -22,6 +22,7 @@ use crate::proxy::http::response::{
 use crate::proxy::http::route_actions::{self, RouteActionRenderContext};
 use crate::proxy::http::semantics::{self, configured_error_response, filter_trailers};
 use crate::proxy::http::upstream::select_request_upstream;
+use crate::proxy::http::uri::{self, UpstreamUriParts};
 use crate::proxy::http::version::select_upstream_http_version;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
@@ -68,6 +69,35 @@ fn fast_path_upstream_timing_required(
 
 fn elapsed_ms(started_at: Instant) -> u64 {
   started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn fast_path_target_uri(
+  origin: &UpstreamUriParts,
+  resolved: &ResolvedRoute<'_>,
+  downstream_scheme: &str,
+  downstream_host: &str,
+  downstream_uri: &http::Uri,
+) -> anyhow::Result<http::Uri> {
+  if resolved.route.actions.rewrite.is_none() {
+    return uri::rewrite_uri(
+      origin,
+      resolved.route.effective_path_prefix(),
+      resolved.route.replace_prefix_with.as_deref(),
+      downstream_uri,
+    );
+  }
+
+  route_actions::build_upstream_uri(
+    origin,
+    resolved.route,
+    RouteActionRenderContext {
+      route_prefix: resolved.route.effective_path_prefix(),
+      path_captures: &resolved.path_captures,
+      downstream_scheme,
+      downstream_host,
+      downstream_uri,
+    },
+  )
 }
 
 pub(crate) struct PlainProxyFastPath;
@@ -246,23 +276,14 @@ impl PlainProxyFastPath {
       );
       return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
     };
-    let target_uri = match route_actions::build_upstream_uri(
-      upstream_uri,
-      resolved.route,
-      RouteActionRenderContext {
-        route_prefix: resolved.route.effective_path_prefix(),
-        path_captures: &resolved.path_captures,
-        downstream_scheme,
-        downstream_host: host,
-        downstream_uri: &parts.uri,
-      },
-    ) {
-      Ok(uri) => uri,
-      Err(error) => {
-        warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
-        return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
-      }
-    };
+    let target_uri =
+      match fast_path_target_uri(upstream_uri, resolved, downstream_scheme, host, &parts.uri) {
+        Ok(uri) => uri,
+        Err(error) => {
+          warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
+          return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+        }
+      };
 
     let rebuild = RebuildRequestOptions {
       target_uri,

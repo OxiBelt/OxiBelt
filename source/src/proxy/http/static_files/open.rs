@@ -112,6 +112,14 @@ async fn open_verified_file_with_openat2(
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn open_verified_file_with_inline_openat2(
+  root: &StaticRootHandle,
+  path: &Path,
+) -> Result<Option<OpenedStaticFile>, StaticOpenError> {
+  open_verified_file_with_openat2_blocking(root.root(), root.dir_fd(), path)
+}
+
+#[cfg(target_os = "linux")]
 fn open_verified_file_with_openat2_blocking(
   root: &Path,
   root_fd: Option<std::sync::Arc<std::os::fd::OwnedFd>>,

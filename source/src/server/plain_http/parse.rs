@@ -47,6 +47,7 @@ pub(super) async fn read_request(
   data_plane_drain: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<ReadRequestOutcome> {
   let started = tokio::time::Instant::now();
+  let mut chunk = [0_u8; READ_CHUNK_BYTES];
   loop {
     match parse_buffered_request(&buffer, max_headers) {
       ParseResult::Complete {
@@ -82,7 +83,7 @@ pub(super) async fn read_request(
       Some(value) if !value.is_zero() => value,
       _ => bail!("plain HTTP static sendfile header read timed out"),
     };
-    let mut chunk = vec![0_u8; READ_CHUNK_BYTES.min(max_header_bytes - buffer.len())];
+    let read_limit = READ_CHUNK_BYTES.min(max_header_bytes - buffer.len());
     let read = tokio::select! {
       biased;
       changed = shutdown.changed() => {
@@ -97,7 +98,7 @@ pub(super) async fn read_request(
         }
         continue;
       }
-      result = tokio::time::timeout(remaining_timeout, stream.read(&mut chunk)) => {
+      result = tokio::time::timeout(remaining_timeout, stream.read(&mut chunk[..read_limit])) => {
         result.context("plain HTTP static sendfile header read timed out")??
       }
     };
