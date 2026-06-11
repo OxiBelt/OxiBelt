@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::cli::{
-  Command, OutputFormat, RulepackApplyArgs, RulepackCommand, RulepackModeArg, RulepackRemoveArgs,
-  RulepackSourceArgs, RulepackSubcommand,
+  Command, OutputFormat, RulepackApplyArgs, RulepackCommand, RulepackFitArgs, RulepackModeArg,
+  RulepackRemoveArgs, RulepackSourceArgs, RulepackSubcommand,
 };
 use crate::output::{print_permission_hint, print_response};
 use crate::plan::{PermissionHint, RequestPlan};
@@ -42,23 +42,41 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
     }
     RulepackSubcommand::Render(args) => {
       let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
+      let vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+      let render_vars = crate::rulepack_fit::resolve_render_variables(
+        &loaded.manifest,
+        &loaded.source_label,
+        &vars,
+        &BTreeMap::new(),
+        true,
+      )?;
       let rendered = render_rulepack_for_install(
         &loaded.manifest,
         &loaded.source_label,
         render_options(
-          &args.vars,
+          render_vars,
           args.mode,
           args.force_mode,
           loaded.git_commit.clone(),
-        )?,
+        ),
       )?;
       print!("{rendered}");
       Ok(true)
     }
     RulepackSubcommand::Check(args) => {
       let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
-      validate_rulepack_manifest(&loaded.manifest)?;
-      let options = render_options(&args.vars, None, false, loaded.git_commit.clone())?;
+      let vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+      let render_vars = crate::rulepack_fit::resolve_render_variables(
+        &loaded.manifest,
+        &loaded.source_label,
+        &vars,
+        &BTreeMap::new(),
+        true,
+      )?;
+      let options = render_options(render_vars, None, false, loaded.git_commit.clone());
+      let rendered_manifest =
+        render_rulepack_for_install(&loaded.manifest, &loaded.source_label, options.clone())?;
+      validate_rulepack_manifest(&rendered_manifest)?;
       let refs = referenced_rulepack_files(&loaded.manifest, &loaded.source_label, options)?;
       if let Some(base_dir) = loaded.base_dir.as_deref() {
         for referenced in &refs {
@@ -73,9 +91,10 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
       );
       Ok(true)
     }
-    RulepackSubcommand::List | RulepackSubcommand::Apply(_) | RulepackSubcommand::Remove(_) => {
-      Ok(false)
-    }
+    RulepackSubcommand::List
+    | RulepackSubcommand::Fit(_)
+    | RulepackSubcommand::Apply(_)
+    | RulepackSubcommand::Remove(_) => Ok(false),
   }
 }
 
@@ -91,6 +110,10 @@ pub(crate) async fn run_remote_if_requested(
     RulepackSubcommand::List => {
       let plan = plan_rulepack(client, command).await?;
       send_and_print(client, &plan, output).await?;
+      Ok(true)
+    }
+    RulepackSubcommand::Fit(args) => {
+      print_fit_report(client, args, output).await?;
       Ok(true)
     }
     RulepackSubcommand::Apply(args) => {
@@ -127,7 +150,8 @@ pub(crate) async fn plan_rulepack(
       .await
       .map(|(plan, _)| plan),
     RulepackSubcommand::Remove(args) => plan_rulepack_remove(client, args).await,
-    RulepackSubcommand::Inspect(_)
+    RulepackSubcommand::Fit(_)
+    | RulepackSubcommand::Inspect(_)
     | RulepackSubcommand::Render(_)
     | RulepackSubcommand::Check(_) => {
       bail!("rulepack local command should run before Admin planning")
@@ -140,12 +164,33 @@ async fn plan_rulepack_apply(
   args: &RulepackApplyArgs,
 ) -> anyhow::Result<(RequestPlan, String)> {
   let loaded = load_rulepack_source(&args.source, client.timeout(), true).await?;
+  let mut vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+  let mut binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+  if args.interactive {
+    crate::rulepack_prompt::complete_interactive_apply(
+      client,
+      &loaded,
+      &args.source,
+      &mut vars,
+      &mut binds,
+      args.mode,
+      args.force_mode,
+    )
+    .await?;
+  }
+  let render_vars = crate::rulepack_fit::resolve_render_variables(
+    &loaded.manifest,
+    &loaded.source_label,
+    &vars,
+    &binds,
+    true,
+  )?;
   let options = render_options(
-    &args.vars,
+    render_vars.clone(),
     Some(args.mode),
     args.force_mode,
     loaded.git_commit.clone(),
-  )?;
+  );
   let rendered_manifest =
     render_rulepack_for_install(&loaded.manifest, &loaded.source_label, options.clone())?;
   let inspection = inspect_rulepack(
@@ -169,7 +214,7 @@ async fn plan_rulepack_apply(
         RulepackReferencedFileKind::Group => "oxirule_group",
       },
       "path": referenced.path.to_string_lossy(),
-      "content": render_text(&raw, &parse_vars(&args.vars)?),
+      "content": render_text(&raw, &render_vars),
     }));
   }
   operations.push(json!({
@@ -190,6 +235,31 @@ async fn plan_rulepack_apply(
     },
     name,
   ))
+}
+
+async fn print_fit_report(
+  client: &AdminClient,
+  args: &RulepackFitArgs,
+  output: OutputFormat,
+) -> anyhow::Result<()> {
+  let loaded = load_rulepack_source(&args.source, client.timeout(), false).await?;
+  let vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+  let binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+  let evaluation = crate::rulepack_fit::evaluate_fit(
+    client,
+    &loaded,
+    &args.source,
+    &vars,
+    &binds,
+    args.mode,
+    args.force_mode,
+  )
+  .await?;
+  match output {
+    OutputFormat::PrettyJson => println!("{}", serde_json::to_string_pretty(&evaluation.report)?),
+    OutputFormat::Json => println!("{}", serde_json::to_string(&evaluation.report)?),
+  }
+  Ok(())
 }
 
 async fn plan_rulepack_remove(
@@ -270,11 +340,11 @@ async fn verify_rulepack_active(client: &AdminClient, name: &str) -> anyhow::Res
 }
 
 #[derive(Debug)]
-struct LoadedRulepackSource {
-  manifest: String,
-  base_dir: Option<PathBuf>,
-  source_label: String,
-  git_commit: Option<String>,
+pub(crate) struct LoadedRulepackSource {
+  pub(crate) manifest: String,
+  pub(crate) base_dir: Option<PathBuf>,
+  pub(crate) source_label: String,
+  pub(crate) git_commit: Option<String>,
   _temp_dir: Option<TempTree>,
 }
 
@@ -460,34 +530,20 @@ fn validate_git_url(git: &str) -> anyhow::Result<String> {
 }
 
 fn render_options(
-  vars: &[String],
+  variables: BTreeMap<String, String>,
   mode: Option<RulepackModeArg>,
   force_mode: bool,
   source_commit: Option<String>,
-) -> anyhow::Result<RulepackRenderOptions> {
-  Ok(RulepackRenderOptions {
-    variables: parse_vars(vars)?,
+) -> RulepackRenderOptions {
+  RulepackRenderOptions {
+    variables,
     mode_override: mode.map(|mode| RulepackModeOverride {
       mode: mode_arg(mode),
       force: force_mode,
     }),
     source_commit,
     pin_variables: false,
-  })
-}
-
-fn parse_vars(vars: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
-  let mut parsed = BTreeMap::new();
-  for item in vars {
-    let Some((key, value)) = item.split_once('=') else {
-      bail!("--var must use KEY=VALUE");
-    };
-    if key.trim().is_empty() {
-      bail!("--var key must not be empty");
-    }
-    parsed.insert(key.to_string(), value.to_string());
   }
-  Ok(parsed)
 }
 
 fn render_text(raw: &str, variables: &BTreeMap<String, String>) -> String {

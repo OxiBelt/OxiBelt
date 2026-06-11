@@ -5,7 +5,7 @@ use clap::Parser;
 use url::Url;
 
 use super::*;
-use crate::cli::{Cli, Command, RulepackSourceArgs};
+use crate::cli::{Cli, Command, RulepackSourceArgs, RulepackSubcommand};
 
 #[test]
 fn rulepack_cli_parses_apply_url_safety_options() {
@@ -22,6 +22,55 @@ fn rulepack_cli_parses_apply_url_safety_options() {
   ])
   .expect("rulepack apply should parse");
   assert!(matches!(parsed.command, Command::Rulepack(_)));
+}
+
+#[test]
+fn rulepack_cli_parses_fit_and_bind_options() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "fit",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--bind",
+    "app_route=mmsecretvault",
+    "--var",
+    "admin_cidr=10.0.0.0/8",
+  ])
+  .expect("rulepack fit should parse");
+
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Fit(args) = command.command else {
+    panic!("expected rulepack fit");
+  };
+  assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
+  assert_eq!(args.vars, vec!["admin_cidr=10.0.0.0/8"]);
+}
+
+#[test]
+fn rulepack_cli_parses_interactive_apply() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "apply",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--interactive",
+    "--bind",
+    "app_route=mmsecretvault",
+  ])
+  .expect("rulepack interactive apply should parse");
+
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Apply(args) = command.command else {
+    panic!("expected rulepack apply");
+  };
+  assert!(args.interactive);
+  assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
 }
 
 #[test]

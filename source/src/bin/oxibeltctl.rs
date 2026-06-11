@@ -28,6 +28,10 @@ mod profile_catalog;
 mod resource_hint;
 #[path = "oxibeltctl/rulepack.rs"]
 mod rulepack;
+#[path = "oxibeltctl/rulepack_fit.rs"]
+mod rulepack_fit;
+#[path = "oxibeltctl/rulepack_prompt.rs"]
+mod rulepack_prompt;
 
 use cli::{AdminArgs, Cli, Command, selected_token_env};
 use output::{print_permission_hint, print_response};

@@ -112,9 +112,11 @@ use plan::{WafRoutePlan, phase_plan};
 use rule_groups::{RuleGroupScope, resolve_rule, validate_rule_group_scope};
 pub use rule_groups::{WafConditionMerge, WafRuleGroupConfig};
 pub use rulepacks::{
-  RULEPACK_FILE_SUFFIX, RulepackModeOverride, RulepackReferencedFile, RulepackReferencedFileKind,
-  RulepackRenderOptions, WafRulepackSummary, inspect_rulepack, referenced_rulepack_files,
-  render_rulepack_for_install, validate_rulepack_manifest,
+  RULEPACK_FILE_SUFFIX, RulepackBinding, RulepackBindingKind, RulepackDiscovery,
+  RulepackInputMetadata, RulepackModeOverride, RulepackReferencedFile, RulepackReferencedFileKind,
+  RulepackRenderOptions, RulepackVariable, WafRulepackSummary, inspect_rulepack,
+  inspect_rulepack_inputs, referenced_rulepack_files, render_rulepack_for_install,
+  validate_rulepack_manifest,
 };
 use runtime_helpers::{
   body_size, ip_in_cidr, pattern_set_matches, request_metadata_has_duplicates, version_string,

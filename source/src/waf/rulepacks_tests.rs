@@ -129,3 +129,102 @@ fn force_mode_sets_rule_modes() {
   assert!(rendered.contains("default_mode = \"enforcing\""));
   assert!(rendered.contains("mode = \"enforcing\""));
 }
+
+#[test]
+fn schema_v2_exposes_route_binding_metadata() {
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "vaultwarden-hardening"
+version = "0.1.0"
+targets = ["vaultwarden"]
+
+[[variables]]
+name = "route_name"
+type = "route"
+required = true
+prompt = "Select the Vaultwarden route."
+
+[[bindings]]
+name = "app_route"
+kind = "route"
+bind_as = "route_name"
+required = true
+prompt = "Select the route that serves Vaultwarden."
+
+[bindings.discovery]
+name_any = ["vault", "secret"]
+host_contains_any = ["vaultwarden"]
+upstream_contains_any = ["vaultwarden"]
+path_prefix_any = ["/"]
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
+"#;
+
+  let metadata = inspect_rulepack_inputs(raw, "test rulepack").expect("metadata");
+
+  assert_eq!(metadata.summary.name, "vaultwarden-hardening");
+  assert_eq!(metadata.bindings[0].name, "app_route");
+  assert_eq!(metadata.bindings[0].bind_as, "route_name");
+  assert_eq!(
+    metadata.bindings[0].discovery.name_any,
+    vec!["vault", "secret"]
+  );
+}
+
+#[test]
+fn schema_v1_rejects_v2_binding_metadata() {
+  let raw = r#"[rulepack]
+schema_version = 1
+name = "demo"
+version = "0.1.0"
+
+[[variables]]
+name = "route_name"
+required = true
+
+[[bindings]]
+name = "app_route"
+kind = "route"
+bind_as = "route_name"
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+
+  let error =
+    inspect_rulepack_inputs(raw, "test rulepack").expect_err("schema v1 should reject bindings");
+
+  assert!(error.to_string().contains("schema_version 1"));
+}
+
+#[test]
+fn schema_v2_rejects_binding_to_unknown_variable() {
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[bindings]]
+name = "app_route"
+kind = "route"
+bind_as = "route_name"
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+
+  let error = inspect_rulepack_inputs(raw, "test rulepack")
+    .expect_err("binding should require a declared render variable");
+
+  assert!(error.to_string().contains("undeclared variable route_name"));
+}

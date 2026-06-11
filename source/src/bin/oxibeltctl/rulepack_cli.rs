@@ -12,11 +12,26 @@ pub(crate) struct RulepackCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum RulepackSubcommand {
   List,
+  Fit(RulepackFitArgs),
   Inspect(RulepackInspectArgs),
   Render(RulepackRenderArgs),
   Check(RulepackCheckArgs),
   Apply(RulepackApplyArgs),
   Remove(RulepackRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackFitArgs {
+  #[command(flatten)]
+  pub(crate) source: RulepackSourceArgs,
+  #[arg(long = "var", value_name = "KEY=VALUE")]
+  pub(crate) vars: Vec<String>,
+  #[arg(long = "bind", value_name = "KEY=VALUE")]
+  pub(crate) binds: Vec<String>,
+  #[arg(long, value_enum)]
+  pub(crate) mode: Option<RulepackModeArg>,
+  #[arg(long)]
+  pub(crate) force_mode: bool,
 }
 
 #[derive(Debug, Args)]
@@ -51,10 +66,14 @@ pub(crate) struct RulepackApplyArgs {
   pub(crate) source: RulepackSourceArgs,
   #[arg(long = "var", value_name = "KEY=VALUE")]
   pub(crate) vars: Vec<String>,
+  #[arg(long = "bind", value_name = "KEY=VALUE")]
+  pub(crate) binds: Vec<String>,
   #[arg(long, value_enum, default_value_t = RulepackModeArg::Monitor)]
   pub(crate) mode: RulepackModeArg,
   #[arg(long)]
   pub(crate) force_mode: bool,
+  #[arg(long)]
+  pub(crate) interactive: bool,
 }
 
 #[derive(Debug, Args)]

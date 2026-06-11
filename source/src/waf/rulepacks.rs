@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+#[path = "rulepacks/input.rs"]
+mod input;
+pub use input::{
+  RulepackBinding, RulepackBindingKind, RulepackDiscovery, RulepackInputMetadata, RulepackVariable,
+};
+
 use super::{
   ExternalRuleFile, ExternalRuleGroupFile, WafMode, WafPhase, WafRuleConfig, WafRuleGroupConfig,
 };
@@ -14,7 +20,8 @@ use super::{
 pub const RULEPACK_FILE_SUFFIX: &str = ".oxirule-rulepack.toml";
 const RULE_FILE_SUFFIX: &str = ".oxirule.toml";
 const GROUP_FILE_SUFFIX: &str = ".oxirule-group.toml";
-const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
+const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct WafRulepackSummary {
@@ -79,6 +86,8 @@ struct RulepackDocument {
   #[serde(default)]
   variables: Vec<RulepackVariable>,
   #[serde(default)]
+  bindings: Vec<RulepackBinding>,
+  #[serde(default)]
   rules: Vec<RulepackRule>,
   #[serde(default)]
   group_files: Vec<RulepackGroupFile>,
@@ -100,16 +109,6 @@ struct RulepackMetadata {
   default_mode: WafMode,
   #[serde(default)]
   source_commit: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RulepackVariable {
-  name: String,
-  #[serde(default)]
-  default: Option<String>,
-  #[serde(default)]
-  required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -189,6 +188,18 @@ pub fn inspect_rulepack(
   Ok(RulepackInspection {
     summary: parsed.summary(Vec::new()),
     rendered: parsed.rendered,
+  })
+}
+
+pub fn inspect_rulepack_inputs(raw: &str, source: &str) -> anyhow::Result<RulepackInputMetadata> {
+  let value: toml::Value =
+    toml::from_str(raw).with_context(|| format!("failed to parse {source}"))?;
+  let document = document_from_value(value, source)?;
+  validate_document_shape(&document, source)?;
+  Ok(RulepackInputMetadata {
+    summary: summary_from_document(&document, Vec::new()),
+    variables: document.variables,
+    bindings: document.bindings,
   })
 }
 
@@ -366,18 +377,25 @@ impl ParsedRulepack {
   }
 
   fn summary(&self, loaded_files: Vec<PathBuf>) -> WafRulepackSummary {
-    WafRulepackSummary {
-      name: self.document.rulepack.name.clone(),
-      version: self.document.rulepack.version.clone(),
-      description: self.document.rulepack.description.clone(),
-      targets: self.document.rulepack.targets.clone(),
-      requires: self.document.rulepack.requires.clone(),
-      default_mode: self.document.rulepack.default_mode.as_str().to_string(),
-      rules: self.document.rules.len(),
-      group_files: self.document.group_files.len(),
-      loaded_files,
-      source_commit: self.document.rulepack.source_commit.clone(),
-    }
+    summary_from_document(&self.document, loaded_files)
+  }
+}
+
+fn summary_from_document(
+  document: &RulepackDocument,
+  loaded_files: Vec<PathBuf>,
+) -> WafRulepackSummary {
+  WafRulepackSummary {
+    name: document.rulepack.name.clone(),
+    version: document.rulepack.version.clone(),
+    description: document.rulepack.description.clone(),
+    targets: document.rulepack.targets.clone(),
+    requires: document.rulepack.requires.clone(),
+    default_mode: document.rulepack.default_mode.as_str().to_string(),
+    rules: document.rules.len(),
+    group_files: document.group_files.len(),
+    loaded_files,
+    source_commit: document.rulepack.source_commit.clone(),
   }
 }
 
@@ -388,9 +406,11 @@ fn document_from_value(value: toml::Value, source: &str) -> anyhow::Result<Rulep
 }
 
 fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow::Result<()> {
-  if document.rulepack.schema_version != SUPPORTED_SCHEMA_VERSION {
+  if document.rulepack.schema_version < MIN_SUPPORTED_SCHEMA_VERSION
+    || document.rulepack.schema_version > MAX_SUPPORTED_SCHEMA_VERSION
+  {
     bail!(
-      "{source} uses unsupported rulepack schema_version {}; supported version is {SUPPORTED_SCHEMA_VERSION}",
+      "{source} uses unsupported rulepack schema_version {}; supported versions are {MIN_SUPPORTED_SCHEMA_VERSION} through {MAX_SUPPORTED_SCHEMA_VERSION}",
       document.rulepack.schema_version
     );
   }
@@ -406,13 +426,12 @@ fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow:
     bail!("{source} must contain at least one [[rules]] or [[group_files]] entry");
   }
 
-  let mut variable_names = HashSet::new();
-  for variable in &document.variables {
-    validate_label(source, "variables.name", &variable.name)?;
-    if !variable_names.insert(variable.name.clone()) {
-      bail!("{source} contains duplicate variable {}", variable.name);
-    }
-  }
+  input::validate_rulepack_inputs(
+    document.rulepack.schema_version,
+    source,
+    &document.variables,
+    &document.bindings,
+  )?;
 
   let mut rule_names = HashSet::new();
   for rule in &document.rules {
