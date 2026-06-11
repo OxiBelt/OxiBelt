@@ -145,7 +145,7 @@ pub(in crate::proxy::http) async fn finalize_response(
     static_response_send_timeout(state, route),
     transport_network,
   );
-  state.metrics.record_response(response.status());
+  state.record_hot_path_response(response.status());
   response
 }
 

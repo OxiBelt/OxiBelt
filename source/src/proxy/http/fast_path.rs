@@ -396,7 +396,7 @@ impl PlainProxyFastPath {
         };
         let response =
           configured_error_response(&state.config, "", status, "upstream request failed", code);
-        state.metrics.record_response(response.status());
+        state.record_hot_path_response(response.status());
         return response;
       }
     };
@@ -426,7 +426,7 @@ impl PlainProxyFastPath {
     {
       Ok(response_body) => response_body,
       Err(response) => {
-        state.metrics.record_response(response.status());
+        state.record_hot_path_response(response.status());
         return response;
       }
     };
@@ -489,7 +489,7 @@ impl PlainProxyFastPath {
         let mut mutations = request_waf.response_header_mutations.clone();
         mutations.extend(response_waf.response_header_mutations);
         let response = waf_terminal_response(terminal, &mutations);
-        state.metrics.record_response(response.status());
+        state.record_hot_path_response(response.status());
         return response;
       }
       apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
@@ -527,7 +527,7 @@ impl PlainProxyFastPath {
     let mut response =
       with_downstream_response_timeout(response, timeouts.response_send, transport_network);
     apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
-    state.metrics.record_response(response.status());
+    state.record_hot_path_response(response.status());
     drop(pool_selection);
     response
   }

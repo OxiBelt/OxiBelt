@@ -99,36 +99,3 @@ fn striped_counters_sum_all_increments() {
   assert!(body.contains("oxibelt_responses_total 4\n"));
   assert!(body.contains("oxibelt_upstream_errors_total 2\n"));
 }
-
-#[test]
-fn hot_path_collection_can_be_disabled_and_reenabled() {
-  let metrics = Metrics::new();
-  metrics.set_hot_path_collection_enabled(false);
-  metrics.record_request();
-  metrics.record_response(StatusCode::BAD_GATEWAY);
-  metrics.record_cache_hit();
-
-  let body = metrics.prometheus(
-    &MetricsConfig::default(),
-    CacheStats::default(),
-    TlsServerSessionStorageStats::default(),
-  );
-  assert!(body.contains("oxibelt_requests_total 0\n"));
-  assert!(body.contains("oxibelt_responses_total 0\n"));
-  assert!(body.contains("oxibelt_upstream_errors_total 0\n"));
-  assert!(body.contains("oxibelt_cache_hits_total 1\n"));
-
-  metrics.set_hot_path_collection_enabled(true);
-  metrics.record_request();
-  metrics.record_response(StatusCode::BAD_GATEWAY);
-
-  let body = metrics.prometheus(
-    &MetricsConfig::default(),
-    CacheStats::default(),
-    TlsServerSessionStorageStats::default(),
-  );
-  assert!(body.contains("oxibelt_requests_total 1\n"));
-  assert!(body.contains("oxibelt_responses_total 1\n"));
-  assert!(body.contains("oxibelt_upstream_errors_total 1\n"));
-  assert!(body.contains("oxibelt_cache_hits_total 1\n"));
-}

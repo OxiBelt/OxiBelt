@@ -79,12 +79,10 @@ pub(super) async fn handle_connection(
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let _global_permit = super::acquire_global_connection_permit(&snapshot)?;
-  let _plain_connection_guard = snapshot
-    .runtime_introspection
-    .guard(RuntimeCounter::PlainHttpConnection);
-  let _http1_connection_guard = snapshot
-    .runtime_introspection
-    .guard(RuntimeCounter::Http1Connection);
+  let _plain_connection_guard =
+    snapshot.runtime_introspection_guard(RuntimeCounter::PlainHttpConnection);
+  let _http1_connection_guard =
+    snapshot.runtime_introspection_guard(RuntimeCounter::Http1Connection);
   let connection_limit_identity = snapshot.config.limits.connection_limit_identity;
   let proxy_mode = snapshot.config.listeners.http_mode == HttpListenerMode::Proxy;
   let _ip_permit =
@@ -124,9 +122,7 @@ pub(super) async fn handle_connection(
     let tls_metadata = tls_metadata.clone();
     let drain = drain.clone();
     async move {
-      let _request_guard = state
-        .runtime_introspection
-        .guard(RuntimeCounter::Http1Request);
+      let _request_guard = state.runtime_introspection_guard(RuntimeCounter::Http1Request);
       let response = match state.config.listeners.http_mode {
         HttpListenerMode::RedirectToHttps => super::redirect_to_https(&request),
         HttpListenerMode::Proxy => {
@@ -279,9 +275,7 @@ async fn try_sendfile_fast_path_inner(
         served_requests,
       });
     };
-    let _request_guard = snapshot
-      .runtime_introspection
-      .guard(RuntimeCounter::Http1Request);
+    let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http1Request);
     buffer = next_buffer;
 
     let close_after_response = header_has_token(&request.headers, CONNECTION, "close");
@@ -292,7 +286,7 @@ async fn try_sendfile_fast_path_inner(
       return Ok(SendfilePreflight::Done);
     }
     served_requests += 1;
-    snapshot.metrics.record_response(status);
+    snapshot.record_hot_path_response(status);
     if close_after_response {
       return Ok(SendfilePreflight::Done);
     }

@@ -15,6 +15,14 @@ fn parse_config(raw: &str) -> Config {
   config
 }
 
+fn metrics_body(snapshot: &AppSnapshot) -> String {
+  snapshot.metrics.prometheus(
+    &snapshot.config.metrics,
+    crate::cache::CacheStats::default(),
+    crate::tls::TlsServerSessionStorageStats::default(),
+  )
+}
+
 #[tokio::test]
 async fn replace_signals_old_data_plane_generation_and_installs_fresh_one() {
   let temp_dir = common::TempDir::new("app-generation-drain");
@@ -119,4 +127,44 @@ fn upstream_client_pools_returns_precomputed_index_by_name() {
 
   assert_eq!(pools.upstream_index("primary"), Some(3));
   assert_eq!(pools.upstream_index("missing"), None);
+}
+
+#[tokio::test]
+async fn hot_path_metrics_helpers_skip_disabled_basic_metrics() {
+  let temp_dir = common::TempDir::new("hot-path-metrics-disabled");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "hot-path-metrics-disabled");
+  let snapshot = AppSnapshot::new(parse_config(&common::minimal_config_toml(
+    &cert_path, &key_path,
+  )))
+  .await
+  .expect("snapshot should initialize");
+
+  snapshot.record_hot_path_request();
+  snapshot.record_hot_path_response(http::StatusCode::BAD_GATEWAY);
+
+  let body = metrics_body(&snapshot);
+  assert!(body.contains("oxibelt_requests_total 0\n"));
+  assert!(body.contains("oxibelt_responses_total 0\n"));
+  assert!(body.contains("oxibelt_upstream_errors_total 0\n"));
+}
+
+#[tokio::test]
+async fn hot_path_metrics_helpers_record_when_basic_metrics_are_enabled() {
+  let temp_dir = common::TempDir::new("hot-path-metrics-enabled");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "hot-path-metrics-enabled");
+  let mut config = parse_config(&common::minimal_config_toml(&cert_path, &key_path));
+  config.metrics.enabled = true;
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+
+  snapshot.record_hot_path_request();
+  snapshot.record_hot_path_response(http::StatusCode::BAD_GATEWAY);
+
+  let body = metrics_body(&snapshot);
+  assert!(body.contains("oxibelt_requests_total 1\n"));
+  assert!(body.contains("oxibelt_responses_total 1\n"));
+  assert!(body.contains("oxibelt_upstream_errors_total 1\n"));
 }

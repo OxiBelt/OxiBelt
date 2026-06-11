@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
-use http::HeaderValue;
+use http::{HeaderValue, StatusCode};
 use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
 use hyper_util::client::legacy::Client;
@@ -33,7 +33,9 @@ use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http::waf_body_coding::WafBodyCodingState;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
-use crate::runtime_introspection::RuntimeIntrospectionState;
+use crate::runtime_introspection::{
+  RuntimeCounterGuard, RuntimeIntrospectionCounter, RuntimeIntrospectionState,
+};
 use crate::shared_state::SharedState;
 use crate::sni_forward::SniForwardTable;
 use crate::stream::pools::StreamPoolState;
@@ -187,6 +189,32 @@ pub struct AppSnapshot {
 }
 
 impl AppSnapshot {
+  #[inline]
+  pub(crate) fn record_hot_path_request(&self) {
+    if self.request_path_features.hot_path_metrics {
+      self.metrics.record_request();
+    }
+  }
+
+  #[inline]
+  pub(crate) fn record_hot_path_response(&self, status: StatusCode) {
+    if self.request_path_features.hot_path_metrics {
+      self.metrics.record_response(status);
+    }
+  }
+
+  #[inline]
+  pub(crate) fn runtime_introspection_guard(
+    &self,
+    counter: RuntimeIntrospectionCounter,
+  ) -> Option<RuntimeCounterGuard> {
+    if self.request_path_features.runtime_introspection {
+      Some(self.runtime_introspection.guard(counter))
+    } else {
+      None
+    }
+  }
+
   pub async fn new(config: Config) -> anyhow::Result<Self> {
     Self::new_with_previous(config, None).await
   }
@@ -219,11 +247,6 @@ impl AppSnapshot {
     let metrics = previous
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
-    configure_hot_path_observability(
-      &metrics,
-      previous.map(|snapshot| snapshot.runtime_introspection.as_ref()),
-      &config,
-    );
     let outbound_revocation = tls::OutboundRevocationRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build outbound TLS revocation runtime")?;
@@ -488,11 +511,9 @@ impl AppSnapshot {
     )
     .context("failed to build control-plane HTTP client")?;
     let metrics = previous.metrics.clone();
-    configure_hot_path_observability(
-      &metrics,
-      Some(previous.runtime_introspection.as_ref()),
-      &config,
-    );
+    previous
+      .runtime_introspection
+      .set_enabled(config.admin.enabled);
     let pools = PoolState::new_with_previous_and_metrics(
       &config.upstream_pools,
       previous.shared_state.clone(),
@@ -575,17 +596,6 @@ impl AppSnapshot {
       alt_svc_header_value,
       http1_upgrades_possible,
     })
-  }
-}
-
-fn configure_hot_path_observability(
-  metrics: &Arc<Metrics>,
-  runtime_introspection: Option<&RuntimeIntrospectionState>,
-  config: &Config,
-) {
-  metrics.set_hot_path_collection_enabled(config.metrics.enabled || config.admin.enabled);
-  if let Some(runtime_introspection) = runtime_introspection {
-    runtime_introspection.set_enabled(config.admin.enabled);
   }
 }
 

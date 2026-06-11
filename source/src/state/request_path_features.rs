@@ -9,8 +9,10 @@ pub(crate) struct RequestPathFeaturePlan {
   pub(crate) compression: bool,
   pub(crate) detailed_metrics: bool,
   pub(crate) dynamic_policy: bool,
+  pub(crate) hot_path_metrics: bool,
   pub(crate) person_proof_api: bool,
   pub(crate) rate_limits: bool,
+  pub(crate) runtime_introspection: bool,
   pub(crate) system_access_log: bool,
   pub(crate) telemetry: bool,
 }
@@ -29,8 +31,10 @@ impl RequestPathFeaturePlan {
       compression: config.compression.enabled,
       detailed_metrics: config.metrics.enabled && config.metrics.detail == MetricsDetail::Detailed,
       dynamic_policy: dynamic_policy_enabled,
+      hot_path_metrics: config.metrics.enabled || config.admin.enabled,
       person_proof_api,
       rate_limits: !config.rate_limits.is_empty(),
+      runtime_introspection: config.admin.enabled,
       system_access_log: system_access_log_enabled,
       telemetry: telemetry_enabled,
     }
@@ -103,10 +107,28 @@ detail = "detailed"
     assert!(plan.compression);
     assert!(plan.detailed_metrics);
     assert!(plan.dynamic_policy);
+    assert!(plan.hot_path_metrics);
     assert!(plan.person_proof_api);
     assert!(plan.rate_limits);
     assert!(plan.system_access_log);
     assert!(plan.telemetry);
+  }
+
+  #[test]
+  fn request_path_feature_plan_tracks_admin_observability() {
+    let temp_dir = common::TempDir::new("request-path-features-admin");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "request-path-features-admin");
+    let mut config = parse_config(&common::minimal_config_toml(&cert_path, &key_path).replace(
+      "[compression]\nenabled = true",
+      "[compression]\nenabled = false",
+    ));
+    config.admin.enabled = true;
+    let plan = RequestPathFeaturePlan::new(&config, false, false, false, false, false);
+
+    assert!(plan.hot_path_metrics);
+    assert!(plan.runtime_introspection);
+    assert!(!plan.detailed_metrics);
   }
 
   #[tokio::test]

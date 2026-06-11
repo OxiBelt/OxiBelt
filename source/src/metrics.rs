@@ -21,7 +21,6 @@ mod stream;
 
 #[derive(Debug, Default)]
 pub struct Metrics {
-  hot_path_collection_disabled: AtomicU64,
   requests_total: StripedCounter,
   responses_total: StripedCounter,
   upstream_errors_total: StripedCounter,
@@ -121,23 +120,11 @@ impl Metrics {
     Arc::new(Self::default())
   }
 
-  pub fn set_hot_path_collection_enabled(&self, enabled: bool) {
-    self
-      .hot_path_collection_disabled
-      .store(u64::from(!enabled), Ordering::Relaxed);
-  }
-
   pub fn record_request(&self) {
-    if self.hot_path_collection_disabled.load(Ordering::Relaxed) != 0 {
-      return;
-    }
     self.requests_total.increment();
   }
 
   pub fn record_response(&self, status: StatusCode) {
-    if self.hot_path_collection_disabled.load(Ordering::Relaxed) != 0 {
-      return;
-    }
     self.responses_total.increment();
     if status.is_server_error() {
       self.upstream_errors_total.increment();

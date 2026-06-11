@@ -335,7 +335,7 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
 {
-  state.metrics.record_request();
+  state.record_hot_path_request();
 
   if state.lifecycle.is_draining() {
     return draining_response();
@@ -1840,7 +1840,7 @@ where
   let mut response =
     with_downstream_response_timeout(response, timeouts.response_send, transport_network);
   apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
-  state.metrics.record_response(response.status());
+  state.record_hot_path_response(response.status());
   response
 }
 

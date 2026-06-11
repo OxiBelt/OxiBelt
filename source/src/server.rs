@@ -2041,9 +2041,8 @@ async fn handle_connection(
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let _global_permit = acquire_global_connection_permit(&handshake_state)?;
-  let _https_connection_guard = handshake_state
-    .runtime_introspection
-    .guard(RuntimeCounter::DownstreamHttpsTcpConnection);
+  let _https_connection_guard =
+    handshake_state.runtime_introspection_guard(RuntimeCounter::DownstreamHttpsTcpConnection);
   let (stream, peer_addr) = proxy_protocol::accept_proxy_header(
     stream,
     peer_addr,
@@ -2132,7 +2131,7 @@ async fn handle_connection(
     let connection_limit_context = connection_limit_context.clone();
     let drain = drain.clone();
     async move {
-      let _request_guard = state.runtime_introspection.guard(request_counter);
+      let _request_guard = state.runtime_introspection_guard(request_counter);
       Ok::<_, Infallible>(
         if request_count.fetch_add(1, Ordering::Relaxed)
           >= state.config.limits.max_requests_per_connection
@@ -2160,9 +2159,8 @@ async fn handle_connection(
   });
 
   if negotiated == b"h2" {
-    let _http2_connection_guard = handshake_state
-      .runtime_introspection
-      .guard(RuntimeCounter::Http2Connection);
+    let _http2_connection_guard =
+      handshake_state.runtime_introspection_guard(RuntimeCounter::Http2Connection);
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     builder.timer(TokioTimer::new());
     crate::h2_tuning::apply_server_defaults(&mut builder, &handshake_state.config.proxy.http2);
@@ -2181,9 +2179,8 @@ async fn handle_connection(
     };
     result.map_err(|error| anyhow::anyhow!(error))?;
   } else {
-    let _http1_connection_guard = handshake_state
-      .runtime_introspection
-      .guard(RuntimeCounter::Http1Connection);
+    let _http1_connection_guard =
+      handshake_state.runtime_introspection_guard(RuntimeCounter::Http1Connection);
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
       .timer(TokioTimer::new())

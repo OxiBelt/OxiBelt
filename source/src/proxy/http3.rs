@@ -296,9 +296,8 @@ pub(crate) async fn handle_downstream_connection(
     .limits
     .acquire_global_connection(&snapshot.config.limits)
     .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))?;
-  let _http3_connection_guard = snapshot
-    .runtime_introspection
-    .guard(RuntimeCounter::Http3Connection);
+  let _http3_connection_guard =
+    snapshot.runtime_introspection_guard(RuntimeCounter::Http3Connection);
   let connection_limit_identity = snapshot.config.limits.connection_limit_identity;
   let _ip_permit = if connection_limit_identity == ConnectionLimitIdentityMode::ProxyProtocol {
     Some(
@@ -400,9 +399,7 @@ pub(crate) async fn handle_downstream_connection(
       state: snapshot.clone(),
       drain: drain.clone(),
     };
-    let _request_guard = snapshot
-      .runtime_introspection
-      .guard(RuntimeCounter::Http3Request);
+    let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http3Request);
     let status = handle_h3_request(request, stream, context).await?;
     debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
   }
