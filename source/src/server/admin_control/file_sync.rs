@@ -358,6 +358,8 @@ struct RulepackInstallLock {
   values: BTreeMap<String, String>,
   #[serde(default)]
   rule_overrides: Vec<crate::waf::RulepackOverride>,
+  #[serde(default)]
+  exceptions: Vec<crate::waf::RulepackException>,
 }
 
 #[derive(Deserialize)]
@@ -417,6 +419,7 @@ fn validate_rulepack_install_lock(content: &str) -> anyhow::Result<()> {
     &lock.install.name,
     &lock.rule_overrides,
   )?;
+  crate::waf::validate_rulepack_exception_list("rulepack install lock", &lock.exceptions)?;
   Ok(())
 }
 

@@ -13,6 +13,11 @@ pub use input::{
   RulepackBinding, RulepackBindingKind, RulepackDiscovery, RulepackInputMetadata, RulepackProfile,
   RulepackVariable,
 };
+#[path = "rulepacks/exceptions.rs"]
+mod exceptions;
+pub use exceptions::{RulepackException, validate_rulepack_exception_list};
+#[path = "rulepacks/files.rs"]
+mod files;
 #[path = "rulepacks/overrides.rs"]
 mod overrides;
 pub use overrides::{
@@ -52,6 +57,7 @@ pub struct WafRulepackSummary {
   pub default_mode: String,
   pub rules: usize,
   pub group_files: usize,
+  pub exceptions: usize,
   pub loaded_files: Vec<PathBuf>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub source_commit: Option<String>,
@@ -84,6 +90,8 @@ struct RulepackDocument {
   profiles: Vec<RulepackProfile>,
   #[serde(default)]
   overrides: Vec<RulepackOverride>,
+  #[serde(default)]
+  exceptions: Vec<RulepackException>,
   #[serde(default)]
   rules: Vec<RulepackRule>,
   #[serde(default)]
@@ -200,7 +208,7 @@ pub fn inspect_rulepack_inputs(raw: &str, source: &str) -> anyhow::Result<Rulepa
   let value: toml::Value =
     toml::from_str(raw).with_context(|| format!("failed to parse {source}"))?;
   let document = document_from_value(value, source)?;
-  validate_document_shape(&document, source)?;
+  validate_document_shape(&document, source, ExceptionValidation::Skip)?;
   Ok(RulepackInputMetadata {
     summary: summary_from_document(&document, Vec::new()),
     variables: document.variables,
@@ -224,40 +232,7 @@ pub fn referenced_rulepack_files(
   options: RulepackRenderOptions,
 ) -> anyhow::Result<Vec<RulepackReferencedFile>> {
   let parsed = ParsedRulepack::parse(raw, source, options)?;
-  let mut files = Vec::new();
-  for rule in &parsed.document.rules {
-    if let Some(path) = &rule.path {
-      validate_relative_rulepack_path(
-        &format!(
-          "OxiRule rulepack {} rule {}",
-          parsed.document.rulepack.name, rule.name
-        ),
-        path,
-        RULE_FILE_SUFFIX,
-      )?;
-      files.push(RulepackReferencedFile {
-        kind: RulepackReferencedFileKind::Rule,
-        path: path.clone(),
-      });
-    }
-  }
-  for group_file in &parsed.document.group_files {
-    if let Some(path) = &group_file.path {
-      validate_relative_rulepack_path(
-        &format!(
-          "OxiRule rulepack {} group file",
-          parsed.document.rulepack.name
-        ),
-        path,
-        GROUP_FILE_SUFFIX,
-      )?;
-      files.push(RulepackReferencedFile {
-        kind: RulepackReferencedFileKind::Group,
-        path: path.clone(),
-      });
-    }
-  }
-  Ok(files)
+  files::referenced_rulepack_files(&parsed.document)
 }
 
 #[derive(Debug)]
@@ -272,7 +247,7 @@ impl ParsedRulepack {
     let mut value: toml::Value =
       toml::from_str(raw).with_context(|| format!("failed to parse {source}"))?;
     let initial = document_from_value(value.clone(), source)?;
-    validate_document_shape(&initial, source)?;
+    validate_document_shape(&initial, source, ExceptionValidation::Skip)?;
     let variables = resolve_variables(
       &initial.variables,
       &initial.bindings,
@@ -288,6 +263,7 @@ impl ParsedRulepack {
       &initial.overrides,
       &options.local_overrides,
     )?;
+    exceptions::append_local_exceptions(&mut value, source, &options.local_exceptions)?;
     if options.pin_variables {
       pin_variable_defaults(&mut value, &variables)?;
       if let Some(table) = value.as_table_mut() {
@@ -303,7 +279,7 @@ impl ParsedRulepack {
       set_rulepack_provenance(&mut value, provenance)?;
     }
     let document = document_from_value(value.clone(), source)?;
-    validate_document_shape(&document, source)?;
+    validate_document_shape(&document, source, ExceptionValidation::Full)?;
     let rendered =
       toml::to_string_pretty(&value).with_context(|| format!("failed to render {source}"))?;
     Ok(Self {
@@ -317,8 +293,20 @@ impl ParsedRulepack {
     self.validate_references(true)?;
     let mut loaded_files = vec![manifest_path.to_path_buf()];
     let mut rules = Vec::new();
+    let mut active_exceptions = exceptions::ActiveRulepackExceptions::new(
+      &format!("OxiRule rulepack {}", self.document.rulepack.name),
+      &self.document.exceptions,
+    )?;
     for rule in &self.document.rules {
-      let (content, loaded_path) = rule_content(rule, base_dir, &self.variables)?;
+      let (content, loaded_path) = files::rule_content(rule, base_dir, &self.variables)?;
+      let content = active_exceptions.apply_to_rule_content(
+        &format!(
+          "OxiRule rulepack {} rule {}",
+          self.document.rulepack.name, rule.name
+        ),
+        rule,
+        &content,
+      )?;
       if let Some(path) = &loaded_path {
         loaded_files.push(path.clone());
       }
@@ -345,10 +333,12 @@ impl ParsedRulepack {
         loaded_from_logical_path: loaded_path.or_else(|| Some(manifest_path.to_path_buf())),
       });
     }
+    active_exceptions.finish(&format!("OxiRule rulepack {}", self.document.rulepack.name))?;
 
     let mut rule_groups = Vec::new();
     for group_file in &self.document.group_files {
-      let (content, loaded_path) = group_file_content(group_file, base_dir, &self.variables)?;
+      let (content, loaded_path) =
+        files::group_file_content(group_file, base_dir, &self.variables)?;
       if let Some(path) = &loaded_path {
         loaded_files.push(path.clone());
       }
@@ -376,7 +366,7 @@ impl ParsedRulepack {
 
   fn validate_references(&self, require_base_files: bool) -> anyhow::Result<()> {
     for rule in &self.document.rules {
-      validate_content_or_path(
+      files::validate_content_or_path(
         &format!(
           "OxiRule rulepack {} rule {}",
           self.document.rulepack.name, rule.name
@@ -388,7 +378,7 @@ impl ParsedRulepack {
       )?;
     }
     for group_file in &self.document.group_files {
-      validate_content_or_path(
+      files::validate_content_or_path(
         &format!(
           "OxiRule rulepack {} group file",
           self.document.rulepack.name
@@ -420,6 +410,7 @@ fn summary_from_document(
     default_mode: document.rulepack.default_mode.as_str().to_string(),
     rules: document.rules.len(),
     group_files: document.group_files.len(),
+    exceptions: document.exceptions.len(),
     loaded_files,
     source_commit: document.rulepack.source_commit.clone(),
     source_url: document.rulepack.source_url.clone(),
@@ -436,7 +427,17 @@ fn document_from_value(value: toml::Value, source: &str) -> anyhow::Result<Rulep
     .with_context(|| format!("failed to decode {source}"))
 }
 
-fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow::Result<()> {
+#[derive(Clone, Copy)]
+enum ExceptionValidation {
+  Skip,
+  Full,
+}
+
+fn validate_document_shape(
+  document: &RulepackDocument,
+  source: &str,
+  exception_validation: ExceptionValidation,
+) -> anyhow::Result<()> {
   if document.rulepack.schema_version != SUPPORTED_SCHEMA_VERSION {
     bail!(
       "{source} uses unsupported rulepack schema_version {}; only schema_version {SUPPORTED_SCHEMA_VERSION} is supported",
@@ -474,6 +475,9 @@ fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow:
     &document.profiles,
   )?;
   overrides::validate_rulepack_overrides(source, &document.rulepack.name, &document.overrides)?;
+  if matches!(exception_validation, ExceptionValidation::Full) {
+    exceptions::validate_rulepack_exceptions(source, &document.exceptions, &document.rules)?;
+  }
 
   let mut rule_names = HashSet::new();
   for rule in &document.rules {
@@ -646,89 +650,13 @@ fn set_rulepack_string(
   Ok(())
 }
 
-fn validate_content_or_path(
-  label: &str,
-  content: Option<&str>,
-  path: Option<&Path>,
-  suffix: &str,
-  _require_base_files: bool,
-) -> anyhow::Result<()> {
-  match (content, path) {
-    (Some(_), Some(_)) => bail!("{label} must use either content or path, not both"),
-    (None, None) => bail!("{label} must include content or path"),
-    (Some(content), None) => {
-      if content.trim().is_empty() {
-        bail!("{label} content must not be empty");
-      }
-      Ok(())
-    }
-    (None, Some(path)) => {
-      validate_relative_rulepack_path(label, path, suffix)?;
-      Ok(())
-    }
-  }
-}
-
-fn rule_content(
-  rule: &RulepackRule,
-  base_dir: &Path,
-  variables: &BTreeMap<String, String>,
-) -> anyhow::Result<(String, Option<PathBuf>)> {
-  match (&rule.content, &rule.path) {
-    (Some(content), None) => Ok((content.clone(), None)),
-    (None, Some(path)) => {
-      read_referenced_file("OxiRule rulepack rule path", base_dir, path, variables)
-    }
-    _ => unreachable!("rulepack rule content/path was validated"),
-  }
-}
-
-fn group_file_content(
-  group_file: &RulepackGroupFile,
-  base_dir: &Path,
-  variables: &BTreeMap<String, String>,
-) -> anyhow::Result<(String, Option<PathBuf>)> {
-  match (&group_file.content, &group_file.path) {
-    (Some(content), None) => Ok((content.clone(), None)),
-    (None, Some(path)) => {
-      read_referenced_file("OxiRule rulepack group path", base_dir, path, variables)
-    }
-    _ => unreachable!("rulepack group content/path was validated"),
-  }
-}
-
-fn read_referenced_file(
-  field_name: &str,
-  base_dir: &Path,
-  path: &Path,
-  variables: &BTreeMap<String, String>,
-) -> anyhow::Result<(String, Option<PathBuf>)> {
-  let (resolved, logical) = crate::config::resolve_existing_local_config_file_path_with_logical(
-    field_name, base_dir, path,
-  )?;
-  let mut content = std::fs::read_to_string(&resolved)
-    .with_context(|| format!("failed to read {} {}", field_name, resolved.display()))?;
-  for (name, replacement) in variables {
-    content = content.replace(&format!("{{{{{name}}}}}"), replacement);
-  }
-  Ok((content, Some(logical)))
-}
-
-fn validate_relative_rulepack_path(label: &str, path: &Path, suffix: &str) -> anyhow::Result<()> {
-  crate::config::resolve_local_config_file_path(label, Path::new("."), path)?;
-  let Some(value) = path.to_str() else {
-    bail!("{label} path is not valid UTF-8: {}", path.display());
-  };
-  if !value.ends_with(suffix) {
-    bail!("{label} path must end with {suffix}");
-  }
-  Ok(())
-}
-
 fn default_rulepack_mode() -> WafMode {
   WafMode::Monitor
 }
 
+#[cfg(test)]
+#[path = "rulepacks_exception_tests.rs"]
+mod exception_tests;
 #[cfg(test)]
 #[path = "rulepacks_override_tests.rs"]
 mod override_tests;

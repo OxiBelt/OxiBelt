@@ -113,11 +113,12 @@ use rule_groups::{RuleGroupScope, resolve_rule, validate_rule_group_scope};
 pub use rule_groups::{WafConditionMerge, WafRuleGroupConfig};
 pub use rulepacks::{
   RULEPACK_FILE_SUFFIX, RulepackActionSelector, RulepackBinding, RulepackBindingKind,
-  RulepackDiscovery, RulepackInputMetadata, RulepackModeOverride, RulepackOverride,
-  RulepackOverrideSelector, RulepackProfile, RulepackReferencedFile, RulepackReferencedFileKind,
-  RulepackRenderOptions, RulepackSourceProvenance, RulepackVariable, WafRulepackSummary,
-  inspect_rulepack, inspect_rulepack_inputs, referenced_rulepack_files,
-  render_rulepack_for_install, validate_rulepack_manifest, validate_rulepack_overrides,
+  RulepackDiscovery, RulepackException, RulepackInputMetadata, RulepackModeOverride,
+  RulepackOverride, RulepackOverrideSelector, RulepackProfile, RulepackReferencedFile,
+  RulepackReferencedFileKind, RulepackRenderOptions, RulepackSourceProvenance, RulepackVariable,
+  WafRulepackSummary, inspect_rulepack, inspect_rulepack_inputs, referenced_rulepack_files,
+  render_rulepack_for_install, validate_rulepack_exception_list, validate_rulepack_manifest,
+  validate_rulepack_overrides,
 };
 use runtime_helpers::{
   body_size, ip_in_cidr, pattern_set_matches, request_metadata_has_duplicates, version_string,

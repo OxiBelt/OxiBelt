@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use oxibelt::waf::{RulepackInputMetadata, RulepackOverride, WafMode, inspect_rulepack_inputs};
+use oxibelt::waf::{
+  RulepackException, RulepackInputMetadata, RulepackOverride, WafMode, inspect_rulepack_inputs,
+};
 use serde::Deserialize;
 
 use crate::cli::RulepackModeArg;
@@ -16,6 +18,7 @@ pub(crate) struct RulepackResolvedInputs {
   pub(crate) force_mode: bool,
   pub(crate) values_file: Option<PathBuf>,
   pub(crate) rule_overrides: Vec<RulepackOverride>,
+  pub(crate) exceptions: Vec<RulepackException>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -29,6 +32,8 @@ struct RulepackValuesFile {
   overrides: RulepackValuesOverrides,
   #[serde(default)]
   rule_overrides: Vec<RulepackOverride>,
+  #[serde(default)]
+  exceptions: Vec<RulepackException>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,6 +79,7 @@ fn resolve_rulepack_inputs_from_metadata(
     &inputs.summary.name,
     &values_file.rule_overrides,
   )?;
+  oxibelt::waf::validate_rulepack_exception_list(request.source, &values_file.exceptions)?;
   let selected_profile = request
     .cli_profile
     .map(str::to_string)
@@ -119,6 +125,7 @@ fn resolve_rulepack_inputs_from_metadata(
     force_mode,
     values_file: request.values_file.map(Path::to_path_buf),
     rule_overrides: values_file.rule_overrides,
+    exceptions: values_file.exceptions,
   })
 }
 
@@ -133,7 +140,7 @@ fn load_values_file(path: &Path) -> anyhow::Result<RulepackValuesFile> {
   for key in table.keys() {
     if !matches!(
       key.as_str(),
-      "bindings" | "values" | "overrides" | "rule_overrides"
+      "bindings" | "values" | "overrides" | "rule_overrides" | "exceptions"
     ) {
       bail!("{} contains unsupported table [{key}]", path.display());
     }
@@ -238,10 +245,10 @@ mode = "monitor"
 
   #[test]
   fn values_file_rejects_unknown_tables() {
-    let file = write_temp_values("[exceptions]\nname = \"later\"\n");
+    let file = write_temp_values("[later]\nname = \"later\"\n");
     let error = load_values_file(file.path()).expect_err("unknown table should fail");
 
-    assert!(error.to_string().contains("unsupported table [exceptions]"));
+    assert!(error.to_string().contains("unsupported table [later]"));
   }
 
   #[test]
@@ -282,6 +289,49 @@ priority = 90
     );
     assert_eq!(resolved.rule_overrides[0].mode, Some(WafMode::Enforcing));
     assert_eq!(resolved.rule_overrides[0].priority, Some(90));
+  }
+
+  #[test]
+  fn values_file_accepts_local_exceptions() {
+    let file = write_temp_values(
+      r#"[bindings]
+app_route = "mmsecretvault"
+
+[[exceptions]]
+name = "allow-healthcheck-login-preflight"
+rule_names = ["admin"]
+routes = ["mmsecretvault"]
+methods = ["GET"]
+path_prefixes = ["/identity/accounts/prelogin"]
+source_cidrs = ["10.20.0.0/16"]
+reason = "internal synthetic healthcheck"
+expires_at = "2999-07-01T00:00:00Z"
+"#,
+    );
+    let cli_vars = BTreeMap::new();
+    let cli_binds = BTreeMap::new();
+
+    let resolved = resolve_rulepack_inputs_from_metadata(
+      RulepackResolveRequest {
+        raw: "",
+        source: "test rulepack",
+        values_file: Some(file.path()),
+        cli_vars: &cli_vars,
+        cli_binds: &cli_binds,
+        cli_profile: None,
+        cli_mode: None,
+        cli_force_mode: false,
+        default_mode: None,
+      },
+      &metadata(),
+    )
+    .expect("resolved values");
+
+    assert_eq!(resolved.exceptions.len(), 1);
+    assert_eq!(
+      resolved.exceptions[0].name,
+      "allow-healthcheck-login-preflight"
+    );
   }
 
   #[test]

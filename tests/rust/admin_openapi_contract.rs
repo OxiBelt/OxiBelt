@@ -375,6 +375,14 @@ fn waf_rulepack_list_documents_optional_provenance_fields() {
     let properties = summary["properties"]
         .as_object()
         .expect("WafRulepackSummary properties should be an object");
+    assert!(
+        required.contains("exceptions"),
+        "WafRulepackSummary exceptions count must be required"
+    );
+    assert!(
+        properties.contains_key("exceptions"),
+        "WafRulepackSummary should document exceptions count"
+    );
     for field in [
         "source_url",
         "source_sha256",

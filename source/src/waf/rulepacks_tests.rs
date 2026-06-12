@@ -200,7 +200,7 @@ path_prefix_any = ["/"]
 name = "block-demo"
 phase = "request"
 priority = 100
-content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
+content = "when = \"Context.RouteName == '{{route_name}}'\"\n"
 "#;
 
   let metadata = inspect_rulepack_inputs(raw, "test rulepack").expect("metadata");
@@ -240,7 +240,7 @@ name_any = ["vault"]
 name = "block-demo"
 phase = "request"
 priority = 100
-content = "when = \"Context.Route.Name == '{{route_name}}' && !Request.Client.Ip.inCidr('{{admin_cidr}}')\"\n"
+content = "when = \"Context.RouteName == '{{route_name}}' && !Request.Client.Ip.inCidr('{{admin_cidr}}')\"\n"
 "#;
 
   let rendered = render_rulepack_for_install(
@@ -390,7 +390,7 @@ host_contains_any = ["vaultwarden"]
 name = "block-demo"
 phase = "request"
 priority = 100
-content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
+content = "when = \"Context.RouteName == '{{route_name}}'\"\n"
 "#;
 
   let error =

@@ -9921,6 +9921,122 @@ rulepack_files = ["rulepacks/route.oxirule-rulepack.toml"]
 }
 
 #[test]
+fn oxirule_rulepack_exceptions_scope_false_positive_traffic() {
+    let temp_dir = common::TempDir::new("waf-rulepack-exceptions");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rulepack_dir = temp_dir.path().join("oxirule").join("rulepacks");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rulepack_dir).expect("failed to create rulepack directory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "waf-rulepack-exceptions");
+    std::fs::write(
+        rulepack_dir.join("login.oxirule-rulepack.toml"),
+        r#"
+[rulepack]
+schema_version = 2
+name = "login-pack"
+version = "0.1.0"
+default_mode = "enforcing"
+
+[[exceptions]]
+name = "allow-healthcheck-login-preflight"
+rule_ids = ["demo-login"]
+routes = ["app-root"]
+methods = ["GET"]
+path_prefixes = ["/identity/accounts/prelogin"]
+source_cidrs = ["203.0.113.0/24"]
+reason = "internal synthetic healthcheck"
+expires_at = "2999-07-01T00:00:00Z"
+
+[[rules]]
+name = "login-preflight"
+id = "demo-login"
+phase = "request"
+priority = 1
+content = '''
+when = "Request.Http.Path.startsWith('/identity/accounts/prelogin')"
+
+[[actions]]
+type = "reject"
+status = 403
+'''
+"#,
+    )
+    .expect("failed to write rulepack");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+rulepack_files = ["rulepacks/login.oxirule-rulepack.toml"]
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = Config::load(&config_path).expect("config should load rulepack exceptions");
+    config.validate().expect("config should validate");
+    assert_eq!(config.waf.rulepack_summaries()[0].exceptions, 1);
+    let engine = WafEngine::new(&config).expect("WAF should compile");
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let get = Method::GET;
+    let post = Method::POST;
+    let uri: Uri = "/identity/accounts/prelogin"
+        .parse()
+        .expect("URI should parse");
+
+    let allowed = engine.evaluate_request(request_input(
+        &get,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert!(allowed.terminal.is_none());
+
+    let wrong_method = engine.evaluate_request(request_input(
+        &post,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        wrong_method
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let wrong_source = engine.evaluate_request(request_input(
+        &get,
+        &uri,
+        &headers,
+        &tags,
+        "198.51.100.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+        wrong_source
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
 fn oxirule_rulepack_schema_v1_fails_config_load() {
     let temp_dir = common::TempDir::new("waf-rulepack-v1");
     let config_dir = temp_dir.path().join("config");

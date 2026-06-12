@@ -36,6 +36,8 @@ mod rulepack_install;
 mod rulepack_openpgp;
 #[path = "oxibeltctl/rulepack_prompt.rs"]
 mod rulepack_prompt;
+#[path = "oxibeltctl/rulepack_render.rs"]
+mod rulepack_render;
 #[path = "oxibeltctl/rulepack_url.rs"]
 mod rulepack_url;
 #[path = "oxibeltctl/rulepack_values.rs"]

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use super::{RulepackOverride, RulepackSourceProvenance, WafRulepackSummary};
+use super::{RulepackException, RulepackOverride, RulepackSourceProvenance, WafRulepackSummary};
 use crate::waf::WafMode;
 
 #[derive(Debug, Clone, Copy)]
@@ -16,6 +16,7 @@ pub struct RulepackModeOverride {
 pub struct RulepackRenderOptions {
   pub variables: BTreeMap<String, String>,
   pub local_overrides: Vec<RulepackOverride>,
+  pub local_exceptions: Vec<RulepackException>,
   pub mode_override: Option<RulepackModeOverride>,
   pub source_commit: Option<String>,
   pub source_provenance: Option<RulepackSourceProvenance>,

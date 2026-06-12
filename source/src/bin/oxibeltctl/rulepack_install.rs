@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
-use oxibelt::waf::{RULEPACK_FILE_SUFFIX, RulepackOverride, RulepackSourceProvenance};
+use oxibelt::waf::{
+  RULEPACK_FILE_SUFFIX, RulepackException, RulepackOverride, RulepackSourceProvenance,
+};
 use serde::Serialize;
 
 use crate::cli::RulepackModeArg;
@@ -22,6 +24,7 @@ pub(crate) struct RulepackInstallLockInput<'a> {
   pub(crate) bindings: &'a BTreeMap<String, String>,
   pub(crate) values: &'a BTreeMap<String, String>,
   pub(crate) rule_overrides: &'a [RulepackOverride],
+  pub(crate) exceptions: &'a [RulepackException],
 }
 
 #[derive(Serialize)]
@@ -33,6 +36,8 @@ struct RulepackInstallLock<'a> {
   values: &'a BTreeMap<String, String>,
   #[serde(skip_serializing_if = "<[_]>::is_empty")]
   rule_overrides: &'a [RulepackOverride],
+  #[serde(skip_serializing_if = "<[_]>::is_empty")]
+  exceptions: &'a [RulepackException],
 }
 
 #[derive(Serialize)]
@@ -90,6 +95,7 @@ pub(crate) fn render_install_lock(input: RulepackInstallLockInput<'_>) -> anyhow
     bindings: input.bindings,
     values: input.values,
     rule_overrides: input.rule_overrides,
+    exceptions: input.exceptions,
   };
   toml::to_string_pretty(&lock).context("failed to render rulepack install lock")
 }
@@ -183,6 +189,7 @@ mod tests {
       bindings: &BTreeMap::from([("app_route".to_string(), "mmsecretvault".to_string())]),
       values: &BTreeMap::from([("admin_cidr".to_string(), "10.10.0.0/16".to_string())]),
       rule_overrides: &rule_overrides,
+      exceptions: &[],
     })
     .expect("install lock");
 
@@ -196,5 +203,40 @@ mod tests {
     assert!(rendered.contains("[[rule_overrides]]"));
     assert!(rendered.contains("rule_id = \"oxibelt.vaultwarden.admin_guard\""));
     assert!(rendered.contains("priority = 90"));
+  }
+
+  #[test]
+  fn install_lock_records_local_exceptions() {
+    let exceptions = vec![RulepackException {
+      name: "allow-healthcheck-login-preflight".to_string(),
+      rule_ids: vec!["oxibelt.vaultwarden.login_rate_limit".to_string()],
+      rule_names: Vec::new(),
+      tags: Vec::new(),
+      routes: vec!["mmsecretvault".to_string()],
+      methods: vec!["GET".to_string()],
+      path_prefixes: vec!["/identity/accounts/prelogin".to_string()],
+      source_cidrs: vec!["10.20.0.0/16".to_string()],
+      reason: "internal synthetic healthcheck".to_string(),
+      expires_at: Some("2999-07-01T00:00:00Z".to_string()),
+    }];
+    let rendered = render_install_lock(RulepackInstallLockInput {
+      name: "vaultwarden",
+      version: "0.1.0",
+      source: "file vaultwarden.oxirule-rulepack.toml",
+      source_commit: None,
+      source_provenance: None,
+      selected_profile: None,
+      effective_mode: RulepackModeArg::Monitor,
+      force_mode: false,
+      bindings: &BTreeMap::new(),
+      values: &BTreeMap::new(),
+      rule_overrides: &[],
+      exceptions: &exceptions,
+    })
+    .expect("install lock");
+
+    assert!(rendered.contains("[[exceptions]]"));
+    assert!(rendered.contains("allow-healthcheck-login-preflight"));
+    assert!(rendered.contains("source_cidrs = [\"10.20.0.0/16\"]"));
   }
 }

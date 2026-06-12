@@ -7,7 +7,7 @@ use anyhow::{Context, bail};
 use http::{Method, StatusCode};
 use oxibelt::admin_client::{AdminClient, AdminResponse};
 use oxibelt::waf::{
-  RULEPACK_FILE_SUFFIX, RulepackModeOverride, RulepackReferencedFileKind, RulepackRenderOptions,
+  RULEPACK_FILE_SUFFIX, RulepackReferencedFileKind, RulepackRenderOptions,
   RulepackSourceProvenance, inspect_rulepack, referenced_rulepack_files,
   render_rulepack_for_install, validate_rulepack_manifest,
 };
@@ -24,6 +24,7 @@ use crate::rulepack_install::{
   RulepackInstallLockInput, installed_rulepack_lock_path, installed_rulepack_path,
   render_install_lock,
 };
+use crate::rulepack_render::{render_options, render_text};
 use crate::rulepack_url::load_url_source;
 #[cfg(test)]
 use crate::rulepack_url::{
@@ -75,6 +76,7 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
         render_options(
           render_vars,
           resolved.rule_overrides.clone(),
+          resolved.exceptions.clone(),
           resolved.mode,
           resolved.force_mode,
           loaded.git_commit.clone(),
@@ -111,6 +113,7 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
       let options = render_options(
         render_vars,
         resolved.rule_overrides.clone(),
+        resolved.exceptions.clone(),
         resolved.mode,
         resolved.force_mode,
         loaded.git_commit.clone(),
@@ -246,6 +249,7 @@ async fn plan_rulepack_apply(
   let options = render_options(
     render_vars.clone(),
     resolved.rule_overrides.clone(),
+    resolved.exceptions.clone(),
     Some(effective_mode),
     resolved.force_mode,
     loaded.git_commit.clone(),
@@ -310,6 +314,7 @@ async fn plan_rulepack_apply(
       bindings: &binds,
       values: &lock_values,
       rule_overrides: &resolved.rule_overrides,
+      exceptions: &resolved.exceptions,
     })?,
   }));
   let etag = current_etag(client).await?;
@@ -595,42 +600,6 @@ fn validate_git_url(git: &str) -> anyhow::Result<String> {
     bail!("git rulepack URL must not include username or password");
   }
   Ok(clone_url.to_string())
-}
-
-fn render_options(
-  variables: BTreeMap<String, String>,
-  local_overrides: Vec<oxibelt::waf::RulepackOverride>,
-  mode: Option<RulepackModeArg>,
-  force_mode: bool,
-  source_commit: Option<String>,
-  source_provenance: Option<RulepackSourceProvenance>,
-) -> RulepackRenderOptions {
-  RulepackRenderOptions {
-    variables,
-    local_overrides,
-    mode_override: mode.map(|mode| RulepackModeOverride {
-      mode: mode_arg(mode),
-      force: force_mode,
-    }),
-    source_commit,
-    source_provenance,
-    pin_variables: false,
-  }
-}
-
-fn render_text(raw: &str, variables: &BTreeMap<String, String>) -> String {
-  let mut rendered = raw.to_string();
-  for (name, value) in variables {
-    rendered = rendered.replace(&format!("{{{{{name}}}}}"), value);
-  }
-  rendered
-}
-
-fn mode_arg(mode: RulepackModeArg) -> oxibelt::waf::WafMode {
-  match mode {
-    RulepackModeArg::Monitor => oxibelt::waf::WafMode::Monitor,
-    RulepackModeArg::Enforcing => oxibelt::waf::WafMode::Enforcing,
-  }
 }
 
 async fn current_etag(client: &AdminClient) -> anyhow::Result<String> {

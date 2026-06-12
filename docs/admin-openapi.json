@@ -5566,6 +5566,7 @@
           "default_mode",
           "rules",
           "group_files",
+          "exceptions",
           "loaded_files"
         ],
         "properties": {
@@ -5604,6 +5605,11 @@
           "group_files": {
             "type": "integer",
             "minimum": 0
+          },
+          "exceptions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of rulepack exception entries declared by the loaded manifest."
           },
           "loaded_files": {
             "type": "array",

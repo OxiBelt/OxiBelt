@@ -299,9 +299,19 @@ login_rate = "10r/m"
 profile = "public-production"
 mode = "enforcing"
 force_mode = true
+
+[[exceptions]]
+name = "allow-healthcheck-login-preflight"
+rule_ids = ["vaultwarden-login"]
+routes = ["mmsecretvault"]
+methods = ["GET"]
+path_prefixes = ["/identity/accounts/prelogin"]
+source_cidrs = ["10.20.0.0/16"]
+reason = "internal synthetic healthcheck"
+expires_at = "2999-07-01T00:00:00Z"
 ```
 
-Only `[bindings]`, `[values]`, and `[overrides]` are accepted. Binding and value entries must be strings. `[overrides] profile` selects a declared `[[profiles]]` entry, `mode` may be `monitor` or `enforcing`, and `force_mode = true` pins every rule to the effective mode. Precedence is `[[variables]] default` < selected profile values/mode < values file < CLI `--bind`, `--var`, `--profile`, `--mode`, and `--force-mode`. Without an explicit profile or mode override, `rulepack apply` still installs in `monitor` mode.
+Only `[bindings]`, `[values]`, `[overrides]`, `[[rule_overrides]]`, and `[[exceptions]]` are accepted. Binding and value entries must be strings. `[overrides] profile` selects a declared `[[profiles]]` entry, `mode` may be `monitor` or `enforcing`, and `force_mode = true` pins every rule to the effective mode. Precedence is `[[variables]] default` < selected profile values/mode < values file < CLI `--bind`, `--var`, `--profile`, `--mode`, and `--force-mode`. Without an explicit profile or mode override, `rulepack apply` still installs in `monitor` mode.
 
 Rulepack schema version `2` also supports typed rule overrides. Manifest `[[overrides]]` entries are rulepack-authored defaults; values-file `[[rule_overrides]]` entries are local operator overlays kept outside the remote rulepack. Override selectors must set exactly one selector kind: `rulepack`, `tags`, `rule_id`, or `rule_name`. Tag selectors match any listed tag. Precedence is manifest rulepack < manifest tag < manifest rule < local rulepack < local tag < local rule, and later entries in the same tier win.
 
@@ -332,7 +342,9 @@ status = 429
 body = "Too Many Requests"
 ```
 
-Supported rule fields are `mode`, `priority`, and `enabled`. Setting `enabled = false` removes the matched rule from the rendered install manifest. Supported action fields are `rate`, `burst`, `status`, and `body`; action overrides require an `action` selector and must match exactly one action in each matched rule. `rate_limit` action overrides require `action.name`; terminal actions such as `reject`, `replace_response`, and `reject_response` may use a type-only selector when that action type is unique in the rule. Overrides do not support raw content replacement, regex patching, arbitrary scripts, callbacks, or native rulepack exceptions in this slice.
+Supported rule fields are `mode`, `priority`, and `enabled`. Setting `enabled = false` removes the matched rule from the rendered install manifest. Supported action fields are `rate`, `burst`, `status`, and `body`; action overrides require an `action` selector and must match exactly one action in each matched rule. `rate_limit` action overrides require `action.name`; terminal actions such as `reject`, `replace_response`, and `reject_response` may use a type-only selector when that action type is unique in the rule. Overrides do not support raw content replacement, regex patching, arbitrary scripts, callbacks, or exception predicates.
+
+Rulepack `[[exceptions]]` provide narrow false-positive tuning without disabling a whole rule. They may live in the source manifest or in a values file. Select rules with `rule_ids`, `rule_names`, or `tags`; at least one rule selector is required. Scope traffic with `routes`, `methods`, `path_prefixes`, or `source_cidrs`; at least one traffic selector is required. Categories are ANDed together, while values within one category are ORed. Matching active exceptions add a negative predicate to the rendered rule condition. `reason` is required, and `expires_at` must use strict UTC `YYYY-MM-DDTHH:MM:SSZ`; expired exceptions are ignored and logged. Header, body, raw regex, and stream-phase exception selectors are not supported.
 
 `oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and scalar variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying a rendered manifest through `/admin/v1/files/sync`. Noninteractive `render`, `check`, and `apply` can pass bindings and values explicitly or through `--values`:
 
@@ -345,7 +357,7 @@ oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --values vaul
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --interactive
 ```
 
-Installed manifests contain concrete rendered rule content and do not require source `[[bindings]]` or `[[profiles]]` metadata at runtime. `rulepack apply` also writes `rulepacks/{name}.install.toml` under the OxiRule directory with the selected profile, effective mode, source/provenance fields, bindings, and values. The install lockfile is metadata only and is not loaded as an executable rulepack.
+Installed manifests contain concrete rendered rule content and do not require source `[[bindings]]` or `[[profiles]]` metadata at runtime. `rulepack apply` also writes `rulepacks/{name}.install.toml` under the OxiRule directory with the selected profile, effective mode, source/provenance fields, bindings, values, local rule overrides, and local exceptions. The install lockfile is metadata only and is not loaded as an executable rulepack.
 
 ## Development Tools
 

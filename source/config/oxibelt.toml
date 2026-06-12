@@ -889,6 +889,8 @@ fail_policy = "closed"
 duplicate_metadata_policy = "fail_closed"
 # rulepack_files = ["rulepacks/*.oxirule-rulepack.toml"]
 # rule_group_files = ["groups/*.oxirule-group.toml"]
+# Rulepack v2 manifests may include [[exceptions]] for scoped false-positive
+# tuning by rule_ids/rule_names/tags plus routes/methods/path_prefixes/source_cidrs.
 
 # [waf.http_body_compression]
 # mode = "off" # off | transform

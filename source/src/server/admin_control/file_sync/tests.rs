@@ -562,6 +562,16 @@ app_route = "mmsecretvault"
 
 [values]
 admin_cidr = "10.10.0.0/16"
+
+[[exceptions]]
+name = "allow-healthcheck-login-preflight"
+rule_ids = ["oxibelt.vaultwarden.login_rate_limit"]
+routes = ["mmsecretvault"]
+methods = ["GET"]
+path_prefixes = ["/identity/accounts/prelogin"]
+source_cidrs = ["10.20.0.0/16"]
+reason = "internal synthetic healthcheck"
+expires_at = "2999-07-01T00:00:00Z"
 "#,
   );
   let committed = commit_file_sync(&valid, &config).expect("install lock should sync");
