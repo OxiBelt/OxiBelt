@@ -1,13 +1,18 @@
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, bail};
-use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
-use pgp::crypto::hash::HashAlgorithm;
-use pgp::packet::SignatureType;
-use pgp::types::{KeyDetails, KeyVersion, VerifyingKey};
+use anyhow::{Context, bail, ensure};
+use sequoia_openpgp as openpgp;
+
+use openpgp::cert::prelude::*;
+use openpgp::parse::Parse;
+use openpgp::parse::stream::{
+  DetachedVerifierBuilder, MessageLayer, MessageStructure, VerificationHelper,
+};
+use openpgp::policy::StandardPolicy;
+use openpgp::types::{HashAlgorithm, SignatureType};
 
 pub(crate) const OPENPGP_KEYRING_ENV: &str = "OXIBELT_RULEPACK_OPENPGP_KEYRING_DIR";
 const DEFAULT_OPENPGP_KEYRING_DIR: &str = "/etc/oxibelt/oxirule/trusted-rulepack-publishers";
@@ -40,127 +45,38 @@ pub(crate) fn verify_rulepack_signature(
   rulepack_bytes: &[u8],
   trust: RulepackOpenPgpTrust<'_>,
 ) -> anyhow::Result<RulepackOpenPgpVerification> {
-  let signature = parse_detached_signature(signature_bytes)?;
-  enforce_signature_policy(&signature)?;
   let pinned = normalize_fingerprint_pins(trust.fingerprints)?;
-  let keys = load_trusted_public_keys(&trust)?;
-  if keys.is_empty() {
+  let certs = load_trusted_public_keys(&trust)?;
+  if certs.is_empty() {
     bail!("rulepack OpenPGP signature requires at least one trusted public key");
   }
 
-  let mut matched_pin = false;
-  let mut verification_errors = Vec::new();
-  for key in &keys {
-    if let Some(verification) = try_verify_candidate(
-      &signature,
-      rulepack_bytes,
-      key,
-      &pinned,
-      &mut matched_pin,
-      &mut verification_errors,
-    )? {
-      return Ok(verification);
-    }
-    for subkey in &key.public_subkeys {
-      if let Some(verification) = try_verify_candidate(
-        &signature,
-        rulepack_bytes,
-        subkey,
-        &pinned,
-        &mut matched_pin,
-        &mut verification_errors,
-      )? {
-        return Ok(verification);
-      }
-    }
-  }
-
-  if !pinned.is_empty() && !matched_pin {
-    bail!("no trusted OpenPGP public key matched --rulepack-openpgp-fingerprint");
-  }
-  let detail = verification_errors
-    .last()
-    .map(|error| format!(": {error}"))
-    .unwrap_or_default();
-  bail!("rulepack OpenPGP signature did not verify with trusted public keys{detail}");
-}
-
-fn try_verify_candidate<K>(
-  signature: &DetachedSignature,
-  rulepack_bytes: &[u8],
-  key: &K,
-  pinned: &BTreeSet<String>,
-  matched_pin: &mut bool,
-  verification_errors: &mut Vec<String>,
-) -> anyhow::Result<Option<RulepackOpenPgpVerification>>
-where
-  K: KeyDetails + VerifyingKey,
-{
-  let fingerprint = normalize_key_fingerprint(key)?;
-  if !pinned.is_empty() && !pinned.contains(&fingerprint) {
-    return Ok(None);
-  }
-  *matched_pin = true;
-  match signature.verify(key, rulepack_bytes) {
-    Ok(()) => Ok(Some(RulepackOpenPgpVerification {
-      signer_fingerprint: fingerprint,
-    })),
-    Err(error) => {
-      verification_errors.push(error.to_string());
-      Ok(None)
-    }
-  }
-}
-
-fn parse_detached_signature(bytes: &[u8]) -> anyhow::Result<DetachedSignature> {
-  let (signature, _) = DetachedSignature::from_reader_single(Cursor::new(bytes))
+  let policy = StandardPolicy::new();
+  let helper = RulepackVerificationHelper::new(certs, pinned);
+  let verifier = DetachedVerifierBuilder::from_bytes(signature_bytes)
     .context("failed to parse OpenPGP detached signature")?;
-  Ok(signature)
+  let mut verifier = verifier.with_policy(&policy, None, helper)?;
+  verifier.verify_bytes(rulepack_bytes)?;
+  let helper = verifier.into_helper();
+  helper.into_verification()
 }
 
-fn enforce_signature_policy(signature: &DetachedSignature) -> anyhow::Result<()> {
-  match signature.signature.typ() {
-    Some(SignatureType::Binary) => {}
-    Some(other) => {
-      bail!("rulepack OpenPGP signature must be a binary detached signature, got {other:?}")
-    }
-    None => bail!("rulepack OpenPGP signature has an unsupported signature type"),
-  }
-  let hash = signature
-    .signature
-    .hash_alg()
-    .context("rulepack OpenPGP signature has an unsupported hash algorithm")?;
-  if !matches!(
-    hash,
-    HashAlgorithm::Sha256
-      | HashAlgorithm::Sha384
-      | HashAlgorithm::Sha512
-      | HashAlgorithm::Sha3_256
-      | HashAlgorithm::Sha3_512
-  ) {
-    bail!("rulepack OpenPGP signature uses unsupported weak hash algorithm {hash}");
-  }
-  Ok(())
-}
-
-fn load_trusted_public_keys(
-  trust: &RulepackOpenPgpTrust<'_>,
-) -> anyhow::Result<Vec<SignedPublicKey>> {
-  let mut keys = Vec::new();
+fn load_trusted_public_keys(trust: &RulepackOpenPgpTrust<'_>) -> anyhow::Result<Vec<Cert>> {
+  let mut certs = Vec::new();
   for path in trust.key_files {
-    keys.extend(load_public_key_file(path)?);
+    certs.extend(load_public_key_file(path)?);
   }
   for dir in trust.keyring_dirs {
-    keys.extend(load_keyring_dir(dir, true)?);
+    certs.extend(load_keyring_dir(dir, true)?);
   }
   if let Some(env_dir) = env_keyring_dir()? {
-    keys.extend(load_keyring_dir(&env_dir, true)?);
+    certs.extend(load_keyring_dir(&env_dir, true)?);
   }
   let default_dir = Path::new(DEFAULT_OPENPGP_KEYRING_DIR);
   if default_dir.exists() {
-    keys.extend(load_keyring_dir(default_dir, true)?);
+    certs.extend(load_keyring_dir(default_dir, true)?);
   }
-  Ok(keys)
+  Ok(certs)
 }
 
 fn env_keyring_dir() -> anyhow::Result<Option<PathBuf>> {
@@ -176,7 +92,7 @@ fn env_keyring_dir() -> anyhow::Result<Option<PathBuf>> {
   }
 }
 
-fn load_keyring_dir(dir: &Path, require_exists: bool) -> anyhow::Result<Vec<SignedPublicKey>> {
+fn load_keyring_dir(dir: &Path, require_exists: bool) -> anyhow::Result<Vec<Cert>> {
   let metadata = match std::fs::symlink_metadata(dir) {
     Ok(metadata) => metadata,
     Err(error) if !require_exists && error.kind() == std::io::ErrorKind::NotFound => {
@@ -202,7 +118,7 @@ fn load_keyring_dir(dir: &Path, require_exists: bool) -> anyhow::Result<Vec<Sign
     .collect::<Result<Vec<_>, _>>()
     .with_context(|| format!("failed to read OpenPGP keyring directory {}", dir.display()))?;
   entries.sort_by_key(|entry| entry.path());
-  let mut keys = Vec::new();
+  let mut certs = Vec::new();
   let mut read_entries = 0usize;
   for entry in entries {
     let path = entry.path();
@@ -218,9 +134,9 @@ fn load_keyring_dir(dir: &Path, require_exists: bool) -> anyhow::Result<Vec<Sign
         dir.display()
       );
     }
-    keys.extend(load_public_key_file(&path)?);
+    certs.extend(load_public_key_file(&path)?);
   }
-  Ok(keys)
+  Ok(certs)
 }
 
 fn is_openpgp_key_file(path: &Path) -> bool {
@@ -230,20 +146,25 @@ fn is_openpgp_key_file(path: &Path) -> bool {
     .is_some_and(|extension| matches!(extension, "asc" | "gpg" | "pgp" | "pub"))
 }
 
-fn load_public_key_file(path: &Path) -> anyhow::Result<Vec<SignedPublicKey>> {
+fn load_public_key_file(path: &Path) -> anyhow::Result<Vec<Cert>> {
   let bytes = read_bounded_regular_file(path, "OpenPGP public key", MAX_OPENPGP_KEY_BYTES)?;
-  let (keys, _) = SignedPublicKey::from_reader_many(Cursor::new(bytes))
+  let certs = CertParser::from_bytes(&bytes)
     .with_context(|| format!("failed to parse OpenPGP public key {}", path.display()))?;
-  let keys = keys
-    .collect::<Result<Vec<_>, _>>()
+  let certs = certs
+    .collect::<openpgp::Result<Vec<_>>>()
     .with_context(|| format!("failed to parse OpenPGP public key {}", path.display()))?;
-  if keys.is_empty() {
+  for cert in &certs {
+    if cert.keys().secret().next().is_some() {
+      bail!("OpenPGP secret keys are not accepted: {}", path.display());
+    }
+  }
+  if certs.is_empty() {
     bail!(
       "OpenPGP public key file contained no public keys: {}",
       path.display()
     );
   }
-  Ok(keys)
+  Ok(certs)
 }
 
 fn read_bounded_regular_file(
@@ -294,25 +215,96 @@ fn normalize_fingerprint_pin(raw: &str) -> anyhow::Result<String> {
   Ok(normalized)
 }
 
-fn normalize_key_fingerprint(key: &impl KeyDetails) -> anyhow::Result<String> {
-  match key.version() {
-    KeyVersion::V4 | KeyVersion::V5 | KeyVersion::V6 => {}
-    version => bail!("trusted OpenPGP key uses unsupported legacy key version {version:?}"),
+struct RulepackVerificationHelper {
+  certs: Vec<Cert>,
+  pinned: BTreeSet<String>,
+  signer_fingerprint: Option<String>,
+}
+
+impl RulepackVerificationHelper {
+  fn new(certs: Vec<Cert>, pinned: BTreeSet<String>) -> Self {
+    Self {
+      certs,
+      pinned,
+      signer_fingerprint: None,
+    }
   }
-  let fingerprint = format!("{:x}", key.fingerprint());
-  if !matches!(fingerprint.len(), 40 | 64)
-    || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-  {
-    bail!("trusted OpenPGP key has unsupported fingerprint length");
+
+  fn into_verification(self) -> anyhow::Result<RulepackOpenPgpVerification> {
+    let signer_fingerprint = self
+      .signer_fingerprint
+      .context("rulepack OpenPGP signature did not verify with trusted public keys")?;
+    Ok(RulepackOpenPgpVerification { signer_fingerprint })
   }
-  Ok(fingerprint)
+}
+
+impl VerificationHelper for RulepackVerificationHelper {
+  fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> openpgp::Result<Vec<Cert>> {
+    Ok(self.certs.clone())
+  }
+
+  fn check(&mut self, structure: MessageStructure<'_>) -> openpgp::Result<()> {
+    let layers = structure.iter().collect::<Vec<_>>();
+    let [MessageLayer::SignatureGroup { results }] = layers.as_slice() else {
+      bail!("OpenPGP detached signature did not produce a signature group");
+    };
+
+    let mut verification_errors = Vec::new();
+    for result in results {
+      match result {
+        Ok(good) => {
+          enforce_signature_policy(good.sig)?;
+          let fingerprint = good.ka.key().fingerprint().to_hex().to_ascii_lowercase();
+          if !self.pinned.is_empty() && !self.pinned.contains(&fingerprint) {
+            continue;
+          }
+          self.signer_fingerprint = Some(fingerprint);
+          return Ok(());
+        }
+        Err(error) => verification_errors.push(error.to_string()),
+      }
+    }
+
+    if !self.pinned.is_empty() {
+      bail!("no trusted OpenPGP public key matched --rulepack-openpgp-fingerprint");
+    }
+    let detail = verification_errors
+      .last()
+      .map(|error| format!(": {error}"))
+      .unwrap_or_default();
+    bail!("rulepack OpenPGP signature did not verify with trusted public keys{detail}");
+  }
+}
+
+fn enforce_signature_policy(signature: &openpgp::packet::Signature) -> anyhow::Result<()> {
+  ensure!(
+    signature.typ() == SignatureType::Binary,
+    "rulepack OpenPGP signature must be a binary detached signature, got {:?}",
+    signature.typ()
+  );
+  let hash = signature.hash_algo();
+  ensure!(
+    matches!(
+      hash,
+      HashAlgorithm::SHA256
+        | HashAlgorithm::SHA384
+        | HashAlgorithm::SHA512
+        | HashAlgorithm::SHA3_256
+        | HashAlgorithm::SHA3_512
+    ),
+    "rulepack OpenPGP signature uses unsupported weak hash algorithm {hash}"
+  );
+  Ok(())
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use pgp::composed::{KeyType, SecretKeyParamsBuilder};
-  use pgp::types::{KeyDetails, Password};
+  use std::io::Write;
+
+  use openpgp::armor;
+  use openpgp::serialize::Serialize;
+  use openpgp::serialize::stream::{Armorer, Message, Signer};
 
   struct SignedFixture {
     rulepack: Vec<u8>,
@@ -323,40 +315,51 @@ mod tests {
   }
 
   fn signed_fixture(content: &[u8], user_id: &str) -> SignedFixture {
-    let mut rng = rand::thread_rng();
-    let key_params = SecretKeyParamsBuilder::default()
-      .key_type(KeyType::Ed25519)
-      .can_sign(true)
-      .can_certify(true)
-      .primary_user_id(user_id.to_string())
-      .passphrase(None)
-      .build()
-      .expect("key params");
-    let secret = key_params.generate(&mut rng).expect("generate key");
-    let public = secret.to_public_key();
-    let fingerprint = format!("{:x}", public.fingerprint());
-    let signature = DetachedSignature::sign_binary_data(
-      &mut rng,
-      &secret.primary_key,
-      &Password::empty(),
-      HashAlgorithm::Sha256,
-      Cursor::new(content),
-    )
-    .expect("sign");
+    let policy = StandardPolicy::new();
+    let (cert, _revocation) = CertBuilder::new()
+      .add_userid(user_id)
+      .add_signing_subkey()
+      .generate()
+      .expect("generate key");
+    let signing_key = cert
+      .keys()
+      .unencrypted_secret()
+      .with_policy(&policy, None)
+      .supported()
+      .alive()
+      .revoked(false)
+      .for_signing()
+      .next()
+      .expect("signing key")
+      .key()
+      .clone();
+    let fingerprint = signing_key.fingerprint().to_hex().to_ascii_lowercase();
+    let keypair = signing_key.into_keypair().expect("keypair");
+    let mut signature = Vec::new();
+    {
+      let message = Message::new(&mut signature);
+      let message = Armorer::new(message)
+        .kind(armor::Kind::Signature)
+        .build()
+        .expect("signature armor");
+      let mut signer = Signer::new(message, keypair)
+        .expect("signer")
+        .hash_algo(HashAlgorithm::SHA256)
+        .expect("hash")
+        .detached()
+        .build()
+        .expect("detached signer");
+      signer.write_all(content).expect("sign content");
+      signer.finalize().expect("finalize signature");
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let key_file = temp.path().join("publisher.asc");
-    std::fs::write(
-      &key_file,
-      public
-        .to_armored_string(None.into())
-        .expect("public key armor"),
-    )
-    .expect("write public key");
+    let mut public_key = Vec::new();
+    cert.serialize(&mut public_key).expect("public key");
+    std::fs::write(&key_file, public_key).expect("write public key");
     SignedFixture {
       rulepack: content.to_vec(),
-      signature: signature
-        .to_armored_bytes(None.into())
-        .expect("signature armor"),
+      signature,
       key_file,
       fingerprint,
       _temp: temp,
