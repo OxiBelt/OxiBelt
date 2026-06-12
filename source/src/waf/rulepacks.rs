@@ -13,12 +13,23 @@ pub use input::{
   RulepackBinding, RulepackBindingKind, RulepackDiscovery, RulepackInputMetadata, RulepackProfile,
   RulepackVariable,
 };
+#[path = "rulepacks/overrides.rs"]
+mod overrides;
+pub use overrides::{
+  RulepackActionSelector, RulepackOverride, RulepackOverrideSelector, validate_rulepack_overrides,
+};
 #[path = "rulepacks/provenance.rs"]
 mod provenance;
 pub use provenance::RulepackSourceProvenance;
 use provenance::{
   set_rulepack_provenance, validate_source_fingerprint, validate_source_sha256,
   validate_source_text,
+};
+#[path = "rulepacks/types.rs"]
+mod types;
+pub use types::{
+  RulepackInspection, RulepackModeOverride, RulepackReferencedFile, RulepackReferencedFileKind,
+  RulepackRenderOptions,
 };
 
 use super::{
@@ -61,40 +72,6 @@ pub(super) struct LoadedRulepack {
   pub rule_groups: Vec<WafRuleGroupConfig>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct RulepackModeOverride {
-  pub mode: WafMode,
-  pub force: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RulepackRenderOptions {
-  pub variables: BTreeMap<String, String>,
-  pub mode_override: Option<RulepackModeOverride>,
-  pub source_commit: Option<String>,
-  pub source_provenance: Option<RulepackSourceProvenance>,
-  pub pin_variables: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RulepackInspection {
-  pub summary: WafRulepackSummary,
-  pub rendered: String,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
-pub struct RulepackReferencedFile {
-  pub kind: RulepackReferencedFileKind,
-  pub path: PathBuf,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RulepackReferencedFileKind {
-  Rule,
-  Group,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RulepackDocument {
@@ -105,6 +82,8 @@ struct RulepackDocument {
   bindings: Vec<RulepackBinding>,
   #[serde(default)]
   profiles: Vec<RulepackProfile>,
+  #[serde(default)]
+  overrides: Vec<RulepackOverride>,
   #[serde(default)]
   rules: Vec<RulepackRule>,
   #[serde(default)]
@@ -302,11 +281,19 @@ impl ParsedRulepack {
     )?;
     render_toml_strings(&mut value, &variables);
     apply_mode_override(&mut value, options.mode_override)?;
+    overrides::apply_overrides(
+      &mut value,
+      source,
+      &initial.rulepack.name,
+      &initial.overrides,
+      &options.local_overrides,
+    )?;
     if options.pin_variables {
       pin_variable_defaults(&mut value, &variables)?;
       if let Some(table) = value.as_table_mut() {
         table.remove("bindings");
         table.remove("profiles");
+        table.remove("overrides");
       }
     }
     if let Some(commit) = options.source_commit {
@@ -486,6 +473,7 @@ fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow:
     &document.bindings,
     &document.profiles,
   )?;
+  overrides::validate_rulepack_overrides(source, &document.rulepack.name, &document.overrides)?;
 
   let mut rule_names = HashSet::new();
   for rule in &document.rules {
@@ -741,6 +729,9 @@ fn default_rulepack_mode() -> WafMode {
   WafMode::Monitor
 }
 
+#[cfg(test)]
+#[path = "rulepacks_override_tests.rs"]
+mod override_tests;
 #[cfg(test)]
 #[path = "rulepacks_tests.rs"]
 mod tests;

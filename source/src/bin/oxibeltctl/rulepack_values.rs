@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use oxibelt::waf::{RulepackInputMetadata, WafMode, inspect_rulepack_inputs};
+use oxibelt::waf::{RulepackInputMetadata, RulepackOverride, WafMode, inspect_rulepack_inputs};
 use serde::Deserialize;
 
 use crate::cli::RulepackModeArg;
@@ -15,6 +15,7 @@ pub(crate) struct RulepackResolvedInputs {
   pub(crate) mode: Option<RulepackModeArg>,
   pub(crate) force_mode: bool,
   pub(crate) values_file: Option<PathBuf>,
+  pub(crate) rule_overrides: Vec<RulepackOverride>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -26,6 +27,8 @@ struct RulepackValuesFile {
   values: BTreeMap<String, String>,
   #[serde(default)]
   overrides: RulepackValuesOverrides,
+  #[serde(default)]
+  rule_overrides: Vec<RulepackOverride>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -66,6 +69,11 @@ fn resolve_rulepack_inputs_from_metadata(
     Some(path) => load_values_file(path)?,
     None => RulepackValuesFile::default(),
   };
+  oxibelt::waf::validate_rulepack_overrides(
+    request.source,
+    &inputs.summary.name,
+    &values_file.rule_overrides,
+  )?;
   let selected_profile = request
     .cli_profile
     .map(str::to_string)
@@ -110,6 +118,7 @@ fn resolve_rulepack_inputs_from_metadata(
     mode,
     force_mode,
     values_file: request.values_file.map(Path::to_path_buf),
+    rule_overrides: values_file.rule_overrides,
   })
 }
 
@@ -122,7 +131,10 @@ fn load_values_file(path: &Path) -> anyhow::Result<RulepackValuesFile> {
     .as_table()
     .with_context(|| format!("{} must contain a TOML table", path.display()))?;
   for key in table.keys() {
-    if !matches!(key.as_str(), "bindings" | "values" | "overrides") {
+    if !matches!(
+      key.as_str(),
+      "bindings" | "values" | "overrides" | "rule_overrides"
+    ) {
       bail!("{} contains unsupported table [{key}]", path.display());
     }
   }
@@ -230,6 +242,76 @@ mode = "monitor"
     let error = load_values_file(file.path()).expect_err("unknown table should fail");
 
     assert!(error.to_string().contains("unsupported table [exceptions]"));
+  }
+
+  #[test]
+  fn values_file_accepts_local_rule_overrides() {
+    let file = write_temp_values(
+      r#"[bindings]
+app_route = "mmsecretvault"
+
+[[rule_overrides]]
+selector = { rule_name = "admin" }
+mode = "enforcing"
+priority = 90
+"#,
+    );
+    let cli_vars = BTreeMap::new();
+    let cli_binds = BTreeMap::new();
+
+    let resolved = resolve_rulepack_inputs_from_metadata(
+      RulepackResolveRequest {
+        raw: "",
+        source: "test rulepack",
+        values_file: Some(file.path()),
+        cli_vars: &cli_vars,
+        cli_binds: &cli_binds,
+        cli_profile: None,
+        cli_mode: None,
+        cli_force_mode: false,
+        default_mode: None,
+      },
+      &metadata(),
+    )
+    .expect("resolved values");
+
+    assert_eq!(resolved.rule_overrides.len(), 1);
+    assert_eq!(
+      resolved.rule_overrides[0].selector.rule_name.as_deref(),
+      Some("admin")
+    );
+    assert_eq!(resolved.rule_overrides[0].mode, Some(WafMode::Enforcing));
+    assert_eq!(resolved.rule_overrides[0].priority, Some(90));
+  }
+
+  #[test]
+  fn values_file_rejects_malformed_rule_overrides() {
+    let file = write_temp_values(
+      r#"[[rule_overrides]]
+selector = {}
+mode = "enforcing"
+"#,
+    );
+    let cli_vars = BTreeMap::new();
+    let cli_binds = BTreeMap::new();
+
+    let error = resolve_rulepack_inputs_from_metadata(
+      RulepackResolveRequest {
+        raw: "",
+        source: "test rulepack",
+        values_file: Some(file.path()),
+        cli_vars: &cli_vars,
+        cli_binds: &cli_binds,
+        cli_profile: None,
+        cli_mode: None,
+        cli_force_mode: false,
+        default_mode: None,
+      },
+      &metadata(),
+    )
+    .expect_err("empty selector should fail");
+
+    assert!(error.to_string().contains("exactly one selector kind"));
   }
 
   #[test]

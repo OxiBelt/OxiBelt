@@ -512,6 +512,10 @@ content = "when = \"true\"\n"
     inspect_rulepack_inputs(raw, "test rulepack").expect_err("schema v1 should be rejected");
 
   assert!(error.to_string().contains("only schema_version 2"));
+
+  let error = validate_rulepack_manifest(raw).expect_err("schema v1 should fail validation");
+
+  assert!(error.to_string().contains("only schema_version 2"));
 }
 
 #[test]

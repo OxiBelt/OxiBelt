@@ -303,6 +303,37 @@ force_mode = true
 
 Only `[bindings]`, `[values]`, and `[overrides]` are accepted. Binding and value entries must be strings. `[overrides] profile` selects a declared `[[profiles]]` entry, `mode` may be `monitor` or `enforcing`, and `force_mode = true` pins every rule to the effective mode. Precedence is `[[variables]] default` < selected profile values/mode < values file < CLI `--bind`, `--var`, `--profile`, `--mode`, and `--force-mode`. Without an explicit profile or mode override, `rulepack apply` still installs in `monitor` mode.
 
+Rulepack schema version `2` also supports typed rule overrides. Manifest `[[overrides]]` entries are rulepack-authored defaults; values-file `[[rule_overrides]]` entries are local operator overlays kept outside the remote rulepack. Override selectors must set exactly one selector kind: `rulepack`, `tags`, `rule_id`, or `rule_name`. Tag selectors match any listed tag. Precedence is manifest rulepack < manifest tag < manifest rule < local rulepack < local tag < local rule, and later entries in the same tier win.
+
+```toml
+[[overrides]]
+selector = { rulepack = "vaultwarden-hardening" }
+mode = "monitor"
+
+[[overrides]]
+selector = { tags = ["surface:login"] }
+mode = "enforcing"
+
+[[overrides]]
+selector = { rule_id = "oxibelt.vaultwarden.admin_guard" }
+mode = "enforcing"
+priority = 90
+```
+
+Values files use `[[rule_overrides]]` so they do not collide with the existing `[overrides]` table for profile and install mode:
+
+```toml
+[[rule_overrides]]
+selector = { rule_name = "vaultwarden-login-rate-limit" }
+action = { type = "rate_limit", name = "vaultwarden-login" }
+rate = "10r/m"
+burst = 10
+status = 429
+body = "Too Many Requests"
+```
+
+Supported rule fields are `mode`, `priority`, and `enabled`. Setting `enabled = false` removes the matched rule from the rendered install manifest. Supported action fields are `rate`, `burst`, `status`, and `body`; action overrides require an `action` selector and must match exactly one action in each matched rule. `rate_limit` action overrides require `action.name`; terminal actions such as `reject`, `replace_response`, and `reject_response` may use a type-only selector when that action type is unique in the rule. Overrides do not support raw content replacement, regex patching, arbitrary scripts, callbacks, or native rulepack exceptions in this slice.
+
 `oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and scalar variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying a rendered manifest through `/admin/v1/files/sync`. Noninteractive `render`, `check`, and `apply` can pass bindings and values explicitly or through `--values`:
 
 ```sh

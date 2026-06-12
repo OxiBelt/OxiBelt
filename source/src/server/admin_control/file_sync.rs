@@ -356,6 +356,8 @@ struct RulepackInstallLock {
   bindings: BTreeMap<String, String>,
   #[serde(default)]
   values: BTreeMap<String, String>,
+  #[serde(default)]
+  rule_overrides: Vec<crate::waf::RulepackOverride>,
 }
 
 #[derive(Deserialize)]
@@ -410,6 +412,11 @@ fn validate_rulepack_install_lock(content: &str) -> anyhow::Result<()> {
   let _ = lock.install.force_mode;
   validate_lock_map("bindings", &lock.bindings)?;
   validate_lock_map("values", &lock.values)?;
+  crate::waf::validate_rulepack_overrides(
+    "rulepack install lock",
+    &lock.install.name,
+    &lock.rule_overrides,
+  )?;
   Ok(())
 }
 

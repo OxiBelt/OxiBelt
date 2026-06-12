@@ -9921,6 +9921,56 @@ rulepack_files = ["rulepacks/route.oxirule-rulepack.toml"]
 }
 
 #[test]
+fn oxirule_rulepack_schema_v1_fails_config_load() {
+    let temp_dir = common::TempDir::new("waf-rulepack-v1");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rulepack_dir = temp_dir.path().join("oxirule").join("rulepacks");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rulepack_dir).expect("failed to create rulepack directory");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "waf-rulepack-v1");
+    std::fs::write(
+        rulepack_dir.join("legacy.oxirule-rulepack.toml"),
+        r#"
+[rulepack]
+schema_version = 1
+name = "legacy-pack"
+version = "0.1.0"
+
+[[rules]]
+name = "legacy-rulepack-rule"
+phase = "request"
+priority = 1
+content = "when = \"true\"\n"
+"#,
+    )
+    .expect("failed to write legacy rulepack");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+rulepack_files = ["rulepacks/legacy.oxirule-rulepack.toml"]
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let error = Config::load(&config_path).expect_err("schema v1 rulepack should fail");
+
+    assert!(error.to_string().contains("only schema_version 2"));
+}
+
+#[test]
 fn duplicate_oxirule_rulepack_names_are_rejected() {
     let temp_dir = common::TempDir::new("waf-rulepack-duplicates");
     let config_dir = temp_dir.path().join("config");

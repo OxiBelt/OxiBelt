@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
-use oxibelt::waf::{RULEPACK_FILE_SUFFIX, RulepackSourceProvenance};
+use oxibelt::waf::{RULEPACK_FILE_SUFFIX, RulepackOverride, RulepackSourceProvenance};
 use serde::Serialize;
 
 use crate::cli::RulepackModeArg;
@@ -21,6 +21,7 @@ pub(crate) struct RulepackInstallLockInput<'a> {
   pub(crate) force_mode: bool,
   pub(crate) bindings: &'a BTreeMap<String, String>,
   pub(crate) values: &'a BTreeMap<String, String>,
+  pub(crate) rule_overrides: &'a [RulepackOverride],
 }
 
 #[derive(Serialize)]
@@ -30,6 +31,8 @@ struct RulepackInstallLock<'a> {
   bindings: &'a BTreeMap<String, String>,
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   values: &'a BTreeMap<String, String>,
+  #[serde(skip_serializing_if = "<[_]>::is_empty")]
+  rule_overrides: &'a [RulepackOverride],
 }
 
 #[derive(Serialize)]
@@ -86,6 +89,7 @@ pub(crate) fn render_install_lock(input: RulepackInstallLockInput<'_>) -> anyhow
     },
     bindings: input.bindings,
     values: input.values,
+    rule_overrides: input.rule_overrides,
   };
   toml::to_string_pretty(&lock).context("failed to render rulepack install lock")
 }
@@ -151,6 +155,22 @@ mod tests {
 
   #[test]
   fn install_lock_records_selected_values() {
+    let rule_overrides = vec![RulepackOverride {
+      selector: oxibelt::waf::RulepackOverrideSelector {
+        rulepack: None,
+        tags: Vec::new(),
+        rule_id: Some("oxibelt.vaultwarden.admin_guard".to_string()),
+        rule_name: None,
+      },
+      action: None,
+      mode: Some(oxibelt::waf::WafMode::Enforcing),
+      priority: Some(90),
+      enabled: None,
+      rate: None,
+      burst: None,
+      status: None,
+      body: None,
+    }];
     let rendered = render_install_lock(RulepackInstallLockInput {
       name: "vaultwarden",
       version: "0.1.0",
@@ -162,6 +182,7 @@ mod tests {
       force_mode: true,
       bindings: &BTreeMap::from([("app_route".to_string(), "mmsecretvault".to_string())]),
       values: &BTreeMap::from([("admin_cidr".to_string(), "10.10.0.0/16".to_string())]),
+      rule_overrides: &rule_overrides,
     })
     .expect("install lock");
 
@@ -172,5 +193,8 @@ mod tests {
     assert!(rendered.contains("app_route = \"mmsecretvault\""));
     assert!(rendered.contains("[values]"));
     assert!(rendered.contains("admin_cidr = \"10.10.0.0/16\""));
+    assert!(rendered.contains("[[rule_overrides]]"));
+    assert!(rendered.contains("rule_id = \"oxibelt.vaultwarden.admin_guard\""));
+    assert!(rendered.contains("priority = 90"));
   }
 }

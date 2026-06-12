@@ -74,6 +74,7 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
         &loaded.source_label,
         render_options(
           render_vars,
+          resolved.rule_overrides.clone(),
           resolved.mode,
           resolved.force_mode,
           loaded.git_commit.clone(),
@@ -109,6 +110,7 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
       )?;
       let options = render_options(
         render_vars,
+        resolved.rule_overrides.clone(),
         resolved.mode,
         resolved.force_mode,
         loaded.git_commit.clone(),
@@ -243,6 +245,7 @@ async fn plan_rulepack_apply(
   )?;
   let options = render_options(
     render_vars.clone(),
+    resolved.rule_overrides.clone(),
     Some(effective_mode),
     resolved.force_mode,
     loaded.git_commit.clone(),
@@ -306,6 +309,7 @@ async fn plan_rulepack_apply(
       force_mode: resolved.force_mode,
       bindings: &binds,
       values: &lock_values,
+      rule_overrides: &resolved.rule_overrides,
     })?,
   }));
   let etag = current_etag(client).await?;
@@ -595,6 +599,7 @@ fn validate_git_url(git: &str) -> anyhow::Result<String> {
 
 fn render_options(
   variables: BTreeMap<String, String>,
+  local_overrides: Vec<oxibelt::waf::RulepackOverride>,
   mode: Option<RulepackModeArg>,
   force_mode: bool,
   source_commit: Option<String>,
@@ -602,6 +607,7 @@ fn render_options(
 ) -> RulepackRenderOptions {
   RulepackRenderOptions {
     variables,
+    local_overrides,
     mode_override: mode.map(|mode| RulepackModeOverride {
       mode: mode_arg(mode),
       force: force_mode,

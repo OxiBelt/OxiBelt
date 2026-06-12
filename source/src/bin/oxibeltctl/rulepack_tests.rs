@@ -179,6 +179,47 @@ fn rulepack_cli_parses_interactive_apply() {
 }
 
 #[test]
+fn rulepack_render_and_check_reject_schema_v1() {
+  let source = TempTree::new().expect("source temp");
+  let path = source.path().join("legacy.oxirule-rulepack.toml");
+  std::fs::write(
+    &path,
+    r#"[rulepack]
+schema_version = 1
+name = "legacy"
+version = "0.1.0"
+
+[[rules]]
+name = "legacy-rule"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#,
+  )
+  .expect("write legacy rulepack");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+
+  for subcommand in ["render", "check"] {
+    let parsed = Cli::try_parse_from([
+      "oxibeltctl",
+      "rulepack",
+      subcommand,
+      "--file",
+      path.to_str().expect("UTF-8 path"),
+    ])
+    .expect("rulepack command should parse");
+    let error = runtime
+      .block_on(run_local_if_requested(&parsed.command))
+      .expect_err("schema v1 should be rejected");
+
+    assert!(error.to_string().contains("only schema_version 2"));
+  }
+}
+
+#[test]
 fn rulepack_url_apply_requires_pin() {
   let args = RulepackSourceArgs {
     file: None,
