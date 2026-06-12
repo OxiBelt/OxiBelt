@@ -241,7 +241,7 @@ OpenPGP trust uses public keys only. `--rulepack-openpgp-key FILE` adds repeatab
 
 When a URL rulepack is rendered for install, OxiBelt records optional `[rulepack]` provenance fields in the installed manifest: `source_url`, `source_sha256`, `source_openpgp_signature_url`, and `source_openpgp_signer_fingerprint`. URLs are sanitized before recording.
 
-Route bindings separate local OxiBelt objects from general render variables. The preferred form is an explicit `[[bindings]]` entry that declares the object to discover and the variable it renders into:
+Route bindings separate local OxiBelt objects from general render variables. Use an explicit `[[bindings]]` entry to declare the object to discover and the placeholder it renders into. Scalar values stay in `[[variables]]`; route names and other environment objects are supplied with `--bind`.
 
 ```toml
 [rulepack]
@@ -250,12 +250,6 @@ name = "vaultwarden-hardening"
 version = "0.1.0"
 targets = ["vaultwarden"]
 default_mode = "monitor"
-
-[[variables]]
-name = "route_name"
-type = "route"
-required = true
-prompt = "Select the route that serves Vaultwarden."
 
 [[variables]]
 name = "admin_cidr"
@@ -277,25 +271,9 @@ upstream_contains_any = ["vaultwarden", "bitwarden"]
 path_prefix_any = ["/"]
 ```
 
-For single route variables, schema version `2` also supports `[variables.discovery]` as shorthand. It creates an implicit route binding with the same name as the variable:
+The `bind_as` value names the render placeholder, so `--bind app_route=mmsecretvault` renders `{{route_name}}`. It must not collide with a scalar variable name or another binding target. Schema version `2` does not support `type = "route"` under `[[variables]]` or `[variables.discovery]`; use `[[bindings]]` instead.
 
-```toml
-[[variables]]
-name = "route_name"
-type = "route"
-required = true
-prompt = "Select the route that serves Vaultwarden."
-
-[variables.discovery]
-name_any = ["vaultwarden", "bitwarden", "vault", "secret"]
-host_contains_any = ["vaultwarden", "bitwarden", "vault"]
-upstream_contains_any = ["vaultwarden", "bitwarden"]
-path_prefix_any = ["/"]
-```
-
-Do not mix `[variables.discovery]` with a `[[bindings]]` entry that targets the same variable. The manifest must choose one binding shape for each rendered route variable.
-
-`oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying through `/admin/v1/files/sync`. Noninteractive `render`, `check`, and `apply` can pass bindings explicitly:
+`oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and scalar variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying a rendered manifest through `/admin/v1/files/sync`. Noninteractive `render`, `check`, and `apply` can pass bindings explicitly:
 
 ```sh
 oxibeltctl rulepack fit --file vaultwarden.oxirule-rulepack.toml

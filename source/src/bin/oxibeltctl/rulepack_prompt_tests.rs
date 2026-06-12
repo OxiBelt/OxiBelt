@@ -48,12 +48,6 @@ name = "vaultwarden-hardening"
 version = "0.1.0"
 
 [[variables]]
-name = "route_name"
-type = "route"
-required = true
-prompt = "Select route."
-
-[[variables]]
 name = "admin_cidr"
 type = "cidr"
 required = true

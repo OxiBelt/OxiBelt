@@ -24,8 +24,6 @@ pub struct RulepackVariable {
   pub description: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub prompt: Option<String>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub discovery: Option<RulepackDiscovery>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -69,7 +67,6 @@ pub(super) fn validate_rulepack_inputs(
   bindings: &[RulepackBinding],
 ) -> anyhow::Result<()> {
   let mut variable_names = HashSet::new();
-  let mut variables_with_discovery = HashSet::new();
   for variable in variables {
     super::validate_label(source, "variables.name", &variable.name)?;
     validate_variable_type(source, variable)?;
@@ -82,37 +79,36 @@ pub(super) fn validate_rulepack_inputs(
     if let Some(default) = &variable.default {
       validate_variable_value(source, variable, default)?;
     }
-    if let Some(discovery) = &variable.discovery {
-      if variable.value_type.as_deref() != Some("route") {
-        bail!(
-          "{source} variable {} discovery requires type = \"route\"",
-          variable.name
-        );
-      }
-      validate_discovery(source, "variables.discovery", discovery)?;
-      variables_with_discovery.insert(variable.name.clone());
-    }
     if !variable_names.insert(variable.name.clone()) {
       bail!("{source} contains duplicate variable {}", variable.name);
     }
   }
 
   let mut binding_names = HashSet::new();
+  let mut binding_targets = HashSet::new();
   for binding in bindings {
     super::validate_label(source, "bindings.name", &binding.name)?;
     super::validate_label(source, "bindings.bind_as", &binding.bind_as)?;
-    if !variable_names.contains(&binding.bind_as) {
+    if variable_names.contains(&binding.bind_as) {
       bail!(
-        "{source} binding {} bind_as references undeclared variable {}",
+        "{source} binding {} bind_as {} conflicts with a declared variable; route and other environment objects must use [[bindings]], while [[variables]] is only for scalar values",
         binding.name,
         binding.bind_as
       );
     }
-    if variables_with_discovery.contains(&binding.bind_as) {
+    if !binding_targets.insert(binding.bind_as.clone()) {
       bail!(
-        "{source} binding {} targets variable {} that already declares variables.discovery; choose either [variables.discovery] or [[bindings]]",
-        binding.name,
+        "{source} contains duplicate binding render target {}",
         binding.bind_as
+      );
+    }
+    if !binding_names.insert(binding.name.clone()) {
+      bail!("{source} contains duplicate binding {}", binding.name);
+    }
+    if variable_names.contains(&binding.name) {
+      bail!(
+        "{source} binding {} conflicts with a declared variable; use distinct names for --bind and --var inputs",
+        binding.name,
       );
     }
     validate_optional_human_text(
@@ -122,46 +118,35 @@ pub(super) fn validate_rulepack_inputs(
     )?;
     validate_optional_human_text(source, "bindings.prompt", binding.prompt.as_deref())?;
     validate_discovery(source, "bindings.discovery", &binding.discovery)?;
-    if !binding_names.insert(binding.name.clone()) {
-      bail!("{source} contains duplicate binding {}", binding.name);
-    }
-  }
-
-  let mut effective_binding_names = binding_names;
-  for variable in variables
-    .iter()
-    .filter(|variable| variable.discovery.is_some())
-  {
-    if !effective_binding_names.insert(variable.name.clone()) {
-      bail!(
-        "{source} contains duplicate effective binding {}",
-        variable.name
-      );
-    }
   }
 
   Ok(())
 }
 
-pub(super) fn effective_bindings(
-  variables: &[RulepackVariable],
-  bindings: &[RulepackBinding],
-) -> Vec<RulepackBinding> {
-  let mut effective = bindings.to_vec();
-  for variable in variables {
-    if let Some(discovery) = &variable.discovery {
-      effective.push(RulepackBinding {
-        name: variable.name.clone(),
-        kind: RulepackBindingKind::Route,
-        bind_as: variable.name.clone(),
-        required: variable.required,
-        description: variable.description.clone(),
-        prompt: variable.prompt.clone(),
-        discovery: discovery.clone(),
-      });
+pub(super) fn reject_legacy_variable_discovery(
+  value: &toml::Value,
+  source: &str,
+) -> anyhow::Result<()> {
+  for variable in value
+    .get("variables")
+    .and_then(toml::Value::as_array)
+    .into_iter()
+    .flatten()
+  {
+    let Some(table) = variable.as_table() else {
+      continue;
+    };
+    let name = table
+      .get("name")
+      .and_then(toml::Value::as_str)
+      .unwrap_or("<unknown>");
+    if table.contains_key("discovery") {
+      bail!(
+        "{source} variable {name} uses [variables.discovery]; route and other environment objects must be declared with explicit [[bindings]] and bind_as"
+      );
     }
   }
-  effective
+  Ok(())
 }
 
 pub(super) fn validate_variable_value(
@@ -178,9 +163,13 @@ pub(super) fn validate_variable_value(
       crate::limits::parse_rate(value)
         .with_context(|| format!("{source} variable {} must be a valid rate", variable.name))?;
     }
-    Some("route") | Some("string") | None => {}
+    Some("string") | None => {}
+    Some("route") => bail!(
+      "{source} variable {} uses type = \"route\"; route objects must be declared with [[bindings]] and bind_as",
+      variable.name
+    ),
     Some(other) => bail!(
-      "{source} variable {} uses unsupported type {}; supported types are string, route, cidr, and rate",
+      "{source} variable {} uses unsupported type {}; supported types are string, cidr, and rate",
       variable.name,
       other
     ),
@@ -194,9 +183,13 @@ fn validate_variable_type(source: &str, variable: &RulepackVariable) -> anyhow::
   };
   super::validate_label(source, "variables.type", value_type)?;
   match value_type.as_str() {
-    "string" | "route" | "cidr" | "rate" => Ok(()),
+    "string" | "cidr" | "rate" => Ok(()),
+    "route" => bail!(
+      "{source} variable {} uses type = \"route\"; route objects must be declared with [[bindings]] and bind_as",
+      variable.name
+    ),
     _ => bail!(
-      "{source} variable {} uses unsupported type {}; supported types are string, route, cidr, and rate",
+      "{source} variable {} uses unsupported type {}; supported types are string, cidr, and rate",
       variable.name,
       value_type
     ),

@@ -1856,7 +1856,7 @@ On transform-enabled routes, route matching, route rate limits, dynamic policy, 
 
 When any transform-enabled route can be selected, `Content-Encoding` ownership belongs to the WAF body transform layer. Configuration validation rejects route and WAF request/response header mutations that set, add, or remove `Content-Encoding` on transform routes, because those mutations would invalidate the decode/replay boundary.
 
-Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. Reusable rule groups are configured under `[[waf.rule_groups]]` or `[[routes.waf.rule_groups]]` and are referenced from rules with `groups = ["name"]`. Shared group files can be loaded with `[waf] rule_group_files = ["groups/*.oxirule-group.toml"]` and route-level `rule_group_files`. Rulepacks can be loaded with `[waf] rulepack_files = ["rulepacks/*.oxirule-rulepack.toml"]` and route-level `rulepack_files`. Each group file uses a top-level `[[rule_groups]]` array and the same fields as inline `WafRuleGroupConfig`. Each rulepack file uses a `[rulepack]` manifest plus `[[rules]]` and/or `[[group_files]]`, then expands into the same native OxiRule rule and group configuration. Exact file paths must exist; glob entries may match zero files and are loaded in sorted order. External rule, group, and rulepack paths resolve under the oxirule directory. A rule entry may use inline `when`, `groups`, or both; `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry. OxiBelt supports rulepack schema version `2` only; v2 manifests may declare typed variables, `[variables.discovery]` shorthand, and route `[[bindings]]` for `oxibeltctl rulepack fit` and `apply --interactive`. These fields guide installation and still render into ordinary rulepack variables before runtime load. URL-installed rulepacks may also carry optional installed-source fields under `[rulepack]`: `source_url`, `source_sha256`, `source_openpgp_signature_url`, and `source_openpgp_signer_fingerprint`.
+Inline global rules are configured under `[[waf.rules]]`; route-level rules use `[[routes.waf.rules]]`. Reusable rule groups are configured under `[[waf.rule_groups]]` or `[[routes.waf.rule_groups]]` and are referenced from rules with `groups = ["name"]`. Shared group files can be loaded with `[waf] rule_group_files = ["groups/*.oxirule-group.toml"]` and route-level `rule_group_files`. Rulepacks can be loaded with `[waf] rulepack_files = ["rulepacks/*.oxirule-rulepack.toml"]` and route-level `rulepack_files`. Each group file uses a top-level `[[rule_groups]]` array and the same fields as inline `WafRuleGroupConfig`. Each rulepack file uses a `[rulepack]` manifest plus `[[rules]]` and/or `[[group_files]]`, then expands into the same native OxiRule rule and group configuration. Exact file paths must exist; glob entries may match zero files and are loaded in sorted order. External rule, group, and rulepack paths resolve under the oxirule directory. A rule entry may use inline `when`, `groups`, or both; `path` cannot be combined with inline `when`, `merge_condition_as`, `groups`, or `actions` on the same rule entry. OxiBelt supports rulepack schema version `2` only; v2 manifests may declare scalar typed variables and route `[[bindings]]` for `oxibeltctl rulepack fit` and `apply --interactive`. Variables are ordinary render values; bindings describe local OxiBelt objects and render through `bind_as` during installation. URL-installed rulepacks may also carry optional installed-source fields under `[rulepack]`: `source_url`, `source_sha256`, `source_openpgp_signature_url`, and `source_openpgp_signer_fingerprint`.
 
 `oxibeltctl rulepack --url` accepts HTTPS rulepacks with `--sha256`, or HTTPS rulepacks with a detached OpenPGP signature verified against local public keys. HTTP rulepack URLs require both `--allow-insecure-rulepack-url` and a valid detached OpenPGP signature. Use `--rulepack-openpgp-signature-url URL` or `--rulepack-openpgp-signature-file FILE` for the detached signature, `--rulepack-openpgp-key FILE` for per-command public-key trust, `--rulepack-openpgp-keyring DIR` for installed trust stores, and `--rulepack-openpgp-fingerprint HEX` for full-fingerprint pins. If no explicit key material is provided, `oxibeltctl` checks `OXIBELT_RULEPACK_OPENPGP_KEYRING_DIR`, then `/etc/oxibelt/oxirule/trusted-rulepack-publishers` when present. Private keys, remote key download, catalog update flows, values files, overrides, exceptions, and Sigstore are out of scope for rulepack URL installs.
 
@@ -1892,16 +1892,11 @@ status = 403
 '''
 ```
 
-Rules inside a rulepack may use inline `content` or a `path` to a `.oxirule.toml` file under the oxirule directory. `[[group_files]]` entries may use inline `content` or a `path` to a `.oxirule-group.toml` file. OxiBelt renders declared variables from defaults at load time; required variables without defaults are intended for `oxibeltctl rulepack render`, `oxibeltctl rulepack check`, `oxibeltctl rulepack apply --var KEY=VALUE`, or route bindings passed as `--bind KEY=VALUE`.
+Rules inside a rulepack may use inline `content` or a `path` to a `.oxirule.toml` file under the oxirule directory. `[[group_files]]` entries may use inline `content` or a `path` to a `.oxirule-group.toml` file. OxiBelt renders declared scalar variables from defaults at load time; required variables without defaults are intended for `oxibeltctl rulepack render`, `oxibeltctl rulepack check`, or `oxibeltctl rulepack apply --var KEY=VALUE`. Environment objects such as routes are declared as bindings and supplied with `--bind KEY=VALUE`.
 
-Route bindings use `kind = "route"` and `bind_as` to name the variable populated during render:
+Route bindings use `kind = "route"` and `bind_as` to name the render placeholder populated during render. `bind_as` must not collide with a scalar `[[variables]]` name or another binding target:
 
 ```toml
-[[variables]]
-name = "route_name"
-type = "route"
-required = true
-
 [[bindings]]
 name = "app_route"
 kind = "route"
@@ -1915,24 +1910,7 @@ upstream_contains_any = ["vaultwarden"]
 path_prefix_any = ["/"]
 ```
 
-Single route variables can use `[variables.discovery]` as shorthand. It creates an implicit route binding with the same name as the variable:
-
-```toml
-[[variables]]
-name = "route_name"
-type = "route"
-required = true
-
-[variables.discovery]
-name_any = ["vault", "secret"]
-host_contains_any = ["vaultwarden", "vault"]
-upstream_contains_any = ["vaultwarden"]
-path_prefix_any = ["/"]
-```
-
-Do not combine `[variables.discovery]` with `[[bindings]]` targeting the same render variable.
-
-`oxibeltctl rulepack fit` uses Admin `/admin/v1/config/effective` and the redacted effective TOML to rank route candidates without installing the rulepack. `oxibeltctl rulepack apply --interactive` prompts for unresolved required bindings and required variables, then deploys with Admin `/admin/v1/files/sync`.
+`oxibeltctl rulepack fit` uses Admin `/admin/v1/config/effective` and the redacted effective TOML to rank route candidates without installing the rulepack. `oxibeltctl rulepack apply --interactive` prompts for unresolved required bindings and required scalar variables, then deploys a rendered manifest through Admin `/admin/v1/files/sync`. Installed manifests contain concrete rendered rule content and do not require source binding metadata at runtime.
 
 ```toml
 [[waf.rules]]

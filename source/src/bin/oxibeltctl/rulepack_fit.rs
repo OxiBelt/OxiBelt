@@ -88,7 +88,7 @@ pub(crate) async fn evaluate_fit(
     .collect::<Vec<_>>();
   let missing_bindings = missing_bindings(&inputs, vars, binds);
   let missing_variables = missing_variables(&inputs, vars, binds, &missing_bindings);
-  let resolved_bindings = resolved_bindings(&inputs, vars, binds);
+  let resolved_bindings = resolved_bindings(&inputs, binds);
   let warnings = fit_warnings(&inputs, &route_candidates);
   let suggested_command = suggested_apply_command(SuggestedCommandContext {
     source_args,
@@ -209,7 +209,12 @@ fn validate_render_values(
           )
         })?;
       }
-      Some("route") | Some("string") | None => {}
+      Some("string") | None => {}
+      Some("route") => bail!(
+        "rulepack {} variable {} uses type = \"route\"; use [[bindings]] and --bind for route objects",
+        inputs.summary.name,
+        variable.name
+      ),
       Some(other) => bail!(
         "rulepack {} variable {} uses unsupported type {}",
         inputs.summary.name,
@@ -452,13 +457,13 @@ fn default_discovery_tokens(inputs: &RulepackInputMetadata) -> Vec<String> {
 
 fn missing_bindings(
   inputs: &RulepackInputMetadata,
-  vars: &BTreeMap<String, String>,
+  _vars: &BTreeMap<String, String>,
   binds: &BTreeMap<String, String>,
 ) -> Vec<String> {
   inputs
     .bindings
     .iter()
-    .filter(|binding| binding.required && binding_value(binding, inputs, vars, binds).is_none())
+    .filter(|binding| binding.required && binding_value(binding, binds).is_none())
     .map(|binding| binding.name.clone())
     .collect()
 }
@@ -483,31 +488,14 @@ pub(crate) fn missing_required_variables(
 fn missing_variables(
   inputs: &RulepackInputMetadata,
   vars: &BTreeMap<String, String>,
-  binds: &BTreeMap<String, String>,
-  missing_bindings: &[String],
+  _binds: &BTreeMap<String, String>,
+  _missing_bindings: &[String],
 ) -> Vec<String> {
-  let unresolved_binding_vars = inputs
-    .bindings
-    .iter()
-    .filter(|binding| {
-      missing_bindings
-        .iter()
-        .any(|missing| missing == &binding.name)
-    })
-    .map(|binding| binding.bind_as.as_str())
-    .collect::<BTreeSet<_>>();
   inputs
     .variables
     .iter()
     .filter(|variable| {
-      variable.required
-        && variable.default.is_none()
-        && !vars.contains_key(&variable.name)
-        && !unresolved_binding_vars.contains(variable.name.as_str())
-        && !inputs
-          .bindings
-          .iter()
-          .any(|binding| binding.bind_as == variable.name && binds.contains_key(&binding.name))
+      variable.required && variable.default.is_none() && !vars.contains_key(&variable.name)
     })
     .map(|variable| variable.name.clone())
     .collect()
@@ -515,35 +503,17 @@ fn missing_variables(
 
 fn resolved_bindings(
   inputs: &RulepackInputMetadata,
-  vars: &BTreeMap<String, String>,
   binds: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
   inputs
     .bindings
     .iter()
-    .filter_map(|binding| {
-      binding_value(binding, inputs, vars, binds).map(|value| (binding.name.clone(), value))
-    })
+    .filter_map(|binding| binding_value(binding, binds).map(|value| (binding.name.clone(), value)))
     .collect()
 }
 
-fn binding_value(
-  binding: &RulepackBinding,
-  inputs: &RulepackInputMetadata,
-  vars: &BTreeMap<String, String>,
-  binds: &BTreeMap<String, String>,
-) -> Option<String> {
-  binds
-    .get(&binding.name)
-    .or_else(|| vars.get(&binding.bind_as))
-    .cloned()
-    .or_else(|| {
-      inputs
-        .variables
-        .iter()
-        .find(|variable| variable.name == binding.bind_as)
-        .and_then(|variable| variable.default.clone())
-    })
+fn binding_value(binding: &RulepackBinding, binds: &BTreeMap<String, String>) -> Option<String> {
+  binds.get(&binding.name).cloned()
 }
 
 fn fit_warnings(

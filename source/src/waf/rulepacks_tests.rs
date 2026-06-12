@@ -183,12 +183,6 @@ name = "vaultwarden-hardening"
 version = "0.1.0"
 targets = ["vaultwarden"]
 
-[[variables]]
-name = "route_name"
-type = "route"
-required = true
-prompt = "Select the Vaultwarden route."
-
 [[bindings]]
 name = "app_route"
 kind = "route"
@@ -221,7 +215,56 @@ content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
 }
 
 #[test]
-fn schema_v2_exposes_variable_discovery_as_route_binding() {
+fn render_for_install_uses_binding_target_and_strips_bindings() {
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "vaultwarden-hardening"
+version = "0.1.0"
+targets = ["vaultwarden"]
+
+[[variables]]
+name = "admin_cidr"
+type = "cidr"
+required = true
+
+[[bindings]]
+name = "app_route"
+kind = "route"
+bind_as = "route_name"
+required = true
+
+[bindings.discovery]
+name_any = ["vault"]
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"Context.Route.Name == '{{route_name}}' && !Request.Client.Ip.inCidr('{{admin_cidr}}')\"\n"
+"#;
+
+  let rendered = render_rulepack_for_install(
+    raw,
+    "test rulepack",
+    RulepackRenderOptions {
+      variables: BTreeMap::from([
+        ("route_name".to_string(), "mmsecretvault".to_string()),
+        ("admin_cidr".to_string(), "10.0.0.0/8".to_string()),
+      ]),
+      ..RulepackRenderOptions::default()
+    },
+  )
+  .expect("render");
+
+  assert!(rendered.contains("mmsecretvault"));
+  assert!(rendered.contains("10.0.0.0/8"));
+  assert!(!rendered.contains("{{route_name}}"));
+  assert!(!rendered.contains("[[bindings]]"));
+  validate_rulepack_manifest(&rendered).expect("rendered install manifest should validate");
+}
+
+#[test]
+fn schema_v2_rejects_variable_discovery_shorthand() {
   let raw = r#"[rulepack]
 schema_version = 2
 name = "vaultwarden-hardening"
@@ -230,7 +273,7 @@ targets = ["vaultwarden"]
 
 [[variables]]
 name = "route_name"
-type = "route"
+type = "string"
 required = true
 prompt = "Select the Vaultwarden route."
 
@@ -245,17 +288,15 @@ priority = 100
 content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
 "#;
 
-  let metadata = inspect_rulepack_inputs(raw, "test rulepack").expect("metadata");
+  let error =
+    inspect_rulepack_inputs(raw, "test rulepack").expect_err("variable discovery should fail");
 
-  assert_eq!(metadata.bindings.len(), 1);
-  assert_eq!(metadata.bindings[0].name, "route_name");
-  assert_eq!(metadata.bindings[0].bind_as, "route_name");
-  assert!(metadata.bindings[0].required);
-  assert_eq!(metadata.bindings[0].discovery.name_any, vec!["vault"]);
+  assert!(error.to_string().contains("[variables.discovery]"));
+  assert!(error.to_string().contains("explicit [[bindings]]"));
 }
 
 #[test]
-fn schema_v2_rejects_mixed_variable_discovery_and_explicit_binding() {
+fn schema_v2_rejects_route_typed_variables() {
   let raw = r#"[rulepack]
 schema_version = 2
 name = "demo"
@@ -266,8 +307,31 @@ name = "route_name"
 type = "route"
 required = true
 
-[variables.discovery]
-name_any = ["vault"]
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+
+  let error =
+    inspect_rulepack_inputs(raw, "test rulepack").expect_err("route variables should fail");
+
+  assert!(error.to_string().contains("type = \"route\""));
+  assert!(error.to_string().contains("[[bindings]]"));
+}
+
+#[test]
+fn schema_v2_rejects_binding_render_target_collision_with_variable() {
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[variables]]
+name = "route_name"
+type = "string"
+required = true
 
 [[bindings]]
 name = "app_route"
@@ -281,10 +345,48 @@ priority = 100
 content = "when = \"true\"\n"
 "#;
 
-  let error =
-    inspect_rulepack_inputs(raw, "test rulepack").expect_err("mixed discovery forms should fail");
+  let error = inspect_rulepack_inputs(raw, "test rulepack")
+    .expect_err("binding target collision should fail");
 
-  assert!(error.to_string().contains("choose either"));
+  assert!(
+    error
+      .to_string()
+      .contains("conflicts with a declared variable")
+  );
+}
+
+#[test]
+fn schema_v2_rejects_duplicate_binding_render_targets() {
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[bindings]]
+name = "app_route"
+kind = "route"
+bind_as = "route_name"
+
+[[bindings]]
+name = "admin_route"
+kind = "route"
+bind_as = "route_name"
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+
+  let error =
+    inspect_rulepack_inputs(raw, "test rulepack").expect_err("duplicate targets should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("duplicate binding render target route_name")
+  );
 }
 
 #[test]
@@ -308,7 +410,7 @@ content = "when = \"true\"\n"
 }
 
 #[test]
-fn schema_v2_rejects_binding_to_unknown_variable() {
+fn schema_v2_allows_binding_to_render_target_without_variable() {
   let raw = r#"[rulepack]
 schema_version = 2
 name = "demo"
@@ -326,10 +428,11 @@ priority = 100
 content = "when = \"true\"\n"
 "#;
 
-  let error = inspect_rulepack_inputs(raw, "test rulepack")
-    .expect_err("binding should require a declared render variable");
+  let metadata =
+    inspect_rulepack_inputs(raw, "test rulepack").expect("binding target should be independent");
 
-  assert!(error.to_string().contains("undeclared variable route_name"));
+  assert_eq!(metadata.bindings[0].name, "app_route");
+  assert_eq!(metadata.bindings[0].bind_as, "route_name");
 }
 
 #[test]

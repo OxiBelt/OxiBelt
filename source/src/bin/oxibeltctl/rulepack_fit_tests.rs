@@ -8,11 +8,6 @@ version = "0.1.0"
 targets = ["vaultwarden"]
 
 [[variables]]
-name = "route_name"
-type = "route"
-required = true
-
-[[variables]]
 name = "admin_cidr"
 type = "cidr"
 required = true
@@ -24,32 +19,6 @@ bind_as = "route_name"
 required = true
 
 [bindings.discovery]
-name_any = ["vault", "secret"]
-host_contains_any = ["vaultwarden", "vault"]
-upstream_contains_any = ["vaultwarden"]
-path_prefix_any = ["/"]
-
-[[rules]]
-name = "admin-guard"
-phase = "request"
-priority = 100
-content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
-"#
-}
-
-fn variable_discovery_rulepack() -> &'static str {
-  r#"[rulepack]
-schema_version = 2
-name = "vaultwarden-hardening"
-version = "0.1.0"
-targets = ["vaultwarden"]
-
-[[variables]]
-name = "route_name"
-type = "route"
-required = true
-
-[variables.discovery]
 name_any = ["vault", "secret"]
 host_contains_any = ["vaultwarden", "vault"]
 upstream_contains_any = ["vaultwarden"]
@@ -106,9 +75,8 @@ upstream = "vaultwarden-origin"
 }
 
 #[test]
-fn variable_discovery_feeds_route_candidates_and_suggested_bind() {
-  let inputs =
-    inspect_rulepack_inputs(variable_discovery_rulepack(), "test rulepack").expect("inputs");
+fn explicit_binding_feeds_route_candidates_and_suggested_bind() {
+  let inputs = inspect_rulepack_inputs(vaultwarden_rulepack(), "test rulepack").expect("inputs");
   let config = r#"
 [[upstreams]]
 name = "vaultwarden-origin"
@@ -128,7 +96,7 @@ upstream = "vaultwarden-origin"
     &default_discovery_tokens(&inputs),
   );
   let route_candidates = vec![RouteCandidateSet {
-    binding: "route_name".to_string(),
+    binding: "app_route".to_string(),
     candidates,
   }];
   let source_args = RulepackSourceArgs {
@@ -158,15 +126,15 @@ upstream = "vaultwarden-origin"
     inputs: &inputs,
     binds: &BTreeMap::new(),
     vars: &BTreeMap::new(),
-    missing_bindings: &["route_name".to_string()],
+    missing_bindings: &["app_route".to_string()],
     missing_variables: &[],
     route_candidates: &route_candidates,
     mode: None,
     force_mode: false,
   });
 
-  assert_eq!(inputs.bindings[0].name, "route_name");
-  assert!(command.contains("--bind route_name=mmsecretvault"));
+  assert_eq!(inputs.bindings[0].name, "app_route");
+  assert!(command.contains("--bind app_route=mmsecretvault"));
 }
 
 #[test]
@@ -230,7 +198,7 @@ fn bind_values_feed_declared_render_variables() {
 }
 
 #[test]
-fn bind_conflicts_with_var_for_same_render_variable() {
+fn var_cannot_override_binding_render_target() {
   let vars = BTreeMap::from([
     ("route_name".to_string(), "other".to_string()),
     ("admin_cidr".to_string(), "10.0.0.0/8".to_string()),
@@ -239,9 +207,13 @@ fn bind_conflicts_with_var_for_same_render_variable() {
 
   let error =
     resolve_render_variables(vaultwarden_rulepack(), "test rulepack", &vars, &binds, true)
-      .expect_err("conflicting binding should fail");
+      .expect_err("binding render target should not be accepted as --var");
 
-  assert!(error.to_string().contains("conflicts"));
+  assert!(
+    error
+      .to_string()
+      .contains("does not declare variable route_name")
+  );
 }
 
 #[test]

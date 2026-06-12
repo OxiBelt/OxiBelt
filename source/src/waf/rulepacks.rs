@@ -228,11 +228,10 @@ pub fn inspect_rulepack_inputs(raw: &str, source: &str) -> anyhow::Result<Rulepa
     toml::from_str(raw).with_context(|| format!("failed to parse {source}"))?;
   let document = document_from_value(value, source)?;
   validate_document_shape(&document, source)?;
-  let bindings = input::effective_bindings(&document.variables, &document.bindings);
   Ok(RulepackInputMetadata {
     summary: summary_from_document(&document, Vec::new()),
     variables: document.variables,
-    bindings,
+    bindings: document.bindings,
   })
 }
 
@@ -300,11 +299,19 @@ impl ParsedRulepack {
       toml::from_str(raw).with_context(|| format!("failed to parse {source}"))?;
     let initial = document_from_value(value.clone(), source)?;
     validate_document_shape(&initial, source)?;
-    let variables = resolve_variables(&initial.variables, &options.variables, source)?;
+    let variables = resolve_variables(
+      &initial.variables,
+      &initial.bindings,
+      &options.variables,
+      source,
+    )?;
     render_toml_strings(&mut value, &variables);
     apply_mode_override(&mut value, options.mode_override)?;
     if options.pin_variables {
       pin_variable_defaults(&mut value, &variables)?;
+      if let Some(table) = value.as_table_mut() {
+        table.remove("bindings");
+      }
     }
     if let Some(commit) = options.source_commit {
       set_rulepack_string(&mut value, "source_commit", commit)?;
@@ -440,6 +447,7 @@ fn summary_from_document(
 }
 
 fn document_from_value(value: toml::Value, source: &str) -> anyhow::Result<RulepackDocument> {
+  input::reject_legacy_variable_discovery(&value, source)?;
   value
     .try_into()
     .with_context(|| format!("failed to decode {source}"))
@@ -514,6 +522,7 @@ fn validate_non_empty(source: &str, field: &str, value: &str) -> anyhow::Result<
 
 fn resolve_variables(
   variables: &[RulepackVariable],
+  bindings: &[RulepackBinding],
   overrides: &BTreeMap<String, String>,
   source: &str,
 ) -> anyhow::Result<BTreeMap<String, String>> {
@@ -522,9 +531,13 @@ fn resolve_variables(
     .iter()
     .map(|variable| variable.name.as_str())
     .collect::<HashSet<_>>();
+  let binding_targets = bindings
+    .iter()
+    .map(|binding| binding.bind_as.as_str())
+    .collect::<HashSet<_>>();
   for key in overrides.keys() {
-    if !known.contains(key.as_str()) {
-      bail!("{source} does not declare variable {key}");
+    if !known.contains(key.as_str()) && !binding_targets.contains(key.as_str()) {
+      bail!("{source} does not declare variable or binding render target {key}");
     }
   }
   for variable in variables {
@@ -541,6 +554,11 @@ fn resolve_variables(
         bail!("{source} requires variable {}", variable.name);
       }
       None => {}
+    }
+  }
+  for binding in bindings {
+    if let Some(value) = overrides.get(&binding.bind_as) {
+      values.insert(binding.bind_as.clone(), value.clone());
     }
   }
   Ok(values)
