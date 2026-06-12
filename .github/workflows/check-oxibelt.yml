@@ -284,6 +284,7 @@ jobs:
           AR_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-ar
           CC_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-gcc
           CXX_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-g++
+          BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr/riscv64-linux-gnu
         run: |
           cargo check --all-targets --locked --target ${{ matrix.target }}
 

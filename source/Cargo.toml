@@ -75,6 +75,9 @@ zstd = "0.13.3"
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
 aws-lc-rs = { version = "1", default-features = false, features = ["bindgen"] }
 
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+openssl-sys = { version = "0.9.116", features = ["vendored"] }
+
 [dev-dependencies]
 clubcard = { version = "0.3", features = ["builder"] }
 pretty_assertions = "1"

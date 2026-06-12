@@ -748,6 +748,10 @@ fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
         "RISC-V cargo check coverage should keep both GNU and musl targets"
     );
     assert!(
+        workflow.contains("BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr/riscv64-linux-gnu"),
+        "RISC-V musl cargo check should expose the cross libc sysroot to bindgen"
+    );
+    assert!(
         qemu_job.needs.is_empty(),
         "RISC-V cargo check should stay independent of Docker image jobs"
     );
