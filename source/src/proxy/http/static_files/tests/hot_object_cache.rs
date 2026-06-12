@@ -272,3 +272,80 @@ async fn hot_object_cache_fails_closed_on_symlink_escape_before_ttl() {
   let body = collect_response_body(escaped).await;
   assert_ne!(body, Bytes::from_static(b"outside secret"));
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn hot_object_cache_fifo_revalidation_does_not_block_runtime_worker() {
+  use std::os::unix::fs::OpenOptionsExt;
+  use std::time::Instant;
+
+  let temp_dir = common::TempDir::new("static-hot-object-cache-fifo");
+  let root = temp_dir.path().join("public");
+  let probe = root.join("probe.txt");
+  let app = root.join("app.txt");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(&probe, "openat2 probe").await.unwrap();
+  tokio::fs::write(&app, "safe body").await.unwrap();
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 3_600_000, 1024));
+  let root_handle = runtime.root_handle(&root);
+  let Some(_) = open_verified_file_with_openat2_for_tests(&root_handle, &probe)
+    .await
+    .expect("openat2 helper should not fail when the syscall is available")
+  else {
+    return;
+  };
+
+  let first = serve_with_runtime(
+    &request("/assets/app.txt"),
+    "assets",
+    "/assets",
+    &root,
+    &runtime,
+    16 * 1024,
+  )
+  .await;
+  assert_eq!(first.status(), StatusCode::OK);
+  assert_eq!(
+    collect_response_body(first).await,
+    Bytes::from_static(b"safe body")
+  );
+
+  tokio::fs::remove_file(&app).await.unwrap();
+  make_fifo(&app);
+  let writer_app = app.clone();
+  let writer = std::thread::spawn(move || {
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = std::fs::OpenOptions::new()
+      .write(true)
+      .custom_flags(libc::O_NONBLOCK)
+      .open(&writer_app);
+  });
+  let serve_task = tokio::spawn({
+    let root = root.clone();
+    let runtime = runtime.clone();
+    async move {
+      serve_with_runtime(
+        &request("/assets/app.txt"),
+        "assets",
+        "/assets",
+        &root,
+        &runtime,
+        16 * 1024,
+      )
+      .await
+    }
+  });
+
+  let started = Instant::now();
+  let revalidated = tokio::time::timeout(Duration::from_millis(350), serve_task)
+    .await
+    .expect("cached FIFO revalidation should not block the runtime worker")
+    .expect("serve task should not panic");
+  let elapsed = started.elapsed();
+  writer.join().expect("FIFO writer thread should not panic");
+  assert!(
+    elapsed < Duration::from_millis(350),
+    "cached FIFO revalidation took {elapsed:?}"
+  );
+  assert_eq!(revalidated.status(), StatusCode::FORBIDDEN);
+}

@@ -18,6 +18,11 @@ pub(crate) struct OpenedStaticFile {
 }
 
 #[derive(Debug)]
+pub(crate) struct VerifiedStaticFileMetadata {
+  pub(crate) metadata: Metadata,
+}
+
+#[derive(Debug)]
 pub(crate) enum StaticOpenError {
   NotFound,
   IsDirectory,
@@ -42,6 +47,25 @@ pub(crate) async fn open_verified_file(
   }
 
   open_verified_file_with_procfs_fallback(root, path).await
+}
+
+pub(crate) fn verify_cached_file_metadata(
+  root: &StaticRootHandle,
+  path: &Path,
+) -> Result<Option<VerifiedStaticFileMetadata>, StaticOpenError> {
+  #[cfg(target_os = "linux")]
+  {
+    let Some(root_fd) = root.dir_fd() else {
+      return Ok(None);
+    };
+    verify_cached_file_metadata_with_openat2(root.root(), &root_fd, path)
+  }
+
+  #[cfg(not(target_os = "linux"))]
+  {
+    let _ = (root, path);
+    Ok(None)
+  }
 }
 
 async fn open_verified_file_with_procfs_fallback(
@@ -146,18 +170,7 @@ fn open_regular_file_beneath_root(
     ))
   }
 
-  let relative = path.strip_prefix(root).map_err(|error| {
-    StaticOpenError::forbidden(anyhow!(
-      "static file path {} is not beneath static_root {}: {error}",
-      path.display(),
-      root.display()
-    ))
-  })?;
-  let relative = if relative.as_os_str().is_empty() {
-    Path::new(".")
-  } else {
-    relative
-  };
+  let relative = relative_path_beneath_root(root, path)?;
 
   let file_fd = match openat2(
     root_fd,
@@ -191,6 +204,68 @@ fn open_regular_file_beneath_root(
     path: path.to_path_buf(),
     metadata,
   }))
+}
+
+#[cfg(target_os = "linux")]
+fn verify_cached_file_metadata_with_openat2(
+  root: &Path,
+  root_fd: &std::os::fd::OwnedFd,
+  path: &Path,
+) -> Result<Option<VerifiedStaticFileMetadata>, StaticOpenError> {
+  use nix::errno::Errno;
+  use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
+
+  let relative = relative_path_beneath_root(root, path)?;
+  let file_fd = match openat2(
+    root_fd,
+    relative,
+    OpenHow::new()
+      .flags(OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
+      .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_MAGICLINKS),
+  ) {
+    Ok(file_fd) => file_fd,
+    Err(Errno::ENOSYS) => return Ok(None),
+    Err(Errno::ENOENT) => return Err(StaticOpenError::NotFound),
+    Err(error) => {
+      return Err(StaticOpenError::forbidden(anyhow!(
+        "failed to revalidate cached static file {} with openat2: {error}",
+        path.display()
+      )));
+    }
+  };
+  let file = std::fs::File::from(file_fd);
+  let metadata = file
+    .metadata()
+    .with_context(|| format!("failed to inspect cached static file {}", path.display()))
+    .map_err(StaticOpenError::forbidden)?;
+  if metadata.is_dir() {
+    return Err(StaticOpenError::IsDirectory);
+  }
+  if !metadata.is_file() {
+    return Err(StaticOpenError::forbidden(anyhow!(
+      "cached static file is not a regular file"
+    )));
+  }
+  Ok(Some(VerifiedStaticFileMetadata { metadata }))
+}
+
+#[cfg(target_os = "linux")]
+fn relative_path_beneath_root<'a>(
+  root: &Path,
+  path: &'a Path,
+) -> Result<&'a Path, StaticOpenError> {
+  let relative = path.strip_prefix(root).map_err(|error| {
+    StaticOpenError::forbidden(anyhow!(
+      "static file path {} is not beneath static_root {}: {error}",
+      path.display(),
+      root.display()
+    ))
+  })?;
+  Ok(if relative.as_os_str().is_empty() {
+    Path::new(".")
+  } else {
+    relative
+  })
 }
 
 #[cfg(all(test, target_os = "linux"))]

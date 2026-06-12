@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::parse::{ParseResult, ParsedPlainRequest, header_has_token, parse_buffered_request};
+use super::parse::{
+  ParseResult, ParsedPlainRequest, header_has_token, parse_buffered_request,
+  parse_buffered_request_with_static_target_filter,
+};
 use super::*;
 use crate::config::Config;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -61,6 +64,39 @@ fn static_sendfile_config_toml(
         "path_prefix = \"/\"\nupstream = \"app\"",
         &format!(
           "path_prefix = \"/static\"\nstatic_root = \"{}\"",
+          root.display()
+        ),
+      ),
+    r#"
+
+[proxy.static_files]
+sendfile = "auto"
+"#,
+    extra
+  )
+}
+
+fn static_sendfile_with_proxy_config_toml(
+  cert_path: &std::path::Path,
+  key_path: &std::path::Path,
+  root: &std::path::Path,
+  extra: &str,
+) -> String {
+  format!(
+    "{}{}{}",
+    common::minimal_config_toml(cert_path, key_path)
+      .replace(
+        "[listeners]\n",
+        "[listeners]\nhttp_bind = \"127.0.0.1:8080\"\nhttp_mode = \"proxy\"\n",
+      )
+      .replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      )
+      .replace(
+        "path_prefix = \"/\"\nupstream = \"app\"",
+        &format!(
+          "path_prefix = \"/static\"\nstatic_root = \"{}\"\n\n[[routes]]\nname = \"main-route\"\nhosts = [\"example.com\"]\npath_prefix = \"/\"\nupstream = \"app\"",
           root.display()
         ),
       ),
@@ -139,6 +175,32 @@ fn parser_accepts_stack_sized_header_blocks() {
 }
 
 #[test]
+fn parser_falls_back_before_headers_for_unmatched_static_target() {
+  let raw = b"GET /perf/h1?body=ok HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+  match parse_buffered_request_with_static_target_filter(raw, 16, &|target| {
+    target.starts_with("/static")
+  }) {
+    ParseResult::Fallback(reason) => {
+      assert_eq!(reason, "request target cannot match static sendfile route");
+    }
+    _ => panic!("non-static origin-form target should fall back before header conversion"),
+  }
+}
+
+#[test]
+fn parser_keeps_ambiguous_targets_on_static_preflight_path() {
+  let raw = b"GET https://example.test/perf/h1 HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+  match parse_buffered_request_with_static_target_filter(raw, 16, &|_| false) {
+    ParseResult::Complete { request, .. } => {
+      assert_eq!(request.target, "https://example.test/perf/h1");
+    }
+    _ => panic!("ambiguous target should keep the existing static preflight path"),
+  }
+}
+
+#[test]
 fn vectored_write_advance_tracks_head_and_body_progress() {
   let mut head = &b"head"[..];
   let mut body = &b"body"[..];
@@ -154,6 +216,64 @@ fn vectored_write_advance_tracks_head_and_body_progress() {
   advance_vectored_write(&mut head, &mut body, 99);
   assert!(head.is_empty());
   assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn non_static_origin_form_request_falls_back_without_route_resolution() {
+  let temp_dir = common::TempDir::new("plain-sendfile-non-static-bypass");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-non-static-bypass");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "hello sendfile")
+    .await
+    .unwrap();
+  let raw = static_sendfile_with_proxy_config_toml(&cert_path, &key_path, &root, "");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = Arc::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let (_drain_tx, mut drain) = watch::channel(false);
+    match try_sendfile_fast_path_inner(
+      stream,
+      peer_addr,
+      &snapshot,
+      WafTransportMetadataInput::default(),
+      &mut shutdown,
+      &mut drain,
+      true,
+    )
+    .await
+    .unwrap()
+    {
+      SendfilePreflight::Continue {
+        io,
+        served_requests,
+      } => {
+        assert_eq!(served_requests, 0);
+        assert_eq!(
+          io.prefix_for_tests(),
+          b"GET /perf/h1?body=ok HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        );
+      }
+      SendfilePreflight::Done => panic!("non-static request should fall back to Hyper"),
+    }
+  });
+
+  let mut client = TcpStream::connect(addr).await.unwrap();
+  client
+    .write_all(b"GET /perf/h1?body=ok HTTP/1.1\r\nHost: example.com\r\n\r\n")
+    .await
+    .unwrap();
+  server.await.unwrap();
 }
 
 #[test]

@@ -21,6 +21,7 @@ pub struct RouteTable {
   exact_hosts: HashMap<String, Vec<usize>>,
   wildcard_hosts: WildcardHostTrie,
   catch_all_hosts: Vec<usize>,
+  static_sendfile_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +142,7 @@ impl RouteTable {
       exact_hosts: HashMap::new(),
       wildcard_hosts: WildcardHostTrie::default(),
       catch_all_hosts: Vec::new(),
+      static_sendfile_prefixes: Vec::new(),
     }
   }
 
@@ -173,12 +175,36 @@ impl RouteTable {
           .push(route_index);
       }
     }
+    if route.static_root.is_some()
+      && route
+        .compression
+        .as_deref()
+        .is_none_or(|value| value == "off")
+    {
+      self
+        .static_sendfile_prefixes
+        .push(route.effective_path_prefix().to_string());
+    }
     self.routes.push(RouteEntry {
       route,
       matcher,
       execution_plan,
       upstream_index,
     });
+  }
+
+  pub(crate) fn has_static_sendfile_candidates(&self) -> bool {
+    !self.static_sendfile_prefixes.is_empty()
+  }
+
+  pub(crate) fn static_sendfile_target_can_match(&self, target: &str) -> bool {
+    let Some(path) = origin_form_target_path(target) else {
+      return true;
+    };
+    self
+      .static_sendfile_prefixes
+      .iter()
+      .any(|prefix| path_prefix_matches(prefix, path))
   }
 
   pub fn resolve<'a>(
@@ -368,6 +394,13 @@ fn ascii_lower_cow(value: &str) -> Cow<'_, str> {
   } else {
     Cow::Borrowed(value)
   }
+}
+
+fn origin_form_target_path(target: &str) -> Option<&str> {
+  if !target.starts_with('/') || target.starts_with("//") || target.contains("://") {
+    return None;
+  }
+  Some(target.split_once('?').map_or(target, |(path, _)| path))
 }
 
 /// Returns whether a request path is within a configured route prefix boundary.

@@ -16,6 +16,7 @@ use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, error_indicates_body_timeout};
 use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
+use crate::proxy::http::request_framing::VerifiedContentLengthZeroBody;
 use crate::proxy::http::response::{
   apply_security_headers, apply_sticky_cookie, text_response, waf_terminal_response,
 };
@@ -69,6 +70,14 @@ fn fast_path_upstream_timing_required(
 
 fn elapsed_ms(started_at: Instant) -> u64 {
   started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn request_body_definitely_empty<B>(request: &Request<B>) -> bool {
+  fast_path_request_body_is_definitely_empty(request.version(), request.headers())
+    || request
+      .extensions()
+      .get::<VerifiedContentLengthZeroBody>()
+      .is_some()
 }
 
 fn fast_path_target_uri(
@@ -263,8 +272,7 @@ impl PlainProxyFastPath {
     let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
     let request_context =
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
-    let request_body_definitely_empty =
-      fast_path_request_body_is_definitely_empty(request.version(), request.headers());
+    let request_body_definitely_empty = request_body_definitely_empty(&request);
     let (mut parts, body) = request.into_parts();
 
     let Some(upstream_uri) = state.upstream_uri_parts_by_index.get(upstream_index) else {

@@ -37,19 +37,25 @@ impl ParsedPlainRequest {
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn read_request(
   stream: &mut TcpStream,
   mut buffer: Vec<u8>,
   max_header_bytes: usize,
   max_headers: usize,
   header_timeout: Duration,
+  target_can_match_static: &(dyn Fn(&str) -> bool + Sync),
   shutdown: &mut watch::Receiver<bool>,
   data_plane_drain: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<ReadRequestOutcome> {
   let started = tokio::time::Instant::now();
   let mut chunk = [0_u8; READ_CHUNK_BYTES];
   loop {
-    match parse_buffered_request(&buffer, max_headers) {
+    match parse_buffered_request_with_static_target_filter(
+      &buffer,
+      max_headers,
+      target_can_match_static,
+    ) {
       ParseResult::Complete {
         header_len,
         request,
@@ -131,18 +137,32 @@ pub(super) struct ParsedPlainRequestSeed {
   pub(super) headers: HeaderMap,
 }
 
+#[cfg(test)]
 pub(super) fn parse_buffered_request(buffer: &[u8], max_headers: usize) -> ParseResult {
+  parse_buffered_request_with_static_target_filter(buffer, max_headers, &|_| true)
+}
+
+pub(super) fn parse_buffered_request_with_static_target_filter(
+  buffer: &[u8],
+  max_headers: usize,
+  target_can_match_static: &(dyn Fn(&str) -> bool + Sync),
+) -> ParseResult {
   if max_headers <= STACK_HEADER_CAPACITY {
     let mut parsed_headers = [httparse::EMPTY_HEADER; STACK_HEADER_CAPACITY];
-    return parse_buffered_request_with_headers(buffer, &mut parsed_headers[..max_headers]);
+    return parse_buffered_request_with_headers(
+      buffer,
+      &mut parsed_headers[..max_headers],
+      target_can_match_static,
+    );
   }
   let mut parsed_headers = vec![httparse::EMPTY_HEADER; max_headers];
-  parse_buffered_request_with_headers(buffer, &mut parsed_headers)
+  parse_buffered_request_with_headers(buffer, &mut parsed_headers, target_can_match_static)
 }
 
 fn parse_buffered_request_with_headers<'a>(
   buffer: &'a [u8],
   parsed_headers: &mut [httparse::Header<'a>],
+  target_can_match_static: &(dyn Fn(&str) -> bool + Sync),
 ) -> ParseResult {
   let mut request = httparse::Request::new(parsed_headers);
   let header_len = match request.parse(buffer) {
@@ -163,6 +183,9 @@ fn parse_buffered_request_with_headers<'a>(
   let Some(version) = request.version else {
     return ParseResult::Fallback("HTTP/1.1 request is missing version");
   };
+  if origin_form_target_path(target).is_some() && !target_can_match_static(target) {
+    return ParseResult::Fallback("request target cannot match static sendfile route");
+  }
   let mut headers = HeaderMap::new();
   for header in request.headers {
     let name = match HeaderName::from_bytes(header.name.as_bytes()) {
@@ -184,6 +207,13 @@ fn parse_buffered_request_with_headers<'a>(
       headers,
     },
   }
+}
+
+fn origin_form_target_path(target: &str) -> Option<&str> {
+  if !target.starts_with('/') || target.starts_with("//") || target.contains("://") {
+    return None;
+  }
+  Some(target.split_once('?').map_or(target, |(path, _)| path))
 }
 
 pub(super) fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {

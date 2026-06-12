@@ -86,8 +86,8 @@ use self::observability::{
 use self::person_proof::handle_person_proof_api;
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::request_framing::{
-  RequestBodyFraming, h2_or_h3_content_length_zero_guard_required, positive_content_length,
-  request_body_framing,
+  RequestBodyFraming, VerifiedContentLengthZeroBody, h2_or_h3_content_length_zero_guard_required,
+  positive_content_length, request_body_framing,
 };
 use self::response::{
   apply_security_headers, apply_sticky_cookie, draining_response, external_auth_response,
@@ -2780,10 +2780,11 @@ where
     }
   }
 
-  Ok(Request::from_parts(
-    parts,
-    Either::Right(full_body(bytes::Bytes::new())),
-  ))
+  let mut request = Request::from_parts(parts, Either::Right(full_body(bytes::Bytes::new())));
+  request
+    .extensions_mut()
+    .insert(VerifiedContentLengthZeroBody);
+  Ok(request)
 }
 
 #[allow(clippy::too_many_arguments)]

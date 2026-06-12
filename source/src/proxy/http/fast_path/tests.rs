@@ -210,6 +210,22 @@ async fn h1_definitely_empty_request_body_shortcut_does_not_poll_body() {
   }
 }
 
+#[test]
+fn h2_content_length_zero_is_definitely_empty_only_after_guard() {
+  let mut request = Request::builder()
+    .version(http::Version::HTTP_2)
+    .uri("https://example.com/perf/h2")
+    .header(http::header::CONTENT_LENGTH, "0")
+    .body(PanicBody)
+    .expect("request should build");
+
+  assert!(!request_body_definitely_empty(&request));
+  request
+    .extensions_mut()
+    .insert(crate::proxy::http::request_framing::VerifiedContentLengthZeroBody);
+  assert!(request_body_definitely_empty(&request));
+}
+
 #[tokio::test]
 async fn soft_features_keep_plain_proxy_fast_path() {
   let temp_dir = common::TempDir::new("plain-fast-path-soft-features");

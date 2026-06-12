@@ -21,6 +21,11 @@ impl PlainHttpIo {
       prefix_offset: 0,
     }
   }
+
+  #[cfg(test)]
+  pub(super) fn prefix_for_tests(&self) -> &[u8] {
+    &self.prefix[self.prefix_offset..]
+  }
 }
 
 impl AsyncRead for PlainHttpIo {

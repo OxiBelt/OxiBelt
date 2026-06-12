@@ -28,7 +28,9 @@ pub(crate) use self::finalize::static_response_send_timeout;
 use self::open::open_verified_file_with_openat2_for_tests;
 #[cfg(test)]
 use self::open::verify_opened_file;
-use self::open::{OpenedStaticFile, StaticOpenError, open_verified_file};
+use self::open::{
+  OpenedStaticFile, StaticOpenError, open_verified_file, verify_cached_file_metadata,
+};
 pub(crate) use self::path::{StaticPathError, resolve_request_path};
 use self::response_plan::{
   FileContentPlan, RangeSelection, cached_object_plan, conditional_not_modified, etag_for_metadata,
@@ -251,6 +253,21 @@ async fn plan_response_inner(
       .await;
     }
     StaticRootPathStatus::Matches | StaticRootPathStatus::Uncached => {}
+  }
+
+  if let Some(plan) = cached_full_object_plan(
+    method,
+    headers,
+    root,
+    &root_handle,
+    &requested_path,
+    static_options,
+    runtime,
+    true,
+    true,
+    allow_hot_object_cache,
+  ) {
+    return plan;
   }
 
   match open_verified_file_for_mode(&root_handle, &requested_path).await {
@@ -510,6 +527,51 @@ async fn plan_opened_file(
       )
     }
   }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cached_full_object_plan(
+  method: &Method,
+  headers: &HeaderMap,
+  root: &Path,
+  root_handle: &runtime::StaticRootHandle,
+  path: &Path,
+  static_options: &RouteStaticFilesConfig,
+  runtime: &StaticFilesRuntime,
+  allow_cache_control: bool,
+  allow_precompressed: bool,
+  allow_hot_object_cache: bool,
+) -> Option<StaticResponsePlan> {
+  if !allow_hot_object_cache
+    || (method != Method::GET && method != Method::HEAD)
+    || headers.contains_key(RANGE)
+    || !static_options.precompressed.is_empty()
+  {
+    return None;
+  }
+  let response_metadata = response_metadata_for_path(
+    method,
+    headers,
+    path,
+    static_options,
+    None,
+    allow_cache_control,
+    allow_precompressed,
+  );
+  let cached = runtime.cached_object(root, path, &response_metadata)?;
+  let metadata = match verify_cached_file_metadata(root_handle, path) {
+    Ok(Some(verified)) => verified.metadata,
+    Ok(None) => return None,
+    Err(StaticOpenError::Forbidden(error)) => {
+      warn!(error = %error, path = %path.display(), "cached static file revalidation failed");
+      return Some(text_plan(StatusCode::FORBIDDEN, "forbidden"));
+    }
+    Err(StaticOpenError::IsDirectory | StaticOpenError::NotFound) => return None,
+  };
+  let etag = etag_for_metadata(&metadata);
+  let modified = metadata.modified().ok();
+  (cached.etag == etag && cached.modified == modified)
+    .then(|| cached_object_plan(method, headers, cached))
 }
 
 enum CandidatePlan {

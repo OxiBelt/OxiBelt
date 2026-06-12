@@ -17,6 +17,7 @@ use crate::waf::{WafProtocol, WafTlsMetadata};
 #[derive(Debug, Clone)]
 pub(super) struct CompiledRouteMatcher {
   valid: bool,
+  prefix_only: bool,
   methods: Vec<Method>,
   headers: Vec<CompiledNamedValueMatcher>,
   queries: Vec<CompiledNamedValueMatcher>,
@@ -164,9 +165,18 @@ impl CompiledRouteMatcher {
       + source_cidrs.len()
       + protocols.len()
       + client_cert.specificity();
+    let prefix_only = methods.is_empty()
+      && headers.is_empty()
+      && queries.is_empty()
+      && config.path.exact.is_none()
+      && config.path.regex.is_none()
+      && source_cidrs.is_empty()
+      && protocols.is_empty()
+      && client_cert.is_empty();
 
     Ok(Self {
       valid: true,
+      prefix_only,
       methods,
       headers,
       queries,
@@ -182,6 +192,7 @@ impl CompiledRouteMatcher {
   pub(super) fn never() -> Self {
     Self {
       valid: false,
+      prefix_only: false,
       methods: Vec::new(),
       headers: Vec::new(),
       queries: Vec::new(),
@@ -197,6 +208,9 @@ impl CompiledRouteMatcher {
   pub(super) fn match_request(&self, context: RouteMatchContext<'_>) -> Option<RouteMatcherResult> {
     if !self.valid {
       return None;
+    }
+    if self.prefix_only {
+      return Some(RouteMatcherResult::default());
     }
     if !self.methods.is_empty()
       && !context
@@ -370,6 +384,14 @@ impl CompiledValueMatcher {
 }
 
 impl CompiledClientCertMatcher {
+  fn is_empty(&self) -> bool {
+    self.present.is_none()
+      && self.fingerprint_sha256.is_none()
+      && self.subject_cn.is_none()
+      && self.san_dns.is_none()
+      && self.san_ip.is_none()
+  }
+
   fn specificity(&self) -> usize {
     usize::from(self.present.is_some())
       + usize::from(self.fingerprint_sha256.is_some()) * 3

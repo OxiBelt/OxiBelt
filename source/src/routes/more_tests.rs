@@ -147,6 +147,25 @@ fn regex_path_match_exposes_bounded_captures() {
 }
 
 #[test]
+fn static_sendfile_prefix_metadata_matches_only_origin_form_targets() {
+  let mut static_route = route("static", &["api.example.com"], "/static", "static");
+  static_route.static_root = Some("/srv/static".into());
+  static_route.upstream = None;
+  let routes = vec![
+    static_route,
+    route("fallback", &["api.example.com"], "/", "fallback"),
+  ];
+  let table = RouteTable::from_routes_for_tests(routes);
+
+  assert!(table.has_static_sendfile_candidates());
+  assert!(table.static_sendfile_target_can_match("/static/app.txt"));
+  assert!(table.static_sendfile_target_can_match("/static?etag=1"));
+  assert!(!table.static_sendfile_target_can_match("/perf/h1?body=ok"));
+  assert!(table.static_sendfile_target_can_match("https://api.example.com/static/app.txt"));
+  assert!(table.static_sendfile_target_can_match("//api.example.com/static/app.txt"));
+}
+
+#[test]
 fn query_absence_matcher_accepts_missing_query_string() {
   let mut absent = route("absent-query", &["example.com"], "/", "absent-query");
   absent.r#match.queries.push(RouteNamedValueMatchConfig {

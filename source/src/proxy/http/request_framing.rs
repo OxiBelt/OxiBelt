@@ -12,6 +12,9 @@ pub(crate) enum RequestBodyFraming {
   Ambiguous,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VerifiedContentLengthZeroBody;
+
 pub(crate) fn request_body_framing(headers: &HeaderMap) -> RequestBodyFraming {
   let mut content_lengths = headers.get_all(CONTENT_LENGTH).iter();
   let first_content_length = content_lengths.next();

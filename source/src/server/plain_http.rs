@@ -231,6 +231,7 @@ async fn try_sendfile_fast_path_inner(
   }
 
   let mut buffer = Vec::new();
+  let mut response_head_buffer = Vec::with_capacity(512);
   let mut served_requests = 0_usize;
   loop {
     if served_requests >= snapshot.config.limits.max_requests_per_connection {
@@ -247,6 +248,11 @@ async fn try_sendfile_fast_path_inner(
       snapshot.config.limits.max_total_header_bytes.max(8192),
       snapshot.config.limits.max_headers,
       Duration::from_millis(snapshot.config.limits.client_header_timeout_ms),
+      &|target| {
+        snapshot
+          .route_table
+          .static_sendfile_target_can_match(target)
+      },
       shutdown,
       data_plane_drain,
     )
@@ -279,7 +285,14 @@ async fn try_sendfile_fast_path_inner(
     emit_system_access_log(&request, snapshot.as_ref(), transport_metadata, &mut plan);
     buffer = request.remaining;
     let status = plan.response.status;
-    if let Err(error) = write_static_plan(&mut stream, &plan, !close_after_response).await {
+    if let Err(error) = write_static_plan(
+      &mut stream,
+      &plan,
+      !close_after_response,
+      &mut response_head_buffer,
+    )
+    .await
+    {
       debug!(error = %error, peer = %peer_addr, "plain HTTP static sendfile response failed");
       return Ok(SendfilePreflight::Done);
     }
@@ -301,6 +314,9 @@ fn sendfile_disabled_reason(
   }
   if config.proxy.static_files.sendfile != StaticFilesSendfileMode::Auto {
     return Some("proxy.static_files.sendfile is not auto");
+  }
+  if !snapshot.route_table.has_static_sendfile_candidates() {
+    return Some("no static sendfile routes are configured");
   }
   if !kernel_sendfile_available {
     return Some("Linux kernel sendfile is not available");
@@ -472,6 +488,7 @@ async fn write_static_plan(
   stream: &mut TcpStream,
   plan: &TimedStaticResponsePlan,
   keep_alive: bool,
+  head_buffer: &mut Vec<u8>,
 ) -> anyhow::Result<()> {
   let TimedStaticResponsePlan {
     response,
@@ -486,20 +503,20 @@ async fn write_static_plan(
   let response_send_timeout = *response_send_timeout;
   match body {
     StaticBodyPlan::Empty => {
-      let head = response_head_bytes(*status, headers, keep_alive);
+      response_head_bytes(*status, headers, keep_alive, head_buffer);
       write_all_tcp(
         stream,
-        &head,
+        head_buffer,
         response_send_timeout,
         "static sendfile response head write failed",
       )
       .await?;
     }
     StaticBodyPlan::Text(message) => {
-      let head = response_head_bytes(*status, headers, keep_alive);
+      response_head_bytes(*status, headers, keep_alive, head_buffer);
       write_all_tcp_vectored(
         stream,
-        &head,
+        head_buffer,
         message.as_bytes(),
         response_send_timeout,
         "static fast-path text response write failed",
@@ -507,10 +524,10 @@ async fn write_static_plan(
       .await?;
     }
     StaticBodyPlan::Bytes(bytes) => {
-      let head = response_head_bytes(*status, headers, keep_alive);
+      response_head_bytes(*status, headers, keep_alive, head_buffer);
       write_all_tcp_vectored(
         stream,
-        &head,
+        head_buffer,
         bytes.as_ref(),
         response_send_timeout,
         "static fast-path bytes response write failed",
@@ -518,7 +535,15 @@ async fn write_static_plan(
       .await?;
     }
     StaticBodyPlan::File(file) => {
-      write_response_head(stream, *status, headers, keep_alive, response_send_timeout).await?;
+      write_response_head(
+        stream,
+        *status,
+        headers,
+        keep_alive,
+        response_send_timeout,
+        head_buffer,
+      )
+      .await?;
       sendfile_all(
         stream,
         &file.file,
@@ -551,38 +576,44 @@ async fn write_response_head(
   headers: &HeaderMap,
   keep_alive: bool,
   response_send_timeout: Duration,
+  head_buffer: &mut Vec<u8>,
 ) -> anyhow::Result<()> {
-  let head = response_head_bytes(status, headers, keep_alive);
+  response_head_bytes(status, headers, keep_alive, head_buffer);
   write_all_tcp(
     stream,
-    &head,
+    head_buffer,
     response_send_timeout,
     "static sendfile response head write failed",
   )
   .await
 }
 
-fn response_head_bytes(status: StatusCode, headers: &HeaderMap, keep_alive: bool) -> Vec<u8> {
+fn response_head_bytes(
+  status: StatusCode,
+  headers: &HeaderMap,
+  keep_alive: bool,
+  output: &mut Vec<u8>,
+) {
   let reason = status.canonical_reason().unwrap_or("");
-  let mut head = Vec::with_capacity(256 + headers.len() * 48);
-  head.extend_from_slice(b"HTTP/1.1 ");
-  append_u16_decimal(&mut head, status.as_u16());
-  head.push(b' ');
-  head.extend_from_slice(reason.as_bytes());
-  head.extend_from_slice(b"\r\n");
+  output.clear();
+  output.reserve(256 + headers.len() * 48);
+  output.extend_from_slice(b"HTTP/1.1 ");
+  append_u16_decimal(output, status.as_u16());
+  output.push(b' ');
+  output.extend_from_slice(reason.as_bytes());
+  output.extend_from_slice(b"\r\n");
   for (name, value) in headers {
-    head.extend_from_slice(name.as_str().as_bytes());
-    head.extend_from_slice(b": ");
-    head.extend_from_slice(value.as_bytes());
-    head.extend_from_slice(b"\r\n");
+    output.extend_from_slice(name.as_str().as_bytes());
+    output.extend_from_slice(b": ");
+    output.extend_from_slice(value.as_bytes());
+    output.extend_from_slice(b"\r\n");
   }
   if keep_alive {
-    head.extend_from_slice(b"Connection: keep-alive\r\n");
+    output.extend_from_slice(b"Connection: keep-alive\r\n");
   } else {
-    head.extend_from_slice(b"Connection: close\r\n");
+    output.extend_from_slice(b"Connection: close\r\n");
   }
-  head.extend_from_slice(b"\r\n");
-  head
+  output.extend_from_slice(b"\r\n");
 }
 
 fn append_u16_decimal(output: &mut Vec<u8>, value: u16) {
