@@ -113,9 +113,9 @@ use rule_groups::{RuleGroupScope, resolve_rule, validate_rule_group_scope};
 pub use rule_groups::{WafConditionMerge, WafRuleGroupConfig};
 pub use rulepacks::{
   RULEPACK_FILE_SUFFIX, RulepackBinding, RulepackBindingKind, RulepackDiscovery,
-  RulepackInputMetadata, RulepackModeOverride, RulepackReferencedFile, RulepackReferencedFileKind,
-  RulepackRenderOptions, RulepackSourceProvenance, RulepackVariable, WafRulepackSummary,
-  inspect_rulepack, inspect_rulepack_inputs, referenced_rulepack_files,
+  RulepackInputMetadata, RulepackModeOverride, RulepackProfile, RulepackReferencedFile,
+  RulepackReferencedFileKind, RulepackRenderOptions, RulepackSourceProvenance, RulepackVariable,
+  WafRulepackSummary, inspect_rulepack, inspect_rulepack_inputs, referenced_rulepack_files,
   render_rulepack_for_install, validate_rulepack_manifest,
 };
 use runtime_helpers::{
@@ -222,7 +222,7 @@ pub struct RouteWafConfig {
   rule_group_files_logical: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WafMode {
   #[default]

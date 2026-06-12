@@ -543,6 +543,50 @@ when = "true"
 }
 
 #[test]
+fn file_sync_put_validates_rulepack_install_locks() {
+  let (_temp_dir, config) = load_temp_config("admin-file-sync-rulepack-install");
+  let valid = put_request(
+    AdminFileRoot::OxiRuleRulepackInstall,
+    "rulepacks/main.install.toml",
+    r#"
+[install]
+name = "main"
+version = "0.1.0"
+source = "file main.oxirule-rulepack.toml"
+effective_mode = "monitor"
+force_mode = false
+installed_at = "2026-06-12T00:00:00Z"
+
+[bindings]
+app_route = "mmsecretvault"
+
+[values]
+admin_cidr = "10.10.0.0/16"
+"#,
+  );
+  let committed = commit_file_sync(&valid, &config).expect("install lock should sync");
+  assert_eq!(committed.len(), 1);
+
+  let invalid = put_request(
+    AdminFileRoot::OxiRuleRulepackInstall,
+    "rulepacks/bad.install.toml",
+    r#"
+[install]
+name = "bad"
+version = "0.1.0"
+source = "test"
+effective_mode = "monitor"
+force_mode = false
+installed_at = "2026-06-12T00:00:00Z"
+
+[exceptions]
+name = "future"
+"#,
+  );
+  assert!(commit_file_sync(&invalid, &config).is_err());
+}
+
+#[test]
 fn file_sync_rejects_cross_type_oxirule_paths() {
   let (_temp_dir, config) = load_temp_config("admin-file-sync-cross-type");
   let oxirule_dir = config
@@ -590,6 +634,28 @@ fn file_sync_rejects_cross_type_oxirule_paths() {
       .join("rulepacks/main.oxirule-rulepack.toml")
       .exists()
   );
+
+  let install_lock_as_rulepack = put_request(
+    AdminFileRoot::OxiRuleRulepack,
+    "rulepacks/main.install.toml",
+    "",
+  );
+  let error = match commit_file_sync(&install_lock_as_rulepack, &config) {
+    Ok(_) => panic!("install lock path should not sync through OxiRule rulepack root"),
+    Err(error) => error.to_string(),
+  };
+  assert!(error.contains("root oxirule_rulepack can only manage .oxirule-rulepack.toml files"));
+
+  let rulepack_as_install_lock = put_request(
+    AdminFileRoot::OxiRuleRulepackInstall,
+    "rulepacks/main.oxirule-rulepack.toml",
+    "",
+  );
+  let error = match commit_file_sync(&rulepack_as_install_lock, &config) {
+    Ok(_) => panic!("rulepack path should not sync through OxiRule rulepack install root"),
+    Err(error) => error.to_string(),
+  };
+  assert!(error.contains("root oxirule_rulepack_install can only manage .install.toml files"));
 
   let existing_group = oxirule_dir.join("groups/main.oxirule-group.toml");
   std::fs::create_dir_all(

@@ -89,6 +89,8 @@ pub(in crate::server) enum AdminFileRoot {
   OxiRuleGroup,
   #[serde(rename = "oxirule_rulepack", alias = "oxi_rulepack")]
   OxiRuleRulepack,
+  #[serde(rename = "oxirule_rulepack_install", alias = "oxi_rulepack_install")]
+  OxiRuleRulepackInstall,
 }
 
 fn default_config_format() -> String {

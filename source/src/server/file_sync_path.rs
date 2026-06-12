@@ -8,6 +8,7 @@ use super::admin_control::AdminFileRoot;
 const OXIRULE_FILE_SUFFIX: &str = ".oxirule.toml";
 const OXIRULE_GROUP_FILE_SUFFIX: &str = ".oxirule-group.toml";
 const OXIRULE_RULEPACK_FILE_SUFFIX: &str = ".oxirule-rulepack.toml";
+const OXIRULE_RULEPACK_INSTALL_FILE_SUFFIX: &str = ".install.toml";
 
 pub(super) fn normalized_relative_path(path: &str) -> Result<String, String> {
   if path.trim().is_empty() {
@@ -54,6 +55,14 @@ pub(super) fn validate_root_path(root: AdminFileRoot, normalized_path: &str) -> 
     }
     AdminFileRoot::OxiRuleRulepack => {
       Err("root oxirule_rulepack can only manage .oxirule-rulepack.toml files".to_string())
+    }
+    AdminFileRoot::OxiRuleRulepackInstall
+      if normalized_path.ends_with(OXIRULE_RULEPACK_INSTALL_FILE_SUFFIX) =>
+    {
+      Ok(())
+    }
+    AdminFileRoot::OxiRuleRulepackInstall => {
+      Err("root oxirule_rulepack_install can only manage .install.toml files".to_string())
     }
   }
 }

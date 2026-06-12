@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use anyhow::{Context, bail};
 use http::Method;
@@ -48,6 +49,17 @@ pub(crate) struct RulepackFitEvaluation {
   pub(crate) report: RulepackFitReport,
 }
 
+pub(crate) struct RulepackFitOptions<'a> {
+  pub(crate) vars: &'a BTreeMap<String, String>,
+  pub(crate) binds: &'a BTreeMap<String, String>,
+  pub(crate) command_vars: &'a BTreeMap<String, String>,
+  pub(crate) command_binds: &'a BTreeMap<String, String>,
+  pub(crate) values_file: Option<&'a Path>,
+  pub(crate) profile_arg: Option<&'a str>,
+  pub(crate) mode: Option<RulepackModeArg>,
+  pub(crate) force_mode: bool,
+}
+
 #[derive(Debug, Clone)]
 struct RouteInventory {
   name: String,
@@ -61,13 +73,10 @@ pub(crate) async fn evaluate_fit(
   client: &AdminClient,
   loaded: &LoadedRulepackSource,
   source_args: &RulepackSourceArgs,
-  vars: &BTreeMap<String, String>,
-  binds: &BTreeMap<String, String>,
-  mode: Option<RulepackModeArg>,
-  force_mode: bool,
+  options: RulepackFitOptions<'_>,
 ) -> anyhow::Result<RulepackFitEvaluation> {
   let inputs = inspect_rulepack_inputs(&loaded.manifest, &loaded.source_label)?;
-  let _ = resolve_render_variables_from_inputs(&inputs, vars, binds)?;
+  let _ = resolve_render_variables_from_inputs(&inputs, options.vars, options.binds)?;
   let config = effective_config_toml(client).await?;
   let routes = route_inventory(&config);
   let default_tokens = default_discovery_tokens(&inputs);
@@ -86,20 +95,23 @@ pub(crate) async fn evaluate_fit(
     .filter(|binding| binding.required)
     .map(|binding| binding.name.clone())
     .collect::<Vec<_>>();
-  let missing_bindings = missing_bindings(&inputs, vars, binds);
-  let missing_variables = missing_variables(&inputs, vars, binds, &missing_bindings);
-  let resolved_bindings = resolved_bindings(&inputs, binds);
+  let missing_bindings = missing_bindings(&inputs, options.vars, options.binds);
+  let missing_variables =
+    missing_variables(&inputs, options.vars, options.binds, &missing_bindings);
+  let resolved_bindings = resolved_bindings(&inputs, options.binds);
   let warnings = fit_warnings(&inputs, &route_candidates);
   let suggested_command = suggested_apply_command(SuggestedCommandContext {
     source_args,
     inputs: &inputs,
-    binds,
-    vars,
+    binds: options.command_binds,
+    vars: options.command_vars,
+    values_file: options.values_file,
+    profile_arg: options.profile_arg,
     missing_bindings: &missing_bindings,
     missing_variables: &missing_variables,
     route_candidates: &route_candidates,
-    mode,
-    force_mode,
+    mode: options.mode,
+    force_mode: options.force_mode,
   });
   let report = RulepackFitReport {
     rulepack: inputs.summary.name.clone(),
@@ -542,6 +554,8 @@ struct SuggestedCommandContext<'a> {
   inputs: &'a RulepackInputMetadata,
   binds: &'a BTreeMap<String, String>,
   vars: &'a BTreeMap<String, String>,
+  values_file: Option<&'a Path>,
+  profile_arg: Option<&'a str>,
   missing_bindings: &'a [String],
   missing_variables: &'a [String],
   route_candidates: &'a [RouteCandidateSet],
@@ -556,6 +570,14 @@ fn suggested_apply_command(context: SuggestedCommandContext<'_>) -> String {
     "apply".to_string(),
   ];
   parts.extend(source_command_parts(context.source_args));
+  if let Some(values_file) = context.values_file {
+    parts.push("--values".to_string());
+    parts.push(values_file.to_string_lossy().to_string());
+  }
+  if let Some(profile) = context.profile_arg {
+    parts.push("--profile".to_string());
+    parts.push(profile.to_string());
+  }
   for binding in &context.inputs.bindings {
     let value = context.binds.get(&binding.name).cloned().or_else(|| {
       context

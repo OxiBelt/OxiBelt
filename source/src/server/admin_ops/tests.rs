@@ -169,6 +169,18 @@ fn config_sync_files_does_not_authorize_oxirule_files() {
     Err(FileSyncPermissionError::Denied("waf:PutOxiRulePack"))
   );
 
+  let install_lock_put = sync_request(
+    admin_control::AdminApplyMode::None,
+    vec![put(
+      admin_control::AdminFileRoot::OxiRuleRulepackInstall,
+      "rulepacks/main.install.toml",
+    )],
+  );
+  assert_eq!(
+    check_file_sync_permissions(&authorization, &install_lock_put),
+    Err(FileSyncPermissionError::Denied("waf:PutOxiRulePack"))
+  );
+
   let reload = sync_request(
     admin_control::AdminApplyMode::OxiRule,
     vec![put(admin_control::AdminFileRoot::Config, "runtime.toml")],
@@ -257,6 +269,7 @@ fn waf_file_permissions_authorize_matching_operations() {
       "oxibelt:oxibelt:waf:oxirule/*",
       "oxibelt:oxibelt:waf:oxirule-group/*",
       "oxibelt:oxibelt:waf:oxirule-rulepack/*",
+      "oxibelt:oxibelt:waf:oxirule-rulepack-install/*",
     ],
   );
   let context = IpmRequestContext::default();
@@ -287,6 +300,14 @@ fn waf_file_permissions_authorize_matching_operations() {
       delete(
         admin_control::AdminFileRoot::OxiRuleRulepack,
         "rulepacks/b.oxirule-rulepack.toml",
+      ),
+      put(
+        admin_control::AdminFileRoot::OxiRuleRulepackInstall,
+        "rulepacks/a.install.toml",
+      ),
+      delete(
+        admin_control::AdminFileRoot::OxiRuleRulepackInstall,
+        "rulepacks/b.install.toml",
       ),
     ],
   );

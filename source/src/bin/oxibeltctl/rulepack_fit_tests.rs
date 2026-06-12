@@ -126,6 +126,8 @@ upstream = "vaultwarden-origin"
     inputs: &inputs,
     binds: &BTreeMap::new(),
     vars: &BTreeMap::new(),
+    values_file: None,
+    profile_arg: None,
     missing_bindings: &["app_route".to_string()],
     missing_variables: &[],
     route_candidates: &route_candidates,
@@ -135,6 +137,50 @@ upstream = "vaultwarden-origin"
 
   assert_eq!(inputs.bindings[0].name, "app_route");
   assert!(command.contains("--bind app_route=mmsecretvault"));
+}
+
+#[test]
+fn suggested_command_preserves_values_file_and_cli_profile() {
+  let inputs = inspect_rulepack_inputs(vaultwarden_rulepack(), "test rulepack").expect("inputs");
+  let source_args = RulepackSourceArgs {
+    file: Some(std::path::PathBuf::from(
+      "vaultwarden.oxirule-rulepack.toml",
+    )),
+    dir: None,
+    url: None,
+    git: None,
+    manifest: std::path::PathBuf::from("rulepack.oxirule-rulepack.toml"),
+    ca_certs: Vec::new(),
+    token_env: None,
+    sha256: None,
+    allow_unpinned_rulepack: false,
+    allow_insecure_rulepack_url: false,
+    require_openpgp_signature: false,
+    openpgp_signature_url: None,
+    openpgp_signature_file: None,
+    openpgp_key_files: Vec::new(),
+    openpgp_keyring_dirs: Vec::new(),
+    openpgp_fingerprints: Vec::new(),
+    git_ref: None,
+  };
+  let command = suggested_apply_command(SuggestedCommandContext {
+    source_args: &source_args,
+    inputs: &inputs,
+    binds: &BTreeMap::new(),
+    vars: &BTreeMap::new(),
+    values_file: Some(std::path::Path::new("vaultwarden.values.toml")),
+    profile_arg: Some("public-production"),
+    missing_bindings: &[],
+    missing_variables: &["admin_cidr".to_string()],
+    route_candidates: &[],
+    mode: Some(RulepackModeArg::Monitor),
+    force_mode: false,
+  });
+
+  assert!(command.contains("--values vaultwarden.values.toml"));
+  assert!(command.contains("--profile public-production"));
+  assert!(command.contains("--var 'admin_cidr=<value>'"));
+  assert!(!command.contains("app_route=mmsecretvault"));
 }
 
 #[test]

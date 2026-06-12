@@ -20,6 +20,10 @@ use crate::cli::{
 };
 use crate::output::{print_permission_hint, print_response};
 use crate::plan::{PermissionHint, RequestPlan};
+use crate::rulepack_install::{
+  RulepackInstallLockInput, installed_rulepack_lock_path, installed_rulepack_path,
+  render_install_lock,
+};
 use crate::rulepack_url::load_url_source;
 #[cfg(test)]
 use crate::rulepack_url::{
@@ -43,13 +47,26 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
     }
     RulepackSubcommand::Render(args) => {
       let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
-      let vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
-      let binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+      let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+      let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+      let resolved = crate::rulepack_values::resolve_rulepack_inputs(
+        crate::rulepack_values::RulepackResolveRequest {
+          raw: &loaded.manifest,
+          source: &loaded.source_label,
+          values_file: args.values.as_deref(),
+          cli_vars: &cli_vars,
+          cli_binds: &cli_binds,
+          cli_profile: args.profile.as_deref(),
+          cli_mode: args.mode,
+          cli_force_mode: args.force_mode,
+          default_mode: None,
+        },
+      )?;
       let render_vars = crate::rulepack_fit::resolve_render_variables(
         &loaded.manifest,
         &loaded.source_label,
-        &vars,
-        &binds,
+        &resolved.vars,
+        &resolved.binds,
         true,
       )?;
       let rendered = render_rulepack_for_install(
@@ -57,8 +74,8 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
         &loaded.source_label,
         render_options(
           render_vars,
-          args.mode,
-          args.force_mode,
+          resolved.mode,
+          resolved.force_mode,
           loaded.git_commit.clone(),
           loaded.source_provenance.clone(),
         ),
@@ -68,19 +85,32 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
     }
     RulepackSubcommand::Check(args) => {
       let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
-      let vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
-      let binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+      let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+      let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+      let resolved = crate::rulepack_values::resolve_rulepack_inputs(
+        crate::rulepack_values::RulepackResolveRequest {
+          raw: &loaded.manifest,
+          source: &loaded.source_label,
+          values_file: args.values.as_deref(),
+          cli_vars: &cli_vars,
+          cli_binds: &cli_binds,
+          cli_profile: args.profile.as_deref(),
+          cli_mode: None,
+          cli_force_mode: false,
+          default_mode: None,
+        },
+      )?;
       let render_vars = crate::rulepack_fit::resolve_render_variables(
         &loaded.manifest,
         &loaded.source_label,
-        &vars,
-        &binds,
+        &resolved.vars,
+        &resolved.binds,
         true,
       )?;
       let options = render_options(
         render_vars,
-        None,
-        false,
+        resolved.mode,
+        resolved.force_mode,
         loaded.git_commit.clone(),
         loaded.source_provenance.clone(),
       );
@@ -174,8 +204,24 @@ async fn plan_rulepack_apply(
   args: &RulepackApplyArgs,
 ) -> anyhow::Result<(RequestPlan, String)> {
   let loaded = load_rulepack_source(&args.source, client.timeout(), true).await?;
-  let mut vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
-  let mut binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+  let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+  let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+  let resolved = crate::rulepack_values::resolve_rulepack_inputs(
+    crate::rulepack_values::RulepackResolveRequest {
+      raw: &loaded.manifest,
+      source: &loaded.source_label,
+      values_file: args.values.as_deref(),
+      cli_vars: &cli_vars,
+      cli_binds: &cli_binds,
+      cli_profile: args.profile.as_deref(),
+      cli_mode: args.mode,
+      cli_force_mode: args.force_mode,
+      default_mode: Some(RulepackModeArg::Monitor),
+    },
+  )?;
+  let mut vars = resolved.vars.clone();
+  let mut binds = resolved.binds.clone();
+  let effective_mode = resolved.mode.unwrap_or(RulepackModeArg::Monitor);
   if args.interactive {
     crate::rulepack_prompt::complete_interactive_apply(
       client,
@@ -183,8 +229,8 @@ async fn plan_rulepack_apply(
       &args.source,
       &mut vars,
       &mut binds,
-      args.mode,
-      args.force_mode,
+      effective_mode,
+      resolved.force_mode,
     )
     .await?;
   }
@@ -197,8 +243,8 @@ async fn plan_rulepack_apply(
   )?;
   let options = render_options(
     render_vars.clone(),
-    Some(args.mode),
-    args.force_mode,
+    Some(effective_mode),
+    resolved.force_mode,
     loaded.git_commit.clone(),
     loaded.source_provenance.clone(),
   );
@@ -234,6 +280,34 @@ async fn plan_rulepack_apply(
     "path": installed_rulepack_path(&name)?,
     "content": rendered_manifest,
   }));
+  let input_metadata =
+    oxibelt::waf::inspect_rulepack_inputs(&loaded.manifest, &loaded.source_label)?;
+  let lock_values = input_metadata
+    .variables
+    .iter()
+    .filter_map(|variable| {
+      render_vars
+        .get(&variable.name)
+        .map(|value| (variable.name.clone(), value.clone()))
+    })
+    .collect::<BTreeMap<_, _>>();
+  operations.push(json!({
+    "op": "put",
+    "root": "oxirule_rulepack_install",
+    "path": installed_rulepack_lock_path(&name)?,
+    "content": render_install_lock(RulepackInstallLockInput {
+      name: &name,
+      version: &inspection.summary.version,
+      source: &loaded.source_label,
+      source_commit: loaded.git_commit.as_deref(),
+      source_provenance: loaded.source_provenance.as_ref(),
+      selected_profile: resolved.selected_profile.as_deref(),
+      effective_mode,
+      force_mode: resolved.force_mode,
+      bindings: &binds,
+      values: &lock_values,
+    })?,
+  }));
   let etag = current_etag(client).await?;
   Ok((
     RequestPlan {
@@ -254,16 +328,35 @@ async fn print_fit_report(
   output: OutputFormat,
 ) -> anyhow::Result<()> {
   let loaded = load_rulepack_source(&args.source, client.timeout(), false).await?;
-  let vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
-  let binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+  let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
+  let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
+  let resolved = crate::rulepack_values::resolve_rulepack_inputs(
+    crate::rulepack_values::RulepackResolveRequest {
+      raw: &loaded.manifest,
+      source: &loaded.source_label,
+      values_file: args.values.as_deref(),
+      cli_vars: &cli_vars,
+      cli_binds: &cli_binds,
+      cli_profile: args.profile.as_deref(),
+      cli_mode: args.mode,
+      cli_force_mode: args.force_mode,
+      default_mode: None,
+    },
+  )?;
   let evaluation = crate::rulepack_fit::evaluate_fit(
     client,
     &loaded,
     &args.source,
-    &vars,
-    &binds,
-    args.mode,
-    args.force_mode,
+    crate::rulepack_fit::RulepackFitOptions {
+      vars: &resolved.vars,
+      binds: &resolved.binds,
+      command_vars: &cli_vars,
+      command_binds: &cli_binds,
+      values_file: resolved.values_file.as_deref(),
+      profile_arg: args.profile.as_deref(),
+      mode: resolved.mode,
+      force_mode: resolved.force_mode,
+    },
   )
   .await?;
   match output {
@@ -281,17 +374,25 @@ async fn plan_rulepack_remove(
     bail!("rulepack remove requires --apply");
   }
   let path = installed_rulepack_path(&args.name)?;
+  let lock_path = installed_rulepack_lock_path(&args.name)?;
   let etag = current_etag(client).await?;
   Ok(RequestPlan {
     method: Method::POST,
     endpoint: "/admin/v1/files/sync".to_string(),
     body: Some(json!({
       "apply": "oxirule",
-      "operations": [{
-        "op": "delete",
-        "root": "oxirule_rulepack",
-        "path": path,
-      }],
+      "operations": [
+        {
+          "op": "delete",
+          "root": "oxirule_rulepack",
+          "path": path,
+        },
+        {
+          "op": "delete",
+          "root": "oxirule_rulepack_install",
+          "path": lock_path,
+        },
+      ],
     })),
     if_match: Some(etag),
     permission: permission(
@@ -540,17 +641,6 @@ async fn current_etag(client: &AdminClient) -> anyhow::Result<String> {
     .and_then(Value::as_str)
     .map(str::to_string)
     .context("config status response did not include etag")
-}
-
-fn installed_rulepack_path(name: &str) -> anyhow::Result<String> {
-  if name.trim().is_empty()
-    || name
-      .chars()
-      .any(|character| matches!(character, '/' | '\\' | '?' | '#'))
-  {
-    bail!("rulepack name is not valid for an install path");
-  }
-  Ok(format!("rulepacks/{name}{RULEPACK_FILE_SUFFIX}"))
 }
 
 fn ensure_manifest_suffix(path: &Path) -> anyhow::Result<()> {

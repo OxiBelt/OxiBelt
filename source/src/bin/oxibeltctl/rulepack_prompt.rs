@@ -23,10 +23,16 @@ pub(crate) async fn complete_interactive_apply(
     client,
     loaded,
     source_args,
-    vars,
-    binds,
-    Some(mode),
-    force_mode,
+    crate::rulepack_fit::RulepackFitOptions {
+      vars,
+      binds,
+      command_vars: vars,
+      command_binds: binds,
+      values_file: None,
+      profile_arg: None,
+      mode: Some(mode),
+      force_mode,
+    },
   )
   .await?;
   let mut prompt = StdioPrompt;

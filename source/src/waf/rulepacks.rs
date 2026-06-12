@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 #[path = "rulepacks/input.rs"]
 mod input;
 pub use input::{
-  RulepackBinding, RulepackBindingKind, RulepackDiscovery, RulepackInputMetadata, RulepackVariable,
+  RulepackBinding, RulepackBindingKind, RulepackDiscovery, RulepackInputMetadata, RulepackProfile,
+  RulepackVariable,
 };
 #[path = "rulepacks/provenance.rs"]
 mod provenance;
+pub use provenance::RulepackSourceProvenance;
 use provenance::{
   set_rulepack_provenance, validate_source_fingerprint, validate_source_sha256,
   validate_source_text,
@@ -74,16 +76,6 @@ pub struct RulepackRenderOptions {
   pub pin_variables: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
-pub struct RulepackSourceProvenance {
-  pub source_url: String,
-  pub source_sha256: String,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub source_openpgp_signature_url: Option<String>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub source_openpgp_signer_fingerprint: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct RulepackInspection {
   pub summary: WafRulepackSummary,
@@ -111,6 +103,8 @@ struct RulepackDocument {
   variables: Vec<RulepackVariable>,
   #[serde(default)]
   bindings: Vec<RulepackBinding>,
+  #[serde(default)]
+  profiles: Vec<RulepackProfile>,
   #[serde(default)]
   rules: Vec<RulepackRule>,
   #[serde(default)]
@@ -232,6 +226,7 @@ pub fn inspect_rulepack_inputs(raw: &str, source: &str) -> anyhow::Result<Rulepa
     summary: summary_from_document(&document, Vec::new()),
     variables: document.variables,
     bindings: document.bindings,
+    profiles: document.profiles,
   })
 }
 
@@ -311,6 +306,7 @@ impl ParsedRulepack {
       pin_variable_defaults(&mut value, &variables)?;
       if let Some(table) = value.as_table_mut() {
         table.remove("bindings");
+        table.remove("profiles");
       }
     }
     if let Some(commit) = options.source_commit {
@@ -484,7 +480,12 @@ fn validate_document_shape(document: &RulepackDocument, source: &str) -> anyhow:
     bail!("{source} must contain at least one [[rules]] or [[group_files]] entry");
   }
 
-  input::validate_rulepack_inputs(source, &document.variables, &document.bindings)?;
+  input::validate_rulepack_inputs(
+    source,
+    &document.variables,
+    &document.bindings,
+    &document.profiles,
+  )?;
 
   let mut rule_names = HashSet::new();
   for rule in &document.rules {

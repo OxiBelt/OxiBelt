@@ -260,7 +260,112 @@ content = "when = \"Context.Route.Name == '{{route_name}}' && !Request.Client.Ip
   assert!(rendered.contains("10.0.0.0/8"));
   assert!(!rendered.contains("{{route_name}}"));
   assert!(!rendered.contains("[[bindings]]"));
+  assert!(!rendered.contains("[[profiles]]"));
   validate_rulepack_manifest(&rendered).expect("rendered install manifest should validate");
+}
+
+#[test]
+fn schema_v2_exposes_profiles_with_typed_values() {
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[variables]]
+name = "login_rate"
+type = "rate"
+default = "5r/m"
+
+[[profiles]]
+name = "public-production"
+mode = "enforcing"
+values = { login_rate = "10r/m" }
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+
+  let metadata = inspect_rulepack_inputs(raw, "test rulepack").expect("profile metadata");
+
+  assert_eq!(metadata.profiles.len(), 1);
+  assert_eq!(metadata.profiles[0].name, "public-production");
+  assert_eq!(metadata.profiles[0].mode, Some(WafMode::Enforcing));
+  assert_eq!(
+    metadata.profiles[0]
+      .values
+      .get("login_rate")
+      .map(String::as_str),
+    Some("10r/m")
+  );
+}
+
+#[test]
+fn schema_v2_rejects_invalid_profiles() {
+  let duplicate = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[profiles]]
+name = "prod"
+
+[[profiles]]
+name = "prod"
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+  let error =
+    inspect_rulepack_inputs(duplicate, "test rulepack").expect_err("duplicate profile should fail");
+  assert!(error.to_string().contains("duplicate profile prod"));
+
+  let unknown_value = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[profiles]]
+name = "prod"
+values = { missing = "value" }
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+  let error = inspect_rulepack_inputs(unknown_value, "test rulepack")
+    .expect_err("unknown profile variable should fail");
+  assert!(error.to_string().contains("unknown variable missing"));
+
+  let invalid_value = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[variables]]
+name = "admin_cidr"
+type = "cidr"
+
+[[profiles]]
+name = "prod"
+values = { admin_cidr = "not-a-cidr" }
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"true\"\n"
+"#;
+  let error = inspect_rulepack_inputs(invalid_value, "test rulepack")
+    .expect_err("invalid profile value should fail");
+  assert!(error.to_string().contains("valid CIDR"));
 }
 
 #[test]

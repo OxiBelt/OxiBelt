@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ pub struct RulepackInputMetadata {
   pub summary: super::WafRulepackSummary,
   pub variables: Vec<RulepackVariable>,
   pub bindings: Vec<RulepackBinding>,
+  pub profiles: Vec<RulepackProfile>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -42,6 +43,16 @@ pub struct RulepackBinding {
   pub discovery: RulepackDiscovery,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RulepackProfile {
+  pub name: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mode: Option<super::WafMode>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub values: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RulepackBindingKind {
@@ -65,6 +76,7 @@ pub(super) fn validate_rulepack_inputs(
   source: &str,
   variables: &[RulepackVariable],
   bindings: &[RulepackBinding],
+  profiles: &[RulepackProfile],
 ) -> anyhow::Result<()> {
   let mut variable_names = HashSet::new();
   for variable in variables {
@@ -118,6 +130,24 @@ pub(super) fn validate_rulepack_inputs(
     )?;
     validate_optional_human_text(source, "bindings.prompt", binding.prompt.as_deref())?;
     validate_discovery(source, "bindings.discovery", &binding.discovery)?;
+  }
+
+  let mut profile_names = HashSet::new();
+  for profile in profiles {
+    super::validate_label(source, "profiles.name", &profile.name)?;
+    if !profile_names.insert(profile.name.clone()) {
+      bail!("{source} contains duplicate profile {}", profile.name);
+    }
+    for (name, value) in &profile.values {
+      let variable = variables.iter().find(|variable| variable.name == *name);
+      let Some(variable) = variable else {
+        bail!(
+          "{source} profile {} sets unknown variable {name}",
+          profile.name
+        );
+      };
+      validate_variable_value(source, variable, value)?;
+    }
   }
 
   Ok(())

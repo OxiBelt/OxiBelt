@@ -139,6 +139,36 @@ fn scripted_prompt_rejects_non_terminal() {
 }
 
 #[test]
+fn scripted_prompt_skips_prefilled_inputs() {
+  let evaluation = evaluation();
+  let mut vars = BTreeMap::from([("admin_cidr".to_string(), "10.0.0.0/8".to_string())]);
+  let mut binds = BTreeMap::from([("app_route".to_string(), "mmsecretvault".to_string())]);
+  let mut prompt = ScriptedPrompt::new(&["yes"]);
+
+  complete_interactive_from_evaluation(
+    &evaluation,
+    &mut vars,
+    &mut binds,
+    RulepackModeArg::Monitor,
+    &mut prompt,
+  )
+  .expect("prefilled interactive inputs");
+
+  assert_eq!(
+    prompt.lines.last().map(String::as_str),
+    Some("Apply rulepack now? [y/N]")
+  );
+  assert_eq!(
+    binds.get("app_route").map(String::as_str),
+    Some("mmsecretvault")
+  );
+  assert_eq!(
+    vars.get("admin_cidr").map(String::as_str),
+    Some("10.0.0.0/8")
+  );
+}
+
+#[test]
 fn scripted_prompt_can_cancel_before_apply() {
   let evaluation = evaluation();
   let mut vars = BTreeMap::new();

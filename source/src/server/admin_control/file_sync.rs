@@ -1,12 +1,13 @@
 //! Admin-controlled file synchronization.
 //! Sync targets are restricted by load scope before writing managed files.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ::http::StatusCode;
 use anyhow::{Context, anyhow, bail};
 use ring::digest;
+use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::config::{Config, RuntimeOverrides};
@@ -292,7 +293,10 @@ fn resolve_sync_target(
       ensure_parent_stays_under_base(config_sync_base(config)?, &target)?;
       return Ok(target);
     }
-    AdminFileRoot::OxiRule | AdminFileRoot::OxiRuleGroup | AdminFileRoot::OxiRuleRulepack => config
+    AdminFileRoot::OxiRule
+    | AdminFileRoot::OxiRuleGroup
+    | AdminFileRoot::OxiRuleRulepack
+    | AdminFileRoot::OxiRuleRulepackInstall => config
       .source_paths
       .oxirule_dir
       .as_ref()
@@ -337,6 +341,119 @@ fn validate_sync_content(root: AdminFileRoot, content: &str) -> anyhow::Result<(
     AdminFileRoot::OxiRuleRulepack => {
       crate::waf::validate_rulepack_manifest(content)?;
     }
+    AdminFileRoot::OxiRuleRulepackInstall => {
+      validate_rulepack_install_lock(content)?;
+    }
+  }
+  Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RulepackInstallLock {
+  install: RulepackInstallSection,
+  #[serde(default)]
+  bindings: BTreeMap<String, String>,
+  #[serde(default)]
+  values: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RulepackInstallSection {
+  name: String,
+  version: String,
+  source: String,
+  #[serde(default)]
+  source_commit: Option<String>,
+  #[serde(default)]
+  source_url: Option<String>,
+  #[serde(default)]
+  source_sha256: Option<String>,
+  #[serde(default)]
+  source_openpgp_signature_url: Option<String>,
+  #[serde(default)]
+  source_openpgp_signer_fingerprint: Option<String>,
+  #[serde(default)]
+  profile: Option<String>,
+  effective_mode: crate::waf::WafMode,
+  force_mode: bool,
+  installed_at: String,
+}
+
+fn validate_rulepack_install_lock(content: &str) -> anyhow::Result<()> {
+  let lock: RulepackInstallLock =
+    toml::from_str(content).context("failed to parse rulepack install lock TOML")?;
+  validate_lock_label("install.name", &lock.install.name)?;
+  validate_lock_text("install.version", &lock.install.version, 128)?;
+  validate_lock_text("install.source", &lock.install.source, 2048)?;
+  validate_lock_text("install.installed_at", &lock.install.installed_at, 64)?;
+  if let Some(value) = &lock.install.source_commit {
+    validate_lock_text("install.source_commit", value, 128)?;
+  }
+  if let Some(value) = &lock.install.source_url {
+    validate_lock_text("install.source_url", value, 2048)?;
+  }
+  if let Some(value) = &lock.install.source_sha256 {
+    validate_sha256(value)?;
+  }
+  if let Some(value) = &lock.install.source_openpgp_signature_url {
+    validate_lock_text("install.source_openpgp_signature_url", value, 2048)?;
+  }
+  if let Some(value) = &lock.install.source_openpgp_signer_fingerprint {
+    validate_fingerprint(value)?;
+  }
+  if let Some(value) = &lock.install.profile {
+    validate_lock_label("install.profile", value)?;
+  }
+  let _ = lock.install.effective_mode;
+  let _ = lock.install.force_mode;
+  validate_lock_map("bindings", &lock.bindings)?;
+  validate_lock_map("values", &lock.values)?;
+  Ok(())
+}
+
+fn validate_lock_map(field: &str, values: &BTreeMap<String, String>) -> anyhow::Result<()> {
+  for (name, value) in values {
+    validate_lock_label(&format!("{field} key"), name)?;
+    validate_lock_text(&format!("{field}.{name}"), value, 2048)?;
+  }
+  Ok(())
+}
+
+fn validate_lock_label(field: &str, value: &str) -> anyhow::Result<()> {
+  validate_lock_text(field, value, 128)?;
+  if !value
+    .bytes()
+    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+  {
+    bail!("{field} contains unsupported characters");
+  }
+  Ok(())
+}
+
+fn validate_lock_text(field: &str, value: &str, max_len: usize) -> anyhow::Result<()> {
+  if value.trim().is_empty() {
+    bail!("{field} must not be empty");
+  }
+  if value.len() > max_len || value.bytes().any(|byte| byte.is_ascii_control()) {
+    bail!("{field} must be 1 to {max_len} printable bytes");
+  }
+  Ok(())
+}
+
+fn validate_sha256(value: &str) -> anyhow::Result<()> {
+  if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    bail!("install.source_sha256 must be a 64-character hex SHA-256 digest");
+  }
+  Ok(())
+}
+
+fn validate_fingerprint(value: &str) -> anyhow::Result<()> {
+  if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    bail!(
+      "install.source_openpgp_signer_fingerprint must be a full 40- or 64-character hex OpenPGP fingerprint"
+    );
   }
   Ok(())
 }

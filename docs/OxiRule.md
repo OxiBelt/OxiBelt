@@ -257,6 +257,11 @@ type = "cidr"
 required = true
 prompt = "Trusted CIDR allowed to access /admin."
 
+[[variables]]
+name = "login_rate"
+type = "rate"
+default = "5r/m"
+
 [[bindings]]
 name = "app_route"
 kind = "route"
@@ -269,18 +274,47 @@ name_any = ["vaultwarden", "bitwarden", "vault", "secret"]
 host_contains_any = ["vaultwarden", "bitwarden", "vault"]
 upstream_contains_any = ["vaultwarden", "bitwarden"]
 path_prefix_any = ["/"]
+
+[[profiles]]
+name = "public-production"
+mode = "enforcing"
+
+[profiles.values]
+login_rate = "10r/m"
 ```
 
 The `bind_as` value names the render placeholder, so `--bind app_route=mmsecretvault` renders `{{route_name}}`. It must not collide with a scalar variable name or another binding target. Schema version `2` does not support `type = "route"` under `[[variables]]` or `[variables.discovery]`; use `[[bindings]]` instead.
 
-`oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and scalar variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying a rendered manifest through `/admin/v1/files/sync`. Noninteractive `render`, `check`, and `apply` can pass bindings explicitly:
+Values files let operators keep local route bindings, scalar values, and rollout profile choices outside the remote rulepack:
+
+```toml
+[bindings]
+app_route = "mmsecretvault"
+
+[values]
+admin_cidr = "10.10.0.0/16"
+login_rate = "10r/m"
+
+[overrides]
+profile = "public-production"
+mode = "enforcing"
+force_mode = true
+```
+
+Only `[bindings]`, `[values]`, and `[overrides]` are accepted. Binding and value entries must be strings. `[overrides] profile` selects a declared `[[profiles]]` entry, `mode` may be `monitor` or `enforcing`, and `force_mode = true` pins every rule to the effective mode. Precedence is `[[variables]] default` < selected profile values/mode < values file < CLI `--bind`, `--var`, `--profile`, `--mode`, and `--force-mode`. Without an explicit profile or mode override, `rulepack apply` still installs in `monitor` mode.
+
+`oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and scalar variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying a rendered manifest through `/admin/v1/files/sync`. Noninteractive `render`, `check`, and `apply` can pass bindings and values explicitly or through `--values`:
 
 ```sh
-oxibeltctl rulepack fit --file vaultwarden.oxirule-rulepack.toml
+oxibeltctl rulepack fit --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml
 oxibeltctl rulepack check --file vaultwarden.oxirule-rulepack.toml --bind app_route=mmsecretvault --var admin_cidr=10.0.0.0/8
+oxibeltctl rulepack render --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml --profile public-production
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --bind app_route=mmsecretvault --var admin_cidr=10.0.0.0/8
+oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --interactive
 ```
+
+Installed manifests contain concrete rendered rule content and do not require source `[[bindings]]` or `[[profiles]]` metadata at runtime. `rulepack apply` also writes `rulepacks/{name}.install.toml` under the OxiRule directory with the selected profile, effective mode, source/provenance fields, bindings, and values. The install lockfile is metadata only and is not loaded as an executable rulepack.
 
 ## Development Tools
 

@@ -74,6 +74,10 @@ fn rulepack_cli_parses_fit_and_bind_options() {
     "fit",
     "--file",
     "vaultwarden.oxirule-rulepack.toml",
+    "--values",
+    "vaultwarden.values.toml",
+    "--profile",
+    "public-production",
     "--bind",
     "app_route=mmsecretvault",
     "--var",
@@ -87,6 +91,8 @@ fn rulepack_cli_parses_fit_and_bind_options() {
   let RulepackSubcommand::Fit(args) = command.command else {
     panic!("expected rulepack fit");
   };
+  assert_eq!(args.values, Some(PathBuf::from("vaultwarden.values.toml")));
+  assert_eq!(args.profile.as_deref(), Some("public-production"));
   assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
   assert_eq!(args.vars, vec!["admin_cidr=10.0.0.0/8"]);
 }
@@ -99,6 +105,10 @@ fn rulepack_cli_parses_render_and_check_bind_options() {
     "render",
     "--file",
     "vaultwarden.oxirule-rulepack.toml",
+    "--values",
+    "vaultwarden.values.toml",
+    "--profile",
+    "public-production",
     "--bind",
     "app_route=mmsecretvault",
   ])
@@ -109,6 +119,8 @@ fn rulepack_cli_parses_render_and_check_bind_options() {
   let RulepackSubcommand::Render(args) = command.command else {
     panic!("expected rulepack render");
   };
+  assert_eq!(args.values, Some(PathBuf::from("vaultwarden.values.toml")));
+  assert_eq!(args.profile.as_deref(), Some("public-production"));
   assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
 
   let parsed = Cli::try_parse_from([
@@ -117,6 +129,10 @@ fn rulepack_cli_parses_render_and_check_bind_options() {
     "check",
     "--file",
     "vaultwarden.oxirule-rulepack.toml",
+    "--values",
+    "vaultwarden.values.toml",
+    "--profile",
+    "public-production",
     "--bind",
     "app_route=mmsecretvault",
   ])
@@ -127,6 +143,8 @@ fn rulepack_cli_parses_render_and_check_bind_options() {
   let RulepackSubcommand::Check(args) = command.command else {
     panic!("expected rulepack check");
   };
+  assert_eq!(args.values, Some(PathBuf::from("vaultwarden.values.toml")));
+  assert_eq!(args.profile.as_deref(), Some("public-production"));
   assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
 }
 
@@ -138,6 +156,10 @@ fn rulepack_cli_parses_interactive_apply() {
     "apply",
     "--file",
     "vaultwarden.oxirule-rulepack.toml",
+    "--values",
+    "vaultwarden.values.toml",
+    "--profile",
+    "public-production",
     "--interactive",
     "--bind",
     "app_route=mmsecretvault",
@@ -151,6 +173,8 @@ fn rulepack_cli_parses_interactive_apply() {
     panic!("expected rulepack apply");
   };
   assert!(args.interactive);
+  assert_eq!(args.values, Some(PathBuf::from("vaultwarden.values.toml")));
+  assert_eq!(args.profile.as_deref(), Some("public-production"));
   assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
 }
 

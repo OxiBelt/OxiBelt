@@ -24,10 +24,14 @@ pub(crate) enum RulepackSubcommand {
 pub(crate) struct RulepackFitArgs {
   #[command(flatten)]
   pub(crate) source: RulepackSourceArgs,
+  #[arg(long = "values", value_name = "FILE")]
+  pub(crate) values: Option<PathBuf>,
   #[arg(long = "var", value_name = "KEY=VALUE")]
   pub(crate) vars: Vec<String>,
   #[arg(long = "bind", value_name = "KEY=VALUE")]
   pub(crate) binds: Vec<String>,
+  #[arg(long = "profile", value_name = "NAME")]
+  pub(crate) profile: Option<String>,
   #[arg(long, value_enum)]
   pub(crate) mode: Option<RulepackModeArg>,
   #[arg(long)]
@@ -44,10 +48,14 @@ pub(crate) struct RulepackInspectArgs {
 pub(crate) struct RulepackRenderArgs {
   #[command(flatten)]
   pub(crate) source: RulepackSourceArgs,
+  #[arg(long = "values", value_name = "FILE")]
+  pub(crate) values: Option<PathBuf>,
   #[arg(long = "var", value_name = "KEY=VALUE")]
   pub(crate) vars: Vec<String>,
   #[arg(long = "bind", value_name = "KEY=VALUE")]
   pub(crate) binds: Vec<String>,
+  #[arg(long = "profile", value_name = "NAME")]
+  pub(crate) profile: Option<String>,
   #[arg(long, value_enum)]
   pub(crate) mode: Option<RulepackModeArg>,
   #[arg(long)]
@@ -58,22 +66,30 @@ pub(crate) struct RulepackRenderArgs {
 pub(crate) struct RulepackCheckArgs {
   #[command(flatten)]
   pub(crate) source: RulepackSourceArgs,
+  #[arg(long = "values", value_name = "FILE")]
+  pub(crate) values: Option<PathBuf>,
   #[arg(long = "var", value_name = "KEY=VALUE")]
   pub(crate) vars: Vec<String>,
   #[arg(long = "bind", value_name = "KEY=VALUE")]
   pub(crate) binds: Vec<String>,
+  #[arg(long = "profile", value_name = "NAME")]
+  pub(crate) profile: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct RulepackApplyArgs {
   #[command(flatten)]
   pub(crate) source: RulepackSourceArgs,
+  #[arg(long = "values", value_name = "FILE")]
+  pub(crate) values: Option<PathBuf>,
   #[arg(long = "var", value_name = "KEY=VALUE")]
   pub(crate) vars: Vec<String>,
   #[arg(long = "bind", value_name = "KEY=VALUE")]
   pub(crate) binds: Vec<String>,
-  #[arg(long, value_enum, default_value_t = RulepackModeArg::Monitor)]
-  pub(crate) mode: RulepackModeArg,
+  #[arg(long, value_enum)]
+  pub(crate) mode: Option<RulepackModeArg>,
+  #[arg(long = "profile", value_name = "NAME")]
+  pub(crate) profile: Option<String>,
   #[arg(long)]
   pub(crate) force_mode: bool,
   #[arg(long)]

@@ -1,6 +1,15 @@
 use anyhow::bail;
+use serde::Serialize;
 
-use super::RulepackSourceProvenance;
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct RulepackSourceProvenance {
+  pub source_url: String,
+  pub source_sha256: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_openpgp_signature_url: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_openpgp_signer_fingerprint: Option<String>,
+}
 
 pub(super) fn validate_source_text(source: &str, field: &str, value: &str) -> anyhow::Result<()> {
   validate_non_empty(source, field, value)?;

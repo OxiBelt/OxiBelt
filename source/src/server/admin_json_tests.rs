@@ -720,6 +720,12 @@ fn file_sync_payload_accepts_public_oxirule_names() {
           "root": "oxirule_rulepack",
           "path": "rulepacks/main.oxirule-rulepack.toml",
           "content": "[rulepack]\nschema_version = 2\nname = \"main\"\nversion = \"0.1.0\"\n\n[[group_files]]\ncontent = '''\n[[rule_groups]]\nname = \"main\"\nwhen = \"true\"\n'''\n"
+        },
+        {
+          "op": "put",
+          "root": "oxirule_rulepack_install",
+          "path": "rulepacks/main.install.toml",
+          "content": "[install]\nname = \"main\"\nversion = \"0.1.0\"\nsource = \"test\"\neffective_mode = \"monitor\"\nforce_mode = false\ninstalled_at = \"2026-06-12T00:00:00Z\"\n"
         }
       ]
     }"#,
@@ -727,7 +733,7 @@ fn file_sync_payload_accepts_public_oxirule_names() {
   .expect("public file sync payload names should deserialize");
 
   assert_eq!(payload.apply, admin_control::AdminApplyMode::OxiRule);
-  assert_eq!(payload.operations.len(), 2);
+  assert_eq!(payload.operations.len(), 3);
   assert_eq!(
     payload.operations[0].root,
     admin_control::AdminFileRoot::OxiRuleGroup
@@ -735,5 +741,9 @@ fn file_sync_payload_accepts_public_oxirule_names() {
   assert_eq!(
     payload.operations[1].root,
     admin_control::AdminFileRoot::OxiRuleRulepack
+  );
+  assert_eq!(
+    payload.operations[2].root,
+    admin_control::AdminFileRoot::OxiRuleRulepackInstall
   );
 }

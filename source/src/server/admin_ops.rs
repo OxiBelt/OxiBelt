@@ -482,6 +482,24 @@ fn file_sync_operation_permissions(
       "oxirule-rulepack",
       &operation.path,
     ),
+    (
+      admin_control::AdminFileRoot::OxiRuleRulepackInstall,
+      admin_control::AdminFileOperationKind::Put,
+    ) => waf_file_permission(
+      operation.root,
+      "waf:PutOxiRulePack",
+      "oxirule-rulepack-install",
+      &operation.path,
+    ),
+    (
+      admin_control::AdminFileRoot::OxiRuleRulepackInstall,
+      admin_control::AdminFileOperationKind::Delete,
+    ) => waf_file_permission(
+      operation.root,
+      "waf:DeleteOxiRulePack",
+      "oxirule-rulepack-install",
+      &operation.path,
+    ),
   }
 }
 
