@@ -24,20 +24,30 @@ pub(crate) fn resolve_request_path(
     if raw_segment.is_empty() {
       continue;
     }
-    let segment = percent_decode_segment(raw_segment)?;
-    if segment == "." || segment == ".." {
-      return Err(StaticPathError::Forbidden);
+    if raw_segment.as_bytes().contains(&b'%') {
+      let segment = percent_decode_segment(raw_segment)?;
+      validate_segment(&segment)?;
+      candidate.push(segment);
+    } else {
+      validate_segment(raw_segment)?;
+      candidate.push(raw_segment);
     }
-    if segment
-      .bytes()
-      .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
-    {
-      return Err(StaticPathError::Invalid);
-    }
-    candidate.push(segment);
   }
 
   Ok(candidate)
+}
+
+fn validate_segment(segment: &str) -> Result<(), StaticPathError> {
+  if segment == "." || segment == ".." {
+    return Err(StaticPathError::Forbidden);
+  }
+  if segment
+    .bytes()
+    .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
+  {
+    return Err(StaticPathError::Invalid);
+  }
+  Ok(())
 }
 
 fn percent_decode_segment(segment: &str) -> Result<String, StaticPathError> {
@@ -75,4 +85,29 @@ pub(crate) enum StaticPathError {
   NotFound,
   Forbidden,
   Invalid,
+}
+
+#[cfg(test)]
+mod tests {
+  use std::path::Path;
+
+  use super::*;
+
+  #[test]
+  fn resolver_rejects_raw_unsafe_segments() {
+    let root = Path::new("/tmp");
+
+    assert_eq!(
+      resolve_request_path(root, "/assets", "/assets/../secret").unwrap_err(),
+      StaticPathError::Forbidden
+    );
+    assert_eq!(
+      resolve_request_path(root, "/assets", "/assets/.").unwrap_err(),
+      StaticPathError::Forbidden
+    );
+    assert_eq!(
+      resolve_request_path(root, "/assets", "/assets/app\\secret").unwrap_err(),
+      StaticPathError::Invalid
+    );
+  }
 }

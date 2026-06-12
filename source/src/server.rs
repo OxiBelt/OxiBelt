@@ -2127,15 +2127,13 @@ async fn handle_connection(
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = request_state.clone();
     let tls_metadata = tls_metadata.clone();
-    let request_count = request_count.clone();
+    let request_index = request_count.fetch_add(1, Ordering::Relaxed);
     let connection_limit_context = connection_limit_context.clone();
     let drain = drain.clone();
     async move {
       let _request_guard = state.runtime_introspection_guard(request_counter);
       Ok::<_, Infallible>(
-        if request_count.fetch_add(1, Ordering::Relaxed)
-          >= state.config.limits.max_requests_per_connection
-        {
+        if request_index >= state.config.limits.max_requests_per_connection {
           text_response(
             StatusCode::TOO_MANY_REQUESTS,
             "too many requests on this connection",

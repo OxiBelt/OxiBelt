@@ -51,6 +51,14 @@ pub(super) async fn read_request(
   let started = tokio::time::Instant::now();
   let mut chunk = [0_u8; READ_CHUNK_BYTES];
   loop {
+    if let Some(reason) =
+      non_static_origin_form_request_line_fallback(&buffer, target_can_match_static)
+    {
+      return Ok(ReadRequestOutcome::Fallback {
+        prefix: buffer,
+        reason,
+      });
+    }
     match parse_buffered_request_with_static_target_filter(
       &buffer,
       max_headers,
@@ -119,6 +127,35 @@ pub(super) async fn read_request(
     }
     buffer.extend_from_slice(&chunk[..read]);
   }
+}
+
+fn non_static_origin_form_request_line_fallback(
+  buffer: &[u8],
+  target_can_match_static: &(dyn Fn(&str) -> bool + Sync),
+) -> Option<&'static str> {
+  let line = request_line(buffer)?;
+  let mut parts = line.split(|byte| *byte == b' ');
+  let _method = parts.next()?;
+  let target = parts.next()?;
+  let _version = parts.next()?;
+  if parts.next().is_some() {
+    return None;
+  }
+  let Ok(target) = std::str::from_utf8(target) else {
+    return None;
+  };
+  if origin_form_target_path(target).is_some() && !target_can_match_static(target) {
+    Some("request target cannot match static sendfile route")
+  } else {
+    None
+  }
+}
+
+fn request_line(buffer: &[u8]) -> Option<&[u8]> {
+  buffer
+    .windows(2)
+    .position(|bytes| bytes == b"\r\n")
+    .map(|end| &buffer[..end])
 }
 
 pub(super) enum ParseResult {
@@ -225,4 +262,41 @@ pub(super) fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &st
         .any(|candidate| candidate.eq_ignore_ascii_case(token))
     })
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn request_line_filter_falls_back_before_complete_headers() {
+    let buffer = b"GET /perf/h1?body=ok HTTP/1.1\r\nHost: example";
+
+    let reason =
+      non_static_origin_form_request_line_fallback(buffer, &|target| target.starts_with("/static"));
+
+    assert_eq!(
+      reason,
+      Some("request target cannot match static sendfile route")
+    );
+  }
+
+  #[test]
+  fn request_line_filter_keeps_static_targets_on_preflight_path() {
+    let buffer = b"GET /static/app.txt HTTP/1.1\r\nHost: example";
+
+    let reason =
+      non_static_origin_form_request_line_fallback(buffer, &|target| target.starts_with("/static"));
+
+    assert_eq!(reason, None);
+  }
+
+  #[test]
+  fn request_line_filter_keeps_ambiguous_targets_on_preflight_path() {
+    let buffer = b"GET https://example.test/perf/h1 HTTP/1.1\r\nHost: example";
+
+    let reason = non_static_origin_form_request_line_fallback(buffer, &|_| false);
+
+    assert_eq!(reason, None);
+  }
 }

@@ -117,7 +117,11 @@ pub(super) async fn handle_connection(
   let tls_metadata = Arc::new(WafTlsMetadata::default());
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = request_state.clone();
-    let request_count = request_count.clone();
+    let request_index = if state.config.listeners.http_mode == HttpListenerMode::Proxy {
+      Some(request_count.fetch_add(1, Ordering::Relaxed))
+    } else {
+      None
+    };
     let connection_limit_context = connection_limit_context.clone();
     let tls_metadata = tls_metadata.clone();
     let drain = drain.clone();
@@ -126,8 +130,7 @@ pub(super) async fn handle_connection(
       let response = match state.config.listeners.http_mode {
         HttpListenerMode::RedirectToHttps => super::redirect_to_https(&request),
         HttpListenerMode::Proxy => {
-          if request_count.fetch_add(1, Ordering::Relaxed)
-            >= state.config.limits.max_requests_per_connection
+          if request_index.unwrap_or(usize::MAX) >= state.config.limits.max_requests_per_connection
           {
             text_response(
               StatusCode::TOO_MANY_REQUESTS,
