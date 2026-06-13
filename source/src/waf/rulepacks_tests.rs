@@ -74,6 +74,30 @@ content = "when = \"true\"\n"
 }
 
 #[test]
+fn rejects_missing_required_binding() {
+  let raw = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[bindings]]
+name = "app_route"
+kind = "route"
+bind_as = "route_name"
+required = true
+
+[[rules]]
+name = "block-demo"
+phase = "request"
+priority = 100
+content = "when = \"Context.Route.Name == '{{route_name}}'\"\n"
+"#;
+  let error = ParsedRulepack::parse(raw, "test rulepack", RulepackRenderOptions::default())
+    .expect_err("missing binding should fail");
+  assert!(error.to_string().contains("requires binding app_route"));
+}
+
+#[test]
 fn rejects_invalid_reference_suffix() {
   let raw = r#"[rulepack]
 schema_version = 2

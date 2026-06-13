@@ -550,8 +550,14 @@ fn resolve_variables(
     }
   }
   for binding in bindings {
-    if let Some(value) = overrides.get(&binding.bind_as) {
-      values.insert(binding.bind_as.clone(), value.clone());
+    match overrides.get(&binding.bind_as) {
+      Some(value) => {
+        values.insert(binding.bind_as.clone(), value.clone());
+      }
+      None if binding.required => {
+        bail!("{source} requires binding {}", binding.name);
+      }
+      None => {}
     }
   }
   Ok(values)

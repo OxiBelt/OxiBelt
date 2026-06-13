@@ -9921,6 +9921,70 @@ rulepack_files = ["rulepacks/route.oxirule-rulepack.toml"]
 }
 
 #[test]
+fn oxirule_rulepack_required_binding_fails_config_load() {
+    let temp_dir = common::TempDir::new("waf-rulepack-required-binding");
+    let config_dir = temp_dir.path().join("config");
+    let cert_dir = temp_dir.path().join("cert");
+    let rulepack_dir = temp_dir.path().join("oxirule").join("rulepacks");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+    std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+    std::fs::create_dir_all(&rulepack_dir).expect("failed to create rulepack directory");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(&cert_dir, "waf-rulepack-required-binding");
+    std::fs::write(
+        rulepack_dir.join("missing-required-binding.oxirule-rulepack.toml"),
+        r#"
+[rulepack]
+schema_version = 2
+name = "binding-gap"
+version = "0.1.0"
+
+[[bindings]]
+name = "app_route"
+kind = "route"
+bind_as = "route_name"
+required = true
+
+[[rules]]
+name = "route-scoped-demo"
+phase = "request"
+priority = 100
+content = '''
+when = "Context.Route.Name == '{{route_name}}'"
+
+[[actions]]
+type = "reject"
+status = 403
+'''
+"#,
+    )
+    .expect("failed to write rulepack");
+
+    let config_path = config_dir.join("oxibelt.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n{}",
+            common::minimal_config_toml_with_paths(
+                &cert_path.file_name().unwrap().to_string_lossy(),
+                &key_path.file_name().unwrap().to_string_lossy(),
+            ),
+            r#"
+[waf]
+enabled = true
+rulepack_files = ["rulepacks/missing-required-binding.oxirule-rulepack.toml"]
+"#
+        ),
+    )
+    .expect("failed to write config");
+
+    let error = Config::load(&config_path).expect_err("missing binding should fail config load");
+    let message = format!("{error:#}");
+    assert!(message.contains("requires binding app_route"));
+    assert!(message.contains("missing-required-binding.oxirule-rulepack.toml"));
+}
+
+#[test]
 fn oxirule_rulepack_exceptions_scope_false_positive_traffic() {
     let temp_dir = common::TempDir::new("waf-rulepack-exceptions");
     let config_dir = temp_dir.path().join("config");

@@ -357,7 +357,7 @@ oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --values vaul
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --interactive
 ```
 
-Installed manifests contain concrete rendered rule content and do not require source `[[bindings]]` or `[[profiles]]` metadata at runtime. `rulepack apply` also writes `rulepacks/{name}.install.toml` under the OxiRule directory with the selected profile, effective mode, source/provenance fields, bindings, values, local rule overrides, and local exceptions. The install lockfile is metadata only and is not loaded as an executable rulepack.
+Installed manifests contain concrete rendered rule content and do not require source `[[bindings]]` or `[[profiles]]` metadata at runtime. Direct runtime loading rejects source manifests that still declare unresolved required bindings; render or apply them with `--bind` first. `rulepack apply` also writes `rulepacks/{name}.install.toml` under the OxiRule directory with the selected profile, effective mode, source/provenance fields, bindings, values, local rule overrides, and local exceptions. The install lockfile is metadata only and is not loaded as an executable rulepack.
 
 ## Development Tools
 
