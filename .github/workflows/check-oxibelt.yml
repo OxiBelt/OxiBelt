@@ -2150,24 +2150,38 @@ jobs:
             failed=1
           fi
 
-          external_failure_count="$(jq -r '[.external_benchmarks[]? | (.fail_count // 0)] | add // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          external_diagnostic_count="$(jq -r '[.external_benchmarks[]? | select((.classification // "") == "benchmark_infrastructure_diagnostic") | {serving_type: (.serving_type // "unknown"), amd64_target_cpu: (.amd64_target_cpu // "unknown"), tool: (.tool // "unknown"), scenario: (.scenario // "unknown"), protocol: (.protocol // "unknown"), diagnostic_reason: (.diagnostic_reason // "benchmark infrastructure diagnostic")}] | unique | length' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          if (( external_diagnostic_count > 0 )); then
+            jq -r '[.external_benchmarks[]? | select((.classification // "") == "benchmark_infrastructure_diagnostic") | {serving_type: (.serving_type // "unknown"), amd64_target_cpu: (.amd64_target_cpu // "unknown"), tool: (.tool // "unknown"), scenario: (.scenario // "unknown"), protocol: (.protocol // "unknown"), diagnostic_reason: (.diagnostic_reason // "benchmark infrastructure diagnostic")}] | unique | .[] | "::warning title=External benchmark diagnostic::" + .tool + " " + .serving_type + " " + .scenario + "/" + .protocol + " on " + .amd64_target_cpu + ": " + .diagnostic_reason' \
+              "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
+            echo "Docker performance external benchmark validation reported ${external_diagnostic_count} infrastructure diagnostic group(s)" >&2
+          fi
+
+          external_failure_count="$(jq -r '[.external_benchmarks[]? | select((.classification // "") != "benchmark_infrastructure_diagnostic") | (.fail_count // 0)] | add // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if (( external_failure_count > 0 )); then
-            jq -r '.external_benchmarks[]? | select((.fail_count // 0) > 0) | "::warning title=External benchmark validation::" + .tool + " " + .comparator + " " + .scenario + "/" + .protocol + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
+            jq -r '.external_benchmarks[]? | select(((.classification // "") != "benchmark_infrastructure_diagnostic") and ((.fail_count // 0) > 0)) | "::warning title=External benchmark validation::" + .tool + " " + .comparator + " " + .scenario + "/" + .protocol + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
               "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
             echo "Docker performance external benchmark validation reported ${external_failure_count} failed sample(s)" >&2
             if [[ "${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}" == "fail" ]]; then
-              jq -r '.external_benchmarks[]? | select((.fail_count // 0) > 0) | "::error title=External benchmark validation gate::" + .tool + " " + .comparator + " " + .scenario + "/" + .protocol + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
+              jq -r '.external_benchmarks[]? | select(((.classification // "") != "benchmark_infrastructure_diagnostic") and ((.fail_count // 0) > 0)) | "::error title=External benchmark validation gate::" + .tool + " " + .comparator + " " + .scenario + "/" + .protocol + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
                 "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
               failed=1
             fi
           fi
 
-          profile_failure_count="$(jq -r '[.profiling[]? | (.fail_count // 0)] | add // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          profile_environment_count="$(jq -r '[.profiling[]? | select((.classification // "") == "profiling_environment_unavailable") | {serving_type: (.serving_type // "unknown"), amd64_target_cpu: (.amd64_target_cpu // "unknown"), diagnostic_group: (.diagnostic_group // .scenario // "unknown"), protocol: (.protocol // "unknown"), profile_mode: (.profile_mode // "unknown"), diagnostic_reason: (.diagnostic_reason // "profiling unavailable in this environment")}] | unique | length' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          if (( profile_environment_count > 0 )); then
+            echo "::warning title=Docker performance diagnostic profiling::profiling unavailable in the current environment for ${profile_environment_count} comparator group(s): perf record failed with status 255; see performance-comparison.md"
+            jq -r '[.profiling[]? | select((.classification // "") == "profiling_environment_unavailable") | {serving_type: (.serving_type // "unknown"), amd64_target_cpu: (.amd64_target_cpu // "unknown"), diagnostic_group: (.diagnostic_group // .scenario // "unknown"), protocol: (.protocol // "unknown"), profile_mode: (.profile_mode // "unknown"), diagnostic_reason: (.diagnostic_reason // "profiling unavailable in this environment")}] | unique | .[] | "Docker performance diagnostic profiling unavailable: " + .serving_type + " " + .diagnostic_group + "/" + .protocol + " " + .profile_mode + " on " + .amd64_target_cpu + ": " + .diagnostic_reason' \
+              "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json" >&2
+          fi
+
+          profile_failure_count="$(jq -r '[.profiling[]? | select((.classification // "") != "profiling_environment_unavailable") | (.fail_count // 0)] | add // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if (( profile_failure_count > 0 )); then
             echo "::warning title=Docker performance diagnostic profiling::Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md"
             echo "Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md" >&2
             if [[ "${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}" == "fail" ]]; then
-              jq -r '.profiling[]? | select((.fail_count // 0) > 0) | "::error title=Docker performance diagnostic profiling gate::" + .comparator + " " + .scenario + "/" + .protocol + " " + .profile_mode + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
+              jq -r '.profiling[]? | select(((.classification // "") != "profiling_environment_unavailable") and ((.fail_count // 0) > 0)) | "::error title=Docker performance diagnostic profiling gate::" + .comparator + " " + .scenario + "/" + .protocol + " " + .profile_mode + " failed " + ((.fail_count // 0) | tostring) + " sample(s)"' \
                 "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json"
               failed=1
             fi

@@ -159,6 +159,7 @@ active_remote_signer_container=""
 active_remote_signer_volume=""
 active_remote_signer_cert_volume=""
 external_summary_started=0
+external_h2load_h3_zero_deferred=0
 nginx_h3_supported=0
 
 case "${profile}" in
@@ -570,6 +571,36 @@ handle_external_benchmark_failure() {
   fi
 
   fail_with_diagnostics "${message}"
+}
+
+flush_external_h2load_h3_zero_failures() {
+  if [[ "${external_h2load_h3_zero_deferred}" != "1" || ! -s "${external_results_jsonl}" ]]; then
+    return
+  fi
+
+  local failures
+  failures="$(jq -s -r '
+    def zero:
+      .tool == "h2load"
+      and .protocol == "h3"
+      and .status == "fail"
+      and .reason == "h2load produced no completed requests"
+      and ((.requests // 0) == 0);
+    def key: [(.amd64_target_cpu // "unknown"), (.scenario // "unknown"), (.protocol // "unknown")];
+    [.[] | select(zero)] as $rows
+    | ($rows
+        | group_by(key)
+        | map(select((map(.comparator) | unique) as $comparators
+          | (($comparators | index("oxibelt")) and ($comparators | index("nginx")) and ($comparators | index("caddy")))))
+        | map(.[0] | key | @json)) as $diagnostic_keys
+    | $rows[]
+    | select((key | @json) as $row_key | ($diagnostic_keys | index($row_key) | not))
+    | "h2load h3 external benchmark failed for " + (.comparator // "unknown") + ": " + (.reason // "unknown failure")
+  ' "${external_results_jsonl}")"
+  while IFS= read -r failure; do
+    [[ -n "${failure}" ]] || continue
+    handle_external_benchmark_failure "${failure}"
+  done <<<"${failures}"
 }
 
 handle_diagnostic_profile_failure() {
@@ -1547,6 +1578,11 @@ run_external_h2load() {
   json="$(external_result_json "${label}" h2load "${comparator}" "${scenario}" "${protocol}" "${row_status}" "${output_file}" "${status}" "${reason}" "${rps}" "" "" "" "${requests}")"
   append_external_result "${json}"
   if [[ "${status}" != "0" ]]; then
+    # Aggregation classifies h2load H3 zero-completion rows after all comparators run.
+    if [[ "${protocol}" == "h3" && "${reason}" == "h2load produced no completed requests" ]]; then
+      external_h2load_h3_zero_deferred=1
+      return
+    fi
     handle_external_benchmark_failure "h2load ${protocol} external benchmark failed for ${comparator}: ${reason}"
   fi
 }
@@ -2855,6 +2891,7 @@ case "${serving_type}" in
     ;;
 esac
 
+flush_external_h2load_h3_zero_failures
 stop_active_proxy
 collect_logs
 finalize_results

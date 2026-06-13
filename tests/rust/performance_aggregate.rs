@@ -841,7 +841,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 13);
+    assert_eq!(report["schema_version"], 14);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1035,7 +1035,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
         ],
     );
 
-    assert_eq!(report["schema_version"], 13);
+    assert_eq!(report["schema_version"], 14);
     assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
     assert_eq!(report["sample_quality"]["ok_iterations"], 16);
     assert_eq!(report["sample_quality"]["failed_iterations"], 0);
@@ -1138,6 +1138,121 @@ fn external_benchmarks_are_reported_without_affecting_primary_gates() {
         .expect("markdown report should be readable");
     assert!(markdown.contains("## External benchmark validation"));
     assert!(markdown.contains("`external-oha/nginx-h2.json`"));
+}
+
+#[test]
+fn cross_comparator_h2load_h3_zero_requests_are_infrastructure_diagnostics() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 100.0, 4.0);
+    write_external_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![
+            json!({
+                "label": "oxibelt-external-h2load-h3",
+                "tool": "h2load",
+                "comparator": "oxibelt",
+                "scenario": "h3",
+                "protocol": "h3",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "requests": 0,
+                "reason": "h2load produced no completed requests",
+                "output_file": "external-h2load/oxibelt-h3.txt"
+            }),
+            json!({
+                "label": "nginx-external-h2load-h3",
+                "tool": "h2load",
+                "comparator": "nginx",
+                "scenario": "h3",
+                "protocol": "h3",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "requests": 0,
+                "reason": "h2load produced no completed requests",
+                "output_file": "external-h2load/nginx-h3.txt"
+            }),
+            json!({
+                "label": "caddy-external-h2load-h3",
+                "tool": "h2load",
+                "comparator": "caddy",
+                "scenario": "h3",
+                "protocol": "h3",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "requests": 0,
+                "reason": "h2load produced no completed requests",
+                "output_file": "external-h2load/caddy-h3.txt"
+            }),
+            json!({
+                "label": "oxibelt-external-h2load-h3-oxibelt-only",
+                "tool": "h2load",
+                "comparator": "oxibelt",
+                "scenario": "h3-oxibelt-only",
+                "protocol": "h3",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "requests": 0,
+                "reason": "h2load produced no completed requests",
+                "output_file": "external-h2load/oxibelt-only-h3.txt"
+            }),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--profile".to_owned(),
+            "smoke".to_owned(),
+            "--expected-runs".to_owned(),
+            "1".to_owned(),
+            "--expected-shards".to_owned(),
+            "20".to_owned(),
+        ],
+    );
+
+    let external_rows = report["external_benchmarks"]
+        .as_array()
+        .expect("external benchmark rows should be present");
+    assert_eq!(external_rows.len(), 4);
+
+    let diagnostic_rows = external_rows
+        .iter()
+        .filter(|row| row["scenario"] == "h3")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostic_rows.len(), 3);
+    for row in diagnostic_rows {
+        assert_eq!(row["classification"], "benchmark_infrastructure_diagnostic");
+        assert_eq!(row["serving_type"], "reverse-proxy");
+        assert_eq!(row["fail_count"], 1);
+        assert_eq!(row["total_requests"].as_f64(), Some(0.0));
+        assert!(
+            row["diagnostic_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("zero completed requests for oxibelt, nginx, and caddy"),
+            "cross-comparator zero-request rows should explain the infrastructure classification"
+        );
+    }
+
+    let oxibelt_specific = external_rows
+        .iter()
+        .find(|row| row["scenario"] == "h3-oxibelt-only")
+        .expect("single-comparator row should remain visible");
+    assert_eq!(
+        oxibelt_specific["classification"],
+        "external_benchmark_validation"
+    );
+    assert_eq!(oxibelt_specific["fail_count"], 1);
+    assert!(oxibelt_specific["diagnostic_reason"].is_null());
+
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains(
+        "`h2load h3 produced zero completed requests for oxibelt, nginx, and caddy; external benchmark comparator group is invalid in this environment`"
+    ));
 }
 
 #[test]
@@ -1286,6 +1401,124 @@ fn diagnostic_profiles_are_reported_without_affecting_primary_gates() {
         !markdown.contains("`failed`"),
         "diagnostic profiling Markdown should not surface generic failure reasons as-is"
     );
+}
+
+#[test]
+fn cross_comparator_perf_255_profiles_are_environment_diagnostics() {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 100.0, 4.0);
+    write_profile_results_array(
+        &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+        vec![
+            json!({
+                "schema_version": 1,
+                "label": "oxibelt-h2",
+                "comparator": "oxibelt",
+                "scenario": "oxibelt-h2",
+                "protocol": "h2",
+                "profile_mode": "cpu-memory",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "reason": "perf record failed with status 255",
+                "cpu": {"enabled": true, "artifacts": {"perf_stderr": "profiles/cpu/oxibelt-h2.perf.stderr.log"}},
+                "memory": {"enabled": true, "artifacts": {"resource": "profiles/memory/oxibelt-h2.resource.json"}}
+            }),
+            json!({
+                "schema_version": 1,
+                "label": "nginx-h2",
+                "comparator": "nginx",
+                "scenario": "nginx-h2",
+                "protocol": "h2",
+                "profile_mode": "cpu-memory",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "reason": "perf record failed with status 255",
+                "cpu": {"enabled": true, "artifacts": {"perf_stderr": "profiles/cpu/nginx-h2.perf.stderr.log"}},
+                "memory": {"enabled": true, "artifacts": {"resource": "profiles/memory/nginx-h2.resource.json"}}
+            }),
+            json!({
+                "schema_version": 1,
+                "label": "caddy-h2",
+                "comparator": "caddy",
+                "scenario": "caddy-h2",
+                "protocol": "h2",
+                "profile_mode": "cpu-memory",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "reason": "perf record failed with status 255",
+                "cpu": {"enabled": true, "artifacts": {"perf_stderr": "profiles/cpu/caddy-h2.perf.stderr.log"}},
+                "memory": {"enabled": true, "artifacts": {"resource": "profiles/memory/caddy-h2.resource.json"}}
+            }),
+            json!({
+                "schema_version": 1,
+                "label": "oxibelt-waf-monitor",
+                "comparator": "oxibelt",
+                "scenario": "oxibelt-waf-monitor",
+                "protocol": "h2",
+                "profile_mode": "cpu-memory",
+                "status": "fail",
+                "amd64_target_cpu": "x86-64-v3",
+                "reason": "perf record failed with status 255",
+                "cpu": {"enabled": true, "artifacts": {"perf_stderr": "profiles/cpu/oxibelt-waf.perf.stderr.log"}},
+                "memory": {"enabled": true, "artifacts": {"resource": "profiles/memory/oxibelt-waf.resource.json"}}
+            }),
+        ],
+    );
+
+    let report = run_aggregate_with_args(
+        &input_dir,
+        &output_dir,
+        &[
+            "--profile".to_owned(),
+            "smoke".to_owned(),
+            "--expected-runs".to_owned(),
+            "1".to_owned(),
+            "--expected-shards".to_owned(),
+            "20".to_owned(),
+        ],
+    );
+
+    let profile_rows = report["profiling"]
+        .as_array()
+        .expect("profile rows should be present");
+    assert_eq!(profile_rows.len(), 4);
+
+    let environment_rows = profile_rows
+        .iter()
+        .filter(|row| row["diagnostic_group"] == "h2")
+        .collect::<Vec<_>>();
+    assert_eq!(environment_rows.len(), 3);
+    for row in environment_rows {
+        assert_eq!(row["classification"], "profiling_environment_unavailable");
+        assert_eq!(row["serving_type"], "reverse-proxy");
+        assert_eq!(row["fail_count"], 1);
+        assert!(
+            row["diagnostic_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("perf record failed with status 255 for oxibelt, nginx, and caddy"),
+            "cross-comparator perf failures should explain the environment classification"
+        );
+    }
+
+    let oxibelt_specific = profile_rows
+        .iter()
+        .find(|row| row["diagnostic_group"] == "waf-monitor")
+        .expect("single-comparator profile row should remain visible");
+    assert_eq!(
+        oxibelt_specific["classification"],
+        "diagnostic_profile_validation"
+    );
+    assert_eq!(oxibelt_specific["fail_count"], 1);
+    assert!(oxibelt_specific["diagnostic_reason"].is_null());
+
+    let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+        .expect("markdown report should be readable");
+    assert!(markdown.contains(
+        "`perf record failed with status 255 for oxibelt, nginx, and caddy; diagnostic profiling is unavailable in this environment`"
+    ));
 }
 
 #[test]

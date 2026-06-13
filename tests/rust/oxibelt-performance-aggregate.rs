@@ -29,9 +29,16 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 13;
+const COMPARISON_SCHEMA_VERSION: u32 = 14;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
+const UNKNOWN_SERVING_TYPE: &str = "unknown";
+const H2LOAD_ZERO_COMPLETED_REQUESTS: &str = "h2load produced no completed requests";
+const PERF_RECORD_STATUS_255: &str = "perf record failed with status 255";
+const EXTERNAL_CLASSIFICATION_VALIDATION: &str = "external_benchmark_validation";
+const EXTERNAL_CLASSIFICATION_INFRA_DIAGNOSTIC: &str = "benchmark_infrastructure_diagnostic";
+const PROFILE_CLASSIFICATION_VALIDATION: &str = "diagnostic_profile_validation";
+const PROFILE_CLASSIFICATION_ENV_UNAVAILABLE: &str = "profiling_environment_unavailable";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
 const SERVING_TYPES: [&str; 6] = [
     "reverse-proxy",
@@ -197,6 +204,7 @@ struct BenchmarkRow {
 struct ExternalBenchmarkSample {
     source_file: String,
     amd64_target_cpu: String,
+    serving_type: String,
     label: String,
     tool: String,
     comparator: String,
@@ -216,6 +224,7 @@ struct ExternalBenchmarkSample {
 struct DiagnosticProfileSample {
     source_file: String,
     amd64_target_cpu: String,
+    serving_type: String,
     label: String,
     comparator: String,
     scenario: String,
@@ -260,6 +269,7 @@ struct AggregateBuilder {
 #[derive(Default)]
 struct ExternalBenchmarkBuilder {
     amd64_target_cpu: String,
+    serving_type: String,
     tool: String,
     comparator: String,
     scenario: String,
@@ -281,6 +291,7 @@ struct ExternalBenchmarkBuilder {
 #[derive(Default)]
 struct DiagnosticProfileBuilder {
     amd64_target_cpu: String,
+    serving_type: String,
     comparator: String,
     scenario: String,
     protocol: String,
@@ -335,6 +346,7 @@ struct AggregateStats {
 #[derive(Clone, Serialize)]
 struct ExternalBenchmarkStats {
     amd64_target_cpu: String,
+    serving_type: String,
     tool: String,
     comparator: String,
     scenario: String,
@@ -352,14 +364,18 @@ struct ExternalBenchmarkStats {
     reasons: Vec<String>,
     source_files: Vec<String>,
     output_files: Vec<String>,
+    classification: String,
+    diagnostic_reason: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 struct DiagnosticProfileStats {
     amd64_target_cpu: String,
+    serving_type: String,
     comparator: String,
     scenario: String,
     protocol: String,
+    diagnostic_group: String,
     profile_mode: String,
     sample_count: usize,
     pass_count: usize,
@@ -371,6 +387,8 @@ struct DiagnosticProfileStats {
     reasons: Vec<String>,
     source_files: Vec<String>,
     artifact_files: Vec<String>,
+    classification: String,
+    diagnostic_reason: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -979,6 +997,9 @@ impl ExternalBenchmarkBuilder {
         if self.amd64_target_cpu.is_empty() {
             self.amd64_target_cpu = sample.amd64_target_cpu;
         }
+        if self.serving_type.is_empty() {
+            self.serving_type = sample.serving_type;
+        }
         if self.tool.is_empty() {
             self.tool = sample.tool;
         }
@@ -1035,6 +1056,7 @@ impl ExternalBenchmarkBuilder {
 
         ExternalBenchmarkStats {
             amd64_target_cpu: self.amd64_target_cpu,
+            serving_type: self.serving_type,
             tool: self.tool,
             comparator: self.comparator,
             scenario: self.scenario,
@@ -1052,6 +1074,8 @@ impl ExternalBenchmarkBuilder {
             reasons: self.reasons.into_iter().collect(),
             source_files: self.source_files.into_iter().collect(),
             output_files: self.output_files.into_iter().collect(),
+            classification: EXTERNAL_CLASSIFICATION_VALIDATION.to_owned(),
+            diagnostic_reason: None,
         }
     }
 }
@@ -1060,6 +1084,9 @@ impl DiagnosticProfileBuilder {
     fn push(&mut self, sample: DiagnosticProfileSample) {
         if self.amd64_target_cpu.is_empty() {
             self.amd64_target_cpu = sample.amd64_target_cpu;
+        }
+        if self.serving_type.is_empty() {
+            self.serving_type = sample.serving_type;
         }
         if self.comparator.is_empty() {
             self.comparator = sample.comparator;
@@ -1110,6 +1137,8 @@ impl DiagnosticProfileBuilder {
     fn finish(self) -> DiagnosticProfileStats {
         DiagnosticProfileStats {
             amd64_target_cpu: self.amd64_target_cpu,
+            serving_type: self.serving_type,
+            diagnostic_group: comparator_neutral_scenario(&self.comparator, &self.scenario),
             comparator: self.comparator,
             scenario: self.scenario,
             protocol: self.protocol,
@@ -1124,8 +1153,136 @@ impl DiagnosticProfileBuilder {
             reasons: self.reasons.into_iter().collect(),
             source_files: self.source_files.into_iter().collect(),
             artifact_files: self.artifact_files.into_iter().collect(),
+            classification: PROFILE_CLASSIFICATION_VALIDATION.to_owned(),
+            diagnostic_reason: None,
         }
     }
+}
+
+fn classify_external_benchmark_diagnostics(rows: &mut [ExternalBenchmarkStats]) {
+    let mut groups: BTreeMap<(String, String, String, String, String), BTreeSet<String>> =
+        BTreeMap::new();
+    for row in rows
+        .iter()
+        .filter(|row| external_h2load_h3_zero_request(row))
+    {
+        groups
+            .entry((
+                row.amd64_target_cpu.clone(),
+                row.serving_type.clone(),
+                row.tool.clone(),
+                row.scenario.clone(),
+                row.protocol.clone(),
+            ))
+            .or_default()
+            .insert(row.comparator.clone());
+    }
+
+    let diagnostic_groups = groups
+        .into_iter()
+        .filter_map(|(group, comparators)| {
+            if has_all_cross_comparators(&comparators) {
+                Some(group)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+
+    for row in rows
+        .iter_mut()
+        .filter(|row| external_h2load_h3_zero_request(row))
+    {
+        let group = (
+            row.amd64_target_cpu.clone(),
+            row.serving_type.clone(),
+            row.tool.clone(),
+            row.scenario.clone(),
+            row.protocol.clone(),
+        );
+        if diagnostic_groups.contains(&group) {
+            row.classification = EXTERNAL_CLASSIFICATION_INFRA_DIAGNOSTIC.to_owned();
+            row.diagnostic_reason = Some(
+                "h2load h3 produced zero completed requests for oxibelt, nginx, and caddy; external benchmark comparator group is invalid in this environment"
+                    .to_owned(),
+            );
+        }
+    }
+}
+
+fn external_h2load_h3_zero_request(row: &ExternalBenchmarkStats) -> bool {
+    row.tool == "h2load"
+        && row.protocol == "h3"
+        && row.fail_count > 0
+        && row.sample_count == row.fail_count
+        && row
+            .reasons
+            .iter()
+            .any(|reason| reason == H2LOAD_ZERO_COMPLETED_REQUESTS)
+        && row.total_requests.unwrap_or(0.0) == 0.0
+}
+
+fn classify_diagnostic_profile_environment_failures(rows: &mut [DiagnosticProfileStats]) {
+    let mut groups: BTreeMap<(String, String, String, String, String), BTreeSet<String>> =
+        BTreeMap::new();
+    for row in rows.iter().filter(|row| diagnostic_profile_perf_255(row)) {
+        groups
+            .entry((
+                row.amd64_target_cpu.clone(),
+                row.serving_type.clone(),
+                row.diagnostic_group.clone(),
+                row.protocol.clone(),
+                row.profile_mode.clone(),
+            ))
+            .or_default()
+            .insert(row.comparator.clone());
+    }
+
+    let diagnostic_groups = groups
+        .into_iter()
+        .filter_map(|(group, comparators)| {
+            if has_all_cross_comparators(&comparators) {
+                Some(group)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+
+    for row in rows
+        .iter_mut()
+        .filter(|row| diagnostic_profile_perf_255(row))
+    {
+        let group = (
+            row.amd64_target_cpu.clone(),
+            row.serving_type.clone(),
+            row.diagnostic_group.clone(),
+            row.protocol.clone(),
+            row.profile_mode.clone(),
+        );
+        if diagnostic_groups.contains(&group) {
+            row.classification = PROFILE_CLASSIFICATION_ENV_UNAVAILABLE.to_owned();
+            row.diagnostic_reason = Some(
+                "perf record failed with status 255 for oxibelt, nginx, and caddy; diagnostic profiling is unavailable in this environment"
+                    .to_owned(),
+            );
+        }
+    }
+}
+
+fn diagnostic_profile_perf_255(row: &DiagnosticProfileStats) -> bool {
+    row.fail_count > 0
+        && row.sample_count == row.fail_count
+        && row
+            .reasons
+            .iter()
+            .any(|reason| reason == PERF_RECORD_STATUS_255)
+}
+
+fn has_all_cross_comparators(comparators: &BTreeSet<String>) -> bool {
+    ["oxibelt", "nginx", "caddy"]
+        .iter()
+        .all(|comparator| comparators.contains(*comparator))
 }
 
 fn main() -> Result<()> {
@@ -1275,7 +1432,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     }
 
     let mut external_builders: BTreeMap<
-        (String, String, String, String, String),
+        (String, String, String, String, String, String),
         ExternalBenchmarkBuilder,
     > = BTreeMap::new();
     for external_results_path in external_results {
@@ -1283,6 +1440,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
             external_builders
                 .entry((
                     sample.amd64_target_cpu.clone(),
+                    sample.serving_type.clone(),
                     sample.tool.clone(),
                     sample.comparator.clone(),
                     sample.scenario.clone(),
@@ -1292,13 +1450,14 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
                 .push(sample);
         }
     }
-    let external_benchmarks = external_builders
+    let mut external_benchmarks = external_builders
         .into_values()
         .map(ExternalBenchmarkBuilder::finish)
         .collect::<Vec<_>>();
+    classify_external_benchmark_diagnostics(&mut external_benchmarks);
 
     let mut profile_builders: BTreeMap<
-        (String, String, String, String, String),
+        (String, String, String, String, String, String),
         DiagnosticProfileBuilder,
     > = BTreeMap::new();
     for profile_results_path in profile_results {
@@ -1306,6 +1465,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
             profile_builders
                 .entry((
                     sample.amd64_target_cpu.clone(),
+                    sample.serving_type.clone(),
                     sample.comparator.clone(),
                     sample.scenario.clone(),
                     sample.protocol.clone(),
@@ -1315,10 +1475,11 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
                 .push(sample);
         }
     }
-    let profiling = profile_builders
+    let mut profiling = profile_builders
         .into_values()
         .map(DiagnosticProfileBuilder::finish)
         .collect::<Vec<_>>();
+    classify_diagnostic_profile_environment_failures(&mut profiling);
 
     let reverse_proxy = build_group_comparisons(ScenarioGroup::ReverseProxy, &aggregate_map);
     let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
@@ -2271,6 +2432,10 @@ fn parse_external_result_value(
             .map(str::to_owned)
             .or_else(|| infer_amd64_target_cpu_from_path(source_file))
             .unwrap_or_else(default_amd64_target_cpu),
+        serving_type: string_field(object.get("serving_type"))
+            .map(str::to_owned)
+            .or_else(|| infer_serving_type_from_path(source_file))
+            .unwrap_or_else(default_serving_type),
         label: label.to_owned(),
         tool: tool.to_owned(),
         comparator: comparator.to_owned(),
@@ -2435,6 +2600,10 @@ fn parse_profile_result_value(
             .map(str::to_owned)
             .or_else(|| infer_amd64_target_cpu_from_path(source_file))
             .unwrap_or_else(default_amd64_target_cpu),
+        serving_type: string_field(object.get("serving_type"))
+            .map(str::to_owned)
+            .or_else(|| infer_serving_type_from_path(source_file))
+            .unwrap_or_else(default_serving_type),
         label: label.to_owned(),
         comparator: comparator.to_owned(),
         scenario: scenario.to_owned(),
@@ -2612,6 +2781,38 @@ fn infer_amd64_target_cpu_from_path(path: &str) -> Option<String> {
     path.split(['/', '\\'])
         .find(|component| is_known_amd64_target_cpu(component))
         .map(str::to_owned)
+}
+
+fn default_serving_type() -> String {
+    UNKNOWN_SERVING_TYPE.to_owned()
+}
+
+fn infer_serving_type_from_path(path: &str) -> Option<String> {
+    for component in path.split(['/', '\\']) {
+        let Some(rest) = component.strip_prefix("oxibelt-docker-performance-") else {
+            continue;
+        };
+        for profile in ["smoke", "benchmark", "soak"] {
+            let Some(remainder) = rest.strip_prefix(&format!("{profile}-")) else {
+                continue;
+            };
+            let Some((serving_type, _shard)) = remainder.rsplit_once("-shard-") else {
+                continue;
+            };
+            if SERVING_TYPES.contains(&serving_type) {
+                return Some(serving_type.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn comparator_neutral_scenario(comparator: &str, scenario: &str) -> String {
+    let prefix = format!("{comparator}-");
+    scenario
+        .strip_prefix(&prefix)
+        .unwrap_or(scenario)
+        .to_owned()
 }
 
 fn normalize_label(label: &str) -> Option<(Comparator, &str)> {
@@ -5735,6 +5936,7 @@ fn write_external_benchmark_table(markdown: &mut String, rows: &[ExternalBenchma
     )
     .unwrap();
     for row in rows {
+        let notes = external_benchmark_notes(row);
         writeln!(
             markdown,
             "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
@@ -5751,11 +5953,19 @@ fn write_external_benchmark_table(markdown: &mut String, rows: &[ExternalBenchma
             format_number(row.median_p99_ms),
             format_number(row.median_error_rate),
             format_list_cell(&row.output_files),
-            format_list_cell(&row.reasons),
+            format_list_cell(&notes),
         )
         .unwrap();
     }
     writeln!(markdown).unwrap();
+}
+
+fn external_benchmark_notes(row: &ExternalBenchmarkStats) -> Vec<String> {
+    let mut notes = row.reasons.iter().cloned().collect::<BTreeSet<_>>();
+    if let Some(reason) = &row.diagnostic_reason {
+        notes.insert(reason.clone());
+    }
+    notes.into_iter().collect()
 }
 
 fn write_diagnostic_profile_table(markdown: &mut String, rows: &[DiagnosticProfileStats]) {
@@ -5800,11 +6010,22 @@ fn write_diagnostic_profile_table(markdown: &mut String, rows: &[DiagnosticProfi
 }
 
 fn diagnostic_profile_notes(row: &DiagnosticProfileStats) -> Vec<String> {
+    if row.classification == PROFILE_CLASSIFICATION_ENV_UNAVAILABLE {
+        return row
+            .diagnostic_reason
+            .clone()
+            .into_iter()
+            .collect::<Vec<_>>();
+    }
+
     let mut notes = row
         .reasons
         .iter()
         .map(|reason| normalize_diagnostic_profile_reason(reason))
         .collect::<BTreeSet<_>>();
+    if let Some(reason) = &row.diagnostic_reason {
+        notes.insert(reason.clone());
+    }
     if notes.is_empty() && row.fail_count > 0 {
         notes.insert("profiling evidence unavailable; see artifacts".to_owned());
     }

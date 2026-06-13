@@ -363,6 +363,34 @@ fn external_benchmark_failure_harness(gate_mode: &str) -> HarnessRun {
     HarnessRun { output, events }
 }
 
+fn external_h2load_h3_zero_flush_harness(gate_mode: &str, rows: &[&str]) -> HarnessRun {
+    let script = performance_script_text();
+    let functions = format!(
+        "{}\n\n{}",
+        extract_bash_function(&script, "handle_external_benchmark_failure"),
+        extract_bash_function(&script, "flush_external_h2load_h3_zero_failures")
+    );
+    let temp_dir = HarnessTempDir::new("oxibelt-performance-external-h2load-h3-zero-");
+    let harness_path = temp_dir.join("harness.sh");
+    let events_path = temp_dir.join("events.log");
+    let results_path = temp_dir.join("external-results.jsonl");
+    fs::write(&results_path, format!("{}\n", rows.join("\n")))
+        .expect("external results fixture should be writable");
+    write_external_h2load_h3_zero_flush_harness(&harness_path, &functions);
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .env("EVENTS_FILE", &events_path)
+        .env("RESULTS_JSONL", &results_path)
+        .env("GATE_MODE", gate_mode)
+        .env_remove("GITHUB_ACTIONS")
+        .output()
+        .expect("Bash harness should execute");
+    let events = fs::read_to_string(&events_path).unwrap_or_default();
+
+    HarnessRun { output, events }
+}
+
 fn diagnostic_profile_failure_harness(gate_mode: &str) -> HarnessRun {
     let script = performance_script_text();
     let functions = format!(
@@ -672,6 +700,31 @@ fail_with_diagnostics() {{
 {function}
 
 handle_external_benchmark_failure "synthetic external benchmark failure"
+printf 'CONTINUE\n' >>"${{events}}"
+"#
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_external_h2load_h3_zero_flush_harness(path: &Path, functions: &str) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+external_results_jsonl="${{RESULTS_JSONL:?}}"
+external_benchmark_gate_mode="${{GATE_MODE:?}}"
+external_h2load_h3_zero_deferred=1
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{functions}
+
+flush_external_h2load_h3_zero_failures
 printf 'CONTINUE\n' >>"${{events}}"
 "#
     );
@@ -1812,6 +1865,60 @@ fn external_benchmark_failures_warn_by_default_and_can_fail_closed() {
     assert!(
         !fail.events.contains("CONTINUE"),
         "fail mode should not continue the harness"
+    );
+}
+
+#[test]
+fn external_h2load_h3_zero_flush_suppresses_cross_comparator_diagnostics() {
+    let run = external_h2load_h3_zero_flush_harness(
+        "warn",
+        &[
+            r#"{"tool":"h2load","protocol":"h3","status":"fail","reason":"h2load produced no completed requests","requests":0,"comparator":"oxibelt","scenario":"h3","amd64_target_cpu":"x86-64-v3"}"#,
+            r#"{"tool":"h2load","protocol":"h3","status":"fail","reason":"h2load produced no completed requests","requests":0,"comparator":"nginx","scenario":"h3","amd64_target_cpu":"x86-64-v3"}"#,
+            r#"{"tool":"h2load","protocol":"h3","status":"fail","reason":"h2load produced no completed requests","requests":0,"comparator":"caddy","scenario":"h3","amd64_target_cpu":"x86-64-v3"}"#,
+        ],
+    );
+
+    assert!(
+        run.output.status.success(),
+        "cross-comparator h2load h3 zero-request diagnostics should not fail the shard harness"
+    );
+    assert!(
+        run.events.contains("CONTINUE"),
+        "cross-comparator diagnostics should let the harness continue"
+    );
+    assert!(
+        !String::from_utf8_lossy(&run.output.stderr)
+            .contains("External benchmark validation warning"),
+        "cross-comparator zero-request diagnostics should be annotated by aggregation, not per shard"
+    );
+}
+
+#[test]
+fn external_h2load_h3_zero_flush_keeps_single_comparator_failures_visible() {
+    let row = r#"{"tool":"h2load","protocol":"h3","status":"fail","reason":"h2load produced no completed requests","requests":0,"comparator":"oxibelt","scenario":"h3","amd64_target_cpu":"x86-64-v3"}"#;
+    let warn = external_h2load_h3_zero_flush_harness("warn", &[row]);
+    assert!(
+        warn.output.status.success(),
+        "warn mode should continue after an OxiBelt-specific h2load h3 failure"
+    );
+    assert!(
+        String::from_utf8_lossy(&warn.output.stderr).contains(
+            "External benchmark validation warning: h2load h3 external benchmark failed for oxibelt: h2load produced no completed requests"
+        ),
+        "warn mode should keep the single-comparator failure visible"
+    );
+
+    let fail = external_h2load_h3_zero_flush_harness("fail", &[row]);
+    assert!(
+        !fail.output.status.success(),
+        "fail mode should stop on an OxiBelt-specific h2load h3 failure"
+    );
+    assert!(
+        fail.events.contains(
+            "FAIL h2load h3 external benchmark failed for oxibelt: h2load produced no completed requests"
+        ),
+        "fail mode should route the single-comparator failure through normal diagnostics"
     );
 }
 

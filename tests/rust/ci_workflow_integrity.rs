@@ -1768,23 +1768,25 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         workflow.contains(
             "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE'] || 'warn' }}"
-        ) && workflow.contains(
-            "external_failure_count=\"$(jq -r '[.external_benchmarks[]? | (.fail_count // 0)] | add // 0'"
-        ) && workflow.contains("::warning title=External benchmark validation::")
+        ) && workflow.contains("external_diagnostic_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") == \"benchmark_infrastructure_diagnostic\")")
+            && workflow.contains("::warning title=External benchmark diagnostic::")
+            && workflow.contains("external_failure_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") != \"benchmark_infrastructure_diagnostic\") | (.fail_count // 0)] | add // 0'")
+            && workflow.contains("::warning title=External benchmark validation::")
             && workflow.contains("::error title=External benchmark validation gate::")
             && workflow.contains("if [[ \"${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}\" == \"fail\" ]]; then"),
-        "summary job should warn on external benchmark failures by default and fail only in fail mode"
+        "summary job should split cross-comparator external diagnostics from real external benchmark failures"
     );
     assert!(
         workflow.contains(
             "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE'] || 'warn' }}"
-        ) && workflow.contains(
-            "profile_failure_count=\"$(jq -r '[.profiling[]? | (.fail_count // 0)] | add // 0'"
-        ) && workflow.contains("::warning title=Docker performance diagnostic profiling::Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md")
+        ) && workflow.contains("profile_environment_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") == \"profiling_environment_unavailable\")")
+            && workflow.contains("profiling unavailable in the current environment for ${profile_environment_count} comparator group(s): perf record failed with status 255")
+            && workflow.contains("profile_failure_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") != \"profiling_environment_unavailable\") | (.fail_count // 0)] | add // 0'")
+            && workflow.contains("::warning title=Docker performance diagnostic profiling::Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md")
             && workflow.contains("::error title=Docker performance diagnostic profiling gate::")
             && workflow.contains("if [[ \"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\" == \"fail\" ]]; then")
             && !workflow.contains(".profiling[]? | select((.fail_count // 0) > 0) | \"::warning title=Docker performance diagnostic profiling::\" + .comparator"),
-        "summary job should emit one diagnostic profiling warning by default and fail only in fail mode"
+        "summary job should split profiling environment diagnostics from real diagnostic profiling failures"
     );
     assert!(
         workflow.contains("missing_expected_count=\"$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length'")
