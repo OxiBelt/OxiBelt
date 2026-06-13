@@ -123,7 +123,7 @@ impl<'a> ActiveRulepackExceptions<'a> {
         );
       }
       self.matches[index] += 1;
-      predicates.push(exception_traffic_predicate(exception));
+      predicates.push(exception_traffic_predicate(exception)?);
     }
     if predicates.is_empty() {
       return Ok(content.to_string());
@@ -300,7 +300,7 @@ fn exception_matches_rule(exception: &RulepackException, rule: &RulepackRule) ->
       .any(|wanted| rule.tags.iter().any(|tag| tag == wanted))
 }
 
-fn exception_traffic_predicate(exception: &RulepackException) -> String {
+fn exception_traffic_predicate(exception: &RulepackException) -> anyhow::Result<String> {
   let mut categories = Vec::new();
   if !exception.methods.is_empty() {
     categories.push(any_equals("Request.Http.Method", &exception.methods));
@@ -320,7 +320,13 @@ fn exception_traffic_predicate(exception: &RulepackException) -> String {
       &exception.source_cidrs,
     ));
   }
-  categories.join(" && ")
+  if let Some(expires_at) = &exception.expires_at {
+    let expires_at_unix_ms = parse_strict_utc_rfc3339(expires_at)
+      .with_context(|| format!("exception {} expires_at is invalid", exception.name))?
+      * 1_000;
+    categories.push(format!("(Request.ReceivedAtUnixMs < {expires_at_unix_ms})"));
+  }
+  Ok(categories.join(" && "))
 }
 
 fn any_equals(field: &str, values: &[String]) -> String {

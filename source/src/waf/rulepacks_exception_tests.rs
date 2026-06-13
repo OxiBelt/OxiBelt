@@ -115,6 +115,7 @@ status = 403
   assert!(when.contains("Context.RouteName == 'app-root'"));
   assert!(when.contains("Request.Http.Method == 'GET'"));
   assert!(when.contains("Request.Client.Ip.inCidr('10.20.0.0/16')"));
+  assert!(when.contains("Request.ReceivedAtUnixMs < 32487782400000"));
   assert!(when.contains("!"));
 }
 

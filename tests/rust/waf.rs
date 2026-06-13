@@ -9984,20 +9984,19 @@ rulepack_files = ["rulepacks/missing-required-binding.oxirule-rulepack.toml"]
     assert!(message.contains("missing-required-binding.oxirule-rulepack.toml"));
 }
 
-#[test]
-fn oxirule_rulepack_exceptions_scope_false_positive_traffic() {
-    let temp_dir = common::TempDir::new("waf-rulepack-exceptions");
+fn compile_login_rulepack_exception_engine(test_name: &str, expires_at: &str) -> WafEngine {
+    let temp_dir = common::TempDir::new(test_name);
     let config_dir = temp_dir.path().join("config");
     let cert_dir = temp_dir.path().join("cert");
     let rulepack_dir = temp_dir.path().join("oxirule").join("rulepacks");
     std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
     std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
     std::fs::create_dir_all(&rulepack_dir).expect("failed to create rulepack directory");
-    let (cert_path, key_path) =
-        common::create_self_signed_cert(&cert_dir, "waf-rulepack-exceptions");
+    let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, test_name);
     std::fs::write(
         rulepack_dir.join("login.oxirule-rulepack.toml"),
-        r#"
+        format!(
+            r#"
 [rulepack]
 schema_version = 2
 name = "login-pack"
@@ -10012,7 +10011,7 @@ methods = ["GET"]
 path_prefixes = ["/identity/accounts/prelogin"]
 source_cidrs = ["203.0.113.0/24"]
 reason = "internal synthetic healthcheck"
-expires_at = "2999-07-01T00:00:00Z"
+expires_at = "{expires_at}"
 
 [[rules]]
 name = "login-preflight"
@@ -10026,7 +10025,8 @@ when = "Request.Http.Path.startsWith('/identity/accounts/prelogin')"
 type = "reject"
 status = 403
 '''
-"#,
+"#
+        ),
     )
     .expect("failed to write rulepack");
 
@@ -10051,7 +10051,13 @@ rulepack_files = ["rulepacks/login.oxirule-rulepack.toml"]
     let config = Config::load(&config_path).expect("config should load rulepack exceptions");
     config.validate().expect("config should validate");
     assert_eq!(config.waf.rulepack_summaries()[0].exceptions, 1);
-    let engine = WafEngine::new(&config).expect("WAF should compile");
+    WafEngine::new(&config).expect("WAF should compile")
+}
+
+#[test]
+fn oxirule_rulepack_exceptions_scope_false_positive_traffic() {
+    let engine =
+        compile_login_rulepack_exception_engine("waf-rulepack-exceptions", "2999-07-01T00:00:00Z");
     let headers = HeaderMap::new();
     let tags = HashMap::new();
     let get = Method::GET;
@@ -10093,6 +10099,64 @@ rulepack_files = ["rulepacks/login.oxirule-rulepack.toml"]
     ));
     assert_eq!(
         wrong_source
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn oxirule_rulepack_exceptions_expire_at_runtime() {
+    const EXPIRES_AT_UNIX_MS: u64 = 32_487_782_400_000;
+
+    let engine = compile_login_rulepack_exception_engine(
+        "waf-rulepack-exceptions-expire-runtime",
+        "2999-07-01T00:00:00Z",
+    );
+    let headers = HeaderMap::new();
+    let tags = HashMap::new();
+    let get = Method::GET;
+    let uri: Uri = "/identity/accounts/prelogin"
+        .parse()
+        .expect("URI should parse");
+
+    let mut before_expiry = request_input(
+        &get,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    );
+    before_expiry.received_at_unix_ms = EXPIRES_AT_UNIX_MS - 1;
+    let allowed = engine.evaluate_request(before_expiry);
+    assert!(allowed.terminal.is_none());
+
+    let mut at_expiry = request_input(
+        &get,
+        &uri,
+        &headers,
+        &tags,
+        "203.0.113.10:49152".parse().unwrap(),
+    );
+    at_expiry.received_at_unix_ms = EXPIRES_AT_UNIX_MS;
+    let expired = engine.evaluate_request(at_expiry);
+    assert_eq!(
+        expired.terminal.as_ref().map(|terminal| terminal.status),
+        Some(StatusCode::FORBIDDEN)
+    );
+
+    let mut wrong_source = request_input(
+        &get,
+        &uri,
+        &headers,
+        &tags,
+        "198.51.100.10:49152".parse().unwrap(),
+    );
+    wrong_source.received_at_unix_ms = EXPIRES_AT_UNIX_MS - 1;
+    let blocked_control = engine.evaluate_request(wrong_source);
+    assert_eq!(
+        blocked_control
             .terminal
             .as_ref()
             .map(|terminal| terminal.status),
