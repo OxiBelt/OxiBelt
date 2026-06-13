@@ -255,7 +255,6 @@ impl ParsedRulepack {
       source,
     )?;
     render_toml_strings(&mut value, &variables);
-    apply_mode_override(&mut value, options.mode_override)?;
     overrides::apply_overrides(
       &mut value,
       source,
@@ -263,6 +262,7 @@ impl ParsedRulepack {
       &initial.overrides,
       &options.local_overrides,
     )?;
+    apply_mode_override(&mut value, options.mode_override)?;
     exceptions::append_local_exceptions(&mut value, source, &options.local_exceptions)?;
     if options.pin_variables {
       pin_variable_defaults(&mut value, &variables)?;
