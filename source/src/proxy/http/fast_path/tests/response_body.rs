@@ -1,12 +1,14 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::HeaderMap;
 use http::header::CONTENT_LENGTH;
+use http::{HeaderMap, Response};
 use http_body_util::{BodyExt, Full};
 
 use super::super::{body, fast_path_response_body};
 use crate::config::TrailerMode;
+use crate::proxy::http::{downstream_response_send_timeout, with_downstream_response_timeout};
+use crate::waf::WafTransportNetwork;
 
 fn response_headers_with_content_length(length: &str) -> HeaderMap {
   let mut headers = HeaderMap::new();
@@ -37,9 +39,27 @@ async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materializ
     };
 
     assert!(prepared.inlined_known_small_body.is_none());
+    assert!(prepared.known_small_body);
     assert!(prepared.trailers_handled);
-    let bytes = prepared
-      .body
+
+    let mut response = Response::new(prepared.body);
+    if prepared.known_small_body && version != http::Version::HTTP_3 {
+      response
+        .extensions_mut()
+        .insert(body::KnownSmallResponseBody);
+    }
+    let response =
+      with_downstream_response_timeout(response, Duration::from_secs(1), WafTransportNetwork::Tcp);
+
+    assert!(downstream_response_send_timeout(&response).is_none());
+    assert!(
+      response
+        .extensions()
+        .get::<body::KnownSmallResponseBody>()
+        .is_some()
+    );
+    let bytes = response
+      .into_body()
       .collect()
       .await
       .expect("materialized body should collect")
@@ -68,11 +88,35 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
 
   let inlined = prepared
     .inlined_known_small_body
+    .clone()
     .expect("H3 response should keep inlined small body metadata");
   assert_eq!(inlined.data.as_ref(), b"ok");
+  assert!(prepared.known_small_body);
   assert!(prepared.trailers_handled);
-  let bytes = prepared
-    .body
+
+  let mut response = Response::new(prepared.body);
+  response.extensions_mut().insert(inlined);
+  let response =
+    with_downstream_response_timeout(response, Duration::from_secs(1), WafTransportNetwork::Udp);
+
+  assert_eq!(
+    downstream_response_send_timeout(&response),
+    Some(Duration::from_secs(1))
+  );
+  assert!(
+    response
+      .extensions()
+      .get::<body::KnownSmallResponseBody>()
+      .is_none()
+  );
+  assert!(
+    response
+      .extensions()
+      .get::<body::InlinedKnownSmallResponseBody>()
+      .is_some()
+  );
+  let bytes = response
+    .into_body()
     .collect()
     .await
     .expect("placeholder body should collect")
