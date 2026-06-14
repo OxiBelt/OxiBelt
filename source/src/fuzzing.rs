@@ -72,6 +72,7 @@ pub fn exercise_http_semantics(data: &[u8]) {
     } else {
       ForwardedHeaderMode::Overwrite
     },
+    None,
   );
 
   let _ = select_upstream_http_version(input.bool(), input.http_version(), input.http_version());

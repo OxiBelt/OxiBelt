@@ -11,7 +11,9 @@ use http::header::{
 };
 use http::uri::Authority;
 
-use crate::config::ForwardedHeaderMode;
+use crate::config::{
+  ForwardedClientIpSource, ForwardedHeaderMode, ForwardedHeadersConfig, RealIpConfig,
+};
 use crate::routes::normalize_host;
 
 mod host;
@@ -23,6 +25,30 @@ const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
 const X_FORWARDED_PORT: HeaderName = HeaderName::from_static("x-forwarded-port");
 const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+
+#[derive(Clone, Debug)]
+pub(crate) struct ForwardedHeaderCache {
+  x_forwarded_for: HeaderValue,
+  x_forwarded_proto: HeaderValue,
+}
+
+pub(crate) fn build_forwarded_header_cache(
+  peer_addr: std::net::SocketAddr,
+  scheme: &str,
+  forwarded_headers: &ForwardedHeadersConfig,
+  real_ip: &RealIpConfig,
+) -> Option<ForwardedHeaderCache> {
+  if forwarded_headers.mode != ForwardedHeaderMode::Overwrite {
+    return None;
+  }
+  if real_ip.enabled && forwarded_headers.client_ip_source != ForwardedClientIpSource::DirectPeer {
+    return None;
+  }
+  Some(ForwardedHeaderCache {
+    x_forwarded_for: ip_header_value(peer_addr.ip()),
+    x_forwarded_proto: forwarded_proto_header_value(scheme),
+  })
+}
 
 pub(crate) fn validate_authority_host_consistency<B>(
   request: &Request<B>,
@@ -67,12 +93,16 @@ pub(crate) fn add_forwarded_headers(
   scheme: &str,
   port: u16,
   mode: ForwardedHeaderMode,
+  cache: Option<&ForwardedHeaderCache>,
 ) {
   remove_inbound_forwarded_headers(headers);
   let forwarded_ip = forwarded_client_addr.ip();
   match mode {
     ForwardedHeaderMode::Overwrite => {
-      headers.insert(X_FORWARDED_FOR, ip_header_value(forwarded_ip));
+      let value = cache
+        .map(|cache| cache.x_forwarded_for.clone())
+        .unwrap_or_else(|| ip_header_value(forwarded_ip));
+      headers.insert(X_FORWARDED_FOR, value);
     }
     ForwardedHeaderMode::Append => {
       let forwarded_for = forwarded_ip.to_string();
@@ -80,7 +110,10 @@ pub(crate) fn add_forwarded_headers(
     }
   }
 
-  headers.insert(X_FORWARDED_PROTO, forwarded_proto_header_value(scheme));
+  let proto = cache
+    .map(|cache| cache.x_forwarded_proto.clone())
+    .unwrap_or_else(|| forwarded_proto_header_value(scheme));
+  headers.insert(X_FORWARDED_PROTO, proto);
 
   match HeaderValue::from_str(host) {
     Ok(value) => {
@@ -283,14 +316,18 @@ pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
 }
 
 fn has_hop_by_hop_headers(headers: &HeaderMap) -> bool {
-  headers.contains_key(CONNECTION)
-    || headers.contains_key(KEEP_ALIVE_HEADER)
-    || headers.contains_key(PROXY_AUTHENTICATE)
-    || headers.contains_key(PROXY_AUTHORIZATION)
-    || headers.contains_key(TRAILER)
-    || headers.contains_key(TRANSFER_ENCODING)
-    || headers.contains_key(UPGRADE)
-    || headers.contains_key(TE)
+  headers.keys().any(is_hop_by_hop_header_name)
+}
+
+fn is_hop_by_hop_header_name(name: &HeaderName) -> bool {
+  name == CONNECTION
+    || name == KEEP_ALIVE_HEADER
+    || name == PROXY_AUTHENTICATE
+    || name == PROXY_AUTHORIZATION
+    || name == TRAILER
+    || name == TRANSFER_ENCODING
+    || name == UPGRADE
+    || name == TE
 }
 
 fn fixed_connection_token(
@@ -408,6 +445,7 @@ mod tests {
       "https",
       443,
       ForwardedHeaderMode::Overwrite,
+      None,
     );
 
     assert!(!headers.contains_key(FORWARDED));
@@ -415,6 +453,79 @@ mod tests {
     assert_eq!(headers["x-forwarded-host"], "example.test");
     assert_eq!(headers["x-forwarded-proto"], "https");
     assert_eq!(headers["x-forwarded-port"], "443");
+  }
+
+  #[test]
+  fn forwarded_header_cache_reuses_xff_and_proto_only() {
+    let peer_addr = "203.0.113.10:5443".parse().unwrap();
+    let cache = build_forwarded_header_cache(
+      peer_addr,
+      "https",
+      &ForwardedHeadersConfig::default(),
+      &RealIpConfig::default(),
+    )
+    .expect("default overwrite headers without real IP can be cached");
+
+    let mut headers = HeaderMap::new();
+    add_forwarded_headers(
+      &mut headers,
+      peer_addr,
+      "example.test",
+      "https",
+      443,
+      ForwardedHeaderMode::Overwrite,
+      Some(&cache),
+    );
+    assert_eq!(headers["x-forwarded-for"], "203.0.113.10");
+    assert_eq!(headers["x-forwarded-proto"], "https");
+    assert_eq!(headers["x-forwarded-host"], "example.test");
+    assert_eq!(headers["x-forwarded-port"], "443");
+
+    add_forwarded_headers(
+      &mut headers,
+      peer_addr,
+      "other.test",
+      "https",
+      8443,
+      ForwardedHeaderMode::Overwrite,
+      Some(&cache),
+    );
+    assert_eq!(headers["x-forwarded-for"], "203.0.113.10");
+    assert_eq!(headers["x-forwarded-proto"], "https");
+    assert_eq!(headers["x-forwarded-host"], "other.test");
+    assert_eq!(headers["x-forwarded-port"], "8443");
+  }
+
+  #[test]
+  fn forwarded_header_cache_is_disabled_when_forwarded_client_can_vary() {
+    let peer_addr = "203.0.113.10:5443".parse().unwrap();
+    let append = ForwardedHeadersConfig {
+      mode: ForwardedHeaderMode::Append,
+      ..ForwardedHeadersConfig::default()
+    };
+    assert!(
+      build_forwarded_header_cache(peer_addr, "https", &append, &RealIpConfig::default()).is_none()
+    );
+
+    let real_ip = RealIpConfig {
+      enabled: true,
+      ..RealIpConfig::default()
+    };
+    assert!(
+      build_forwarded_header_cache(
+        peer_addr,
+        "https",
+        &ForwardedHeadersConfig::default(),
+        &real_ip
+      )
+      .is_none()
+    );
+
+    let direct_peer = ForwardedHeadersConfig {
+      client_ip_source: ForwardedClientIpSource::DirectPeer,
+      ..ForwardedHeadersConfig::default()
+    };
+    assert!(build_forwarded_header_cache(peer_addr, "https", &direct_peer, &real_ip).is_some());
   }
 
   #[test]
@@ -436,6 +547,7 @@ mod tests {
       "https",
       8443,
       ForwardedHeaderMode::Append,
+      None,
     );
 
     assert!(!headers.contains_key(FORWARDED));
@@ -457,6 +569,7 @@ mod tests {
       "https",
       443,
       ForwardedHeaderMode::Overwrite,
+      None,
     );
 
     assert!(!headers.contains_key("x-forwarded-host"));
@@ -476,6 +589,7 @@ mod tests {
       "https",
       443,
       ForwardedHeaderMode::Overwrite,
+      None,
     );
 
     assert_eq!(headers["x-forwarded-for"], "2001:db8::10");

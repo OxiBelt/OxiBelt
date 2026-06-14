@@ -10,7 +10,9 @@ use crate::config::{CompressionConfig, ForwardedHeaderMode, HttpVersion};
 use crate::waf::{HeaderMutation, apply_header_mutations};
 
 use super::body::{BoxError, ProxyBody};
-use super::headers::{add_forwarded_headers, set_effective_host_header, strip_hop_by_hop_headers};
+use super::headers::{
+  ForwardedHeaderCache, add_forwarded_headers, set_effective_host_header, strip_hop_by_hop_headers,
+};
 use super::version::upstream_request_version;
 
 pub(crate) struct RebuildRequestOptions<'a> {
@@ -21,6 +23,7 @@ pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) downstream_scheme: &'a str,
   pub(crate) downstream_port: u16,
   pub(crate) forwarded_header_mode: ForwardedHeaderMode,
+  pub(crate) forwarded_header_cache: Option<&'a ForwardedHeaderCache>,
   pub(crate) preserve_host: bool,
   pub(crate) upstream_version: HttpVersion,
   pub(crate) waf_mutations: &'a [HeaderMutation],
@@ -62,6 +65,7 @@ pub(crate) fn rebuild_request_parts(
     options.downstream_scheme,
     options.downstream_port,
     options.forwarded_header_mode,
+    options.forwarded_header_cache,
   );
 
   if options.compression.enabled || options.remove_accept_encoding {
@@ -111,6 +115,7 @@ mod tests {
       downstream_scheme: "https",
       downstream_port: 443,
       forwarded_header_mode: ForwardedHeaderMode::Overwrite,
+      forwarded_header_cache: None,
       preserve_host,
       upstream_version: HttpVersion::H1,
       waf_mutations: &[],

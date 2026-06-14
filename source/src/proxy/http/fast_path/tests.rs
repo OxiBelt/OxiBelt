@@ -489,6 +489,7 @@ async fn person_proof_api_handler_wins_over_upstream_pool_fast_path() {
     WafTransportMetadataInput::default(),
     Arc::new(WafTlsMetadata::default()),
     None,
+    None,
     state,
     WafProtocol::Http,
     WafTransportNetwork::Tcp,

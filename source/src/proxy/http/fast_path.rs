@@ -14,7 +14,9 @@ use tracing::warn;
 use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, error_indicates_body_timeout};
-use crate::proxy::http::headers::{is_upgrade_request, strip_hop_by_hop_headers};
+use crate::proxy::http::headers::{
+  ForwardedHeaderCache, is_upgrade_request, strip_hop_by_hop_headers,
+};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
 use crate::proxy::http::request_framing::VerifiedContentLengthZeroBody;
 use crate::proxy::http::response::{
@@ -158,6 +160,7 @@ impl PlainProxyFastPath {
     state: &Arc<AppSnapshot>,
     resolved: &ResolvedRoute<'_>,
     forwarded_client_addr: SocketAddr,
+    forwarded_header_cache: Option<&ForwardedHeaderCache>,
     client_addr: SocketAddr,
     host: &str,
     downstream_port: u16,
@@ -300,6 +303,7 @@ impl PlainProxyFastPath {
       downstream_host: host,
       downstream_port,
       forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
+      forwarded_header_cache,
       preserve_host: upstream.preserve_host,
       upstream_version,
       waf_mutations: &request_waf.request_header_mutations,
@@ -425,6 +429,7 @@ impl PlainProxyFastPath {
     let (mut parts, response_body) = upstream_response.into_parts();
     let FastPathResponseBody {
       body: response_body,
+      known_small_response_body,
       inlined_known_small_body,
       trailers_handled,
     } = match fast_path_response_body(
@@ -529,15 +534,14 @@ impl PlainProxyFastPath {
     };
     let mut response = Response::from_parts(parts, response_body);
     if let Some(inlined) = inlined_known_small_body {
-      if request_version != http::Version::HTTP_3 {
-        response
-          .extensions_mut()
-          .insert(body::KnownSmallResponseBody);
-      }
       response.extensions_mut().insert(inlined);
     }
-    let mut response =
-      with_downstream_response_timeout(response, timeouts.response_send, transport_network);
+    let mut response = fast_path_downstream_response_timeout(
+      response,
+      known_small_response_body,
+      timeouts.response_send,
+      transport_network,
+    );
     apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
     state.record_hot_path_response(response.status());
     drop(pool_selection);
@@ -551,6 +555,7 @@ pub(crate) async fn try_handle_plain_proxy<B>(
   state: &Arc<AppSnapshot>,
   resolved: &ResolvedRoute<'_>,
   forwarded_client_addr: SocketAddr,
+  forwarded_header_cache: Option<&ForwardedHeaderCache>,
   client_addr: SocketAddr,
   host: &str,
   downstream_port: u16,
@@ -598,6 +603,7 @@ where
       state,
       resolved,
       forwarded_client_addr,
+      forwarded_header_cache,
       client_addr,
       host,
       downstream_port,
@@ -638,6 +644,18 @@ fn apply_fast_path_priority_policy(headers: &mut HeaderMap, mode: PriorityMode) 
   }
 }
 
+fn fast_path_downstream_response_timeout(
+  response: Response<ProxyBody>,
+  known_small_response_body: bool,
+  timeout: std::time::Duration,
+  transport_network: WafTransportNetwork,
+) -> Response<ProxyBody> {
+  if known_small_response_body && transport_network != WafTransportNetwork::Udp {
+    return response;
+  }
+  with_downstream_response_timeout(response, timeout, transport_network)
+}
+
 fn fast_path_outbound_request_body(
   body: ProxyBody,
   trailer_mode: TrailerMode,
@@ -655,6 +673,7 @@ fn fast_path_outbound_request_body(
 
 struct FastPathResponseBody {
   body: ProxyBody,
+  known_small_response_body: bool,
   inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
   trailers_handled: bool,
 }
@@ -681,6 +700,7 @@ where
   {
     SmallResponseDisposition::Inlined { body, inlined } => Ok(FastPathResponseBody {
       body,
+      known_small_response_body: true,
       inlined_known_small_body: inlined,
       trailers_handled: true,
     }),
@@ -690,6 +710,7 @@ where
         upstream_read_timeout,
         BodyTimeoutKind::UpstreamResponseRead,
       ),
+      known_small_response_body: false,
       inlined_known_small_body: None,
       trailers_handled: false,
     }),

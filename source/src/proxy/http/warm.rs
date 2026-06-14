@@ -69,6 +69,7 @@ pub(crate) async fn warm_cache_request(
     WafTransportMetadataInput::default(),
     tls.clone(),
     None,
+    None,
     snapshot.clone(),
     WafProtocol::Http,
     WafTransportNetwork::Tcp,

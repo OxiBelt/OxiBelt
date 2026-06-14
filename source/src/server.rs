@@ -2123,10 +2123,17 @@ async fn handle_connection(
   } else {
     RuntimeCounter::Http1Request
   };
+  let forwarded_header_cache = http::headers::build_forwarded_header_cache(
+    peer_addr,
+    "https",
+    &handshake_state.config.proxy.forwarded_headers,
+    &handshake_state.config.proxy.real_ip,
+  );
   let request_state = handshake_state.clone();
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = request_state.clone();
     let tls_metadata = tls_metadata.clone();
+    let forwarded_header_cache = forwarded_header_cache.clone();
     let request_index = request_count.fetch_add(1, Ordering::Relaxed);
     let connection_limit_context = connection_limit_context.clone();
     let drain = drain.clone();
@@ -2139,13 +2146,14 @@ async fn handle_connection(
             "too many requests on this connection",
           )
         } else {
-          http::handle(
+          http::handle_with_forwarded_header_cache(
             request,
             peer_addr,
             tcp_max_hop,
             transport_metadata,
             tls_metadata,
             connection_limit_context.clone(),
+            forwarded_header_cache,
             state,
             "https",
             drain,

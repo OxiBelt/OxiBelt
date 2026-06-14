@@ -544,6 +544,7 @@ pub(crate) async fn prepare_webtransport(
     "https",
     downstream_port,
     state.config.proxy.forwarded_headers.mode,
+    None,
   );
   apply_header_mutations(&mut headers, &request_waf.request_header_mutations);
   state

@@ -107,6 +107,7 @@ pub(crate) use self::waf_body_capture::{
 };
 use self::waf_body_coding::has_non_identity_content_encoding;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
+
 #[derive(Clone, Copy)]
 pub(crate) struct EffectiveTimeouts {
   pub(crate) response_send: Duration,
@@ -192,6 +193,34 @@ pub(crate) async fn handle(
   downstream_scheme: &'static str,
   drain: ConnectionDrain,
 ) -> Response<ProxyBody> {
+  handle_with_forwarded_header_cache(
+    request,
+    peer_addr,
+    tcp_max_hop,
+    transport_metadata,
+    tls,
+    connection_limit_context,
+    None,
+    state,
+    downstream_scheme,
+    drain,
+  )
+  .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_with_forwarded_header_cache(
+  request: Request<Incoming>,
+  peer_addr: std::net::SocketAddr,
+  tcp_max_hop: Option<u8>,
+  transport_metadata: WafTransportMetadataInput<'static>,
+  tls: Arc<WafTlsMetadata>,
+  connection_limit_context: Option<ConnectionLimitContext>,
+  forwarded_header_cache: Option<headers::ForwardedHeaderCache>,
+  state: Arc<AppSnapshot>,
+  downstream_scheme: &'static str,
+  drain: ConnectionDrain,
+) -> Response<ProxyBody> {
   let protocol = request_protocol(request.headers());
   handle_inner(
     request,
@@ -200,6 +229,7 @@ pub(crate) async fn handle(
     transport_metadata,
     tls,
     connection_limit_context,
+    forwarded_header_cache,
     state,
     protocol,
     WafTransportNetwork::Tcp,
@@ -229,6 +259,7 @@ pub(crate) async fn handle_http3(
     },
     tls,
     connection_limit_context,
+    None,
     state,
     WafProtocol::Http,
     WafTransportNetwork::Udp,
@@ -247,6 +278,7 @@ async fn handle_inner<B>(
   transport_metadata: WafTransportMetadataInput<'_>,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
+  forwarded_header_cache: Option<headers::ForwardedHeaderCache>,
   state: Arc<AppSnapshot>,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
@@ -286,6 +318,7 @@ where
     transport_metadata,
     tls,
     connection_limit_context,
+    forwarded_header_cache,
     &state,
     protocol,
     transport_network,
@@ -321,6 +354,7 @@ async fn handle_inner_impl<B>(
   transport_metadata: WafTransportMetadataInput<'_>,
   tls: Arc<WafTlsMetadata>,
   connection_limit_context: Option<ConnectionLimitContext>,
+  forwarded_header_cache: Option<headers::ForwardedHeaderCache>,
   state: &Arc<AppSnapshot>,
   protocol: WafProtocol,
   transport_network: WafTransportNetwork,
@@ -391,6 +425,7 @@ where
     client_addr,
     state.config.proxy.forwarded_headers.client_ip_source,
   );
+  let forwarded_header_cache = forwarded_header_cache.as_ref();
   access_log.client_addr = client_addr;
 
   match state.config.limits.connection_limit_identity {
@@ -490,6 +525,7 @@ where
       state,
       &resolved,
       forwarded_client_addr,
+      forwarded_header_cache,
       client_addr,
       host,
       downstream_port,
@@ -523,6 +559,7 @@ where
       state,
       &resolved,
       forwarded_client_addr,
+      forwarded_header_cache,
       client_addr,
       host,
       downstream_port,
@@ -1137,6 +1174,7 @@ where
     downstream_host: host,
     downstream_port,
     forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
+    forwarded_header_cache,
     preserve_host: upstream.preserve_host,
     upstream_version,
     waf_mutations: &request_waf.request_header_mutations,
@@ -2333,6 +2371,7 @@ async fn handle_upgrade_request(
     downstream_scheme,
     downstream_port,
     state.config.proxy.forwarded_headers.mode,
+    None,
   );
   apply_header_mutations(&mut parts.headers, &request_waf.request_header_mutations);
   state
