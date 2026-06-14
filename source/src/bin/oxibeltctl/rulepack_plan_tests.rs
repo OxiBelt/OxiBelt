@@ -53,11 +53,7 @@ fn active_summary_diff_marks_changed_rules_unknown() {
   assert_eq!(diff.changed_rules, None);
   assert_eq!(diff.deleted_rules, 0);
   assert_eq!(diff.basis, "active_summary");
-  assert!(
-    warnings
-      .iter()
-      .any(|warning| warning.contains("content-level changed-rule diff"))
-  );
+  assert!(warnings.is_empty());
 }
 
 #[test]

@@ -513,6 +513,7 @@ fn expected_operations() -> BTreeSet<(String, String)> {
         ("get", "/admin/v1/waf/rule-costs"),
         ("get", "/admin/v1/waf/crs/compatibility"),
         ("get", "/admin/v1/waf/rulepacks"),
+        ("post", "/admin/v1/waf/rulepacks/plan"),
         ("get", "/admin/v1/waf/person-proof/status"),
         ("get", "/admin/v1/waf/person-proof/clearances"),
         ("post", "/admin/v1/waf/person-proof/clearances/revoke"),

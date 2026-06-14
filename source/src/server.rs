@@ -806,6 +806,11 @@ async fn admin_response_inner(
     .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
 
+  if path == "/admin/v1/waf/rulepacks/plan" {
+    return admin_rulepacks::plan_response(request, &snapshot.config, &authorization, &method)
+      .await;
+  }
+
   if path.starts_with("/admin/v1/waf/oxirule/") {
     return admin_ops::admin_waf_devtools_response(
       request,

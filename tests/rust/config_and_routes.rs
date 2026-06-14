@@ -4829,10 +4829,14 @@ actions = [
     "waf:ReplayOxiRule",
     "waf:AnalyzeOxiRuleRisk",
     "waf:PlanOxiRuleHardening",
+    "waf:PlanOxiRulePack",
+    "config:ReadRouteInventory",
 ]
 resources = [
     "oxibelt:default:waf:oxirule/*",
     "oxibelt:default:waf:oxirule-group/*",
+    "oxibelt:default:waf:oxirule-rulepack/*",
+    "oxibelt:default:config:route-inventory/current",
     "oxibelt:default:waf:replay/*",
     "oxibelt:default:waf:analyze/*",
     "oxibelt:default:waf:hardening-plan/*",

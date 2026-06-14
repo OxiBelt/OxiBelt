@@ -1,3 +1,5 @@
+#[path = "rulepack_plan_admin.rs"]
+mod admin_endpoint;
 #[path = "rulepack_plan_risk.rs"]
 mod risk;
 
@@ -9,7 +11,7 @@ use http::{Method, StatusCode};
 use oxibelt::admin_client::AdminClient;
 use oxibelt::waf::{
   RulepackReferencedFileKind, RulepackRenderOptions, WafRulepackSummary, inspect_rulepack,
-  referenced_rulepack_files, render_rulepack_for_install,
+  inspect_rulepack_inputs, referenced_rulepack_files, render_rulepack_for_install,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -25,6 +27,7 @@ use crate::rulepack_install::{
 };
 use crate::rulepack_prompt::InteractiveApplyRequest;
 use crate::rulepack_render::{render_options, render_text};
+use admin_endpoint::admin_plan_value;
 use risk::{RulepackRisk, augment_risk_with_devtools, risk_for_prepared};
 
 #[derive(Debug)]
@@ -127,22 +130,22 @@ pub(crate) async fn print_plan(
   args: &RulepackPlanArgs,
   output: OutputFormat,
 ) -> anyhow::Result<()> {
-  let report = build_report(
-    client,
-    RulepackReportContext {
-      source: &args.source,
-      values: args.values.as_deref(),
-      vars: &args.vars,
-      binds: &args.binds,
-      profile: args.profile.as_deref(),
-      mode: args.mode,
-      force_mode: args.force_mode,
-      fixture: None,
-      replay: None,
-      view: "plan",
-    },
-  )
-  .await?;
+  let context = RulepackReportContext {
+    source: &args.source,
+    values: args.values.as_deref(),
+    vars: &args.vars,
+    binds: &args.binds,
+    profile: args.profile.as_deref(),
+    mode: args.mode,
+    force_mode: args.force_mode,
+    fixture: None,
+    replay: None,
+    view: "plan",
+  };
+  if let Some(value) = admin_plan_value(client, &context).await? {
+    return print_value(&value, output);
+  }
+  let report = build_report(client, context).await?;
   print_report(&report, output)
 }
 
@@ -151,22 +154,22 @@ pub(crate) async fn print_diff(
   args: &RulepackDiffArgs,
   output: OutputFormat,
 ) -> anyhow::Result<()> {
-  let report = build_report(
-    client,
-    RulepackReportContext {
-      source: &args.source,
-      values: args.values.as_deref(),
-      vars: &args.vars,
-      binds: &args.binds,
-      profile: args.profile.as_deref(),
-      mode: args.mode,
-      force_mode: args.force_mode,
-      fixture: None,
-      replay: None,
-      view: "diff",
-    },
-  )
-  .await?;
+  let context = RulepackReportContext {
+    source: &args.source,
+    values: args.values.as_deref(),
+    vars: &args.vars,
+    binds: &args.binds,
+    profile: args.profile.as_deref(),
+    mode: args.mode,
+    force_mode: args.force_mode,
+    fixture: None,
+    replay: None,
+    view: "diff",
+  };
+  if let Some(value) = admin_plan_value(client, &context).await? {
+    return print_value(&value, output);
+  }
+  let report = build_report(client, context).await?;
   print_report(&report, output)
 }
 
@@ -176,22 +179,22 @@ pub(crate) async fn print_apply_dry_run(
   output: OutputFormat,
 ) -> anyhow::Result<()> {
   if !args.interactive {
-    let report = build_report(
-      client,
-      RulepackReportContext {
-        source: &args.source,
-        values: args.values.as_deref(),
-        vars: &args.vars,
-        binds: &args.binds,
-        profile: args.profile.as_deref(),
-        mode: args.mode,
-        force_mode: args.force_mode,
-        fixture: args.fixture.as_deref(),
-        replay: args.replay.as_deref(),
-        view: "apply_dry_run",
-      },
-    )
-    .await?;
+    let context = RulepackReportContext {
+      source: &args.source,
+      values: args.values.as_deref(),
+      vars: &args.vars,
+      binds: &args.binds,
+      profile: args.profile.as_deref(),
+      mode: args.mode,
+      force_mode: args.force_mode,
+      fixture: args.fixture.as_deref(),
+      replay: args.replay.as_deref(),
+      view: "apply_dry_run",
+    };
+    if let Some(value) = admin_plan_value(client, &context).await? {
+      return print_value(&value, output);
+    }
+    let report = build_report(client, context).await?;
     return print_report(&report, output);
   }
   let prepared = prepare_rulepack_apply(client, args, false).await?;
@@ -566,7 +569,7 @@ fn complete_install_plan(prepared: &PreparedRulepackApply) -> RulepackInstallPla
 fn diff_for_summary(
   planned: &WafRulepackSummary,
   active: Option<&ActiveRulepackSummary>,
-  warnings: &mut Vec<String>,
+  _warnings: &mut Vec<String>,
 ) -> RulepackDiff {
   let Some(active) = active else {
     return RulepackDiff {
@@ -578,10 +581,6 @@ fn diff_for_summary(
       planned_version: planned.version.clone(),
     };
   };
-  warnings.push(
-    "content-level changed-rule diff requires a future Admin manifest-read or rulepack-plan endpoint"
-      .to_string(),
-  );
   RulepackDiff {
     added_rules: planned.rules.saturating_sub(active.rules) as i64,
     changed_rules: None,
@@ -662,9 +661,13 @@ fn empty_fit_report(name: &str) -> crate::rulepack_fit::RulepackFitReport {
 }
 
 fn print_report(report: &RulepackPreinstallReport, output: OutputFormat) -> anyhow::Result<()> {
+  print_value(&serde_json::to_value(report)?, output)
+}
+
+fn print_value(value: &Value, output: OutputFormat) -> anyhow::Result<()> {
   match output {
-    OutputFormat::PrettyJson => println!("{}", serde_json::to_string_pretty(report)?),
-    OutputFormat::Json => println!("{}", serde_json::to_string(report)?),
+    OutputFormat::PrettyJson => println!("{}", serde_json::to_string_pretty(value)?),
+    OutputFormat::Json => println!("{}", serde_json::to_string(value)?),
   }
   Ok(())
 }

@@ -1306,6 +1306,49 @@
         }
       }
     },
+    "/admin/v1/waf/rulepacks/plan": {
+      "post": {
+        "tags": [
+          "waf"
+        ],
+        "operationId": "planWafRulepack",
+        "summary": "Plan a non-mutating OxiRule rulepack install against the active configuration.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminRulepackPlanRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rulepack planning report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminRulepackPlanResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
+      }
+    },
     "/admin/v1/waf/person-proof/status": {
       "get": {
         "tags": [
@@ -5637,6 +5680,370 @@
             "type": "string",
             "pattern": "^[0-9A-Fa-f]{40}([0-9A-Fa-f]{24})?$",
             "description": "Full OpenPGP signer fingerprint that verified the downloaded rulepack."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackPlanRequest": {
+        "type": "object",
+        "required": [
+          "manifest"
+        ],
+        "properties": {
+          "manifest": {
+            "type": "string",
+            "description": "Inline schema-version-2 OxiRule rulepack manifest. Schema version 1 and legacy variables.discovery manifests are rejected."
+          },
+          "source": {
+            "$ref": "#/components/schemas/AdminRulepackPlanSource"
+          },
+          "values": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Scalar render values keyed by rulepack variable name."
+          },
+          "bindings": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Resolved binding values keyed by rulepack binding name."
+          },
+          "rule_overrides": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Values-file rule overrides using the rulepack schema-v2 override shape."
+          },
+          "exceptions": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Values-file rulepack exceptions using the schema-v2 exception shape."
+          },
+          "profile": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "monitor",
+              "enforcing"
+            ]
+          },
+          "force_mode": {
+            "type": "boolean",
+            "default": false
+          },
+          "include_route_candidates": {
+            "type": "boolean",
+            "default": false,
+            "description": "Requires config:ReadRouteInventory when true."
+          },
+          "include_diff": {
+            "type": "boolean",
+            "default": false,
+            "description": "Requires waf:ListOxiRulePacks when true."
+          },
+          "include_cost": {
+            "type": "boolean",
+            "default": false,
+            "description": "Requires waf:EstimateOxiRuleCost when true."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackPlanSource": {
+        "type": "object",
+        "required": [
+          "url",
+          "sha256"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{64}$"
+          },
+          "openpgp_signature_url": {
+            "type": "string"
+          },
+          "openpgp_signer_fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{40}([0-9A-Fa-f]{24})?$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackPlanResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "rulepack",
+          "required_inputs",
+          "route_candidates",
+          "install_plan",
+          "risk",
+          "cost_warnings",
+          "warnings",
+          "permission_hints"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "rulepack": {
+            "type": "string"
+          },
+          "required_inputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminRulepackRequiredInput"
+            }
+          },
+          "route_candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminRulepackRouteCandidateSet"
+            }
+          },
+          "rendered_manifest": {
+            "type": "string",
+            "description": "Concrete rendered schema-v2 rulepack manifest. Omitted until required inputs are complete."
+          },
+          "install_plan": {
+            "$ref": "#/components/schemas/AdminRulepackInstallPlan"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/AdminRulepackDiff"
+          },
+          "risk": {
+            "$ref": "#/components/schemas/AdminRulepackRisk"
+          },
+          "cost_warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permission_hints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Actions needed for optional report sections."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackRequiredInput": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackRouteCandidateSet": {
+        "type": "object",
+        "required": [
+          "binding",
+          "candidates"
+        ],
+        "properties": {
+          "binding": {
+            "type": "string"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminRulepackRouteCandidate"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackRouteCandidate": {
+        "type": "object",
+        "required": [
+          "name",
+          "score",
+          "reason",
+          "hosts",
+          "path_prefix"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "score": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "path_prefix": {
+            "type": "string"
+          },
+          "upstream": {
+            "type": "string",
+            "description": "Configured upstream or upstream-pool name only; URLs, credentials, TLS details, token environment variables, and file paths are not returned."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackInstallPlan": {
+        "type": "object",
+        "required": [
+          "ready",
+          "will_put",
+          "mode",
+          "bindings",
+          "values_count",
+          "endpoint"
+        ],
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "will_put": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "will_reload": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "monitor",
+              "enforcing"
+            ]
+          },
+          "profile": {
+            "type": "string"
+          },
+          "bindings": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "values_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source_url": {
+            "type": "string"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{64}$"
+          },
+          "endpoint": {
+            "type": "string",
+            "const": "/admin/v1/files/sync"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackDiff": {
+        "type": "object",
+        "required": [
+          "added_rules",
+          "changed_rules",
+          "deleted_rules",
+          "basis",
+          "planned_version"
+        ],
+        "properties": {
+          "added_rules": {
+            "type": "integer"
+          },
+          "changed_rules": {
+            "type": "integer"
+          },
+          "deleted_rules": {
+            "type": "integer"
+          },
+          "basis": {
+            "type": "string"
+          },
+          "active_version": {
+            "type": "string"
+          },
+          "planned_version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminRulepackRisk": {
+        "type": "object",
+        "required": [
+          "terminal_actions",
+          "body_inspection",
+          "response_inspection",
+          "estimated_cost"
+        ],
+        "properties": {
+          "terminal_actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "body_inspection": {
+            "type": "boolean"
+          },
+          "response_inspection": {
+            "type": "boolean"
+          },
+          "estimated_cost": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "low",
+              "medium",
+              "high"
+            ]
           }
         },
         "additionalProperties": false
