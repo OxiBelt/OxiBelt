@@ -1140,24 +1140,28 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
     assert!(
         nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.1")
             && nginx_dockerfile.contains("--with-http_v3_module")
-            && nginx_dockerfile.contains("-march=${NGINX_TARGET_CPU}"),
-        "nginx comparator image should pin mainline nginx, build HTTP/3, and use the requested target CPU"
+            && nginx_dockerfile
+                .contains(r#"org.oxibelt.performance.amd64_target_cpu="${NGINX_TARGET_CPU}""#),
+        "nginx comparator image should pin mainline nginx, build HTTP/3, and record the target CPU metadata"
     );
-    for flag in [
-        "-U_FORTIFY_SOURCE",
-        "-D_FORTIFY_SOURCE=3",
-        "-fstack-protector-strong",
-        "-fstack-clash-protection",
-        "-fcf-protection=full",
-        "-fPIE",
-        "-fno-plt",
-        "-Wformat-security",
-        "-Werror=format-security",
-        "-Wl,-z,relro",
-        "-Wl,-z,now",
-        "-Wl,-z,noexecstack",
-        "-pie",
-    ] {
+    let expected_nginx_cc_opt = r#"--with-cc-opt="-O2 -pipe \
+        -fPIE -pie \
+        -fstack-protector-strong \
+        -fstack-protector-explicit \
+        -fstack-clash-protection \
+        -fcf-protection=full \
+        -fvisibility=hidden \
+        -D_FORTIFY_SOURCE=3 \
+        -D_GLIBCXX_ASSERTIONS \
+        -flto=auto \
+        -ftrapv \
+        -Wall -Wextra \
+        -Wformat -Wformat-security -Werror=format-security""#;
+    assert!(
+        nginx_dockerfile.contains(expected_nginx_cc_opt),
+        "nginx comparator image should use the expected GCC compilation options"
+    );
+    for flag in ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,-z,noexecstack", "-pie"] {
         assert!(
             nginx_dockerfile.contains(flag),
             "nginx comparator image should include GCC hardening flag {flag}"
