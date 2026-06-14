@@ -426,6 +426,7 @@ impl PlainProxyFastPath {
     let FastPathResponseBody {
       body: response_body,
       inlined_known_small_body,
+      known_small_body,
       trailers_handled,
     } = match fast_path_response_body(
       &parts.headers,
@@ -528,12 +529,12 @@ impl PlainProxyFastPath {
       fast_path_filter_trailers(response_body, state.config.proxy.http.trailers)
     };
     let mut response = Response::from_parts(parts, response_body);
+    if known_small_body && request_version != http::Version::HTTP_3 {
+      response
+        .extensions_mut()
+        .insert(body::KnownSmallResponseBody);
+    }
     if let Some(inlined) = inlined_known_small_body {
-      if request_version != http::Version::HTTP_3 {
-        response
-          .extensions_mut()
-          .insert(body::KnownSmallResponseBody);
-      }
       response.extensions_mut().insert(inlined);
     }
     let mut response =
@@ -656,6 +657,7 @@ fn fast_path_outbound_request_body(
 struct FastPathResponseBody {
   body: ProxyBody,
   inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
+  known_small_body: bool,
   trailers_handled: bool,
 }
 
@@ -682,6 +684,7 @@ where
     SmallResponseDisposition::Inlined { body, inlined } => Ok(FastPathResponseBody {
       body,
       inlined_known_small_body: inlined,
+      known_small_body: true,
       trailers_handled: true,
     }),
     SmallResponseDisposition::Streaming(body) => Ok(FastPathResponseBody {
@@ -691,6 +694,7 @@ where
         BodyTimeoutKind::UpstreamResponseRead,
       ),
       inlined_known_small_body: None,
+      known_small_body: false,
       trailers_handled: false,
     }),
     SmallResponseDisposition::Error(response) => Err(response),
