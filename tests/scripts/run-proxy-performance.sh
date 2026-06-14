@@ -7,6 +7,7 @@ usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
+  OXIBELT_DOCKER_COMMAND           Docker CLI command to invoke (default: docker)
   OXIBELT_AMD64_TARGET_CPU         AMD64 target CPU label recorded in result rows
   OXIBELT_NGINX_IMAGE              nginx comparator image (default: nginx:mainline-alpine)
   OXIBELT_NGINX_H3_MODE            auto, required, optional, or disabled (default: auto)
@@ -221,6 +222,7 @@ diagnostic_profile_frequency="${OXIBELT_PERF_DIAGNOSTIC_FREQUENCY:-49}"
 diagnostic_profile_gate_mode="${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE:-warn}"
 diagnostic_profile_compress="${OXIBELT_PERF_DIAGNOSTIC_COMPRESS:-1}"
 diagnostic_profile_warning_count=0
+docker_command="${OXIBELT_DOCKER_COMMAND:-docker}"
 
 if [[ ! "${max_load_errors_per_million}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION must be a non-negative number; got '${max_load_errors_per_million}'" >&2
@@ -334,11 +336,19 @@ if [[ -z "${diagnostic_profile_event}" ]]; then
   echo "OXIBELT_PERF_DIAGNOSTIC_EVENT must not be empty when diagnostic profiling is configured" >&2
   exit 2
 fi
+if [[ -z "${docker_command}" ]]; then
+  echo "OXIBELT_DOCKER_COMMAND must not be empty" >&2
+  exit 2
+fi
+
+docker() {
+  command "${docker_command}" "$@"
+}
 
 cleanup() {
-  docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
+  docker ps -aq --filter "label=${test_label}" | xargs -r "${docker_command}" rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker volume ls -q --filter "label=${test_label}" | xargs -r docker volume rm >/dev/null 2>&1 || true
+  docker volume ls -q --filter "label=${test_label}" | xargs -r "${docker_command}" volume rm >/dev/null 2>&1 || true
   if [[ "${remove_perf_probe_image}" == "1" ]]; then
     docker rmi -f "${perf_probe_image}" >/dev/null 2>&1 || true
   fi
@@ -362,13 +372,13 @@ mkdir -p "${logs_dir}" "${probe_logs_dir}" "${profiles_dir}" "${profile_cpu_dir}
 : >"${resource_snapshots_jsonl}"
 
 require_tool() {
-  if ! command -v "$1" >/dev/null 2>&1; then
+  if ! type -P "$1" >/dev/null 2>&1; then
     echo "missing required command: $1" >&2
     exit 1
   fi
 }
 
-require_tool docker
+require_tool "${docker_command}"
 require_tool jq
 require_tool openssl
 if [[ -n "${profile_label}" ]]; then
@@ -2823,6 +2833,7 @@ cat >"${summary_md}" <<EOF
 - OxiBelt baseline fixture: \`${oxibelt_baseline_scenario}\`
 - OxiBelt aggressive fixture: \`${oxibelt_aggressive_scenario}\`
 - OxiBelt handshake fixture: \`${oxibelt_handshake_scenario}\`
+- Docker command: \`${docker_command}\`
 - OxiBelt AMD64 target CPU: \`${amd64_target_cpu}\`
 - Perf probe image: \`${perf_probe_image}\`
 - External benchmarks: \`${external_benchmarks}\`
