@@ -104,6 +104,7 @@ fn scripted_prompt_collects_binding_and_required_variable() {
     &mut vars,
     &mut binds,
     RulepackModeArg::Monitor,
+    true,
     &mut prompt,
   )
   .expect("interactive inputs");
@@ -131,6 +132,7 @@ fn scripted_prompt_rejects_non_terminal() {
     &mut vars,
     &mut binds,
     RulepackModeArg::Monitor,
+    true,
     &mut prompt,
   )
   .expect_err("non-terminal should fail");
@@ -150,6 +152,7 @@ fn scripted_prompt_skips_prefilled_inputs() {
     &mut vars,
     &mut binds,
     RulepackModeArg::Monitor,
+    true,
     &mut prompt,
   )
   .expect("prefilled interactive inputs");
@@ -180,9 +183,35 @@ fn scripted_prompt_can_cancel_before_apply() {
     &mut vars,
     &mut binds,
     RulepackModeArg::Monitor,
+    true,
     &mut prompt,
   )
   .expect_err("decline should cancel");
 
   assert!(error.to_string().contains("cancelled"));
+}
+
+#[test]
+fn scripted_prompt_can_skip_apply_confirmation_for_dry_run() {
+  let evaluation = evaluation();
+  let mut vars = BTreeMap::from([("admin_cidr".to_string(), "10.0.0.0/8".to_string())]);
+  let mut binds = BTreeMap::from([("app_route".to_string(), "mmsecretvault".to_string())]);
+  let mut prompt = ScriptedPrompt::new(&[]);
+
+  complete_interactive_from_evaluation(
+    &evaluation,
+    &mut vars,
+    &mut binds,
+    RulepackModeArg::Monitor,
+    false,
+    &mut prompt,
+  )
+  .expect("dry-run interactive inputs");
+
+  assert!(
+    !prompt
+      .lines
+      .iter()
+      .any(|line| line.contains("Apply rulepack now?"))
+  );
 }

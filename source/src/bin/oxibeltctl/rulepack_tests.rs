@@ -2,10 +2,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
+use oxibelt::admin_client::{AdminClient, AdminClientOptions, DEFAULT_ADMIN_URL};
 use url::Url;
 
 use super::*;
-use crate::cli::{Cli, Command, RulepackSourceArgs, RulepackSubcommand};
+use crate::cli::{
+  Cli, Command, OutputFormat, RulepackModeArg, RulepackSourceArgs, RulepackSubcommand,
+};
 
 #[test]
 fn rulepack_cli_parses_apply_url_safety_options() {
@@ -98,6 +101,62 @@ fn rulepack_cli_parses_fit_and_bind_options() {
 }
 
 #[test]
+fn rulepack_cli_parses_plan_and_diff_options() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "plan",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--values",
+    "vaultwarden.values.toml",
+    "--profile",
+    "public-production",
+    "--mode",
+    "enforcing",
+    "--force-mode",
+    "--bind",
+    "app_route=mmsecretvault",
+    "--var",
+    "admin_cidr=10.0.0.0/8",
+  ])
+  .expect("rulepack plan should parse");
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Plan(args) = command.command else {
+    panic!("expected rulepack plan");
+  };
+  assert_eq!(args.values, Some(PathBuf::from("vaultwarden.values.toml")));
+  assert_eq!(args.profile.as_deref(), Some("public-production"));
+  assert_eq!(args.mode, Some(RulepackModeArg::Enforcing));
+  assert!(args.force_mode);
+  assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
+  assert_eq!(args.vars, vec!["admin_cidr=10.0.0.0/8"]);
+
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "diff",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--values",
+    "vaultwarden.values.toml",
+    "--bind",
+    "app_route=mmsecretvault",
+  ])
+  .expect("rulepack diff should parse");
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Diff(args) = command.command else {
+    panic!("expected rulepack diff");
+  };
+  assert_eq!(args.values, Some(PathBuf::from("vaultwarden.values.toml")));
+  assert_eq!(args.binds, vec!["app_route=mmsecretvault"]);
+}
+
+#[test]
 fn rulepack_cli_parses_render_and_check_bind_options() {
   let parsed = Cli::try_parse_from([
     "oxibeltctl",
@@ -179,7 +238,61 @@ fn rulepack_cli_parses_interactive_apply() {
 }
 
 #[test]
-fn rulepack_render_and_check_reject_schema_v1() {
+fn rulepack_cli_parses_apply_dry_run_fixture_and_replay() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "apply",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--dry-run",
+    "--fixture",
+    "vaultwarden-login.json",
+    "--replay",
+    "captured.ndjson",
+  ])
+  .expect("rulepack apply dry-run should parse");
+
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Apply(args) = command.command else {
+    panic!("expected rulepack apply");
+  };
+  assert!(args.dry_run);
+  assert_eq!(args.fixture, Some(PathBuf::from("vaultwarden-login.json")));
+  assert_eq!(args.replay, Some(PathBuf::from("captured.ndjson")));
+}
+
+#[test]
+fn rulepack_cli_rejects_fixture_or_replay_without_dry_run() {
+  let fixture = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "apply",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--fixture",
+    "vaultwarden-login.json",
+  ])
+  .expect_err("fixture without dry-run should fail");
+  assert!(fixture.to_string().contains("--dry-run"));
+
+  let replay = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "apply",
+    "--file",
+    "vaultwarden.oxirule-rulepack.toml",
+    "--replay",
+    "captured.ndjson",
+  ])
+  .expect_err("replay without dry-run should fail");
+  assert!(replay.to_string().contains("--dry-run"));
+}
+
+#[test]
+fn rulepack_render_check_plan_diff_and_dry_run_reject_schema_v1() {
   let source = TempTree::new().expect("source temp");
   let path = source.path().join("legacy.oxirule-rulepack.toml");
   std::fs::write(
@@ -217,6 +330,113 @@ content = "when = \"true\"\n"
 
     assert!(error.to_string().contains("only schema_version 2"));
   }
+
+  for subcommand in ["plan", "diff"] {
+    let parsed = Cli::try_parse_from([
+      "oxibeltctl",
+      "rulepack",
+      subcommand,
+      "--file",
+      path.to_str().expect("UTF-8 path"),
+    ])
+    .expect("rulepack command should parse");
+    let error = runtime
+      .block_on(run_remote_if_requested(
+        &dummy_client(),
+        &parsed.command,
+        OutputFormat::PrettyJson,
+      ))
+      .expect_err("schema v1 should be rejected");
+    assert!(error.to_string().contains("only schema_version 2"));
+  }
+
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "apply",
+    "--file",
+    path.to_str().expect("UTF-8 path"),
+    "--dry-run",
+  ])
+  .expect("rulepack dry-run command should parse");
+  let error = runtime
+    .block_on(run_remote_if_requested(
+      &dummy_client(),
+      &parsed.command,
+      OutputFormat::PrettyJson,
+    ))
+    .expect_err("schema v1 dry-run should be rejected");
+  assert!(error.to_string().contains("only schema_version 2"));
+}
+
+#[test]
+fn rulepack_plan_diff_and_dry_run_reject_legacy_variable_discovery() {
+  let source = TempTree::new().expect("source temp");
+  let path = source.path().join("legacy-discovery.oxirule-rulepack.toml");
+  std::fs::write(
+    &path,
+    r#"[rulepack]
+schema_version = 2
+name = "legacy-discovery"
+version = "0.1.0"
+
+[[variables]]
+name = "route_name"
+type = "string"
+required = true
+
+[variables.discovery]
+name_any = ["vault"]
+
+[[rules]]
+name = "legacy-rule"
+phase = "request"
+priority = 100
+content = "when = \"Context.RouteName == '{{route_name}}'\"\n"
+"#,
+  )
+  .expect("write legacy discovery rulepack");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+
+  for subcommand in ["plan", "diff"] {
+    let parsed = Cli::try_parse_from([
+      "oxibeltctl",
+      "rulepack",
+      subcommand,
+      "--file",
+      path.to_str().expect("UTF-8 path"),
+    ])
+    .expect("rulepack command should parse");
+    let error = runtime
+      .block_on(run_remote_if_requested(
+        &dummy_client(),
+        &parsed.command,
+        OutputFormat::PrettyJson,
+      ))
+      .expect_err("legacy discovery should be rejected");
+    assert!(error.to_string().contains("[variables.discovery]"));
+  }
+
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "apply",
+    "--file",
+    path.to_str().expect("UTF-8 path"),
+    "--dry-run",
+  ])
+  .expect("rulepack dry-run command should parse");
+  let error = runtime
+    .block_on(run_remote_if_requested(
+      &dummy_client(),
+      &parsed.command,
+      OutputFormat::PrettyJson,
+    ))
+    .expect_err("legacy discovery dry-run should be rejected");
+  assert!(error.to_string().contains("[variables.discovery]"));
 }
 
 #[test]
@@ -368,4 +588,14 @@ fn rulepack_source_rejects_symlink_escape() {
       .expect_err("symlink escape should fail");
 
   assert!(error.to_string().contains("must stay within"));
+}
+
+fn dummy_client() -> AdminClient {
+  oxibelt::tls::install_default_provider().expect("provider");
+  let options = AdminClientOptions::new(
+    Url::parse(DEFAULT_ADMIN_URL).expect("default URL"),
+    "dummy-token".to_string(),
+    Duration::from_millis(10),
+  );
+  AdminClient::new(options).expect("dummy client")
 }

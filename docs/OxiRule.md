@@ -212,7 +212,7 @@ status = 429
 
 Each `[[rules]]` entry declares the rule metadata and uses either inline `content` or `path = "rules/name.oxirule.toml"`. Each `[[group_files]]` entry uses either inline `content` or `path = "groups/name.oxirule-group.toml"`. Referenced paths resolve under the OxiRule directory and must stay normalized relative paths. `default_mode` defaults to `monitor`; rule-level `mode` overrides it.
 
-Use `oxibeltctl rulepack inspect`, `render`, `check`, `fit`, and `apply` to work with local files, directories, HTTPS bundles, or `git+https://` repositories. URL installs verify transport and trust before UTF-8/TOML parsing, rendering, route fitting, or apply. HTTPS rulepacks may be installed unsigned, but `apply` still requires `--sha256` unless `--allow-unpinned-rulepack` is set. A valid detached OpenPGP signature from a locally trusted public key also satisfies the apply pin. HTTP rulepacks additionally require `--allow-insecure-rulepack-url` and a valid detached OpenPGP signature; `--sha256` and `--allow-unpinned-rulepack` do not bypass that signature requirement. `git+https://` installs require `--git-ref` and record the resolved commit in the installed manifest.
+Use `oxibeltctl rulepack inspect`, `render`, `check`, `fit`, `plan`, `diff`, and `apply` to work with local files, directories, HTTPS bundles, or `git+https://` repositories. URL installs verify transport and trust before UTF-8/TOML parsing, rendering, route fitting, planning, diffing, or apply. HTTPS rulepacks may be installed unsigned, but `apply`, `plan`, `diff`, and `apply --dry-run` still require `--sha256` unless `--allow-unpinned-rulepack` is set. A valid detached OpenPGP signature from a locally trusted public key also satisfies the apply pin. HTTP rulepacks additionally require `--allow-insecure-rulepack-url` and a valid detached OpenPGP signature; `--sha256` and `--allow-unpinned-rulepack` do not bypass that signature requirement. `git+https://` installs require `--git-ref` and record the resolved commit in the installed manifest.
 
 ```bash
 oxibeltctl rulepack apply \
@@ -283,7 +283,7 @@ mode = "enforcing"
 login_rate = "10r/m"
 ```
 
-The `bind_as` value names the render placeholder, so `--bind app_route=mmsecretvault` renders `{{route_name}}`. It must not collide with a scalar variable name or another binding target. Schema version `2` does not support `type = "route"` under `[[variables]]` or `[variables.discovery]`; use `[[bindings]]` instead.
+The `bind_as` value names the render placeholder, so `--bind app_route=mmsecretvault` renders `{{route_name}}`. It must not collide with a scalar variable name or another binding target. OxiBelt rulepacks are schema version `2` only. Schema version `1`, `type = "route"` under `[[variables]]`, and legacy `[variables.discovery]` are rejected by render, check, fit, plan, diff, apply, and apply dry-run; use `[[bindings]]` instead.
 
 Values files let operators keep local route bindings, scalar values, and rollout profile choices outside the remote rulepack:
 
@@ -346,18 +346,28 @@ Supported rule fields are `mode`, `priority`, and `enabled`. Setting `enabled = 
 
 Rulepack `[[exceptions]]` provide narrow false-positive tuning without disabling a whole rule. They may live in the source manifest or in a values file. Select rules with `rule_ids`, `rule_names`, or `tags`; at least one rule selector is required. Scope traffic with `routes`, `methods`, `path_prefixes`, or `source_cidrs`; at least one traffic selector is required. Categories are ANDed together, while values within one category are ORed. Matching active exceptions add a negative predicate to the rendered rule condition. `reason` is required, and `expires_at` must use strict UTC `YYYY-MM-DDTHH:MM:SSZ`; expired exceptions are ignored and logged, while future-dated exceptions stop matching requests once `expires_at` is reached without requiring a reload. Header, body, raw regex, and stream-phase exception selectors are not supported.
 
-`oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and scalar variables as JSON. `oxibeltctl rulepack apply --interactive` uses the same fitting data to prompt for unresolved route bindings and required variables before applying a rendered manifest through `/admin/v1/files/sync`. Noninteractive `render`, `check`, and `apply` can pass bindings and values explicitly or through `--values`:
+`oxibeltctl rulepack fit` reads the redacted effective config from Admin `/admin/v1/config/effective`, scores route candidates from route names, hosts, upstream names, redacted upstream origins, and path prefixes, then prints missing bindings and scalar variables as JSON. `oxibeltctl rulepack plan`, `rulepack diff`, and `rulepack apply --dry-run` reuse that fitting data, render the intended install artifact, and print a non-mutating `RulepackPreinstallReport`. `oxibeltctl rulepack apply --interactive` uses the same data to prompt for unresolved route bindings and required variables before applying a rendered manifest through `/admin/v1/files/sync`; `apply --interactive --dry-run` may prompt for missing inputs, but it does not ask for final install approval. Noninteractive `render`, `check`, `plan`, `diff`, and `apply` can pass bindings and values explicitly or through `--values`:
 
 ```sh
 oxibeltctl rulepack fit --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml
+oxibeltctl rulepack plan --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml
+oxibeltctl rulepack diff --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml
 oxibeltctl rulepack check --file vaultwarden.oxirule-rulepack.toml --bind app_route=mmsecretvault --var admin_cidr=10.0.0.0/8
 oxibeltctl rulepack render --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml --profile public-production
+oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml --dry-run
+oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml --dry-run --fixture fixture.json --replay captured.ndjson
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --bind app_route=mmsecretvault --var admin_cidr=10.0.0.0/8
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --values vaultwarden.values.toml
 oxibeltctl rulepack apply --file vaultwarden.oxirule-rulepack.toml --interactive
 ```
 
-Installed manifests contain concrete rendered rule content and do not require source `[[bindings]]` or `[[profiles]]` metadata at runtime. Direct runtime loading rejects source manifests that still declare unresolved required bindings; render or apply them with `--bind` first. `rulepack apply` also writes `rulepacks/{name}.install.toml` under the OxiRule directory with the selected profile, effective mode, source/provenance fields, bindings, values, local rule overrides, and local exceptions. The install lockfile is metadata only and is not loaded as an executable rulepack.
+The preinstall report contains `install_plan`, `diff`, `risk`, `warnings`, `route_candidates`, `missing_bindings`, `missing_variables`, and `suggested_command`. In complete reports, `install_plan.will_put` lists the exact OxiRule-relative files that would be written, `will_reload` is `oxirule`, and the report includes the effective mode, selected profile, bindings, values count, and source/provenance summary. Incomplete reports leave `diff` empty and include route candidates plus a suggested command for the missing bindings or scalar values.
+
+`rulepack diff` uses the active `/admin/v1/waf/rulepacks` summaries as the current-state basis. A new install reports exact `added_rules`, `changed_rules = 0`, `deleted_rules = 0`, and `basis = "new_install"`. A same-name active rulepack reports exact count deltas from the active summary, sets `changed_rules = null`, uses `basis = "active_summary"`, and warns that content-level changed-rule diffs require a future Admin manifest-read or plan endpoint.
+
+`risk` reports terminal action types derived from rendered rule TOML, static request/response body inspection needs, cost warnings from the Admin OxiRule devtool when available, optional fixture results, optional replay results, and an estimated cost of `low` or `medium`. `--fixture FILE` and `--replay FILE` are valid only with `apply --dry-run`. Dry-run prints the report and exits before fetching an apply ETag, sending `/admin/v1/files/sync`, or verifying active installation.
+
+Installed manifests contain concrete rendered rule content and do not require source `[[bindings]]` or `[[profiles]]` metadata at runtime. Direct runtime loading rejects source manifests that still declare unresolved required bindings; render, plan, diff, dry-run, or apply them with `--bind` first. `rulepack apply` also writes `rulepacks/{name}.install.toml` under the OxiRule directory with the selected profile, effective mode, source/provenance fields, bindings, values, local rule overrides, and local exceptions. The install lockfile is metadata only and is not loaded as an executable rulepack.
 
 ## Development Tools
 

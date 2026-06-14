@@ -13,6 +13,8 @@ pub(crate) struct RulepackCommand {
 pub(crate) enum RulepackSubcommand {
   List,
   Fit(RulepackFitArgs),
+  Plan(RulepackPlanArgs),
+  Diff(RulepackDiffArgs),
   Inspect(RulepackInspectArgs),
   Render(RulepackRenderArgs),
   Check(RulepackCheckArgs),
@@ -22,6 +24,42 @@ pub(crate) enum RulepackSubcommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct RulepackFitArgs {
+  #[command(flatten)]
+  pub(crate) source: RulepackSourceArgs,
+  #[arg(long = "values", value_name = "FILE")]
+  pub(crate) values: Option<PathBuf>,
+  #[arg(long = "var", value_name = "KEY=VALUE")]
+  pub(crate) vars: Vec<String>,
+  #[arg(long = "bind", value_name = "KEY=VALUE")]
+  pub(crate) binds: Vec<String>,
+  #[arg(long = "profile", value_name = "NAME")]
+  pub(crate) profile: Option<String>,
+  #[arg(long, value_enum)]
+  pub(crate) mode: Option<RulepackModeArg>,
+  #[arg(long)]
+  pub(crate) force_mode: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackPlanArgs {
+  #[command(flatten)]
+  pub(crate) source: RulepackSourceArgs,
+  #[arg(long = "values", value_name = "FILE")]
+  pub(crate) values: Option<PathBuf>,
+  #[arg(long = "var", value_name = "KEY=VALUE")]
+  pub(crate) vars: Vec<String>,
+  #[arg(long = "bind", value_name = "KEY=VALUE")]
+  pub(crate) binds: Vec<String>,
+  #[arg(long = "profile", value_name = "NAME")]
+  pub(crate) profile: Option<String>,
+  #[arg(long, value_enum)]
+  pub(crate) mode: Option<RulepackModeArg>,
+  #[arg(long)]
+  pub(crate) force_mode: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackDiffArgs {
   #[command(flatten)]
   pub(crate) source: RulepackSourceArgs,
   #[arg(long = "values", value_name = "FILE")]
@@ -94,6 +132,12 @@ pub(crate) struct RulepackApplyArgs {
   pub(crate) force_mode: bool,
   #[arg(long)]
   pub(crate) interactive: bool,
+  #[arg(long)]
+  pub(crate) dry_run: bool,
+  #[arg(long, value_name = "FILE", requires = "dry_run")]
+  pub(crate) fixture: Option<PathBuf>,
+  #[arg(long, value_name = "FILE", requires = "dry_run")]
+  pub(crate) replay: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

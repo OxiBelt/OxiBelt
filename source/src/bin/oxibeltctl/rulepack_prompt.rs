@@ -10,33 +10,45 @@ use crate::cli::{RulepackModeArg, RulepackSourceArgs};
 use crate::rulepack::LoadedRulepackSource;
 use crate::rulepack_fit::{RulepackFitEvaluation, RulepackFitReport};
 
+pub(crate) struct InteractiveApplyRequest<'a> {
+  pub(crate) loaded: &'a LoadedRulepackSource,
+  pub(crate) source_args: &'a RulepackSourceArgs,
+  pub(crate) vars: &'a mut BTreeMap<String, String>,
+  pub(crate) binds: &'a mut BTreeMap<String, String>,
+  pub(crate) mode: RulepackModeArg,
+  pub(crate) force_mode: bool,
+  pub(crate) confirm_apply: bool,
+}
+
 pub(crate) async fn complete_interactive_apply(
   client: &AdminClient,
-  loaded: &LoadedRulepackSource,
-  source_args: &RulepackSourceArgs,
-  vars: &mut BTreeMap<String, String>,
-  binds: &mut BTreeMap<String, String>,
-  mode: RulepackModeArg,
-  force_mode: bool,
+  request: InteractiveApplyRequest<'_>,
 ) -> anyhow::Result<()> {
   let evaluation = crate::rulepack_fit::evaluate_fit(
     client,
-    loaded,
-    source_args,
+    request.loaded,
+    request.source_args,
     crate::rulepack_fit::RulepackFitOptions {
-      vars,
-      binds,
-      command_vars: vars,
-      command_binds: binds,
+      vars: request.vars,
+      binds: request.binds,
+      command_vars: request.vars,
+      command_binds: request.binds,
       values_file: None,
       profile_arg: None,
-      mode: Some(mode),
-      force_mode,
+      mode: Some(request.mode),
+      force_mode: request.force_mode,
     },
   )
   .await?;
   let mut prompt = StdioPrompt;
-  complete_interactive_from_evaluation(&evaluation, vars, binds, mode, &mut prompt)
+  complete_interactive_from_evaluation(
+    &evaluation,
+    request.vars,
+    request.binds,
+    request.mode,
+    request.confirm_apply,
+    &mut prompt,
+  )
 }
 
 pub(crate) trait InteractivePrompt {
@@ -74,6 +86,7 @@ pub(crate) fn complete_interactive_from_evaluation(
   vars: &mut BTreeMap<String, String>,
   binds: &mut BTreeMap<String, String>,
   mode: RulepackModeArg,
+  confirm_apply: bool,
   prompt: &mut impl InteractivePrompt,
 ) -> anyhow::Result<()> {
   if !prompt.is_terminal() {
@@ -82,6 +95,9 @@ pub(crate) fn complete_interactive_from_evaluation(
   collect_missing_bindings(&evaluation.inputs, &evaluation.report, vars, binds, prompt)?;
   collect_missing_variables(&evaluation.inputs, vars, binds, prompt)?;
   print_confirmation(&evaluation.inputs, vars, binds, mode, prompt)?;
+  if !confirm_apply {
+    return Ok(());
+  }
   let answer = prompt.prompt("Apply rulepack now? [y/N]")?;
   if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
     bail!("rulepack apply cancelled");

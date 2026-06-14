@@ -70,7 +70,7 @@ pub(crate) enum Command {
   Pool(PoolCommand),
   Waf(WafCommand),
   OxiRule(OxiRuleCommand),
-  Rulepack(RulepackCommand),
+  Rulepack(Box<RulepackCommand>),
   DynamicPolicy(DynamicPolicyCommand),
   Block(MitigationArgs),
   Allow(MitigationArgs),

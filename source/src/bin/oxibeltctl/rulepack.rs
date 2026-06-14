@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
@@ -7,24 +6,20 @@ use anyhow::{Context, bail};
 use http::{Method, StatusCode};
 use oxibelt::admin_client::{AdminClient, AdminResponse};
 use oxibelt::waf::{
-  RULEPACK_FILE_SUFFIX, RulepackReferencedFileKind, RulepackRenderOptions,
-  RulepackSourceProvenance, inspect_rulepack, referenced_rulepack_files,
-  render_rulepack_for_install, validate_rulepack_manifest,
+  RULEPACK_FILE_SUFFIX, RulepackRenderOptions, RulepackSourceProvenance, inspect_rulepack,
+  referenced_rulepack_files, render_rulepack_for_install, validate_rulepack_manifest,
 };
 use serde_json::{Value, json};
 use url::Url;
 
 use crate::cli::{
-  Command, OutputFormat, RulepackApplyArgs, RulepackCommand, RulepackFitArgs, RulepackModeArg,
-  RulepackRemoveArgs, RulepackSourceArgs, RulepackSubcommand,
+  Command, OutputFormat, RulepackApplyArgs, RulepackCommand, RulepackFitArgs, RulepackRemoveArgs,
+  RulepackSourceArgs, RulepackSubcommand,
 };
 use crate::output::{print_permission_hint, print_response};
 use crate::plan::{PermissionHint, RequestPlan};
-use crate::rulepack_install::{
-  RulepackInstallLockInput, installed_rulepack_lock_path, installed_rulepack_path,
-  render_install_lock,
-};
-use crate::rulepack_render::{render_options, render_text};
+use crate::rulepack_install::{installed_rulepack_lock_path, installed_rulepack_path};
+use crate::rulepack_render::render_options;
 use crate::rulepack_url::load_url_source;
 #[cfg(test)]
 use crate::rulepack_url::{
@@ -138,6 +133,8 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
     }
     RulepackSubcommand::List
     | RulepackSubcommand::Fit(_)
+    | RulepackSubcommand::Plan(_)
+    | RulepackSubcommand::Diff(_)
     | RulepackSubcommand::Apply(_)
     | RulepackSubcommand::Remove(_) => Ok(false),
   }
@@ -161,7 +158,19 @@ pub(crate) async fn run_remote_if_requested(
       print_fit_report(client, args, output).await?;
       Ok(true)
     }
+    RulepackSubcommand::Plan(args) => {
+      crate::rulepack_plan::print_plan(client, args, output).await?;
+      Ok(true)
+    }
+    RulepackSubcommand::Diff(args) => {
+      crate::rulepack_plan::print_diff(client, args, output).await?;
+      Ok(true)
+    }
     RulepackSubcommand::Apply(args) => {
+      if args.dry_run {
+        crate::rulepack_plan::print_apply_dry_run(client, args, output).await?;
+        return Ok(true);
+      }
       let (plan, installed_name) = plan_rulepack_apply(client, args).await?;
       send_and_print(client, &plan, output).await?;
       verify_rulepack_active(client, &installed_name).await?;
@@ -191,11 +200,18 @@ pub(crate) async fn plan_rulepack(
       permission: permission("waf:ListOxiRulePacks", "*"),
       filter: crate::plan::ResponseFilter::None,
     }),
-    RulepackSubcommand::Apply(args) => plan_rulepack_apply(client, args)
-      .await
-      .map(|(plan, _)| plan),
+    RulepackSubcommand::Apply(args) => {
+      if args.dry_run {
+        bail!("rulepack apply --dry-run should run before Admin request planning")
+      }
+      plan_rulepack_apply(client, args)
+        .await
+        .map(|(plan, _)| plan)
+    }
     RulepackSubcommand::Remove(args) => plan_rulepack_remove(client, args).await,
     RulepackSubcommand::Fit(_)
+    | RulepackSubcommand::Plan(_)
+    | RulepackSubcommand::Diff(_)
     | RulepackSubcommand::Inspect(_)
     | RulepackSubcommand::Render(_)
     | RulepackSubcommand::Check(_) => {
@@ -208,126 +224,21 @@ async fn plan_rulepack_apply(
   client: &AdminClient,
   args: &RulepackApplyArgs,
 ) -> anyhow::Result<(RequestPlan, String)> {
-  let loaded = load_rulepack_source(&args.source, client.timeout(), true).await?;
-  let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
-  let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
-  let resolved = crate::rulepack_values::resolve_rulepack_inputs(
-    crate::rulepack_values::RulepackResolveRequest {
-      raw: &loaded.manifest,
-      source: &loaded.source_label,
-      values_file: args.values.as_deref(),
-      cli_vars: &cli_vars,
-      cli_binds: &cli_binds,
-      cli_profile: args.profile.as_deref(),
-      cli_mode: args.mode,
-      cli_force_mode: args.force_mode,
-      default_mode: Some(RulepackModeArg::Monitor),
-    },
-  )?;
-  let mut vars = resolved.vars.clone();
-  let mut binds = resolved.binds.clone();
-  let effective_mode = resolved.mode.unwrap_or(RulepackModeArg::Monitor);
-  if args.interactive {
-    crate::rulepack_prompt::complete_interactive_apply(
-      client,
-      &loaded,
-      &args.source,
-      &mut vars,
-      &mut binds,
-      effective_mode,
-      resolved.force_mode,
-    )
-    .await?;
-  }
-  let render_vars = crate::rulepack_fit::resolve_render_variables(
-    &loaded.manifest,
-    &loaded.source_label,
-    &vars,
-    &binds,
-    true,
-  )?;
-  let options = render_options(
-    render_vars.clone(),
-    resolved.rule_overrides.clone(),
-    resolved.exceptions.clone(),
-    Some(effective_mode),
-    resolved.force_mode,
-    loaded.git_commit.clone(),
-    loaded.source_provenance.clone(),
-  );
-  let rendered_manifest =
-    render_rulepack_for_install(&loaded.manifest, &loaded.source_label, options.clone())?;
-  let inspection = inspect_rulepack(
-    &rendered_manifest,
-    &loaded.source_label,
-    RulepackRenderOptions::default(),
-  )?;
-  let name = inspection.summary.name.clone();
-  let mut operations = Vec::new();
-  for referenced in referenced_rulepack_files(&loaded.manifest, &loaded.source_label, options)? {
-    let Some(base_dir) = loaded.base_dir.as_deref() else {
-      bail!("remote single-file rulepacks must embed rule and group content");
-    };
-    let path = resolve_existing_local_source_file(base_dir, &referenced.path)?;
-    let raw = std::fs::read_to_string(&path)
-      .with_context(|| format!("failed to read referenced rulepack file {}", path.display()))?;
-    operations.push(json!({
-      "op": "put",
-      "root": match referenced.kind {
-        RulepackReferencedFileKind::Rule => "oxirule",
-        RulepackReferencedFileKind::Group => "oxirule_group",
-      },
-      "path": referenced.path.to_string_lossy(),
-      "content": render_text(&raw, &render_vars),
-    }));
-  }
-  operations.push(json!({
-    "op": "put",
-    "root": "oxirule_rulepack",
-    "path": installed_rulepack_path(&name)?,
-    "content": rendered_manifest,
-  }));
-  let input_metadata =
-    oxibelt::waf::inspect_rulepack_inputs(&loaded.manifest, &loaded.source_label)?;
-  let lock_values = input_metadata
-    .variables
-    .iter()
-    .filter_map(|variable| {
-      render_vars
-        .get(&variable.name)
-        .map(|value| (variable.name.clone(), value.clone()))
-    })
-    .collect::<BTreeMap<_, _>>();
-  operations.push(json!({
-    "op": "put",
-    "root": "oxirule_rulepack_install",
-    "path": installed_rulepack_lock_path(&name)?,
-    "content": render_install_lock(RulepackInstallLockInput {
-      name: &name,
-      version: &inspection.summary.version,
-      source: &loaded.source_label,
-      source_commit: loaded.git_commit.as_deref(),
-      source_provenance: loaded.source_provenance.as_ref(),
-      selected_profile: resolved.selected_profile.as_deref(),
-      effective_mode,
-      force_mode: resolved.force_mode,
-      bindings: &binds,
-      values: &lock_values,
-      rule_overrides: &resolved.rule_overrides,
-      exceptions: &resolved.exceptions,
-    })?,
-  }));
+  let prepared = crate::rulepack_plan::prepare_rulepack_apply(client, args, true).await?;
   let etag = current_etag(client).await?;
   Ok((
     RequestPlan {
       method: Method::POST,
       endpoint: "/admin/v1/files/sync".to_string(),
-      body: Some(json!({ "apply": "oxirule", "operations": operations })),
+      body: Some(prepared.request_body),
       if_match: Some(etag),
-      permission: permission("waf:PutOxiRulePack", &format!("oxirule-rulepack/{name}")),
+      permission: permission(
+        "waf:PutOxiRulePack",
+        &format!("oxirule-rulepack/{}", prepared.name),
+      ),
       filter: crate::plan::ResponseFilter::None,
     },
-    name,
+    prepared.name,
   ))
 }
 
@@ -487,7 +398,7 @@ impl LoadedRulepackSource {
   }
 }
 
-async fn load_rulepack_source(
+pub(crate) async fn load_rulepack_source(
   args: &RulepackSourceArgs,
   timeout: Duration,
   require_pin: bool,
@@ -602,7 +513,7 @@ fn validate_git_url(git: &str) -> anyhow::Result<String> {
   Ok(clone_url.to_string())
 }
 
-async fn current_etag(client: &AdminClient) -> anyhow::Result<String> {
+pub(crate) async fn current_etag(client: &AdminClient) -> anyhow::Result<String> {
   let response = client
     .request_json(Method::GET, "/admin/v1/config/status", None, None)
     .await?;
@@ -631,7 +542,10 @@ fn ensure_manifest_suffix(path: &Path) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn resolve_existing_local_source_file(base_dir: &Path, relative: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_existing_local_source_file(
+  base_dir: &Path,
+  relative: &Path,
+) -> anyhow::Result<PathBuf> {
   let candidate = join_local_source_path(base_dir, relative)?;
   let canonical_base = base_dir.canonicalize().with_context(|| {
     format!(
@@ -716,3 +630,7 @@ impl TempTree {
 #[cfg(test)]
 #[path = "rulepack_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rulepack_dry_run_tests.rs"]
+mod dry_run_tests;

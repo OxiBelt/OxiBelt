@@ -34,6 +34,8 @@ mod rulepack_fit;
 mod rulepack_install;
 #[path = "oxibeltctl/rulepack_openpgp.rs"]
 mod rulepack_openpgp;
+#[path = "oxibeltctl/rulepack_plan.rs"]
+mod rulepack_plan;
 #[path = "oxibeltctl/rulepack_prompt.rs"]
 mod rulepack_prompt;
 #[path = "oxibeltctl/rulepack_render.rs"]
