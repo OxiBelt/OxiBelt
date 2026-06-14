@@ -27,6 +27,9 @@ use crate::rulepack_url::{
 };
 
 pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<bool> {
+  if crate::rulepack_catalog::run_local_if_requested(command).await? {
+    return Ok(true);
+  }
   let Command::Rulepack(command) = command else {
     return Ok(false);
   };
@@ -132,6 +135,11 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
       Ok(true)
     }
     RulepackSubcommand::List
+    | RulepackSubcommand::Repo(_)
+    | RulepackSubcommand::Search(_)
+    | RulepackSubcommand::Info(_)
+    | RulepackSubcommand::Install(_)
+    | RulepackSubcommand::Update(_)
     | RulepackSubcommand::Fit(_)
     | RulepackSubcommand::Plan(_)
     | RulepackSubcommand::Diff(_)
@@ -176,12 +184,31 @@ pub(crate) async fn run_remote_if_requested(
       verify_rulepack_active(client, &installed_name).await?;
       Ok(true)
     }
+    RulepackSubcommand::Install(args) => {
+      let apply_args =
+        crate::rulepack_catalog::resolve_install_args(args, client.timeout()).await?;
+      if apply_args.dry_run {
+        crate::rulepack_plan::print_apply_dry_run(client, &apply_args, output).await?;
+        return Ok(true);
+      }
+      let (plan, installed_name) = plan_rulepack_apply(client, &apply_args).await?;
+      send_and_print(client, &plan, output).await?;
+      verify_rulepack_active(client, &installed_name).await?;
+      Ok(true)
+    }
+    RulepackSubcommand::Update(args) => {
+      crate::rulepack_catalog::print_update_plan(client, args, output).await?;
+      Ok(true)
+    }
     RulepackSubcommand::Remove(args) => {
       let plan = plan_rulepack_remove(client, args).await?;
       send_and_print(client, &plan, output).await?;
       Ok(true)
     }
-    RulepackSubcommand::Inspect(_)
+    RulepackSubcommand::Repo(_)
+    | RulepackSubcommand::Search(_)
+    | RulepackSubcommand::Info(_)
+    | RulepackSubcommand::Inspect(_)
     | RulepackSubcommand::Render(_)
     | RulepackSubcommand::Check(_) => Ok(false),
   }
@@ -209,7 +236,12 @@ pub(crate) async fn plan_rulepack(
         .map(|(plan, _)| plan)
     }
     RulepackSubcommand::Remove(args) => plan_rulepack_remove(client, args).await,
-    RulepackSubcommand::Fit(_)
+    RulepackSubcommand::Repo(_)
+    | RulepackSubcommand::Search(_)
+    | RulepackSubcommand::Info(_)
+    | RulepackSubcommand::Install(_)
+    | RulepackSubcommand::Update(_)
+    | RulepackSubcommand::Fit(_)
     | RulepackSubcommand::Plan(_)
     | RulepackSubcommand::Diff(_)
     | RulepackSubcommand::Inspect(_)

@@ -298,75 +298,81 @@ fn enforce_signature_policy(signature: &openpgp::packet::Signature) -> anyhow::R
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
+pub(crate) struct TestSignedRulepackFixture {
+  pub(crate) rulepack: Vec<u8>,
+  pub(crate) signature: Vec<u8>,
+  pub(crate) key_file: PathBuf,
+  pub(crate) fingerprint: String,
+  _temp: tempfile::TempDir,
+}
+
+#[cfg(test)]
+pub(crate) fn test_signed_rulepack_fixture(
+  content: &[u8],
+  user_id: &str,
+) -> TestSignedRulepackFixture {
   use std::io::Write;
 
   use openpgp::armor;
   use openpgp::serialize::Serialize;
   use openpgp::serialize::stream::{Armorer, Message, Signer};
 
-  struct SignedFixture {
-    rulepack: Vec<u8>,
-    signature: Vec<u8>,
-    key_file: PathBuf,
-    fingerprint: String,
-    _temp: tempfile::TempDir,
+  let policy = StandardPolicy::new();
+  let (cert, _revocation) = CertBuilder::new()
+    .add_userid(user_id)
+    .add_signing_subkey()
+    .generate()
+    .expect("generate key");
+  let signing_key = cert
+    .keys()
+    .unencrypted_secret()
+    .with_policy(&policy, None)
+    .supported()
+    .alive()
+    .revoked(false)
+    .for_signing()
+    .next()
+    .expect("signing key")
+    .key()
+    .clone();
+  let fingerprint = signing_key.fingerprint().to_hex().to_ascii_lowercase();
+  let keypair = signing_key.into_keypair().expect("keypair");
+  let mut signature = Vec::new();
+  {
+    let message = Message::new(&mut signature);
+    let message = Armorer::new(message)
+      .kind(armor::Kind::Signature)
+      .build()
+      .expect("signature armor");
+    let mut signer = Signer::new(message, keypair)
+      .expect("signer")
+      .hash_algo(HashAlgorithm::SHA256)
+      .expect("hash")
+      .detached()
+      .build()
+      .expect("detached signer");
+    signer.write_all(content).expect("sign content");
+    signer.finalize().expect("finalize signature");
   }
-
-  fn signed_fixture(content: &[u8], user_id: &str) -> SignedFixture {
-    let policy = StandardPolicy::new();
-    let (cert, _revocation) = CertBuilder::new()
-      .add_userid(user_id)
-      .add_signing_subkey()
-      .generate()
-      .expect("generate key");
-    let signing_key = cert
-      .keys()
-      .unencrypted_secret()
-      .with_policy(&policy, None)
-      .supported()
-      .alive()
-      .revoked(false)
-      .for_signing()
-      .next()
-      .expect("signing key")
-      .key()
-      .clone();
-    let fingerprint = signing_key.fingerprint().to_hex().to_ascii_lowercase();
-    let keypair = signing_key.into_keypair().expect("keypair");
-    let mut signature = Vec::new();
-    {
-      let message = Message::new(&mut signature);
-      let message = Armorer::new(message)
-        .kind(armor::Kind::Signature)
-        .build()
-        .expect("signature armor");
-      let mut signer = Signer::new(message, keypair)
-        .expect("signer")
-        .hash_algo(HashAlgorithm::SHA256)
-        .expect("hash")
-        .detached()
-        .build()
-        .expect("detached signer");
-      signer.write_all(content).expect("sign content");
-      signer.finalize().expect("finalize signature");
-    }
-    let temp = tempfile::tempdir().expect("tempdir");
-    let key_file = temp.path().join("publisher.asc");
-    let mut public_key = Vec::new();
-    cert.serialize(&mut public_key).expect("public key");
-    std::fs::write(&key_file, public_key).expect("write public key");
-    SignedFixture {
-      rulepack: content.to_vec(),
-      signature,
-      key_file,
-      fingerprint,
-      _temp: temp,
-    }
+  let temp = tempfile::tempdir().expect("tempdir");
+  let key_file = temp.path().join("publisher.asc");
+  let mut public_key = Vec::new();
+  cert.serialize(&mut public_key).expect("public key");
+  std::fs::write(&key_file, public_key).expect("write public key");
+  TestSignedRulepackFixture {
+    rulepack: content.to_vec(),
+    signature,
+    key_file,
+    fingerprint,
+    _temp: temp,
   }
+}
 
-  fn trust_for(fixture: &SignedFixture) -> RulepackOpenPgpTrust<'_> {
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn trust_for(fixture: &TestSignedRulepackFixture) -> RulepackOpenPgpTrust<'_> {
     RulepackOpenPgpTrust {
       key_files: std::slice::from_ref(&fixture.key_file),
       keyring_dirs: &[],
@@ -386,7 +392,8 @@ mod tests {
 
   #[test]
   fn valid_signature_verifies_with_trusted_public_key() {
-    let fixture = signed_fixture(b"[rulepack]\nname = \"demo\"\n", "Rulepack <rulepack@test>");
+    let fixture =
+      test_signed_rulepack_fixture(b"[rulepack]\nname = \"demo\"\n", "Rulepack <rulepack@test>");
 
     let verification =
       verify_rulepack_signature(&fixture.signature, &fixture.rulepack, trust_for(&fixture))
@@ -397,7 +404,7 @@ mod tests {
 
   #[test]
   fn tampered_rulepack_does_not_verify() {
-    let fixture = signed_fixture(b"original bytes", "Rulepack <rulepack@test>");
+    let fixture = test_signed_rulepack_fixture(b"original bytes", "Rulepack <rulepack@test>");
     let mut tampered = fixture.rulepack.clone();
     tampered.extend_from_slice(b"\nchanged");
 
@@ -413,8 +420,8 @@ mod tests {
 
   #[test]
   fn wrong_trusted_key_does_not_verify() {
-    let fixture = signed_fixture(b"rulepack bytes", "Rulepack <rulepack@test>");
-    let other = signed_fixture(b"other bytes", "Other <other@test>");
+    let fixture = test_signed_rulepack_fixture(b"rulepack bytes", "Rulepack <rulepack@test>");
+    let other = test_signed_rulepack_fixture(b"other bytes", "Other <other@test>");
 
     let error = verify_rulepack_signature(
       &fixture.signature,
@@ -436,7 +443,7 @@ mod tests {
 
   #[test]
   fn fingerprint_pin_must_match_trusted_signer() {
-    let fixture = signed_fixture(b"rulepack bytes", "Rulepack <rulepack@test>");
+    let fixture = test_signed_rulepack_fixture(b"rulepack bytes", "Rulepack <rulepack@test>");
     let wrong_fingerprint = vec!["0".repeat(40)];
 
     let error = verify_rulepack_signature(
@@ -459,7 +466,7 @@ mod tests {
 
   #[test]
   fn missing_trust_material_fails_closed() {
-    let fixture = signed_fixture(b"rulepack bytes", "Rulepack <rulepack@test>");
+    let fixture = test_signed_rulepack_fixture(b"rulepack bytes", "Rulepack <rulepack@test>");
 
     let error = verify_rulepack_signature(
       &fixture.signature,

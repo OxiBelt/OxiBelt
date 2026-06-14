@@ -123,7 +123,7 @@ async fn load_rulepack_signature(
   .await
 }
 
-async fn download_url_bytes(
+pub(crate) async fn download_url_bytes(
   url: &Url,
   ca_certs: &[PathBuf],
   token_env: Option<&str>,
@@ -253,7 +253,7 @@ pub(crate) fn same_origin(left: &Url, right: &Url) -> bool {
     && left.port_or_known_default() == right.port_or_known_default()
 }
 
-fn diagnostic_url(url: &Url) -> String {
+pub(crate) fn diagnostic_url(url: &Url) -> String {
   let mut diagnostic_url = url.clone();
   let _ = diagnostic_url.set_username("");
   let _ = diagnostic_url.set_password(None);

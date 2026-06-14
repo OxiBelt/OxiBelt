@@ -241,6 +241,43 @@ OpenPGP trust uses public keys only. `--rulepack-openpgp-key FILE` adds repeatab
 
 When a URL rulepack is rendered for install, OxiBelt records optional `[rulepack]` provenance fields in the installed manifest: `source_url`, `source_sha256`, `source_openpgp_signature_url`, and `source_openpgp_signer_fingerprint`. URLs are sanitized before recording.
 
+Remote catalogs are a discovery layer over the same URL install path. `oxibeltctl rulepack repo add NAME URL` records a catalog index URL in `${OXIBELT_RULEPACK_REPOS_FILE}` when set, otherwise `${XDG_CONFIG_HOME:-$HOME/.config}/oxibelt/rulepack-repos.toml`. The registry stores repo URLs, CA certificate paths, token environment variable names, insecure-URL opt-ins, and OpenPGP trust settings; it never stores bearer token values.
+
+Catalog indexes may be TOML or JSON. TOML indexes use this shape:
+
+```toml
+[index]
+schema_version = 1
+generated_at = "2026-06-14T00:00:00Z"
+
+[[rulepacks]]
+name = "vaultwarden-hardening"
+version = "0.3.0"
+targets = ["vaultwarden", "bitwarden-rs"]
+source = "https://packs.example.test/vaultwarden/0.3.0/rulepack.oxirule-rulepack.toml"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+signature_type = "openpgp"
+signature = "https://packs.example.test/vaultwarden/0.3.0/rulepack.sig"
+min_oxibelt_version = "0.1.0"
+license = "Apache-2.0"
+maintainers = ["example-security"]
+description = "Protect Vaultwarden admin and login surfaces."
+```
+
+`source` must be an HTTPS `.oxirule-rulepack.toml` URL unless the repo was added with `--allow-insecure-rulepack-url`; HTTP rulepack sources still require a valid detached OpenPGP signature during install. `sha256` is required for every catalog entry and is passed to the existing URL verifier. `signature_type` may only be `openpgp` in this release, and `signature` is passed to `--rulepack-openpgp-signature-url`. Sigstore and SLSA provenance are reserved for a later catalog schema.
+
+```bash
+oxibeltctl rulepack repo add official https://packs.example.test/index.toml \
+  --rulepack-openpgp-keyring /etc/oxibelt/oxirule/trusted-rulepack-publishers
+oxibeltctl rulepack search vaultwarden
+oxibeltctl rulepack info vaultwarden-hardening
+oxibeltctl rulepack install vaultwarden-hardening --interactive --dry-run
+oxibeltctl rulepack install vaultwarden-hardening --interactive
+oxibeltctl rulepack update --plan
+```
+
+`rulepack install` resolves the selected catalog entry into the same inputs as `rulepack apply --url`, so `--values`, `--bind`, `--var`, `--profile`, `--mode`, `--force-mode`, `--interactive`, `--dry-run`, `--fixture`, and `--replay` keep their normal behavior. Catalog-installed manifests must still be schema version `2`; schema version `1`, `type = "route"` under `[[variables]]`, and legacy `[variables.discovery]` are rejected.
+
 Route bindings separate local OxiBelt objects from general render variables. Use an explicit `[[bindings]]` entry to declare the object to discover and the placeholder it renders into. Scalar values stay in `[[variables]]`; route names and other environment objects are supplied with `--bind`.
 
 ```toml

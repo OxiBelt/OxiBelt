@@ -28,6 +28,12 @@ mod profile_catalog;
 mod resource_hint;
 #[path = "oxibeltctl/rulepack.rs"]
 mod rulepack;
+#[path = "oxibeltctl/rulepack_catalog.rs"]
+mod rulepack_catalog;
+#[path = "oxibeltctl/rulepack_catalog_index.rs"]
+mod rulepack_catalog_index;
+#[path = "oxibeltctl/rulepack_catalog_registry.rs"]
+mod rulepack_catalog_registry;
 #[path = "oxibeltctl/rulepack_fit.rs"]
 mod rulepack_fit;
 #[path = "oxibeltctl/rulepack_install.rs"]

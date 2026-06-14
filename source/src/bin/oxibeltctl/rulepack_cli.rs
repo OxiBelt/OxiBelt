@@ -12,6 +12,11 @@ pub(crate) struct RulepackCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum RulepackSubcommand {
   List,
+  Repo(RulepackRepoCommand),
+  Search(RulepackSearchArgs),
+  Info(RulepackInfoArgs),
+  Install(RulepackCatalogInstallArgs),
+  Update(RulepackUpdateArgs),
   Fit(RulepackFitArgs),
   Plan(RulepackPlanArgs),
   Diff(RulepackDiffArgs),
@@ -20,6 +25,97 @@ pub(crate) enum RulepackSubcommand {
   Check(RulepackCheckArgs),
   Apply(RulepackApplyArgs),
   Remove(RulepackRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackRepoCommand {
+  #[command(subcommand)]
+  pub(crate) command: RulepackRepoSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RulepackRepoSubcommand {
+  Add(Box<RulepackRepoAddArgs>),
+  List,
+  Remove(RulepackRepoRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackRepoAddArgs {
+  pub(crate) name: String,
+  pub(crate) url: Url,
+  #[arg(long = "rulepack-ca-cert", value_name = "FILE")]
+  pub(crate) ca_certs: Vec<PathBuf>,
+  #[arg(long = "rulepack-token-env")]
+  pub(crate) token_env: Option<String>,
+  #[arg(long = "allow-insecure-rulepack-url")]
+  pub(crate) allow_insecure_rulepack_url: bool,
+  #[arg(long = "require-rulepack-openpgp-signature")]
+  pub(crate) require_openpgp_signature: bool,
+  #[arg(long = "rulepack-openpgp-key", value_name = "FILE")]
+  pub(crate) openpgp_key_files: Vec<PathBuf>,
+  #[arg(long = "rulepack-openpgp-keyring", value_name = "DIR")]
+  pub(crate) openpgp_keyring_dirs: Vec<PathBuf>,
+  #[arg(long = "rulepack-openpgp-fingerprint", value_name = "HEX")]
+  pub(crate) openpgp_fingerprints: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackRepoRemoveArgs {
+  pub(crate) name: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackSearchArgs {
+  pub(crate) query: String,
+  #[arg(long = "repo", value_name = "NAME")]
+  pub(crate) repo: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackInfoArgs {
+  pub(crate) name: String,
+  #[arg(long = "version", value_name = "VERSION")]
+  pub(crate) version: Option<String>,
+  #[arg(long = "repo", value_name = "NAME")]
+  pub(crate) repo: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackCatalogInstallArgs {
+  pub(crate) name: String,
+  #[arg(long = "version", value_name = "VERSION")]
+  pub(crate) version: Option<String>,
+  #[arg(long = "repo", value_name = "NAME")]
+  pub(crate) repo: Option<String>,
+  #[arg(long = "values", value_name = "FILE")]
+  pub(crate) values: Option<PathBuf>,
+  #[arg(long = "var", value_name = "KEY=VALUE")]
+  pub(crate) vars: Vec<String>,
+  #[arg(long = "bind", value_name = "KEY=VALUE")]
+  pub(crate) binds: Vec<String>,
+  #[arg(long, value_enum)]
+  pub(crate) mode: Option<RulepackModeArg>,
+  #[arg(long = "profile", value_name = "NAME")]
+  pub(crate) profile: Option<String>,
+  #[arg(long)]
+  pub(crate) force_mode: bool,
+  #[arg(long)]
+  pub(crate) interactive: bool,
+  #[arg(long)]
+  pub(crate) dry_run: bool,
+  #[arg(long, value_name = "FILE", requires = "dry_run")]
+  pub(crate) fixture: Option<PathBuf>,
+  #[arg(long, value_name = "FILE", requires = "dry_run")]
+  pub(crate) replay: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RulepackUpdateArgs {
+  #[arg(long, required = true)]
+  pub(crate) plan: bool,
+  #[arg(long = "repo", value_name = "NAME")]
+  pub(crate) repo: Option<String>,
 }
 
 #[derive(Debug, Args)]
