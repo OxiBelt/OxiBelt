@@ -598,6 +598,57 @@ run_load "${{LOAD_LABEL:?}}" h2 oxibelt "/perf/h2?body=ok" 1 1
     fs::write(path, harness).expect("Bash harness should be writable");
 }
 
+fn write_probe_json_fallback_harness(
+    path: &Path,
+    function: &str,
+    tls_dir: &Path,
+    probe_logs_dir: &Path,
+    events_path: &Path,
+    json_path: &Path,
+) {
+    let harness = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+run_id=test
+test_label=perf-test
+network_name=perf-net
+perf_probe_image=perf-probe
+tls_dir="{tls_dir}"
+probe_logs_dir="{probe_logs_dir}"
+
+mkdir -p "${{tls_dir}}" "${{probe_logs_dir}}"
+printf 'cert\n' >"${{tls_dir}}/fullchain.pem"
+
+docker() {{
+  printf 'DOCKER %s\n' "$*" >>"{events_path}"
+  case "$1" in
+    create|cp|rm)
+      return 0
+      ;;
+    start)
+      return 0
+      ;;
+    logs)
+      printf '%s\n' '{{"type":"load","label":"ready-oxibelt","requests":1,"rps":1,"errors":0}}'
+      return 0
+      ;;
+  esac
+  return 1
+}}
+
+{function}
+
+run_probe_json load --label ready-oxibelt >"{json_path}"
+"#,
+        tls_dir = tls_dir.display(),
+        probe_logs_dir = probe_logs_dir.display(),
+        events_path = events_path.display(),
+        json_path = json_path.display(),
+    );
+    fs::write(path, harness).expect("Bash harness should be writable");
+}
+
 fn write_profile_pid_harness(path: &Path, active_oxibelt_host_pid: &str) {
     let harness = format!(
         r#"#!/usr/bin/env bash
@@ -1831,6 +1882,53 @@ fn performance_probe_image_override_skips_local_probe_build() {
         script.contains("if [[ \"${remove_perf_probe_image}\" == \"1\" ]]; then")
             && script.contains("docker rmi -f \"${perf_probe_image}\""),
         "performance harness should not delete externally provided probe images"
+    );
+}
+
+#[test]
+fn run_probe_json_uses_container_logs_when_attach_output_is_blank() {
+    let function = extract_bash_function(&performance_script_text(), "run_probe_json");
+    let temp_dir = HarnessTempDir::new("oxibelt-probe-json-fallback-");
+    let harness_path = temp_dir.join("harness.sh");
+    let tls_dir = temp_dir.join("tls");
+    let probe_logs_dir = temp_dir.join("probe-logs");
+    let events_path = temp_dir.join("events.log");
+    let json_path = temp_dir.join("result.json");
+
+    write_probe_json_fallback_harness(
+        &harness_path,
+        &function,
+        &tls_dir,
+        &probe_logs_dir,
+        &events_path,
+        &json_path,
+    );
+
+    let output = Command::new("bash")
+        .arg(&harness_path)
+        .output()
+        .expect("fallback harness should run");
+    assert!(
+        output.status.success(),
+        "fallback harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = fs::read_to_string(&json_path).expect("probe JSON should be written");
+    assert!(
+        json.contains(r#""label":"ready-oxibelt""#),
+        "container log JSON should be returned when attached output is blank: {json}"
+    );
+    let probe_log = fs::read_to_string(probe_logs_dir.join("ready-oxibelt.log"))
+        .expect("probe log should be written");
+    assert!(
+        probe_log.contains("Attached output:\n") && probe_log.contains("\nContainer logs:\n"),
+        "probe log should show attached output and container log sections: {probe_log}"
+    );
+    assert!(
+        probe_log.contains(r#""requests":1"#),
+        "probe log should include the fallback container logs: {probe_log}"
     );
 }
 

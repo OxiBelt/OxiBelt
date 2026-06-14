@@ -1268,7 +1268,7 @@ run_profiled_probe_json() {
 
 run_probe_json() {
   local probe_container="oxibelt-perf-probe-${run_id}-${RANDOM}"
-  local output status json probe_label previous_arg probe_log_name probe_log_path arg
+  local output container_logs selected_output status json probe_label previous_arg probe_log_name probe_log_path arg
   probe_label="probe"
   previous_arg=""
   for arg in "$@"; do
@@ -1290,20 +1290,36 @@ run_probe_json() {
 
   status=0
   output="$(docker start -a "${probe_container}" 2>&1)" || status=$?
+  container_logs="$(docker logs "${probe_container}" 2>&1 || true)"
+  selected_output="${output}"
+  if [[ "${status}" == "0" ]]; then
+    json="$(printf '%s\n' "${selected_output}" | tail -n 1)"
+    if ! jq -e . >/dev/null <<<"${json}" && [[ -n "${container_logs}" ]]; then
+      selected_output="${container_logs}"
+      json="$(printf '%s\n' "${selected_output}" | tail -n 1)"
+    fi
+  fi
   {
     printf 'Command: perf-probe'
     printf ' %q' "$@"
     printf '\n\n'
+    printf 'Exit status: %s\n\n' "${status}"
+    printf 'Attached output:\n'
     printf '%s\n' "${output}"
+    printf '\nContainer logs:\n'
+    printf '%s\n' "${container_logs}"
   } >"${probe_log_path}"
   docker rm -f "${probe_container}" >/dev/null 2>&1 || true
   if [[ "${status}" != "0" ]]; then
-    echo "${output}" >&2
+    if [[ -n "${output}" ]]; then
+      echo "${output}" >&2
+    else
+      echo "${container_logs}" >&2
+    fi
     return "${status}"
   fi
-  json="$(printf '%s\n' "${output}" | tail -n 1)"
   if ! jq -e . >/dev/null <<<"${json}"; then
-    echo "${output}" >&2
+    echo "${selected_output}" >&2
     return 1
   fi
   printf '%s\n' "${json}"
