@@ -1756,6 +1756,7 @@ jobs:
           }
           OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE="$(actions_var_or_default OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE warn)"
           OXIBELT_PERF_DIAGNOSTIC_GATE_MODE="$(actions_var_or_default OXIBELT_PERF_DIAGNOSTIC_GATE_MODE warn)"
+          unset OXIBELT_ACTIONS_VARS_JSON
           selected_profile_label="${PERFORMANCE_PROFILE_LABEL}"
           if [[ -z "${selected_profile_label}" || "${selected_profile_label}" == "none" ]]; then
             if [[ "${PERFORMANCE_H2_PROFILE}" == "true" ]]; then
@@ -1840,7 +1841,8 @@ jobs:
                   OXIBELT_PERF_DIAGNOSTIC_COMPRESS=1
                 )
               fi
-              env "${profile_env[@]}" \
+              env -u OXIBELT_ACTIONS_VARS_JSON \
+              "${profile_env[@]}" \
               "${diagnostic_profile_env[@]}" \
               OXIBELT_DOCKER_IMAGE="${image_tag}" \
               OXIBELT_NGINX_IMAGE="${nginx_image_tag}" \
@@ -2144,6 +2146,7 @@ jobs:
           }
           OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE="$(actions_var_or_default OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE warn)"
           OXIBELT_PERF_DIAGNOSTIC_GATE_MODE="$(actions_var_or_default OXIBELT_PERF_DIAGNOSTIC_GATE_MODE warn)"
+          unset OXIBELT_ACTIONS_VARS_JSON
           results_files="$(jq -r '.artifact_discovery.results_files // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           unsupported_count="$(jq -r '.artifact_discovery.unsupported_cpu.count // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if [[ "${results_files}" == "0" ]]; then

@@ -1578,8 +1578,10 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
             && performance_job.contains(
                 "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\""
             )
-            && performance_job.contains("OXIBELT_NGINX_H3_MODE=required"),
-        "docker-performance should compare target-specific images, reuse probe and external images, pass diagnostic gate mode, and require nginx HTTP/3 in CI"
+            && performance_job.contains("OXIBELT_NGINX_H3_MODE=required")
+            && performance_job.contains("unset OXIBELT_ACTIONS_VARS_JSON")
+            && performance_job.contains("env -u OXIBELT_ACTIONS_VARS_JSON"),
+        "docker-performance should compare target-specific images, reuse probe and external images, pass diagnostic gate mode, require nginx HTTP/3 in CI, and keep the full vars JSON out of repository scripts"
     );
     assert!(
         performance_job.contains("name: Download performance probe image artifact")
@@ -1778,6 +1780,7 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
             && workflow.contains("actions_var_or_default()")
             && workflow.contains("OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=\"$(actions_var_or_default OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE warn)\"")
             && !workflow.contains("vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE']")
+            && workflow.matches("unset OXIBELT_ACTIONS_VARS_JSON").count() >= 2
             && workflow.contains("external_diagnostic_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") == \"benchmark_infrastructure_diagnostic\")")
             && workflow.contains("::warning title=External benchmark diagnostic::")
             && workflow.contains("external_failure_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") != \"benchmark_infrastructure_diagnostic\") | (.fail_count // 0)] | add // 0'")
@@ -1789,6 +1792,7 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         workflow.contains("OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"$(actions_var_or_default OXIBELT_PERF_DIAGNOSTIC_GATE_MODE warn)\"")
             && !workflow.contains("vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE']")
+            && summary_job.contains("unset OXIBELT_ACTIONS_VARS_JSON")
             && workflow.contains("profile_environment_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") == \"profiling_environment_unavailable\")")
             && workflow.contains("profiling unavailable in the current environment for ${profile_environment_count} comparator group(s): perf record failed with status 255")
             && workflow.contains("profile_failure_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") != \"profiling_environment_unavailable\") | (.fail_count // 0)] | add // 0'")
