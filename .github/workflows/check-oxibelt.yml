@@ -131,7 +131,7 @@ jobs:
       fail-fast: false
       matrix:
         rust_version:
-          - 1.95.0
+          - 1.96.0
         runner:
           - ubuntu-latest
           - ubuntu-24.04-arm
@@ -167,8 +167,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Install Rust advisory tools
         run: |
@@ -232,7 +232,7 @@ jobs:
       fail-fast: false
       matrix:
         rust_version:
-          - 1.95.0
+          - 1.96.0
         target:
           - riscv64gc-unknown-linux-gnu
           - riscv64gc-unknown-linux-musl
@@ -315,8 +315,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Generate matrices
         id: matrices
@@ -364,8 +364,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Install native build dependencies
         run: |
@@ -878,8 +878,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -950,8 +950,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -1022,8 +1022,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -1094,8 +1094,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -1166,8 +1166,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -1238,8 +1238,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -1310,8 +1310,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -1382,8 +1382,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -1937,8 +1937,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
 
       - name: Download Docker performance summary input artifacts
         id: download-performance-artifacts

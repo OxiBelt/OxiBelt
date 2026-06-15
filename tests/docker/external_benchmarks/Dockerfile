@@ -1,4 +1,4 @@
-FROM rust:1.95.0-trixie AS oha-builder
+FROM rust:1.96.0-trixie AS oha-builder
 
 ARG OHA_VERSION=1.12.1
 

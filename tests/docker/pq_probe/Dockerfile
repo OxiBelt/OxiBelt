@@ -1,4 +1,4 @@
-FROM rust:1.95.0-trixie AS builder
+FROM rust:1.96.0-trixie AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential clang cmake perl pkg-config && \

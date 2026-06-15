@@ -2148,7 +2148,7 @@ fn local_performance_probe_build_retries_base_pulls_and_build() {
     let script = performance_script_text();
 
     assert!(
-        script.contains("for base_image in rust:1.95.0-trixie debian:trixie-slim; do")
+        script.contains("for base_image in rust:1.96.0-trixie debian:trixie-slim; do")
             && script.contains("retry_command 3 docker pull \"${base_image}\"")
             && script.contains("retry_command 3 docker build"),
         "local probe image builds should retry Docker Hub base-image pulls and the Docker build"
@@ -2169,7 +2169,7 @@ fn local_external_benchmark_build_retries_base_pulls_and_build() {
 
     assert!(
         script
-            .contains("for base_image in rust:1.95.0-trixie debian:trixie debian:trixie-slim; do")
+            .contains("for base_image in rust:1.96.0-trixie debian:trixie debian:trixie-slim; do")
             && script.contains("retry_command 3 docker pull \"${base_image}\"")
             && script.contains("retry_command 3 docker build")
             && script.contains("tests/docker/external_benchmarks/Dockerfile"),

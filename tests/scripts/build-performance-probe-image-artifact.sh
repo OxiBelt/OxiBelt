@@ -46,7 +46,7 @@ retry_command() {
 
 mkdir -p "${output_dir}"
 
-for base_image in rust:1.95.0-trixie debian:trixie-slim; do
+for base_image in rust:1.96.0-trixie debian:trixie-slim; do
   retry_command 3 docker pull --platform "${platform}" "${base_image}"
 done
 
