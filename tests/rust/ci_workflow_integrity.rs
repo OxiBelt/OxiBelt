@@ -1147,7 +1147,6 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
     let expected_nginx_cc_opt = r#"--with-cc-opt="-O2 -pipe \
         -fPIE -pie \
         -fstack-protector-strong \
-        -fstack-protector-explicit \
         -fstack-clash-protection \
         -fcf-protection=full \
         -fvisibility=hidden \
@@ -1160,6 +1159,10 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
     assert!(
         nginx_dockerfile.contains(expected_nginx_cc_opt),
         "nginx comparator image should use the expected GCC compilation options"
+    );
+    assert!(
+        !nginx_dockerfile.contains("-fstack-protector-explicit"),
+        "nginx comparator image should not weaken stack protection with explicit-only mode"
     );
     for flag in ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,-z,noexecstack", "-pie"] {
         assert!(

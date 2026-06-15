@@ -41,7 +41,6 @@ RUN case "${NGINX_TARGET_CPU}" in \
       --with-cc-opt="-O2 -pipe \
         -fPIE -pie \
         -fstack-protector-strong \
-        -fstack-protector-explicit \
         -fstack-clash-protection \
         -fcf-protection=full \
         -fvisibility=hidden \
