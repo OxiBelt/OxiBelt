@@ -7,7 +7,8 @@ use url::Url;
 
 use super::*;
 use crate::cli::{
-  Cli, Command, OutputFormat, RulepackModeArg, RulepackSourceArgs, RulepackSubcommand,
+  Cli, Command, OutputFormat, RulepackAdapterArg, RulepackModeArg, RulepackSourceArgs,
+  RulepackSubcommand,
 };
 
 #[test]
@@ -262,6 +263,86 @@ fn rulepack_cli_parses_apply_dry_run_fixture_and_replay() {
   assert!(args.dry_run);
   assert_eq!(args.fixture, Some(PathBuf::from("vaultwarden-login.json")));
   assert_eq!(args.replay, Some(PathBuf::from("captured.ndjson")));
+}
+
+#[test]
+fn rulepack_cli_parses_adapt() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "adapt",
+    "--adapter",
+    "modsecurity-crs-exclusion",
+    "--input",
+    "exclusions.conf",
+    "--output",
+    "crs-patch.toml",
+    "--route",
+    "app-root",
+    "--method",
+    "POST",
+    "--path-prefix",
+    "/login",
+    "--reason",
+    "confirmed false positive",
+    "--name-prefix",
+    "local-crs",
+    "--allow-global-disable",
+    "--force",
+  ])
+  .expect("rulepack adapt should parse");
+
+  let Command::Rulepack(command) = parsed.command else {
+    panic!("expected rulepack command");
+  };
+  let RulepackSubcommand::Adapt(args) = command.command else {
+    panic!("expected rulepack adapt");
+  };
+  assert_eq!(args.adapter, RulepackAdapterArg::ModsecurityCrsExclusion);
+  assert_eq!(args.input, PathBuf::from("exclusions.conf"));
+  assert_eq!(args.output, Some(PathBuf::from("crs-patch.toml")));
+  assert_eq!(args.routes, vec!["app-root"]);
+  assert_eq!(args.methods, vec!["POST"]);
+  assert_eq!(args.path_prefixes, vec!["/login"]);
+  assert_eq!(args.reason, "confirmed false positive");
+  assert_eq!(args.name_prefix, "local-crs");
+  assert!(args.allow_global_disable);
+  assert!(args.force);
+}
+
+#[test]
+fn rulepack_adapt_runs_locally_and_writes_output_file() {
+  let source = TempTree::new().expect("source temp");
+  let input = source.path().join("exclusions.conf");
+  let output = source.path().join("crs-patch.toml");
+  std::fs::write(&input, "SecRuleRemoveById 942100\n").expect("write exclusion input");
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "rulepack",
+    "adapt",
+    "--adapter",
+    "modsecurity-crs-exclusion",
+    "--input",
+    input.to_str().expect("UTF-8 path"),
+    "--output",
+    output.to_str().expect("UTF-8 path"),
+    "--route",
+    "app-root",
+  ])
+  .expect("rulepack adapt should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+
+  let handled = runtime
+    .block_on(run_local_if_requested(&parsed.command))
+    .expect("adapt should run locally");
+
+  assert!(handled);
+  let rendered = std::fs::read_to_string(&output).expect("output should be written");
+  assert!(rendered.contains("[[waf.crs.allowlists]]"));
+  assert!(rendered.contains("rule_ids = [\"942100\"]"));
 }
 
 #[test]

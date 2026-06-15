@@ -134,6 +134,10 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
       );
       Ok(true)
     }
+    RulepackSubcommand::Adapt(args) => {
+      crate::rulepack_adapt::run_adapt(args)?;
+      Ok(true)
+    }
     RulepackSubcommand::List
     | RulepackSubcommand::Repo(_)
     | RulepackSubcommand::Search(_)
@@ -210,7 +214,8 @@ pub(crate) async fn run_remote_if_requested(
     | RulepackSubcommand::Info(_)
     | RulepackSubcommand::Inspect(_)
     | RulepackSubcommand::Render(_)
-    | RulepackSubcommand::Check(_) => Ok(false),
+    | RulepackSubcommand::Check(_)
+    | RulepackSubcommand::Adapt(_) => Ok(false),
   }
 }
 
@@ -246,7 +251,8 @@ pub(crate) async fn plan_rulepack(
     | RulepackSubcommand::Diff(_)
     | RulepackSubcommand::Inspect(_)
     | RulepackSubcommand::Render(_)
-    | RulepackSubcommand::Check(_) => {
+    | RulepackSubcommand::Check(_)
+    | RulepackSubcommand::Adapt(_) => {
       bail!("rulepack local command should run before Admin planning")
     }
   }

@@ -23,6 +23,7 @@ pub(crate) enum RulepackSubcommand {
   Inspect(RulepackInspectArgs),
   Render(RulepackRenderArgs),
   Check(RulepackCheckArgs),
+  Adapt(RulepackAdaptArgs),
   Apply(RulepackApplyArgs),
   Remove(RulepackRemoveArgs),
 }
@@ -211,6 +212,38 @@ pub(crate) struct RulepackCheckArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct RulepackAdaptArgs {
+  #[arg(long, value_enum)]
+  pub(crate) adapter: RulepackAdapterArg,
+  #[arg(long = "input", value_name = "FILE")]
+  pub(crate) input: PathBuf,
+  #[arg(long = "output", value_name = "FILE")]
+  pub(crate) output: Option<PathBuf>,
+  #[arg(long = "route", value_name = "NAME")]
+  pub(crate) routes: Vec<String>,
+  #[arg(long = "method", value_name = "METHOD")]
+  pub(crate) methods: Vec<String>,
+  #[arg(long = "path-prefix", value_name = "PREFIX")]
+  pub(crate) path_prefixes: Vec<String>,
+  #[arg(
+    long = "reason",
+    value_name = "TEXT",
+    default_value = "adapted from ModSecurity CRS exclusion"
+  )]
+  pub(crate) reason: String,
+  #[arg(
+    long = "name-prefix",
+    value_name = "NAME",
+    default_value = "adapted-crs"
+  )]
+  pub(crate) name_prefix: String,
+  #[arg(long = "allow-global-disable")]
+  pub(crate) allow_global_disable: bool,
+  #[arg(long)]
+  pub(crate) force: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct RulepackApplyArgs {
   #[command(flatten)]
   pub(crate) source: RulepackSourceArgs,
@@ -307,4 +340,10 @@ pub(crate) struct RulepackSourceArgs {
 pub(crate) enum RulepackModeArg {
   Monitor,
   Enforcing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum RulepackAdapterArg {
+  #[value(name = "modsecurity-crs-exclusion")]
+  ModsecurityCrsExclusion,
 }

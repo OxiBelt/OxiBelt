@@ -406,6 +406,19 @@ The preinstall report contains `install_plan`, `diff`, `risk`, `warnings`, `rout
 
 Installed manifests contain concrete rendered rule content and do not require source `[[bindings]]` or `[[profiles]]` metadata at runtime. Direct runtime loading rejects source manifests that still declare unresolved required bindings; render, plan, diff, dry-run, or apply them with `--bind` first. `rulepack apply` also writes `rulepacks/{name}.install.toml` under the OxiRule directory with the selected profile, effective mode, source/provenance fields, bindings, values, local rule overrides, and local exceptions. The install lockfile is metadata only and is not loaded as an executable rulepack.
 
+`oxibeltctl rulepack adapt` is a local import helper for foreign WAF ecosystem inputs. It does not install policy, contact Admin APIs, fetch remote rulepacks, or execute external adapter binaries. The first adapter, `modsecurity-crs-exclusion`, converts a narrow subset of ModSecurity CRS exclusion directives into OxiBelt-native CRS tuning TOML:
+
+```sh
+oxibeltctl rulepack adapt \
+  --adapter modsecurity-crs-exclusion \
+  --input exclusions.conf \
+  --route app-root \
+  --method POST \
+  --output crs-tuning.toml
+```
+
+Supported input is limited to `SecRuleRemoveById`, `SecRuleRemoveByTag`, `SecRuleRemoveByMsg`, and literal `<Location "/prefix">` blocks. Scoped exclusions emit `[[waf.crs.allowlists]]`; unscoped exclusions fail closed unless `--allow-global-disable` is set, in which case they emit `[[waf.crs.rule_overrides]] mode = "disabled"`. Unsupported ModSecurity updates, `ctl:ruleRemove*`, regex `LocationMatch`, rule ID ranges, scripts, callbacks, and ambiguous path scopes are rejected. Adapters do not change the native rulepack format: OxiBelt rulepack manifests remain schema version `2` only, and schema version `1`, `[variables.discovery]`, and `[[variables]] type = "route"` stay rejected.
+
 ## Development Tools
 
 OxiBelt includes local and Admin API OxiRule development tools for validating and exercising rules before writing or applying them.
@@ -473,6 +486,8 @@ reason = "editor intentionally submits HTML"
 ```
 
 Rule selectors match by `rule_ids`, `tags`, or `msg_contains`; at least one selector is required. Allowlists also require a traffic selector. Traffic selector categories are ANDed together, and values within one category are ORed. Scope allowlists with `methods`, `routes`, or `path_prefixes`; `header_equals` is rejected because inbound request headers are client-controlled before proxy forwarding. A matching allowlist suppresses CRS scoring/actions for that transaction, increments `tuned_hits`, and leaves the original hit visible for review. `rule_overrides` are for broader per-rule policy changes: `monitor` observes without contributing to blocking score, `enforcing` can enforce under global monitor mode, and `disabled` records hits without scoring/actions.
+
+Use `oxibeltctl rulepack adapt --adapter modsecurity-crs-exclusion` when importing existing ModSecurity CRS exclusion snippets. Review the generated TOML before adding it to `[waf.crs]`; the adapter supports only narrow remove-by-ID/tag/message exclusions and intentionally rejects broad or executable ModSecurity constructs.
 
 Recommended rollout is monitor first, review `/admin/v1/waf/rule-hits`, add scoped allowlists or per-rule overrides for confirmed false positives, then switch CRS mode to `enforcing`. This mirrors the CRS tuning model while keeping OxiBelt's supported tuning surface in TOML rather than implementing the full ModSecurity exclusion language. See the official CRS [v4.25.0 LTS announcement](https://coreruleset.org/20260321/announcing-crs-v4-25-lts/), [false positives and tuning](https://coreruleset.org/docs/2-how-crs-works/2-3-false-positives-and-tuning/), and [installation](https://coreruleset.org/docs/1-getting-started/1-1-crs-installation/) references.
 
