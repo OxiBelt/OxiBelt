@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use ring::digest;
@@ -264,38 +264,11 @@ fn registry_writes_user_private_toml_and_never_stores_token_values() {
 
 #[test]
 fn catalog_selection_resolves_entry_into_existing_url_source_options() {
-  let selection = CatalogEntrySelection {
-    repo: "official".to_string(),
-    repo_config: RulepackRepoConfig {
-      url: Url::parse("https://packs.example.test/index.toml").expect("catalog url"),
-      ca_certs: Vec::new(),
-      token_env: Some("OXIBELT_RULEPACK_TOKEN".to_string()),
-      allow_insecure_rulepack_url: false,
-      require_openpgp_signature: false,
-      openpgp_key_files: vec![PathBuf::from("publisher.asc")],
-      openpgp_keyring_dirs: vec![PathBuf::from("trusted")],
-      openpgp_fingerprints: vec!["0123456789abcdef0123456789abcdef01234567".to_string()],
-    },
-    entry: CatalogRulepack {
-      name: "vaultwarden-hardening".to_string(),
-      version: "0.3.0".to_string(),
-      targets: vec!["vaultwarden".to_string()],
-      source: Url::parse(
-        "https://packs.example.test/vaultwarden/0.3.0/rulepack.oxirule-rulepack.toml",
-      )
-      .expect("rulepack url"),
-      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
-      signature_type: Some("openpgp".to_string()),
-      signature: Some(
-        Url::parse("https://packs.example.test/vaultwarden/0.3.0/rulepack.sig")
-          .expect("signature url"),
-      ),
-      min_oxibelt_version: Some("0.1.0".to_string()),
-      license: Some("Apache-2.0".to_string()),
-      maintainers: vec!["example-security".to_string()],
-      description: Some("Vaultwarden hardening".to_string()),
-    },
-  };
+  let selection = catalog_selection(
+    "https://packs.example.test/index.toml",
+    "https://packs.example.test/vaultwarden/0.3.0/rulepack.oxirule-rulepack.toml",
+    "https://packs.example.test/vaultwarden/0.3.0/rulepack.sig",
+  );
   let source = source_args_for_selection(&selection);
 
   assert_eq!(
@@ -311,6 +284,22 @@ fn catalog_selection_resolves_entry_into_existing_url_source_options() {
   assert_eq!(
     source.openpgp_key_files,
     vec![PathBuf::from("publisher.asc")]
+  );
+}
+
+#[test]
+fn catalog_selection_drops_repo_token_for_cross_origin_source() {
+  let selection = catalog_selection(
+    "https://packs.example.test/index.toml",
+    "https://cdn.example.test/vaultwarden/0.3.0/rulepack.oxirule-rulepack.toml",
+    "https://cdn.example.test/vaultwarden/0.3.0/rulepack.sig",
+  );
+  let source = source_args_for_selection(&selection);
+
+  assert_eq!(source.token_env, None);
+  assert_eq!(
+    source.url.as_ref().map(Url::as_str),
+    Some("https://cdn.example.test/vaultwarden/0.3.0/rulepack.oxirule-rulepack.toml")
   );
 }
 
@@ -398,6 +387,126 @@ type = "log"
   );
 }
 
+#[test]
+fn catalog_cross_origin_source_does_not_receive_repo_token() {
+  let signed = crate::rulepack_openpgp::test_signed_rulepack_fixture(
+    br#"[rulepack]
+schema_version = 2
+name = "cross-origin-catalog-demo"
+version = "0.1.0"
+
+[[rules]]
+name = "log"
+phase = "request"
+priority = 100
+content = '''
+when = "true"
+
+[[actions]]
+type = "log"
+'''
+"#,
+    "Rulepack Catalog <catalog@test>",
+  );
+  let Some((source_url, signature_url, source_handle)) =
+    rulepack_source_http_server(&signed.rulepack, &signed.signature)
+  else {
+    return;
+  };
+  let Some((catalog_url, catalog_handle)) =
+    catalog_index_http_server(&source_url, &signature_url, &sha256_hex(&signed.rulepack))
+  else {
+    return;
+  };
+  let token_env = unique_env_name("OXIBELT_TEST_RULEPACK_REPO_TOKEN");
+  set_env(&token_env, "repo-secret-token");
+
+  let repo = RulepackRepoConfig {
+    url: catalog_url,
+    ca_certs: Vec::new(),
+    token_env: Some(token_env.clone()),
+    allow_insecure_rulepack_url: true,
+    require_openpgp_signature: false,
+    openpgp_key_files: vec![signed.key_file.clone()],
+    openpgp_keyring_dirs: Vec::new(),
+    openpgp_fingerprints: vec![signed.fingerprint],
+  };
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let load_result = runtime.block_on(async {
+    let catalog = load_repo_catalog("local", &repo, Duration::from_secs(2)).await?;
+    let selection = CatalogEntrySelection {
+      repo: catalog.repo,
+      repo_config: repo,
+      entry: catalog.entries.into_iter().next().expect("catalog entry"),
+    };
+    let source = source_args_for_selection(&selection);
+    crate::rulepack::load_rulepack_source(&source, Duration::from_secs(2), true).await?;
+    Ok::<(), anyhow::Error>(())
+  });
+  remove_env(&token_env);
+  load_result.expect("catalog source should verify");
+
+  let catalog_requests = catalog_handle.join().expect("catalog server thread");
+  let source_requests = source_handle.join().expect("source server thread");
+  let catalog_request = catalog_requests
+    .iter()
+    .find(|request| request.starts_with("GET /index.toml "))
+    .expect("catalog index request");
+  assert!(
+    catalog_request
+      .lines()
+      .any(|line| line.eq_ignore_ascii_case("authorization: Bearer repo-secret-token")),
+    "expected catalog auth header, got:\n{catalog_request}"
+  );
+
+  let rulepack_request = source_requests
+    .iter()
+    .find(|request| request.starts_with("GET /rulepack.oxirule-rulepack.toml "))
+    .expect("rulepack source request");
+  assert_no_request_header(rulepack_request, "authorization");
+  let signature_request = source_requests
+    .iter()
+    .find(|request| request.starts_with("GET /rulepack.sig "))
+    .expect("signature source request");
+  assert_no_request_header(signature_request, "authorization");
+}
+
+fn catalog_selection(
+  catalog_url: &str,
+  source_url: &str,
+  signature_url: &str,
+) -> CatalogEntrySelection {
+  CatalogEntrySelection {
+    repo: "official".to_string(),
+    repo_config: RulepackRepoConfig {
+      url: Url::parse(catalog_url).expect("catalog url"),
+      ca_certs: Vec::new(),
+      token_env: Some("OXIBELT_RULEPACK_TOKEN".to_string()),
+      allow_insecure_rulepack_url: false,
+      require_openpgp_signature: false,
+      openpgp_key_files: vec![PathBuf::from("publisher.asc")],
+      openpgp_keyring_dirs: vec![PathBuf::from("trusted")],
+      openpgp_fingerprints: vec!["0123456789abcdef0123456789abcdef01234567".to_string()],
+    },
+    entry: CatalogRulepack {
+      name: "vaultwarden-hardening".to_string(),
+      version: "0.3.0".to_string(),
+      targets: vec!["vaultwarden".to_string()],
+      source: Url::parse(source_url).expect("rulepack url"),
+      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+      signature_type: Some("openpgp".to_string()),
+      signature: Some(Url::parse(signature_url).expect("signature url")),
+      min_oxibelt_version: Some("0.1.0".to_string()),
+      license: Some("Apache-2.0".to_string()),
+      maintainers: vec!["example-security".to_string()],
+      description: Some("Vaultwarden hardening".to_string()),
+    },
+  }
+}
+
 fn catalog_http_server(
   rulepack: &[u8],
   signature: &[u8],
@@ -462,6 +571,101 @@ min_oxibelt_version = "0.1.0"
   ))
 }
 
+fn catalog_index_http_server(
+  source_url: &Url,
+  signature_url: &Url,
+  sha256: &str,
+) -> Option<(Url, thread::JoinHandle<Vec<String>>)> {
+  let listener = match TcpListener::bind("127.0.0.1:0") {
+    Ok(listener) => listener,
+    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return None,
+    Err(error) => panic!("catalog listener: {error}"),
+  };
+  let addr = listener.local_addr().expect("catalog listener address");
+  let index = format!(
+    r#"[index]
+schema_version = 1
+
+[[rulepacks]]
+name = "cross-origin-catalog-demo"
+version = "0.1.0"
+targets = ["demo"]
+source = "{source_url}"
+sha256 = "{sha256}"
+signature_type = "openpgp"
+signature = "{signature_url}"
+min_oxibelt_version = "0.1.0"
+"#
+  )
+  .into_bytes();
+  let handle = thread::spawn(move || {
+    let (mut stream, _) = listener.accept().expect("catalog request");
+    stream
+      .set_read_timeout(Some(Duration::from_secs(2)))
+      .expect("catalog read timeout");
+    let request = read_http_request(&mut stream);
+    let header = format!(
+      "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+      index.len()
+    );
+    stream
+      .write_all(header.as_bytes())
+      .expect("catalog response header");
+    stream.write_all(&index).expect("catalog response body");
+    vec![request]
+  });
+  Some((
+    Url::parse(&format!("http://{addr}/index.toml")).expect("catalog URL"),
+    handle,
+  ))
+}
+
+fn rulepack_source_http_server(
+  rulepack: &[u8],
+  signature: &[u8],
+) -> Option<(Url, Url, thread::JoinHandle<Vec<String>>)> {
+  let listener = match TcpListener::bind("127.0.0.1:0") {
+    Ok(listener) => listener,
+    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return None,
+    Err(error) => panic!("source listener: {error}"),
+  };
+  let addr = listener.local_addr().expect("source listener address");
+  let rulepack = rulepack.to_vec();
+  let signature = signature.to_vec();
+  let source_url =
+    Url::parse(&format!("http://{addr}/rulepack.oxirule-rulepack.toml")).expect("source URL");
+  let signature_url = Url::parse(&format!("http://{addr}/rulepack.sig")).expect("signature URL");
+  let handle = thread::spawn(move || {
+    let mut requests = Vec::new();
+    for _ in 0..2 {
+      let (mut stream, _) = listener.accept().expect("source request");
+      stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("source read timeout");
+      let request = read_http_request(&mut stream);
+      let (status, body): (&str, &[u8]) =
+        if request.starts_with("GET /rulepack.oxirule-rulepack.toml ") {
+          ("200 OK", &rulepack)
+        } else if request.starts_with("GET /rulepack.sig ") {
+          ("200 OK", &signature)
+        } else {
+          ("404 Not Found", b"not found")
+        };
+      let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+      );
+      stream
+        .write_all(header.as_bytes())
+        .expect("source response header");
+      stream.write_all(body).expect("source response body");
+      requests.push(request);
+    }
+    requests
+  });
+  Some((source_url, signature_url, handle))
+}
+
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {
   let mut request = Vec::new();
   let mut buffer = [0_u8; 1024];
@@ -500,6 +704,14 @@ fn complete_http_request(request: &[u8]) -> bool {
   request.len() >= header_end + 4 + content_length
 }
 
+fn assert_no_request_header(request: &str, name: &str) {
+  let found = request
+    .lines()
+    .filter_map(|line| line.split_once(':'))
+    .any(|(header, _)| header.eq_ignore_ascii_case(name));
+  assert!(!found, "unexpected request header {name}, got:\n{request}");
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
   let digest = digest::digest(&digest::SHA256, bytes);
   let mut out = String::with_capacity(digest.as_ref().len() * 2);
@@ -508,4 +720,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
     write!(&mut out, "{byte:02x}").expect("hex write");
   }
   out
+}
+
+fn unique_env_name(prefix: &str) -> String {
+  let nanos = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .expect("clock should be after Unix epoch")
+    .as_nanos();
+  format!("{prefix}_{}_{}", std::process::id(), nanos)
+}
+
+fn set_env(key: &str, value: &str) {
+  unsafe {
+    std::env::set_var(key, value);
+  }
+}
+
+fn remove_env(key: &str) {
+  unsafe {
+    std::env::remove_var(key);
+  }
 }

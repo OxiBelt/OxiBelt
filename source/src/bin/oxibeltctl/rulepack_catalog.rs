@@ -19,6 +19,7 @@ use crate::rulepack_catalog_index::{
 use crate::rulepack_catalog_registry::{
   RulepackRepoConfig, ensure_repo_name, load_registry, registry_path, save_registry,
 };
+use crate::rulepack_url::same_origin;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogEntrySelection {
@@ -380,6 +381,12 @@ async fn load_entries(
 
 fn source_args_for_selection(selection: &CatalogEntrySelection) -> RulepackSourceArgs {
   let signature_url = selection.entry.signature.clone();
+  let token_env = selection
+    .repo_config
+    .token_env
+    .as_ref()
+    .filter(|_| same_origin(&selection.repo_config.url, &selection.entry.source))
+    .cloned();
   RulepackSourceArgs {
     file: None,
     dir: None,
@@ -387,7 +394,7 @@ fn source_args_for_selection(selection: &CatalogEntrySelection) -> RulepackSourc
     git: None,
     manifest: "rulepack.oxirule-rulepack.toml".into(),
     ca_certs: selection.repo_config.ca_certs.clone(),
-    token_env: selection.repo_config.token_env.clone(),
+    token_env,
     sha256: Some(selection.entry.sha256.clone()),
     allow_unpinned_rulepack: false,
     allow_insecure_rulepack_url: selection.repo_config.allow_insecure_rulepack_url,

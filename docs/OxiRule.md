@@ -241,7 +241,7 @@ OpenPGP trust uses public keys only. `--rulepack-openpgp-key FILE` adds repeatab
 
 When a URL rulepack is rendered for install, OxiBelt records optional `[rulepack]` provenance fields in the installed manifest: `source_url`, `source_sha256`, `source_openpgp_signature_url`, and `source_openpgp_signer_fingerprint`. URLs are sanitized before recording.
 
-Remote catalogs are a discovery layer over the same URL install path. `oxibeltctl rulepack repo add NAME URL` records a catalog index URL in `${OXIBELT_RULEPACK_REPOS_FILE}` when set, otherwise `${XDG_CONFIG_HOME:-$HOME/.config}/oxibelt/rulepack-repos.toml`. The registry stores repo URLs, CA certificate paths, token environment variable names, insecure-URL opt-ins, and OpenPGP trust settings; it never stores bearer token values.
+Remote catalogs are a discovery layer over the same URL install path. `oxibeltctl rulepack repo add NAME URL` records a catalog index URL in `${OXIBELT_RULEPACK_REPOS_FILE}` when set, otherwise `${XDG_CONFIG_HOME:-$HOME/.config}/oxibelt/rulepack-repos.toml`. The registry stores repo URLs, CA certificate paths, token environment variable names, insecure-URL opt-ins, and OpenPGP trust settings; it never stores bearer token values. Catalog repo tokens are forwarded to catalog-selected rulepack source URLs only when the source URL uses the same scheme, host, and port as the catalog repo URL.
 
 Catalog indexes may be TOML or JSON. TOML indexes use this shape:
 
