@@ -1,8 +1,3 @@
 [advisories]
 db-urls = ["https://github.com/RustSec/advisory-db"]
-ignore = [
-  # RUSTSEC-2025-0141 is currently transitive through clubcard-crlite 0.3.2.
-  # No patched upstream release is available, and replacing the CRLite parser
-  # is a larger revocation-format compatibility change tracked separately.
-  "RUSTSEC-2025-0141",
-]
+ignore = []

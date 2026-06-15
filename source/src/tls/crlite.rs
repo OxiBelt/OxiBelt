@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use clubcard_crlite::{CRLiteClubcard, CRLiteKey, CRLiteStatus};
+use clubcard_crlite::{CRLiteClubcard, CRLiteKey, CRLiteStatus, IssuerSpkiHash, LogId, Timestamp};
 use ring::digest;
 use x509_cert::Certificate;
 use x509_cert::der::{
@@ -15,10 +15,8 @@ use crate::config::{CrliteConfig, CrliteCoveragePolicy, CrliteFailurePolicy, Tls
 
 const CT_PRECERT_SCTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.2");
 
-type IssuerSpkiHash = [u8; 32];
-type LogId = [u8; 32];
 type Serial = Vec<u8>;
-type SctEntries = Vec<(LogId, u64)>;
+type SctEntries = Vec<(LogId, Timestamp)>;
 
 pub(super) struct CrliteQueryMaterial {
   issuer_spki_hash: IssuerSpkiHash,
@@ -92,7 +90,7 @@ fn check_crlite_filter(
     material
       .scts
       .iter()
-      .map(|(log_id, timestamp)| (log_id, *timestamp)),
+      .map(|(log_id, timestamp)| (*log_id, *timestamp)),
   );
   let result = crlite_result_name(&status);
   if status == CRLiteStatus::Revoked {
@@ -205,7 +203,7 @@ pub(super) fn crlite_query_material_from_der(
   let serial = leaf.tbs_certificate.serial_number.as_bytes().to_vec();
   let scts = embedded_scts(&leaf)?;
   Ok(CrliteQueryMaterial {
-    issuer_spki_hash,
+    issuer_spki_hash: IssuerSpkiHash(issuer_spki_hash),
     serial,
     scts,
   })
@@ -249,7 +247,7 @@ fn parse_sct_list(mut bytes: &[u8]) -> anyhow::Result<SctEntries> {
     log_id.copy_from_slice(&sct[1..33]);
     let mut timestamp = [0_u8; 8];
     timestamp.copy_from_slice(&sct[33..41]);
-    scts.push((log_id, u64::from_be_bytes(timestamp)));
+    scts.push((LogId(log_id), Timestamp(u64::from_be_bytes(timestamp))));
   }
   Ok(scts)
 }
@@ -360,39 +358,44 @@ mod tests {
   use base64::Engine;
   use clubcard::builder::{ApproximateRibbon, ClubcardBuilder, ExactRibbon};
   use clubcard_crlite::builder::CRLiteBuilderItem;
-  use clubcard_crlite::{CRLiteCoverage, CRLiteQuery};
+  use clubcard_crlite::{CRLiteCoverage, CRLiteQuery, Encoding};
 
   #[test]
   fn valid_filter_bytes_round_trip_and_query() {
-    let issuer = [5_u8; 32];
-    let other_issuer = [6_u8; 32];
-    let log_id = [9_u8; 32];
+    let issuer = IssuerSpkiHash([5_u8; 32]);
+    let other_issuer = IssuerSpkiHash([6_u8; 32]);
+    let log_id = LogId([9_u8; 32]);
     let revoked_serial = vec![1_u8];
     let good_serial = vec![2_u8];
     let filter = test_crlite_filter(issuer, log_id, &revoked_serial, &good_serial);
-    let bytes = filter.to_bytes().expect("filter should serialize");
+    let bytes = filter
+      .to_bytes(Encoding::V4)
+      .expect("filter should serialize");
 
     let parsed = CRLiteClubcard::from_bytes(&bytes).expect("filter should parse");
     let revoked_key = CRLiteKey::new(&issuer, &revoked_serial);
     let good_key = CRLiteKey::new(&issuer, &good_serial);
     let not_enrolled_key = CRLiteKey::new(&other_issuer, &revoked_serial);
-    let covered_sct = std::iter::once((&log_id, 100_u64));
-    let uncovered_log = [8_u8; 32];
+    let covered_sct = std::iter::once((log_id, Timestamp(100)));
+    let uncovered_log = LogId([8_u8; 32]);
 
     assert_eq!(
       parsed.contains(&revoked_key, covered_sct),
       CRLiteStatus::Revoked
     );
     assert_eq!(
-      parsed.contains(&good_key, std::iter::once((&log_id, 100_u64))),
+      parsed.contains(&good_key, std::iter::once((log_id, Timestamp(100)))),
       CRLiteStatus::Good
     );
     assert_eq!(
-      parsed.contains(&revoked_key, std::iter::once((&uncovered_log, 100_u64))),
+      parsed.contains(
+        &revoked_key,
+        std::iter::once((uncovered_log, Timestamp(100)))
+      ),
       CRLiteStatus::NotCovered
     );
     assert_eq!(
-      parsed.contains(&not_enrolled_key, std::iter::once((&log_id, 100_u64))),
+      parsed.contains(&not_enrolled_key, std::iter::once((log_id, Timestamp(100)))),
       CRLiteStatus::NotEnrolled
     );
   }
@@ -536,7 +539,7 @@ mod tests {
 
     let parsed = parse_sct_list(&list).expect("SCT list should parse");
 
-    assert_eq!(parsed, vec![(log_id, timestamp)]);
+    assert_eq!(parsed, vec![(LogId(log_id), Timestamp(timestamp))]);
   }
 
   fn coverage_error(policy: CrliteCoveragePolicy, status: &CRLiteStatus) -> Option<&'static str> {
@@ -568,25 +571,25 @@ mod tests {
   }
 
   fn test_crlite_filter(
-    issuer: [u8; 32],
-    log_id: [u8; 32],
+    issuer: IssuerSpkiHash,
+    log_id: LogId,
     revoked_serial: &[u8],
     good_serial: &[u8],
   ) -> CRLiteClubcard {
     let mut builder = ClubcardBuilder::new();
-    let mut approx_builder = builder.new_approx_builder(&issuer);
+    let mut approx_builder = builder.new_approx_builder(&issuer.0);
     approx_builder.insert(CRLiteBuilderItem::revoked(issuer, revoked_serial.to_vec()));
     approx_builder.set_universe_size(2);
     builder.collect_approx_ribbons(vec![ApproximateRibbon::from(approx_builder)]);
 
-    let mut exact_builder = builder.new_exact_builder(&issuer);
+    let mut exact_builder = builder.new_exact_builder(&issuer.0);
     exact_builder.insert(CRLiteBuilderItem::revoked(issuer, revoked_serial.to_vec()));
     exact_builder.insert(CRLiteBuilderItem::not_revoked(issuer, good_serial.to_vec()));
     builder.collect_exact_ribbons(vec![ExactRibbon::from(exact_builder)]);
 
     let ct_logs = format!(
       r#"[{{"LogID":"{}","MaxTimestamp":1000,"MinTimestamp":0,"MMD":0,"MinEntry":0}}]"#,
-      base64::engine::general_purpose::STANDARD.encode(log_id)
+      base64::engine::general_purpose::STANDARD.encode(log_id.0)
     );
     builder
       .build::<CRLiteQuery>(
