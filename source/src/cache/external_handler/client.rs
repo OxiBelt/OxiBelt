@@ -105,23 +105,28 @@ impl ExternalCacheHttpClient {
   ) -> anyhow::Result<Option<ExternalCacheLookupHit>> {
     let body = serde_json::to_vec(request).context("failed to encode external cache lookup")?;
     let request = self.request(Method::POST, "lookup", json_body(Bytes::from(body)))?;
-    let response = tokio::time::timeout(self.request_timeout, self.client.request(request))
-      .await
-      .context("external cache lookup timed out")?
-      .context("external cache lookup failed")?;
-    match response.status() {
-      StatusCode::NO_CONTENT | StatusCode::NOT_FOUND => Ok(None),
-      status if status.is_success() => read_framed_lookup(
-        response.into_body(),
-        self.max_metadata_bytes,
-        self.max_body_bytes,
-        self.memory_body_bytes,
-        temp_dir,
-      )
-      .await
-      .map(Some),
-      status => bail!("external cache lookup returned {status}"),
-    }
+    tokio::time::timeout(self.request_timeout, async {
+      let response = self
+        .client
+        .request(request)
+        .await
+        .context("external cache lookup failed")?;
+      match response.status() {
+        StatusCode::NO_CONTENT | StatusCode::NOT_FOUND => Ok(None),
+        status if status.is_success() => read_framed_lookup(
+          response.into_body(),
+          self.max_metadata_bytes,
+          self.max_body_bytes,
+          self.memory_body_bytes,
+          temp_dir,
+        )
+        .await
+        .map(Some),
+        status => bail!("external cache lookup returned {status}"),
+      }
+    })
+    .await
+    .context("external cache lookup timed out")?
   }
 
   pub(crate) async fn fill(
@@ -170,26 +175,31 @@ impl ExternalCacheHttpClient {
   ) -> anyhow::Result<ExternalCachePurgeResponse> {
     let body = serde_json::to_vec(purge).context("failed to encode external cache purge")?;
     let request = self.request(Method::POST, "purge", json_body(Bytes::from(body)))?;
-    let response = tokio::time::timeout(self.request_timeout, self.client.request(request))
-      .await
-      .context("external cache purge timed out")?
-      .context("external cache purge failed")?;
-    if !response.status().is_success() {
-      bail!("external cache purge returned {}", response.status());
-    }
-    let (parts, body) = response.into_parts();
-    if parts.status == StatusCode::NO_CONTENT {
-      return Ok(ExternalCachePurgeResponse::default());
-    }
-    let bytes = http_body_util::Limited::new(body, self.max_metadata_bytes)
-      .collect()
-      .await
-      .map_err(|error| anyhow!("external cache purge response failed: {error}"))?
-      .to_bytes();
-    if bytes.is_empty() {
-      return Ok(ExternalCachePurgeResponse::default());
-    }
-    serde_json::from_slice(&bytes).context("external cache purge response is not JSON")
+    tokio::time::timeout(self.request_timeout, async {
+      let response = self
+        .client
+        .request(request)
+        .await
+        .context("external cache purge failed")?;
+      if !response.status().is_success() {
+        bail!("external cache purge returned {}", response.status());
+      }
+      let (parts, body) = response.into_parts();
+      if parts.status == StatusCode::NO_CONTENT {
+        return Ok(ExternalCachePurgeResponse::default());
+      }
+      let bytes = http_body_util::Limited::new(body, self.max_metadata_bytes)
+        .collect()
+        .await
+        .map_err(|error| anyhow!("external cache purge response failed: {error}"))?
+        .to_bytes();
+      if bytes.is_empty() {
+        return Ok(ExternalCachePurgeResponse::default());
+      }
+      serde_json::from_slice(&bytes).context("external cache purge response is not JSON")
+    })
+    .await
+    .context("external cache purge timed out")?
   }
 
   fn request(
@@ -392,6 +402,47 @@ mod tests {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::TcpListener;
 
+  fn handler_config(endpoint: &str) -> ExternalCacheHandlerConfig {
+    ExternalCacheHandlerConfig {
+      name: "massive".to_string(),
+      kind: crate::config::ExternalCacheHandlerKind::Http,
+      endpoint: Url::parse(endpoint).unwrap(),
+      token_env: None,
+      connect_timeout_ms: 50,
+      request_timeout_ms: 50,
+      max_metadata_bytes: 1024,
+      max_body_bytes: Some(1024),
+      max_inflight_requests: 1,
+      fail_policy: crate::config::ExternalCacheHandlerFailPolicy::LocalOnly,
+    }
+  }
+
+  fn lookup_request() -> ExternalCacheLookupRequest {
+    ExternalCacheLookupRequest::new(
+      "default".to_string(),
+      String::new(),
+      "key".to_string(),
+      "https".to_string(),
+      "example.test".to_string(),
+      "/".to_string(),
+      "GET".to_string(),
+      false,
+    )
+  }
+
+  fn purge_request() -> ExternalCachePurgeRequest {
+    ExternalCachePurgeRequest::new(
+      super::super::protocol::ExternalCachePurgeKind::Exact,
+      "default".to_string(),
+      Some("https".to_string()),
+      Some("example.test".to_string()),
+      Some("/".to_string()),
+      None,
+      None,
+      Some(String::new()),
+    )
+  }
+
   #[tokio::test]
   #[ignore = "requires loopback sockets, which are unavailable in some sandboxes"]
   async fn lookup_timeout_maps_to_error() {
@@ -409,33 +460,67 @@ mod tests {
         .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
         .await;
     });
-    let config = ExternalCacheHandlerConfig {
-      name: "massive".to_string(),
-      kind: crate::config::ExternalCacheHandlerKind::Http,
-      endpoint: Url::parse(&endpoint).unwrap(),
-      token_env: None,
-      connect_timeout_ms: 50,
-      request_timeout_ms: 50,
-      max_metadata_bytes: 1024,
-      max_body_bytes: Some(1024),
-      max_inflight_requests: 1,
-      fail_policy: crate::config::ExternalCacheHandlerFailPolicy::LocalOnly,
-    };
+    let config = handler_config(&endpoint);
     let client = ExternalCacheHttpClient::new(&config, &[], 1024, 1024).unwrap();
-    let request = ExternalCacheLookupRequest::new(
-      "default".to_string(),
-      String::new(),
-      "key".to_string(),
-      "https".to_string(),
-      "example.test".to_string(),
-      "/".to_string(),
-      "GET".to_string(),
-      false,
-    );
+    let request = lookup_request();
     let error = match client.lookup(&request, None).await {
       Ok(_) => panic!("delayed lookup should time out"),
       Err(error) => error,
     };
     assert!(format!("{error:#}").contains("external cache lookup timed out"));
+  }
+
+  #[tokio::test]
+  #[ignore = "requires loopback sockets, which are unavailable in some sandboxes"]
+  async fn lookup_timeout_covers_stalled_response_body() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!(
+      "http://{}/internal/v1/cache/",
+      listener.local_addr().unwrap()
+    );
+    tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      let mut buffer = [0u8; 1024];
+      let _ = stream.read(&mut buffer).await;
+      let _ = stream
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\n\r\n")
+        .await;
+      tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+    let config = handler_config(&endpoint);
+    let client = ExternalCacheHttpClient::new(&config, &[], 1024, 1024).unwrap();
+    let request = lookup_request();
+    let error = match client.lookup(&request, None).await {
+      Ok(_) => panic!("stalled lookup body should time out"),
+      Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("external cache lookup timed out"));
+  }
+
+  #[tokio::test]
+  #[ignore = "requires loopback sockets, which are unavailable in some sandboxes"]
+  async fn purge_timeout_covers_stalled_response_body() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!(
+      "http://{}/internal/v1/cache/",
+      listener.local_addr().unwrap()
+    );
+    tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      let mut buffer = [0u8; 1024];
+      let _ = stream.read(&mut buffer).await;
+      let _ = stream
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 16\r\n\r\n{\"purged\":")
+        .await;
+      tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+    let config = handler_config(&endpoint);
+    let client = ExternalCacheHttpClient::new(&config, &[], 1024, 1024).unwrap();
+    let request = purge_request();
+    let error = match client.purge(&request).await {
+      Ok(_) => panic!("stalled purge body should time out"),
+      Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("external cache purge timed out"));
   }
 }
