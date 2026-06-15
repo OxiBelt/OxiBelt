@@ -44,7 +44,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 image_tag="oxibelt:alpine-musl-${artifact_arch}"
 image_tar="${output_dir%/}/oxibelt-alpine-musl-${artifact_arch}.tar"
-rust_builder_image="rust:1.95.0-alpine3.23"
+rust_builder_image="rust:1.96.0-alpine3.24"
 rust_target=""
 rust_target_cpu=""
 oxibelt_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/source/Cargo.toml" | head -n 1)"
@@ -97,7 +97,7 @@ if [[ -z "${oxibelt_source}" ]]; then
 fi
 
 if [[ "${artifact_arch}" == "riscv64" ]]; then
-  rust_builder_image="rust:1.95.0-trixie"
+  rust_builder_image="rust:1.96.0-trixie"
   rust_target="riscv64gc-unknown-linux-musl"
 fi
 
