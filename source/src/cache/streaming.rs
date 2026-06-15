@@ -352,7 +352,7 @@ impl ResponseCache {
       tags,
       size,
     };
-    let shared_entry = {
+    let (shared_entry, external_entry) = {
       let mut inner = self.inner.lock().expect("cache lock poisoned");
       if variant_count_exceeded(
         &inner,
@@ -382,9 +382,10 @@ impl ResponseCache {
         .as_ref()
         .filter(|shared| shared.has_cache())
         .map(|_| shared_cache_entry_metadata(&stored, body_len));
+      let external_entry = self.external_entry_for_stored(&stored);
       inner.entries.insert(variant_key, stored);
       self.evict_if_needed(&mut inner, &prepared.policy);
-      shared_entry
+      (shared_entry, external_entry)
     };
     if let Some(shared) = &self.shared_state
       && shared.has_cache()
@@ -392,6 +393,9 @@ impl ResponseCache {
       && let Err(error) = shared.cache_put_file(&shared_entry, &body_path, body_len)
     {
       warn!(error = %error, "failed to write streaming cache entry to shared cache");
+    }
+    if let Some((handler, metadata, body)) = external_entry {
+      self.spawn_external_fill(handler, metadata, body);
     }
     CacheInsertOutcome::Stored
   }

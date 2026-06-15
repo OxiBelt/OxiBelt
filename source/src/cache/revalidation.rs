@@ -51,7 +51,7 @@ fn update_prepared_not_modified(
     Some(size) if size <= cache.config.max_size_bytes => size,
     _ => return,
   };
-  let shared_entry = {
+  let (shared_entry, external_metadata) = {
     let mut inner = cache.inner.lock().expect("cache lock poisoned");
     let Some(mut stored) = detach_entry(&mut inner, &prepared.variant_key) else {
       return;
@@ -81,14 +81,18 @@ fn update_prepared_not_modified(
       .as_ref()
       .filter(|shared| shared.has_cache())
       .and_then(|_| shared_cache_entry(&stored));
+    let external_metadata = cache.external_metadata_for_stored(&stored);
     inner.entries.insert(prepared.variant_key, stored);
     cache.evict_if_needed(&mut inner, &prepared.policy);
-    shared_entry
+    (shared_entry, external_metadata)
   };
   if let Some(shared) = &cache.shared_state
     && shared.has_cache()
     && let Some(shared_entry) = shared_entry
   {
     shared.cache_put(&shared_entry);
+  }
+  if let Some((handler, metadata)) = external_metadata {
+    cache.spawn_external_revalidate(handler, metadata);
   }
 }

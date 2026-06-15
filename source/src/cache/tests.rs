@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "tests_core.rs"]
 mod core;
+#[path = "tests_external.rs"]
+mod external;
 #[path = "tests_fill.rs"]
 mod fill;
 #[path = "tests_index.rs"]
@@ -37,6 +39,7 @@ fn cache_config_with_disabled_named_background_refresh() -> CacheConfig {
       lock_wait_timeout_ms: None,
       admission: None,
       stale_if_error: None,
+      external_handler: None,
       rules: Vec::new(),
     }],
     ..CacheConfig::default()
@@ -64,6 +67,7 @@ fn test_cache_policy_with_negative_status() -> crate::config::CachePolicyConfig 
     lock_wait_timeout_ms: None,
     admission: None,
     stale_if_error: None,
+    external_handler: None,
     rules: Vec::new(),
   }
 }

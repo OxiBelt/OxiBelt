@@ -1042,6 +1042,7 @@ background_refresh = true
 background_refresh_max_concurrent = 16
 negative_statuses = []
 negative_ttl_seconds = 0
+# external_handler = "massive"
 
 [cache.surrogate]
 enabled = true
@@ -1060,9 +1061,22 @@ read_timeout = true
 statuses = []
 max_upstream_stale_seconds = 0
 
+# [[cache.external_handlers]]
+# name = "massive"
+# kind = "http"
+# endpoint = "https://cache-handler.internal.example/v1/cache/"
+# token_env = "OXIBELT_EXTERNAL_CACHE_TOKEN"
+# connect_timeout_ms = 250
+# request_timeout_ms = 30000
+# max_metadata_bytes = 1048576
+# max_body_bytes = 1073741824
+# max_inflight_requests = 64
+# fail_policy = "local_only"
+
 [[cache.policies]]
 name = "assets"
 store = "memory_then_disk"
+# external_handler = "off"
 
 [[cache.policies.rules]]
 mime_types = ["image/*", "text/css", "application/javascript"]
@@ -1202,6 +1216,8 @@ max_concurrent_responses = 0
 Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate`. OxiBelt only compresses downstream responses when the client permits an enabled encoding, the request does not carry `Cookie`, `Authorization`, or `Proxy-Authorization`, the response is not already encoded or secret-bearing, the status/MIME/size policy matches, and HTTP semantics such as `Cache-Control: no-transform` and range responses allow transformation. Responses with `Set-Cookie`, `Cache-Control: private`, or `Cache-Control: no-store` are not compressed. `max_concurrent_responses = 0` uses an automatic CPU budget. Named `[[compression.policies]]` entries can be selected with route `compression`; policy names must not be `default` or `off` because those exact lowercase values are reserved for route selection.
 
 `cache.store = "tmpfs"` validates `tmpfs_dir` under `/dev/shm` when cache is enabled. `disk` and `memory_then_disk` require an explicit writable `disk_dir` and `disk_max_size_bytes`; OxiBelt does not choose a disk path implicitly. If `memory_then_disk` omits `memory_max_size_bytes`, OxiBelt uses `memory_auto_fraction` of the detected cgroup/container memory limit, falling back to system memory. `cache_key` and `partition_key` support `{scheme}`, `{host}`, `{uri}`, `{path}`, `{query}`, `{query:name}`, `{header:Name}`, and `{cookie:name}`. Named cache policies are selected by `routes.cache`; `default` refers to the top-level `[cache]` policy. Policy rules select storage after the upstream response MIME type is known. When `cache_backend` maps to a shared backend, the configured local cache remains L1 and the shared backend stores collected full cacheable objects, disk-streamed objects, metadata, fill locks, and purge-visible L2 entries. Disk streaming fills commit to local L1 first, then publish the shared L2 body as bounded chunks using `cache.stream_chunk_bytes`; shared chunk hits are copied into bounded temporary files before downstream streaming instead of materializing the full object in memory.
+
+`[[cache.external_handlers]]` defines optional HTTP L3 handlers behind local L1 and shared-state L2. `cache.external_handler = "name"` selects a top-level default, `cache.policies.external_handler = "name"` overrides it, and `cache.policies.external_handler = "off"` disables inherited L3 for that policy. Handler names must be unique runtime identifiers and cannot be `default` or `off`; endpoints must be `http://` or `https://`; timeout, metadata, body, and inflight limits must be positive. `token_env` supplies a bearer token without putting credentials in the TOML. The handler protocol uses JSON control requests for lookup, revalidation metadata refresh, and purge, plus framed cache entries with an 8-byte big-endian metadata length, UTF-8 JSON metadata, and raw body bytes. OxiBelt remains authoritative for keys, partitions, `Vary`, cacheability, credential bypasses, status headers, admission, and purge authorization; handler errors, malformed records, mismatches, and expired records are safe misses under `local_only`.
 
 The cache honors HTTP cache metadata including `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and `Vary`. It can revalidate stale entries, serve stale entries on configured upstream errors, answer fresh conditional hits with `304`, attach `Age` to cached hits, serve single and multipart byte ranges from full stored responses, and cache configured negative statuses with `negative_statuses` and `negative_ttl_seconds`. `HEAD` can reuse a cached `GET` entry, but a `HEAD` miss is not stored. Named policies may override negative-cache defaults so routes can opt into different negative caching by selecting a policy. `stale-if-error` serving is controlled separately for connect errors, read timeouts, configured HTTP statuses, and `max_upstream_stale_seconds`, where `0` leaves stale lifetime uncapped beyond the response metadata.
 

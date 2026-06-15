@@ -1226,14 +1226,27 @@ where
   let mut stale_on_error = None;
   let mut _cache_fill_guard = None;
   let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
-  if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
+  let initial_cache_lookup = crate::cache::CacheLookupContext {
     policy_name: resolved.route.cache.as_deref(),
     scheme: downstream_scheme,
     host,
     method: &request_method,
     uri: &request_uri,
     request_headers: &request_headers,
-  }) {
+  };
+  let lookup = match state.cache.lookup(initial_cache_lookup.clone()) {
+    Some(lookup) => Some(lookup),
+    None => {
+      state
+        .cache
+        .lookup_external(
+          initial_cache_lookup,
+          state.config.proxy.buffering.temp_dir.as_deref(),
+        )
+        .await
+    }
+  };
+  if let Some(lookup) = lookup {
     if let Some(response) = handle_cache_lookup_result(
       state,
       &resolved,

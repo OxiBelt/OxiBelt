@@ -677,7 +677,8 @@ async fn admin_response_inner(
       AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context)
     };
     let response =
-      admin::cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &authorization);
+      admin::cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &authorization)
+        .await;
     return response;
   }
 

@@ -19,6 +19,7 @@ pub(super) struct DetailedMetrics {
   http: HashMap<HttpMetricKey, HistogramSeries>,
   upstream: HashMap<UpstreamMetricKey, HistogramSeries>,
   cache: HashMap<CacheMetricKey, u64>,
+  external_cache: HashMap<ExternalCacheMetricKey, u64>,
   cache_fill_stage: HashMap<CacheFillStageMetricKey, HistogramSeries>,
   tls_handshake: HashMap<TlsHandshakeMetricKey, HistogramSeries>,
   quic_retries: HashMap<QuicRetryMetricKey, u64>,
@@ -53,6 +54,13 @@ struct CacheMetricKey {
   policy: String,
   outcome: String,
   reason: String,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct ExternalCacheMetricKey {
+  handler: String,
+  operation: String,
+  outcome: String,
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -199,6 +207,20 @@ impl Metrics {
     let mut detailed = lock_detailed(&self.detailed);
     if detailed.cache.contains_key(&key) || detailed.cache.len() < MAX_DETAILED_SERIES {
       *detailed.cache.entry(key).or_default() += 1;
+    }
+  }
+
+  pub fn record_external_cache_operation(&self, handler: &str, operation: &str, outcome: &str) {
+    let key = ExternalCacheMetricKey {
+      handler: sanitize_label_value(handler),
+      operation: sanitize_label_value(operation),
+      outcome: sanitize_label_value(outcome),
+    };
+    let mut detailed = lock_detailed(&self.detailed);
+    if detailed.external_cache.contains_key(&key)
+      || detailed.external_cache.len() < MAX_DETAILED_SERIES
+    {
+      *detailed.external_cache.entry(key).or_default() += 1;
     }
   }
 
@@ -436,6 +458,20 @@ impl Metrics {
       append_labeled_metric(
         output,
         "oxibelt_cache_events_total",
+        "counter",
+        &labels,
+        *value,
+      );
+    }
+    for (key, value) in &detailed.external_cache {
+      let labels = [
+        ("handler", key.handler.as_str()),
+        ("operation", key.operation.as_str()),
+        ("outcome", key.outcome.as_str()),
+      ];
+      append_labeled_metric(
+        output,
+        "oxibelt_external_cache_operations_total",
         "counter",
         &labels,
         *value,

@@ -456,6 +456,7 @@ background_refresh = true
 background_refresh_max_concurrent = 16
 negative_statuses = []
 negative_ttl_seconds = 0
+# external_handler = "massive"
 
 [cache.surrogate]
 enabled = true
@@ -473,6 +474,18 @@ connect_error = true
 read_timeout = true
 statuses = []
 max_upstream_stale_seconds = 0
+
+# [[cache.external_handlers]]
+# name = "massive"
+# kind = "http"
+# endpoint = "https://cache-handler.internal.example/v1/cache/"
+# token_env = "OXIBELT_EXTERNAL_CACHE_TOKEN"
+# connect_timeout_ms = 250
+# request_timeout_ms = 30000
+# max_metadata_bytes = 1048576
+# max_body_bytes = 1073741824
+# max_inflight_requests = 64
+# fail_policy = "local_only"
 
 [admin]
 enabled = false

@@ -23,20 +23,25 @@ use crate::config::{
   CacheAdmissionConfig, CacheConfig, CachePolicyConfig, CacheStaleIfErrorConfig, CacheStore,
   default_cache_tmpfs_dir,
 };
-use crate::shared_state::{SharedCacheEntry, SharedState, SharedVaryMatcher};
+use crate::shared_state::SharedState;
 
 mod entry;
+mod external;
+mod external_handler;
 mod fill;
 mod index;
 mod range;
 mod revalidation;
+mod shared;
 pub mod signing;
 mod streaming;
 
 pub use entry::{CacheBodyFile, CacheEntry};
+pub(crate) use external_handler::{ExternalCachePurgeReport, ExternalCacheRuntime};
 pub(crate) use fill::{CacheFillDecision, CacheFillSuppressionReason};
 pub use fill::{CacheFillGuard, CacheFillWaiter};
 pub(crate) use range::range_entry;
+pub(in crate::cache) use shared::{shared_cache_entry, shared_cache_entry_metadata};
 pub(crate) use streaming::{CacheStreamingInsert, CacheStreamingInsertDecision};
 
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
@@ -156,7 +161,7 @@ pub(crate) struct CachePreparedInsert {
 }
 
 #[derive(Debug, Clone)]
-struct StoredEntry {
+pub(in crate::cache) struct StoredEntry {
   policy: String,
   partition: String,
   base_key: String,
@@ -258,6 +263,7 @@ struct CachePolicyRuntime {
   background_refresh: bool,
   background_refresh_max_concurrent: usize,
   lock_wait_timeout: Duration,
+  external_handler: Option<String>,
   admission: CacheAdmissionRuntime,
   stale_if_error: CacheStaleIfErrorConfig,
   rules: Vec<CachePolicyRuleRuntime>,
@@ -289,12 +295,25 @@ pub struct ResponseCache {
   fills: Arc<fill::CacheFillCoordinator>,
   inner: Mutex<CacheInner>,
   shared_state: Option<Arc<SharedState>>,
+  external_cache: ExternalCacheRuntime,
 }
 
 impl ResponseCache {
   pub fn new(
     config: &CacheConfig,
     shared_state: Option<Arc<SharedState>>,
+  ) -> anyhow::Result<Arc<Self>> {
+    Self::new_with_external(
+      config,
+      shared_state,
+      ExternalCacheRuntime::disabled(crate::metrics::Metrics::new()),
+    )
+  }
+
+  pub(crate) fn new_with_external(
+    config: &CacheConfig,
+    shared_state: Option<Arc<SharedState>>,
+    external_cache: ExternalCacheRuntime,
   ) -> anyhow::Result<Arc<Self>> {
     let tmpfs_dir = if config.enabled && config.store == CacheStore::Tmpfs {
       let dir = config
@@ -336,6 +355,7 @@ impl ResponseCache {
       background_refresh: config.background_refresh,
       background_refresh_max_concurrent: config.background_refresh_max_concurrent,
       lock_wait_timeout: Duration::from_millis(config.lock_wait_timeout_ms),
+      external_handler: external_handler_selection(config.external_handler.as_deref(), None),
       admission: admission_runtime(&config.admission, &config.negative_statuses),
       stale_if_error: config.stale_if_error.clone(),
       rules: Vec::new(),
@@ -366,6 +386,7 @@ impl ResponseCache {
       fills: fill::CacheFillCoordinator::new(),
       inner: Mutex::new(CacheInner::default()),
       shared_state,
+      external_cache,
     });
     cache.load_disk_entries();
     Ok(cache)
@@ -593,7 +614,7 @@ impl ResponseCache {
     if entry.body_file.is_some() {
       return;
     }
-    self.insert(
+    self.insert_with_external(
       CacheInsertContext {
         policy_name: ctx.policy_name,
         scheme: ctx.scheme,
@@ -603,6 +624,7 @@ impl ResponseCache {
         request_headers: ctx.request_headers,
       },
       entry,
+      false,
     );
   }
 
@@ -701,8 +723,19 @@ impl ResponseCache {
   }
 
   pub fn insert(&self, ctx: CacheInsertContext<'_>, entry: CacheEntry) -> CacheInsertOutcome {
+    self.insert_with_external(ctx, entry, true)
+  }
+
+  fn insert_with_external(
+    &self,
+    ctx: CacheInsertContext<'_>,
+    entry: CacheEntry,
+    publish_external: bool,
+  ) -> CacheInsertOutcome {
     match self.prepare_insert(ctx, entry.status, &entry.headers, Some(entry.body.len())) {
-      CachePreparedInsertDecision::Cacheable(prepared) => self.insert_prepared(*prepared, entry),
+      CachePreparedInsertDecision::Cacheable(prepared) => {
+        self.insert_prepared_with_external(*prepared, entry, publish_external)
+      }
       CachePreparedInsertDecision::NotCacheable(_) => CacheInsertOutcome::NotCacheable,
       CachePreparedInsertDecision::Rejected(_) => CacheInsertOutcome::Rejected,
     }
@@ -713,11 +746,20 @@ impl ResponseCache {
     prepared: CachePreparedInsert,
     entry: CacheEntry,
   ) -> CacheInsertOutcome {
+    self.insert_prepared_with_external(prepared, entry, true)
+  }
+
+  fn insert_prepared_with_external(
+    &self,
+    prepared: CachePreparedInsert,
+    entry: CacheEntry,
+    publish_external: bool,
+  ) -> CacheInsertOutcome {
     let size = match entry.body.len().checked_add(prepared.header_bytes) {
       Some(size) if size <= self.config.max_size_bytes => size,
       _ => return CacheInsertOutcome::Rejected,
     };
-    let shared_entry = {
+    let (shared_entry, external_entry) = {
       let mut inner = self.inner.lock().expect("cache lock poisoned");
       if variant_count_exceeded(
         &inner,
@@ -798,15 +840,21 @@ impl ResponseCache {
         .as_ref()
         .filter(|shared| shared.has_cache())
         .and_then(|_| shared_cache_entry(&stored));
+      let external_entry = publish_external
+        .then(|| self.external_entry_for_stored(&stored))
+        .flatten();
       inner.entries.insert(prepared.variant_key, stored);
       self.evict_if_needed(&mut inner, &prepared.policy);
-      shared_entry
+      (shared_entry, external_entry)
     };
     if let Some(shared) = &self.shared_state
       && shared.has_cache()
       && let Some(shared_entry) = shared_entry
     {
       shared.cache_put(&shared_entry);
+    }
+    if let Some((handler, metadata, body)) = external_entry {
+      self.spawn_external_fill(handler, metadata, body);
     }
     CacheInsertOutcome::Stored
   }
@@ -2043,6 +2091,10 @@ fn policy_runtime(
         .lock_wait_timeout_ms
         .unwrap_or(config.lock_wait_timeout_ms),
     ),
+    external_handler: external_handler_selection(
+      config.external_handler.as_deref(),
+      policy.external_handler.as_deref(),
+    ),
     admission: admission_runtime(
       policy.admission.as_ref().unwrap_or(&config.admission),
       policy
@@ -2062,6 +2114,16 @@ fn policy_runtime(
         store: rule.store,
       })
       .collect(),
+  }
+}
+
+fn external_handler_selection(
+  default: Option<&str>,
+  override_value: Option<&str>,
+) -> Option<String> {
+  match override_value.or(default) {
+    Some("off") | None => None,
+    Some(name) => Some(name.to_string()),
   }
 }
 
@@ -2233,51 +2295,6 @@ fn entry_lookup_key(entry: &StoredEntry) -> index::LookupKey {
     &entry.uri,
     &entry.base_key,
   )
-}
-
-fn shared_cache_entry(entry: &StoredEntry) -> Option<SharedCacheEntry> {
-  let body = match &entry.body {
-    StoredBody::Memory(body) => body.to_vec(),
-    StoredBody::Tmpfs(path) | StoredBody::Disk(path) => std::fs::read(path).ok()?,
-  };
-  let mut shared_entry = shared_cache_entry_metadata(entry, body.len());
-  shared_entry.body = body;
-  Some(shared_entry)
-}
-
-fn shared_cache_entry_metadata(entry: &StoredEntry, body_len: usize) -> SharedCacheEntry {
-  SharedCacheEntry {
-    policy: entry.policy.clone(),
-    partition: entry.partition.clone(),
-    base_key: entry.base_key.clone(),
-    variant_key: entry.variant_key.clone(),
-    scheme: entry.scheme.clone(),
-    host: entry.host.clone(),
-    uri: entry.uri.clone(),
-    status: entry.status.as_u16(),
-    headers: entry
-      .headers
-      .iter()
-      .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
-      .collect(),
-    body_len,
-    body_chunks: Vec::new(),
-    body: Vec::new(),
-    stored_at_ms: system_time_ms(entry.stored_at),
-    expires_at_ms: system_time_ms(entry.expires_at),
-    stale_if_error_until_ms: entry.stale_if_error_until.map(system_time_ms),
-    stale_while_revalidate_until_ms: entry.stale_while_revalidate_until.map(system_time_ms),
-    must_revalidate: entry.must_revalidate,
-    vary: entry
-      .vary
-      .iter()
-      .map(|item| SharedVaryMatcher {
-        name: item.name.clone(),
-        value: item.value.clone(),
-      })
-      .collect(),
-    tags: entry.tags.clone(),
-  }
 }
 
 fn system_time_ms(time: SystemTime) -> i64 {

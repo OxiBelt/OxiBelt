@@ -10,12 +10,13 @@ use oxibelt::config::{
     CompressionConfig, Config, ConnectionLimitIdentityMode, CrliteCoveragePolicy,
     CrliteFailurePolicy, CrliteManagedStorage, CrliteMode, DatabaseMitigationMode, DatabaseTlsMode,
     DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
-    ExpectContinueMode, ExternalAuthProvider, ForwardedClientIpSource, ForwardedHeaderMode,
-    GrpcRetryMode, HealthCheckProtocol, HotReloadMode, IpmPolicyEffect,
-    KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail,
-    MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode,
-    ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
-    RuntimeOverrides, SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
+    ExpectContinueMode, ExternalAuthProvider, ExternalCacheHandlerFailPolicy,
+    ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
+    HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
+    LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy,
+    OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
+    QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides,
+    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
     StaticPrecompressedEncoding, StreamNetwork, TlsKeyExchangeGroup, TlsServerResumptionMode,
     TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
     UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
@@ -3001,6 +3002,220 @@ cache = "assets"
     assert_eq!(config.cache.policies[0].max_vary_fields, Some(2));
     assert_eq!(config.cache.policies[0].lock_wait_timeout_ms, Some(100));
     assert_eq!(config.routes[1].cache.as_deref(), Some("assets"));
+}
+
+#[test]
+fn cache_external_handler_config_parse_and_policy_override() {
+    let temp_dir = common::TempDir::new("cache-external-handler");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "cache-external-handler");
+    let raw = format!(
+        r#"
+{}
+
+[cache]
+enabled = true
+external_handler = "massive"
+
+[[cache.external_handlers]]
+name = "massive"
+kind = "http"
+endpoint = "http://127.0.0.1:19090/internal/v1/cache/"
+token_env = "OXIBELT_EXTERNAL_CACHE_TOKEN"
+connect_timeout_ms = 125
+request_timeout_ms = 5000
+max_metadata_bytes = 4096
+max_body_bytes = 8192
+max_inflight_requests = 8
+fail_policy = "local_only"
+
+[[cache.policies]]
+name = "assets"
+external_handler = "off"
+
+[[cache.policies]]
+name = "api"
+external_handler = "massive"
+"#,
+        common::minimal_config_toml(&cert_path, &key_path)
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+
+    assert_eq!(config.cache.external_handler.as_deref(), Some("massive"));
+    let handler = &config.cache.external_handlers[0];
+    assert_eq!(handler.name, "massive");
+    assert_eq!(handler.kind, ExternalCacheHandlerKind::Http);
+    assert_eq!(
+        handler.token_env.as_deref(),
+        Some("OXIBELT_EXTERNAL_CACHE_TOKEN")
+    );
+    assert_eq!(handler.connect_timeout_ms, 125);
+    assert_eq!(handler.request_timeout_ms, 5000);
+    assert_eq!(handler.max_metadata_bytes, 4096);
+    assert_eq!(handler.max_body_bytes, Some(8192));
+    assert_eq!(handler.max_inflight_requests, 8);
+    assert_eq!(
+        handler.fail_policy,
+        ExternalCacheHandlerFailPolicy::LocalOnly
+    );
+    assert_eq!(
+        config.cache.policies[0].external_handler.as_deref(),
+        Some("off")
+    );
+    assert_eq!(
+        config.cache.policies[1].external_handler.as_deref(),
+        Some("massive")
+    );
+}
+
+#[test]
+fn cache_external_handler_rejects_invalid_values() {
+    let temp_dir = common::TempDir::new("cache-external-invalid");
+    let (cert_path, key_path) =
+        common::create_self_signed_cert(temp_dir.path(), "cache-external-invalid");
+    let base = common::minimal_config_toml(&cert_path, &key_path);
+
+    for (label, suffix, expected) in [
+        (
+            "duplicate",
+            r#"
+[cache]
+enabled = true
+
+[[cache.external_handlers]]
+name = "massive"
+endpoint = "http://127.0.0.1:19090/cache/"
+
+[[cache.external_handlers]]
+name = "massive"
+endpoint = "http://127.0.0.1:19091/cache/"
+"#,
+            "duplicate cache external handler name massive",
+        ),
+        (
+            "invalid-scheme",
+            r#"
+[cache]
+enabled = true
+
+[[cache.external_handlers]]
+name = "massive"
+endpoint = "unix://cache.sock"
+"#,
+            "endpoint must use http:// or https://",
+        ),
+        (
+            "zero-timeout",
+            r#"
+[cache]
+enabled = true
+
+[[cache.external_handlers]]
+name = "massive"
+endpoint = "http://127.0.0.1:19090/cache/"
+connect_timeout_ms = 0
+"#,
+            "connect_timeout_ms must be greater than 0",
+        ),
+        (
+            "zero-body-limit",
+            r#"
+[cache]
+enabled = true
+
+[[cache.external_handlers]]
+name = "massive"
+endpoint = "http://127.0.0.1:19090/cache/"
+max_body_bytes = 0
+"#,
+            "max_body_bytes must be greater than 0",
+        ),
+        (
+            "zero-inflight",
+            r#"
+[cache]
+enabled = true
+
+[[cache.external_handlers]]
+name = "massive"
+endpoint = "http://127.0.0.1:19090/cache/"
+max_inflight_requests = 0
+"#,
+            "max_inflight_requests must be greater than 0",
+        ),
+        (
+            "unknown-top-level-reference",
+            r#"
+[cache]
+enabled = true
+external_handler = "missing"
+"#,
+            "cache.external_handler references unknown cache external handler missing",
+        ),
+        (
+            "top-level-off",
+            r#"
+[cache]
+enabled = true
+external_handler = "off"
+"#,
+            "cache.external_handler must reference a cache external handler name",
+        ),
+        (
+            "unknown-policy-reference",
+            r#"
+[cache]
+enabled = true
+
+[[cache.external_handlers]]
+name = "massive"
+endpoint = "http://127.0.0.1:19090/cache/"
+
+[[cache.policies]]
+name = "assets"
+external_handler = "missing"
+"#,
+            "cache policy assets external_handler references unknown cache external handler missing",
+        ),
+    ] {
+        let config: Config = toml::from_str(&(base.clone() + suffix)).expect("config should parse");
+        let error = config
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("{label} should fail validation"));
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected {label} error: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn cache_external_handler_unknown_fields_fail_strict_shape_validation() {
+    let temp_dir = common::TempDir::new("cache-external-unknown");
+    let config_path = write_loadable_config(&temp_dir, "cache-external-unknown", |raw| {
+        raw + r#"
+
+[cache]
+enabled = true
+external_handler = "massive"
+
+[[cache.external_handlers]]
+name = "massive"
+endpoint = "http://127.0.0.1:19090/cache/"
+unexpected = true
+"#
+    });
+
+    let error = Config::load(&config_path).expect_err("unknown external handler field should fail");
+    assert!(
+        error.to_string().contains(
+            "configuration contains unknown field(s): cache.external_handlers.unexpected"
+        ),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[test]

@@ -557,22 +557,18 @@ fn slug_piece(value: &str, fallback: &str) -> String {
   let mut previous_dash = false;
   for ch in value.chars() {
     let next = if ch.is_ascii_alphanumeric() {
-      Some(ch.to_ascii_lowercase())
-    } else if ch == '_' || ch == '-' || ch == '.' {
-      Some('-')
+      ch.to_ascii_lowercase()
     } else {
-      Some('-')
+      '-'
     };
-    if let Some(ch) = next {
-      if ch == '-' {
-        if !previous_dash && !slug.is_empty() {
-          slug.push(ch);
-        }
-        previous_dash = true;
-      } else {
-        slug.push(ch);
-        previous_dash = false;
+    if next == '-' {
+      if !previous_dash && !slug.is_empty() {
+        slug.push(next);
       }
+      previous_dash = true;
+    } else {
+      slug.push(next);
+      previous_dash = false;
     }
   }
   let slug = slug.trim_matches('-');

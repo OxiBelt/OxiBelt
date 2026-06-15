@@ -14,7 +14,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
-use crate::cache::ResponseCache;
+use crate::cache::{ExternalCacheRuntime, ResponseCache};
 use crate::client_identity::ClientIdentityRuntime;
 use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
@@ -296,8 +296,11 @@ impl AppSnapshot {
     publish_upstream_pool_server_metrics(&pools);
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
-    let cache = ResponseCache::new(&config.cache, shared_state.clone())
-      .context("failed to build response cache")?;
+    let external_cache = ExternalCacheRuntime::new(&config, metrics.clone())
+      .context("failed to build external cache handlers")?;
+    let cache =
+      ResponseCache::new_with_external(&config.cache, shared_state.clone(), external_cache)
+        .context("failed to build response cache")?;
     let telemetry = match previous {
       Some(_) => TelemetryRuntime::new(&config.telemetry.tracing)
         .context("failed to build telemetry runtime")?,

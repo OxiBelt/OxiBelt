@@ -16,6 +16,8 @@ use crate::waf::{AccessLogFieldConfig, WafConfig};
 mod admin_legacy;
 mod admin_runtime;
 mod allowed_keys;
+mod cache_external;
+mod cache_sections;
 mod client_identity;
 mod crlite;
 mod database;
@@ -44,6 +46,12 @@ mod turn_queue;
 mod upstream_pool;
 mod workers;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
+pub use cache_external::{
+  ExternalCacheHandlerConfig, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
+};
+pub use cache_sections::{
+  CacheAdmissionConfig, CachePolicyRuleConfig, CacheStaleIfErrorConfig, CacheSurrogateConfig,
+};
 pub use client_identity::*;
 pub use crlite::*;
 pub use database::*;
@@ -1559,6 +1567,13 @@ impl Config {
     }
     validate_cache_admission("cache.admission", &self.cache.admission, &self.cache)?;
     validate_cache_stale_if_error("cache.stale_if_error", &self.cache.stale_if_error)?;
+    let external_handler_names = cache_external::validate_external_handlers(&self.cache)?;
+    cache_external::validate_external_handler_reference(
+      "cache.external_handler",
+      self.cache.external_handler.as_deref(),
+      &external_handler_names,
+      false,
+    )?;
 
     let mut names = HashSet::new();
     for policy in &self.cache.policies {
@@ -1671,6 +1686,12 @@ impl Config {
           stale_if_error,
         )?;
       }
+      cache_external::validate_external_handler_reference(
+        &format!("cache policy {} external_handler", policy.name),
+        policy.external_handler.as_deref(),
+        &external_handler_names,
+        true,
+      )?;
       if policy.store == Some(CacheStore::Tmpfs) && self.cache.enabled {
         let dir = self
           .cache
@@ -2567,6 +2588,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "disk_dir",
       "disk_max_size_bytes",
       "enabled",
+      "external_handler",
+      "external_handlers",
       "lock",
       "lock_wait_timeout_ms",
       "max_tag_bytes",
@@ -2599,6 +2622,18 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "statuses",
     ][..],
     "cache.surrogate" => &["enabled", "strip_response_header"][..],
+    "cache.external_handlers" => &[
+      "connect_timeout_ms",
+      "endpoint",
+      "fail_policy",
+      "kind",
+      "max_body_bytes",
+      "max_inflight_requests",
+      "max_metadata_bytes",
+      "name",
+      "request_timeout_ms",
+      "token_env",
+    ][..],
     "cache.stale_if_error" => &[
       "connect_error",
       "max_upstream_stale_seconds",
@@ -2612,6 +2647,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "cache_key",
       "default_ttl_seconds",
       "disk_max_size_bytes",
+      "external_handler",
       "lock_wait_timeout_ms",
       "max_tag_bytes",
       "max_tags_per_entry",
@@ -4409,6 +4445,10 @@ pub struct CacheConfig {
   pub stale_if_error: CacheStaleIfErrorConfig,
   #[serde(default)]
   pub policies: Vec<CachePolicyConfig>,
+  #[serde(default)]
+  pub external_handler: Option<String>,
+  #[serde(default)]
+  pub external_handlers: Vec<ExternalCacheHandlerConfig>,
 }
 
 impl Default for CacheConfig {
@@ -4447,23 +4487,8 @@ impl Default for CacheConfig {
       admission: CacheAdmissionConfig::default(),
       stale_if_error: CacheStaleIfErrorConfig::default(),
       policies: Vec::new(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct CacheSurrogateConfig {
-  #[serde(default = "default_true")]
-  pub enabled: bool,
-  #[serde(default = "default_true")]
-  pub strip_response_header: bool,
-}
-
-impl Default for CacheSurrogateConfig {
-  fn default() -> Self {
-    Self {
-      enabled: true,
-      strip_response_header: true,
+      external_handler: None,
+      external_handlers: Vec::new(),
     }
   }
 }
@@ -4524,63 +4549,9 @@ pub struct CachePolicyConfig {
   #[serde(default)]
   pub stale_if_error: Option<CacheStaleIfErrorConfig>,
   #[serde(default)]
+  pub external_handler: Option<String>,
+  #[serde(default)]
   pub rules: Vec<CachePolicyRuleConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct CacheAdmissionConfig {
-  #[serde(default = "default_cache_admission_statuses")]
-  pub statuses: Vec<u16>,
-  #[serde(default)]
-  pub content_types: Vec<String>,
-  #[serde(default)]
-  pub max_body_bytes: usize,
-  #[serde(default = "default_cache_admission_min_hits")]
-  pub min_hits: usize,
-  #[serde(default = "default_cache_admission_max_tracked_keys")]
-  pub max_tracked_keys: usize,
-}
-
-impl Default for CacheAdmissionConfig {
-  fn default() -> Self {
-    Self {
-      statuses: default_cache_admission_statuses(),
-      content_types: Vec::new(),
-      max_body_bytes: 0,
-      min_hits: default_cache_admission_min_hits(),
-      max_tracked_keys: default_cache_admission_max_tracked_keys(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct CacheStaleIfErrorConfig {
-  #[serde(default = "default_true")]
-  pub connect_error: bool,
-  #[serde(default = "default_true")]
-  pub read_timeout: bool,
-  #[serde(default)]
-  pub statuses: Vec<u16>,
-  #[serde(default)]
-  pub max_upstream_stale_seconds: u64,
-}
-
-impl Default for CacheStaleIfErrorConfig {
-  fn default() -> Self {
-    Self {
-      connect_error: true,
-      read_timeout: true,
-      statuses: Vec::new(),
-      max_upstream_stale_seconds: 0,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct CachePolicyRuleConfig {
-  #[serde(default)]
-  pub mime_types: Vec<String>,
-  pub store: CacheStore,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -5640,18 +5611,6 @@ fn default_cache_background_refresh_max_concurrent() -> usize {
 
 fn default_cache_lock_wait_timeout_ms() -> u64 {
   10_000
-}
-
-fn default_cache_admission_statuses() -> Vec<u16> {
-  vec![200, 203, 204, 301, 308]
-}
-
-fn default_cache_admission_min_hits() -> usize {
-  1
-}
-
-fn default_cache_admission_max_tracked_keys() -> usize {
-  16_384
 }
 
 pub(crate) fn default_cache_tmpfs_dir() -> PathBuf {

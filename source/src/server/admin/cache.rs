@@ -248,7 +248,7 @@ pub(in crate::server) async fn cache_purge_json_response(
   let partition = body.partition.as_deref();
   let scheme = body.scheme.as_deref().unwrap_or(default_scheme);
 
-  let purged = match body.purge_type.as_str() {
+  let (purged, external_reports) = match body.purge_type.as_str() {
     "exact" => {
       let Some(host) = body.host.as_deref() else {
         audit_rejected_cache_purge(
@@ -271,9 +271,14 @@ pub(in crate::server) async fn cache_purge_json_response(
       if !authorize_cache_target(authorization, "cache:PurgeObject", policy, Some(host)) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      snapshot
+      let purged = snapshot
         .cache
-        .purge_exact_partition(policy, scheme, host, uri, partition)
+        .purge_exact_partition(policy, scheme, host, uri, partition);
+      let external_reports = snapshot
+        .cache
+        .purge_external_exact_partition(policy, scheme, host, uri, partition)
+        .await;
+      (purged, external_reports)
     }
     "prefix" => {
       let Some(host) = body.host.as_deref() else {
@@ -297,9 +302,15 @@ pub(in crate::server) async fn cache_purge_json_response(
       if !authorize_cache_target(authorization, "cache:PurgePrefix", policy, Some(host)) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      snapshot
+      let purged =
+        snapshot
+          .cache
+          .purge_prefix_partition(policy, scheme, host, path_prefix, partition);
+      let external_reports = snapshot
         .cache
-        .purge_prefix_partition(policy, scheme, host, path_prefix, partition)
+        .purge_external_prefix_partition(policy, scheme, host, path_prefix, partition)
+        .await;
+      (purged, external_reports)
     }
     "tag" => {
       let Some(tag) = body.tag.as_deref() else {
@@ -319,13 +330,24 @@ pub(in crate::server) async fn cache_purge_json_response(
       ) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      snapshot.cache.purge_tag_partition(
+      let purged = snapshot.cache.purge_tag_partition(
         policy,
         tag,
         body.scheme.as_deref(),
         body.host.as_deref(),
         partition,
-      )
+      );
+      let external_reports = snapshot
+        .cache
+        .purge_external_tag_partition(
+          policy,
+          tag,
+          body.scheme.as_deref(),
+          body.host.as_deref(),
+          partition,
+        )
+        .await;
+      (purged, external_reports)
     }
     _ => {
       audit_rejected_cache_purge(
@@ -365,7 +387,11 @@ pub(in crate::server) async fn cache_purge_json_response(
     purge_type = %body.purge_type,
     "admin JSON cache purge completed"
   );
-  json_response(StatusCode::OK, &json!({ "purged": purged }))
+  let mut response = json!({ "purged": purged });
+  if !external_reports.is_empty() {
+    response["external_handlers"] = json!(external_reports);
+  }
+  json_response(StatusCode::OK, &response)
 }
 
 fn audit_rejected_cache_purge(
@@ -397,7 +423,7 @@ fn header_map_from_strings(
   Ok(map)
 }
 
-pub(in crate::server) fn cache_purge_response(
+pub(in crate::server) async fn cache_purge_response(
   snapshot: &AppSnapshot,
   params: &std::collections::HashMap<String, String>,
   path: &str,
@@ -418,7 +444,7 @@ pub(in crate::server) fn cache_purge_response(
   let partition = params.get("partition").map(String::as_str);
   let purge_scheme = params.get("scheme").map(String::as_str).unwrap_or(scheme);
   let host = params.get("host").map(String::as_str);
-  let purged = match path {
+  let (purged, external_reports) = match path {
     "/cache/purge" => {
       let Some(host) = host else {
         admin_audit(
@@ -456,9 +482,14 @@ pub(in crate::server) fn cache_purge_response(
         );
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      snapshot
+      let purged = snapshot
         .cache
-        .purge_exact_partition(policy, purge_scheme, host, uri, partition)
+        .purge_exact_partition(policy, purge_scheme, host, uri, partition);
+      let external_reports = snapshot
+        .cache
+        .purge_external_exact_partition(policy, purge_scheme, host, uri, partition)
+        .await;
+      (purged, external_reports)
     }
     "/cache/purge-prefix" => {
       let Some(host) = host else {
@@ -497,9 +528,15 @@ pub(in crate::server) fn cache_purge_response(
         );
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      snapshot
+      let purged =
+        snapshot
+          .cache
+          .purge_prefix_partition(policy, purge_scheme, host, path_prefix, partition);
+      let external_reports = snapshot
         .cache
-        .purge_prefix_partition(policy, purge_scheme, host, path_prefix, partition)
+        .purge_external_prefix_partition(policy, purge_scheme, host, path_prefix, partition)
+        .await;
+      (purged, external_reports)
     }
     "/cache/purge-tag" => {
       let Some(tag) = params.get("tag").map(String::as_str) else {
@@ -526,13 +563,24 @@ pub(in crate::server) fn cache_purge_response(
         );
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      snapshot.cache.purge_tag_partition(
+      let purged = snapshot.cache.purge_tag_partition(
         policy,
         tag,
         params.get("scheme").map(String::as_str),
         host,
         partition,
-      )
+      );
+      let external_reports = snapshot
+        .cache
+        .purge_external_tag_partition(
+          policy,
+          tag,
+          params.get("scheme").map(String::as_str),
+          host,
+          partition,
+        )
+        .await;
+      (purged, external_reports)
     }
     _ => unreachable!("admin cache purge path checked before dispatch"),
   };
@@ -551,5 +599,17 @@ pub(in crate::server) fn cache_purge_response(
     None,
   );
   info!(peer = %peer_addr, actor = %authorization.actor.name, policy, purged, "admin cache purge completed");
-  text_response(StatusCode::OK, &format!("purged={purged}\n"))
+  let mut body = format!("purged={purged}\n");
+  for report in external_reports {
+    body.push_str("external_handler=");
+    body.push_str(&report.handler);
+    body.push_str(" status=");
+    body.push_str(report.status);
+    if let Some(purged) = report.purged {
+      body.push_str(" purged=");
+      body.push_str(&purged.to_string());
+    }
+    body.push('\n');
+  }
+  text_response(StatusCode::OK, &body)
 }
