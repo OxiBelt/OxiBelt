@@ -44,6 +44,7 @@ RUN case "${NGINX_TARGET_CPU}" in \
         -fstack-clash-protection \
         -fcf-protection=full \
         -fvisibility=hidden \
+        -U_FORTIFY_SOURCE \
         -D_FORTIFY_SOURCE=3 \
         -D_GLIBCXX_ASSERTIONS \
         -flto=auto \

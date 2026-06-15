@@ -1150,6 +1150,7 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
         -fstack-clash-protection \
         -fcf-protection=full \
         -fvisibility=hidden \
+        -U_FORTIFY_SOURCE \
         -D_FORTIFY_SOURCE=3 \
         -D_GLIBCXX_ASSERTIONS \
         -flto=auto \
