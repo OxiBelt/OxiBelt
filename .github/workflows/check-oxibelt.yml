@@ -769,8 +769,8 @@ jobs:
       (
         github.event_name == 'push' ||
         github.event_name == 'schedule' ||
-        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
-        (github.event_name == 'workflow_dispatch' && inputs.submit_dependency_snapshots)
+        (github.event_name == 'pull_request' && github.event['pull_request']['head']['repo']['full_name'] == github.repository) ||
+        (github.event_name == 'workflow_dispatch' && inputs['submit_dependency_snapshots'])
       )
     permissions:
       actions: read
@@ -1516,7 +1516,7 @@ jobs:
           retention-days: 0
 
   docker-performance:
-    name: Docker performance (${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}, ${{ matrix.serving_type }}, shard ${{ matrix.shard }})
+    name: Docker performance (${{ github.event_name == 'workflow_dispatch' && inputs['performance_profile'] || 'smoke' }}, ${{ matrix.serving_type }}, shard ${{ matrix.shard }})
     runs-on: ${{ matrix.runner }}
     needs:
       - docker-integration-config-runtime
@@ -1570,14 +1570,12 @@ jobs:
           - accept-multipliers
           - remote-signer
     env:
-      PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
-      PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
-      PERFORMANCE_H2_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_h2_profile || false }}
-      PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile_label || 'none' }}
+      PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_profile'] || 'smoke' }}
+      PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_iterations'] || '5' }}
+      PERFORMANCE_H2_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_h2_profile'] || false }}
+      PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_profile_label'] || 'none' }}
       PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}
       OXIBELT_PERF_REGRESSION_GATE_MODE: warn
-      OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE'] || 'warn' }}
-      OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE'] || 'warn' }}
 
     steps:
       - name: Checkout
@@ -1667,7 +1665,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-external-benchmark-image/oxibelt-external-benchmark-image.tar"
 
       - name: Install Linux perf and heap tooling for performance profiling
-        if: github.event_name != 'workflow_dispatch' || inputs.performance_profile == 'smoke' || inputs.performance_h2_profile || inputs.performance_profile_label != 'none'
+        if: github.event_name != 'workflow_dispatch' || inputs['performance_profile'] == 'smoke' || inputs['performance_h2_profile'] || inputs['performance_profile_label'] != 'none'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -1743,11 +1741,21 @@ jobs:
           AMD64_V3_NGINX_IMAGE_TAG: oxibelt/performance-nginx:alpine-x86-64-v3
           AMD64_V3_CADDY_IMAGE_TAG: oxibelt/performance-caddy:alpine-x86-64-v3
           PERFORMANCE_SHARD: ${{ matrix.shard }}
+          OXIBELT_ACTIONS_VARS_JSON: ${{ toJSON(vars) }}
         run: |
           if [[ ! "${PERFORMANCE_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
             echo "performance_iterations must be a positive integer; got '${PERFORMANCE_ITERATIONS}'" >&2
             exit 2
           fi
+          actions_var_or_default() {
+            local name="$1"
+            local fallback="$2"
+            jq -r --arg name "${name}" --arg fallback "${fallback}" \
+              '.[$name] // "" | if . == "" then $fallback else . end' \
+              <<<"${OXIBELT_ACTIONS_VARS_JSON}"
+          }
+          OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE="$(actions_var_or_default OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE warn)"
+          OXIBELT_PERF_DIAGNOSTIC_GATE_MODE="$(actions_var_or_default OXIBELT_PERF_DIAGNOSTIC_GATE_MODE warn)"
           selected_profile_label="${PERFORMANCE_PROFILE_LABEL}"
           if [[ -z "${selected_profile_label}" || "${selected_profile_label}" == "none" ]]; then
             if [[ "${PERFORMANCE_H2_PROFILE}" == "true" ]]; then
@@ -1926,10 +1934,8 @@ jobs:
       actions: read
       contents: read
     env:
-      PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile || 'smoke' }}
-      PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}
-      OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE'] || 'warn' }}
-      OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE'] || 'warn' }}
+      PERFORMANCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_profile'] || 'smoke' }}
+      PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_iterations'] || '5' }}
 
     steps:
       - name: Checkout
@@ -2076,7 +2082,7 @@ jobs:
         env:
           BASELINE_REPORT: ${{ steps.download-performance-baseline.outputs.baseline_report }}
           BASELINE_CONTEXT: ${{ steps.download-performance-baseline.outputs.baseline_context }}
-          PERFORMANCE_ACCEPTED_REGRESSION_REASON: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_accepted_regression_reason || '' }}
+          PERFORMANCE_ACCEPTED_REGRESSION_REASON: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_accepted_regression_reason'] || '' }}
         run: |
           mkdir -p "${RUNNER_TEMP}/oxibelt-performance-artifacts"
           aggregate_args=(
@@ -2126,7 +2132,18 @@ jobs:
 
       - name: Evaluate Docker performance regression gates
         if: steps.performance-artifacts.outputs.found == 'true'
+        env:
+          OXIBELT_ACTIONS_VARS_JSON: ${{ toJSON(vars) }}
         run: |
+          actions_var_or_default() {
+            local name="$1"
+            local fallback="$2"
+            jq -r --arg name "${name}" --arg fallback "${fallback}" \
+              '.[$name] // "" | if . == "" then $fallback else . end' \
+              <<<"${OXIBELT_ACTIONS_VARS_JSON}"
+          }
+          OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE="$(actions_var_or_default OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE warn)"
+          OXIBELT_PERF_DIAGNOSTIC_GATE_MODE="$(actions_var_or_default OXIBELT_PERF_DIAGNOSTIC_GATE_MODE warn)"
           results_files="$(jq -r '.artifact_discovery.results_files // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           unsupported_count="$(jq -r '.artifact_discovery.unsupported_cpu.count // 0' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if [[ "${results_files}" == "0" ]]; then
@@ -2206,14 +2223,14 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - docker-performance
-    if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run))
+    if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run']))
     permissions:
       actions: read
       contents: read
     timeout-minutes: 360
     env:
-      AGGRESSIVE_LONG_RUN_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run_seconds || '18000' }}
-      AGGRESSIVE_LONG_RUN_CONCURRENCY: ${{ github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run_concurrency || '256' }}
+      AGGRESSIVE_LONG_RUN_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run_seconds'] || '18000' }}
+      AGGRESSIVE_LONG_RUN_CONCURRENCY: ${{ github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run_concurrency'] || '256' }}
 
     steps:
       - name: Checkout

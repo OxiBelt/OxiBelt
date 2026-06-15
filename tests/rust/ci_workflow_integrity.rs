@@ -900,8 +900,8 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
         "github.repository == 'OxiBelt/OxiBelt'",
         "github.event_name == 'push'",
         "github.event_name == 'schedule'",
-        "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository",
-        "github.event_name == 'workflow_dispatch' && inputs.submit_dependency_snapshots",
+        "github.event_name == 'pull_request' && github.event['pull_request']['head']['repo']['full_name'] == github.repository",
+        "github.event_name == 'workflow_dispatch' && inputs['submit_dependency_snapshots']",
     ] {
         assert!(
             snapshot_job_text.contains(expected),
@@ -1380,15 +1380,15 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "workflow_dispatch should expose exact H2/H3 profiling labels"
     );
     assert!(
-        workflow.contains("PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_iterations || '5' }}"),
+        workflow.contains("PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_iterations'] || '5' }}"),
         "docker-performance should default to five iterations outside manual dispatch"
     );
     assert!(
-        workflow.contains("PERFORMANCE_H2_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_h2_profile || false }}"),
+        workflow.contains("PERFORMANCE_H2_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_h2_profile'] || false }}"),
         "docker-performance should keep H2 profiling disabled outside explicit manual dispatch"
     );
     assert!(
-        workflow.contains("PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_profile_label || 'none' }}"),
+        workflow.contains("PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_profile_label'] || 'none' }}"),
         "docker-performance should keep exact profiling labels disabled outside manual dispatch"
     );
     let legacy_apt_flamegraph_packages = [
@@ -1760,7 +1760,7 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     assert!(
         summary_job.contains("PERFORMANCE_ACCEPTED_REGRESSION_REASON:")
             && summary_job
-                .contains("inputs.performance_accepted_regression_reason")
+                .contains("inputs['performance_accepted_regression_reason']")
             && summary_job
                 .contains("aggregate_args+=(--accepted-regression-reason \"${PERFORMANCE_ACCEPTED_REGRESSION_REASON}\")"),
         "summary job should pass explicit accepted-regression reasons to the aggregate binary"
@@ -1774,9 +1774,11 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should read the regression gate status from the comparison JSON"
     );
     assert!(
-        workflow.contains(
-            "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE: ${{ vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE'] || 'warn' }}"
-        ) && workflow.contains("external_diagnostic_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") == \"benchmark_infrastructure_diagnostic\")")
+        workflow.contains("OXIBELT_ACTIONS_VARS_JSON: ${{ toJSON(vars) }}")
+            && workflow.contains("actions_var_or_default()")
+            && workflow.contains("OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=\"$(actions_var_or_default OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE warn)\"")
+            && !workflow.contains("vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE']")
+            && workflow.contains("external_diagnostic_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") == \"benchmark_infrastructure_diagnostic\")")
             && workflow.contains("::warning title=External benchmark diagnostic::")
             && workflow.contains("external_failure_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") != \"benchmark_infrastructure_diagnostic\") | (.fail_count // 0)] | add // 0'")
             && workflow.contains("::warning title=External benchmark validation::")
@@ -1785,9 +1787,9 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
         "summary job should split cross-comparator external diagnostics from real external benchmark failures"
     );
     assert!(
-        workflow.contains(
-            "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE: ${{ vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE'] || 'warn' }}"
-        ) && workflow.contains("profile_environment_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") == \"profiling_environment_unavailable\")")
+        workflow.contains("OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"$(actions_var_or_default OXIBELT_PERF_DIAGNOSTIC_GATE_MODE warn)\"")
+            && !workflow.contains("vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE']")
+            && workflow.contains("profile_environment_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") == \"profiling_environment_unavailable\")")
             && workflow.contains("profiling unavailable in the current environment for ${profile_environment_count} comparator group(s): perf record failed with status 255")
             && workflow.contains("profile_failure_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") != \"profiling_environment_unavailable\") | (.fail_count // 0)] | add // 0'")
             && workflow.contains("::warning title=Docker performance diagnostic profiling::Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md")
@@ -1863,7 +1865,7 @@ fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
         "aggressive long-run should start after the Docker performance matrix"
     );
     assert!(
-        workflow.contains("if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run))"),
+        workflow.contains("if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run']))"),
         "aggressive long-run should run only after successful Docker performance on schedule or explicit manual dispatch"
     );
     assert!(
@@ -1871,7 +1873,7 @@ fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
         "aggressive long-run should fit within GitHub-hosted runner limits"
     );
     assert!(
-        workflow.contains("AGGRESSIVE_LONG_RUN_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.aggressive_long_run_seconds || '18000' }}"),
+        workflow.contains("AGGRESSIVE_LONG_RUN_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run_seconds'] || '18000' }}"),
         "aggressive long-run should default to a five-hour scheduled soak"
     );
     assert!(
