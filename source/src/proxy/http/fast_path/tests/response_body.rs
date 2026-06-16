@@ -42,12 +42,14 @@ async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materializ
     .await
     {
       Ok(prepared) => prepared,
-      Err(response) => panic!("unexpected response status {}", response.status()),
+      Err(error) => panic!("unexpected response status {}", error.response.status()),
     };
 
     assert!(prepared.inlined_known_small_body.is_none());
     assert!(prepared.known_small_response_body);
     assert!(prepared.trailers_handled);
+    assert_eq!(prepared.disposition, "inlined");
+    assert_eq!(prepared.reason, "known_small");
     let bytes = prepared
       .body
       .collect()
@@ -73,13 +75,15 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
   .await
   {
     Ok(prepared) => prepared,
-    Err(response) => panic!("unexpected response status {}", response.status()),
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
   };
 
   let inlined = prepared
     .inlined_known_small_body
     .expect("H3 response should keep inlined small body metadata");
   assert!(prepared.known_small_response_body);
+  assert_eq!(prepared.disposition, "inlined");
+  assert_eq!(prepared.reason, "known_small");
   assert_eq!(inlined.data.as_ref(), b"ok");
   assert!(prepared.trailers_handled);
   let bytes = prepared
@@ -105,12 +109,14 @@ async fn end_stream_fast_path_response_body_skips_timeout_wrapping() {
   .await
   {
     Ok(prepared) => prepared,
-    Err(response) => panic!("unexpected response status {}", response.status()),
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
   };
 
   assert!(prepared.known_small_response_body);
   assert!(prepared.trailers_handled);
   assert!(prepared.inlined_known_small_body.is_none());
+  assert_eq!(prepared.disposition, "inlined");
+  assert_eq!(prepared.reason, "empty");
   let bytes = prepared
     .body
     .collect()
@@ -118,6 +124,31 @@ async fn end_stream_fast_path_response_body_skips_timeout_wrapping() {
     .expect("empty body should collect")
     .to_bytes();
   assert!(bytes.is_empty());
+}
+
+#[tokio::test]
+async fn unknown_length_fast_path_response_body_keeps_streaming_metadata() {
+  let body = Full::new(Bytes::from_static(b"streaming"))
+    .map_err(|never| -> body::BoxError { match never {} });
+
+  let prepared = match fast_path_response_body(
+    &HeaderMap::new(),
+    body,
+    Duration::from_secs(1),
+    TrailerMode::Drop,
+    http::Version::HTTP_11,
+  )
+  .await
+  {
+    Ok(prepared) => prepared,
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
+  };
+
+  assert!(!prepared.known_small_response_body);
+  assert!(!prepared.trailers_handled);
+  assert!(prepared.inlined_known_small_body.is_none());
+  assert_eq!(prepared.disposition, "streamed");
+  assert_eq!(prepared.reason, "unknown_length");
 }
 
 #[test]

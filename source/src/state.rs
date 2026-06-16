@@ -57,14 +57,19 @@ use upstream_clients::build_clients;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type UpstreamBody = BoxBody<Bytes, BoxError>;
-type HyperClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, UpstreamBody>;
-type H2cClient = Client<HttpConnector, UpstreamBody>;
+type HyperConnector =
+  upstream_clients::InstrumentedConnector<hyper_rustls::HttpsConnector<HttpConnector>>;
+type H2cConnector = upstream_clients::InstrumentedConnector<HttpConnector>;
+type HyperClient = Client<HyperConnector, UpstreamBody>;
+type H2cClient = Client<H2cConnector, UpstreamBody>;
 
 #[derive(Clone)]
 struct ClientPool {
   h1_only: HyperClient,
   negotiated: HyperClient,
   h2c: H2cClient,
+  metrics: Arc<Metrics>,
+  pool_label: &'static str,
 }
 
 impl ClientPool {
@@ -74,9 +79,24 @@ impl ClientPool {
     version: HttpVersion,
   ) -> Option<UpstreamClientRef<'_>> {
     match version {
-      HttpVersion::H1 => Some(UpstreamClientRef::Hyper(&self.h1_only)),
-      HttpVersion::H2 if origin_scheme == "http" => Some(UpstreamClientRef::H2c(&self.h2c)),
-      HttpVersion::H2 => Some(UpstreamClientRef::Hyper(&self.negotiated)),
+      HttpVersion::H1 => Some(UpstreamClientRef::Hyper {
+        client: &self.h1_only,
+        metrics: &self.metrics,
+        version: "h1",
+        pool: self.pool_label,
+      }),
+      HttpVersion::H2 if origin_scheme == "http" => Some(UpstreamClientRef::H2c {
+        client: &self.h2c,
+        metrics: &self.metrics,
+        version: "h2c",
+        pool: self.pool_label,
+      }),
+      HttpVersion::H2 => Some(UpstreamClientRef::Hyper {
+        client: &self.negotiated,
+        metrics: &self.metrics,
+        version: "h2",
+        pool: self.pool_label,
+      }),
       HttpVersion::H3 => None,
     }
   }
@@ -84,8 +104,18 @@ impl ClientPool {
 
 #[derive(Clone, Copy)]
 pub(crate) enum UpstreamClientRef<'a> {
-  Hyper(&'a HyperClient),
-  H2c(&'a H2cClient),
+  Hyper {
+    client: &'a HyperClient,
+    metrics: &'a Arc<Metrics>,
+    version: &'static str,
+    pool: &'static str,
+  },
+  H2c {
+    client: &'a H2cClient,
+    metrics: &'a Arc<Metrics>,
+    version: &'static str,
+    pool: &'static str,
+  },
 }
 
 impl UpstreamClientRef<'_> {
@@ -93,10 +123,35 @@ impl UpstreamClientRef<'_> {
     &self,
     request: http::Request<UpstreamBody>,
   ) -> Result<http::Response<Incoming>, hyper_util::client::legacy::Error> {
+    let scheme = upstream_client_metric_scheme(request.uri());
     match self {
-      Self::Hyper(client) => client.request(request).await,
-      Self::H2c(client) => client.request(request).await,
+      Self::Hyper {
+        client,
+        metrics,
+        version,
+        pool,
+      } => {
+        metrics.record_http_upstream_client_request(version, scheme, pool);
+        client.request(request).await
+      }
+      Self::H2c {
+        client,
+        metrics,
+        version,
+        pool,
+      } => {
+        metrics.record_http_upstream_client_request(version, scheme, pool);
+        client.request(request).await
+      }
     }
+  }
+}
+
+fn upstream_client_metric_scheme(uri: &http::Uri) -> &'static str {
+  match uri.scheme_str() {
+    Some("http") => "http",
+    Some("https") => "https",
+    _ => "other",
   }
 }
 
@@ -256,6 +311,8 @@ impl AppSnapshot {
       &tls_resumption,
       &config.proxy.http2,
       &outbound_revocation,
+      metrics.clone(),
+      "primary",
     )
     .context("failed to build upstream HTTP clients")?;
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
@@ -265,6 +322,8 @@ impl AppSnapshot {
       &tls_resumption,
       &config.proxy.http2,
       &outbound_revocation,
+      metrics.clone(),
+      "health",
     )
     .context("failed to build upstream health-check HTTP clients")?;
     let h3_clients =
@@ -489,6 +548,8 @@ impl AppSnapshot {
       &previous.tls_resumption,
       &config.proxy.http2,
       &previous.outbound_revocation,
+      previous.metrics.clone(),
+      "primary",
     )
     .context("failed to build upstream HTTP clients")?;
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
@@ -498,6 +559,8 @@ impl AppSnapshot {
       &previous.tls_resumption,
       &config.proxy.http2,
       &previous.outbound_revocation,
+      previous.metrics.clone(),
+      "health",
     )
     .context("failed to build upstream health-check HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(

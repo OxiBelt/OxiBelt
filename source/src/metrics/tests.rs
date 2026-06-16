@@ -64,7 +64,80 @@ fn prometheus_output_includes_plain_proxy_fast_path_decisions() {
   assert!(body.contains(
     "oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outcome=\"miss\",reason=\"cache_policy\"} 1"
   ));
-  assert!(!body.contains("unknown"));
+  assert!(!body.contains("reason=\"unknown\""));
+}
+
+#[test]
+fn prometheus_output_includes_fast_path_response_body_dispositions() {
+  let metrics = Metrics::new();
+  metrics.record_fast_path_response_body("h1", "inlined", "known_small");
+  metrics.record_fast_path_response_body("h1", "streamed", "unknown_length");
+  metrics.record_fast_path_response_body("h1", "error", "read_timeout");
+  metrics.record_fast_path_response_body("h1", "streamed", "unknown");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains(
+    "oxibelt_http_fast_path_response_bodies_total{protocol=\"h1\",disposition=\"inlined\",reason=\"known_small\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_fast_path_response_bodies_total{protocol=\"h1\",disposition=\"streamed\",reason=\"unknown_length\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_fast_path_response_bodies_total{protocol=\"h1\",disposition=\"error\",reason=\"read_timeout\"} 1"
+  ));
+  assert!(!body.contains("unknown\"} 1"));
+}
+
+#[test]
+fn prometheus_output_includes_upstream_client_reuse_metrics() {
+  let metrics = Metrics::new();
+  metrics.record_http_upstream_client_request("h1", "http", "primary");
+  metrics.record_http_upstream_client_request("h1", "http", "primary");
+  metrics.record_http_upstream_client_pool_miss("h1", "http", "primary");
+  metrics.record_http_upstream_client_connection_created("h1", "http", "primary");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains(
+    "oxibelt_http_upstream_client_requests_total{version=\"h1\",scheme=\"http\",pool=\"primary\"} 2"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_upstream_client_pool_misses_total{version=\"h1\",scheme=\"http\",pool=\"primary\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_upstream_client_connections_created_total{version=\"h1\",scheme=\"http\",pool=\"primary\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_upstream_client_reuse_estimate{version=\"h1\",scheme=\"http\",pool=\"primary\"} 0.500000"
+  ));
+}
+
+#[test]
+fn prometheus_output_includes_downstream_h1_flush_metrics() {
+  let metrics = Metrics::new();
+  metrics.record_http_downstream_write_flush("h1", "tls");
+  metrics.record_http_downstream_write_flush("h2", "tls");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(
+    body
+      .contains("oxibelt_http_downstream_write_flushes_total{protocol=\"h1\",transport=\"tls\"} 1")
+  );
+  assert!(!body.contains("oxibelt_http_downstream_write_flushes_total{protocol=\"h2\""));
 }
 
 #[test]

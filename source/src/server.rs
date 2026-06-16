@@ -2,10 +2,13 @@
 //! This module binds transports together without owning protocol-specific policy.
 
 use std::convert::Infallible;
+use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use ::http::{Response, StatusCode};
@@ -14,6 +17,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use ring::digest;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -254,6 +258,81 @@ impl Drop for OpsTasks {
     for task in &self.tasks {
       task.abort();
     }
+  }
+}
+
+pub(super) struct InstrumentedDownstreamIo<I> {
+  inner: I,
+  metrics: Arc<crate::metrics::Metrics>,
+  protocol: &'static str,
+  transport: &'static str,
+}
+
+impl<I> InstrumentedDownstreamIo<I> {
+  pub(super) fn new(
+    inner: I,
+    metrics: Arc<crate::metrics::Metrics>,
+    protocol: &'static str,
+    transport: &'static str,
+  ) -> Self {
+    Self {
+      inner,
+      metrics,
+      protocol,
+      transport,
+    }
+  }
+}
+
+impl<I> AsyncRead for InstrumentedDownstreamIo<I>
+where
+  I: AsyncRead + Unpin,
+{
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    cx: &mut TaskContext<'_>,
+    buf: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.inner).poll_read(cx, buf)
+  }
+}
+
+impl<I> AsyncWrite for InstrumentedDownstreamIo<I>
+where
+  I: AsyncWrite + Unpin,
+{
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut TaskContext<'_>,
+    buf: &[u8],
+  ) -> Poll<io::Result<usize>> {
+    Pin::new(&mut self.inner).poll_write(cx, buf)
+  }
+
+  fn poll_write_vectored(
+    mut self: Pin<&mut Self>,
+    cx: &mut TaskContext<'_>,
+    bufs: &[IoSlice<'_>],
+  ) -> Poll<io::Result<usize>> {
+    Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    self.inner.is_write_vectored()
+  }
+
+  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+    let result = Pin::new(&mut self.inner).poll_flush(cx);
+    if matches!(result, Poll::Ready(Ok(()))) {
+      self
+        .metrics
+        .record_http_downstream_write_flush(self.protocol, self.transport);
+    }
+    result
+  }
+
+  fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.inner).poll_shutdown(cx)
   }
 }
 
@@ -2207,9 +2286,10 @@ async fn handle_connection(
           .max_total_header_bytes
           .max(8192),
       )
-      .writev(false)
       .keep_alive(true);
-    let connection = builder.serve_connection(TokioIo::new(tls_stream), service);
+    let io =
+      InstrumentedDownstreamIo::new(tls_stream, handshake_state.metrics.clone(), "h1", "tls");
+    let connection = builder.serve_connection(TokioIo::new(io), service);
     let result = if handshake_state.http1_upgrades_possible {
       let connection = connection.with_upgrades();
       tokio::pin!(connection);
@@ -2533,13 +2613,65 @@ mod tests {
     ));
   }
 
+  use std::io;
   use std::path::Path;
+  use std::pin::Pin;
+  use std::task::{Context as TaskContext, Poll};
   use std::time::Instant;
 
   use crate::config::Config;
-  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 
   const ADMIN_TOKEN_ENV: &str = "PATH";
+
+  struct FlushReadyIo;
+
+  impl tokio::io::AsyncRead for FlushReadyIo {
+    fn poll_read(
+      self: Pin<&mut Self>,
+      _cx: &mut TaskContext<'_>,
+      _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+      Poll::Pending
+    }
+  }
+
+  impl tokio::io::AsyncWrite for FlushReadyIo {
+    fn poll_write(
+      self: Pin<&mut Self>,
+      _cx: &mut TaskContext<'_>,
+      _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+      Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+      Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+      Poll::Ready(Ok(()))
+    }
+  }
+
+  #[test]
+  fn instrumented_downstream_io_records_successful_flush() {
+    let metrics = crate::metrics::Metrics::new();
+    let mut io = InstrumentedDownstreamIo::new(FlushReadyIo, metrics.clone(), "h1", "tcp");
+    let mut cx = TaskContext::from_waker(futures_util::task::noop_waker_ref());
+
+    let result = tokio::io::AsyncWrite::poll_flush(Pin::new(&mut io), &mut cx);
+    assert!(matches!(result, Poll::Ready(Ok(()))));
+
+    let body = metrics.prometheus(
+      &crate::config::MetricsConfig::default(),
+      crate::cache::CacheStats::default(),
+      crate::tls::TlsServerSessionStorageStats::default(),
+    );
+    assert!(body.contains(
+      "oxibelt_http_downstream_write_flushes_total{protocol=\"h1\",transport=\"tcp\"} 1"
+    ));
+  }
 
   #[tokio::test]
   async fn admin_listener_disabled_config_does_not_serve_stale_requests() {

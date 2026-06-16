@@ -18,8 +18,33 @@ pub(super) enum SmallResponseDisposition {
     body: ProxyBody,
     inlined: Option<body::InlinedKnownSmallResponseBody>,
   },
-  Streaming(ProxyBody),
-  Error(Response<ProxyBody>),
+  Streaming {
+    body: ProxyBody,
+    reason: SmallResponseReason,
+  },
+  Error {
+    response: Response<ProxyBody>,
+    reason: SmallResponseReason,
+  },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SmallResponseReason {
+  UnknownLength,
+  ReadTimeout,
+  LengthMismatch,
+  BodyError,
+}
+
+impl SmallResponseReason {
+  pub(super) fn as_str(self) -> &'static str {
+    match self {
+      Self::UnknownLength => "unknown_length",
+      Self::ReadTimeout => "read_timeout",
+      Self::LengthMismatch => "length_mismatch",
+      Self::BodyError => "body_error",
+    }
+  }
 }
 
 pub(super) async fn try_inline_response_body<B>(
@@ -34,28 +59,40 @@ where
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
 {
   let Some(length) = exact_known_small_content_length(headers, &body) else {
-    return SmallResponseDisposition::Streaming(box_body(body));
+    return SmallResponseDisposition::Streaming {
+      body: box_body(body),
+      reason: SmallResponseReason::UnknownLength,
+    };
   };
 
   let collected = match collect_exact_small_response_body(body, length, timeout).await {
     Ok(collected) => collected,
     Err(SmallResponseReadError::Timeout) => {
-      return SmallResponseDisposition::Error(text_response(
-        StatusCode::GATEWAY_TIMEOUT,
-        "upstream response body timed out",
-      ));
+      return SmallResponseDisposition::Error {
+        response: text_response(
+          StatusCode::GATEWAY_TIMEOUT,
+          "upstream response body timed out",
+        ),
+        reason: SmallResponseReason::ReadTimeout,
+      };
     }
     Err(SmallResponseReadError::LengthMismatch) => {
-      return SmallResponseDisposition::Error(text_response(
-        StatusCode::BAD_GATEWAY,
-        "upstream response body length mismatch",
-      ));
+      return SmallResponseDisposition::Error {
+        response: text_response(
+          StatusCode::BAD_GATEWAY,
+          "upstream response body length mismatch",
+        ),
+        reason: SmallResponseReason::LengthMismatch,
+      };
     }
     Err(SmallResponseReadError::Body(error)) => {
-      return SmallResponseDisposition::Error(text_response(
-        StatusCode::BAD_GATEWAY,
-        &format!("failed to read upstream response body: {error}"),
-      ));
+      return SmallResponseDisposition::Error {
+        response: text_response(
+          StatusCode::BAD_GATEWAY,
+          &format!("failed to read upstream response body: {error}"),
+        ),
+        reason: SmallResponseReason::BodyError,
+      };
     }
   };
 
@@ -577,9 +614,10 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Error(response) = disposition else {
+    let SmallResponseDisposition::Error { response, reason } = disposition else {
       panic!("expected length mismatch response");
     };
+    assert_eq!(reason, SmallResponseReason::LengthMismatch);
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
   }
 
@@ -596,9 +634,10 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Error(response) = disposition else {
+    let SmallResponseDisposition::Error { response, reason } = disposition else {
       panic!("expected length mismatch response");
     };
+    assert_eq!(reason, SmallResponseReason::LengthMismatch);
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
   }
 
@@ -615,7 +654,10 @@ mod tests {
 
     assert!(matches!(
       disposition,
-      SmallResponseDisposition::Streaming(_)
+      SmallResponseDisposition::Streaming {
+        reason: SmallResponseReason::UnknownLength,
+        ..
+      }
     ));
   }
 
@@ -632,7 +674,10 @@ mod tests {
 
     assert!(matches!(
       disposition,
-      SmallResponseDisposition::Streaming(_)
+      SmallResponseDisposition::Streaming {
+        reason: SmallResponseReason::UnknownLength,
+        ..
+      }
     ));
   }
 
@@ -672,7 +717,10 @@ mod tests {
 
     assert!(matches!(
       disposition,
-      SmallResponseDisposition::Streaming(_)
+      SmallResponseDisposition::Streaming {
+        reason: SmallResponseReason::UnknownLength,
+        ..
+      }
     ));
   }
 
@@ -687,9 +735,10 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Streaming(body) = disposition else {
+    let SmallResponseDisposition::Streaming { body, reason } = disposition else {
       panic!("expected streaming body");
     };
+    assert_eq!(reason, SmallResponseReason::UnknownLength);
     assert_eq!(body.size_hint().upper(), Some(3));
   }
 
@@ -708,7 +757,10 @@ mod tests {
 
     assert!(matches!(
       disposition,
-      SmallResponseDisposition::Streaming(_)
+      SmallResponseDisposition::Streaming {
+        reason: SmallResponseReason::UnknownLength,
+        ..
+      }
     ));
   }
 
@@ -725,9 +777,10 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Error(response) = disposition else {
+    let SmallResponseDisposition::Error { response, reason } = disposition else {
       panic!("expected timeout response");
     };
+    assert_eq!(reason, SmallResponseReason::ReadTimeout);
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
   }
 }

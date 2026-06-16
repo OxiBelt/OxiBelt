@@ -2370,6 +2370,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "toml",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",

@@ -14,11 +14,13 @@ mod auth;
 mod crlite;
 mod detail;
 mod fast_path;
+mod http_io;
 mod ocsp;
 mod outbound_revocation;
 mod pool;
 mod sni_forward;
 mod stream;
+mod upstream_client;
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -61,6 +63,8 @@ pub struct Metrics {
   ocsp: ocsp::OcspMetrics,
   outbound_revocation: outbound_revocation::OutboundRevocationMetrics,
   fast_path: fast_path::FastPathMetrics,
+  http_io: http_io::HttpIoMetrics,
+  upstream_client: upstream_client::UpstreamClientMetrics,
   sni_forward: sni_forward::SniForwardMetrics,
   stream: stream::StreamMetrics,
   pool: pool::PoolMetrics,
@@ -137,6 +141,37 @@ impl Metrics {
     self
       .fast_path
       .record_plain_proxy_decision(protocol, outcome, reason);
+  }
+
+  pub fn record_fast_path_response_body(&self, protocol: &str, disposition: &str, reason: &str) {
+    self
+      .fast_path
+      .record_response_body(protocol, disposition, reason);
+  }
+
+  pub fn record_http_upstream_client_request(&self, version: &str, scheme: &str, pool: &str) {
+    self.upstream_client.record_request(version, scheme, pool);
+  }
+
+  pub fn record_http_upstream_client_pool_miss(&self, version: &str, scheme: &str, pool: &str) {
+    self.upstream_client.record_pool_miss(version, scheme, pool);
+  }
+
+  pub fn record_http_upstream_client_connection_created(
+    &self,
+    version: &str,
+    scheme: &str,
+    pool: &str,
+  ) {
+    self
+      .upstream_client
+      .record_connection_created(version, scheme, pool);
+  }
+
+  pub fn record_http_downstream_write_flush(&self, protocol: &str, transport: &str) {
+    self
+      .http_io
+      .record_downstream_write_flush(protocol, transport);
   }
 
   pub fn record_cache_hit(&self) {
@@ -515,6 +550,8 @@ impl Metrics {
     self.append_ocsp_prometheus(&mut output);
     self.append_outbound_revocation_prometheus(&mut output);
     self.append_fast_path_prometheus(&mut output);
+    self.append_upstream_client_prometheus(&mut output);
+    self.append_http_io_prometheus(&mut output);
     self.append_sni_forward_prometheus(&mut output);
     self.append_stream_prometheus(&mut output);
     self.append_upstream_pool_prometheus(&mut output);
@@ -614,6 +651,14 @@ impl Metrics {
 
   fn append_fast_path_prometheus(&self, output: &mut String) {
     self.fast_path.append_prometheus(output);
+  }
+
+  fn append_upstream_client_prometheus(&self, output: &mut String) {
+    self.upstream_client.append_prometheus(output);
+  }
+
+  fn append_http_io_prometheus(&self, output: &mut String) {
+    self.http_io.append_prometheus(output);
   }
 }
 

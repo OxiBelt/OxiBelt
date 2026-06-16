@@ -61,6 +61,7 @@ tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "net", "rt-
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
 toml = "1.1.2"
+tower-service = "0.3.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std"] }
 unicode-normalization = "0.1.25"

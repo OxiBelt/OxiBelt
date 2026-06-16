@@ -429,6 +429,8 @@ impl PlainProxyFastPath {
       known_small_response_body,
       inlined_known_small_body,
       trailers_handled,
+      disposition: response_body_disposition,
+      reason: response_body_reason,
     } = match fast_path_response_body(
       &parts.headers,
       response_body,
@@ -439,11 +441,26 @@ impl PlainProxyFastPath {
     .await
     {
       Ok(response_body) => response_body,
-      Err(response) => {
+      Err(error) => {
+        if state.request_path_features.hot_path_metrics {
+          state.metrics.record_fast_path_response_body(
+            fast_path_metric_protocol(request_version),
+            "error",
+            error.reason,
+          );
+        }
+        let response = error.response;
         state.record_hot_path_response(response.status());
         return response;
       }
     };
+    if state.request_path_features.hot_path_metrics {
+      state.metrics.record_fast_path_response_body(
+        fast_path_metric_protocol(request_version),
+        response_body_disposition,
+        response_body_reason,
+      );
+    }
     strip_hop_by_hop_headers(&mut parts.headers);
     apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
     if state.request_path_features.security_response_headers {
@@ -536,6 +553,11 @@ impl PlainProxyFastPath {
       fast_path_filter_trailers(response_body, state.config.proxy.http.trailers)
     };
     let mut response = Response::from_parts(parts, response_body);
+    if known_small_response_body {
+      response
+        .extensions_mut()
+        .insert(body::KnownSmallResponseBody);
+    }
     if let Some(inlined) = inlined_known_small_body {
       response.extensions_mut().insert(inlined);
     }
@@ -650,6 +672,15 @@ fn fast_path_alt_svc_possible(
     )
 }
 
+fn fast_path_metric_protocol(version: http::Version) -> &'static str {
+  match version {
+    http::Version::HTTP_10 | http::Version::HTTP_11 => "h1",
+    http::Version::HTTP_2 => "h2",
+    http::Version::HTTP_3 => "h3",
+    _ => "other",
+  }
+}
+
 fn fast_path_downstream_response_timeout(
   response: Response<ProxyBody>,
   known_small_response_body: bool,
@@ -682,6 +713,13 @@ struct FastPathResponseBody {
   known_small_response_body: bool,
   inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
   trailers_handled: bool,
+  disposition: &'static str,
+  reason: &'static str,
+}
+
+struct FastPathResponseBodyError {
+  response: Response<ProxyBody>,
+  reason: &'static str,
 }
 
 async fn fast_path_response_body<B>(
@@ -690,7 +728,7 @@ async fn fast_path_response_body<B>(
   upstream_read_timeout: std::time::Duration,
   trailer_mode: TrailerMode,
   request_version: http::Version,
-) -> Result<FastPathResponseBody, Response<ProxyBody>>
+) -> Result<FastPathResponseBody, FastPathResponseBodyError>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
@@ -709,14 +747,20 @@ where
       known_small_response_body: true,
       inlined_known_small_body: inlined,
       trailers_handled: true,
+      disposition: "inlined",
+      reason: "known_small",
     }),
-    SmallResponseDisposition::Streaming(body) if body.is_end_stream() => Ok(FastPathResponseBody {
-      body,
-      known_small_response_body: true,
-      inlined_known_small_body: None,
-      trailers_handled: true,
-    }),
-    SmallResponseDisposition::Streaming(body) => Ok(FastPathResponseBody {
+    SmallResponseDisposition::Streaming { body, .. } if body.is_end_stream() => {
+      Ok(FastPathResponseBody {
+        body,
+        known_small_response_body: true,
+        inlined_known_small_body: None,
+        trailers_handled: true,
+        disposition: "inlined",
+        reason: "empty",
+      })
+    }
+    SmallResponseDisposition::Streaming { body, reason } => Ok(FastPathResponseBody {
       body: body::with_read_timeout(
         body,
         upstream_read_timeout,
@@ -725,8 +769,13 @@ where
       known_small_response_body: false,
       inlined_known_small_body: None,
       trailers_handled: false,
+      disposition: "streamed",
+      reason: reason.as_str(),
     }),
-    SmallResponseDisposition::Error(response) => Err(response),
+    SmallResponseDisposition::Error { response, reason } => Err(FastPathResponseBodyError {
+      response,
+      reason: reason.as_str(),
+    }),
   }
 }
 
