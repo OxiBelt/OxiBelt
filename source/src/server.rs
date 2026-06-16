@@ -2207,6 +2207,7 @@ async fn handle_connection(
           .max_total_header_bytes
           .max(8192),
       )
+      .writev(false)
       .keep_alive(true);
     let connection = builder.serve_connection(TokioIo::new(tls_stream), service);
     let result = if handshake_state.http1_upgrades_possible {
